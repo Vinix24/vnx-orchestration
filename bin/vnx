@@ -1242,9 +1242,11 @@ cmd_bootstrap_skills() {
   # Each CLI tool has its own skill discovery path. Sync shipped skills
   # to each provider so T1 (multi-model) always has identical capabilities.
 
-  # Codex CLI: reads skills from ~/.codex/skills/ (global home dir).
+  # Codex CLI: reads project skills from .agents/skills/ (project-scoped).
+  # We no longer sync to ~/.codex/skills/ (global) to avoid polluting user's
+  # global config. Project-local skills are sufficient for VNX dispatches.
   if command -v codex >/dev/null 2>&1; then
-    local codex_skills_dir="$HOME/.codex/skills"
+    local codex_skills_dir="$PROJECT_ROOT/.agents/skills"
     mkdir -p "$codex_skills_dir"
     if command -v rsync >/dev/null 2>&1; then
       rsync -a "$shipped_skills_dir/" "$codex_skills_dir/"
