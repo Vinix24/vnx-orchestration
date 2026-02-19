@@ -122,70 +122,59 @@ install_docs() {
   log "[install] Installed: .vnx/docs ($(find "$dst_docs" -type f | wc -l | tr -d ' ') files)"
 }
 
-bootstrap_codex_skills() {
-  if [ "${VNX_SKIP_CODEX_SKILLS_BOOTSTRAP:-0}" = "1" ]; then
-    log "[install] Skipping Codex skills bootstrap (VNX_SKIP_CODEX_SKILLS_BOOTSTRAP=1)"
-    return 0
-  fi
-
-  local codex_home="${CODEX_HOME:-$HOME/.codex}"
-  local codex_skills_dir="$codex_home/skills"
-  mkdir -p "$codex_skills_dir"
+bootstrap_provider_skills() {
+  # Install skills to project-local directories for each CLI provider.
+  # We deliberately avoid writing to global home directories (~/.codex/skills,
+  # ~/.gemini/skills) — the user may have their own global skills and we should
+  # not pollute them. Project-local paths are sufficient for VNX dispatches.
+  #
+  # Discovery paths (project-scoped):
+  #   Codex CLI  → .agents/skills/   (scanned from cwd up to repo root)
+  #   Gemini CLI → .gemini/skills/   (workspace-scoped)
+  #   Claude     → .claude/skills/   (handled by vnx bootstrap-skills)
 
   local skills_src=""
-  # Prefer shipped skills from the installed dist.
   if [ -d "$TARGET_VNX_DIR/skills" ]; then
     skills_src="$TARGET_VNX_DIR/skills"
   elif [ -d "$SRC_ROOT/skills" ]; then
     skills_src="$SRC_ROOT/skills"
-  elif [ -d "$TARGET_PROJECT_DIR/.claude/skills" ]; then
-    skills_src="$TARGET_PROJECT_DIR/.claude/skills"
   fi
 
-  if [ -n "$skills_src" ]; then
-    copy_if_missing "$skills_src/README.md" "$codex_skills_dir/README.md"
-    copy_if_missing "$skills_src/skills.yaml" "$codex_skills_dir/skills.yaml"
+  [ -n "$skills_src" ] || return 0
 
+  # Codex — project-local .agents/skills/
+  if command -v codex >/dev/null 2>&1; then
+    local agents_skills_dir="$TARGET_PROJECT_DIR/.agents/skills"
+    mkdir -p "$agents_skills_dir"
     local copied_count=0
     local skill
     for skill in "${BASIC_SKILLS[@]}"; do
       if [ -d "$skills_src/$skill" ]; then
-        copy_if_missing "$skills_src/$skill" "$codex_skills_dir/$skill"
+        copy_if_missing "$skills_src/$skill" "$agents_skills_dir/$skill"
         copied_count=$((copied_count + 1))
       fi
     done
-    log "[install] Codex skills bootstrap complete: $copied_count basic skills in $codex_skills_dir"
-    return 0
+    copy_if_missing "$skills_src/README.md" "$agents_skills_dir/README.md"
+    copy_if_missing "$skills_src/skills.yaml" "$agents_skills_dir/skills.yaml"
+    log "[install] Codex skills (project-local): $copied_count skills in $agents_skills_dir"
   fi
 
-  # Fallback: create minimal starter skills when no source tree is available.
-  local skill
-  for skill in "${BASIC_SKILLS[@]}"; do
-    local skill_dir="$codex_skills_dir/$skill"
-    mkdir -p "$skill_dir"
-    if [ ! -f "$skill_dir/SKILL.md" ]; then
-      cat > "$skill_dir/SKILL.md" <<EOF
-# $skill
-
-Purpose: Starter Codex skill scaffold created by VNX installer.
-
-Guidelines:
-- Keep changes minimal and targeted.
-- Follow existing project conventions.
-- Prefer deterministic outputs and explicit validation.
-EOF
-    fi
-  done
-
-  if [ ! -f "$codex_skills_dir/README.md" ]; then
-    cat > "$codex_skills_dir/README.md" <<EOF
-# Codex Skills (Bootstrapped by VNX)
-
-This directory was initialized by VNX install for first-time Codex usage.
-EOF
+  # Gemini — project-local .gemini/skills/
+  if command -v gemini >/dev/null 2>&1; then
+    local gemini_skills_dir="$TARGET_PROJECT_DIR/.gemini/skills"
+    mkdir -p "$gemini_skills_dir"
+    local copied_count=0
+    local skill
+    for skill in "${BASIC_SKILLS[@]}"; do
+      if [ -d "$skills_src/$skill" ]; then
+        copy_if_missing "$skills_src/$skill" "$gemini_skills_dir/$skill"
+        copied_count=$((copied_count + 1))
+      fi
+    done
+    copy_if_missing "$skills_src/README.md" "$gemini_skills_dir/README.md"
+    copy_if_missing "$skills_src/skills.yaml" "$gemini_skills_dir/skills.yaml"
+    log "[install] Gemini skills (project-local): $copied_count skills in $gemini_skills_dir"
   fi
-
-  log "[install] Codex skills fallback initialized in $codex_skills_dir"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -214,7 +203,7 @@ done
 install_docs
 
 chmod +x "$TARGET_VNX_DIR/bin/vnx"
-bootstrap_codex_skills
+bootstrap_provider_skills
 
 # Persist origin URL for vnx update
 if git -C "$SRC_ROOT" remote get-url origin >/dev/null 2>&1; then

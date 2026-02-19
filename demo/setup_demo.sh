@@ -837,10 +837,9 @@ if ! grep -q "T0 orchestration itself uses \`CLAUDE.md\` only." "$PROJECT_DIR/.c
 fi
 echo "  Verified: T0 CLAUDE.md + t0-orchestrator skill are current"
 
-# Configure T1 = Codex CLI (multi-model demo)
-mkdir -p "$PROJECT_DIR/.vnx-data"
-echo 'VNX_T1_PROVIDER=codex_cli' > "$PROJECT_DIR/.vnx-data/config.env"
-echo "  T1 provider set to: Codex CLI"
+# Provider profiles are selected interactively at `vnx start`.
+# No hardcoded provider — user picks claude-only, claude-codex,
+# claude-gemini, or full-multi from the startup menu.
 
 # ── Step 8: Initialize feature queue ───────────────────────────────────
 echo "[8/8] Initializing feature queue from FEATURE_PLAN.md..."
@@ -873,7 +872,7 @@ echo "    - PR-2 to PR-6 blocked by dependencies"
 echo "    - Quality advisory trap: lead_scoring_engine.py (555 lines > 500 warning)"
 echo "    - 37 quality gate open items (blockers + warnings)"
 echo "    - 4 terminal templates (T0 orchestrator + T1/T2/T3 workers)"
-echo "    - 18 skills copied for Claude Code"
+echo "    - Skills deployed for Claude (.claude/skills/), Codex (.agents/skills/), Gemini (.gemini/skills/)"
 echo "    - SessionStart hooks for automatic context loading"
 echo ""
 echo "  Quality thresholds enforced:"
@@ -894,6 +893,14 @@ echo ""
 echo "  To launch:"
 echo "    cd $PROJECT_DIR"
 echo "    .claude/vnx-system/bin/vnx start"
+echo ""
+echo "  Provider profiles (choose at startup):"
+echo "    claude-only   — All Claude Code (default)"
+echo "    claude-codex  — T1: Codex CLI"
+echo "    claude-gemini — T1: Gemini CLI"
+echo "    full-multi    — T1: Codex CLI, T2: Gemini CLI"
+echo ""
+echo "    Or: .claude/vnx-system/bin/vnx start --profile claude-codex"
 echo ""
 echo "  Controls:"
 echo "    Ctrl+G ......... Open dispatch queue popup"

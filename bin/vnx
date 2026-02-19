@@ -72,7 +72,8 @@ Commands:
   bootstrap-skills   Create/link ./\.claude/skills from shipped dist skills
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
   bootstrap-hooks    Deploy SessionStart hooks to .claude/hooks/ + settings.json
-  start              Launch VNX tmux session (2x2 grid, orchestration, Claude)
+  start [--profile X] Launch VNX tmux session (interactive profile selection)
+                     Profiles: claude-only, claude-codex, claude-gemini, full-multi
   stop               Stop VNX tmux session and orchestration processes
   doctor             Validate layout, dependencies, and path hygiene
   smoke              Run one-shot local receipt pipeline smoke test
@@ -97,7 +98,55 @@ ensure_runtime_layout() {
     "$VNX_DISPATCH_DIR/failed" \
     "$VNX_REPORTS_DIR" \
     "$VNX_DB_DIR" \
-    "$VNX_DATA_DIR/receipts"
+    "$VNX_DATA_DIR/receipts" \
+    "$VNX_DATA_DIR/profiles"
+
+  # Write provider profiles if they don't exist yet (idempotent).
+  _write_profiles_if_missing "$VNX_DATA_DIR/profiles"
+}
+
+_write_profiles_if_missing() {
+  local dir="$1"
+
+  # claude-only: all terminals run Claude Code
+  if [ ! -f "$dir/claude-only.env" ]; then
+    cat > "$dir/claude-only.env" <<'ENV'
+# VNX Profile: claude-only
+# All worker terminals use Claude Code (claude).
+VNX_T1_PROVIDER=claude_code
+VNX_T2_PROVIDER=claude_code
+ENV
+  fi
+
+  # claude-codex: T1 uses Codex CLI, T2 uses Claude Code
+  if [ ! -f "$dir/claude-codex.env" ]; then
+    cat > "$dir/claude-codex.env" <<'ENV'
+# VNX Profile: claude-codex
+# T1 uses Codex CLI, T2 uses Claude Code.
+VNX_T1_PROVIDER=codex_cli
+VNX_T2_PROVIDER=claude_code
+ENV
+  fi
+
+  # claude-gemini: T1 uses Gemini CLI, T2 uses Claude Code
+  if [ ! -f "$dir/claude-gemini.env" ]; then
+    cat > "$dir/claude-gemini.env" <<'ENV'
+# VNX Profile: claude-gemini
+# T1 uses Gemini CLI, T2 uses Claude Code.
+VNX_T1_PROVIDER=gemini_cli
+VNX_T2_PROVIDER=claude_code
+ENV
+  fi
+
+  # full-multi: T1 uses Codex CLI, T2 uses Gemini CLI
+  if [ ! -f "$dir/full-multi.env" ]; then
+    cat > "$dir/full-multi.env" <<'ENV'
+# VNX Profile: full-multi
+# T1 uses Codex CLI, T2 uses Gemini CLI.
+VNX_T1_PROVIDER=codex_cli
+VNX_T2_PROVIDER=gemini_cli
+ENV
+  fi
 }
 
 write_default_config_if_missing() {
@@ -281,13 +330,94 @@ cmd_start() {
   local dispatch_dir="${VNX_DISPATCH_DIR:-$runtime_dir/dispatches}"
   local log_dir="$runtime_dir/logs"
 
-  # Load project-level config (e.g., VNX_T1_PROVIDER=codex)
-  if [ -f "$runtime_dir/config.env" ]; then
+  # ── Cleanup: kill any existing VNX processes for THIS project ────────
+  # Supervisor is killed first to prevent it from respawning children.
+  # Pattern is scoped to PROJECT_ROOT so other projects are not affected.
+  local vnx_scripts_pattern="$VNX_HOME/scripts"
+  local stale_count
+  stale_count=$(pgrep -f "$vnx_scripts_pattern" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$stale_count" -gt 0 ]; then
+    log "Cleaning up $stale_count stale VNX process(es) for this project..."
+    pkill -f "vnx_supervisor.*$(basename "$PROJECT_ROOT")" 2>/dev/null || true
+    pkill -f "$vnx_scripts_pattern" 2>/dev/null || true
+    pkill -f "$VNX_HOME/dashboard" 2>/dev/null || true
+    sleep 1
+    # Force kill anything that didn't exit cleanly
+    pkill -9 -f "$vnx_scripts_pattern" 2>/dev/null || true
+    pkill -9 -f "$VNX_HOME/dashboard" 2>/dev/null || true
+    log "Cleanup complete."
+  fi
+
+  # ── Profile support: vnx start --profile <name> ─────────────────────
+  local profile_name=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile|-p) profile_name="$2"; shift 2 ;;
+      --profile=*) profile_name="${1#*=}"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  # Load profile: flag > interactive menu > config.env fallback
+  if [ -n "$profile_name" ]; then
+    local profile_file="$runtime_dir/profiles/${profile_name}.env"
+    if [ -f "$profile_file" ]; then
+      # shellcheck source=/dev/null
+      source "$profile_file"
+      log "Loaded profile: $profile_name ($profile_file)"
+    else
+      err "Profile not found: $profile_file"
+      echo "Available profiles:"
+      ls "$runtime_dir/profiles/"*.env 2>/dev/null | while read -r f; do
+        echo "  $(basename "${f%.env}")"
+      done
+      exit 1
+    fi
+  elif [ -d "$runtime_dir/profiles" ] && ls "$runtime_dir/profiles/"*.env >/dev/null 2>&1 && [ -t 0 ]; then
+    # Interactive profile selection when profiles exist and stdin is a terminal
+    echo ""
+    echo "  VNX Provider Profiles"
+    echo "  ─────────────────────"
+    local -a profile_files profile_names
+    local i=1
+    for f in "$runtime_dir/profiles/"*.env; do
+      local name
+      name="$(basename "${f%.env}")"
+      profile_files+=("$f")
+      profile_names+=("$name")
+      # Read first comment line as description
+      local desc
+      desc="$(grep '^# VNX Profile:' "$f" 2>/dev/null | head -1 | sed 's/^# VNX Profile: //')"
+      local detail
+      detail="$(grep '^# T0:' "$f" 2>/dev/null | head -1 | sed 's/^# //')"
+      printf "  %d) %-16s %s\n" "$i" "$name" "${desc:+- $desc}"
+      [ -n "$detail" ] && printf "     %-16s %s\n" "" "$detail"
+      i=$((i + 1))
+    done
+    echo ""
+    printf "  Select profile [1-%d]: " "${#profile_names[@]}"
+    local choice
+    read -r choice
+    if [ -n "$choice" ] && [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le "${#profile_names[@]}" ] 2>/dev/null; then
+      local idx=$((choice - 1))
+      profile_name="${profile_names[$idx]}"
+      # shellcheck source=/dev/null
+      source "${profile_files[$idx]}"
+      log "Loaded profile: $profile_name (${profile_files[$idx]})"
+    else
+      echo "  Invalid choice. Using default (config.env or claude-only)."
+      if [ -f "$runtime_dir/config.env" ]; then
+        source "$runtime_dir/config.env"
+        log "Loaded project config: $runtime_dir/config.env"
+      fi
+    fi
+  elif [ -f "$runtime_dir/config.env" ]; then
     # shellcheck source=/dev/null
     source "$runtime_dir/config.env"
     log "Loaded project config: $runtime_dir/config.env"
   fi
   local t1_provider="${VNX_T1_PROVIDER:-claude_code}"
+  local t2_provider="${VNX_T2_PROVIDER:-claude_code}"
 
   if ! command -v tmux >/dev/null 2>&1; then
     err "tmux is required for 'vnx start'. Install: brew install tmux"
@@ -321,11 +451,16 @@ cmd_start() {
       T2="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T2" '$2==p {print $1; exit}')"
       T3="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T3" '$2==p {print $1; exit}')"
 
-      local t1_cmd
+      local t1_cmd t2_cmd
       case "$t1_provider" in
         codex_cli|codex) t1_cmd="codex" ;;
         gemini_cli|gemini) t1_cmd="gemini" ;;
         *) t1_cmd="claude --model sonnet" ;;
+      esac
+      case "$t2_provider" in
+        codex_cli|codex) t2_cmd="codex" ;;
+        gemini_cli|gemini) t2_cmd="gemini" ;;
+        *) t2_cmd="claude --model sonnet" ;;
       esac
 
       local node_path="$HOME/.nvm/versions/node/v20.18.2/bin"
@@ -334,7 +469,7 @@ cmd_start() {
 
       [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus" C-m
       [ -n "$T1" ] && tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
-      [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && claude --model sonnet" C-m
+      [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
       [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus" C-m
 
       if [ -n "$T0" ] && [ -n "$T1" ] && [ -n "$T2" ] && [ -n "$T3" ]; then
@@ -344,11 +479,11 @@ cmd_start() {
   "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
   "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
   "T1": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "claude_code" },
+  "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
   "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" },
   "tracks": {
     "A": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-    "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "claude_code" },
+    "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
     "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" }
   }
 }
@@ -462,11 +597,16 @@ TSJSON
   tmux select-pane -t "$T2" -T "T2"
   tmux select-pane -t "$T3" -T "T3"
 
-  # Provider-aware T1 pane title
+  # Provider-aware pane titles
   case "$t1_provider" in
     codex_cli|codex) tmux select-pane -t "$T1" -T "T1 [CODEX]" ;;
     gemini_cli|gemini) tmux select-pane -t "$T1" -T "T1 [GEMINI]" ;;
     *) tmux select-pane -t "$T1" -T "T1" ;;
+  esac
+  case "$t2_provider" in
+    codex_cli|codex) tmux select-pane -t "$T2" -T "T2 [CODEX]" ;;
+    gemini_cli|gemini) tmux select-pane -t "$T2" -T "T2 [GEMINI]" ;;
+    *) tmux select-pane -t "$T2" -T "T2" ;;
   esac
   tmux set -t "$session_name" -g pane-border-status top
   tmux set -t "$session_name" -g pane-border-format "#{pane_title}"
@@ -479,11 +619,11 @@ TSJSON
   "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
   "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
   "T1": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "claude_code" },
+  "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
   "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" },
   "tracks": {
     "A": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-    "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "claude_code" },
+    "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
     "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" }
   }
 }
@@ -568,30 +708,37 @@ TSJSON
     # popup command as a per-session option (@vnx_popup_cmd) and bind a single
     # global key that reads the CURRENT session's option at invocation time.
     local popup_env="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR; export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR'"
-    local popup_full_cmd="$popup_env bash '$popup_script'"
+    local popup_full_cmd="$popup_env; bash '$popup_script'"
 
     # Store per-session so Ctrl+G resolves the correct project at runtime.
     tmux set-option -t "$session_name" @vnx_popup_cmd "$popup_full_cmd" 2>/dev/null
 
-    # Create resolver script that reads @vnx_popup_cmd from the CURRENT session.
-    # This avoids run-shell + nested display-popup which fails with exit code 1.
+    # Create resolver script that reads @vnx_popup_cmd from the current client session.
+    # Keep this compatible with tmux variants that do not support `run-shell -F`.
     local resolver="/tmp/vnx_popup_resolver.sh"
-    if [ ! -f "$resolver" ]; then
-      cat > "$resolver" <<'RESOLVER'
+    cat > "$resolver" <<'RESOLVER'
 #!/usr/bin/env bash
-cmd=$(tmux show-option -v @vnx_popup_cmd 2>/dev/null)
+session=""
+session=$(tmux display-message -p '#{client_session}' 2>/dev/null || true)
+if [ -z "$session" ]; then
+    session=$(tmux list-clients -F '#{client_session}' 2>/dev/null | head -n1 || true)
+fi
+if [ -z "$session" ]; then
+    echo "Could not determine tmux session."
+    sleep 2
+    exit 1
+fi
+cmd=$(tmux show-option -t "$session" -v @vnx_popup_cmd 2>/dev/null)
 if [ -n "$cmd" ]; then
     eval "$cmd"
 else
-    echo "No VNX popup configured for this session."
+    echo "No VNX popup configured for session: $session"
     echo "Start VNX first: vnx start"
     sleep 2
 fi
 RESOLVER
-      chmod +x "$resolver"
-    fi
+    chmod +x "$resolver"
 
-    # Global binding: display-popup calls resolver, which reads per-session option.
     tmux bind-key -n C-g display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
     tmux bind-key -n 'C-\' display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
     tmux bind-key q display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
@@ -632,17 +779,22 @@ RESOLVER
   local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
   local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
 
-  # Provider-aware launch command for T1
-  local t1_cmd
+  # Provider-aware launch commands for T1 and T2
+  local t1_cmd t2_cmd
   case "$t1_provider" in
     codex_cli|codex) t1_cmd="codex" ;;
     gemini_cli|gemini) t1_cmd="gemini" ;;
     *) t1_cmd="claude --model sonnet" ;;
   esac
+  case "$t2_provider" in
+    codex_cli|codex) t2_cmd="codex" ;;
+    gemini_cli|gemini) t2_cmd="gemini" ;;
+    *) t2_cmd="claude --model sonnet" ;;
+  esac
 
   tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus" C-m
   tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
-  tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && claude --model sonnet" C-m
+  tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
   tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus" C-m
 
   # ── Grid balancing (equal pane sizes) ────────────────────────────────
@@ -659,12 +811,17 @@ RESOLVER
   echo ""
   echo "VNX SESSION LAUNCHED"
   echo ""
-  local t1_label="Claude Sonnet"
+  local t1_label="Claude Sonnet" t2_label="Claude Sonnet"
   case "$t1_provider" in
     codex_cli|codex) t1_label="Codex CLI" ;;
     gemini_cli|gemini) t1_label="Gemini CLI" ;;
   esac
-  echo "Layout: 2x2 grid  |  T0/T3: Opus  |  T1: $t1_label  |  T2: Sonnet"
+  case "$t2_provider" in
+    codex_cli|codex) t2_label="Codex CLI" ;;
+    gemini_cli|gemini) t2_label="Gemini CLI" ;;
+  esac
+  [ -n "$profile_name" ] && echo "Profile: $profile_name"
+  echo "Layout: 2x2 grid  |  T0: Opus  |  T1: $t1_label  |  T2: $t2_label  |  T3: Opus"
   echo ""
   echo "Controls:"
   echo "  Ctrl+G ......... Open dispatch queue popup"
@@ -1151,9 +1308,11 @@ cmd_bootstrap_skills() {
   # Each CLI tool has its own skill discovery path. Sync shipped skills
   # to each provider so T1 (multi-model) always has identical capabilities.
 
-  # Codex CLI: reads skills from ~/.codex/skills/ (global home dir).
+  # Codex CLI: reads project skills from .agents/skills/ (project-scoped).
+  # We no longer sync to ~/.codex/skills/ (global) to avoid polluting user's
+  # global config. Project-local skills are sufficient for VNX dispatches.
   if command -v codex >/dev/null 2>&1; then
-    local codex_skills_dir="$HOME/.codex/skills"
+    local codex_skills_dir="$PROJECT_ROOT/.agents/skills"
     mkdir -p "$codex_skills_dir"
     if command -v rsync >/dev/null 2>&1; then
       rsync -a "$shipped_skills_dir/" "$codex_skills_dir/"
@@ -1417,7 +1576,7 @@ main() {
       cmd_bootstrap_hooks
       ;;
     start)
-      cmd_start
+      cmd_start "$@"
       ;;
     stop)
       cmd_stop
