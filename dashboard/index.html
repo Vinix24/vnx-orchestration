@@ -855,17 +855,18 @@
       const grid = document.getElementById("terminals-grid");
       grid.innerHTML = "";
       const terminalOrder = ["T0", "T1", "T2", "T3"];
-      const roleLabels = {
-        T0: "Orchestrator",
-        T1: "Worker",
-        T2: "Worker",
-        T3: "Worker",
-      };
       const terminals = data.terminals ?? {};
+      function getProviderLabel(provider) {
+        const p = String(provider || "").toLowerCase();
+        if (p.includes("codex")) return "Codex CLI";
+        if (p.includes("gemini")) return "Gemini CLI";
+        return "Claude Code";
+      }
       terminalOrder.forEach((name) => {
         const info = terminals[name] || {
           status: "offline",
           model: "—",
+          provider: "claude_code",
           current_command: "—",
           last_update: "never",
         };
@@ -898,9 +899,8 @@
         const card = document.createElement("div");
         card.className = "terminal-card";
         const statusDot = `<span class="status-circle" style="background:${terminalStatusColor(normalizedStatus)}"></span>`;
-        const role = roleLabels[name] || "Worker";
-        const modelLabel = info.model && info.model !== "unknown" ? info.model : "unknown";
-        const label = `${name} - ${role} ${modelLabel}`;
+        const providerLabel = name === "T0" ? "Orchestrator" : getProviderLabel(info.provider);
+        const label = `${name} - ${providerLabel}`;
         const unlockControl = (name === "T1" || name === "T2" || name === "T3")
           ? `<div class="terminal-controls"><button class="restart-btn" type="button" onclick="unlockTerminal('${name}', this)">Unlock</button></div>`
           : "";

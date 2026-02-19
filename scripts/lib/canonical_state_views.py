@@ -249,11 +249,18 @@ def build_terminal_snapshot(
     }
 
 
-def _dashboard_terminals(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _dashboard_terminals(snapshot: Dict[str, Any], state_dir: Path | None = None) -> Dict[str, Any]:
+    # Load panes.json to get provider information
+    panes_data: Dict[str, Any] = {}
+    if state_dir:
+        panes_file = state_dir / "panes.json"
+        panes_data = _safe_load_json(panes_file) or {}
+
     terminals = {
         "T0": {
             "status": "unknown",
             "model": MODEL_BY_TERMINAL["T0"],
+            "provider": (panes_data.get("T0") or {}).get("provider", "claude_code"),
             "is_active": False,
             "current_command": "unknown",
             "directory": "unknown",
@@ -263,9 +270,11 @@ def _dashboard_terminals(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     for terminal in TERMINALS:
         info = (snapshot.get("terminals") or {}).get(terminal) or {}
+        pane_info = panes_data.get(terminal) or {}
         payload = {
             "status": info.get("status", "unknown"),
             "model": info.get("model", MODEL_BY_TERMINAL[terminal]),
+            "provider": pane_info.get("provider", "claude_code"),
             "is_active": bool(info.get("is_active", False)),
             "current_command": info.get("current_command", "claude"),
             "directory": info.get("directory", "vnx-terminal"),
@@ -401,7 +410,7 @@ def main() -> int:
         if args.command == "terminal-snapshot":
             payload = snapshot
         elif args.command == "dashboard-terminals":
-            payload = _dashboard_terminals(snapshot)
+            payload = _dashboard_terminals(snapshot, state_root)
         elif args.command == "brief-terminals":
             payload = {
                 "terminals": _brief_terminals(snapshot),

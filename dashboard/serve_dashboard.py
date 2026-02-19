@@ -138,6 +138,17 @@ def _unlock_terminal(terminal_id: str) -> dict:
         with contextlib.suppress(Exception):
             shadow_record = json.loads(stdout)
 
+    # Force-refresh dashboard_status.json so the next UI refresh sees the update
+    dashboard_update_script = SCRIPTS_DIR / "update_dashboard_status.sh"
+    if dashboard_update_script.exists():
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["bash", str(dashboard_update_script)],
+                cwd=str(SCRIPTS_DIR),
+                capture_output=True,
+                timeout=5,
+            )
+
     return {
         "status": "ok",
         "terminal": terminal_id,
