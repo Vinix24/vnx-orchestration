@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VNX Live Dashboard</title>
+  <style>
+    :root {
+      --bg: #070b16;
+      --brand-blue: #0a2463;
+      --brand-blue-2: #1a3a7a;
+      --brand-orange: #f97316;
+      --brand-gold: #facc15;
+      --panel: rgba(10, 20, 48, 0.92);
+      --accent: var(--brand-orange);
+      --accent-strong: var(--brand-gold);
+      --text: #f4f4f9;
+      --muted: rgba(244, 244, 249, 0.65);
+      --border-soft: rgba(255, 255, 255, 0.12);
+      --glow: 0 18px 50px rgba(10, 36, 99, 0.55);
+      --green: #50fa7b;
+      --yellow: #facc15;
+      --red: #ff6b6b;
+      font-family: "Space Grotesk", "Inter", system-ui, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% -10%, rgba(249, 115, 22, 0.35), transparent 45%),
+        radial-gradient(circle at 80% 0%, rgba(10, 36, 99, 0.8), transparent 55%),
+        linear-gradient(160deg, var(--brand-blue), var(--brand-blue-2) 55%, #05070f 100%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 2rem;
+    }
+
+    main {
+      width: min(1100px, 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: clamp(1.8rem, 3vw, 2.5rem);
+      letter-spacing: 0.03em;
+      text-shadow: 0 0 30px rgba(249, 115, 22, 0.35);
+    }
+
+    header p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1rem;
+    }
+
+    .open-items-row {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(360px, 3fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    @media (max-width: 900px) {
+      .open-items-row {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .top-row {
+      display: grid;
+      grid-template-columns: 3fr 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+
+    @media (max-width: 900px) {
+      .top-row {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border-soft);
+      border-radius: 18px;
+      padding: 1rem 1.2rem;
+      box-shadow: var(--glow);
+      min-height: 120px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .panel::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, rgba(249, 115, 22, 0.08), transparent 35%, rgba(250, 204, 21, 0.06));
+      opacity: 0.6;
+      pointer-events: none;
+    }
+
+    .panel h2 {
+      margin: 0;
+      font-size: 1rem;
+      color: var(--muted);
+    }
+
+    .panel strong {
+      font-size: clamp(1.6rem, 5vw, 2.6rem);
+      display: block;
+      margin-top: 0.4rem;
+    }
+
+    .list.compact {
+      display: grid;
+      gap: 0.5rem;
+      margin-top: 0.6rem;
+    }
+
+    .list.compact .list-row {
+      justify-content: flex-start;
+      gap: 0.5rem;
+    }
+
+    .list.compact .count {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .pill-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      background: rgba(0, 0, 0, 0.2);
+      color: var(--muted);
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+
+    .blocker-list {
+      display: grid;
+      gap: 0.5rem;
+      margin-top: 0.6rem;
+    }
+
+    .blocker-item {
+      display: grid;
+      gap: 0.2rem;
+      padding: 0.55rem 0.7rem;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .blocker-item strong {
+      font-size: 0.95rem;
+      margin: 0;
+    }
+
+    .blocker-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    details.open-items-details {
+      margin-top: 0.7rem;
+    }
+
+    details.open-items-details summary {
+      cursor: pointer;
+      color: var(--accent-strong);
+      font-weight: 600;
+      list-style: none;
+    }
+
+    details.open-items-details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .subpanel {
+      margin-top: 0.9rem;
+      padding: 0.85rem 0.95rem;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .subpanel h3 {
+      margin: 0 0 0.4rem;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+
+    .terminals {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(180px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .terminal-card {
+      border-radius: 16px;
+      padding: 0.9rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(12px);
+      display: grid;
+      gap: 0.35rem;
+    }
+
+    .terminal-controls {
+      margin-top: 0.35rem;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .terminals strong {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .terminals span {
+      font-size: 1.05rem;
+      display: block;
+      margin-top: 0.2rem;
+    }
+
+    .status-circle {
+      width: 0.75rem;
+      height: 0.75rem;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 0.35rem;
+      box-shadow: 0 0 12px rgba(0, 0, 0, 0.35);
+    }
+
+    .process-list {
+      display: grid;
+      gap: 0.6rem;
+      margin-top: 0.6rem;
+    }
+
+    .process-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0.75rem;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(10px);
+    }
+
+    .process-meta {
+      display: grid;
+      gap: 0.2rem;
+    }
+
+    .process-name {
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    .process-info {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .process-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .process-stoplight {
+      width: 0.7rem;
+      height: 0.7rem;
+      border-radius: 50%;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
+    }
+
+    .process-stoplight.running {
+      background: var(--green);
+      box-shadow: 0 0 12px rgba(80, 250, 123, 0.55);
+    }
+
+    .process-stoplight.stopped {
+      background: var(--red);
+      box-shadow: 0 0 12px rgba(255, 107, 107, 0.55);
+    }
+
+    .restart-btn {
+      border-radius: 999px;
+      padding: 0.35rem 0.7rem;
+      font-size: 0.75rem;
+      border: 1px solid var(--border-soft);
+      background: rgba(0, 0, 0, 0.25);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .restart-btn:hover {
+      border-color: rgba(249, 115, 22, 0.6);
+      color: var(--accent-strong);
+      box-shadow: 0 0 16px rgba(249, 115, 22, 0.2);
+    }
+
+    .restart-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .pulse {
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); opacity: 0.6; }
+      50% { transform: scale(1.25); opacity: 1; }
+      100% { transform: scale(1); opacity: 0.6; }
+    }
+
+    .queues, .gates {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .pr-queue-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+
+    @media (max-width: 900px) {
+      .pr-queue-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .pr-meta {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-top: 0.6rem;
+      position: relative;
+      z-index: 1;
+    }
+
+    .pr-feature-name {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .pr-progress {
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .progress-track {
+      margin-top: 0.75rem;
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      position: relative;
+      z-index: 1;
+    }
+
+    .progress-track span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, rgba(80, 250, 123, 0.95), rgba(250, 204, 21, 0.92), rgba(249, 115, 22, 0.92));
+      transition: width 0.6s ease;
+    }
+
+    .pr-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.85rem;
+      position: relative;
+      z-index: 1;
+    }
+
+    .pr-table th,
+    .pr-table td {
+      text-align: left;
+      padding: 0.65rem 0.7rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      vertical-align: top;
+      font-size: 0.9rem;
+    }
+
+    .pr-table th {
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      border-radius: 999px;
+      padding: 0.22rem 0.55rem;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(0, 0, 0, 0.18);
+      font-size: 0.8rem;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .status-pill::before {
+      content: "";
+      width: 0.45rem;
+      height: 0.45rem;
+      border-radius: 50%;
+      display: inline-block;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.35);
+    }
+
+    .status-pill.done::before {
+      background: var(--green);
+      box-shadow: 0 0 12px rgba(80, 250, 123, 0.55);
+    }
+
+    .status-pill.in_progress::before {
+      background: var(--brand-orange);
+      box-shadow: 0 0 12px rgba(249, 115, 22, 0.55);
+    }
+
+    .status-pill.pending::before {
+      background: var(--brand-gold);
+      box-shadow: 0 0 12px rgba(250, 204, 21, 0.45);
+    }
+
+    .status-pill.blocked {
+      border-color: rgba(255, 107, 107, 0.35);
+      background: rgba(255, 107, 107, 0.1);
+    }
+
+    .deps {
+      color: var(--muted);
+      font-size: 0.85rem;
+      white-space: nowrap;
+    }
+
+    .pr-table .pr-id {
+      font-size: 0.95rem;
+      letter-spacing: 0.01em;
+      font-weight: 700;
+    }
+
+    .pr-id.small {
+      font-size: 0.95rem;
+      letter-spacing: 0.01em;
+    }
+
+    .list {
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .list-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.9rem;
+    }
+
+    .list-row span {
+      font-weight: 600;
+    }
+
+    .ticker {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .pill {
+      padding: 0.45rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 0.85rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .pill.ok {
+      border-color: rgba(114, 255, 235, 0.25);
+      color: rgba(114, 255, 235, 0.92);
+      box-shadow: 0 0 20px rgba(114, 255, 235, 0.15);
+    }
+
+    .pill.error {
+      border-color: rgba(255, 124, 124, 0.28);
+      color: rgba(255, 124, 124, 0.92);
+      box-shadow: 0 0 20px rgba(255, 124, 124, 0.12);
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+      padding: 1rem 0 1.5rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>VNX Live Control Plane</h1>
+        <p>7-second refresh · powered by `dashboard_status.json`</p>
+      </div>
+      <div class="header-right">
+        <div id="fetch-status" class="pill">Loading state…</div>
+        <div id="refresh-counter">Next refresh in 0s</div>
+      </div>
+    </header>
+
+    <section class="top-row">
+      <article class="panel">
+        <h2>Terminal Status</h2>
+        <div class="terminals" id="terminals-grid"></div>
+      </article>
+      <article class="panel">
+        <h2>Processes</h2>
+        <div class="list-row" style="align-items:center; margin-top:0.6rem;">
+          <div style="display:flex; align-items:center; gap:0.5rem;">
+            <span id="process-summary-light" class="process-stoplight"></span>
+            <span id="process-summary-text" style="font-weight:600;">—</span>
+          </div>
+          <button id="process-toggle" class="restart-btn" type="button">Details</button>
+        </div>
+        <div id="processes-wrap" style="display:none; margin-top:0.6rem;">
+          <div class="process-list" id="processes-list"></div>
+        </div>
+        <div class="subpanel">
+          <h3>Queues</h3>
+          <div class="list" id="queue-stats"></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="open-items-row">
+      <article class="panel">
+        <h2>Open Items</h2>
+        <strong id="open-items-count">—</strong>
+        <div class="list compact" id="open-items-details"></div>
+      </article>
+      <article class="panel">
+        <h2>Top Blockers</h2>
+        <div class="blocker-list" id="top-blockers-list"></div>
+        <details class="open-items-details">
+          <summary>Alle open items</summary>
+          <div class="blocker-list" id="all-open-items-list"></div>
+        </details>
+      </article>
+    </section>
+
+    <section>
+      <article class="panel">
+        <h2>PR Queue</h2>
+        <div class="pr-queue-layout">
+          <div>
+            <div class="pr-meta">
+              <div class="pr-feature-name" id="pr-feature-name">—</div>
+              <div class="pr-progress" id="pr-progress-label">—</div>
+            </div>
+            <div class="progress-track"><span id="pr-progress-fill"></span></div>
+            <table class="pr-table">
+              <thead>
+                <tr>
+                  <th style="width: 110px;">PR</th>
+                  <th>Description</th>
+                  <th style="width: 150px;">Status</th>
+                  <th style="width: 170px;">Dependencies</th>
+                </tr>
+              </thead>
+              <tbody id="pr-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      Dashboard generated from `.claude/vnx-system/state/dashboard_status.json`. Serve this directory via `python -m http.server` from `.claude/vnx-system`.
+    </footer>
+  </main>
+
+  <script>
+    const REFRESH_INTERVAL = 7000;
+    // Served from `.claude/vnx-system`; keep this path absolute so it works from `/` and `/dashboard/`.
+    const STATE_BASE_URL = "/state/dashboard_status.json";
+    const fetchStatus = document.getElementById("fetch-status");
+
+    function normalizeTerminalStatus(status) {
+      const value = String(status || "").toLowerCase();
+      if (["working", "active", "busy", "claimed", "in_progress"].includes(value)) return "working";
+      if (value === "idle") return "idle";
+      if (["blocked", "error", "failed", "timeout", "no_confirmation"].includes(value)) return "blocked";
+      if (value === "unknown") return "unknown";
+      return "offline";
+    }
+
+    function terminalStatusColor(status) {
+      if (status === "working") return "var(--brand-orange)";
+      if (status === "idle") return "var(--green)";
+      if (status === "blocked") return "var(--red)";
+      if (status === "unknown") return "var(--yellow)";
+      return "var(--red)";
+    }
+
+    function buildList(container, rows) {
+      container.innerHTML = "";
+      rows.forEach(([label, value]) => {
+        const row = document.createElement("div");
+        row.className = "list-row";
+        row.innerHTML = `<span>${label}</span><span>${value}</span>`;
+        container.appendChild(row);
+      });
+    }
+
+    function render(data) {
+      const summary = data.open_items?.summary ?? {};
+      const openCount = summary.open_count ?? data.open_items?.open_count ?? "—";
+      document.getElementById("open-items-count").textContent = openCount;
+      const openDetails = [];
+      const blockersCount = summary.blocker_count ?? data.open_items?.blocker_count ?? 0;
+      const warningsCount = summary.warn_count ?? data.open_items?.warn_count ?? 0;
+      const infosCount = summary.info_count ?? data.open_items?.info_count ?? 0;
+      openDetails.push(["Blockers", blockersCount]);
+      openDetails.push(["Warnings", warningsCount]);
+      openDetails.push(["Infos", infosCount]);
+      const openItemsDetails = document.getElementById("open-items-details");
+      if (openItemsDetails) {
+        openItemsDetails.innerHTML = "";
+        openDetails.forEach(([label, value]) => {
+          const row = document.createElement("div");
+          row.className = "list-row";
+          row.innerHTML = `<span>${label}</span><span class="count">${value}</span>`;
+          openItemsDetails.appendChild(row);
+        });
+      }
+
+      const topBlockers = data.open_items?.top_blockers ?? [];
+      const topBlockersList = document.getElementById("top-blockers-list");
+      if (topBlockersList) {
+        topBlockersList.innerHTML = "";
+        if (!topBlockers.length) {
+          topBlockersList.innerHTML = `<div class="muted">Geen blockers</div>`;
+        } else {
+          topBlockers.slice(0, 3).forEach((item) => {
+            const card = document.createElement("div");
+            card.className = "blocker-item";
+            const prTag = item.pr_id ? `<span class="pill-tag">PR ${item.pr_id}</span>` : "";
+            card.innerHTML = `
+              <strong>${item.title ?? "—"}</strong>
+              <div class="blocker-meta">
+                <span class="pill-tag">${item.id ?? "—"}</span>
+                ${prTag}
+              </div>
+            `;
+            topBlockersList.appendChild(card);
+          });
+        }
+      }
+
+      const allOpenItems = data.open_items?.open_items ?? [];
+      const allOpenItemsList = document.getElementById("all-open-items-list");
+      if (allOpenItemsList) {
+        allOpenItemsList.innerHTML = "";
+        if (!allOpenItems.length) {
+          allOpenItemsList.innerHTML = `<div class="muted">Geen open items</div>`;
+        } else {
+          allOpenItems.forEach((item) => {
+            const card = document.createElement("div");
+            card.className = "blocker-item";
+            const prTag = item.pr_id ? `<span class="pill-tag">PR ${item.pr_id}</span>` : "";
+            const severity = item.severity ? item.severity.toUpperCase() : "ITEM";
+            card.innerHTML = `
+              <strong>${item.title ?? "—"}</strong>
+              <div class="blocker-meta">
+                <span class="pill-tag">${item.id ?? "—"}</span>
+                <span class="pill-tag">${severity}</span>
+                ${prTag}
+              </div>
+            `;
+            allOpenItemsList.appendChild(card);
+          });
+        }
+      }
+
+      const prQueue = data.pr_queue ?? {};
+      const totalPrs = prQueue.total_prs ?? 0;
+      const completedPrs = prQueue.completed_prs ?? 0;
+      const progressPercent = prQueue.progress_percent ?? (totalPrs ? Math.round((completedPrs / totalPrs) * 100) : 0);
+      document.getElementById("pr-feature-name").textContent = prQueue.active_feature ?? "—";
+      document.getElementById("pr-progress-label").textContent = `${completedPrs}/${totalPrs} completed · ${progressPercent}%`;
+      const prFill = document.getElementById("pr-progress-fill");
+      if (prFill) prFill.style.width = `${Math.max(0, Math.min(100, progressPercent))}%`;
+
+      const prBody = document.getElementById("pr-table-body");
+      prBody.innerHTML = "";
+      const prs = prQueue.prs ?? [];
+      prs.forEach((pr) => {
+        const tr = document.createElement("tr");
+        const deps = pr.deps?.length ? pr.deps.join(", ") : "—";
+        const status = pr.status ?? "pending";
+        const isBlocked = Boolean(pr.blocked);
+        const statusLabel = status === "in_progress" ? "In Progress" : status === "done" ? "Done" : "Pending";
+        const pillClass = `status-pill ${status}${isBlocked ? " blocked" : ""}`;
+        const prId = pr.id ?? "—";
+        const smallIds = new Set(["PR-1", "PR-2", "PR-3", "PR1", "PR2", "PR3"]);
+        const idClass = smallIds.has(prId) ? "pr-id small" : "pr-id";
+        tr.innerHTML = `
+          <td><strong class="${idClass}">${prId}</strong></td>
+          <td>${pr.description ?? "—"}</td>
+          <td><span class="${pillClass}">${isBlocked ? "Blocked" : statusLabel}</span></td>
+          <td class="deps">${deps}</td>
+        `;
+        prBody.appendChild(tr);
+      });
+
+      const processes = document.getElementById("processes-list");
+      const processWrap = document.getElementById("processes-wrap");
+      const processSummaryText = document.getElementById("process-summary-text");
+      const processSummaryLight = document.getElementById("process-summary-light");
+      const processToggle = document.getElementById("process-toggle");
+
+      processes.innerHTML = "";
+      const processEntries = Object.entries(data.processes ?? {});
+      const runningCount = processEntries.filter(([, info]) => info.running).length;
+      const totalCount = processEntries.length || 0;
+      const allRunning = totalCount > 0 && runningCount === totalCount;
+      const anyRunning = runningCount > 0;
+
+      if (processSummaryLight) {
+        processSummaryLight.className = "process-stoplight";
+        if (allRunning) {
+          processSummaryLight.classList.add("running");
+        } else if (!anyRunning) {
+          processSummaryLight.classList.add("stopped");
+        } else {
+          processSummaryLight.style.background = "var(--brand-orange)";
+          processSummaryLight.style.boxShadow = "0 0 12px rgba(249, 115, 22, 0.55)";
+        }
+      }
+
+      if (processSummaryText) {
+        if (totalCount === 0) {
+          processSummaryText.textContent = "No processes detected";
+        } else if (allRunning) {
+          processSummaryText.textContent = `All ${totalCount} running`;
+        } else {
+          processSummaryText.textContent = `${runningCount}/${totalCount} running`;
+        }
+      }
+
+      if (processToggle && processWrap) {
+        if (!processToggle.dataset.bound) {
+          processToggle.addEventListener("click", () => {
+            const open = processWrap.style.display !== "none";
+            processWrap.style.display = open ? "none" : "block";
+            processToggle.textContent = open ? "Details" : "Hide";
+          });
+          processToggle.dataset.bound = "true";
+        }
+      }
+
+      processEntries.forEach(([name, info]) => {
+        const item = document.createElement("div");
+        item.className = "process-item";
+
+        const meta = document.createElement("div");
+        meta.className = "process-meta";
+        const status = info.running ? "running" : "stopped";
+        const pid = info.pid ?? "—";
+        meta.innerHTML = `
+          <div class="process-name">${name}</div>
+          <div class="process-info">PID ${pid} · ${status}</div>
+        `;
+
+        const controls = document.createElement("div");
+        controls.className = "process-controls";
+        const light = document.createElement("span");
+        light.className = `process-stoplight ${info.running ? "running" : "stopped"}`;
+
+        const button = document.createElement("button");
+        button.className = "restart-btn";
+        button.textContent = "Restart";
+        button.addEventListener("click", () => restartProcess(name, button));
+
+        controls.appendChild(light);
+        controls.appendChild(button);
+        item.appendChild(meta);
+        item.appendChild(controls);
+        processes.appendChild(item);
+      });
+
+      buildList(document.getElementById("queue-stats"), [
+        ["Queue", data.queues?.queue ?? 0],
+        ["Pending", data.queues?.pending ?? 0],
+        ["Active", data.queues?.active ?? 0],
+      ]);
+
+      const grid = document.getElementById("terminals-grid");
+      grid.innerHTML = "";
+      const terminalOrder = ["T0", "T1", "T2", "T3"];
+      const roleLabels = {
+        T0: "Orchestrator",
+        T1: "Worker",
+        T2: "Worker",
+        T3: "Worker",
+      };
+      const terminals = data.terminals ?? {};
+      terminalOrder.forEach((name) => {
+        const info = terminals[name] || {
+          status: "offline",
+          model: "—",
+          current_command: "—",
+          last_update: "never",
+        };
+        const normalizedStatus = normalizeTerminalStatus(info.status);
+        let statusText = "Offline";
+        if (normalizedStatus === "idle") {
+          statusText = "Idle";
+        } else if (normalizedStatus === "blocked") {
+          if (info.current_task) {
+            statusText = `Blocked on ${info.current_task}`;
+          } else {
+            statusText = "Blocked (waiting for input)";
+          }
+        } else if (normalizedStatus === "unknown") {
+          statusText = "Unknown";
+        } else if (normalizedStatus === "working") {
+          if (info.current_task) {
+            statusText = `Working on ${info.current_task}`;
+          } else {
+            const currentPr = data.pr_queue?.current_pr;
+            if (currentPr) {
+              statusText = `Working on ${currentPr}`;
+            } else if (data.pr_queue?.active_feature) {
+              statusText = `Working on ${data.pr_queue.active_feature}`;
+            } else {
+              statusText = "Working";
+            }
+          }
+        }
+        const card = document.createElement("div");
+        card.className = "terminal-card";
+        const statusDot = `<span class="status-circle" style="background:${terminalStatusColor(normalizedStatus)}"></span>`;
+        const role = roleLabels[name] || "Worker";
+        const modelLabel = info.model && info.model !== "unknown" ? info.model : "unknown";
+        const label = `${name} - ${role} ${modelLabel}`;
+        const unlockControl = (name === "T1" || name === "T2" || name === "T3")
+          ? `<div class="terminal-controls"><button class="restart-btn" type="button" onclick="unlockTerminal('${name}', this)">Unlock</button></div>`
+          : "";
+        card.innerHTML = `
+          <strong>${label}</strong>
+          <span>${statusDot} ${statusText}</span>
+          ${unlockControl}
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    async function restartProcess(processName, button) {
+      button.disabled = true;
+      const previousLabel = button.textContent;
+      button.textContent = "Restarting...";
+      try {
+        const res = await fetch("/api/restart-process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ process: processName }),
+        });
+        if (!res.ok) {
+          throw new Error("restart failed");
+        }
+      } catch (err) {
+        console.error("restart error", err);
+      } finally {
+        button.textContent = previousLabel;
+        button.disabled = false;
+        refresh();
+      }
+    }
+
+    async function unlockTerminal(terminalId, button) {
+      if (!confirm(`Unlock ${terminalId}? This sets terminal and track to idle and clears active dispatch.`)) {
+        return;
+      }
+
+      button.disabled = true;
+      const previousLabel = button.textContent;
+      button.textContent = "Unlocking...";
+      try {
+        const res = await fetch("/api/unlock-terminal", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ terminal: terminalId }),
+        });
+        if (!res.ok) {
+          throw new Error("unlock failed");
+        }
+      } catch (err) {
+        console.error("unlock error", err);
+      } finally {
+        button.textContent = previousLabel;
+        button.disabled = false;
+        refresh();
+      }
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch(STATE_BASE_URL + "?t=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) throw new Error("state fetch failed");
+        const data = await res.json();
+        render(data);
+        if (fetchStatus) {
+          fetchStatus.classList.remove("error");
+          fetchStatus.classList.add("ok");
+          fetchStatus.textContent = `Live · ${data.timestamp || "updated"}`;
+        }
+      } catch (err) {
+        console.error("dashboard refresh error", err);
+        if (fetchStatus) {
+          fetchStatus.classList.remove("ok");
+          fetchStatus.classList.add("error");
+          fetchStatus.textContent = "No data (fetch failed)";
+        }
+      }
+    }
+
+    let countdown = REFRESH_INTERVAL / 1000;
+    const counter = document.getElementById("refresh-counter");
+
+    function tick() {
+      countdown = Math.max(0, countdown - 1);
+      counter.textContent = `Next refresh in ${countdown}s`;
+      if (countdown === 0) {
+        refresh();
+        countdown = REFRESH_INTERVAL / 1000;
+      }
+    }
+
+    refresh();
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>

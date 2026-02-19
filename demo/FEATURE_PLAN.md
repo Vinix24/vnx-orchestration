@@ -45,12 +45,13 @@ Dependencies: []
 **Track**: A
 Dependencies: [PR-1]
 **Warning**: Scoring weights must be configurable via config, not hardcoded. Use the model registry from PR-1 for AI-assisted scoring.
-**Scope**: Core scoring algorithm with configurable weights
-**Files**: `src/services/scoring_engine.py`, `src/models/score.py`, `config/scoring_weights.yaml`
+**Scope**: Update the existing lead scoring engine to load weights from YAML config and integrate with the AI model registry from PR-1. The current implementation in `lead_scoring_engine.py` has hardcoded weights that must be replaced with config-driven values.
+**Files**: `src/services/lead_scoring_engine.py`, `src/models/score.py`, `config/scoring_weights.yaml`
 **Open Items**:
-- OI-201: Implement weighted scoring with behavioral + demographic factors
-- OI-202: Add score normalization (0-100 scale)
-- OI-203: Create scoring audit trail for transparency
+- OI-201: Update `src/services/lead_scoring_engine.py` to load weights from `config/scoring_weights.yaml` instead of hardcoded values
+- OI-202: Add score normalization (0-100 scale) to the existing engine
+- OI-203: Extend the scoring audit trail with timestamp and reason tracking
+- OI-204: Add batch scoring method to `LeadScoringEngine` that processes a list of leads with per-lead error handling, progress callbacks, and aggregated statistics (min/max/avg/median scores, tier distribution, failure count)
 
 ### Quality Gate
 - [ ] All tests pass for scoring_engine including edge cases
