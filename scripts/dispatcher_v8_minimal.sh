@@ -434,30 +434,46 @@ configure_terminal_mode() {
         local reset_cmd
         reset_cmd=$(get_context_reset_command "$provider")
         log "V8 MODE_CONTROL: Clearing context via $reset_cmd ..."
-        if ! tmux_send_best_effort "$target_pane" "$reset_cmd"; then
+
+        # Pre-clear: ensure input line is empty before typing command
+        # Without this, leftover characters in the input buffer cause
+        # /new to become " /new" (leading space) which Codex doesn't
+        # recognize as a command (white text instead of blue).
+        # NOTE: Do NOT use C-c here — it can kill the CLI process entirely,
+        # leaving a bare zsh shell where dispatch content gets executed as
+        # shell commands. C-u alone safely clears the input line.
+        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+        sleep 0.3
+
+        if ! tmux_send_best_effort "$target_pane" -l "$reset_cmd"; then
             log_structured_failure "context_reset_failed" "Failed to send context reset command" "pane=$target_pane provider=$provider"
             return 1
         fi
-        if ! tmux_send_best_effort "$target_pane" "Enter"; then
+        sleep 1  # Allow CLI to fully render typed command before submitting
+        if ! tmux_send_best_effort "$target_pane" Enter; then
             log_structured_failure "context_reset_submit_failed" "Failed to submit context reset command" "pane=$target_pane provider=$provider"
             return 1
         fi
-        sleep 3  # Critical delay for context reset to complete
+        sleep 4  # Critical delay for context reset to complete (Codex /new needs time)
     fi
 
     # Step 3: Switch model if specified (only for providers that support /model)
     if [[ -n "$requires_model" ]] && [[ "$requires_model" != "" ]]; then
         if [[ "$provider" == "claude_code" || "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
             log "V8 MODE_CONTROL: Switching to model: $requires_model (provider=$provider)"
-            if ! tmux_send_best_effort "$target_pane" "/model $requires_model"; then
+            # Pre-clear input line (C-u only — C-c would kill the CLI process)
+            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+            sleep 0.3
+            if ! tmux_send_best_effort "$target_pane" -l "/model $requires_model"; then
                 log_structured_failure "model_switch_failed" "Failed to send model switch command" "pane=$target_pane model=$requires_model"
                 return 1
             fi
-            if ! tmux_send_best_effort "$target_pane" "Enter"; then
+            sleep 1  # Allow CLI to render command before submitting
+            if ! tmux_send_best_effort "$target_pane" Enter; then
                 log_structured_failure "model_switch_submit_failed" "Failed to submit model switch command" "pane=$target_pane model=$requires_model"
                 return 1
             fi
-            sleep 3  # Critical delay for model switch
+            sleep 4  # Critical delay for model switch to complete
         elif [[ "$provider" == "gemini_cli" || "$provider" == "gemini" ]]; then
             log "V8 MODE_CONTROL: Gemini does not support runtime model switching — Requires-Model=$requires_model ignored"
         else
@@ -470,15 +486,19 @@ configure_terminal_mode() {
         if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
             if [[ "$mode" == "planning" ]]; then
                 log "V8 MODE_CONTROL: Codex planning mode via /plan"
-                if ! tmux_send_best_effort "$target_pane" "/plan"; then
+                # Pre-clear input line (C-u only — C-c would kill the CLI process)
+                tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+                sleep 0.3
+                if ! tmux_send_best_effort "$target_pane" -l "/plan"; then
                     log_structured_failure "plan_mode_activation_failed" "Failed to send /plan command" "pane=$target_pane provider=$provider"
                     return 1
                 fi
-                if ! tmux_send_best_effort "$target_pane" "Enter"; then
+                sleep 1  # Allow CLI to render command before submitting
+                if ! tmux_send_best_effort "$target_pane" Enter; then
                     log_structured_failure "plan_mode_submit_failed" "Failed to submit /plan command" "pane=$target_pane provider=$provider"
                     return 1
                 fi
-                sleep 1
+                sleep 2  # Wait for plan mode activation
             else
                 log "V8 MODE_CONTROL: Codex - skipping unsupported mode: $mode"
             fi
@@ -498,15 +518,19 @@ configure_terminal_mode() {
 
             # First, ensure we're using Opus for planning
             log "V8: Switching to Opus model for planning mode"
-            if ! tmux_send_best_effort "$target_pane" "/model opus"; then
+            # Pre-clear input line (C-u only — C-c would kill the CLI process)
+            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+            sleep 0.3
+            if ! tmux_send_best_effort "$target_pane" -l "/model opus"; then
                 log_structured_failure "planning_model_switch_failed" "Failed to switch to Opus for planning mode" "pane=$target_pane"
                 return 1
             fi
-            if ! tmux_send_best_effort "$target_pane" "Enter"; then
+            sleep 1  # Allow CLI to render command before submitting
+            if ! tmux_send_best_effort "$target_pane" Enter; then
                 log_structured_failure "planning_model_submit_failed" "Failed to submit Opus switch for planning mode" "pane=$target_pane"
                 return 1
             fi
-            sleep 3  # Critical delay for model switch
+            sleep 4  # Critical delay for model switch to complete
 
             # Then activate PLAN mode
             log "V8 MODE_CONTROL: Activating PLAN mode (⏸)..."
@@ -783,10 +807,11 @@ dispatch_with_skill_activation() {
     # This matches V7 behavior where mode changes need time to settle
     sleep 2
 
-    # Clear any existing content in terminal
-    if ! tmux_send_best_effort "$target_pane" C-c; then
-        log "V8 DISPATCH: best-effort Ctrl+C clear failed (continuing)"
-    fi
+    # Pre-clear: ensure terminal input line is empty before skill activation
+    # NOTE: Do NOT use C-c here — it kills the CLI process, leaving a bare
+    # zsh shell where dispatch content gets executed as shell commands.
+    # C-u alone safely clears the readline input buffer.
+    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
     sleep 0.5
 
     # Map role to skill name
@@ -1004,6 +1029,9 @@ $receipt_footer"
         return 1
     fi
 
+    # Allow CLI to render the skill command before pasting instruction
+    sleep 0.5
+
     # Step 2: Load instruction into buffer and paste after typed skill command
     if ! echo "$complete_prompt" | tmux load-buffer -; then
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
@@ -1021,8 +1049,8 @@ $receipt_footer"
         return 1
     fi
 
-    # Add delay before Enter to ensure content is fully pasted
-    sleep 0.5
+    # Add delay before Enter to ensure content is fully pasted and rendered
+    sleep 1
 
     if ! tmux send-keys -t "$target_pane" Enter; then
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
