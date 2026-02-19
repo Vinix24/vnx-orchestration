@@ -82,13 +82,27 @@ discover_pane_by_path() {
             awk -v root="$terminals_root" -v t="$terminal" '$2==root"/"t {print $1; exit}')
     fi
 
-    # Fallback: generic terminal path scan.
+    # Fallback: generic terminal path scan (scoped to own session when possible).
     if [ -z "$pane_id" ]; then
-        pane_id=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
-            grep -E "/terminals/(T${terminal#T}|${terminal}|T-MANAGER)" | \
-            grep -E "(T${terminal#T}|${terminal})" | \
-            awk '{print $1}' | \
-            head -1)
+        local vnx_session_path=""
+        if [ -n "${PROJECT_ROOT:-}" ]; then
+            vnx_session_path="vnx-$(basename "$PROJECT_ROOT")"
+        fi
+        if [ -n "$vnx_session_path" ] && tmux has-session -t "$vnx_session_path" 2>/dev/null; then
+            pane_id=$(tmux list-panes -s -t "$vnx_session_path" -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
+                grep -E "/terminals/(T${terminal#T}|${terminal}|T-MANAGER)" | \
+                grep -E "(T${terminal#T}|${terminal})" | \
+                awk '{print $1}' | \
+                head -1)
+        fi
+        # Only fall back to all-sessions scan if no PROJECT_ROOT is set
+        if [ -z "$pane_id" ] && [ -z "${PROJECT_ROOT:-}" ]; then
+            pane_id=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
+                grep -E "/terminals/(T${terminal#T}|${terminal}|T-MANAGER)" | \
+                grep -E "(T${terminal#T}|${terminal})" | \
+                awk '{print $1}' | \
+                head -1)
+        fi
     fi
 
     if [ -n "$pane_id" ]; then
