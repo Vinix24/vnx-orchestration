@@ -1,8 +1,8 @@
 # VNX Documentation
 
 **Status**: Active
-**Last Updated**: 2026-02-10
-**Owner**: T-MANAGER
+**Last Updated**: 2026-02-19
+**Owner**: VNX Maintainer
 **Purpose**: Describe how VNX documentation is organized and where to find the current source of truth.
 
 ---

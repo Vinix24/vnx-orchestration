@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-02-18
+**Last Updated**: 2026-02-19
 
 ---
 
@@ -119,5 +119,5 @@ docs/
 
   architecture/          # Architecture studies & proposals
 
-  internal/              # Internal docs (not tracked in git)
+  internal/              # Internal docs (maintainer notes + publication drafts)
 ```
