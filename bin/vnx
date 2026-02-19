@@ -573,15 +573,18 @@ TSJSON
     # Store per-session so Ctrl+G resolves the correct project at runtime.
     tmux set-option -t "$session_name" @vnx_popup_cmd "$popup_full_cmd" 2>/dev/null
 
-    # Create resolver script that reads @vnx_popup_cmd from the originating session.
-    # #{session_name} is resolved by tmux BEFORE the popup opens, so the resolver
-    # always gets the correct session even though display-popup runs in client context.
+    # Create resolver script that reads @vnx_popup_cmd from the current client session.
+    # Keep this compatible with tmux variants that do not support `run-shell -F`.
     local resolver="/tmp/vnx_popup_resolver.sh"
     cat > "$resolver" <<'RESOLVER'
 #!/usr/bin/env bash
-session="${1:-}"
+session=""
+session=$(tmux display-message -p '#{client_session}' 2>/dev/null || true)
 if [ -z "$session" ]; then
-    echo "No session name provided."
+    session=$(tmux list-clients -F '#{client_session}' 2>/dev/null | head -n1 || true)
+fi
+if [ -z "$session" ]; then
+    echo "Could not determine tmux session."
     sleep 2
     exit 1
 fi
@@ -596,11 +599,10 @@ fi
 RESOLVER
     chmod +x "$resolver"
 
-    # Global binding: #{session_name} is expanded at key-press time by tmux.
-    tmux bind-key -n C-g display-popup -E -w 80% -h 60% "bash $resolver '#{session_name}'" 2>/dev/null
-    tmux bind-key -n 'C-\' display-popup -E -w 80% -h 60% "bash $resolver '#{session_name}'" 2>/dev/null
-    tmux bind-key q display-popup -E -w 80% -h 60% "bash $resolver '#{session_name}'" 2>/dev/null
-    tmux bind-key p display-popup -E -w 80% -h 60% "bash $resolver '#{session_name}'" 2>/dev/null
+    tmux bind-key -n C-g display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
+    tmux bind-key -n 'C-\' display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
+    tmux bind-key q display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
+    tmux bind-key p display-popup -E -w 80% -h 60% "bash $resolver" 2>/dev/null
     log "Popup queue bound to Ctrl+G, Ctrl+\\, Ctrl+B Q/P (resolver-based)"
   fi
 
