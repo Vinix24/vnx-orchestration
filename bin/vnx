@@ -98,7 +98,55 @@ ensure_runtime_layout() {
     "$VNX_DISPATCH_DIR/failed" \
     "$VNX_REPORTS_DIR" \
     "$VNX_DB_DIR" \
-    "$VNX_DATA_DIR/receipts"
+    "$VNX_DATA_DIR/receipts" \
+    "$VNX_DATA_DIR/profiles"
+
+  # Write provider profiles if they don't exist yet (idempotent).
+  _write_profiles_if_missing "$VNX_DATA_DIR/profiles"
+}
+
+_write_profiles_if_missing() {
+  local dir="$1"
+
+  # claude-only: all terminals run Claude Code
+  if [ ! -f "$dir/claude-only.env" ]; then
+    cat > "$dir/claude-only.env" <<'ENV'
+# VNX Profile: claude-only
+# All worker terminals use Claude Code (claude).
+VNX_T1_PROVIDER=claude_code
+VNX_T2_PROVIDER=claude_code
+ENV
+  fi
+
+  # claude-codex: T1 uses Codex CLI, T2 uses Claude Code
+  if [ ! -f "$dir/claude-codex.env" ]; then
+    cat > "$dir/claude-codex.env" <<'ENV'
+# VNX Profile: claude-codex
+# T1 uses Codex CLI, T2 uses Claude Code.
+VNX_T1_PROVIDER=codex_cli
+VNX_T2_PROVIDER=claude_code
+ENV
+  fi
+
+  # claude-gemini: T1 uses Gemini CLI, T2 uses Claude Code
+  if [ ! -f "$dir/claude-gemini.env" ]; then
+    cat > "$dir/claude-gemini.env" <<'ENV'
+# VNX Profile: claude-gemini
+# T1 uses Gemini CLI, T2 uses Claude Code.
+VNX_T1_PROVIDER=gemini_cli
+VNX_T2_PROVIDER=claude_code
+ENV
+  fi
+
+  # full-multi: T1 uses Codex CLI, T2 uses Gemini CLI
+  if [ ! -f "$dir/full-multi.env" ]; then
+    cat > "$dir/full-multi.env" <<'ENV'
+# VNX Profile: full-multi
+# T1 uses Codex CLI, T2 uses Gemini CLI.
+VNX_T1_PROVIDER=codex_cli
+VNX_T2_PROVIDER=gemini_cli
+ENV
+  fi
 }
 
 write_default_config_if_missing() {
