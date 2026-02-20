@@ -728,6 +728,7 @@ TSJSON
     tmux set-option -t "$session_name" @vnx_popup_cmd "$popup_full_cmd" 2>/dev/null
 
     # Create resolver script that reads @vnx_popup_cmd from the current client session.
+    # Falls back to scanning all sessions by pane path if the current session has no cmd set.
     # Keep this compatible with tmux variants that do not support `run-shell -F`.
     local resolver="/tmp/vnx_popup_resolver.sh"
     cat > "$resolver" <<'RESOLVER'
@@ -742,7 +743,27 @@ if [ -z "$session" ]; then
     sleep 2
     exit 1
 fi
-cmd=$(tmux show-option -t "$session" -v @vnx_popup_cmd 2>/dev/null)
+
+# Primary: read popup cmd from current session.
+cmd=$(tmux show-option -t "$session" -v @vnx_popup_cmd 2>/dev/null || true)
+
+# Fallback: if current session has no cmd (e.g. old session before naming change),
+# scan all sessions and pick the one whose PROJECT_ROOT matches the current pane path.
+if [ -z "$cmd" ]; then
+    current_path=$(tmux display-message -p '#{pane_current_path}' 2>/dev/null || true)
+    for s in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+        candidate=$(tmux show-option -t "$s" -v @vnx_popup_cmd 2>/dev/null || true)
+        if [ -z "$candidate" ]; then continue; fi
+        project_root=$(echo "$candidate" | grep -oE "PROJECT_ROOT='[^']+'" | head -1 | cut -d"'" -f2 || true)
+        if [ -n "$project_root" ] && [[ "$current_path" == "$project_root"* ]]; then
+            cmd="$candidate"
+            # Also set it on current session for future Ctrl+G calls.
+            tmux set-option -t "$session" @vnx_popup_cmd "$cmd" 2>/dev/null || true
+            break
+        fi
+    done
+fi
+
 if [ -n "$cmd" ]; then
     eval "$cmd"
 else
