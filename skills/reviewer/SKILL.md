@@ -83,3 +83,15 @@ For report generation, see: `@.claude/skills/reviewer/template.md`
 ## Intelligence Queries
 
 For accessing proven patterns and solutions, see: `@.claude/skills/reviewer/scripts/intelligence.sh`
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: reviewer
+```
+
+No exceptions. This must appear before any other content.

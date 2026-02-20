@@ -246,3 +246,14 @@ Generate optimization reports in:
 - Maintain code readability
 - Include benchmark results
 - Document trade-offs
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: python-optimizer
+```
+
+No exceptions. This must appear before any other content.

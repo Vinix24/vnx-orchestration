@@ -325,7 +325,18 @@ monitor() {
     log "Starting continuous monitoring (checking every ${CHECK_INTERVAL}s)..."
     log "Auto-restart enabled for all supervised processes (all critical)"
 
+    local rotation_cycle=0
+    local ROTATION_INTERVAL=60  # Check log rotation every 60 cycles (5min at 5s interval)
+
     while true; do
+        # Periodic log rotation check (every ~5 minutes)
+        rotation_cycle=$((rotation_cycle + 1))
+        if [ $rotation_cycle -ge $ROTATION_INTERVAL ]; then
+            rotation_cycle=0
+            log "Running periodic log rotation check..."
+            bash "$SCRIPTS_DIR/daily_log_rotation.sh" >> "$SUPERVISOR_LOG" 2>&1 || \
+                log "WARNING: Log rotation check failed"
+        fi
         receipt_item="${RECEIPT_SERVICE_NAME}:${RECEIPT_SCRIPT}"
         # Check each process
         for item in "dispatcher:dispatcher_v8_minimal.sh" \

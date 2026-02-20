@@ -151,11 +151,20 @@ echo "Press Ctrl+C to stop"
 echo ""
 
 # If queue already has items on watcher startup, raise popup immediately.
+# Wait briefly for tmux session to be fully registered (race condition at startup).
 if [ "$LAST_COUNT" -gt 0 ]; then
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}✓ $LAST_COUNT queued dispatch(es) on startup${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    show_enhanced_notification_async "$LAST_COUNT queued dispatch(es) on startup" "$LAST_COUNT"
+    # Retry popup with delay — tmux session may not be resolvable yet at startup
+    for _attempt in 1 2 3; do
+        if [ -n "$(resolve_project_tmux_session)" ]; then
+            show_enhanced_notification_async "$LAST_COUNT queued dispatch(es) on startup" "$LAST_COUNT"
+            break
+        fi
+        echo "Waiting for tmux session to register (attempt $_attempt/3)..."
+        sleep 3
+    done
 fi
 
 while true; do

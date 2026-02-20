@@ -137,3 +137,14 @@ Generate optimization reports in:
 - No full table scans on large tables
 - RLS policies use indexes
 - Connection pool never exhausted
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: supabase-expert
+```
+
+No exceptions. This must appear before any other content.

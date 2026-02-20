@@ -760,6 +760,10 @@ uvicorn src.api.main:app --reload --port 8000
 pytest tests/
 ```
 
+## Git Workflow
+- Work directly on `main` branch. Do NOT create feature branches.
+- Commit directly to main — no PRs needed for this project.
+
 ## Key Constraints
 - Python 3.10+
 - FastAPI for API layer
@@ -768,6 +772,16 @@ pytest tests/
 EOF
 
 echo "  Created: CLAUDE.md"
+
+# Prevent global MCP servers from being enabled in the demo
+# settings.local.json with empty enabledMcpjsonServers overrides any user defaults
+mkdir -p "$PROJECT_DIR/.claude"
+cat > "$PROJECT_DIR/.claude/settings.local.json" << 'EOF'
+{
+  "enabledMcpjsonServers": []
+}
+EOF
+echo "  Created: settings.local.json (MCP servers disabled for demo)"
 
 # ── Step 5: Feature plan with quality gates ────────────────────────────
 echo "[5/8] Creating FEATURE_PLAN.md with dependencies, warnings & quality gates..."

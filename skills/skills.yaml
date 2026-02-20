@@ -7,30 +7,9 @@
 version: 2.0.0
 updated: 2026-02-16
 
-# ─── Valid Skills (18 core) ─────────────────────────────────────────
-# Projects may add project-specific skills to this list.
-
-valid_skills:
-  - planner
-  - architect
-  - backend-developer
-  - api-developer
-  - frontend-developer
-  - test-engineer
-  - quality-engineer
-  - reviewer
-  - debugger
-  - security-engineer
-  - performance-profiler
-  - python-optimizer
-  - supabase-expert
-  - data-analyst
-  - excel-reporter
-  - monitoring-specialist
-  - vnx-manager
-  - t0-orchestrator
-
 # ─── Skill Definitions ─────────────────────────────────────────────
+# Valid skills are derived from the keys of this block (single source of truth).
+# Do NOT maintain a separate valid_skills list — add entries here instead.
 
 skills:
   # --- Core VNX Skills ---

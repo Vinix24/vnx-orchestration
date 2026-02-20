@@ -66,3 +66,15 @@ When making system changes, consider:
 3. **Simplicity**: Can we achieve this with simpler code?
 4. **Observability**: Will we be able to debug issues?
 5. **Documentation**: Can future maintainers understand this?
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: vnx-manager
+```
+
+No exceptions. This must appear before any other content.

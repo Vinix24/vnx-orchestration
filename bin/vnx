@@ -466,12 +466,12 @@ cmd_start() {
       local t1_cmd t2_cmd
       case "$t1_provider" in
         codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
-        gemini_cli|gemini) t1_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+        gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
         *) t1_cmd="claude --model sonnet" ;;
       esac
       case "$t2_provider" in
         codex_cli|codex) t2_cmd="codex -m $codex_model" ;;
-        gemini_cli|gemini) t2_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+        gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
         *) t2_cmd="claude --model sonnet" ;;
       esac
 
@@ -818,12 +818,12 @@ RESOLVER
   local t1_cmd t2_cmd
   case "$t1_provider" in
     codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
-    gemini_cli|gemini) t1_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
     *) t1_cmd="claude --model sonnet $t0_flags" ;;
   esac
   case "$t2_provider" in
     codex_cli|codex) t2_cmd="codex -m $codex_model" ;;
-    gemini_cli|gemini) t2_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
     *) t2_cmd="claude --model sonnet $t0_flags" ;;
   esac
 

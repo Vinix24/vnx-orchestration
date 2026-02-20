@@ -14,7 +14,7 @@ LOGS_DIR="$VNX_LOGS_DIR"
 # Configuration
 MAX_LOG_LINES=50000        # Keep max 50k lines per conversation log
 MAX_DASHBOARD_LINES=10000  # Keep max 10k lines for dashboard
-MAX_LOG_SIZE_MB=100        # Rotate logs bigger than 100MB
+MAX_LOG_SIZE_MB=20         # Rotate logs bigger than 20MB
 MAX_STATE_SIZE_MB=100      # Rotate state NDJSON files bigger than 100MB
 MAX_STATE_LOG_LINES=20000  # Keep last 20k lines for state logs
 MAX_LOG_ARCHIVE_LINES=50000 # Keep last 50k lines for large logs
@@ -58,6 +58,12 @@ archive_and_trim_file() {
     mv "$file_path.tmp" "$file_path"
     echo "    ✓ Archived $((total_lines - tail_lines)) lines to $(basename "$archive_file")"
     echo "    ✓ Kept last $tail_lines lines"
+
+    # Compress archive to save disk space
+    if command -v gzip >/dev/null 2>&1 && [ -f "$archive_file" ]; then
+        gzip "$archive_file"
+        echo "    ✓ Compressed to $(basename "$archive_file").gz"
+    fi
 }
 
 archive_old_dispatch_jsons() {
@@ -74,16 +80,8 @@ archive_old_dispatch_jsons() {
 # 1. Rotate conversation logs if they exceed size/line limits
 echo "Rotating conversation logs..."
 for log in "$STATE_DIR"/t*_conversation.log; do
-    if [ -f "$log" ]; then
-        SIZE_MB=$(du -m "$log" | cut -f1)
-        if [ "$SIZE_MB" -gt "$MAX_LOG_SIZE_MB" ]; then
-            echo "  Rotating $(basename $log) (${SIZE_MB}MB > ${MAX_LOG_SIZE_MB}MB)"
-            # Keep only last N lines
-            tail -n $MAX_LOG_LINES "$log" > "$log.tmp"
-            mv "$log.tmp" "$log"
-            echo "    ✓ Rotated to $MAX_LOG_LINES lines"
-        fi
-    fi
+    [ -f "$log" ] || continue
+    archive_and_trim_file "$log" "$MAX_LOG_SIZE_MB" "$MAX_LOG_LINES" "$ARCHIVE_DIR"
 done
 
 # 2. Rotate dashboard log

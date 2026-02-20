@@ -62,3 +62,15 @@ For report generation, see: `@.claude/skills/test-engineer/template.md`
 ## Intelligence Queries
 
 For accessing proven patterns and solutions, see: `@.claude/skills/test-engineer/scripts/intelligence.sh`
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: test-engineer
+```
+
+No exceptions. This must appear before any other content.

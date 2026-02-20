@@ -12,8 +12,16 @@ if [[ "$1" == "--search" ]]; then
     echo "🔍 Searching for skill matching: $SEARCH_TERM"
     echo ""
 
-    # Check valid skills
-    MATCH=$(grep -A 20 "^valid_skills:" "$SKILLS_YAML" | grep -i "$SEARCH_TERM" | sed 's/^  - //')
+    # Derive valid skills from skills: block (single source of truth)
+    MATCH=$(python3 -c "
+import yaml, sys
+with open('$SKILLS_YAML') as f:
+    d = yaml.safe_load(f)
+skills = list(d.get('skills', {}).keys())
+term = sys.argv[1].lower()
+matches = [s for s in skills if term in s.lower()]
+print('\n'.join(matches))
+" "$SEARCH_TERM")
     if [[ -n "$MATCH" ]]; then
         echo "✅ Valid skill: $MATCH"
         exit 0
@@ -34,7 +42,14 @@ if [[ "$1" == "--search" ]]; then
 else
     echo "📋 Valid Skills (use EXACTLY these names)"
     echo "========================================"
-    grep -A 20 "^valid_skills:" "$SKILLS_YAML" | grep "^  -" | sed 's/^  - /  ✓ /' | sed 's/ *#.*//'
+    # Derive from skills: block (single source of truth)
+    python3 -c "
+import yaml
+with open('$SKILLS_YAML') as f:
+    d = yaml.safe_load(f)
+for s in sorted(d.get('skills', {}).keys()):
+    print(f'  ✓ {s}')
+"
     echo ""
     echo "💡 Tip: Use --search <term> to find a skill"
     echo "   Example: ./list_valid_skills.sh --search performance"

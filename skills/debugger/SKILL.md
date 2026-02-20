@@ -71,3 +71,15 @@ For report generation, see: `@.claude/skills/debugger/template.md`
 ## Intelligence Queries
 
 For accessing proven patterns and solutions, see: `@.claude/skills/debugger/scripts/intelligence.sh`
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: debugger
+```
+
+No exceptions. This must appear before any other content.

@@ -185,3 +185,14 @@ Generate reports in:
 - Measure impact quantitatively
 - Consider trade-offs explicitly
 - Document optimization rationale
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: performance-profiler
+```
+
+No exceptions. This must appear before any other content.

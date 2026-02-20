@@ -13,6 +13,11 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
+try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None  # type: ignore
+
 
 class FeaturePlanValidator:
     """Validates feature plan structure and constraints."""
@@ -168,22 +173,34 @@ class FeaturePlanValidator:
                         f"{pr_id}: Missing required field '{field}'"
                     )
 
+    @staticmethod
+    def _load_valid_skills() -> set:
+        """Load valid skill names from skills.yaml (single source of truth)."""
+        skills_yaml = Path(__file__).parent.parent / "skills" / "skills.yaml"
+        if _yaml is not None and skills_yaml.exists():
+            with open(skills_yaml) as f:
+                data = _yaml.safe_load(f)
+            return {
+                name.lstrip('@')
+                for name in (
+                    entry.get('name', key)
+                    for key, entry in data.get('skills', {}).items()
+                )
+            }
+        # Fallback: derive from directory names if yaml unavailable
+        skills_dir = Path(__file__).parent.parent / "skills"
+        return {
+            p.name for p in skills_dir.iterdir()
+            if p.is_dir() and (p / "SKILL.md").exists()
+        }
+
     def _validate_skills(self):
         """Validate skill references are valid."""
-        valid_skills = {
-            '@backend-developer',
-            '@api-developer',
-            '@frontend-developer',
-            '@test-engineer',
-            '@debugger',
-            '@reviewer',
-            '@architect',
-            '@planner'
-        }
+        valid_skills = self._load_valid_skills()
 
         for pr_id, pr_data in self.prs.items():
             skill = pr_data.get('skill')
-            if skill and skill not in valid_skills:
+            if skill and skill.lstrip('@') not in valid_skills:
                 self.warnings.append(
                     f"{pr_id}: Unknown skill '{skill}'. Valid: {', '.join(sorted(valid_skills))}"
                 )
