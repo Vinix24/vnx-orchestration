@@ -55,7 +55,6 @@ Dependencies: [PR-1]
 
 ### Quality Gate
 - [ ] All tests pass for scoring_engine including edge cases
-- [ ] No Python file exceeds 500 lines (warning) or 800 lines (blocker)
 - [ ] No function exceeds 40 lines (warning) or 70 lines (blocker)
 - [ ] Score normalization produces values in 0-100 range for all inputs
 - [ ] No hardcoded scoring weights - all configurable via YAML
