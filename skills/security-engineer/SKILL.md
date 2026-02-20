@@ -57,3 +57,15 @@ Generate report: `.claude/vnx-system/security_reports/SECURITY_AUDIT_[date].md`
 - Verify all external dependencies are secure
 - Test authentication and authorization thoroughly
 - Document all findings with evidence
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: security-engineer
+```
+
+No exceptions. This must appear before any other content.

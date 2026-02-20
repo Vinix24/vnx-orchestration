@@ -183,3 +183,14 @@ worksheet.write_array_formula('G2:G100', '{=RANK(E2:E100,E:E,0)}')
 - Consistent color scheme
 - Print-ready layout
 - Interactive filters where applicable
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: excel-reporter
+```
+
+No exceptions. This must appear before any other content.

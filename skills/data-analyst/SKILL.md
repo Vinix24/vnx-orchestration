@@ -105,3 +105,14 @@ Period: [Start] - [End]
 - Minimum sample size (n > 30)
 - Clear visualization labels
 - Reproducible analysis code
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: data-analyst
+```
+
+No exceptions. This must appear before any other content.

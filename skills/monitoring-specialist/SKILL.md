@@ -261,3 +261,14 @@ Generate monitoring configs in:
 - <1% false positive alerts
 - Dashboard load time <2s
 - 99.9% monitoring uptime
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: monitoring-specialist
+```
+
+No exceptions. This must appear before any other content.

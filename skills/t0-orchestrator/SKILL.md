@@ -230,3 +230,15 @@ When not dispatching, provide explicit status to user:
 5. `template.md`
 
 Final rule: if evidence is weak or contradictory, do not approve by default.
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: t0-orchestrator
+```
+
+No exceptions. This must appear before any other content.

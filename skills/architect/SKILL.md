@@ -66,3 +66,15 @@ See `template.md` for report format and output location.
 
 ## Intelligence Access
 Use `scripts/intelligence.sh` for accessing VNX intelligence patterns and solutions.
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: architect
+```
+
+No exceptions. This must appear before any other content.

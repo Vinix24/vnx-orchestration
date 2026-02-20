@@ -47,3 +47,15 @@ Ensure production readiness through evidence-based validation. Break everything 
 
 ## Output Format
 Generate report: `.claude/vnx-system/quality_reports/QUALITY_VALIDATION_[date].md`
+
+---
+
+## Skill Activation Announcement
+
+**MANDATORY — first line of every response after skill load:**
+
+```
+🔧 Skill actief: quality-engineer
+```
+
+No exceptions. This must appear before any other content.
