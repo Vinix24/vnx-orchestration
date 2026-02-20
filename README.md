@@ -56,17 +56,31 @@ cd /path/to/your/project
 
 ### Multi-provider profiles
 
-Choose your provider combination at startup:
+`vnx init` automatically creates four provider profiles in `.vnx-data/profiles/`.
+When you run `vnx start` in an interactive terminal, a selection menu appears:
+
+```
+Available profiles:
+  1) claude-codex
+  2) claude-gemini
+  3) claude-only
+  4) full-multi
+
+  Select profile [1-4]:
+```
+
+Or pass a profile directly to skip the menu:
 
 ```bash
-.vnx/bin/vnx start                          # Interactive menu
+.vnx/bin/vnx start                          # Interactive menu (interactive terminal only)
 .vnx/bin/vnx start --profile claude-only    # All Claude Code
-.vnx/bin/vnx start --profile claude-codex   # T1: Codex CLI
-.vnx/bin/vnx start --profile claude-gemini  # T1: Gemini CLI
+.vnx/bin/vnx start --profile claude-codex   # T1: Codex CLI, T2: Claude
+.vnx/bin/vnx start --profile claude-gemini  # T1: Gemini CLI, T2: Claude
 .vnx/bin/vnx start --profile full-multi     # T1: Codex, T2: Gemini
 ```
 
 T0 (orchestrator) and T3 (deep specialist) always run Claude Opus.
+Profile `.env` files are idempotent — edit them freely to customize provider assignments.
 
 ## Demo (no LLM required)
 
@@ -134,7 +148,11 @@ your-project/
 ├── .claude/skills/    # Claude Code skills (copied by bootstrap-skills)
 ├── .agents/skills/    # Codex CLI skills (project-local, copied by bootstrap-skills)
 ├── .gemini/skills/    # Gemini CLI skills (project-local, copied by bootstrap-skills)
-└── .vnx-data/         # Runtime state: dispatches, receipts, logs (never commit)
+└── .vnx-data/         # Runtime state (never commit)
+    ├── profiles/      # Provider selection .env files (auto-created by vnx init)
+    ├── dispatches/    # Dispatch queue (pending → active → completed/failed)
+    ├── receipts/      # NDJSON ledger
+    └── logs/          # Supervisor and component logs
 ```
 
 ## CI
