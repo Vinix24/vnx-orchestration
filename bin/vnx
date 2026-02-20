@@ -1412,6 +1412,59 @@ EOF
     log "[bootstrap-terminals] Wrote: $target_file"
   done
 
+  # ── Generate .mcp.json per terminal ──────────────────────────────────
+  # Write an empty .mcp.json for each terminal. If the user has global MCP
+  # servers in ~/.claude.json, explicitly disable them so they don't leak
+  # into project terminals. This ensures predictable behaviour regardless
+  # of the user's global Claude Code configuration.
+  local global_claude_json="$HOME/.claude.json"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$global_claude_json" ]; then
+    python3 - "$terminals_dir" "$terminal_ids" "$force" <<'PYEOF'
+import json, os, sys
+
+terminals_dir = sys.argv[1]
+terminal_ids  = sys.argv[2].split()
+force         = sys.argv[3] == "1"
+
+# Read global MCP server definitions
+with open(os.path.expanduser("~/.claude.json")) as fh:
+    global_mcps = json.load(fh).get("mcpServers", {})
+
+if not global_mcps:
+    print("[bootstrap-terminals] No global MCPs detected — skipping .mcp.json generation")
+    sys.exit(0)
+
+# Build a config that disables every global MCP server
+disable_all = {}
+for name, cfg in global_mcps.items():
+    entry = dict(cfg)
+    entry["disabled"] = True
+    disable_all[name] = entry
+
+mcp_config = {"mcpServers": disable_all}
+
+for tid in terminal_ids:
+    target = os.path.join(terminals_dir, tid, ".mcp.json")
+    if os.path.exists(target) and not force:
+        print(f"[bootstrap-terminals] Keeping existing: {target}")
+        continue
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w") as fh:
+        json.dump(mcp_config, fh, indent=2)
+        fh.write("\n")
+    print(f"[bootstrap-terminals] Wrote .mcp.json (all globals disabled): {target}")
+PYEOF
+  else
+    # Fallback: write minimal empty config
+    for terminal_id in $terminal_ids; do
+      local mcp_file="$terminals_dir/$terminal_id/.mcp.json"
+      if [ ! -f "$mcp_file" ] || [ "$force" -eq 1 ]; then
+        printf '{"mcpServers": {}}\n' > "$mcp_file"
+        log "[bootstrap-terminals] Wrote .mcp.json (empty): $mcp_file"
+      fi
+    done
+  fi
+
   log "[bootstrap-terminals] Done"
 }
 
