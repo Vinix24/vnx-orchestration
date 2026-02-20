@@ -1465,6 +1465,50 @@ PYEOF
     done
   fi
 
+  # ── Pre-trust project root for Gemini CLI ────────────────────────────
+  # Gemini CLI asks "Do you trust this folder?" on first launch and then
+  # crashes during the restart that applies trust (known bug in 0.29.5).
+  # Pre-populate ~/.gemini/trustedFolders.json with TRUST_FOLDER for the
+  # project root and terminals dir so the dialog never appears.
+  local gemini_trust_file="$HOME/.gemini/trustedFolders.json"
+  if command -v gemini >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    python3 - "$PROJECT_ROOT" "$gemini_trust_file" <<'PYEOF'
+import json, os, sys
+
+project_root   = sys.argv[1]
+trust_file     = sys.argv[2]
+
+new_entries = {
+    project_root:                                   "TRUST_FOLDER",
+    os.path.join(project_root, ".claude/terminals"): "TRUST_FOLDER",
+}
+
+# Load or create
+os.makedirs(os.path.dirname(trust_file), exist_ok=True)
+if os.path.exists(trust_file):
+    with open(trust_file) as fh:
+        trust = json.load(fh)
+else:
+    trust = {}
+
+added = []
+for path, level in new_entries.items():
+    if path not in trust:
+        trust[path] = level
+        added.append(path)
+
+with open(trust_file, "w") as fh:
+    json.dump(trust, fh, indent=2)
+    fh.write("\n")
+
+if added:
+    for p in added:
+        print(f"[bootstrap-terminals] Gemini trust added: {p}")
+else:
+    print("[bootstrap-terminals] Gemini trust already set for project root")
+PYEOF
+  fi
+
   log "[bootstrap-terminals] Done"
 }
 
