@@ -282,6 +282,24 @@ cmd_start() {
   local dispatch_dir="${VNX_DISPATCH_DIR:-$runtime_dir/dispatches}"
   local log_dir="$runtime_dir/logs"
 
+  # ── Cleanup: kill any existing VNX processes for THIS project ────────
+  # Supervisor is killed first to prevent it from respawning children.
+  # Pattern is scoped to PROJECT_ROOT so other projects are not affected.
+  local vnx_scripts_pattern="$VNX_HOME/scripts"
+  local stale_count
+  stale_count=$(pgrep -f "$vnx_scripts_pattern" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$stale_count" -gt 0 ]; then
+    log "Cleaning up $stale_count stale VNX process(es) for this project..."
+    pkill -f "vnx_supervisor.*$(basename "$PROJECT_ROOT")" 2>/dev/null || true
+    pkill -f "$vnx_scripts_pattern" 2>/dev/null || true
+    pkill -f "$VNX_HOME/dashboard" 2>/dev/null || true
+    sleep 1
+    # Force kill anything that didn't exit cleanly
+    pkill -9 -f "$vnx_scripts_pattern" 2>/dev/null || true
+    pkill -9 -f "$VNX_HOME/dashboard" 2>/dev/null || true
+    log "Cleanup complete."
+  fi
+
   # ── Profile support: vnx start --profile <name> ─────────────────────
   local profile_name=""
   while [ $# -gt 0 ]; do
