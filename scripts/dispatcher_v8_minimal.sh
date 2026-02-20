@@ -454,7 +454,13 @@ configure_terminal_mode() {
             log_structured_failure "context_reset_submit_failed" "Failed to submit context reset command" "pane=$target_pane provider=$provider"
             return 1
         fi
-        sleep 4  # Critical delay for context reset to complete (Codex /new needs time)
+        # Provider-aware delay: Gemini /clear needs more time to reset UI than
+        # Claude /clear or Codex /new (different rendering cycle + history wipe).
+        case "$provider" in
+            gemini_cli|gemini) sleep 6 ;;
+            codex_cli|codex)   sleep 4 ;;
+            *)                 sleep 3 ;;
+        esac
     fi
 
     # Step 3: Switch model if specified (only for providers that support /model)
