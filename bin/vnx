@@ -418,6 +418,9 @@ cmd_start() {
   fi
   local t1_provider="${VNX_T1_PROVIDER:-claude_code}"
   local t2_provider="${VNX_T2_PROVIDER:-claude_code}"
+  local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-flash}"
+  local codex_model="${VNX_CODEX_MODEL:-o4-mini}"
+  local t0_flags="${VNX_T0_FLAGS:---dangerously-skip-permissions}"
 
   if ! command -v tmux >/dev/null 2>&1; then
     err "tmux is required for 'vnx start'. Install: brew install tmux"
@@ -462,24 +465,24 @@ cmd_start() {
 
       local t1_cmd t2_cmd
       case "$t1_provider" in
-        codex_cli|codex) t1_cmd="codex" ;;
-        gemini_cli|gemini) t1_cmd="gemini" ;;
-        *) t1_cmd="claude --model sonnet" ;;
+        codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
+        gemini_cli|gemini) t1_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+        *) t1_cmd="claude --model sonnet --dangerously-skip-permissions" ;;
       esac
       case "$t2_provider" in
-        codex_cli|codex) t2_cmd="codex" ;;
-        gemini_cli|gemini) t2_cmd="gemini" ;;
-        *) t2_cmd="claude --model sonnet" ;;
+        codex_cli|codex) t2_cmd="codex -m $codex_model" ;;
+        gemini_cli|gemini) t2_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+        *) t2_cmd="claude --model sonnet --dangerously-skip-permissions" ;;
       esac
 
       local node_path="$HOME/.nvm/versions/node/v20.18.2/bin"
       local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
       local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
 
-      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus" C-m
+      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus $t0_flags" C-m
       [ -n "$T1" ] && tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
       [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus" C-m
+      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus $t0_flags" C-m
 
       if [ -n "$T0" ] && [ -n "$T1" ] && [ -n "$T2" ] && [ -n "$T3" ]; then
         cat > "$state_dir/panes.json" <<PJSON
@@ -793,20 +796,20 @@ RESOLVER
   # Provider-aware launch commands for T1 and T2
   local t1_cmd t2_cmd
   case "$t1_provider" in
-    codex_cli|codex) t1_cmd="codex" ;;
-    gemini_cli|gemini) t1_cmd="gemini" ;;
-    *) t1_cmd="claude --model sonnet" ;;
+    codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
+    gemini_cli|gemini) t1_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *) t1_cmd="claude --model sonnet $t0_flags" ;;
   esac
   case "$t2_provider" in
-    codex_cli|codex) t2_cmd="codex" ;;
-    gemini_cli|gemini) t2_cmd="gemini" ;;
-    *) t2_cmd="claude --model sonnet" ;;
+    codex_cli|codex) t2_cmd="codex -m $codex_model" ;;
+    gemini_cli|gemini) t2_cmd="gemini -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *) t2_cmd="claude --model sonnet $t0_flags" ;;
   esac
 
-  tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus" C-m
+  tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus $t0_flags" C-m
   tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
   tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus" C-m
+  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus $t0_flags" C-m
 
   # ── Grid balancing (equal pane sizes) ────────────────────────────────
   local win_h half
