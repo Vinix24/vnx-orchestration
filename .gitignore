@@ -8,10 +8,12 @@ logs/
 pids/
 locks/
 dispatches/
+!demo/dry-run/evidence/dispatches/
 unified_reports/
 receipts/
 queue/
 reports/
+!demo/dry-run/evidence/reports/
 orchestration/
 
 # Database runtime files (generated locally by init scripts)

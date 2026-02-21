@@ -1,4 +1,7 @@
-# VNX
+# VNX — Glass Box Governance for Multi-Agent AI
+
+> Reference architecture and working prototype by Vincent van Deth.
+> Full write-up on [vincentvandeth.nl/blog](https://vincentvandeth.nl/blog).
 
 Portable orchestration toolkit for multi-agent terminal workflows.
 Coordinates AI coding agents (Claude Code, Codex CLI, Gemini CLI) across parallel tmux panes with an append-only receipt ledger, dispatch queue, and quality gates.
@@ -26,8 +29,8 @@ brew install tmux jq fswatch
 
 ```bash
 # 1. Clone
-git clone https://github.com/Vinix24/vnx-orchestration-system.git
-cd vnx-orchestration-system
+git clone https://github.com/Vinix24/vnx-orchestration.git
+cd vnx-orchestration
 
 # 2. Install into your project
 ./install.sh /path/to/your/project
@@ -84,13 +87,27 @@ Profile `.env` files are idempotent — edit them freely to customize provider a
 
 ## Demo (no LLM required)
 
-The smoke test validates the full dispatch-receipt pipeline without any API calls:
+### Smoke test (pipeline validation)
 
 ```bash
 .vnx/bin/vnx smoke
 ```
 
-This creates an isolated temp workspace, writes a test report, runs the receipt processor in one-shot mode, and verifies a receipt was appended to the ledger. Pass `--keep` to inspect artifacts after the run.
+Creates an isolated temp workspace, writes a test report, runs the receipt processor
+in one-shot mode, and verifies a receipt was appended to the ledger. Pass `--keep` to inspect artifacts after the run.
+
+### Dry-run replay (governance lifecycle)
+
+Replay a real 6-PR demo session with full governance pipeline — no API calls needed.
+Uses actual receipts, dispatches, and quality verdicts from a live LeadFlow demo.
+
+```bash
+cd demo/dry-run
+bash replay.sh          # Normal speed (2s between steps)
+bash replay.sh --fast   # Fast mode (0.5s between steps)
+```
+
+See [demo/dry-run/README.md](demo/dry-run/README.md) for evidence file details.
 
 ## How It Works
 
@@ -167,9 +184,7 @@ Offline-only (no secrets, no API calls, no LLM). Targets sub-2-minute runtime.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Contributing / Collaboration
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 - Maintainer focus: governance architecture, reliability, and practical multi-terminal operation.
 - Most valuable contributions: test coverage, failure-mode hardening, provider adapters, and docs clarity.
@@ -180,6 +195,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Security
 
 See [SECURITY.md](SECURITY.md).
+
+## Blog Series
+
+Building VNX in public — architecture decisions, failure modes, and lessons from shipping AI orchestration:
+
+[vincentvandeth.nl/blog](https://vincentvandeth.nl/blog)
+
+## Contact
+
+Questions, ideas, or feedback? Open a thread in [GitHub Discussions](https://github.com/Vinix24/vnx-orchestration/discussions).
 
 ## License
 

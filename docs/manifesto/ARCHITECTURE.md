@@ -1,6 +1,6 @@
 # Glass Box Governance: An Append-Only Audit Architecture for Multi-Agent AI Workflows
 
-**Author**: Vincent van de Th
+**Author**: Vincent van Deth
 **Date**: February 2026
 **Status**: Reference Architecture — Daily-Use Prototype
 **Usage**: 6 months daily use on local system · 1466 dispatches processed · 4 concurrent terminals
