@@ -6,6 +6,10 @@
 Portable orchestration toolkit for multi-agent terminal workflows.
 Coordinates AI coding agents (Claude Code, Codex CLI, Gemini CLI) across parallel tmux panes with an append-only receipt ledger, dispatch queue, and quality gates.
 
+![VNX multi-terminal orchestration — T0 orchestrator coordinating Claude Code, Codex CLI, and Gemini CLI across parallel tracks](docs/images/vnx-terminals-hero.png)
+
+*T0 orchestrator dispatching work to 3 parallel terminals — Codex CLI (T1), Claude Code Sonnet (T2), Claude Code Opus (T3) — with real-time terminal status tracking.*
+
 ## Prerequisites
 
 | Tool | Required | Notes |
@@ -111,6 +115,10 @@ See [demo/dry-run/README.md](demo/dry-run/README.md) for evidence file details.
 
 ## How It Works
 
+![VNX dispatch queue popup — human-in-the-loop approval with dispatch metadata](docs/images/vnx-dispatch-queue.png)
+
+*The dispatch queue popup (Ctrl+G) shows pending tasks with full context — role, track, gate, priority, and instructions. Human approves, rejects, or edits before any agent receives work.*
+
 1. **T0 dispatches** a task to a worker terminal via the dispatch queue
 2. **Worker executes** the task using its AI CLI (Claude Code, Codex, etc.)
 3. **Worker writes a report** to `unified_reports/` when done
@@ -118,6 +126,10 @@ See [demo/dry-run/README.md](demo/dry-run/README.md) for evidence file details.
 5. **T0 gets notified** and can inspect the receipt for status, cost, duration, and git provenance
 
 All state lives on the filesystem. No database, no cloud dependency, no lock-in.
+
+![T0 quality advisory — evidence-based PR review with open item assessment](docs/images/vnx-quality-advisory.png)
+
+*T0 performs evidence-based quality review: key findings, severity-tagged open items, and pass/warn/partial verdicts — before deciding whether to approve, hold, or redispatch.*
 
 ## Commands
 
