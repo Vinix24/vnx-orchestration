@@ -24,7 +24,6 @@
 - Dispatch format (JSON): `core/10_JSON_DISPATCH_FORMAT.md`
 - Receipt format (NDJSON): `core/11_RECEIPT_FORMAT.md`
 - Permission settings: `core/12_PERMISSION_SETTINGS.md`
-- Error contract standard: `orchestration/ERROR_CONTRACT_STANDARD.md`
 
 ### Technical Deep Dives
 - Intelligence system: `core/technical/INTELLIGENCE_SYSTEM.md`
@@ -43,29 +42,12 @@
 
 ---
 
-## Orchestration
-
-- Orchestration index: `orchestration/ORCHESTRATION_INDEX.md`
-- T0 operations guide: `orchestration/T0_OPERATIONS_GUIDE.md`
-- T0 brief schema: `orchestration/T0_BRIEF_SCHEMA.md`
-- PR systems guide: `orchestration/PR_SYSTEMS_GUIDE.md`
-- PR queue workflow: `orchestration/README_PR_QUEUE.md`
-
----
-
 ## Intelligence
 
 - Intelligence overview: `intelligence/README.md`
 - T0 orchestration intelligence: `intelligence/T0_ORCHESTRATION_INTELLIGENCE.md`
 - Tag taxonomy: `intelligence/TAG_TAXONOMY.md`
 - Cost tracking guide: `intelligence/COST_TRACKING_GUIDE.md`
-
----
-
-## Testing & Quality
-
-- QA system: `testing/QUALITY_ASSURANCE_SYSTEM.md`
-- Quality reviewer workflow: `testing/QUALITY_REVIEWER_WORKFLOW.md`
 
 ---
 
@@ -77,15 +59,6 @@
 - Open method (how it was built): `manifesto/OPEN_METHOD.md`
 - Limitations & scope: `manifesto/LIMITATIONS.md`
 - Public roadmap: `manifesto/ROADMAP.md`
-
----
-
-## Architecture Studies
-
-- State simplification (completed): `architecture/VNX_STATE_SIMPLIFICATION_PROPOSAL.md`
-- Receipt upgrade plan: `architecture/RECEIPT_UPGRADE_PLAN.md`
-- Git provenance study: `architecture/GIT_PROVENANCE_FEASIBILITY_STUDY.md`
-- State consolidation: `architecture/STATE_CONSOLIDATION_ANALYSIS.md`
 
 ---
 
@@ -113,11 +86,5 @@ docs/
 
   intelligence/          # Intelligence system reference
 
-  orchestration/         # PR workflow, T0 guides, contracts
-
-  testing/               # QA and testing methodology
-
-  architecture/          # Architecture studies & proposals
-
-  internal/              # Internal docs (maintainer notes + publication drafts)
+  images/                # Screenshots used in README
 ```

@@ -43,11 +43,12 @@ All data in `evidence/` was captured from a live demo session on 2026-02-21:
 
 ## Session Timeline
 
+Execution times from receipt ledger (all times CET, 2026-02-21):
+
 ```
-16:55  Setup complete, PR-1 promoted to queue
 16:03  T2 starts PR-1 (Claude Code, Sonnet)
 16:08  T2 completes PR-1 → APPROVE
-16:10  T1 starts PR-2 (Codex CLI, Sonnet)     ← parallel
+16:10  T1 starts PR-2 (Codex CLI)              ← parallel
 16:11  T2 starts PR-5 (Claude Code, Sonnet)    ← parallel
 16:17  T2 completes PR-5 → APPROVE
 16:18  T1 completes PR-2 → APPROVE_WITH_FOLLOWUP
@@ -60,6 +61,7 @@ All data in `evidence/` was captured from a live demo session on 2026-02-21:
 16:42  T3 starts PR-6 (Claude Opus, planning gate)
 16:45  T3 completes PR-6 architecture review → HOLD (3 blockers)
 16:48  T3 starts PR-6 follow-up dispatch
+16:56  T3 completes PR-6 follow-up → APPROVE
 ```
 
-Total duration: ~50 minutes for 6 PRs with quality gates.
+Total duration: ~53 minutes for 6 PRs with quality gates.

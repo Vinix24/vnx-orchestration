@@ -186,13 +186,12 @@ your-project/
 
 ## CI
 
-The repository includes `.github/workflows/vnx-smoke.yml`:
+Two GitHub Actions workflows run on every push to `main` and on PRs:
 
-1. `vnx init`
-2. `vnx doctor`
-3. `vnx smoke`
+- **`public-ci.yml`** — Install + doctor validation, gitleaks secret scan
+- **`vnx-ci.yml`** — Profile A (doctor + core pytest suites), Profile B (PR queue integration)
 
-Offline-only (no secrets, no API calls, no LLM). Targets sub-2-minute runtime.
+Offline-only (no secrets, no API calls, no LLM).
 
 ## Contributing
 

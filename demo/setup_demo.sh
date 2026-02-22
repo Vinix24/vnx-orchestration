@@ -35,7 +35,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEMO_DIR="${1:-$HOME/Development/vnx_demo}"
 PROJECT_DIR="$DEMO_DIR/leadflow"
-VNX_REPO="https://github.com/Vinix24/vnx-orchestration-system.git"
+VNX_REPO="https://github.com/Vinix24/vnx-orchestration.git"
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  VNX Orchestration Demo Setup"

@@ -10,11 +10,9 @@
 ## Current System Snapshot (2026-02-18)
 
 - Architecture: `00_VNX_ARCHITECTURE.md` (V10.0)
-- PR workflow: `../orchestration/README_PR_QUEUE.md`
 - Monitoring/ops: `../operations/MONITORING_GUIDE.md`
 - Receipt pipeline: `../operations/RECEIPT_PIPELINE.md` (V8.1)
 - Dispatcher: V8.2 Minimal — see `technical/DISPATCHER_SYSTEM.md`
-- Orchestration index: `../orchestration/ORCHESTRATION_INDEX.md`
 
 For full navigation, start at `../DOCS_INDEX.md`.
 
@@ -585,4 +583,4 @@ This is line three
 
 ---
 
-*For architecture details see 00_VNX_ARCHITECTURE.md (V10.0) | For operations see ../operations/README.md*
+*For architecture details see 00_VNX_ARCHITECTURE.md (V10.0) | For operations see ../operations/MONITORING_GUIDE.md*
