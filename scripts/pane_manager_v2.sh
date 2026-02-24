@@ -32,7 +32,7 @@ _pm_log() {
 # Method 1: Discover pane by title
 discover_pane_by_title() {
     local terminal="$1"
-    local pane_id
+    local pane_id=""
 
     # Scope to own session when PROJECT_ROOT is set (prevents cross-project matches)
     local vnx_session=""
