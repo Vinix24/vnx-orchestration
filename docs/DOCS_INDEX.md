@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-02-23
+**Last Updated**: 2026-02-24
 
 ---
 
@@ -9,6 +9,7 @@
 1. **Architecture Overview**: `core/00_VNX_ARCHITECTURE.md` (V10.0)
 2. **Getting Started**: `core/00_GETTING_STARTED.md` (vnx CLI, demo setup)
 3. **Limitations & Scope**: `manifesto/LIMITATIONS.md`
+4. **Context Rotation** (community doc): `CONTEXT_ROTATION.md`
 
 ---
 
@@ -31,6 +32,7 @@
 - Dispatcher system (V7 legacy + V8 current): `core/technical/DISPATCHER_SYSTEM.md`
 - State management: `core/technical/STATE_MANAGEMENT.md`
 - Report lifecycle: `core/technical/REPORT_LIFECYCLE.md`
+- **Context rotation system (v2.5)**: `core/technical/CONTEXT_ROTATION_SYSTEM.md`
 
 ---
 
@@ -84,6 +86,7 @@
 
 ## Architecture Studies
 
+- **SuperClaude audit**: `architecture/SUPERCLAUDE_AUDIT.md` (framework relevance assessment)
 - State simplification (completed): `architecture/VNX_STATE_SIMPLIFICATION_PROPOSAL.md`
 - Receipt upgrade plan: `architecture/RECEIPT_UPGRADE_PLAN.md`
 - Git provenance study: `architecture/GIT_PROVENANCE_FEASIBILITY_STUDY.md`
