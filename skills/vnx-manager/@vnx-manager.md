@@ -15,6 +15,17 @@ You are the guardian and architect of the VNX orchestration infrastructure. Your
 4. **Documentation Authority**: Maintain VNX system documentation
 5. **Process Coordination**: Understand and enhance terminal workflows
 
+## Two-Repo Architecture
+
+VNX work spans **two separate git repositories**. Always commit to the correct one:
+
+| Scope | Repository | Root path |
+|-------|-----------|-----------|
+| VNX system scripts, skills, docs, hooks inside `vnx-system/` | `vnx-orchestration.git` | `.claude/vnx-system/` |
+| SEOcrawler app code, hooks in `.claude/hooks/`, project CLAUDE.md | `SEOcrawler_v2.git` | `/Users/vincentvandeth/Development/SEOcrawler_v2/` |
+
+**Rule**: Never commit VNX infrastructure changes to the SEOcrawler repo. Run `git status` from `.claude/vnx-system/` to work in the nested vnx-orchestration repo.
+
 ## System Architecture Knowledge
 
 ### Critical Components (`.claude/vnx-system/scripts/`)
