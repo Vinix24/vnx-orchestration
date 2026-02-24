@@ -534,16 +534,20 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     # Generate quality advisory (best-effort)
     try:
         if repo_root is None:
-            # Try to detect repo root from receipt context or use current directory
-            repo_root = Path.cwd()
+            # Use PROJECT_ROOT from env (same as provenance, line 481) so git
+            # runs in the SEOcrawler repo, not the vnx-system scripts cwd.
+            repo_root = Path(paths.get("PROJECT_ROOT", Path.cwd())).resolve()
 
         changed_files = get_changed_files(repo_root)
 
-        # Fallback: parse report for "Files Modified" when git diff is empty.
-        if not changed_files:
-            report_path = str(receipt.get("report_path") or "")
-            if report_path:
-                changed_files = _extract_changed_files_from_report(Path(report_path), repo_root)
+        # Always supplement with files declared in the report's "Files Modified"
+        # section — agents are authoritative about what they changed, and git diff
+        # misses uncommitted work (agents don't always commit before filing).
+        report_path = str(receipt.get("report_path") or "")
+        if report_path:
+            report_files = _extract_changed_files_from_report(Path(report_path), repo_root)
+            if report_files:
+                changed_files = list({*changed_files, *report_files})
 
         # Only run quality checks if there are changed files
         if changed_files:
