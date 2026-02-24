@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-02-18
+**Last Updated**: 2026-02-23
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -207,7 +207,23 @@ VNX is a file-based orchestration system enabling parallel development across mu
 
 **Note**: `report_watcher.sh` exists but production receipt ingestion is handled by `receipt_processor_v4.sh`.
 
-### 7. T0 Intelligence Aggregator (`t0_intelligence_aggregator.py`)
+### 7. Context Rotation Hooks (Stop/PostToolUse/SessionStart) - v2.4
+
+**Purpose**: Optional context-rotation automation for long-running sessions.
+
+**Hooks**:
+- **Stop hook** (`vnx_context_monitor.sh`): observes `context_window.json` and emits block/warn guidance.
+- **PostToolUse hook** (`vnx_handover_detector.sh`): detects handover docs, acquires lock, appends receipt, triggers rotator.
+- **SessionStart hook** (`vnx_rotation_recovery.sh`): injects last handover into new session context.
+
+**Activation**:
+- Experimental / opt-in via `VNX_CONTEXT_ROTATION_ENABLED=1`.
+- Default no-op (backward-compatible).
+
+**Receipts**:
+- `context_rotation` receipts are **informational only**. T0 does not need to act on these receipts unless paired with a human decision or explicit dispatch.
+
+### 8. T0 Intelligence Aggregator (`t0_intelligence_aggregator.py`)
 
 **Purpose**: Progressive context management for T0 orchestration
 
@@ -221,7 +237,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 
 **Output**: `state/t0_intelligence.ndjson` (rolling window, last 1000 events)
 
-### 8. Unified State Manager (`unified_state_manager_v2.py`)
+### 9. Unified State Manager (`unified_state_manager_v2.py`)
 
 **Purpose**: Real-time state consolidation
 
@@ -231,7 +247,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - Writes to `state/unified_state.ndjson`
 - Powers intelligence aggregator
 
-### 9. VNX Supervisor (`vnx_supervisor_simple.sh`)
+### 10. VNX Supervisor (`vnx_supervisor_simple.sh`)
 
 **Purpose**: Process health monitoring and auto-restart
 
@@ -241,9 +257,9 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - PID tracking in `state/pids/`
 - Health checks every 10 seconds
 
-### 10. Dashboard Generator (`generate_valid_dashboard.sh`)
+### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
 
-### 11. T0 Brief Generator (`generate_t0_brief.sh`)
+### 12. T0 Brief Generator (`generate_t0_brief.sh`)
 
 **Purpose**: Build a <2KB “single glance” JSON snapshot for T0 decision-making.
 
@@ -262,7 +278,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 
 **Output**: `state/dashboard_status.json`
 
-### 10. Queue Popup Watcher (`queue_popup_watcher.sh`)
+### 13. Queue Popup Watcher (`queue_popup_watcher.sh`)
 
 **Purpose**: Automatic popup for new dispatches
 

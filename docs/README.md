@@ -14,9 +14,10 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 **Most Used**:
 - Index: `DOCS_INDEX.md`
 - Architecture: `core/00_VNX_ARCHITECTURE.md`
-- Getting started: `core/00_GETTING_STARTED.md`
+- PR workflow: `orchestration/README_PR_QUEUE.md`
 - Monitoring: `operations/MONITORING_GUIDE.md`
-- Design manifesto: `manifesto/ARCHITECTURE.md`
+- Dashboard: `core/00_GETTING_STARTED.md` (launch + URL)
+- Roadmap: `roadmap/implementation/VNX_IMPLEMENTATION_ROADMAP.MD`
 
 ## Directory Overview
 
@@ -24,10 +25,13 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 |-----------|---------|
 | `core/` | System fundamentals, dispatch/receipt formats, permissions |
 | `core/technical/` | Deep technical references (dispatcher, intelligence, state) |
+| `architecture/` | Strategy documents, design decisions, proposals |
 | `operations/` | Monitoring, restart, receipt pipeline, daemon ops |
+| `orchestration/` | PR workflow, T0 guides, skills, progress tracking |
 | `intelligence/` | Intelligence system, tag taxonomy, token optimization |
-| `manifesto/` | Design philosophy, architecture overview, limitations |
-| `images/` | Screenshots and diagrams used in README |
+| `testing/` | QA system, quality reviewer workflow |
+| `roadmap/` | Project status, implementation roadmap, feature plans |
+| `archive/` | Superseded/historical docs, organized by date |
 
 ## Documentation Rules (Source of Truth)
 
