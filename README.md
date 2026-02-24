@@ -161,6 +161,7 @@ This clones the latest release, runs `install.sh`, and preserves your runtime da
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/manifesto/ARCHITECTURE.md) | Glass Box Governance: the four-pillar design |
+| [Dispatch Guide](docs/DISPATCH_GUIDE.md) | How dispatches work: feature plans, terminal locking, and parallel execution |
 | [Open Method](docs/manifesto/OPEN_METHOD.md) | How VNX was built — AI as junior developer, not autopilot |
 | [Limitations](docs/manifesto/LIMITATIONS.md) | Tested scope, known gaps, and design constraints |
 
