@@ -592,8 +592,38 @@ _build_state_line() {
     t3_st=$(jq -r '.terminals.T3.status // "idle"' "$brief_file" 2>/dev/null)
     q_pending=$(jq -r '.queues.pending // 0' "$brief_file" 2>/dev/null)
     q_active=$(jq -r '.queues.active // 0' "$brief_file" 2>/dev/null)
+
+    local detail
+    detail=$(python3 - 2>/dev/null <<'PYEOF' || true
+import json, os, re, sys
+state_file = os.path.join(os.environ.get('VNX_STATE_DIR', ''), 'terminal_state.json')
+dispatch_base = os.environ.get('VNX_DISPATCH_DIR', '')
+if not os.path.isfile(state_file):
+    sys.exit(0)
+state = json.load(open(state_file))
+lines = []
+for t in ['T1', 'T2', 'T3']:
+    term = state.get('terminals', {}).get(t, {})
+    if term.get('status') == 'working' and term.get('claimed_by'):
+        claimed = term['claimed_by']
+        for subdir in ['active', 'pending', 'completed']:
+            path = os.path.join(dispatch_base, subdir, claimed + '.md')
+            if os.path.isfile(path):
+                content = open(path).read()
+                role = re.search(r'^[-\s]*Role:\s*(.+)', content, re.MULTILINE)
+                reason = re.search(r'^[-\s]*Reason:\s*(.+)', content, re.MULTILINE)
+                r = role.group(1).strip() if role else '?'
+                rs = reason.group(1).strip() if reason else '?'
+                lines.append(f'  {t} {r} \u2014 {rs}')
+                break
+if lines:
+    print('\n'.join(lines))
+PYEOF
+)
+
     echo "
-📊 STATE: T1=$t1_st T2=$t2_st T3=$t3_st | Queue: pending=$q_pending active=$q_active"
+📊 STATE: T1=$t1_st T2=$t2_st T3=$t3_st | Queue: pending=$q_pending active=$q_active${detail:+
+$detail}"
 }
 
 # Sub-helper: Build quality line from sidecar (dispatch_id must match)
