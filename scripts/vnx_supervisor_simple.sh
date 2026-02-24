@@ -392,8 +392,6 @@ monitor() {
                     fi
                 else
                     log "🚨 ALERT: $name has crashed $MAX_RESTART_ATTEMPTS times - waiting ${RESTART_COOLDOWN}s before retry"
-                    # Still track time for cooldown
-                    echo "$restart_count|$current_time" > "$tracking_file"
                 fi
             else
                 # Process is running - reset restart counter

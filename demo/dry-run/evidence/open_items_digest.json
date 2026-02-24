@@ -1,0 +1,181 @@
+{
+  "summary": {
+    "open_count": 21,
+    "blocker_count": 0,
+    "warn_count": 7,
+    "info_count": 14,
+    "done_count": 41,
+    "deferred_count": 0,
+    "wontfix_count": 0
+  },
+  "top_blockers": [],
+  "top_warnings": [
+    {
+      "id": "OI-037",
+      "title": "`tests/test_ai_config.py` is 523 lines \u2014 slightly above the 500-line warning threshold.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-042",
+      "title": "test_ai_dispatch.py is 588 lines \u2014 above 500-line warning",
+      "pr_id": "PR-5"
+    }
+  ],
+  "open_items": [
+    {
+      "id": "OI-037",
+      "severity": "warn",
+      "title": "`tests/test_ai_config.py` is 523 lines \u2014 slightly above the 500-line warning threshold.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-038",
+      "severity": "info",
+      "title": "`PyYAML` is a runtime dependency used by `ai_config.py` but is not listed in",
+      "pr_id": null
+    },
+    {
+      "id": "OI-039",
+      "severity": "info",
+      "title": "`tests/test_ai_dispatch.py` is 588 lines \u2014 above the 500-line soft warning.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-040",
+      "severity": "info",
+      "title": "`ProviderCallAdapter` is a Protocol with no concrete implementation yet.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-041",
+      "severity": "info",
+      "title": "`datetime.datetime.utcnow()` produces deprecation warnings in Python 3.12.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-042",
+      "severity": "warn",
+      "title": "test_ai_dispatch.py is 588 lines \u2014 above 500-line warning",
+      "pr_id": "PR-5"
+    },
+    {
+      "id": "OI-043",
+      "severity": "warn",
+      "title": "datetime.utcnow() deprecation in ai_dispatch.py",
+      "pr_id": "PR-5"
+    },
+    {
+      "id": "OI-044",
+      "severity": "info",
+      "title": "ProviderCallAdapter has no concrete HTTP implementation",
+      "pr_id": "PR-5"
+    },
+    {
+      "id": "OI-045",
+      "severity": "warn",
+      "title": "lead_scoring_engine.py is 651 lines with 4 functions above 40-line warning",
+      "pr_id": "PR-2"
+    },
+    {
+      "id": "OI-049",
+      "severity": "info",
+      "title": "TokenAuthenticator uses static token map \u2014 needs JWT/session integration for production",
+      "pr_id": "PR-3"
+    },
+    {
+      "id": "OI-050",
+      "severity": "info",
+      "title": "Redis pub/sub adapter not implemented \u2014 single-instance broadcasting only",
+      "pr_id": "PR-3"
+    },
+    {
+      "id": "OI-051",
+      "severity": "info",
+      "title": "websockets package installed but unused \u2014 Starlette built-in used instead",
+      "pr_id": "PR-3"
+    },
+    {
+      "id": "OI-053",
+      "severity": "warn",
+      "title": "`lead_scoring_engine.py` is already at 652 lines (exceeds 500-line warning threshold). Adding campaign enrollment callbacks to scoring flow should be done via event hooks, not by extending the file.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-054",
+      "severity": "warn",
+      "title": "Double opt-in flow is recommended for maximum GDPR compliance but adds complexity. Implementation team should decide on single vs double opt-in before coding.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-056",
+      "severity": "info",
+      "title": "Email provider integration (SMTP/SendGrid/SES) is out of scope for this architecture review but must be decided before implementation. Recommend an abstract `EmailProvider` interface with pluggable backends.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-057",
+      "severity": "info",
+      "title": "`persistence.py` at 474 lines \u2014 approaching 500-line warn threshold. Consider splitting row mappers into a separate module if more tables are added.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-058",
+      "severity": "info",
+      "title": "`UNSUBSCRIBE_SECRET` in `consent_manager.py` is hardcoded \u2014 should be loaded from environment variable for production deployment.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-059",
+      "severity": "info",
+      "title": "Pre-existing `datetime.utcnow()` deprecation warnings in `test_ai_dispatch.py` (30 warnings) \u2014 not in PR-6 scope but should be addressed.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-060",
+      "severity": "info",
+      "title": "Double opt-in deferred per plan (OI-054) \u2014 single opt-in implemented for MVP as specified.",
+      "pr_id": null
+    },
+    {
+      "id": "OI-061",
+      "severity": "info",
+      "title": "UNSUBSCRIBE_SECRET hardcoded in consent_manager.py \u2014 needs env var for production",
+      "pr_id": "PR-6"
+    },
+    {
+      "id": "OI-062",
+      "severity": "warn",
+      "title": "test_campaign_integration.py is 595 lines \u2014 exceeds 500-line warning threshold",
+      "pr_id": "PR-6"
+    }
+  ],
+  "recent_closures": [
+    {
+      "id": "OI-036",
+      "title": "No email sent without explicit user consent record",
+      "closed_reason": "evidence: Single send path in campaign_service.py:send_campaign_email. verify_consent() is first call (line 133). Returns no_consent if false. No alternative send paths exist."
+    },
+    {
+      "id": "OI-035",
+      "title": "Unsubscribe mechanism functional in all campaign templates",
+      "closed_reason": "evidence: HMAC-signed unsubscribe tokens in consent_manager.py. GET/POST /unsubscribe/{token} endpoints in campaigns.py:144-178. Idempotent \u2014 checks if already unsubscribed. CampaignTemplate.__post_init__ enforces mandatory unsubscribe_url."
+    },
+    {
+      "id": "OI-033",
+      "title": "No function exceeds 40 lines (warning) or 70 lines (blocker)",
+      "closed_reason": "evidence: AST analysis shows max function is chi_squared_significance at 43 lines (warn only). No function exceeds 70-line blocker."
+    },
+    {
+      "id": "OI-032",
+      "title": "No Python file exceeds 500 lines (warning) or 800 lines (blocker)",
+      "closed_reason": "evidence: Max source file is persistence.py at 474 lines (under 500 warn). All other PR-6 source files under 310 lines."
+    },
+    {
+      "id": "OI-052",
+      "title": "No database persistence layer exists \u2014 consent records REQUIRE durable storage for GDPR compliance. Must be resolved before PR-6 implementation starts.",
+      "closed_reason": "evidence: SQLite persistence via aiosqlite in persistence.py. DatabaseManager initialized in main.py lifespan, schema auto-created. consent_records, campaigns, campaign_enrollments, ab_test_configs, ab_test_assignments tables. test_consent_survives_db_reconnect confirms durability."
+    }
+  ],
+  "last_updated": "2026-02-21T17:57:58.904261",
+  "digest_generated": "2026-02-21T17:57:58.904918"
+}

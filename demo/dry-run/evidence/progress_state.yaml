@@ -1,0 +1,119 @@
+version: '1.0'
+updated_at: '2026-02-21T16:56:09.614956+00:00'
+updated_by: receipt_processor
+tracks:
+  A:
+    current_gate: implementation
+    status: idle
+    active_dispatch_id: null
+    last_receipt:
+      event_type: task_complete
+      status: success
+      timestamp: '2026-02-21T16:33:45.294551'
+      dispatch_id: 20260221-165539-scoring-dashboard-api-(track-a-A
+    history:
+    - timestamp: '2026-02-21T16:33:45.570547+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:30:47.517939+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-165539-scoring-dashboard-api-(track-a-A
+      updated_by: dispatcher
+    - timestamp: '2026-02-21T16:26:13.495134+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:26:01.663839+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:22:30.747000+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-172043-d7d261a8-A
+      updated_by: dispatcher
+    - timestamp: '2026-02-21T16:18:55.214530+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:10:52.680668+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-165539-lead-scoring-engine-(track-a)-A
+      updated_by: dispatcher
+  B:
+    current_gate: implementation
+    status: idle
+    active_dispatch_id: null
+    last_receipt:
+      event_type: task_complete
+      status: success
+      timestamp: '2026-02-21T16:17:52.631893'
+      dispatch_id: 20260221-165539-multi-provider-dispatch-(track-B
+    history:
+    - timestamp: '2026-02-21T16:17:53.028305+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:11:04.829224+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-165539-multi-provider-dispatch-(track-B
+      updated_by: dispatcher
+    - timestamp: '2026-02-21T16:08:33.589258+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:03:29.896189+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-165539-ai-config-&-model-registry-(tr-B
+      updated_by: dispatcher
+  C:
+    current_gate: implementation
+    status: idle
+    active_dispatch_id: null
+    last_receipt:
+      event_type: task_complete
+      status: success
+      timestamp: '2026-02-21T16:56:09.175203'
+      dispatch_id: 20260221-174706-4f2b01a7-C
+    history:
+    - timestamp: '2026-02-21T16:56:09.614847+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:48:11.625612+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-174706-4f2b01a7-C
+      updated_by: dispatcher
+    - timestamp: '2026-02-21T16:45:46.670264+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:42:38.975447+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-165539-email-campaign-integration-(tr-C
+      updated_by: dispatcher
+    - timestamp: '2026-02-21T16:35:59.952448+00:00'
+      gate: implementation
+      status: idle
+      dispatch_id: null
+      updated_by: receipt_processor
+    - timestamp: '2026-02-21T16:31:32.578903+00:00'
+      gate: implementation
+      status: working
+      dispatch_id: 20260221-165539-real-time-score-updates-via-we-C
+      updated_by: dispatcher

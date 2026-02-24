@@ -1,7 +1,14 @@
-# VNX
+# VNX — Glass Box Governance for Multi-Agent AI
+
+> Reference architecture and working prototype by Vincent van Deth.
+> Full write-up on [vincentvandeth.nl/blog](https://vincentvandeth.nl/blog).
 
 Portable orchestration toolkit for multi-agent terminal workflows.
 Coordinates AI coding agents (Claude Code, Codex CLI, Gemini CLI) across parallel tmux panes with an append-only receipt ledger, dispatch queue, and quality gates.
+
+![VNX multi-terminal orchestration — T0 orchestrator coordinating Claude Code, Codex CLI, and Gemini CLI across parallel tracks](docs/images/vnx-terminals-hero.png)
+
+*T0 orchestrator dispatching work to 3 parallel terminals — Codex CLI (T1), Claude Code Sonnet (T2), Claude Code Opus (T3) — with real-time terminal status tracking.*
 
 ## Prerequisites
 
@@ -26,8 +33,8 @@ brew install tmux jq fswatch
 
 ```bash
 # 1. Clone
-git clone https://github.com/Vinix24/vnx-orchestration-system.git
-cd vnx-orchestration-system
+git clone https://github.com/Vinix24/vnx-orchestration.git
+cd vnx-orchestration
 
 # 2. Install into your project
 ./install.sh /path/to/your/project
@@ -84,15 +91,33 @@ Profile `.env` files are idempotent — edit them freely to customize provider a
 
 ## Demo (no LLM required)
 
-The smoke test validates the full dispatch-receipt pipeline without any API calls:
+### Smoke test (pipeline validation)
 
 ```bash
 .vnx/bin/vnx smoke
 ```
 
-This creates an isolated temp workspace, writes a test report, runs the receipt processor in one-shot mode, and verifies a receipt was appended to the ledger. Pass `--keep` to inspect artifacts after the run.
+Creates an isolated temp workspace, writes a test report, runs the receipt processor
+in one-shot mode, and verifies a receipt was appended to the ledger. Pass `--keep` to inspect artifacts after the run.
+
+### Dry-run replay (governance lifecycle)
+
+Replay a real 6-PR demo session with full governance pipeline — no API calls needed.
+Uses actual receipts, dispatches, and quality verdicts from a live LeadFlow demo.
+
+```bash
+cd demo/dry-run
+bash replay.sh          # Normal speed (2s between steps)
+bash replay.sh --fast   # Fast mode (0.5s between steps)
+```
+
+See [demo/dry-run/README.md](demo/dry-run/README.md) for evidence file details.
 
 ## How It Works
+
+![VNX dispatch queue popup — human-in-the-loop approval with dispatch metadata](docs/images/vnx-dispatch-queue.png)
+
+*The dispatch queue popup (Ctrl+G) shows pending tasks with full context — role, track, gate, priority, and instructions. Human approves, rejects, or edits before any agent receives work.*
 
 1. **T0 dispatches** a task to a worker terminal via the dispatch queue
 2. **Worker executes** the task using its AI CLI (Claude Code, Codex, etc.)
@@ -101,6 +126,10 @@ This creates an isolated temp workspace, writes a test report, runs the receipt 
 5. **T0 gets notified** and can inspect the receipt for status, cost, duration, and git provenance
 
 All state lives on the filesystem. No database, no cloud dependency, no lock-in.
+
+![T0 quality advisory — evidence-based PR review with open item assessment](docs/images/vnx-quality-advisory.png)
+
+*T0 performs evidence-based quality review: key findings, severity-tagged open items, and pass/warn/partial verdicts — before deciding whether to approve, hold, or redispatch.*
 
 ## Commands
 
@@ -132,6 +161,7 @@ This clones the latest release, runs `install.sh`, and preserves your runtime da
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/manifesto/ARCHITECTURE.md) | Glass Box Governance: the four-pillar design |
+| [Dispatch Guide](docs/DISPATCH_GUIDE.md) | How dispatches work: feature plans, terminal locking, and parallel execution |
 | [Open Method](docs/manifesto/OPEN_METHOD.md) | How VNX was built — AI as junior developer, not autopilot |
 | [Limitations](docs/manifesto/LIMITATIONS.md) | Tested scope, known gaps, and design constraints |
 
@@ -157,19 +187,16 @@ your-project/
 
 ## CI
 
-The repository includes `.github/workflows/vnx-smoke.yml`:
+Two GitHub Actions workflows run on every push to `main` and on PRs:
 
-1. `vnx init`
-2. `vnx doctor`
-3. `vnx smoke`
+- **`public-ci.yml`** — Install + doctor validation, gitleaks secret scan
+- **`vnx-ci.yml`** — Profile A (doctor + core pytest suites), Profile B (PR queue integration)
 
-Offline-only (no secrets, no API calls, no LLM). Targets sub-2-minute runtime.
+Offline-only (no secrets, no API calls, no LLM).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Contributing / Collaboration
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 - Maintainer focus: governance architecture, reliability, and practical multi-terminal operation.
 - Most valuable contributions: test coverage, failure-mode hardening, provider adapters, and docs clarity.
@@ -180,6 +207,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Security
 
 See [SECURITY.md](SECURITY.md).
+
+## Blog Series
+
+Building VNX in public — architecture decisions, failure modes, and lessons from shipping AI orchestration:
+
+[vincentvandeth.nl/blog](https://vincentvandeth.nl/blog)
+
+## Contact
+
+Questions, ideas, or feedback? Open a thread in [GitHub Discussions](https://github.com/Vinix24/vnx-orchestration/discussions).
 
 ## License
 
