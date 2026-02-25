@@ -23,13 +23,15 @@ The only clean fix is `/clear` — but that wipes everything. You lose all conte
 Context hits 65% used
   → PreToolUse hook fires, returns decision: "block"
     → Claude writes ROTATION-HANDOVER.md (task state, progress, next steps)
-      → PostToolUse hook detects handover file
+      → PostToolUse hook detects handover file → {"continue":false} stops Claude
         → Acquires atomic lock (prevents race conditions)
           → Launches vnx_rotate.sh async (nohup)
             → tmux sends /clear to the correct pane
-              → SessionStart hook detects source: "clear"
-                → Injects handover into fresh session
-                  → Agent resumes where it left off
+              → SessionStart hook fires on fresh session
+                → Injects handover content as additionalContext
+                → Writes signal file (unblocks rotator wait loop)
+                  → Rotator detects signal → sends /{skill} + continuation prompt
+                    → Agent resumes where it left off
 ```
 
 Three hooks, one bash script, zero manual steps.
@@ -39,8 +41,8 @@ Three hooks, one bash script, zero manual steps.
 | Hook | Script | Trigger | Action |
 |------|--------|---------|--------|
 | **PreToolUse** | `vnx_context_monitor.sh` | Every tool call | Checks `remaining_pct`. At ≥65% used → `decision: "block"` with instruction to write handover |
-| **PostToolUse** | `vnx_handover_detector.sh` | File write | Detects `ROTATION-HANDOVER` in path → acquires lock → launches rotator |
-| **SessionStart** | `vnx_rotation_recovery.sh` | Session clear/compact | Finds most recent handover (<300s old) → injects as context |
+| **PostToolUse** | `vnx_handover_detector.sh` | File write | Detects `ROTATION-HANDOVER` in path → acquires lock → launches rotator → emits `{"continue":false}` to halt Claude |
+| **SessionStart** | `vnx_rotation_recovery.sh` | Session clear/compact | Injects handover as `additionalContext` + writes signal file to unblock rotator |
 
 The `Stop` hook is also registered as a safety net for idle sessions. The primary detection path is `PreToolUse` — it fires before every tool call, allowing interruption mid-task. `Stop` only fires when the agent is fully idle.
 
@@ -121,27 +123,37 @@ The `agent_farm` project has multi-agent tmux orchestration with a `--context-th
 
 ### Enable
 
-Context rotation is **opt-in**. Set the environment variable:
-
-```bash
-export VNX_CONTEXT_ROTATION_ENABLED=1
-```
-
-Or add to your `.bashrc` / `.zshrc`.
-
-### Hook Registration
-
-Add to `.claude/settings.json`:
+Set `VNX_CONTEXT_ROTATION_ENABLED=1` in the `env` block of `.claude/settings.json`. This guarantees hooks receive the variable regardless of shell environment:
 
 ```json
 {
+  "env": {
+    "VNX_CONTEXT_ROTATION_ENABLED": "1"
+  }
+}
+```
+
+You can also export it in your shell (`export VNX_CONTEXT_ROTATION_ENABLED=1`), but the `env` block is the reliable path — Claude Code hooks don't always inherit the interactive shell environment.
+
+### Hook Registration
+
+Add to **both** `.claude/settings.json` and `.claude/settings.local.json`.
+
+> **Critical**: `settings.local.json` **completely replaces** `settings.json` for the `hooks` key — it does not merge. If `settings.local.json` exists with a `hooks` key, the hooks in `settings.json` are ignored entirely. Both files must contain the full hook list.
+
+```json
+{
+  "env": {
+    "VNX_CONTEXT_ROTATION_ENABLED": "1"
+  },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "",
+        "matcher": "*",
         "hooks": [{
           "type": "command",
-          "command": ".claude/vnx-system/hooks/vnx_context_monitor.sh"
+          "command": "/absolute/path/to/.vnx/hooks/vnx_context_monitor.sh",
+          "timeout": 3000
         }]
       }
     ],
@@ -150,31 +162,43 @@ Add to `.claude/settings.json`:
         "matcher": "Write",
         "hooks": [{
           "type": "command",
-          "command": ".claude/vnx-system/hooks/vnx_handover_detector.sh"
+          "command": "/absolute/path/to/.vnx/hooks/vnx_handover_detector.sh",
+          "timeout": 3000
         }]
       }
     ],
     "Stop": [
       {
-        "matcher": "",
         "hooks": [{
           "type": "command",
-          "command": ".claude/vnx-system/hooks/vnx_context_monitor.sh"
+          "command": "/absolute/path/to/.vnx/hooks/vnx_context_monitor.sh",
+          "timeout": 3000
         }]
       }
     ],
     "SessionStart": [
       {
-        "matcher": "",
+        "matcher": "*",
         "hooks": [{
           "type": "command",
-          "command": ".claude/hooks/vnx_rotation_recovery.sh"
+          "command": "/absolute/path/to/.claude/hooks/vnx_rotation_recovery.sh",
+          "timeout": 3000
         }]
       }
     ]
   }
 }
 ```
+
+Use absolute paths — Claude Code hooks run in an environment where relative paths may not resolve correctly.
+
+**If you already have a SessionStart hook**, use the `--fallback` parameter so your existing hook runs on normal startup and rotation recovery only fires after a `/clear`:
+
+```json
+"command": "if [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then /path/to/vnx_rotation_recovery.sh --fallback /path/to/your/existing_sessionstart.sh; else /path/to/your/existing_sessionstart.sh; fi"
+```
+
+Worker terminals (T1/T2/T3) get rotation recovery; T0 and other terminals get their normal startup hook.
 
 ### File Structure
 
@@ -230,6 +254,11 @@ Evidence bundle: `.claude/vnx-system/docs/intelligence/evidence/context-rotation
 Test report: `.claude/vnx-system/docs/intelligence/VNX_ROTATION_TEST_REPORT.md`
 
 ## Changelog
+
+### v2.6 (2026-02-25)
+- **Fix**: `vnx_handover_detector.sh` now emits `{"continue":false}` from PostToolUse after launching the rotator — Claude's agent loop halts the moment the handover Write completes, so `/clear` lands on an idle terminal instead of racing with an active session
+- **Fix**: `vnx_context_monitor.sh` Stage 2 defense-in-depth corrected — was returning `{"continue":false}` (Stop hook construct, no effect in PreToolUse) now correctly returns `{"decision":"block"}`, blocking every tool call after the handover is written
+- **Fix**: Stage 1 block message now explicitly instructs Claude that writing the handover is its final action in the session
 
 ### v2.5 (2026-02-24)
 - **Fix**: Dispatch-ID regex now uses `[^:]*` to absorb optional markdown bold (`**`) before the colon — handles both `Dispatch-ID: foo` and `**Dispatch-ID**: foo` formats
