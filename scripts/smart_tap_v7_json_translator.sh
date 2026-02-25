@@ -322,9 +322,10 @@ validate_block() {
     else
         # Markdown validation (existing logic)
         if [[ "$block" == *"[[TARGET:"* ]] && [[ "$block" == *"[[DONE]]"* ]]; then
-            # Additional validation: reject blocks that look like example/test blocks
-            if [[ "$block" == *"/Desktop/Screenshot"* ]] || \
-               [[ "$block" == *"example block"* ]] || \
+            # Additional validation: reject blocks that are literal examples/tests
+            # NOTE: Do NOT filter on "/Desktop/Screenshot" — real dispatches can
+            # reference screenshot paths as context for the target terminal.
+            if [[ "$block" == *"example block"* ]] || \
                [[ "$block" == *"test block"* ]]; then
                 log "Rejected example/test block"
                 return 1

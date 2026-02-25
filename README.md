@@ -113,6 +113,22 @@ bash replay.sh --fast   # Fast mode (0.5s between steps)
 
 See [demo/dry-run/README.md](demo/dry-run/README.md) for evidence file details.
 
+### Dry-run replay (context rotation)
+
+Demonstrates automatic context rotation: when an agent's context window fills up,
+VNX intercepts the next tool call, triggers a structured handover, clears the session,
+and resumes with the same dispatch, same skill, and a fresh context window.
+
+```bash
+cd demo/dry-run-context-rotation
+bash replay.sh          # Normal speed (2s between steps)
+bash replay.sh --fast   # Fast mode (0.5s between steps)
+```
+
+Shows the full hook chain: `vnx_context_monitor.sh` (PreToolUse block at 65%) →
+`vnx_handover_detector.sh` (PostToolUse stop) → `vnx_rotate.sh` (/clear + skill recovery + continuation).
+See [demo/dry-run-context-rotation/README.md](demo/dry-run-context-rotation/README.md) for details.
+
 ## How It Works
 
 ![VNX dispatch queue popup — human-in-the-loop approval with dispatch metadata](docs/images/vnx-dispatch-queue.png)
@@ -126,6 +142,19 @@ See [demo/dry-run/README.md](demo/dry-run/README.md) for evidence file details.
 5. **T0 gets notified** and can inspect the receipt for status, cost, duration, and git provenance
 
 All state lives on the filesystem. No database, no cloud dependency, no lock-in.
+
+### Context rotation
+
+Long-running tasks can exhaust an agent's context window. VNX handles this automatically:
+
+1. **Monitor** — a PreToolUse hook tracks context usage per terminal. At 50% it logs a warning; at 65% it blocks the next tool call and instructs the agent to write a structured handover document (completed work, remaining tasks, files modified).
+2. **Detect** — a PostToolUse hook detects the handover Write, emits a `context_rotation` receipt, and stops the agent (`{"continue":false}`).
+3. **Rotate** — a background script sends `/clear` to the terminal, recovers the original skill and dispatch ID from the handover, and sends a continuation prompt with the same skill activated.
+4. **Resume** — the agent starts fresh, reads the handover + original dispatch, and picks up where the previous session left off.
+
+The dispatch ID is preserved across sessions, so the receipt ledger maintains a complete chain: `task_started → context_pressure → context_rotation → context_rotation_continuation → task_complete`. Zero human intervention, zero lost work.
+
+See the [context rotation dry-run demo](demo/dry-run-context-rotation/) for a visual walkthrough.
 
 ![T0 quality advisory — evidence-based PR review with open item assessment](docs/images/vnx-quality-advisory.png)
 
