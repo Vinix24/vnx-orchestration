@@ -45,6 +45,12 @@ fi
 log "Starting context rotation for $TERMINAL"
 rm -f "$SIGNAL_FILE"
 
+# Remove the rotation latch file so the context monitor stops blocking
+# after /clear lands and the new session starts with a fresh context window.
+LATCH_FILE="$VNX_STATE_DIR/rotation_latch_${TERMINAL}"
+rm -f "$LATCH_FILE"
+log "Rotation latch removed: $LATCH_FILE"
+
 sleep 3
 
 log "Sending /clear to pane $PANE_ID"
