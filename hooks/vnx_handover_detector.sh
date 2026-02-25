@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/_vnx_hook_common.sh"
 
+export VNX_CONTEXT_ROTATION_ENABLED="${VNX_CONTEXT_ROTATION_ENABLED:-1}"
 vnx_context_rotation_enabled || exit 0
 
 INPUT="$(cat)"
@@ -110,4 +111,9 @@ done
 trap - EXIT INT TERM
 vnx_log "Rotation script started for $TERMINAL (PID: $ROTATE_PID)"
 
+# Stop the agent loop immediately after the handover is written.
+# PostToolUse {"continue":false} halts Claude before the next action,
+# so /clear from vnx_rotate.sh lands on an idle terminal instead of
+# racing with Claude's next tool call.
+echo '{"continue":false,"stopReason":"Context rotation in progress. Handover written. Waiting for /clear from vnx_rotate.sh — do not continue."}'
 exit 0
