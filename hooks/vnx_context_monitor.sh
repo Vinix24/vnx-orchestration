@@ -79,8 +79,12 @@ if (( USED_PCT >= ROTATION_THRESHOLD )); then
   # Two-stage rotation:
   # Stage 1: block + instruct handover (Claude stays alive to write it)
   # Stage 2: if handover already exists, force-stop Claude so /clear can land
+  #
+  # Latch file prevents Stage 1 from regenerating a new filename on every
+  # hook invocation — Claude sees a consistent filename across retries.
 
   HANDOVER_DIR="$VNX_DATA_DIR/rotation_handovers"
+  LATCH_FILE="$VNX_STATE_DIR/rotation_latch_${TERMINAL}"
   EXISTING_HANDOVER=$(ls -t "$HANDOVER_DIR"/*"${TERMINAL}-ROTATION-HANDOVER"*.md 2>/dev/null | head -1)
 
   if [[ -n "$EXISTING_HANDOVER" ]]; then
@@ -99,10 +103,32 @@ EOF
     fi
   fi
 
-  # Stage 1: instruct Claude to write handover
+  # Stage 1: instruct Claude to write handover.
+  # Use a latch file so repeated invocations return the SAME filename.
+  # Without this, each hook call generates a new timestamp → Claude gets
+  # confused by changing filenames and may never write the handover.
+  if [[ -f "$LATCH_FILE" ]]; then
+    LATCH_AGE=$(( $(date +%s) - $(stat -f %m "$LATCH_FILE" 2>/dev/null || stat -c %Y "$LATCH_FILE" 2>/dev/null || echo 0) ))
+    if (( LATCH_AGE < 600 )); then
+      # Re-read the latched filename and repeat the same block message
+      HANDOVER_FILENAME=$(cat "$LATCH_FILE")
+      vnx_log "Context rotation stage 1 (repeat): blocking with latched filename $HANDOVER_FILENAME on $TERMINAL"
+      HANDOVER_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      cat <<EOF
+{"decision":"block","reason":"VNX CONTEXT ROTATION REQUIRED (${USED_PCT}% used, ${REMAINING_INT}% remaining). Write a handover file NOW to $VNX_DATA_DIR/rotation_handovers/ named ${HANDOVER_FILENAME}.\n\nREQUIRED FORMAT:\n# ${TERMINAL} Context Rotation Handover\n**Timestamp**: ${HANDOVER_ISO}\n**Terminal**: ${TERMINAL}\n**Dispatch-ID**: [copy from your current dispatch assignment]\n**Context Used**: ${USED_PCT}%\n\n## Status\n[complete | in-progress | blocked]\n\n## Completed Work\n[bullet list of what was done]\n\n## Remaining Tasks\n[bullet list of what is left, or 'None']\n\n## Files Modified\n[list of files changed with brief description]\n\n## Next Steps\n[what the incoming session should do first]\n\nIMPORTANT: Writing the handover file is your FINAL action in this session. Do NOT run any other tools or commands after writing it. The system will handle clearing and resumption automatically."}
+EOF
+      exit 0
+    else
+      # Stale latch (>10 min) — remove and re-latch below
+      rm -f "$LATCH_FILE"
+    fi
+  fi
+
+  # First Stage 1 invocation: generate filename and latch it
   vnx_log "Context rotation stage 1: ${USED_PCT}% used on $TERMINAL, requesting handover"
   HANDOVER_TS=$(date +%Y%m%d-%H%M%S)
   HANDOVER_FILENAME="${HANDOVER_TS}-${TERMINAL}-ROTATION-HANDOVER.md"
+  echo "$HANDOVER_FILENAME" > "$LATCH_FILE"
   HANDOVER_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   cat <<EOF
 {"decision":"block","reason":"VNX CONTEXT ROTATION REQUIRED (${USED_PCT}% used, ${REMAINING_INT}% remaining). Write a handover file NOW to $VNX_DATA_DIR/rotation_handovers/ named ${HANDOVER_FILENAME}.\n\nREQUIRED FORMAT:\n# ${TERMINAL} Context Rotation Handover\n**Timestamp**: ${HANDOVER_ISO}\n**Terminal**: ${TERMINAL}\n**Dispatch-ID**: [copy from your current dispatch assignment]\n**Context Used**: ${USED_PCT}%\n\n## Status\n[complete | in-progress | blocked]\n\n## Completed Work\n[bullet list of what was done]\n\n## Remaining Tasks\n[bullet list of what is left, or 'None']\n\n## Files Modified\n[list of files changed with brief description]\n\n## Next Steps\n[what the incoming session should do first]\n\nIMPORTANT: Writing the handover file is your FINAL action in this session. Do NOT run any other tools or commands after writing it. The system will handle clearing and resumption automatically."}
