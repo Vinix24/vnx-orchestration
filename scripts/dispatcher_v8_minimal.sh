@@ -1095,10 +1095,10 @@ $receipt_footer"
         log "V8 WARNING: Failed to notify heartbeat ACK monitor (non-fatal)"
     }
 
-    # Move dispatch to completed
-    mv "$dispatch_file" "$COMPLETED_DIR/$filename"
+    # Move dispatch to active (receipt_processor moves to completed on task_complete)
+    mv "$dispatch_file" "$ACTIVE_DIR/$filename"
 
-    log "V8 DISPATCH: Complete - moved to $COMPLETED_DIR/$filename"
+    log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
     return 0
 }
 

@@ -134,15 +134,22 @@ tmux paste-buffer -t "$PANE_ID"
 sleep 1
 tmux send-keys -t "$PANE_ID" Enter
 
-# Update terminal state to "working" so T0 sees correct status after rotation
+# Update terminal state to "working" ONLY if dispatch is still in active/.
+# If receipt_processor already moved it to completed/ (task_complete arrived
+# during the rotation window), don't clobber the idle state.
 if [[ -n "$DISPATCH_ID" && "$DISPATCH_ID" != "unknown" ]]; then
-  python3 "$SCRIPT_DIR/../scripts/terminal_state_shadow.py" \
-    --terminal-id "$TERMINAL" \
-    --status "working" \
-    --claimed-by "$DISPATCH_ID" \
-    --last-activity "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || \
-    log "WARNING: Failed to update terminal state after rotation"
-  log "Terminal state updated: $TERMINAL -> working (dispatch=$DISPATCH_ID)"
+  ACTIVE_CHECK=$(ls "$VNX_DATA_DIR/dispatches/active/${DISPATCH_ID}"*.md 2>/dev/null | head -1)
+  if [[ -n "$ACTIVE_CHECK" ]]; then
+    python3 "$SCRIPT_DIR/../scripts/terminal_state_shadow.py" \
+      --terminal-id "$TERMINAL" \
+      --status "working" \
+      --claimed-by "$DISPATCH_ID" \
+      --last-activity "$(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || \
+      log "WARNING: Failed to update terminal state after rotation"
+    log "Terminal state updated: $TERMINAL -> working (dispatch=$DISPATCH_ID)"
+  else
+    log "Dispatch $DISPATCH_ID not in active/ — task already completed, skipping state update"
+  fi
 fi
 
 # Emit continuation receipt for context-rot research

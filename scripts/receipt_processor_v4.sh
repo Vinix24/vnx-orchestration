@@ -434,6 +434,21 @@ update_receipt_shadow_state() {
     shadow_update_terminal_state "$terminal" "$completion_status" "$_rf_dispatch_id" "$_rf_timestamp" "$clear_claim" "$lease_seconds"
 }
 
+# Section C2: Move dispatch from active/ to completed/ on task finish.
+# Reads _rf_* variables. Non-fatal.
+_move_dispatch_to_completed() {
+    if [ "$_rf_event_type" != "task_complete" ] && [ "$_rf_event_type" != "task_failed" ] && [ "$_rf_event_type" != "task_timeout" ]; then
+        return 0
+    fi
+    [ -z "$_rf_dispatch_id" ] && return 0
+    local src
+    src=$(ls "$VNX_DISPATCH_DIR/active/${_rf_dispatch_id}"*.md 2>/dev/null | head -1)
+    [ -z "$src" ] && return 0
+    mv "$src" "$VNX_DISPATCH_DIR/completed/" 2>/dev/null && \
+        log "DEBUG" "Dispatch moved: active → completed ($_rf_dispatch_id)" || \
+        log "WARN" "Failed to move dispatch to completed: $_rf_dispatch_id"
+}
+
 # Section D: Extract PR ID (3-tier) and attach evidence to open items.
 # Reads _rf_* variables. Non-fatal.
 attach_pr_evidence() {
@@ -741,6 +756,9 @@ process_single_report() {
 
     # C. Shadow write terminal state (non-fatal)
     update_receipt_shadow_state "$terminal"
+
+    # C2. Move dispatch from active/ → completed/ on task finish (non-fatal)
+    _move_dispatch_to_completed
 
     # D. Attach PR evidence on success (non-fatal)
     attach_pr_evidence "$receipt_json" "$report_path"
