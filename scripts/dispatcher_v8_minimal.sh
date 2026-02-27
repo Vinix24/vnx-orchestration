@@ -771,8 +771,8 @@ map_role_to_skill() {
             echo "$role"
             ;;
         *)
-            # Unknown role - log warning and use as-is
-            log "V8 WARNING: Unknown role '$role' - using as-is (may fail skill activation)"
+            # Unknown role - pass through (log to stderr to avoid corrupting subshell capture)
+            log "V8 WARNING: Unknown role '$role' - using as-is (may fail skill activation)" >&2
             echo "$role"
             ;;
     esac
