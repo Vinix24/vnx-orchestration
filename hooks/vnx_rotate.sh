@@ -120,12 +120,18 @@ if [[ -n "$SKILL" ]]; then
 Read handover: ${HANDOVER_PATH}
 Read dispatch: ${DISPATCH_FILE}
 
-Resume from where the previous session left off. The handover doc contains status, completed work, and remaining tasks."
+Resume from where the previous session left off. The handover doc contains status, completed work, and remaining tasks.
+
+Write your report to: \`.vnx-data/unified_reports/\`
+Filename: \`$(date +%Y%m%d-%H%M%S)-${TERMINAL}-<short-title>.md\`"
 else
   PROMPT="Context rotation complete. Read the handover document at:
 ${HANDOVER_PATH}
 
-Resume the remaining work as described in the handover document. Start by reading that file."
+Resume the remaining work as described in the handover document. Start by reading that file.
+
+Write your report to: \`.vnx-data/unified_reports/\`
+Filename: \`$(date +%Y%m%d-%H%M%S)-${TERMINAL}-<short-title>.md\`"
 fi
 
 log "Sending continuation prompt (skill=${SKILL:-none})"
