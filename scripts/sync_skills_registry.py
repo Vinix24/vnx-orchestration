@@ -269,7 +269,7 @@ def main() -> int:
     claude_dir = vnx_system_dir.parent  # .claude/
 
     skills_dir = Path(args.skills_dir) if args.skills_dir else claude_dir / "skills"
-    registry_path = Path(args.registry) if args.registry else vnx_system_dir / "skills" / "skills.yaml"
+    registry_path = Path(args.registry) if args.registry else claude_dir / "skills" / "skills.yaml"
 
     return sync(skills_dir, registry_path, dry_run=args.dry_run)
 
