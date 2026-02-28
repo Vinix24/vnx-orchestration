@@ -265,8 +265,8 @@ def main() -> int:
 
     # Auto-detect paths relative to this script's location
     script_dir = Path(__file__).resolve().parent
-    vnx_system_dir = script_dir.parent  # .claude/vnx-system/
-    claude_dir = vnx_system_dir.parent  # .claude/
+    vnx_system_dir = script_dir.parent  # scripts -> vnx-system
+    claude_dir = vnx_system_dir.parent  # vnx-system -> .claude
 
     skills_dir = Path(args.skills_dir) if args.skills_dir else claude_dir / "skills"
     registry_path = Path(args.registry) if args.registry else claude_dir / "skills" / "skills.yaml"
