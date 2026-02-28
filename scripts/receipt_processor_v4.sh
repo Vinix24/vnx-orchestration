@@ -29,6 +29,7 @@ POLL_INTERVAL="${VNX_POLL_INTERVAL:-5}"          # seconds between report direct
 # FSWATCH_RETRIES="${VNX_FSWATCH_RETRIES:-3}"   # (disabled) fswatch restart attempts before polling fallback
 # FSWATCH_BACKOFF="${VNX_FSWATCH_BACKOFF:-5}"   # (disabled) seconds between fswatch restarts
 CONFIRMATION_GRACE_SECONDS="${VNX_CONFIRMATION_GRACE_SECONDS:-300}"  # Lease window for no-confirmation blocks
+FLOOD_LOCK_MAX_AGE="${VNX_FLOOD_LOCK_MAX_AGE:-300}"  # Auto-clear flood lock after N seconds (default 5 min)
 
 # State files
 LAST_PROCESSED="$STATE_DIR/receipt_last_processed"
@@ -197,29 +198,22 @@ should_process_report() {
     return 0  # Should process
 }
 
-# Acquire exclusive lock for receipt writing (prevents race conditions)
+# File descriptor for receipt write lock (flock-based, OS-level atomic)
+RECEIPT_LOCK_FD=9
+RECEIPT_LOCK_FILE="$STATE_DIR/receipt_write.lock"
+
+# Acquire exclusive lock for receipt writing via flock (prevents race conditions)
 acquire_receipt_lock() {
-    local lockfile="$STATE_DIR/receipt_write.lock"
-    local max_wait=5
-    local waited=0
-
-    while [ -f "$lockfile" ] && [ "$waited" -lt "$max_wait" ]; do
-        sleep 0.1
-        waited=$((waited + 1))
-    done
-
-    if [ "$waited" -ge "$max_wait" ]; then
-        log "WARN" "Lock acquisition timeout, proceeding anyway"
+    exec 9>"$RECEIPT_LOCK_FILE"
+    if ! flock -w 5 $RECEIPT_LOCK_FD; then
+        log "ERROR" "Receipt write lock acquisition failed after 5s (held by another process)"
+        return 1
     fi
-
-    # Create lock with PID
-    echo "$$" > "$lockfile"
 }
 
 # Release receipt write lock
 release_receipt_lock() {
-    local lockfile="$STATE_DIR/receipt_write.lock"
-    rm -f "$lockfile"
+    flock -u $RECEIPT_LOCK_FD 2>/dev/null || true
 }
 
 # Check if receipt content already exists (deduplication)
@@ -268,10 +262,17 @@ is_duplicate_receipt() {
 check_flood_protection() {
     local queue_size="$1"
 
-    # Check if flood protection is active
+    # Check if flood protection is active — auto-clear if lock is stale
     if [ -f "$FLOOD_LOCKFILE" ]; then
-        log "WARN" "Flood protection is active. Clear with: rm $FLOOD_LOCKFILE"
-        return 1
+        local lock_age=$(( $(date +%s) - $(stat -f %m "$FLOOD_LOCKFILE" 2>/dev/null || echo "0") ))
+        if [ "$lock_age" -ge "$FLOOD_LOCK_MAX_AGE" ]; then
+            log "INFO" "Flood lock expired after ${lock_age}s (max ${FLOOD_LOCK_MAX_AGE}s) — auto-clearing"
+            rm -f "$FLOOD_LOCKFILE"
+        else
+            local remaining=$(( FLOOD_LOCK_MAX_AGE - lock_age ))
+            log "WARN" "Flood protection active (${lock_age}s old, auto-clears in ${remaining}s). Manual: rm $FLOOD_LOCKFILE"
+            return 1
+        fi
     fi
 
     # Check queue size
@@ -924,6 +925,7 @@ cleanup() {
     sleep 0.5
     release_receipt_lock  # Ensure lock is released
     rm -f "$PID_FILE"
+    rm -f "$FLOOD_LOCKFILE"  # Clear flood lock on clean shutdown
     # Clean up singleton lock (and legacy fswatch FIFO if it exists)
     rm -f "$STATE_DIR/.fswatch_fifo.$$"
     rm -rf "$VNX_LOCKS_DIR/receipt_processor_v4.sh.lock"

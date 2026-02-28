@@ -125,6 +125,33 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             os.unlink(tmp_path)
 
 
+def _is_lease_expired(lease_expires_at: str | None) -> bool:
+    """Check if a lease timestamp is in the past."""
+    if not lease_expires_at:
+        return False
+    try:
+        expires = datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00"))
+        return expires <= datetime.now(timezone.utc)
+    except (ValueError, AttributeError):
+        return False
+
+
+def _gc_expired_leases(terminals: Dict[str, Any]) -> int:
+    """Clear claim fields on all terminals with expired leases. Returns count of cleaned entries."""
+    cleaned = 0
+    for record in terminals.values():
+        if not isinstance(record, dict):
+            continue
+        claimed_by = record.get("claimed_by")
+        lease_expires_at = record.get("lease_expires_at")
+        if claimed_by and _is_lease_expired(lease_expires_at):
+            record["claimed_by"] = None
+            record["claimed_at"] = None
+            record["lease_expires_at"] = None
+            cleaned += 1
+    return cleaned
+
+
 def update_terminal_state(state_dir: str | Path, update: TerminalUpdate) -> Dict[str, Any]:
     if not update.terminal_id:
         raise TerminalStateValidationError("terminal_id is required")
@@ -140,6 +167,9 @@ def update_terminal_state(state_dir: str | Path, update: TerminalUpdate) -> Dict
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         document = _load_document(state_file)
         terminals = document.setdefault("terminals", {})
+
+        # Garbage-collect expired leases on every write (cheap: iterates 3-4 terminals)
+        _gc_expired_leases(terminals)
 
         existing = terminals.get(update.terminal_id, {})
         version = int(existing.get("version", 0)) + 1
