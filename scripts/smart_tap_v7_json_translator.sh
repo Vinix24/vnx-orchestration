@@ -517,14 +517,14 @@ process_single_block() {
 
 # Function to process captured content
 process_capture() {
-    # ── Hard queue gate ───────────────────────────────────────────────────
-    # Only process new Manager Blocks if queue is empty.
-    # This prevents T0 from flooding the queue with multiple dispatches.
-    # NOTE: active/ is NOT checked here — dispatches sit in active/ while
-    # terminals work on them (pending→active→completed lifecycle). Blocking
-    # on active/ would prevent the smart tap from ever picking up new blocks.
+    # ── Queue overflow protection ─────────────────────────────────────────
+    # Cap total queue size to prevent unbounded growth. Individual blocks
+    # are further limited by the per-track cap (max 5) in process_single_block.
+    # NOTE: active/ is NOT checked — dispatches sit in active/ while terminals
+    # work on them (pending→active→completed lifecycle).
     local queue_count=$(ls "$DISPATCH_DIR/queue/" 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$queue_count" -gt 0 ]; then
+    if [ "$queue_count" -ge 15 ]; then
+        log "⚠ Queue at capacity (${queue_count} items) — deferring new block capture"
         return
     fi
 
