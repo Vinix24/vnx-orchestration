@@ -42,7 +42,7 @@ results have become increasingly clear, multi-model dispatch support has been ad
 ## By Design
 - **File-based**: Uses the filesystem as a message bus. Not designed for distributed networks.
 - **Local-first**: No cloud dependency for orchestration state.
-- **Bash/Python prototype**: Current code is a reference implementation, not a packaged production binary.
+- **Bash/Python prototype (~60/40 ratio)**: The codebase is approximately 60% bash and 40% Python. This ratio reflects origin, not design preference — VNX started as tmux `send-keys` scripts and grew organically. Bash handles tmux orchestration, file-bus operations, and process supervision; Python handles intelligence, receipt processing, and anything requiring structured data or testability. New components are written in Python by default; existing bash is migrated when it needs significant changes. See [EVOLUTION_TIMELINE.md — Language Evolution](EVOLUTION_TIMELINE.md#language-evolution-why-60-bash--40-python) for full context.
 - **Tmux Dependency**: Orchestration currently relies on tmux pane naming conventions.
 - **Hook-agnostic**: Quality intelligence and usage tracking do not require provider hooks; hooks are optional enrichments.
 - **T0 write isolation**: The orchestrator cannot write files directly; write restrictions are enforced through Claude Code hooks. This ensures T0 stays a coordinator, not an executor.

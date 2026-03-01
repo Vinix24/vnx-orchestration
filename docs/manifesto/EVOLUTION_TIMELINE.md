@@ -141,6 +141,30 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 ---
 
+## Language Evolution: Why ~60% Bash / ~40% Python
+
+VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice.
+
+**Why bash persists:**
+- Tmux orchestration (`send-keys`, pane management, session control) is inherently shell-native.
+- File-bus operations (watch, move, append) are one-liners in bash but verbose in Python.
+- Supervisor, dispatcher, and smart-tap were written first and work reliably.
+
+**Why Python is growing:**
+- Intelligence pipeline (FTS5 queries, pattern scoring, learning loop) needs structured data handling.
+- Receipt processing moved from bash to Python for JSON parsing reliability.
+- CI testing is pytest-based — Python scripts are directly testable, bash scripts require wrapper tests.
+- New features are written in Python by default.
+
+**Active migration policy:**
+- New components: Python.
+- Existing bash scripts: migrated when they need significant changes (not rewritten for its own sake).
+- Target: critical-path components in Python, shell glue for tmux/filesystem operations.
+
+Current ratio reflects origin, not preference. The system is moving toward Python for anything that benefits from testability, type safety, and structured error handling.
+
+---
+
 ## What Is Mature Today
 
 - Receipt-led governance and audit trail
