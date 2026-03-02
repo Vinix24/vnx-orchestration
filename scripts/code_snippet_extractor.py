@@ -10,6 +10,7 @@ import ast
 import re
 import sys
 import subprocess
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -311,13 +312,17 @@ class SnippetExtractor:
             commit_hash = self._get_file_commit_hash(snippet_data['file_path'])
             now = datetime.now().isoformat()
 
+            # Compute stable pattern hash for O(1) usage lookup
+            hash_base = f"{snippet_data['title']}|{snippet_data['file_path']}|{snippet_data['line_range']}"
+            pattern_hash = hashlib.sha1(hash_base.encode("utf-8")).hexdigest()
+
             # Insert metadata with citation fields
             cursor.execute("""
                 INSERT INTO snippet_metadata (
                     snippet_rowid, file_path, line_start, line_end,
                     quality_score, usage_count,
-                    source_commit_hash, extracted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    source_commit_hash, pattern_hash, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 snippet_rowid,
                 snippet_data['file_path'],
@@ -326,6 +331,7 @@ class SnippetExtractor:
                 snippet_data['quality_score'],
                 0,
                 commit_hash,
+                pattern_hash,
                 now
             ))
 

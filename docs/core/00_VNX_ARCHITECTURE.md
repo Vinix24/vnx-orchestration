@@ -612,12 +612,12 @@ On `vnx start`, the system:
 **Quality Context Structure**:
 ```json
 {
-  "intelligence_version": "1.0.0",
+  "intelligence_version": "1.4.0",
   "agent_validated": true,
   "patterns_available": true,
   "pattern_count": 5,
-  "pattern_ids": ["pattern_0", "pattern_1", "pattern_2", "pattern_3", "pattern_4"],
-  "tags_analyzed": false,
+  "offered_pattern_hashes": ["a1b2c3...", "d4e5f6...", "g7h8i9...", "j0k1l2...", "m3n4o5..."],
+  "tags_analyzed": true,
   "reports_mined": false
 }
 ```
