@@ -226,13 +226,20 @@ class T0IntelligenceGatherer:
             "success_prediction": None,  # PR #7
             "file_warnings": [],         # PR #2
 
+            # Pattern hashes for feedback loop (agents report back which they used)
+            "offered_pattern_hashes": [
+                p['pattern_hash'] for p in suggested_patterns if p.get('pattern_hash')
+            ],
+
             # Quality context with patterns and tags
             "quality_context": {
-                "intelligence_version": "1.3.0",
+                "intelligence_version": "1.4.0",
                 "agent_validated": True,
                 "patterns_available": len(suggested_patterns) > 0,
                 "pattern_count": len(suggested_patterns),
-                "pattern_ids": [f"pattern_{i}" for i, p in enumerate(suggested_patterns)],
+                "offered_pattern_hashes": [
+                    p['pattern_hash'] for p in suggested_patterns if p.get('pattern_hash')
+                ],
                 "tags_analyzed": tag_analysis.get("analyzed", False),
                 "tag_combination": tag_analysis.get("tag_combination", []),
                 "prevention_rules_available": len(prevention_rules) > 0,
@@ -270,9 +277,15 @@ class T0IntelligenceGatherer:
 
     def extract_task_paths(self, text: str) -> List[str]:
         """Extract file paths from task description"""
-        # Simpler, balanced pattern that captures repo-relative paths without regex errors
-        # Matches e.g. src/foo.py, tests/bar/test_baz.py, docs/file.md, SEOCRAWLER_DOCS/01_OVERVIEW.md, .vnx/...
-        path_pattern = r'(?:src|tests|docs|refactorQuickscan|SEOCRAWLER_DOCS|\\.claude)/(?:[^\\s`),]+)'
+        # Build path prefix pattern from known dirs + VNX_DOCS_DIRS entries
+        prefixes = ['src', 'tests', 'docs', '\\.claude']
+        docs_dirs_raw = os.environ.get("VNX_DOCS_DIRS", "")
+        if docs_dirs_raw:
+            for entry in docs_dirs_raw.split(","):
+                name = Path(entry.strip()).name
+                if name and name not in prefixes:
+                    prefixes.append(re.escape(name))
+        path_pattern = r'(?:' + '|'.join(prefixes) + r')/(?:[^\\s`),]+)'
         paths = [p.strip() for p in re.findall(path_pattern, text)]
 
         # Also capture bare filenames (e.g. SEOScanForm.tsx, scan_orchestrator_service.py)
@@ -282,6 +295,31 @@ class T0IntelligenceGatherer:
             if name not in paths:
                 paths.append(name)
         return paths
+
+    def _get_preferred_language(self, task_paths: List[str], keywords: List[str]) -> Optional[str]:
+        """Determine preferred language based on task context.
+        Returns: "python", "markdown", or None (search all).
+        """
+        doc_keywords = {
+            'documentation', 'docs', 'document', 'markdown',
+            'guide', 'runbook', 'architecture-doc', 'api-doc',
+            'content', 'marketing', 'sales', 'deployment-guide',
+        }
+        if any(k in keywords for k in doc_keywords):
+            return "markdown"
+
+        if not task_paths:
+            return None
+
+        exts = {Path(p.strip('`')).suffix.lower() for p in task_paths if p}
+        if not exts:
+            return None
+
+        if exts.issubset({'.md', '.markdown', '.txt'}):
+            return "markdown"
+        if exts.issubset({'.py'}):
+            return "python"
+        return None
 
     def _should_skip_code_patterns(self, task_paths: List[str], keywords: List[str]) -> bool:
         """Skip code pattern lookup for non-code tasks (docs/UI) unless explicitly Python-related."""
@@ -432,6 +470,13 @@ class T0IntelligenceGatherer:
                     code = code[:997] + "..."
                 pattern['code'] = code
 
+        # Register offered patterns in pattern_usage for feedback loop tracking
+        self._register_offered_patterns(patterns)
+
+        # Verify pattern freshness via citation commit hashes
+        for pattern in patterns:
+            self._verify_pattern_freshness(pattern)
+
         # Hard filters: enforce actionable relevance (lightweight)
         filtered = []
         for pattern in patterns:
@@ -466,6 +511,92 @@ class T0IntelligenceGatherer:
         # Fallback: if filters remove all patterns, return best-scoring original pattern
         patterns.sort(key=lambda x: x['relevance_score'], reverse=True)
         return patterns[:1] if patterns else []
+
+    def _register_offered_patterns(self, patterns: List[Dict]):
+        """Register offered patterns in pattern_usage table for feedback loop tracking.
+
+        Called at dispatch time so the learning loop can later detect which patterns
+        were offered but never used (ignored).
+        """
+        if not self.quality_db:
+            return
+
+        now = datetime.now().isoformat()
+        for pattern in patterns:
+            pattern_hash = pattern.get('pattern_hash', '')
+            if not pattern_hash:
+                continue
+
+            try:
+                self.quality_db.execute('''
+                    INSERT INTO pattern_usage
+                        (pattern_id, pattern_title, pattern_hash, last_offered, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pattern_id) DO UPDATE SET
+                        last_offered = excluded.last_offered,
+                        updated_at = excluded.updated_at
+                ''', (
+                    pattern_hash,
+                    str(pattern.get('title', ''))[:200],
+                    pattern_hash,
+                    now, now, now
+                ))
+            except Exception:
+                pass
+
+        try:
+            self.quality_db.commit()
+        except Exception:
+            pass
+
+    def _verify_pattern_freshness(self, pattern: Dict):
+        """Verify pattern freshness by comparing source_commit_hash with current file state.
+
+        Adds a 'citation' dict to the pattern with commit hash and staleness info.
+        """
+        if not self.quality_db:
+            return
+
+        file_path = pattern.get('file_path', '')
+        if not file_path:
+            return
+
+        try:
+            cursor = self.quality_db.execute('''
+                SELECT source_commit_hash, verified_at
+                FROM snippet_metadata
+                WHERE file_path = ?
+                  AND source_commit_hash IS NOT NULL
+                LIMIT 1
+            ''', (file_path,))
+            row = cursor.fetchone()
+
+            if not row:
+                return
+
+            stored_hash = row['source_commit_hash']
+            verified_at = row['verified_at']
+
+            # Get current commit hash for the file
+            import subprocess
+            result = subprocess.run(
+                ['git', 'log', '-1', '--format=%H', '--', file_path],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(self.project_root)
+            )
+            current_hash = result.stdout.strip() if result.returncode == 0 else None
+
+            is_stale = current_hash is not None and current_hash != stored_hash
+
+            pattern['citation'] = {
+                'source_commit': stored_hash[:12] if stored_hash else None,
+                'current_commit': current_hash[:12] if current_hash else None,
+                'stale': is_stale,
+                'verified_at': verified_at
+            }
+
+        except Exception:
+            pass
 
     def score_pattern_relevance(
         self,
@@ -588,9 +719,14 @@ class T0IntelligenceGatherer:
             keywords = self.extract_keywords(task_description)
             task_paths = task_paths or []
 
+            # Language-aware filtering: doc tasks get markdown, code tasks get python
+            preferred_lang = self._get_preferred_language(task_paths, keywords)
+
             # Frontend/UI/doc tasks should not pull python snippets by default
             if self._should_skip_code_patterns(task_paths, keywords) and not self._is_testing_gate(gate):
-                return []
+                if preferred_lang != "markdown":
+                    return []
+                # Doc task: allow through, FTS5 query will filter on language="markdown"
 
             # BAND-AID FIX 1: Component tag pre-filtering
             # Extract component from task paths to narrow search space
@@ -638,18 +774,25 @@ class T0IntelligenceGatherer:
                     # Boost component-specific patterns
                     quoted_keywords.extend([f'tags:"{tag}"' for tag in component_tags[:2]])
 
+                # Language filter: restrict to preferred language when set
+                if preferred_lang:
+                    quoted_keywords.append(f'language:"{preferred_lang}"')
+
                 match_terms = ' OR '.join(quoted_keywords)
+
+                # Lower quality threshold for markdown (docs score lower by design)
+                min_quality = 40 if preferred_lang == "markdown" else 85
 
                 query = """
                 SELECT rowid as snippet_id, title, description, code, file_path, line_range,
                        tags, quality_score, usage_count, last_updated, language
                 FROM code_snippets
                 WHERE code_snippets MATCH ?
-                AND quality_score >= 85
+                AND quality_score >= ?
                 ORDER BY rank, quality_score DESC
                 LIMIT ?
                 """
-                cursor = self.quality_db.execute(query, (match_terms, limit * 3))
+                cursor = self.quality_db.execute(query, (match_terms, min_quality, limit * 3))
 
             # Collect unique patterns from cursor
             patterns = []
@@ -1287,7 +1430,7 @@ def main():
             stats = {}
 
         if human:
-            emit_human("VNX Intelligence Gatherer v1.3.0")
+            emit_human("VNX Intelligence Gatherer v1.4.0")
             emit_human(f"Loaded agents: {len(gatherer.agent_directory)}")
             emit_human(f"Database connected: {gatherer.quality_db is not None}")
             emit_human(f"Tag engine available: {gatherer.tag_engine is not None}")
@@ -1299,7 +1442,7 @@ def main():
             emit_human("\nCommands: list-agents, validate, gather, patterns, keywords, tags, prevention")
         else:
             emit_json({
-                "version": "1.3.0",
+                "version": "1.4.0",
                 "loaded_agents": len(gatherer.agent_directory),
                 "database_connected": gatherer.quality_db is not None,
                 "tag_engine_available": gatherer.tag_engine is not None,

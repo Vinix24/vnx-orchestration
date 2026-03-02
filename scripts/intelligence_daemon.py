@@ -39,6 +39,7 @@ try:
     from gather_intelligence import T0IntelligenceGatherer
     from learning_loop import LearningLoop
     from cached_intelligence import CachedIntelligence
+    from tag_intelligence import TagIntelligenceEngine
 except ImportError as e:
     print(f"ERROR: Could not import required modules: {e}", file=sys.stderr)
     sys.exit(1)
@@ -206,6 +207,12 @@ class IntelligenceDaemon:
             # Pattern quality check
             self._verify_pattern_quality()
 
+            # Bulk citation freshness verification
+            self._verify_pattern_freshness_bulk()
+
+            # Tag auto-refresh from completed dispatches
+            self._refresh_tags_from_completed_dispatches()
+
             # Cleanup old data
             self._cleanup_old_data()
 
@@ -271,6 +278,9 @@ class IntelligenceDaemon:
                 subprocess.run(["python3", scanner], check=False)
             if os.path.exists(extractor):
                 subprocess.run(["python3", extractor], check=False)
+            doc_extractor = os.path.join(base_dir, "scripts", "doc_section_extractor.py")
+            if os.path.exists(doc_extractor):
+                subprocess.run(["python3", doc_extractor], check=False)
             logger.info("✅ Intelligence refresh complete")
         except Exception as e:
             logger.error(f"❌ Intelligence refresh failed: {e}")
@@ -312,6 +322,110 @@ class IntelligenceDaemon:
                 logger.info("Old data cleanup complete")
         except Exception as e:
             logger.error(f"Data cleanup failed: {e}")
+
+    def _verify_pattern_freshness_bulk(self):
+        """Bulk verification of snippet citations against current git state.
+
+        Iterates all snippet_metadata rows with source_commit_hash,
+        compares with the current commit for each file, and updates verified_at.
+        Stale snippets get their quality_score penalized.
+        """
+        if not self.gatherer.quality_db:
+            return
+
+        try:
+            cursor = self.gatherer.quality_db.execute('''
+                SELECT id, file_path, source_commit_hash
+                FROM snippet_metadata
+                WHERE source_commit_hash IS NOT NULL
+            ''')
+            rows = cursor.fetchall()
+
+            if not rows:
+                logger.info("No snippets with commit hashes to verify")
+                return
+
+            now = datetime.now().isoformat()
+            verified = 0
+            stale = 0
+
+            for row in rows:
+                file_path = row['file_path']
+                stored_hash = row['source_commit_hash']
+
+                try:
+                    result = subprocess.run(
+                        ['git', 'log', '-1', '--format=%H', '--', file_path],
+                        capture_output=True, text=True, timeout=5,
+                        cwd=str(self.project_root)
+                    )
+                    current_hash = result.stdout.strip() if result.returncode == 0 else None
+
+                    if current_hash and current_hash != stored_hash:
+                        stale += 1
+                        # Penalize stale snippet quality
+                        self.gatherer.quality_db.execute('''
+                            UPDATE snippet_metadata
+                            SET verified_at = ?, quality_score = MAX(0, quality_score * 0.8)
+                            WHERE id = ?
+                        ''', (now, row['id']))
+                    else:
+                        self.gatherer.quality_db.execute('''
+                            UPDATE snippet_metadata
+                            SET verified_at = ?
+                            WHERE id = ?
+                        ''', (now, row['id']))
+
+                    verified += 1
+
+                except Exception:
+                    continue
+
+            self.gatherer.quality_db.commit()
+            logger.info(f"Freshness check: {verified} verified, {stale} stale out of {len(rows)} snippets")
+
+        except Exception as e:
+            logger.error(f"Bulk freshness verification failed: {e}")
+
+    def _refresh_tags_from_completed_dispatches(self):
+        """Scan completed dispatches from the last 24h and feed extracted tags into tag intelligence.
+
+        For each dispatch, extracts tags from metadata (Priority, Gate, Role, Reason)
+        and instruction text (compound tag detection), then runs them through
+        analyze_multi_tag_patterns() for pattern detection and prevention rule generation.
+        """
+        dispatches_dir = self.vnx_dir / "dispatches" / "completed"
+        if not dispatches_dir.is_dir():
+            logger.info("No completed dispatches directory found")
+            return
+
+        cutoff = (datetime.now() - timedelta(days=1)).timestamp()
+        tag_engine = TagIntelligenceEngine()
+        processed = 0
+
+        for dispatch_file in dispatches_dir.glob("*.md"):
+            try:
+                if dispatch_file.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+
+            tags = tag_engine.extract_tags_from_dispatch(dispatch_file)
+            if not tags:
+                continue
+
+            normalized = tag_engine.normalize_tags(tags)
+            if normalized:
+                tag_engine.analyze_multi_tag_patterns(
+                    list(normalized),
+                    phase=None,
+                    terminal=None,
+                    outcome="completed",
+                )
+                processed += 1
+
+        tag_engine.close()
+        logger.info(f"Tag refresh: processed {processed} completed dispatches")
 
     def run_learning_cycle(self):
         """Run the learning loop to update pattern confidence"""

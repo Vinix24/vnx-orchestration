@@ -46,3 +46,7 @@
 - [ ] Charts labeled
 - [ ] Print-ready layout
 - [ ] Dutch compliance
+
+## Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []

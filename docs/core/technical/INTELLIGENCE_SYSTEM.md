@@ -1,10 +1,10 @@
 # VNX Intelligence System - Technical Reference
-**Last Updated**: 2026-02-05
+**Last Updated**: 2026-03-02
 **Owner**: T-MANAGER
 **Purpose**: Documentation for VNX Intelligence System - Technical Reference.
 
-**Version**: 2.0.0
-**Date**: 2026-01-26
+**Version**: 3.0.0
+**Date**: 2026-03-02
 **Status**: Active
 **Maintainer**: T-MANAGER
 
@@ -13,13 +13,14 @@
 2. [System Architecture](#system-architecture)
 3. [Agent Validation](#agent-validation)
 4. [Pattern Matching Engine](#pattern-matching-engine)
-5. [Prevention Rules](#prevention-rules)
-6. [Tag Intelligence](#tag-intelligence)
-7. [Learning Loop](#learning-loop)
-8. [Performance & Caching](#performance--caching)
-9. [Integration](#integration)
-10. [Operations](#operations)
-11. [Testing](#testing)
+5. [Documentation Ingestion](#documentation-ingestion)
+6. [Prevention Rules](#prevention-rules)
+7. [Tag Intelligence](#tag-intelligence)
+8. [Learning Loop](#learning-loop)
+9. [Performance & Caching](#performance--caching)
+10. [Integration](#integration)
+11. [Operations](#operations)
+12. [Testing](#testing)
 
 ---
 
@@ -29,18 +30,20 @@ The VNX Intelligence System provides automated intelligence gathering and valida
 
 ### Key Capabilities
 - **Agent Validation**: Validates agent names before dispatch (100% prevention of invalid agents)
-- **Pattern Matching**: Queries 1,143 code patterns with relevance scoring (60-80% relevance)
+- **Pattern Matching**: Queries code patterns + doc sections with relevance scoring (60-80% relevance)
+- **Documentation Ingestion**: Indexes markdown documentation into FTS5 alongside code patterns
+- **Language-Aware Filtering**: Routes doc tasks to markdown sections, code tasks to Python snippets
 - **Prevention Rules**: Generates 1-4 context-aware prevention rules per task
 - **Tag Intelligence**: Extracts 50+ specific tags for precise matching
 - **Learning Loop**: Adjusts confidence scores based on real-world effectiveness
 - **Performance Caching**: Sub-100ms query response with 80%+ cache hit rate
 
 ### Intelligence Database
-- **Location**: `.claude/vnx-system/state/quality_intelligence.db`
+- **Location**: `$VNX_STATE_DIR/quality_intelligence.db`
 - **Engine**: SQLite with FTS5 full-text search
-- **Pattern Count**: 1,143 code snippets
-- **Schema Version**: 2.0
-- **Size**: ~45MB
+- **Content**: Code snippets (`language="python"`) + doc sections (`language="markdown"`)
+- **Schema Version**: 3.0
+- **Configuration**: `VNX_DOCS_DIRS` env var for markdown ingestion directories
 
 ---
 
@@ -80,10 +83,20 @@ The VNX Intelligence System provides automated intelligence gathering and valida
                      ▼
 ┌─────────────────────────────────────────────────────────┐
 │            Quality Intelligence Database                │
-│  • code_snippets: 1,143 patterns                       │
+│  • code_snippets: Python patterns (language="python")   │
+│  • code_snippets: Doc sections (language="markdown")    │
 │  • pattern_usage: Learning loop tracking                │
-│  • FTS5 index: Full-text search                        │
+│  • FTS5 index: Full-text search (both languages)       │
 └─────────────────────────────────────────────────────────┘
+                     ▲
+          ┌──────────┴──────────┐
+          │                     │
+┌─────────────────┐  ┌─────────────────────────────────┐
+│ code_snippet_   │  │ doc_section_extractor.py         │
+│ extractor.py    │  │ (VNX_DOCS_DIRS → markdown)      │
+│ (*.py → python) │  │ Splits on ## headings, scores,  │
+│                 │  │ categorizes, stores as FTS5      │
+└─────────────────┘  └─────────────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────┐
@@ -203,27 +216,47 @@ Connects 1,143 existing code patterns from the quality intelligence database to 
 ### Pattern Database Schema
 
 ```sql
-CREATE TABLE code_snippets (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT,
-    code TEXT NOT NULL,
-    file_path TEXT,
-    line_start INTEGER,
-    line_end INTEGER,
-    tags TEXT,
-    quality_score REAL DEFAULT 70.0,
-    usage_count INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+-- FTS5 virtual table: stores both code snippets and doc sections
+CREATE VIRTUAL TABLE IF NOT EXISTS code_snippets USING fts5(
+    title,              -- Function name or ## heading text
+    description,        -- Docstring or frontmatter summary + first sentence
+    code,               -- Code snippet or section body (full-text searchable)
+    file_path,          -- Source file location
+    line_range,         -- "start-end" line numbers
+    tags,               -- Categories: crawler, storage, documentation, etc.
+    language,           -- "python" for code, "markdown" for docs
+    framework,          -- Framework name or doc category (architecture, api, etc.)
+    dependencies,       -- Required imports or cross-referenced doc files
+    quality_score,      -- 0-100 quality assessment
+    usage_count,        -- How many times referenced
+    last_updated,       -- Timestamp of last update
+    tokenize = 'porter unicode61'
 );
 
-CREATE VIRTUAL TABLE code_snippets_fts USING fts5(
-    title, description, tags, file_path,
-    content='code_snippets',
-    content_rowid='rowid'
+-- Metadata table for staleness tracking
+CREATE TABLE IF NOT EXISTS snippet_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snippet_rowid INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    line_start INTEGER,
+    line_end INTEGER,
+    quality_score REAL DEFAULT 0.0,
+    usage_count INTEGER DEFAULT 0,
+    source_commit_hash TEXT,        -- Git commit hash at extraction time
+    extracted_at DATETIME,
+    verified_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+The `language` field distinguishes content type:
+- **`"python"`**: Code snippets extracted by `code_snippet_extractor.py`
+- **`"markdown"`**: Documentation sections extracted by `doc_section_extractor.py`
+
+The `framework` field serves dual purpose:
+- For Python: framework name (crawl4ai, supabase, fastapi, etc.)
+- For Markdown: document category (architecture, api, operations, etc.)
 
 ### Relevance Scoring Algorithm
 
@@ -282,7 +315,13 @@ return min(score, 1.0)  # Cap at 1.0
 
 ### Language-Aware Filtering
 
-If a task only references non-code files (e.g., `.md`, `.html`, `.js`, `.css`) and does not explicitly mention Python, the system **skips code pattern injection** and relies on prevention rules + report mining. This prevents irrelevant Python snippets on documentation or UI tasks.
+The system uses `_get_preferred_language()` to route queries to the right content type:
+
+- **Doc tasks** (keywords: documentation, guide, markdown, content, marketing, etc. or paths: `.md`, `.txt`): Query is filtered to `language="markdown"` with lowered quality threshold (40 vs 85)
+- **Code tasks** (paths: `.py`): Query filtered to `language="python"` with standard quality threshold (85)
+- **Mixed/unspecified tasks**: No language filter applied — FTS5 searches both code and doc sections
+
+This replaces the previous behavior of completely skipping intelligence for non-code tasks. Now doc tasks receive relevant markdown sections instead of nothing.
 
 ### Path Whitelist Behavior
 
@@ -339,6 +378,119 @@ MAX_CODE_LENGTH = 1000  # Increased from 500
 - **Pattern Coverage**: All 1,143 patterns searchable
 - **Relevance Accuracy**: 60-80% (improved from 20-40%)
 - **Code Completeness**: 100% (improved from ~30%)
+
+---
+
+## Documentation Ingestion
+
+### Purpose
+Indexes project markdown documentation into the same FTS5 `code_snippets` table, making architectural decisions, API specs, deployment procedures, and business logic searchable alongside code patterns. Configured via `VNX_DOCS_DIRS` environment variable — feature is inactive when not set.
+
+### Implementation
+
+**Version**: 1.0.0 (2026-03-02)
+**File**: `scripts/doc_section_extractor.py`
+**Configuration**: `VNX_DOCS_DIRS` env var (comma-separated paths, relative or absolute)
+
+### How It Works
+
+1. **Directory Resolution**: Reads `VNX_DOCS_DIRS` env var, resolves relative paths against `PROJECT_ROOT`
+2. **File Discovery**: Globs `*.md` recursively, skips `archive/` directories
+3. **Frontmatter Parsing**: Extracts YAML frontmatter (title, status, summary, owner) via `yaml.safe_load()`
+4. **Section Splitting**: Splits on `## ` headings — each heading becomes a separate FTS5 record
+5. **Quality Scoring**: Scores 0-100 based on code blocks, tables, word count, cross-references, status
+6. **Category Detection**: Derives from filename prefix number (e.g., `10_` → architecture, `20_` → api)
+7. **FTS5 Storage**: Inserts into `code_snippets` with `language="markdown"`, `framework=<category>`
+8. **Idempotency**: Skips unchanged files (git commit hash check), clears stale sections before re-extraction
+
+### Configuration
+
+```bash
+# Enable doc ingestion (relative to PROJECT_ROOT):
+export VNX_DOCS_DIRS=SEOCRAWLER_DOCS
+
+# Multiple directories:
+export VNX_DOCS_DIRS=SEOCRAWLER_DOCS,docs/extra
+
+# Absolute path:
+export VNX_DOCS_DIRS=/path/to/docs
+
+# Feature disabled when empty/unset (default)
+```
+
+### Document Categories
+
+Derived from filename number prefix:
+
+| Range | Category |
+|-------|----------|
+| 0-9 | governance |
+| 10-19 | architecture |
+| 20-29 | api |
+| 30-49 | implementation |
+| 50-59 | configuration |
+| 60-69 | operations |
+| 70-79 | business |
+| 80-99 | deployment |
+
+Fallback: subdirectory name (`production/` → operations) or frontmatter owner field.
+
+### Quality Scoring (0-100)
+
+| Factor | Score |
+|--------|-------|
+| Base | 50 |
+| Has code blocks | +10 |
+| Multiple code blocks (>=2) | +5 |
+| Has tables | +8 |
+| Good body length (50-500 words) | +10 |
+| Long body (>500 words) | +5 |
+| Too short (<20 words) | -15 |
+| Cross-references (>=1) | +5 |
+| Cross-references (>=3) | +5 |
+| Frontmatter with summary | +5 |
+| Status archived/deprecated | x0.5 |
+| Status draft | x0.75 |
+
+Minimum score to store: 40 (lower than code's 60, docs are inherently useful).
+
+### FTS5 Column Mapping
+
+| `code_snippets` column | Value for doc section |
+|-------------------------|----------------------|
+| `title` | `##` heading text |
+| `description` | Frontmatter summary + first sentence |
+| `code` | Full section body (searchable via FTS5) |
+| `file_path` | Path to markdown file |
+| `line_range` | `"15-45"` |
+| `tags` | `"documentation, architecture, api"` |
+| `language` | `"markdown"` |
+| `framework` | Category (architecture, api, operations, etc.) |
+| `dependencies` | Cross-referenced doc filenames |
+| `quality_score` | Doc quality score (0-100) |
+
+### Standalone Usage
+
+```bash
+# Run extraction:
+VNX_DOCS_DIRS=SEOCRAWLER_DOCS python3 scripts/doc_section_extractor.py
+
+# Verify FTS5 entries:
+sqlite3 "$VNX_STATE_DIR/quality_intelligence.db" \
+  "SELECT COUNT(*) FROM code_snippets WHERE language='markdown'"
+```
+
+### Integration with Intelligence Daemon
+
+The daemon calls `doc_section_extractor.py` after `code_snippet_extractor.py` during daily hygiene refresh (`_refresh_quality_intelligence()`). No manual scheduling needed.
+
+### Testing
+
+```bash
+cd .claude/vnx-system
+python3 -m pytest tests/test_doc_section_extractor.py -v
+# 13 tests: frontmatter, splitting, scoring, categorization, tags, env config, E2E pipeline
+```
 
 ---
 
@@ -928,12 +1080,12 @@ echo "$INTEL_JSON" | jq '.quality_context' > "$DISPATCH_DIR/quality_context.json
 
 ```json
 {
-  "intelligence_version": "2.0.0",
+  "intelligence_version": "3.0.0",
   "agent_validated": true,
   "suggested_agent": null,
   "patterns_available": true,
   "pattern_count": 5,
-  "pattern_ids": ["pattern_0", "pattern_1", "pattern_2", "pattern_3", "pattern_4"],
+  "offered_pattern_hashes": ["a1b2c3...", "d4e5f6...", "g7h8i9...", "j0k1l2...", "m3n4o5..."],
   "patterns": [
     {
       "title": "verify_browser_context_cleanup",
@@ -1115,11 +1267,13 @@ print(f'TTL: {cache.pattern_cache_ttl} seconds')
 
 ```
 .claude/vnx-system/tests/
-├── test_pattern_matching.py       # Pattern engine tests
-├── test_agent_validation.py       # Agent validation tests
-├── test_prevention_rules.py       # Prevention rule generation tests
-├── test_learning_loop.py          # Learning loop tests
-└── test_intelligence_integration.py  # End-to-end integration tests
+├── test_pattern_matching.py          # Pattern engine tests
+├── test_agent_validation.py          # Agent validation tests
+├── test_doc_section_extractor.py     # Doc ingestion tests (13 tests)
+├── test_cli_json_output.py           # CLI JSON contract stability
+├── test_validate_template_tokens.py  # Template validation
+├── test_receipt_ci_guard.py          # Receipt format compliance
+└── test_pr_recommendation_integration.py  # PR queue integration
 ```
 
 ### Running Tests
@@ -1171,15 +1325,18 @@ python3 tests/test_intelligence_integration.py
 ### Files Reference
 
 #### Core Scripts
-- `.claude/vnx-system/scripts/gather_intelligence.py` - Main intelligence engine (865 lines)
-- `.claude/vnx-system/scripts/learning_loop.py` - Learning & confidence adjustment (342 lines)
-- `.claude/vnx-system/scripts/cached_intelligence.py` - Performance caching layer (276 lines)
-- `.claude/vnx-system/scripts/intelligence_daemon.py` - Daemon integration (198 lines)
+- `.claude/vnx-system/scripts/gather_intelligence.py` - Main intelligence engine with language-aware filtering
+- `.claude/vnx-system/scripts/code_snippet_extractor.py` - Python code pattern extraction
+- `.claude/vnx-system/scripts/doc_section_extractor.py` - Markdown documentation section extraction
+- `.claude/vnx-system/scripts/learning_loop.py` - Learning & confidence adjustment
+- `.claude/vnx-system/scripts/cached_intelligence.py` - Performance caching layer
+- `.claude/vnx-system/scripts/intelligence_daemon.py` - Daemon integration (orchestrates all extractors)
 
 #### Database
-- `.claude/vnx-system/state/quality_intelligence.db` - SQLite database (45MB)
-  - `code_snippets` table (1,143 patterns)
-  - `pattern_usage` table (learning data)
+- `$VNX_STATE_DIR/quality_intelligence.db` - SQLite database
+  - `code_snippets` FTS5 table — Python snippets (`language="python"`) + doc sections (`language="markdown"`)
+  - `snippet_metadata` table — commit hash tracking, staleness verification
+  - `pattern_usage` table — learning data
   - FTS5 full-text search indexes
 
 #### Configuration
@@ -1206,6 +1363,7 @@ python3 tests/test_intelligence_integration.py
 
 ### Version History
 
+- **v3.0.0** (2026-03-02) - Documentation ingestion (`doc_section_extractor.py`), language-aware filtering, `VNX_DOCS_DIRS` config
 - **v2.0.0** (2026-01-26) - Enhanced relevance scoring, prevention rules, tag intelligence
 - **v1.1.0** (2026-01-19) - Pattern matching engine (PR #2), dispatcher integration (PR #8)
 - **v1.0.0** (2026-01-18) - Agent validation (PR #1)
@@ -1239,7 +1397,7 @@ python3 tests/test_intelligence_integration.py
 
 ---
 
-**Document Version**: 2.0.0
-**Last Updated**: 2026-01-26
+**Document Version**: 3.0.0
+**Last Updated**: 2026-03-02
 **Maintained by**: T-MANAGER
-**Status**: Production Active ✅
+**Status**: Production Active

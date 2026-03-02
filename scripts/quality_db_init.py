@@ -108,6 +108,15 @@ def initialize_database() -> bool:
         cursor.executescript(schema_sql)
         conn.commit()
 
+        # Migration: add pattern_hash column if missing (for existing databases)
+        cursor.execute("PRAGMA table_info(snippet_metadata)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "pattern_hash" not in columns:
+            cursor.execute("ALTER TABLE snippet_metadata ADD COLUMN pattern_hash TEXT")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_snippet_pattern_hash ON snippet_metadata (pattern_hash)")
+            conn.commit()
+            log('INFO', 'Migrated snippet_metadata: added pattern_hash column + index')
+
         log('SUCCESS', 'Database schema initialized successfully')
 
         # Close connection
@@ -139,7 +148,10 @@ def verify_database_structure() -> bool:
             'dispatch_quality_context',
             'quality_system_metrics',
             'scan_history',
-            'schema_version'
+            'schema_version',
+            'pattern_usage',
+            'tag_combinations',
+            'prevention_rules'
         ]
 
         # Expected views

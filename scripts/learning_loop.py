@@ -76,7 +76,7 @@ class LearningLoop:
     def load_pattern_metrics(self):
         """Load existing pattern metrics from database"""
         try:
-            # First ensure we have the pattern_usage table
+            # Ensure pattern_usage table exists (matches schema definition)
             self.conn.execute('''
                 CREATE TABLE IF NOT EXISTS pattern_usage (
                     pattern_id TEXT PRIMARY KEY,
@@ -87,6 +87,7 @@ class LearningLoop:
                     success_count INTEGER DEFAULT 0,
                     failure_count INTEGER DEFAULT 0,
                     last_used TIMESTAMP,
+                    last_offered TIMESTAMP,
                     confidence REAL DEFAULT 1.0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -115,77 +116,76 @@ class LearningLoop:
             print(f"⚠️ Error loading pattern metrics: {e}")
 
     def extract_used_patterns(self, start_time: datetime = None) -> Dict[str, List[str]]:
-        """Extract patterns that were actually used from receipts"""
+        """Extract patterns that were actually used from pattern_usage table.
+
+        Queries patterns where used_count > 0 and updated_at is within the window.
+        """
         if not start_time:
             start_time = datetime.now() - timedelta(hours=24)
 
         used_patterns = defaultdict(list)
 
-        # Scan receipts for pattern usage
-        for receipt_file in self.receipts_path.glob("*.ndjson"):
-            # Skip old receipts
-            if receipt_file.stat().st_mtime < start_time.timestamp():
-                continue
+        try:
+            cursor = self.conn.execute('''
+                SELECT pattern_id, used_count, last_used
+                FROM pattern_usage
+                WHERE used_count > 0
+                  AND updated_at >= ?
+            ''', (start_time.isoformat(),))
 
-            try:
-                with open(receipt_file, 'r') as f:
-                    for line in f:
-                        try:
-                            receipt = json.loads(line.strip())
+            for row in cursor:
+                used_patterns[row['pattern_id']].append(f"db_tracked_{row['used_count']}")
 
-                            # Check if patterns were provided and used
-                            quality_context = receipt.get('quality_context', {})
-                            if quality_context.get('patterns_available'):
-                                pattern_ids = quality_context.get('pattern_ids', [])
+            print(f"  DB query: {len(used_patterns)} used patterns found")
 
-                                # Check if terminal actually referenced patterns in response
-                                response = receipt.get('terminal_response', '')
-                                for pattern_id in pattern_ids:
-                                    # Simple heuristic: pattern was used if mentioned in response
-                                    if pattern_id in response or 'pattern' in response.lower():
-                                        used_patterns[pattern_id].append(receipt.get('dispatch_id', 'unknown'))
-
-                        except json.JSONDecodeError:
-                            continue
-
-            except Exception as e:
-                print(f"⚠️ Error reading receipt {receipt_file}: {e}")
+        except Exception as e:
+            print(f"  DB query error: {e}")
 
         return used_patterns
 
     def extract_ignored_patterns(self, start_time: datetime = None) -> Dict[str, int]:
-        """Extract patterns that were provided but not used"""
+        """Extract patterns that were offered but never used.
+
+        Queries pattern_usage for patterns with used_count=0 that were recently offered
+        (last_offered within the time window).
+        """
         if not start_time:
             start_time = datetime.now() - timedelta(hours=24)
 
         ignored_patterns = defaultdict(int)
 
-        for receipt_file in self.receipts_path.glob("*.ndjson"):
-            if receipt_file.stat().st_mtime < start_time.timestamp():
-                continue
+        try:
+            cursor = self.conn.execute('''
+                SELECT pattern_id, ignored_count
+                FROM pattern_usage
+                WHERE used_count = 0
+                  AND last_offered >= ?
+            ''', (start_time.isoformat(),))
 
-            try:
-                with open(receipt_file, 'r') as f:
-                    for line in f:
-                        try:
-                            receipt = json.loads(line.strip())
-                            quality_context = receipt.get('quality_context', {})
+            for row in cursor:
+                ignored_patterns[row['pattern_id']] = max(1, row['ignored_count'])
 
-                            # Patterns were available but no evidence of usage
-                            if quality_context.get('patterns_available'):
-                                pattern_ids = quality_context.get('pattern_ids', [])
-                                response = receipt.get('terminal_response', '')
+            if ignored_patterns:
+                print(f"  DB query: {len(ignored_patterns)} ignored patterns found")
+                return ignored_patterns
 
-                                for pattern_id in pattern_ids:
-                                    # Pattern was ignored if not mentioned in response
-                                    if pattern_id not in response and 'pattern' not in response.lower():
-                                        ignored_patterns[pattern_id] += 1
+        except Exception as e:
+            print(f"  DB query fallback: {e}")
 
-                        except json.JSONDecodeError:
-                            continue
+        # Fallback: patterns in pattern_usage that have never been used
+        try:
+            cursor = self.conn.execute('''
+                SELECT pattern_id
+                FROM pattern_usage
+                WHERE used_count = 0
+                  AND created_at >= ?
+            ''', (start_time.isoformat(),))
 
-            except Exception as e:
-                print(f"⚠️ Error processing receipt {receipt_file}: {e}")
+            for row in cursor:
+                ignored_patterns[row['pattern_id']] = 1
+
+        except Exception:
+            pass
 
         return ignored_patterns
 
@@ -215,6 +215,7 @@ class LearningLoop:
             print(f"📈 Boosted {pattern_id}: {old_confidence:.3f} → {metric.confidence:.3f}")
 
         # Decay confidence for ignored patterns
+        now = datetime.now().isoformat()
         for pattern_id, ignore_count in ignored_patterns.items():
             if pattern_id not in self.pattern_metrics:
                 self.pattern_metrics[pattern_id] = PatternUsageMetric(
@@ -230,8 +231,24 @@ class LearningLoop:
             old_confidence = metric.confidence
             metric.confidence = max(metric.confidence * metric.decay_rate, 0.1)
 
+            # Persist ignored_count increment to DB
+            try:
+                self.conn.execute('''
+                    UPDATE pattern_usage
+                    SET ignored_count = ignored_count + ?, updated_at = ?
+                    WHERE pattern_id = ?
+                ''', (ignore_count, now, pattern_id))
+            except Exception:
+                pass
+
             self.learning_stats["confidence_adjustments"] += 1
             print(f"📉 Decayed {pattern_id}: {old_confidence:.3f} → {metric.confidence:.3f}")
+
+        # Commit ignored_count updates
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
 
     def extract_failure_patterns(self, start_time: datetime = None) -> List[Dict]:
         """Extract new failure patterns from recent terminal errors"""
@@ -460,8 +477,10 @@ class LearningLoop:
                 'last_used': pattern.last_used.isoformat() if pattern.last_used else None
             })
 
-        # Save report
-        report_file = self.vnx_path / "state" / f"learning_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        # Save report to state directory (via VNX_STATE_DIR)
+        paths = ensure_env()
+        state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
+        report_file = state_dir / f"learning_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(report_file, 'w') as f:
             json.dump(report, f, indent=2)
 
@@ -492,9 +511,9 @@ class LearningLoop:
         self.conn.commit()
 
     def hash_pattern(self, pattern_id: str) -> str:
-        """Create hash of pattern content for matching"""
-        # Simple hash for now, can be enhanced
-        return str(hash(pattern_id))
+        """Create SHA1 hash of pattern_id, consistent with gather_intelligence.py"""
+        import hashlib
+        return hashlib.sha1(pattern_id.encode("utf-8")).hexdigest()
 
     def daily_learning_cycle(self):
         """Run the complete daily learning cycle"""

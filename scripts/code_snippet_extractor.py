@@ -9,6 +9,8 @@ import sqlite3
 import ast
 import re
 import sys
+import subprocess
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -217,6 +219,20 @@ class SnippetExtractor:
         if self.conn:
             self.conn.close()
 
+    @staticmethod
+    def _get_file_commit_hash(file_path: str) -> Optional[str]:
+        """Get the latest git commit hash for a file."""
+        try:
+            result = subprocess.run(
+                ['git', 'log', '-1', '--format=%H', '--', file_path],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(PROJECT_ROOT)
+            )
+            commit_hash = result.stdout.strip()
+            return commit_hash if result.returncode == 0 and commit_hash else None
+        except Exception:
+            return None
+
     def get_quality_files(self) -> List[Dict]:
         """Get files with quality score >= MIN_QUALITY_SCORE"""
         cursor = self.conn.cursor()
@@ -292,19 +308,31 @@ class SnippetExtractor:
 
             snippet_rowid = cursor.lastrowid
 
-            # Insert metadata
+            # Get commit hash for citation tracking
+            commit_hash = self._get_file_commit_hash(snippet_data['file_path'])
+            now = datetime.now().isoformat()
+
+            # Compute stable pattern hash for O(1) usage lookup
+            hash_base = f"{snippet_data['title']}|{snippet_data['file_path']}|{snippet_data['line_range']}"
+            pattern_hash = hashlib.sha1(hash_base.encode("utf-8")).hexdigest()
+
+            # Insert metadata with citation fields
             cursor.execute("""
                 INSERT INTO snippet_metadata (
                     snippet_rowid, file_path, line_start, line_end,
-                    quality_score, usage_count
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    quality_score, usage_count,
+                    source_commit_hash, pattern_hash, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 snippet_rowid,
                 snippet_data['file_path'],
                 snippet_data['line_start'],
                 snippet_data['line_end'],
                 snippet_data['quality_score'],
-                0
+                0,
+                commit_hash,
+                pattern_hash,
+                now
             ))
 
             self.conn.commit()

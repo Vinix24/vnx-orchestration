@@ -52,6 +52,10 @@ Brief overview of API work completed (2-3 sentences)
 - API versioning considerations
 - Next endpoints to implement
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - Follow RESTful conventions
 - Include complete OpenAPI documentation

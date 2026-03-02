@@ -48,6 +48,10 @@ Brief overview of what was accomplished (2-3 sentences)
 - Potential improvements
 - Technical debt items
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - Include actual code snippets
 - Provide test evidence

@@ -334,7 +334,7 @@ _track_pattern_usage() {
     used_hashes=$(echo "$receipt_json" | jq -r '.used_pattern_hashes // empty | join(",")' 2>/dev/null)
     [ -z "$used_hashes" ] && return 0
     python3 - "$used_hashes" <<'PY'
-import os, sys, sqlite3, hashlib
+import os, sys, sqlite3
 from datetime import datetime
 hashes = [h.strip().lower() for h in sys.argv[1].split(",") if h.strip()]
 if not hashes:
@@ -346,25 +346,83 @@ db_path = os.path.join(state_dir, "quality_intelligence.db")
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
-rows = cur.execute("SELECT rowid, title, file_path, line_range, usage_count FROM code_snippets").fetchall()
-hash_set = set(hashes)
+
+# O(1) lookup via indexed pattern_hash column in snippet_metadata
+placeholders = ",".join("?" for _ in hashes)
+rows = cur.execute(
+    f"SELECT sm.snippet_rowid, sm.pattern_hash, cs.title, cs.usage_count "
+    f"FROM snippet_metadata sm "
+    f"JOIN code_snippets cs ON cs.rowid = sm.snippet_rowid "
+    f"WHERE sm.pattern_hash IN ({placeholders})",
+    hashes
+).fetchall()
+
+updated = 0
+now = datetime.utcnow().isoformat()
+for row in rows:
+    new_count = int(row["usage_count"] or 0) + 1
+    cur.execute("UPDATE code_snippets SET usage_count = ?, last_updated = ? WHERE rowid = ?",
+                (new_count, now, row["snippet_rowid"]))
+    cur.execute("""
+        INSERT INTO pattern_usage (pattern_id, pattern_title, pattern_hash, used_count, last_used, confidence)
+        VALUES (?, ?, ?, 1, ?, 1.0)
+        ON CONFLICT(pattern_id) DO UPDATE SET
+            used_count = used_count + 1,
+            last_used = excluded.last_used,
+            updated_at = CURRENT_TIMESTAMP
+    """, (row["pattern_hash"], row["title"], row["pattern_hash"], now))
+    updated += 1
+if updated:
+    conn.commit()
+conn.close()
+PY
+}
+
+# Sub-helper: Fallback success credit for recently offered patterns (non-fatal).
+# When a receipt has status=success but NO used_pattern_hashes, give partial
+# credit (success_count += 1) to patterns offered within the last 2 hours.
+_track_pattern_success_fallback() {
+    local receipt_json="$1"
+    local status
+    status=$(echo "$receipt_json" | jq -r '.status // ""' 2>/dev/null)
+    local event_type
+    event_type=$(echo "$receipt_json" | jq -r '.event_type // .event // ""' 2>/dev/null)
+    local used_hashes
+    used_hashes=$(echo "$receipt_json" | jq -r '.used_pattern_hashes // empty | join(",")' 2>/dev/null)
+
+    # Only trigger on task_complete + success + no explicit used_pattern_hashes
+    [ "$event_type" != "task_complete" ] && return 0
+    [ "$status" != "success" ] && return 0
+    [ -n "$used_hashes" ] && return 0
+
+    python3 - <<'PY'
+import os, sys, sqlite3
+from datetime import datetime, timedelta
+state_dir = os.environ.get("VNX_STATE_DIR")
+if not state_dir:
+    sys.exit(0)
+db_path = os.path.join(state_dir, "quality_intelligence.db")
+if not os.path.exists(db_path):
+    sys.exit(0)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cutoff = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+rows = conn.execute('''
+    SELECT pattern_id FROM pattern_usage
+    WHERE last_offered >= ? AND last_offered IS NOT NULL
+''', (cutoff,)).fetchall()
+if not rows:
+    conn.close()
+    sys.exit(0)
+now = datetime.utcnow().isoformat()
 updated = 0
 for row in rows:
-    base = f"{row['title']}|{row['file_path']}|{row['line_range']}"
-    pattern_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
-    if pattern_hash in hash_set:
-        new_count = int(row["usage_count"] or 0) + 1
-        cur.execute("UPDATE code_snippets SET usage_count = ?, last_updated = ? WHERE rowid = ?",
-                    (new_count, datetime.utcnow().isoformat(), row["rowid"]))
-        cur.execute("""
-            INSERT INTO pattern_usage (pattern_id, pattern_title, pattern_hash, used_count, last_used, confidence)
-            VALUES (?, ?, ?, 1, ?, 1.0)
-            ON CONFLICT(pattern_id) DO UPDATE SET
-                used_count = used_count + 1,
-                last_used = excluded.last_used,
-                updated_at = CURRENT_TIMESTAMP
-        """, (pattern_hash, row["title"], pattern_hash, datetime.utcnow().isoformat()))
-        updated += 1
+    conn.execute('''
+        UPDATE pattern_usage
+        SET success_count = success_count + 1, updated_at = ?
+        WHERE pattern_id = ?
+    ''', (now, row['pattern_id']))
+    updated += 1
 if updated:
     conn.commit()
 conn.close()
@@ -398,6 +456,7 @@ append_and_track_receipt() {
     log "DEBUG" "Triggered t0_brief.json regeneration (async)"
 
     _track_pattern_usage "$receipt_json"
+    _track_pattern_success_fallback "$receipt_json"
 
     local report_hash=$(_sha256 "$report_path")
     echo "$report_hash" >> "$PROCESSED_HASHES"

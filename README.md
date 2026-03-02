@@ -4,7 +4,7 @@
 > Full write-up on [vincentvandeth.nl/blog](https://vincentvandeth.nl/blog).
 
 Portable orchestration toolkit for multi-agent terminal workflows.
-Coordinates AI coding agents (Claude Code, Codex CLI, Gemini CLI) across parallel tmux panes with an append-only receipt ledger, dispatch queue, and quality gates.
+Coordinates AI coding agents (Claude Code, Codex CLI, Gemini CLI) across parallel tmux panes with an append-only receipt ledger, dispatch queue, quality gates, and smart context injection — each dispatch is automatically enriched with relevant code patterns and documentation sections from your codebase.
 
 ![VNX multi-terminal orchestration — T0 orchestrator coordinating Claude Code, Codex CLI, and Gemini CLI across parallel tracks](docs/images/vnx-terminals-hero.png)
 

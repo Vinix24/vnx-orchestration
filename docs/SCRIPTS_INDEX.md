@@ -22,6 +22,9 @@ Evidence is based on ripgrep matches in `.claude/vnx-system/scripts`, `.claude/v
   Evidence: `.claude/vnx-system/docs/operations/INTELLIGENCE_DAEMON.md:220`, `.claude/vnx-system/scripts/intelligence_daemon.py:214`, `.claude/vnx-system/scripts/code_snippet_extractor.py:423`
 - `code_snippet_extractor.py`
   Evidence: `.claude/vnx-system/docs/operations/INTELLIGENCE_DAEMON.md:221`, `.claude/vnx-system/scripts/intelligence_daemon.py:215`, `.claude/vnx-system/docs/roadmap/implementation/01_IMPLEMENTATION_ROADMAP.md:550`
+- `doc_section_extractor.py`
+  Evidence: `.claude/vnx-system/scripts/intelligence_daemon.py:282`, `.claude/vnx-system/docs/core/technical/INTELLIGENCE_SYSTEM.md`, `.claude/vnx-system/tests/test_doc_section_extractor.py`
+  Purpose: Extracts markdown documentation sections into FTS5 code_snippets table with language="markdown". Configured via VNX_DOCS_DIRS env var.
 - `cost_tracker.py`
   Evidence: `.claude/vnx-system/bin/vnx:383`, `.claude/vnx-system/docs/operations/COST_TRACKING_GUIDE.md:11`, `.claude/vnx-system/docs/operations/COST_TRACKING_GUIDE.md:85`
 - `daily_log_rotation.sh`

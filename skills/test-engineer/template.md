@@ -52,6 +52,10 @@ Brief overview of testing work completed (2-3 sentences)
 - Test infrastructure improvements
 - CI/CD integration suggestions
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - Minimum 80% code coverage
 - All critical paths tested
