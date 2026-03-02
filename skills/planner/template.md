@@ -50,6 +50,10 @@ High-level overview of the plan and expected outcomes (3-4 sentences)
 - Success metrics
 - Review checkpoints
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - Include clear phase boundaries
 - Define measurable success criteria

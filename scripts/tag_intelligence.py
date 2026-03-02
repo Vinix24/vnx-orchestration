@@ -5,6 +5,7 @@ Analyzes tag combinations from receipts/reports to detect patterns and generate 
 """
 
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -103,6 +104,15 @@ class TagIntelligenceEngine:
         except Exception as e:
             print(f"⚠️ Warning: Could not create tables: {e}")
 
+    # Compound tags that pass through normalization as-is (already specific)
+    COMPOUND_TAGS = frozenset([
+        'sse-streaming', 'browser-pool', 'kvk-validation',
+        'btw-validation', 'memory-budget', 'prompt-caching',
+        'receipt-processing', 'dispatch-routing', 'quality-gate',
+        'crawler-component', 'storage-component', 'api-component',
+        'dutch-market', 'frontend-component',
+    ])
+
     def normalize_tags(self, tags: List[str]) -> Tuple[str, ...]:
         """Normalize tags to standardized taxonomy"""
         normalized = []
@@ -110,8 +120,11 @@ class TagIntelligenceEngine:
         for tag in tags:
             tag_lower = tag.lower().strip()
 
+            # Compound tags pass through as-is (already specific)
+            if tag_lower in self.COMPOUND_TAGS:
+                normalized.append(tag_lower)
             # Map to standardized taxonomy
-            if tag_lower in ['design', 'planning', 'architecture']:
+            elif tag_lower in ['design', 'planning', 'architecture']:
                 normalized.append('design-phase')
             elif tag_lower in ['implementation', 'coding', 'development']:
                 normalized.append('implementation-phase')
@@ -150,6 +163,107 @@ class TagIntelligenceEngine:
                 normalized.append(tag_lower)
 
         return tuple(sorted(set(normalized)))
+
+    # Compound tag detection patterns for instruction text
+    _COMPOUND_KEYWORD_MAP = [
+        (re.compile(r'SSE\s+stream', re.IGNORECASE), 'sse-streaming'),
+        (re.compile(r'browser\s+pool', re.IGNORECASE), 'browser-pool'),
+        (re.compile(r'KvK\s+valid', re.IGNORECASE), 'kvk-validation'),
+        (re.compile(r'BTW\s+valid', re.IGNORECASE), 'btw-validation'),
+        (re.compile(r'memory\s+budget', re.IGNORECASE), 'memory-budget'),
+        (re.compile(r'prompt\s+cach', re.IGNORECASE), 'prompt-caching'),
+        (re.compile(r'receipt\s+process', re.IGNORECASE), 'receipt-processing'),
+        (re.compile(r'dispatch\s+rout', re.IGNORECASE), 'dispatch-routing'),
+        (re.compile(r'quality\s+gate', re.IGNORECASE), 'quality-gate'),
+    ]
+
+    def extract_tags_from_dispatch(self, dispatch_path: Path) -> List[str]:
+        """Extract tags from a completed dispatch file's metadata and instruction text.
+
+        Reads structured metadata fields (Priority, Gate, Role, Reason) and
+        detects compound tags from the instruction body.
+        """
+        tags: List[str] = []
+
+        try:
+            text = dispatch_path.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            return tags
+
+        # --- Metadata field extraction ---
+        # Priority: P0 → critical-blocker
+        priority_match = re.search(r'^Priority:\s*(P\d)', text, re.MULTILINE)
+        if priority_match:
+            p = priority_match.group(1).upper()
+            if p == 'P0':
+                tags.append('critical-blocker')
+            elif p == 'P1':
+                tags.append('high-priority')
+
+        # Gate: implementation → implementation-phase
+        gate_match = re.search(r'^Gate:\s*(\S+)', text, re.MULTILINE)
+        if gate_match:
+            gate = gate_match.group(1).lower()
+            gate_map = {
+                'implementation': 'implementation-phase',
+                'testing': 'testing-phase',
+                'review': 'needs-validation',
+                'investigation': 'testing-phase',
+                'design': 'design-phase',
+                'production': 'production-phase',
+            }
+            if gate in gate_map:
+                tags.append(gate_map[gate])
+
+        # Role: → component tag based on role
+        role_match = re.search(r'^Role:\s*(.+)', text, re.MULTILINE)
+        if role_match:
+            role = role_match.group(1).strip().lower()
+            role_map = {
+                'backend-developer': 'implementation-phase',
+                'api-developer': 'api-component',
+                'debugger': 'testing-phase',
+                'debugging-specialist': 'testing-phase',
+                'quality-engineer': 'needs-validation',
+                'test-engineer': 'testing-phase',
+                'reviewer': 'needs-validation',
+                'performance-profiler': 'performance-issue',
+                'security-engineer': 'needs-validation',
+            }
+            if role in role_map:
+                tags.append(role_map[role])
+
+        # On-Failure: review → needs-validation
+        on_failure_match = re.search(r'^On-Failure:\s*(\S+)', text, re.MULTILINE)
+        if on_failure_match:
+            action = on_failure_match.group(1).lower()
+            if action == 'review':
+                tags.append('needs-validation')
+
+        # Reason: keyword extraction
+        reason_match = re.search(r'^Reason:\s*(.+)', text, re.MULTILINE)
+        if reason_match:
+            reason = reason_match.group(1).lower()
+            if 'memory' in reason or 'oom' in reason:
+                tags.append('memory-problem')
+            if 'race' in reason or 'concurren' in reason:
+                tags.append('race-condition')
+            if 'crawler' in reason:
+                tags.append('crawler-component')
+            if 'storage' in reason or 'database' in reason:
+                tags.append('storage-component')
+            if 'sse' in reason or 'streaming' in reason:
+                tags.append('sse-streaming')
+
+        # --- Compound tag detection from instruction text ---
+        instruction_match = re.search(r'Instruction:\s*\n(.*?)(?:\[\[DONE\]\]|$)', text, re.DOTALL)
+        instruction_text = instruction_match.group(1) if instruction_match else text
+
+        for pattern, tag in self._COMPOUND_KEYWORD_MAP:
+            if pattern.search(instruction_text):
+                tags.append(tag)
+
+        return list(set(tags))
 
     def analyze_multi_tag_patterns(
         self,

@@ -139,7 +139,10 @@ def verify_database_structure() -> bool:
             'dispatch_quality_context',
             'quality_system_metrics',
             'scan_history',
-            'schema_version'
+            'schema_version',
+            'pattern_usage',
+            'tag_combinations',
+            'prevention_rules'
         ]
 
         # Expected views
