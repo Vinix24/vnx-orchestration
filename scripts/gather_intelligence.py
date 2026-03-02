@@ -277,9 +277,15 @@ class T0IntelligenceGatherer:
 
     def extract_task_paths(self, text: str) -> List[str]:
         """Extract file paths from task description"""
-        # Simpler, balanced pattern that captures repo-relative paths without regex errors
-        # Matches e.g. src/foo.py, tests/bar/test_baz.py, docs/file.md, SEOCRAWLER_DOCS/01_OVERVIEW.md, .vnx/...
-        path_pattern = r'(?:src|tests|docs|refactorQuickscan|SEOCRAWLER_DOCS|\\.claude)/(?:[^\\s`),]+)'
+        # Build path prefix pattern from known dirs + VNX_DOCS_DIRS entries
+        prefixes = ['src', 'tests', 'docs', '\\.claude']
+        docs_dirs_raw = os.environ.get("VNX_DOCS_DIRS", "")
+        if docs_dirs_raw:
+            for entry in docs_dirs_raw.split(","):
+                name = Path(entry.strip()).name
+                if name and name not in prefixes:
+                    prefixes.append(re.escape(name))
+        path_pattern = r'(?:' + '|'.join(prefixes) + r')/(?:[^\\s`),]+)'
         paths = [p.strip() for p in re.findall(path_pattern, text)]
 
         # Also capture bare filenames (e.g. SEOScanForm.tsx, scan_orchestrator_service.py)
@@ -289,6 +295,31 @@ class T0IntelligenceGatherer:
             if name not in paths:
                 paths.append(name)
         return paths
+
+    def _get_preferred_language(self, task_paths: List[str], keywords: List[str]) -> Optional[str]:
+        """Determine preferred language based on task context.
+        Returns: "python", "markdown", or None (search all).
+        """
+        doc_keywords = {
+            'documentation', 'docs', 'document', 'markdown',
+            'guide', 'runbook', 'architecture-doc', 'api-doc',
+            'content', 'marketing', 'sales', 'deployment-guide',
+        }
+        if any(k in keywords for k in doc_keywords):
+            return "markdown"
+
+        if not task_paths:
+            return None
+
+        exts = {Path(p.strip('`')).suffix.lower() for p in task_paths if p}
+        if not exts:
+            return None
+
+        if exts.issubset({'.md', '.markdown', '.txt'}):
+            return "markdown"
+        if exts.issubset({'.py'}):
+            return "python"
+        return None
 
     def _should_skip_code_patterns(self, task_paths: List[str], keywords: List[str]) -> bool:
         """Skip code pattern lookup for non-code tasks (docs/UI) unless explicitly Python-related."""
@@ -688,9 +719,14 @@ class T0IntelligenceGatherer:
             keywords = self.extract_keywords(task_description)
             task_paths = task_paths or []
 
+            # Language-aware filtering: doc tasks get markdown, code tasks get python
+            preferred_lang = self._get_preferred_language(task_paths, keywords)
+
             # Frontend/UI/doc tasks should not pull python snippets by default
             if self._should_skip_code_patterns(task_paths, keywords) and not self._is_testing_gate(gate):
-                return []
+                if preferred_lang != "markdown":
+                    return []
+                # Doc task: allow through, FTS5 query will filter on language="markdown"
 
             # BAND-AID FIX 1: Component tag pre-filtering
             # Extract component from task paths to narrow search space
@@ -738,18 +774,25 @@ class T0IntelligenceGatherer:
                     # Boost component-specific patterns
                     quoted_keywords.extend([f'tags:"{tag}"' for tag in component_tags[:2]])
 
+                # Language filter: restrict to preferred language when set
+                if preferred_lang:
+                    quoted_keywords.append(f'language:"{preferred_lang}"')
+
                 match_terms = ' OR '.join(quoted_keywords)
+
+                # Lower quality threshold for markdown (docs score lower by design)
+                min_quality = 40 if preferred_lang == "markdown" else 85
 
                 query = """
                 SELECT rowid as snippet_id, title, description, code, file_path, line_range,
                        tags, quality_score, usage_count, last_updated, language
                 FROM code_snippets
                 WHERE code_snippets MATCH ?
-                AND quality_score >= 85
+                AND quality_score >= ?
                 ORDER BY rank, quality_score DESC
                 LIMIT ?
                 """
-                cursor = self.quality_db.execute(query, (match_terms, limit * 3))
+                cursor = self.quality_db.execute(query, (match_terms, min_quality, limit * 3))
 
             # Collect unique patterns from cursor
             patterns = []

@@ -141,6 +141,21 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 ---
 
+## Language Evolution: From Bash to Python
+
+VNX started as a single tmux `send-keys` command — the simplest possible way to deliver a dispatch to another terminal pane. Tmux scripting is inherently bash, so the early automation (dispatch delivery, pane management, terminal status) was all shell scripts. As the system grew, more complex logic (receipt processing, quality advisory, state reconciliation, intelligence injection) was written in Python for structured data handling and testability.
+
+The result is a ~60/40 bash/python ratio that reflects this organic growth:
+
+- **Bash (~60%)**: tmux session management, dispatch delivery, file watchers, hook scripts, CLI entrypoint (`vnx`), context rotation pipeline
+- **Python (~40%)**: receipt processing, quality advisory, terminal state reconciliation, cost reporting, intelligence generation, CI test suites
+
+This split is a direct consequence of the system's origin — not an architectural choice. Bash was the right tool for the first layer (terminal orchestration), but as governance logic grew more complex, the lack of structured error handling, testability, and type safety in bash became a maintenance burden.
+
+**Active migration**: Critical-path components are being progressively rewritten in Python to improve reliability, enable unit testing, and reduce the surface area for subtle shell bugs. The governance logic (quality advisory, receipt processing) already runs in Python; the remaining bash scripts handle tmux orchestration and hook wiring where shell is the natural interface.
+
+---
+
 ## What Is Mature Today
 
 - Receipt-led governance and audit trail

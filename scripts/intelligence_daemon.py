@@ -278,6 +278,9 @@ class IntelligenceDaemon:
                 subprocess.run(["python3", scanner], check=False)
             if os.path.exists(extractor):
                 subprocess.run(["python3", extractor], check=False)
+            doc_extractor = os.path.join(base_dir, "scripts", "doc_section_extractor.py")
+            if os.path.exists(doc_extractor):
+                subprocess.run(["python3", doc_extractor], check=False)
             logger.info("✅ Intelligence refresh complete")
         except Exception as e:
             logger.error(f"❌ Intelligence refresh failed: {e}")

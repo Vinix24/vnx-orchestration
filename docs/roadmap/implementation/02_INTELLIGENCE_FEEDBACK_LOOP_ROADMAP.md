@@ -79,50 +79,28 @@ Zonder deze instructie is de sterke feedback loop (expliciete hash-rapportage) n
 
 ---
 
-### 3. HOOG: SEOCRAWLER_DOCS Ingestion
+### ~~3. HOOG: SEOCRAWLER_DOCS Ingestion~~ DONE (2026-03-02)
 
-**Files**:
-- `scripts/code_snippet_extractor.py` — verwerkt alleen `*.py` bestanden
-- `scripts/code_quality_scanner.py` — scant alleen `*.py` bestanden
+**Status**: Afgerond — `doc_section_extractor.py` geïmplementeerd en CI-groen (13/13 tests)
 
-**Impact**: 79 SEOCRAWLER_DOCS markdown bestanden (marketing, sales, architectuur, API specs, deployment, security) zijn **volledig onzichtbaar** voor het intelligence systeem
-**Urgentie**: Blokkeert intelligence voor niet-code projecten (marketing, sales, business)
+**Oplossing geïmplementeerd**:
+- Nieuw script: `scripts/doc_section_extractor.py` — apart van code extractor
+- Configureerbaar via `VNX_DOCS_DIRS` env var (geen hardcoded paden)
+- Splitst markdown op `##` headings, scoort secties, categoriseert op bestandsnaam-prefix
+- Slaat op in bestaande `code_snippets` FTS5 tabel met `language="markdown"`
+- `framework` kolom hergebruikt voor doc categorie (architecture, api, operations, etc.)
+- Idempotent: skipt ongewijzigde bestanden via git commit hash check
+- Intelligence daemon roept extractor automatisch aan in dagelijkse hygiene
+- `gather_intelligence.py` uitgebreid met `_get_preferred_language()` voor taal-aware filtering
+- FTS5 queries filteren nu op `language` kolom: doc-taken krijgen markdown, code-taken krijgen Python
 
-**Het probleem**:
-```
-SEOCRAWLER_DOCS/
-├── 01_ARCHITECTURE_OVERVIEW.md
-├── 02_CRAWLER_ARCHITECTURE.md
-├── API_QUICKSCAN.md
-├── API_REFERENCE.md
-├── PREVIEW_SYSTEM_ARCHITECTURE.md
-├── 41_BROWSER_POOL.md
-├── 50_ACTIVECAMPAIGN_AUTOMATION_SETUP.md
-├── ... (79 bestanden totaal)
-```
-
-`code_snippet_extractor.py` zoekt alleen naar Python files:
-```python
-for py_file in source_dir.rglob("*.py"):
-    # ... extract snippets
-```
-
-Markdown docs met architectuurbeslissingen, API contracten, deployment procedures, en business logica worden nooit geïndexeerd in `quality_intelligence.db`.
-
-**Oplossing**:
-1. Voeg een `MarkdownDocExtractor` toe aan `code_snippet_extractor.py` (of als apart script)
-2. Parse markdown files op heading-structuur (## sections als individuele "snippets")
-3. Extraheer metadata: titel, sectie, tags (uit bestandsnaam en heading keywords)
-4. Sla op in `code_snippets` tabel met `source_type="documentation"`
-5. Update `code_quality_scanner.py` om docs te scoren op basis van:
-   - Volledigheid (heeft het een example? heeft het een schema?)
-   - Staleness (wanneer laatst gewijzigd vs laatst gecontroleerd)
-   - Relevance keywords
-
-**Effort**: 1-2 dagen
-**Risico als we dit vergeten**: Intelligence systeem is blind voor 79 docs met cruciale project kennis. Agents die marketing/sales/deployment taken krijgen, krijgen geen relevante intelligence mee.
-
-**Cross-ref**: Niet expliciet in het Upgrade Report gedocumenteerd, maar het is een directe consequentie van het feit dat de code_snippet_extractor alleen `*.py` verwerkt.
+**Files gewijzigd/aangemaakt**:
+| File | Actie |
+|------|-------|
+| `scripts/doc_section_extractor.py` | Nieuw — markdown parser + FTS5 opslag |
+| `scripts/gather_intelligence.py` | Gewijzigd — `_get_preferred_language()`, language filter in FTS5 query |
+| `scripts/intelligence_daemon.py` | Gewijzigd — roept doc extractor aan in `_refresh_quality_intelligence()` |
+| `tests/test_doc_section_extractor.py` | Nieuw — 13 CI tests |
 
 ---
 
@@ -210,12 +188,12 @@ class ConversationAnalyzer:
 |---|------|----------|--------|-----------|
 | 1 | ~~Regex bug report_parser.py:566~~ | DONE | 5 min | ~~Hele used_count pipeline~~ |
 | 2 | ~~Agent template instructie~~ | DONE | 30 min | ~~Sterke feedback signalen~~ |
-| 3 | SEOCRAWLER_DOCS ingestion | HOOG | 1-2 dagen | Non-code intelligence |
+| 3 | ~~SEOCRAWLER_DOCS ingestion~~ | DONE (2026-03-02) | ~4 uur | ~~Non-code intelligence~~ |
 | 4 | _track_pattern_usage O(n) fix | MEDIUM | 1 uur | Performance bij DB groei |
 | 5 | Stale docs update | MEDIUM | 30 min | Documentatie consistency |
 | 6 | conversation_analyzer_stub.py | LAAG | 3 dagen | Conversation log mining |
 
-**Aanbevolen aanpak**: Items 1-2 eerst (samen <1 uur, deblokkeren de feedback loop die we net gebouwd hebben). Dan item 3 als volgende PR. Items 4-5 kunnen mee in een cleanup PR. Item 6 is een apart project.
+**Status**: Items 1-3 afgerond. Items 4-5 kunnen mee in een cleanup PR. Item 6 is een apart project.
 
 ---
 
@@ -233,9 +211,9 @@ class ConversationAnalyzer:
 | **P3-2**: Stable-Prefix Dispatch | Niet gestart | Backlog |
 
 **Nieuw ontdekt** (niet in Upgrade Report):
-- Regex bug in report_parser.py (item 1)
-- Agent template instructie gap (item 2)
-- SEOCRAWLER_DOCS ingestion gap (item 3)
+- ~~Regex bug in report_parser.py (item 1)~~ DONE
+- ~~Agent template instructie gap (item 2)~~ DONE
+- ~~SEOCRAWLER_DOCS ingestion gap (item 3)~~ DONE — `doc_section_extractor.py` + language-aware filtering
 - _track_pattern_usage O(n) scan (item 4)
 
 ---

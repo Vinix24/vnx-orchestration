@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-02-24
+**Last Updated**: 2026-03-02
 
 ---
 
@@ -28,7 +28,7 @@
 - Error contract standard: `orchestration/ERROR_CONTRACT_STANDARD.md`
 
 ### Technical Deep Dives
-- Intelligence system: `core/technical/INTELLIGENCE_SYSTEM.md`
+- Intelligence system (v3.0 — code + doc ingestion): `core/technical/INTELLIGENCE_SYSTEM.md`
 - Dispatcher system (V7 legacy + V8 current): `core/technical/DISPATCHER_SYSTEM.md`
 - State management: `core/technical/STATE_MANAGEMENT.md`
 - Report lifecycle: `core/technical/REPORT_LIFECYCLE.md`
