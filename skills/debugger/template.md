@@ -58,6 +58,10 @@ Brief overview of the issue and resolution (3-4 sentences)
 - Test improvements
 - Documentation needs
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - Include complete reproduction steps
 - Document all debugging commands used

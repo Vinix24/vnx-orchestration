@@ -39,3 +39,7 @@
 - [ ] Apply optimizations
 - [ ] Measure impact
 - [ ] Document results
+
+## Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []

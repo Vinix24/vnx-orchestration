@@ -92,6 +92,9 @@ CREATE TABLE IF NOT EXISTS snippet_metadata (
     line_end INTEGER,
     quality_score REAL DEFAULT 0.0,
     usage_count INTEGER DEFAULT 0,
+    source_commit_hash TEXT,        -- Git commit hash at extraction time
+    extracted_at DATETIME,          -- When snippet was extracted from source
+    verified_at DATETIME,           -- Last staleness verification timestamp
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -278,6 +281,63 @@ CREATE TABLE IF NOT EXISTS scan_history (
 CREATE INDEX IF NOT EXISTS idx_scan_history ON scan_history (started_at DESC);
 
 -- ============================================================================
+-- PATTERN USAGE TRACKING (Feedback Loop)
+-- ============================================================================
+
+-- Track which patterns are offered and used by terminals
+CREATE TABLE IF NOT EXISTS pattern_usage (
+    pattern_id TEXT PRIMARY KEY,
+    pattern_title TEXT NOT NULL,
+    pattern_hash TEXT NOT NULL,
+    used_count INTEGER DEFAULT 0,
+    ignored_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failure_count INTEGER DEFAULT 0,
+    last_used TIMESTAMP,
+    last_offered TIMESTAMP,
+    confidence REAL DEFAULT 1.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pattern_usage_hash ON pattern_usage (pattern_hash);
+CREATE INDEX IF NOT EXISTS idx_pattern_usage_confidence ON pattern_usage (confidence DESC);
+
+-- ============================================================================
+-- TAG INTELLIGENCE
+-- ============================================================================
+
+-- Track tag combination occurrences for prevention rule generation
+CREATE TABLE IF NOT EXISTS tag_combinations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag_tuple TEXT NOT NULL UNIQUE,
+    occurrence_count INTEGER DEFAULT 0,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    phases TEXT,
+    terminals TEXT,
+    outcomes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tag_tuple ON tag_combinations (tag_tuple);
+
+-- Prevention rules generated from recurring tag patterns
+CREATE TABLE IF NOT EXISTS prevention_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag_combination TEXT NOT NULL,
+    rule_type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    recommendation TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    created_at TEXT NOT NULL,
+    triggered_count INTEGER DEFAULT 0,
+    last_triggered TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rule_combination ON prevention_rules (tag_combination);
+CREATE INDEX IF NOT EXISTS idx_rule_confidence ON prevention_rules (confidence DESC);
+
+-- ============================================================================
 -- VIEWS FOR COMMON QUERIES
 -- ============================================================================
 
@@ -344,3 +404,6 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.0.2-phase2', 'Initial Quality Intelligence Database schema');
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.0.3-intelligence-db', 'Add pattern_usage, tag_combinations, prevention_rules; citation fields in snippet_metadata');

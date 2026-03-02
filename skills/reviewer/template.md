@@ -55,6 +55,10 @@ Brief overview of code review findings (3-4 sentences)
 - Documentation updates required
 - Architecture improvements
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - Check for security vulnerabilities
 - Verify test coverage

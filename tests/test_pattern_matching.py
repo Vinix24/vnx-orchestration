@@ -86,7 +86,7 @@ class TestPatternMatching(unittest.TestCase):
         self.assertTrue(quality_context['agent_validated'])
         self.assertIn('patterns_available', quality_context)
         self.assertIn('pattern_count', quality_context)
-        self.assertIn('pattern_ids', quality_context)
+        self.assertIn('offered_pattern_hashes', quality_context)
 
         # Pattern count should match
         self.assertEqual(quality_context['pattern_count'], len(result['suggested_patterns']))

@@ -563,7 +563,7 @@ class ReportParser:
         hashes: List[str] = []
 
         # YAML or JSON-like list (used_pattern_hashes: [abc, def])
-        list_match = re.search(r'used_pattern_hashes\s*:\s*\\[(.*?)\\]', content, re.IGNORECASE | re.DOTALL)
+        list_match = re.search(r'used_pattern_hashes\s*:\s*\[(.*?)\]', content, re.IGNORECASE | re.DOTALL)
         if list_match:
             hashes.extend(re.findall(r'[a-f0-9]{8,40}', list_match.group(1), re.IGNORECASE))
 

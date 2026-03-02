@@ -371,6 +371,57 @@ conn.close()
 PY
 }
 
+# Sub-helper: Fallback success credit for recently offered patterns (non-fatal).
+# When a receipt has status=success but NO used_pattern_hashes, give partial
+# credit (success_count += 1) to patterns offered within the last 2 hours.
+_track_pattern_success_fallback() {
+    local receipt_json="$1"
+    local status
+    status=$(echo "$receipt_json" | jq -r '.status // ""' 2>/dev/null)
+    local event_type
+    event_type=$(echo "$receipt_json" | jq -r '.event_type // .event // ""' 2>/dev/null)
+    local used_hashes
+    used_hashes=$(echo "$receipt_json" | jq -r '.used_pattern_hashes // empty | join(",")' 2>/dev/null)
+
+    # Only trigger on task_complete + success + no explicit used_pattern_hashes
+    [ "$event_type" != "task_complete" ] && return 0
+    [ "$status" != "success" ] && return 0
+    [ -n "$used_hashes" ] && return 0
+
+    python3 - <<'PY'
+import os, sys, sqlite3
+from datetime import datetime, timedelta
+state_dir = os.environ.get("VNX_STATE_DIR")
+if not state_dir:
+    sys.exit(0)
+db_path = os.path.join(state_dir, "quality_intelligence.db")
+if not os.path.exists(db_path):
+    sys.exit(0)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cutoff = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+rows = conn.execute('''
+    SELECT pattern_id FROM pattern_usage
+    WHERE last_offered >= ? AND last_offered IS NOT NULL
+''', (cutoff,)).fetchall()
+if not rows:
+    conn.close()
+    sys.exit(0)
+now = datetime.utcnow().isoformat()
+updated = 0
+for row in rows:
+    conn.execute('''
+        UPDATE pattern_usage
+        SET success_count = success_count + 1, updated_at = ?
+        WHERE pattern_id = ?
+    ''', (now, row['pattern_id']))
+    updated += 1
+if updated:
+    conn.commit()
+conn.close()
+PY
+}
+
 # Section B: Append receipt, track patterns, mark processed, extract OIs.
 # Returns 0 on success (new receipt), 1 on failure, 2 on duplicate.
 append_and_track_receipt() {
@@ -398,6 +449,7 @@ append_and_track_receipt() {
     log "DEBUG" "Triggered t0_brief.json regeneration (async)"
 
     _track_pattern_usage "$receipt_json"
+    _track_pattern_success_fallback "$receipt_json"
 
     local report_hash=$(_sha256 "$report_path")
     echo "$report_hash" >> "$PROCESSED_HASHES"

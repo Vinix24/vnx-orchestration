@@ -52,6 +52,10 @@ Brief overview of frontend work completed (2-3 sentences)
 - Component refactoring needs
 - Accessibility enhancements
 
+### Intelligence Feedback
+<!-- If your dispatch included [INTELLIGENCE_DATA] with offered_pattern_hashes, report which patterns you actually used: -->
+used_pattern_hashes: []
+
 ## Quality Standards
 - WCAG 2.1 AA compliance minimum
 - Mobile-first responsive design
