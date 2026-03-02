@@ -141,18 +141,27 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 ---
 
-## Language Evolution: From Bash to Python
+## Language Evolution: Why ~60% Bash / ~40% Python
 
-VNX started as a single tmux `send-keys` command — the simplest possible way to deliver a dispatch to another terminal pane. Tmux scripting is inherently bash, so the early automation (dispatch delivery, pane management, terminal status) was all shell scripts. As the system grew, more complex logic (receipt processing, quality advisory, state reconciliation, intelligence injection) was written in Python for structured data handling and testability.
+VNX started as tmux `send-keys` scripts — the most direct way to control terminal panes programmatically. This means the codebase grew organically from bash, not as a planned language choice.
 
-The result is a ~60/40 bash/python ratio that reflects this organic growth:
+**Why bash persists:**
+- Tmux orchestration (`send-keys`, pane management, session control) is inherently shell-native.
+- File-bus operations (watch, move, append) are one-liners in bash but verbose in Python.
+- Supervisor, dispatcher, and smart-tap were written first and work reliably.
 
-- **Bash (~60%)**: tmux session management, dispatch delivery, file watchers, hook scripts, CLI entrypoint (`vnx`), context rotation pipeline
-- **Python (~40%)**: receipt processing, quality advisory, terminal state reconciliation, cost reporting, intelligence generation, CI test suites
+**Why Python is growing:**
+- Intelligence pipeline (FTS5 queries, pattern scoring, learning loop) needs structured data handling.
+- Receipt processing moved from bash to Python for JSON parsing reliability.
+- CI testing is pytest-based — Python scripts are directly testable, bash scripts require wrapper tests.
+- New features are written in Python by default.
 
-This split is a direct consequence of the system's origin — not an architectural choice. Bash was the right tool for the first layer (terminal orchestration), but as governance logic grew more complex, the lack of structured error handling, testability, and type safety in bash became a maintenance burden.
+**Active migration policy:**
+- New components: Python.
+- Existing bash scripts: migrated when they need significant changes (not rewritten for its own sake).
+- Target: critical-path components in Python, shell glue for tmux/filesystem operations.
 
-**Active migration**: Critical-path components are being progressively rewritten in Python to improve reliability, enable unit testing, and reduce the surface area for subtle shell bugs. The governance logic (quality advisory, receipt processing) already runs in Python; the remaining bash scripts handle tmux orchestration and hook wiring where shell is the natural interface.
+Current ratio reflects origin, not preference. The system is moving toward Python for anything that benefits from testability, type safety, and structured error handling.
 
 ---
 
