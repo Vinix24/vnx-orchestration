@@ -9,6 +9,7 @@ Configurable via VNX_DOCS_DIRS environment variable (comma-separated paths,
 relative to PROJECT_ROOT or absolute). Feature is inactive when not configured.
 """
 
+import hashlib
 import os
 import re
 import sqlite3
@@ -453,13 +454,18 @@ class DocSectionExtractor:
 
             commit_hash = self._get_file_commit_hash(section_data["file_path"])
             now = datetime.now().isoformat()
+
+            # Compute stable pattern hash for O(1) usage lookup
+            hash_base = f"{section_data['title']}|{section_data['file_path']}|{section_data['line_range']}"
+            pattern_hash = hashlib.sha1(hash_base.encode("utf-8")).hexdigest()
+
             cursor.execute(
                 """
                 INSERT INTO snippet_metadata (
                     snippet_rowid, file_path, line_start, line_end,
                     quality_score, usage_count,
-                    source_commit_hash, extracted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    source_commit_hash, pattern_hash, extracted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snippet_rowid,
@@ -469,6 +475,7 @@ class DocSectionExtractor:
                     section_data["quality_score"],
                     0,
                     commit_hash,
+                    pattern_hash,
                     now,
                 ),
             )

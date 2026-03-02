@@ -104,57 +104,36 @@ Zonder deze instructie is de sterke feedback loop (expliciete hash-rapportage) n
 
 ---
 
-### 4. MEDIUM: _track_pattern_usage O(n) Full Table Scan
+### ~~4. MEDIUM: _track_pattern_usage O(n) Full Table Scan~~ DONE (2026-03-02)
 
-**File**: `scripts/receipt_processor_v4.sh`, functie `_track_pattern_usage()` (regel 331-372)
-**Impact**: Bij elke receipt wordt de hele `code_snippets` tabel gescand om SHA1 hashes te matchen
-**Urgentie**: Wordt een bottleneck zodra de DB groeit (nu 1.143 patterns, bij SEOCRAWLER_DOCS ingestion 2.000+)
+**Status**: Afgerond — `pattern_hash` kolom toegevoegd aan `snippet_metadata` met index
 
-**Het probleem**:
-```python
-# In de inline Python van _track_pattern_usage():
-rows = conn.execute('SELECT id, title, file_path, line_range FROM code_snippets').fetchall()
-for row in rows:
-    hash_val = hashlib.sha1(f"{row[1]}|{row[2]}|{row[3]}".encode()).hexdigest()
-    if hash_val in used_hashes:
-        # update pattern_usage
-```
+**Oplossing geïmplementeerd**:
+- `snippet_metadata` tabel: `pattern_hash TEXT` kolom + `idx_snippet_pattern_hash` index
+- `code_snippet_extractor.py` en `doc_section_extractor.py`: berekenen `SHA1(title|file_path|line_range)` bij extractie
+- `receipt_processor_v4.sh`: `_track_pattern_usage()` query via `WHERE sm.pattern_hash IN (...)` i.p.v. O(n) full table scan
+- `quality_db_init.py`: migratie voor bestaande databases (ALTER TABLE + CREATE INDEX)
 
-Dit berekent SHA1 voor **elke rij** bij elke receipt. O(n) met n = aantal patterns.
-
-**Oplossing**: Voeg een `pattern_hash` kolom toe aan `code_snippets` tabel:
-```sql
-ALTER TABLE code_snippets ADD COLUMN pattern_hash TEXT;
-CREATE INDEX idx_pattern_hash ON code_snippets(pattern_hash);
-```
-
-Vul bij extractie (in `code_snippet_extractor.py`) en query dan direct:
-```sql
-SELECT id FROM code_snippets WHERE pattern_hash IN (?, ?, ...)
-```
-
-**Effort**: 1 uur
-**Risico als we dit vergeten**: Trage receipt processing bij DB groei, maar functioneel correct
+**Files gewijzigd**:
+| File | Actie |
+|------|-------|
+| `schemas/quality_intelligence.sql` | `pattern_hash` kolom + index |
+| `scripts/code_snippet_extractor.py` | Hash berekening bij extractie |
+| `scripts/doc_section_extractor.py` | Hash berekening bij extractie |
+| `scripts/receipt_processor_v4.sh` | O(1) indexed lookup i.p.v. O(n) scan |
+| `scripts/quality_db_init.py` | Migratie voor bestaande databases |
 
 ---
 
-### 5. MEDIUM: Stale Documentatie-Referenties
+### ~~5. MEDIUM: Stale Documentatie-Referenties~~ DONE (2026-03-02)
 
-**Files met verouderde `pattern_ids` referenties**:
-- `docs/core/00_VNX_ARCHITECTURE.md` — verwijst naar `pattern_ids` in intelligence flow
-- `docs/intelligence/` — diverse docs met oude veldnamen
-- `docs/internal/intelligence_upgrade/INTELLIGENCE_UPGRADE_REPORT.md` — P0-1 en P0-2 zijn nu afgerond, status moet ge-update
+**Status**: Afgerond — alle `pattern_ids` referenties vervangen door `offered_pattern_hashes`
 
-**Impact**: Verwarrend voor toekomstige ontwikkelaars die de docs lezen
-**Urgentie**: Niet blokkerend maar nodig voor onderhoud
-
-**Fix**:
-1. Zoek alle referenties naar `pattern_ids` in docs en vervang door `offered_pattern_hashes`
-2. Update het Upgrade Report: P0-1 en P0-2 → "Afgerond in PR #2 (2026-03-02)"
-3. Update intelligence versie referenties naar 1.4.0
-
-**Effort**: 30 minuten
-**Risico als we dit vergeten**: Documentatie-drift, verwarring bij onboarding
+**Oplossing geïmplementeerd**:
+- `docs/core/00_VNX_ARCHITECTURE.md`: `pattern_ids` → `offered_pattern_hashes`, versie 1.0.0 → 1.4.0
+- `docs/core/technical/INTELLIGENCE_SYSTEM.md`: `pattern_ids` → `offered_pattern_hashes`, versie 2.0.0 → 3.0.0
+- `docs/core/technical/DISPATCHER_SYSTEM.md`: `pattern_ids` → `offered_pattern_hashes`, versie 1.0.0 → 1.4.0
+- `docs/internal/intelligence_upgrade/INTELLIGENCE_UPGRADE_REPORT.md`: P0-1 en P0-2 gemarkeerd als DONE
 
 ---
 
@@ -189,11 +168,11 @@ class ConversationAnalyzer:
 | 1 | ~~Regex bug report_parser.py:566~~ | DONE | 5 min | ~~Hele used_count pipeline~~ |
 | 2 | ~~Agent template instructie~~ | DONE | 30 min | ~~Sterke feedback signalen~~ |
 | 3 | ~~SEOCRAWLER_DOCS ingestion~~ | DONE (2026-03-02) | ~4 uur | ~~Non-code intelligence~~ |
-| 4 | _track_pattern_usage O(n) fix | MEDIUM | 1 uur | Performance bij DB groei |
-| 5 | Stale docs update | MEDIUM | 30 min | Documentatie consistency |
+| 4 | ~~_track_pattern_usage O(n) fix~~ | DONE (2026-03-02) | 1 uur | ~~Performance bij DB groei~~ |
+| 5 | ~~Stale docs update~~ | DONE (2026-03-02) | 30 min | ~~Documentatie consistency~~ |
 | 6 | conversation_analyzer_stub.py | LAAG | 3 dagen | Conversation log mining |
 
-**Status**: Items 1-3 afgerond. Items 4-5 kunnen mee in een cleanup PR. Item 6 is een apart project.
+**Status**: Items 1-5 afgerond. Item 6 is een apart project.
 
 ---
 
@@ -214,7 +193,7 @@ class ConversationAnalyzer:
 - ~~Regex bug in report_parser.py (item 1)~~ DONE
 - ~~Agent template instructie gap (item 2)~~ DONE
 - ~~SEOCRAWLER_DOCS ingestion gap (item 3)~~ DONE — `doc_section_extractor.py` + language-aware filtering
-- _track_pattern_usage O(n) scan (item 4)
+- ~~_track_pattern_usage O(n) scan (item 4)~~ DONE — `pattern_hash` kolom + indexed lookup
 
 ---
 

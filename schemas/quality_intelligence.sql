@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS snippet_metadata (
     quality_score REAL DEFAULT 0.0,
     usage_count INTEGER DEFAULT 0,
     source_commit_hash TEXT,        -- Git commit hash at extraction time
+    pattern_hash TEXT,              -- SHA1(title|file_path|line_range) for O(1) usage lookup
     extracted_at DATETIME,          -- When snippet was extracted from source
     verified_at DATETIME,           -- Last staleness verification timestamp
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS snippet_metadata (
 CREATE INDEX IF NOT EXISTS idx_snippet_quality ON snippet_metadata (quality_score DESC);
 CREATE INDEX IF NOT EXISTS idx_snippet_usage ON snippet_metadata (usage_count DESC);
 CREATE INDEX IF NOT EXISTS idx_snippet_file ON snippet_metadata (file_path);
+CREATE INDEX IF NOT EXISTS idx_snippet_pattern_hash ON snippet_metadata (pattern_hash);
 
 -- ============================================================================
 -- QUALITY TRENDS & ANALYTICS
