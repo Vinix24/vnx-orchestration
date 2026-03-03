@@ -656,6 +656,35 @@ update_track_progress() {
     fi
 }
 
+# Sub-helper: Build model performance line from t0_session_brief.json
+_build_model_line() {
+    local brief_file="$STATE_DIR/t0_session_brief.json"
+    [ ! -f "$brief_file" ] && return 0
+
+    local model_parts=""
+    model_parts=$(python3 -c "
+import json, sys
+try:
+    with open('$brief_file') as f:
+        data = json.load(f)
+    perf = data.get('model_performance', {})
+    parts = []
+    for model, stats in sorted(perf.items()):
+        avg_k = round(stats.get('avg_tokens_per_session', 0) / 1000)
+        err = round(stats.get('error_recovery_rate', 0) * 100)
+        cache = round(stats.get('cache_hit_ratio', 0) * 100)
+        parts.append(f'{model} avg={avg_k}K tok | err={err}% | cache={cache}%')
+    if parts:
+        print(' | '.join(parts))
+except Exception:
+    pass
+" 2>/dev/null)
+
+    [ -z "$model_parts" ] && return 0
+    echo "
+📈 MODEL: $model_parts"
+}
+
 # Sub-helper: Build state line from t0_brief.json
 _build_state_line() {
     local brief_file="$STATE_DIR/t0_brief.json"
@@ -747,8 +776,9 @@ send_receipt_to_t0() {
 
     local state_line=$(_build_state_line)
     local quality_line=$(_build_quality_line "$dispatch_id")
+    local model_line=$(_build_model_line)
 
-    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${_rf_status} | ID: ${dispatch_id} | Next: ${next_action} | Report: ${report_path}${quality_line}${state_line}"
+    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${_rf_status} | ID: ${dispatch_id} | Next: ${next_action} | Report: ${report_path}${quality_line}${state_line}${model_line}"
     echo "$receipt_msg" | tmux load-buffer -
     if ! tmux paste-buffer -t "$t0_pane" 2>/dev/null; then
         log "ERROR" "Failed to paste receipt to T0 pane $t0_pane"

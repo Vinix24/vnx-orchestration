@@ -174,6 +174,25 @@ Evidence is based on ripgrep matches in `.claude/vnx-system/scripts`, `.claude/v
 - `vnx_supervisor_simple.sh`
   Evidence: `.claude/vnx-system/dashboard/serve_dashboard.py:49`, `.claude/terminals/T-MANAGER/VNX_HYBRID_FINAL_UPDATE_REPORT.md:45`, `.claude/vnx-system/docs/operations/34_RECEIPT_TROUBLESHOOTING.md:60`
 
+- `conversation_analyzer.py`
+  Evidence: `.claude/vnx-system/scripts/conversation_analyzer.py`
+  Purpose: Nightly session mining pipeline — parse JSONL logs, detect patterns, deep analysis, store to session_analytics. Extracts session_model from JSONL for model-based analytics.
+- `conversation_analyzer_nightly.sh`
+  Evidence: `.claude/vnx-system/scripts/conversation_analyzer_nightly.sh`
+  Purpose: Nightly 3-phase pipeline runner: (1) conversation_analyzer → (2) generate_t0_session_brief → (3) generate_suggested_edits.
+- `generate_t0_session_brief.py`
+  Evidence: `.claude/vnx-system/scripts/generate_t0_session_brief.py`
+  Purpose: Generate model-based session performance brief (`t0_session_brief.json`) for T0 dispatch intelligence. Auto, read-only.
+- `generate_suggested_edits.py`
+  Evidence: `.claude/vnx-system/scripts/generate_suggested_edits.py`
+  Purpose: Generate human-in-the-loop suggested edits (`pending_edits.json`) for MEMORY, rules, CLAUDE.md, and skill templates.
+- `apply_suggested_edits.py`
+  Evidence: `.claude/vnx-system/scripts/apply_suggested_edits.py`, `.claude/vnx-system/bin/vnx` (suggest subcommand)
+  Purpose: CLI for reviewing, accepting, rejecting, and applying suggested system tuning edits. Invoked via `vnx suggest`.
+- `send_digest_email.py`
+  Evidence: `.claude/vnx-system/scripts/send_digest_email.py`, `.claude/vnx-system/scripts/conversation_analyzer_nightly.sh` (Phase 4)
+  Purpose: Opt-in email digest sender. Reads t0_session_brief.json and pending_edits.json, formats digest, sends via SMTP. Requires VNX_DIGEST_EMAIL + VNX_SMTP_PASS env vars.
+
 ## Legacy
 - `ack_register.sh`
   Evidence: `.claude/vnx-system/scripts/archived_20250929/ARCHIVE_MANIFEST.md:117`, `.claude/vnx-system/docs/archive/VNX_ORCHESTRATION_CLEANUP_REPORT.md:73`, `.claude/vnx-system/docs/archive/04_CHANGELOG.md:31`
