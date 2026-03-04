@@ -85,6 +85,12 @@
 
 ---
 
+## Plans
+
+- **Autonomous execution plan**: `../plans/AUTONOMOUS_EXECUTION_PLAN.md` (showstoppers, robustheid, safeguards)
+
+---
+
 ## Architecture Studies
 
 - **SuperClaude audit**: `architecture/SUPERCLAUDE_AUDIT.md` (framework relevance assessment)
