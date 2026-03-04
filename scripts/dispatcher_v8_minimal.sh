@@ -726,7 +726,7 @@ Your report MUST include this metadata block exactly as shown below. The receipt
 1. Stage and commit ALL code changes from this task:
    - Conventional commit: \`feat|fix|test|refactor(<scope>): <description>\`
    - Include in commit body: \`Dispatch-ID: ${dispatch_id_for_footer:-unknown}\`
-   - Do NOT commit \`.vnx-data/\` or \`.claude/vnx-system/\` files
+   - Do NOT commit VNX infrastructure or state directories
 2. Then write your report below
 
 ## Expected Outputs
