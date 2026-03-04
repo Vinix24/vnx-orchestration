@@ -171,6 +171,9 @@ Evidence is based on ripgrep matches in `.claude/vnx-system/scripts`, `.claude/v
   Evidence: `.claude/vnx-system/bin/vnx:149`, `.claude/vnx-system/scripts/vnx_doctor.sh:22`, `.claude/vnx-system/scripts/vnx_doctor.sh:34`
 - `vnx_package_check.sh`
   Evidence: `.claude/vnx-system/bin/vnx:162`
+- `vnx_worktree_setup.sh`
+  Evidence: `README.md:165-167`, `plans/AUTONOMOUS_EXECUTION_PLAN.md`
+  Purpose: Git worktree lifecycle for feature plans — create, remove, list. One worktree per feature plan, shared by all agents.
 - `vnx_supervisor_simple.sh`
   Evidence: `.claude/vnx-system/dashboard/serve_dashboard.py:49`, `.claude/terminals/T-MANAGER/VNX_HYBRID_FINAL_UPDATE_REPORT.md:45`, `.claude/vnx-system/docs/operations/34_RECEIPT_TROUBLESHOOTING.md:60`
 

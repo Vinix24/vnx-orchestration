@@ -178,6 +178,9 @@ See the [context rotation dry-run demo](demo/dry-run-context-rotation/) for a vi
 | `vnx suggest reject <ids>` | Reject suggestions (with optional reason) |
 | `vnx suggest apply` | Apply accepted suggestions to target files |
 | `vnx suggest history` | Show previously applied suggestions |
+| `vnx worktree create <name>` | Create a git worktree for a feature plan |
+| `vnx worktree remove <name>` | Remove a worktree (fails if uncommitted changes) |
+| `vnx worktree list` | List VNX-managed worktrees |
 | `vnx package-check` | Fail if runtime artifacts exist inside dist |
 
 ## Updating
@@ -218,6 +221,35 @@ your-project/
     ├── receipts/      # NDJSON ledger
     └── logs/          # Supervisor and component logs
 ```
+
+## Git Worktrees
+
+VNX supports isolated git worktrees for feature plan execution. One worktree per feature plan — all agents work in the same worktree, with dependency ordering preventing conflicts.
+
+```bash
+# Create a worktree for a feature plan (branches from HEAD)
+vnx worktree create fp04
+
+# Or branch from a specific ref
+vnx worktree create fp04 main
+
+# All agents work in the worktree
+# project-wt-fp04/
+
+# After PR merge, clean up
+vnx worktree remove fp04
+
+# List active worktrees
+vnx worktree list
+```
+
+Workers are instructed to commit before completing each task. The receipt processor captures git provenance (commit SHA, branch, dirty state) and reports commit hygiene to T0:
+
+- **CLEAN** — worker committed, `is_dirty: false`
+- **DIRTY_LOW** — minor uncommitted changes
+- **DIRTY_HIGH** — likely no commit made (>20 dirty files)
+
+Receipts also track `in_worktree: true/false`, making worktree usage visible in the audit trail.
 
 ## Session Intelligence
 
