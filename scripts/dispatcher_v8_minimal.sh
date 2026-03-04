@@ -894,14 +894,17 @@ dispatch_with_skill_activation() {
 import sys, json
 try:
     data = json.load(sys.stdin)
-    patterns = data.get("patterns", [])[:5]  # Top 5 patterns
+    patterns = data.get("suggested_patterns", [])[:5]  # Top 5 patterns
     if patterns:
         print("### 🧠 Relevant Patterns\n")
         for p in patterns:
             title = p.get("title", "Unknown")
-            desc = p.get("description", "")[:100]  # Truncate long descriptions
-            rel = p.get("relevance", 0)
-            print(f"- **{title}** (relevance: {rel:.2f}): {desc}")
+            desc = p.get("description", "")[:100]
+            rel = p.get("relevance_score", 0)
+            fp = p.get("file_path", "")
+            lr = p.get("line_range", "")
+            loc = f" @ `{fp}:{lr}`" if fp and lr else ""
+            print(f"- **{title}** (relevance: {rel:.2f}): {desc}{loc}")
 except (json.JSONDecodeError, TypeError) as exc:
     print(f"[NON_CRITICAL] pattern_summary_parse_failed: {exc}", file=sys.stderr)
 ' 2>/dev/null)

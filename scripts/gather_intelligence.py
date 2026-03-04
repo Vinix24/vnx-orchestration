@@ -526,25 +526,38 @@ class T0IntelligenceGatherer:
         for pattern in patterns:
             self._verify_pattern_freshness(pattern)
 
+        # Determine if this is an implementation gate (not testing/review)
+        is_impl_gate = gate and gate.lower() in ('implementation', 'design', 'architecture')
+
         # Hard filters: enforce actionable relevance (lightweight)
         filtered = []
         for pattern in patterns:
             tags = _tag_set(pattern)
+            file_path_str = str(pattern.get('file_path', '')).lower()
 
             # Rule: exclude generic-only patterns
             if not tags or (len(tags) == 1 and tags[0] == 'general'):
                 continue
 
+            # Rule: for implementation gates, exclude test files (agents need source, not tests)
+            if is_impl_gate and ('/test_' in file_path_str or '/tests/' in file_path_str
+                                  or file_path_str.endswith('_test.py')):
+                continue
+
             # Rule: require at least 1 preferred tag overlap when preferred tags exist
-            if preferred_tags:
-                overlap = sum(1 for t in preferred_tags if t in tags)
+            # Skip meta-tags that describe the dispatch, not the code pattern
+            meta_tags = {'normal-priority', 'high-priority', 'implementation-phase',
+                         'refactoring', 'dutch-market', 'crawler-component', 'security',
+                         'validation', 'memory', 'performance'}
+            code_preferred = [t for t in preferred_tags if t not in meta_tags]
+            if code_preferred:
+                overlap = sum(1 for t in code_preferred if t in tags)
                 if overlap < 1:
                     continue
 
             # Soft rule: prefer file path overlap when task paths are provided
             if path_hints:
-                file_path = str(pattern.get('file_path', '')).lower()
-                if any(hint in file_path for hint in path_hints):
+                if any(hint in file_path_str for hint in path_hints):
                     pattern['relevance_score'] = pattern.get('relevance_score', 0) + 0.2
 
             filtered.append(pattern)
@@ -552,14 +565,17 @@ class T0IntelligenceGatherer:
         # Sort by relevance and return top N
         filtered.sort(key=lambda x: x['relevance_score'], reverse=True)
 
+        # Hard floor: never inject patterns below minimum relevance threshold
+        MIN_RELEVANCE = 0.15
+        filtered = [p for p in filtered if p.get('relevance_score', 0) >= MIN_RELEVANCE]
+
+        if not filtered:
+            return []
+
         # Return top patterns based on relevance threshold
-        if filtered and filtered[0].get('relevance_score', 0) >= 0.6:
+        if filtered[0].get('relevance_score', 0) >= 0.6:
             return filtered[:limit]
-        if filtered:
-            return filtered[:1]
-        # Fallback: if filters remove all patterns, return best-scoring original pattern
-        patterns.sort(key=lambda x: x['relevance_score'], reverse=True)
-        return patterns[:1] if patterns else []
+        return filtered[:1]
 
     def _register_offered_patterns(self, patterns: List[Dict]):
         """Register offered patterns in pattern_usage table for feedback loop tracking.
@@ -1174,25 +1190,32 @@ class T0IntelligenceGatherer:
             return []
 
         try:
-            # Extract keywords from task description
             keywords = self.extract_keywords(task_description)
             tags = self.extract_tags_from_description(task_description)
+            search_terms = list(set(keywords + tags))
 
-            # Query report_findings table for similar reports
-            query = '''
+            if not search_terms:
+                return []
+
+            # Build OR-based LIKE conditions for each keyword individually
+            conditions = []
+            params = []
+            for term in search_terms[:8]:
+                conditions.append("(summary LIKE ? OR tags_found LIKE ?)")
+                params.extend([f"%{term}%", f"%{term}%"])
+
+            where_clause = " OR ".join(conditions)
+            query = f'''
                 SELECT report_path, task_type, summary, tags_found,
                        patterns_found, antipatterns_found, prevention_rules_found,
                        report_date, terminal
                 FROM report_findings
-                WHERE summary LIKE ? OR tags_found LIKE ?
+                WHERE {where_clause}
                 ORDER BY extracted_at DESC
                 LIMIT 5
             '''
 
-            keyword_pattern = '%' + '%'.join(keywords) + '%'
-            tag_pattern = '%' + '%'.join(tags) + '%'
-
-            cursor = self.quality_db.execute(query, (keyword_pattern, tag_pattern))
+            cursor = self.quality_db.execute(query, params)
             reports = []
 
             for row in cursor:
@@ -1211,7 +1234,7 @@ class T0IntelligenceGatherer:
             return reports
 
         except Exception as e:
-            print(f"⚠️ Warning: Could not find similar reports: {e}")
+            print(f"⚠️ Warning: Could not find similar reports: {e}", file=sys.stderr)
             return []
 
     def query_antipatterns(self, task_description: str, limit: int = 5) -> List[Dict]:
@@ -1221,18 +1244,29 @@ class T0IntelligenceGatherer:
 
         try:
             keywords = self.extract_keywords(task_description)
-            keyword_pattern = '%' + '%'.join(keywords) + '%'
+            if not keywords:
+                return []
 
-            query = '''
+            # Build OR-based LIKE conditions per keyword
+            conditions = []
+            params = []
+            for kw in keywords[:8]:
+                conditions.append("(title LIKE ? OR description LIKE ?)")
+                params.extend([f"%{kw}%", f"%{kw}%"])
+
+            where_clause = " OR ".join(conditions)
+            params.append(limit)
+
+            query = f'''
                 SELECT title, description, category, severity,
                        occurrence_count
                 FROM antipatterns
-                WHERE title LIKE ? OR description LIKE ?
+                WHERE {where_clause}
                 ORDER BY occurrence_count DESC, last_seen DESC
                 LIMIT ?
             '''
 
-            cursor = self.quality_db.execute(query, (keyword_pattern, keyword_pattern, limit))
+            cursor = self.quality_db.execute(query, params)
             antipatterns = []
 
             for row in cursor:
@@ -1248,7 +1282,7 @@ class T0IntelligenceGatherer:
             return antipatterns
 
         except Exception as e:
-            print(f"⚠️ Warning: Could not query antipatterns: {e}")
+            print(f"⚠️ Warning: Could not query antipatterns: {e}", file=sys.stderr)
             return []
 
     def get_mined_quality_context(self, task_description: str) -> str:
