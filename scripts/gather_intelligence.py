@@ -163,6 +163,52 @@ class T0IntelligenceGatherer:
         else:
             return 'backend-developer'
 
+    def _get_session_insights(self, terminal: str) -> List[str]:
+        """Get recent session insights for context injection from conversation mining."""
+        if not self.quality_db:
+            return []
+        try:
+            cur = self.quality_db.cursor()
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='session_analytics'"
+            )
+            if not cur.fetchone():
+                return []
+
+            cur.execute("""
+                SELECT primary_activity, has_error_recovery, has_context_reset,
+                       tool_calls_total, tool_edit_count, total_output_tokens,
+                       cache_read_tokens, cache_creation_tokens
+                FROM session_analytics
+                WHERE terminal = ? AND session_date >= date('now', '-7 days')
+                ORDER BY session_date DESC LIMIT 10
+            """, (terminal,))
+            rows = cur.fetchall()
+            if not rows:
+                return []
+
+            insights = []
+            activities = [r["primary_activity"] for r in rows if r["primary_activity"]]
+            if activities:
+                from collections import Counter
+                top_activity = Counter(activities).most_common(1)[0]
+                insights.append(f"Primary activity last 7d: {top_activity[0]} ({top_activity[1]}x)")
+
+            err_count = sum(1 for r in rows if r["has_error_recovery"])
+            if err_count >= 2:
+                insights.append(f"Error recovery detected in {err_count} recent sessions")
+
+            total_cache_read = sum(r["cache_read_tokens"] or 0 for r in rows)
+            total_cache_create = sum(r["cache_creation_tokens"] or 0 for r in rows)
+            total_cache = total_cache_read + total_cache_create
+            if total_cache > 0:
+                hit_pct = total_cache_read / total_cache * 100
+                insights.append(f"Cache hit ratio: {hit_pct:.0f}%")
+
+            return insights[:3]
+        except Exception:
+            return []
+
     def gather_for_dispatch(
         self,
         task_description: str,
@@ -232,8 +278,11 @@ class T0IntelligenceGatherer:
             ],
 
             # Quality context with patterns and tags
+            # Session intelligence (conversation mining)
+            "session_insights": self._get_session_insights(terminal),
+
             "quality_context": {
-                "intelligence_version": "1.4.0",
+                "intelligence_version": "1.5.0",
                 "agent_validated": True,
                 "patterns_available": len(suggested_patterns) > 0,
                 "pattern_count": len(suggested_patterns),

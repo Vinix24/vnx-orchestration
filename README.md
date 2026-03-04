@@ -173,6 +173,14 @@ See the [context rotation dry-run demo](demo/dry-run-context-rotation/) for a vi
 | `vnx bootstrap-skills` | Create/link AI CLI skills from shipped templates |
 | `vnx bootstrap-terminals` | Create terminal CLAUDE.md files from templates |
 | `vnx patch-agent-files` | Idempotent snippet patching for CLAUDE.md / AGENTS.md |
+| `vnx suggest review` | Show pending system tuning suggestions |
+| `vnx suggest accept <ids>` | Accept specific suggestions |
+| `vnx suggest reject <ids>` | Reject suggestions (with optional reason) |
+| `vnx suggest apply` | Apply accepted suggestions to target files |
+| `vnx suggest history` | Show previously applied suggestions |
+| `vnx worktree create <name>` | Create a git worktree for a feature plan |
+| `vnx worktree remove <name>` | Remove a worktree (fails if uncommitted changes) |
+| `vnx worktree list` | List VNX-managed worktrees |
 | `vnx package-check` | Fail if runtime artifacts exist inside dist |
 
 ## Updating
@@ -213,6 +221,74 @@ your-project/
     ├── receipts/      # NDJSON ledger
     └── logs/          # Supervisor and component logs
 ```
+
+## Git Worktrees
+
+VNX supports isolated git worktrees for feature plan execution. One worktree per feature plan — all agents work in the same worktree, with dependency ordering preventing conflicts.
+
+```bash
+# Create a worktree for a feature plan (branches from HEAD)
+vnx worktree create fp04
+
+# Or branch from a specific ref
+vnx worktree create fp04 main
+
+# All agents work in the worktree
+# project-wt-fp04/
+
+# After PR merge, clean up
+vnx worktree remove fp04
+
+# List active worktrees
+vnx worktree list
+```
+
+Workers are instructed to commit before completing each task. The receipt processor captures git provenance (commit SHA, branch, dirty state) and reports commit hygiene to T0:
+
+- **CLEAN** — worker committed, `is_dirty: false`
+- **DIRTY_LOW** — minor uncommitted changes
+- **DIRTY_HIGH** — likely no commit made (>20 dirty files)
+
+Receipts also track `in_worktree: true/false`, making worktree usage visible in the audit trail.
+
+## Session Intelligence
+
+VNX mines Claude Code JSONL session logs to extract model-based performance patterns and generate actionable system tuning suggestions — all through a **human-in-the-loop** workflow.
+
+### Nightly pipeline
+
+A 4-phase pipeline runs automatically (via launchd or cron):
+
+1. **Analyze** — parse session logs, detect patterns, extract model performance (`conversation_analyzer.py`)
+2. **Brief** — aggregate model metrics into a T0-readable state file (`t0_session_brief.json`)
+3. **Suggest** — generate tuning proposals for MEMORY, rules, CLAUDE.md, and skills (`pending_edits.json`)
+4. **Email** — send a digest to your inbox with performance data and pending suggestions (opt-in)
+
+### Human-in-the-loop tuning
+
+Nothing is auto-applied. The pipeline generates suggestions; you decide:
+
+```bash
+vnx suggest review              # See what's proposed
+vnx suggest accept 1,3,5        # Approve specific edits
+vnx suggest reject 2 --reason "too aggressive"
+vnx suggest apply               # Apply accepted edits to target files
+```
+
+Suggestions include model comparisons (e.g. "Opus: 83% first-try success for refactoring vs Sonnet 43%"), threshold tightening proposals, and one-time configuration additions.
+
+### Email digest (opt-in)
+
+Get the nightly digest in your inbox. Configure via environment variables:
+
+```bash
+export VNX_DIGEST_EMAIL="you@gmail.com"
+export VNX_SMTP_PASS="your-app-password"    # Gmail App Password
+```
+
+Works with any SMTP provider. Skipped silently when not configured.
+
+See [Session Intelligence docs](docs/intelligence/SESSION_INTELLIGENCE.md) for full reference.
 
 ## CI
 

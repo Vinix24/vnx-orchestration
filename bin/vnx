@@ -81,6 +81,7 @@ Commands:
   package-check      Fail if runtime artifacts exist inside dist
   update [url] [branch]  Pull latest VNX from origin and re-install
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
+  suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
   help               Show this help text
 USAGE
   }
@@ -1787,6 +1788,9 @@ main() {
       ;;
     queue-status)
       python3 "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
+      ;;
+    suggest)
+      python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
       ;;
     help|-h|--help)
       usage
