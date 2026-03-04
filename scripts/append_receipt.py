@@ -295,12 +295,18 @@ def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
                 "deletions": _extract_shortstat_value(shortstat, "deletion"),
             }
 
+    # Detect if running inside a git worktree
+    git_dir = _safe_subprocess(["git", "rev-parse", "--git-dir"], cwd=git_root) or ""
+    git_common_dir = _safe_subprocess(["git", "rev-parse", "--git-common-dir"], cwd=git_root) or ""
+    in_worktree = bool(git_dir and git_common_dir and git_dir != git_common_dir)
+
     return {
         "git_ref": git_ref,
         "branch": branch,
         "is_dirty": is_dirty,
         "dirty_files": dirty_files,
         "diff_summary": diff_summary,
+        "in_worktree": in_worktree,
         "captured_at": captured_at,
         "captured_by": "append_receipt",
     }

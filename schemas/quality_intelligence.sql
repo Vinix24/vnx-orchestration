@@ -340,6 +340,99 @@ CREATE INDEX IF NOT EXISTS idx_rule_combination ON prevention_rules (tag_combina
 CREATE INDEX IF NOT EXISTS idx_rule_confidence ON prevention_rules (confidence DESC);
 
 -- ============================================================================
+-- SESSION ANALYTICS (Conversation Mining)
+-- ============================================================================
+
+-- Session-level metrics extracted from Claude Code JSONL logs
+CREATE TABLE IF NOT EXISTS session_analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL UNIQUE,
+    project_path TEXT NOT NULL,
+    terminal TEXT,
+    session_date DATE NOT NULL,
+
+    -- Token metrics
+    total_input_tokens INTEGER DEFAULT 0,
+    total_output_tokens INTEGER DEFAULT 0,
+    cache_creation_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+
+    -- Tool metrics
+    tool_calls_total INTEGER DEFAULT 0,
+    tool_read_count INTEGER DEFAULT 0,
+    tool_edit_count INTEGER DEFAULT 0,
+    tool_bash_count INTEGER DEFAULT 0,
+    tool_grep_count INTEGER DEFAULT 0,
+    tool_write_count INTEGER DEFAULT 0,
+    tool_task_count INTEGER DEFAULT 0,
+    tool_other_count INTEGER DEFAULT 0,
+
+    -- Session metrics
+    message_count INTEGER DEFAULT 0,
+    user_message_count INTEGER DEFAULT 0,
+    assistant_message_count INTEGER DEFAULT 0,
+    duration_minutes REAL,
+
+    -- Heuristic flags (phase 2: no LLM needed)
+    has_error_recovery BOOLEAN DEFAULT FALSE,
+    has_context_reset BOOLEAN DEFAULT FALSE,
+    has_large_refactor BOOLEAN DEFAULT FALSE,
+    has_test_cycle BOOLEAN DEFAULT FALSE,
+    primary_activity TEXT,
+
+    -- LLM deep analysis (phase 3: optional)
+    deep_analysis_json TEXT,
+    deep_analysis_model TEXT,
+    deep_analysis_at DATETIME,
+
+    -- Model identification
+    session_model TEXT DEFAULT 'unknown',
+
+    -- Metadata
+    file_size_bytes INTEGER,
+    analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    analyzer_version TEXT DEFAULT '1.0.0'
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_terminal ON session_analytics (terminal, session_date DESC);
+CREATE INDEX IF NOT EXISTS idx_session_project ON session_analytics (project_path, session_date DESC);
+CREATE INDEX IF NOT EXISTS idx_session_date ON session_analytics (session_date DESC);
+CREATE INDEX IF NOT EXISTS idx_session_activity ON session_analytics (primary_activity);
+CREATE INDEX IF NOT EXISTS idx_session_model ON session_analytics (session_model, session_date DESC);
+
+-- Improvement suggestions extracted from session analysis
+CREATE TABLE IF NOT EXISTS improvement_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    component TEXT,
+    current_behavior TEXT NOT NULL,
+    suggested_improvement TEXT NOT NULL,
+    evidence TEXT,
+    priority TEXT DEFAULT 'medium',
+    status TEXT DEFAULT 'new',
+    digest_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    acted_on_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_improvement_category ON improvement_suggestions (category, status);
+CREATE INDEX IF NOT EXISTS idx_improvement_priority ON improvement_suggestions (priority, status);
+
+-- Nightly digest reports
+CREATE TABLE IF NOT EXISTS nightly_digests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    digest_date DATE NOT NULL UNIQUE,
+    sessions_analyzed INTEGER DEFAULT 0,
+    deep_analyzed INTEGER DEFAULT 0,
+    new_suggestions INTEGER DEFAULT 0,
+    total_tokens_used INTEGER DEFAULT 0,
+    digest_markdown TEXT NOT NULL,
+    digest_path TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================================
 -- VIEWS FOR COMMON QUERIES
 -- ============================================================================
 
@@ -409,3 +502,9 @@ VALUES ('8.0.2-phase2', 'Initial Quality Intelligence Database schema');
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.0.3-intelligence-db', 'Add pattern_usage, tag_combinations, prevention_rules; citation fields in snippet_metadata');
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.0.4-conversation-mining', 'Add session_analytics, improvement_suggestions, nightly_digests tables');
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.0.5-session-model', 'Add session_model column to session_analytics for model-based performance tracking');

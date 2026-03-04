@@ -37,7 +37,9 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - **Singleton Process Enforcement**: Bulletproof duplicate prevention
 - **Progressive Intelligence**: Token-efficient context aggregation
 - **Quality Advisory Pipeline**: Automatic file size/complexity warnings on every completion
+- **Track-Agnostic Workers**: T1-T3 handle any task type; T0 dispatches to the next available worker
 - **Multi-Model Coordination**: Opus (T0, T3) + Sonnet (T1, T2), Codex CLI (T1 alternative)
+- **Git Worktree Isolation**: One worktree per feature plan; all agents share it, auto-commit per task, provenance in every receipt
 
 ### Architecture Diagram
 
@@ -47,16 +49,16 @@ VNX is a file-based orchestration system enabling parallel development across mu
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │  T0 (BRAIN)  │  │  T1 (Track A)│  │  T2 (Track B)│         │
+│  │  T0 (BRAIN)  │  │  T1 (Worker) │  │  T2 (Worker) │         │
 │  │ Claude Opus  │  │Claude/Codex  │  │Claude Sonnet │         │
 │  │ Read-Only    │  │  Full R/W    │  │  Full R/W    │         │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘         │
 │         │                  │                  │                  │
 │         │   ┌──────────────┴──────────────────┘                │
 │         │   │          ┌──────────────┐                         │
-│         │   │          │  T3 (Track C)│                         │
+│         │   │          │  T3 (Worker) │                         │
 │         │   │          │ Claude Opus  │                         │
-│         │   │          │ Investigation│                         │
+│         │   │          │ Any Task     │                         │
 │         │   │          └──────┬───────┘                         │
 │         │   │                  │                                 │
 │         ▼   ▼                  ▼                                 │
@@ -89,12 +91,12 @@ VNX is a file-based orchestration system enabling parallel development across mu
 
 ### Terminal Specifications
 
-| Terminal | Role | Provider | Model | Permissions | Track | Purpose |
-|----------|------|----------|-------|-------------|-------|---------|
-| **T0** | Orchestrator | Claude Code | Opus | Read-Only | - | Manager blocks, coordination, intelligence |
-| **T1** | Worker | Claude/Codex | Sonnet | Full R/W | A | Crawler development, validation |
-| **T2** | Worker | Claude Code | Sonnet | Full R/W | B | Storage pipeline, RAG systems |
-| **T3** | Worker | Claude Code | Opus | Full R/W | C | Deep analysis, investigations, research |
+| Terminal | Role | Provider | Model | Permissions | Purpose |
+|----------|------|----------|-------|-------------|---------|
+| **T0** | Orchestrator | Claude Code | Opus | Read-Only | Manager blocks, coordination, intelligence |
+| **T1** | Worker | Claude/Codex | Sonnet | Full R/W | Any task dispatched by T0 (provider configurable) |
+| **T2** | Worker | Claude Code | Sonnet | Full R/W | Any task dispatched by T0 |
+| **T3** | Worker | Claude Code | Opus | Full R/W | Any task dispatched by T0 (Opus for complex work) |
 
 **Multi-Provider Support**: T1 can run Codex CLI instead of Claude Code (configured via `config.env` or `vnx start --t1-provider codex`). Gemini CLI is also supported. Skills are synced to `~/.claude/skills/`, `~/.codex/skills/`, and `.gemini/skills/` during `vnx init`.
 
@@ -759,9 +761,9 @@ project-root/
 
 ### Terminal Status
 - **T0 (Claude Opus)**: Orchestrator brain, read-only
-- **T1 (Claude Sonnet / Codex CLI)**: Track A (provider configurable)
-- **T2 (Claude Sonnet)**: Track B
-- **T3 (Claude Opus)**: Track C, deep investigations
+- **T1 (Claude Sonnet / Codex CLI)**: Worker (provider configurable)
+- **T2 (Claude Sonnet)**: Worker
+- **T3 (Claude Opus)**: Worker (Opus for complex tasks)
 
 ---
 
