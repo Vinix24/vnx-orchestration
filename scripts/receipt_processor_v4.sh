@@ -751,6 +751,23 @@ _build_quality_line() {
     fi
 }
 
+# Section E2: Check provenance quality (informational, non-fatal).
+# Returns CLEAN, DIRTY_LOW, or DIRTY_HIGH as a signal for T0.
+check_provenance_quality() {
+    local receipt_json="$1"
+    local is_dirty dirty_files
+    is_dirty=$(echo "$receipt_json" | jq -r '.provenance.is_dirty // true' 2>/dev/null)
+    dirty_files=$(echo "$receipt_json" | jq -r '.provenance.dirty_files // 0' 2>/dev/null)
+
+    if [ "$is_dirty" = "false" ]; then
+        echo "CLEAN"
+    elif [ "$dirty_files" -gt 20 ]; then
+        echo "DIRTY_HIGH"
+    else
+        echo "DIRTY_LOW"
+    fi
+}
+
 # Section F: Build enriched receipt message and deliver to T0 via tmux.
 # Reads _rf_* variables.
 send_receipt_to_t0() {
@@ -777,8 +794,16 @@ send_receipt_to_t0() {
     local state_line=$(_build_state_line)
     local quality_line=$(_build_quality_line "$dispatch_id")
     local model_line=$(_build_model_line)
+    local git_quality
+    git_quality=$(check_provenance_quality "$receipt_json")
+    local git_line=""
+    if [ "$git_quality" != "CLEAN" ]; then
+        local git_ref
+        git_ref=$(echo "$receipt_json" | jq -r '.provenance.git_ref // "?"' 2>/dev/null)
+        git_line=" | Git: ${git_quality} (ref:${git_ref:0:8})"
+    fi
 
-    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${_rf_status} | ID: ${dispatch_id} | Next: ${next_action} | Report: ${report_path}${quality_line}${state_line}${model_line}"
+    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${_rf_status} | ID: ${dispatch_id} | Next: ${next_action} | Report: ${report_path}${quality_line}${state_line}${model_line}${git_line}"
     echo "$receipt_msg" | tmux load-buffer -
     if ! tmux paste-buffer -t "$t0_pane" 2>/dev/null; then
         log "ERROR" "Failed to paste receipt to T0 pane $t0_pane"
