@@ -52,22 +52,22 @@ PROCESS_COMMANDS = {
     "queue_watcher": ["bash", "queue_popup_watcher.sh"],
     "receipt_processor": ["bash", "receipt_processor_v4.sh"],
     "supervisor": ["bash", "vnx_supervisor_simple.sh"],
-    "ack_dispatcher": ["bash", "dispatch_ack_watcher.sh"],
+    "heartbeat_ack_monitor": ["python3", "heartbeat_ack_monitor.py"],
     "intelligence_daemon": ["python3", "intelligence_daemon.py"],
-    "report_watcher": ["bash", "report_watcher.sh"],
-    "receipt_notifier": ["bash", "receipt_notifier.sh"],
+    "unified_state_manager": ["python3", "unified_state_manager_v2.py"],
+    "recommendations_engine": ["bash", "recommendations_engine_daemon.sh"],
 }
 
 PROCESS_KILL_PATTERNS = {
     "smart_tap": "smart_tap_v7_json_translator",
-    "dispatcher": "dispatcher_v8_minimal|dispatcher_v7_compilation",
+    "dispatcher": "dispatcher_v8_minimal",
     "queue_watcher": "queue_popup_watcher",
     "receipt_processor": "receipt_processor_v4",
-    "report_watcher": "report_watcher",
-    "receipt_notifier": "receipt_notifier",
     "supervisor": "vnx_supervisor_simple",
-    "ack_dispatcher": "dispatch_ack_watcher|ack_dispatcher_v2",
+    "heartbeat_ack_monitor": "heartbeat_ack_monitor",
     "intelligence_daemon": "intelligence_daemon.py",
+    "unified_state_manager": "unified_state_manager_v2",
+    "recommendations_engine": "recommendations_engine_daemon",
 }
 
 TERMINAL_TRACK_MAP = {

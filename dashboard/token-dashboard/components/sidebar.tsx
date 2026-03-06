@@ -3,12 +3,15 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign } from 'lucide-react';
+import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, Activity, AlertCircle, GitBranch } from 'lucide-react';
 
 const NAV_ITEMS = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
-  { href: '/tokens', label: 'Token Analysis', icon: Coins },
+  { href: '/system', label: 'System', icon: Activity },
   { href: '/terminals', label: 'Terminals', icon: Monitor },
+  { href: '/open-items', label: 'Open Items', icon: AlertCircle },
+  { href: '/pr-queue', label: 'PR Queue', icon: GitBranch },
+  { href: '/tokens', label: 'Token Analysis', icon: Coins },
   { href: '/models', label: 'Models', icon: Cpu },
   { href: '/usage', label: 'Usage & Costs', icon: DollarSign },
 ];
@@ -48,10 +51,10 @@ export default function Sidebar() {
               className="text-sm font-semibold"
               style={{ color: 'var(--color-foreground)', letterSpacing: '-0.01em' }}
             >
-              Token Dashboard
+              VNX Dashboard
             </h1>
             <p className="text-xs" style={{ color: 'var(--color-muted)', marginTop: 2 }}>
-              Session Analytics
+              Unified Control Plane
             </p>
           </div>
         </div>
@@ -108,7 +111,7 @@ export default function Sidebar() {
           opacity: 0.7,
         }}
       >
-        Claude Code Analytics
+        VNX Orchestration
       </div>
     </aside>
   );

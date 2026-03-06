@@ -172,7 +172,7 @@ your-project/
 ├── .vnx/              # VNX system (installed from this repo)
 │   ├── bin/vnx        # Main CLI entrypoint
 │   ├── scripts/       # Orchestration scripts (dispatcher, supervisor, etc.)
-│   ├── dashboard/     # Real-time monitoring dashboard
+│   ├── dashboard/     # Unified Next.js dashboard (system + token analytics)
 │   ├── skills/        # Shipped skill templates
 │   └── docs/          # Architecture and operations docs
 ├── .claude/skills/    # Claude Code skills (copied by bootstrap-skills)
@@ -184,6 +184,33 @@ your-project/
     ├── receipts/      # NDJSON ledger
     └── logs/          # Supervisor and component logs
 ```
+
+## Dashboard
+
+Unified Next.js dashboard combining system monitoring and token analytics in one interface.
+
+```bash
+# Start backend (port 4173)
+python dashboard/serve_dashboard.py &
+
+# Start dashboard (port 3100)
+cd dashboard/token-dashboard && npm run dev
+```
+
+Open [localhost:3100](http://localhost:3100).
+
+| Page | Route | Description |
+|------|-------|-------------|
+| Overview | `/` | Health banner, system KPIs, recommendations, token charts |
+| System | `/system` | Process monitor with restart buttons, queue stats, gates, locks |
+| Terminals | `/terminals` | Terminal status cards with unlock, token comparison per terminal |
+| Open Items | `/open-items` | Severity filtering, text search, recent closures |
+| PR Queue | `/pr-queue` | Feature progress bar, PR table with status pills |
+| Token Analysis | `/tokens` | Context/call trends, cache efficiency, session table |
+| Models | `/models` | Model distribution and performance comparison |
+| Usage & Costs | `/usage` | Cost estimation per model and terminal |
+
+All system pages auto-refresh every 7 seconds. Process restart and terminal unlock are available directly from the dashboard.
 
 ## CI
 

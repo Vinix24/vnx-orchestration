@@ -4,14 +4,16 @@ import { useState } from 'react';
 import dynamic from 'next/dynamic';
 import { subDays, format } from 'date-fns';
 import { useTokenStats } from '@/lib/hooks';
+import { usePolling } from '@/lib/use-polling';
 import PeriodSelector from '@/components/period-selector';
 import TerminalFilter from '@/components/terminal-filter';
 import { weightedAverage } from '@/lib/metrics';
+import { normalizeTerminalStatus, terminalStatusColor, getProviderLabel } from '@/lib/utils';
 
 const TerminalComparison = dynamic(() => import('@/components/charts/terminal-comparison'), { ssr: false });
 import { TERMINAL_COLORS } from '@/lib/types';
-import type { GroupBy, TokenStats } from '@/lib/types';
-import { Monitor, Zap, Database, TrendingUp } from 'lucide-react';
+import type { GroupBy, TokenStats, DashboardStatus, TerminalStateFile } from '@/lib/types';
+import { Monitor, Zap, Database, TrendingUp, Unlock } from 'lucide-react';
 
 const ALL_TERMINALS = new Set(['T-MANAGER', 'T0', 'T1', 'T2', 'T3', 'unknown']);
 
@@ -80,6 +82,121 @@ function TerminalMiniCard({ terminal, rows }: { terminal: string; rows: TokenSta
   );
 }
 
+function TerminalStatusCard({
+  name,
+  info,
+  stateInfo,
+  prQueue,
+}: {
+  name: string;
+  info: { status: string; model: string; provider: string; current_task?: string };
+  stateInfo?: { claimed_by: string | null; lease_expires_at: string | null };
+  prQueue?: DashboardStatus['pr_queue'];
+}) {
+  const [unlocking, setUnlocking] = useState(false);
+  const normalized = normalizeTerminalStatus(info.status, name);
+  const color = terminalStatusColor(normalized);
+  const providerLabel = getProviderLabel(info.provider, name);
+
+  let statusText = 'Offline';
+  if (name === 'T0') {
+    statusText = 'In control';
+  } else if (normalized === 'idle') statusText = 'Idle';
+  else if (normalized === 'blocked') statusText = info.current_task ? `Blocked on ${info.current_task}` : 'Blocked';
+  else if (normalized === 'unknown') statusText = 'Unknown';
+  else if (normalized === 'working') {
+    statusText = info.current_task
+      ? `Working on ${info.current_task}`
+      : prQueue?.current_pr
+      ? `Working on ${prQueue.current_pr}`
+      : 'Working';
+  }
+
+  async function handleUnlock() {
+    if (!confirm(`Unlock ${name}? This sets terminal and track to idle and clears active dispatch.`)) return;
+    setUnlocking(true);
+    try {
+      const res = await fetch('/api/unlock-terminal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ terminal: name }),
+      });
+      if (!res.ok) throw new Error('Unlock failed');
+    } catch (err) {
+      console.error('Unlock error:', err);
+    } finally {
+      setUnlocking(false);
+    }
+  }
+
+  const canUnlock = name !== 'T0';
+
+  return (
+    <div
+      className="glass-card"
+      style={{ padding: 20, borderLeft: `3px solid ${color}60` }}
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <span
+          style={{
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            background: color,
+            boxShadow: `0 0 10px ${color}80`,
+            display: 'inline-block',
+          }}
+        />
+        <span className="text-sm font-semibold" style={{ color: 'var(--color-foreground)' }}>
+          {name}
+        </span>
+        <span className="text-xs" style={{ color: 'var(--color-muted)' }}>
+          {providerLabel}
+        </span>
+      </div>
+
+      <div className="text-xs mb-1" style={{ color }}>
+        {statusText}
+      </div>
+
+      <div className="grid gap-1 text-xs" style={{ color: 'var(--color-muted)', marginTop: 8 }}>
+        <div>Model: <span style={{ color: 'var(--color-foreground)' }}>{info.model || 'unknown'}</span></div>
+        {info.current_task && (
+          <div>Task: <span style={{ color: 'var(--color-foreground)' }}>{info.current_task}</span></div>
+        )}
+        {stateInfo?.claimed_by && (
+          <div>Claimed: <span style={{ color: 'var(--color-foreground)' }}>{stateInfo.claimed_by}</span></div>
+        )}
+        {stateInfo?.lease_expires_at && (
+          <div>Lease: <span style={{ color: 'var(--color-foreground)' }}>{stateInfo.lease_expires_at}</span></div>
+        )}
+      </div>
+
+      {canUnlock && (
+        <div className="flex justify-end mt-3">
+          <button
+            onClick={handleUnlock}
+            disabled={unlocking}
+            className="flex items-center gap-1.5 text-xs font-medium transition-all"
+            style={{
+              padding: '5px 12px',
+              borderRadius: 20,
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              background: 'rgba(0, 0, 0, 0.25)',
+              color: 'var(--color-foreground)',
+              cursor: unlocking ? 'not-allowed' : 'pointer',
+              opacity: unlocking ? 0.5 : 1,
+            }}
+          >
+            <Unlock size={12} />
+            {unlocking ? 'Unlocking...' : 'Unlock'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function TerminalsPage() {
   const [from, setFrom] = useState(() => format(subDays(new Date(), 30), 'yyyy-MM-dd'));
   const [to, setTo] = useState(() => format(new Date(), 'yyyy-MM-dd'));
@@ -88,6 +205,9 @@ export default function TerminalsPage() {
 
   const { data: raw, error, isLoading } = useTokenStats(from, to, group);
   const data = raw?.filter((r) => terminals.has(r.terminal));
+
+  const { data: dashboardStatus } = usePolling<DashboardStatus>('/state/dashboard_status.json');
+  const { data: terminalState } = usePolling<TerminalStateFile>('/state/terminal_state.json');
 
   const terminalGroups = new Map<string, TokenStats[]>();
   if (data) {
@@ -98,11 +218,42 @@ export default function TerminalsPage() {
     }
   }
 
+  const terminalOrder = ['T0', 'T1', 'T2', 'T3'];
+  const statusTerminals = dashboardStatus?.terminals ?? {};
+
   return (
     <div>
       <div className="section-header">
         <div className="accent-bar" />
-        <h2>Terminal Comparison</h2>
+        <h2>Terminals</h2>
+      </div>
+
+      {/* Terminal Status Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8 stagger-children">
+        {terminalOrder.map((name) => {
+          const info = statusTerminals[name] || {
+            status: 'offline',
+            model: '—',
+            provider: 'claude_code',
+            current_command: '—',
+            last_update: 'never',
+          };
+          const stateEntry = terminalState?.terminals?.[name];
+          return (
+            <TerminalStatusCard
+              key={name}
+              name={name}
+              info={info}
+              stateInfo={stateEntry ? { claimed_by: stateEntry.claimed_by, lease_expires_at: stateEntry.lease_expires_at } : undefined}
+              prQueue={dashboardStatus?.pr_queue}
+            />
+          );
+        })}
+      </div>
+
+      <div className="section-header" style={{ marginTop: 12 }}>
+        <div className="accent-bar" />
+        <h2>Token Comparison</h2>
       </div>
 
       <PeriodSelector

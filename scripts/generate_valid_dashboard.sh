@@ -353,9 +353,8 @@ SQL
 
 while true; do
     SMART_TAP=$(pgrep -f smart_tap_v7_json_translator | head -1 || echo "")
-    DISPATCHER=$(pgrep -f "dispatcher_v8_minimal|dispatcher_v7_compilation" | head -1 || echo "")
+    DISPATCHER=$(pgrep -f "dispatcher_v8_minimal" | head -1 || echo "")
     QUEUE_WATCHER=$(pgrep -f queue_popup_watcher | head -1 || echo "")
-    REPORT_WATCHER=$(pgrep -f report_watcher.sh | head -1 || echo "")
     RECEIPT_PROCESSOR=$(pgrep -f receipt_processor_v4 | head -1 || echo "")
     SUPERVISOR=$(pgrep -f "vnx_supervisor_simple" | head -1 || echo "")
     if [ -z "$SUPERVISOR" ] && [ -f "$VNX_PIDS_DIR/vnx_supervisor.pid" ]; then
@@ -364,8 +363,10 @@ while true; do
             SUPERVISOR="$PID_FROM_FILE"
         fi
     fi
-    ACK_DISPATCHER=$(pgrep -f "ack_dispatcher_v2|dispatch_ack_watcher" | head -1 || echo "")
-    STATE_MANAGER=$(pgrep -f "state_manager" | head -1 || echo "")
+    HEARTBEAT_ACK=$(pgrep -f "heartbeat_ack_monitor" | head -1 || echo "")
+    STATE_MANAGER=$(pgrep -f "unified_state_manager_v2" | head -1 || echo "")
+    INTELLIGENCE_DAEMON_PID=$(pgrep -f "intelligence_daemon.py" | head -1 || echo "")
+    RECOMMENDATIONS_ENGINE=$(pgrep -f "recommendations_engine_daemon" | head -1 || echo "")
 
     QUEUE_COUNT=$(count_md "$DISPATCH_DIR/queue")
     PENDING_COUNT=$(count_md "$DISPATCH_DIR/pending")
@@ -394,11 +395,12 @@ while true; do
         "smart_tap": {"pid": "${SMART_TAP:-0}", "running": $([ -n "$SMART_TAP" ] && echo "true" || echo "false")},
         "dispatcher": {"pid": "${DISPATCHER:-0}", "running": $([ -n "$DISPATCHER" ] && echo "true" || echo "false")},
         "queue_watcher": {"pid": "${QUEUE_WATCHER:-0}", "running": $([ -n "$QUEUE_WATCHER" ] && echo "true" || echo "false")},
-        "report_watcher": {"pid": "${REPORT_WATCHER:-0}", "running": $([ -n "$REPORT_WATCHER" ] && echo "true" || echo "false")},
         "receipt_processor": {"pid": "${RECEIPT_PROCESSOR:-0}", "running": $([ -n "$RECEIPT_PROCESSOR" ] && echo "true" || echo "false")},
         "supervisor": {"pid": "${SUPERVISOR:-0}", "running": $([ -n "$SUPERVISOR" ] && echo "true" || echo "false")},
-        "ack_dispatcher": {"pid": "${ACK_DISPATCHER:-0}", "running": $([ -n "$ACK_DISPATCHER" ] && echo "true" || echo "false")},
-        "state_manager": {"pid": "${STATE_MANAGER:-0}", "running": $([ -n "$STATE_MANAGER" ] && echo "true" || echo "false")}
+        "heartbeat_ack_monitor": {"pid": "${HEARTBEAT_ACK:-0}", "running": $([ -n "$HEARTBEAT_ACK" ] && echo "true" || echo "false")},
+        "intelligence_daemon": {"pid": "${INTELLIGENCE_DAEMON_PID:-0}", "running": $([ -n "$INTELLIGENCE_DAEMON_PID" ] && echo "true" || echo "false")},
+        "unified_state_manager": {"pid": "${STATE_MANAGER:-0}", "running": $([ -n "$STATE_MANAGER" ] && echo "true" || echo "false")},
+        "recommendations_engine": {"pid": "${RECOMMENDATIONS_ENGINE:-0}", "running": $([ -n "$RECOMMENDATIONS_ENGINE" ] && echo "true" || echo "false")}
     },
     "intelligence_daemon": $INTELLIGENCE_HEALTH_JSON,
     "open_items": $OPEN_ITEMS_JSON,

@@ -33,10 +33,8 @@ cat > "$DASHBOARD_FILE" << EOF
         "queue_watcher": $(check_process "queue_popup_watcher"),
         "receipt_processor": $(check_process "receipt_processor_v4"),
         "supervisor": $(check_process "vnx_supervisor_simple"),
-        "ack_dispatcher": $(check_process "dispatch_ack_watcher"),
+        "heartbeat_ack_monitor": $(check_process "heartbeat_ack_monitor"),
         "intelligence_daemon": $(check_process "intelligence_daemon.py"),
-        "report_watcher": $(check_process "report_watcher"),
-        "receipt_notifier": $(check_process "receipt_notifier"),
         "unified_state_manager": $(check_process "unified_state_manager_v2"),
         "recommendations_engine": $(check_process "recommendations_engine_daemon")
     },

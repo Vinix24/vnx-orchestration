@@ -3,8 +3,8 @@ import Sidebar from '@/components/sidebar';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'VNX Token Dashboard',
-  description: 'Claude Code session analytics dashboard',
+  title: 'VNX Dashboard',
+  description: 'VNX Orchestration unified control plane',
 };
 
 export default function RootLayout({
