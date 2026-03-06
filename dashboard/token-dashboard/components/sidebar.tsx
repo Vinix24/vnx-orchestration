@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign } from 'lucide-react';
@@ -32,24 +33,16 @@ export default function Sidebar() {
         }}
       >
         <div className="flex items-center gap-3">
-          <div
+          <Image
+            src="/logo.png"
+            alt="VNX"
+            width={36}
+            height={36}
             style={{
-              width: 36,
-              height: 36,
               borderRadius: 10,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 11,
-              fontWeight: 800,
-              letterSpacing: '0.05em',
-              background: 'linear-gradient(135deg, #f97316 0%, #fb923c 100%)',
-              color: '#070b16',
               boxShadow: '0 4px 16px rgba(249, 115, 22, 0.3)',
             }}
-          >
-            VNX
-          </div>
+          />
           <div>
             <h1
               className="text-sm font-semibold"
