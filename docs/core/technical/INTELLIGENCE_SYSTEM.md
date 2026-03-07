@@ -1,10 +1,10 @@
 # VNX Intelligence System - Technical Reference
-**Last Updated**: 2026-03-02
+**Last Updated**: 2026-03-07
 **Owner**: T-MANAGER
 **Purpose**: Documentation for VNX Intelligence System - Technical Reference.
 
-**Version**: 3.0.0
-**Date**: 2026-03-02
+**Version**: 4.0.0
+**Date**: 2026-03-07
 **Status**: Active
 **Maintainer**: T-MANAGER
 
@@ -17,10 +17,11 @@
 6. [Prevention Rules](#prevention-rules)
 7. [Tag Intelligence](#tag-intelligence)
 8. [Learning Loop](#learning-loop)
-9. [Performance & Caching](#performance--caching)
-10. [Integration](#integration)
-11. [Operations](#operations)
-12. [Testing](#testing)
+9. [Governance Measurement](#governance-measurement)
+10. [Performance & Caching](#performance--caching)
+11. [Integration](#integration)
+12. [Operations](#operations)
+13. [Testing](#testing)
 
 ---
 
@@ -932,6 +933,117 @@ REPORT_CACHE_TTL = 1800    # 30 min
 
 ---
 
+## Governance Measurement
+
+### Purpose
+
+Replaces self-reported terminal status with objective, calculated quality scores. Detects anomalies using Statistical Process Control (SPC) and makes rework visible through First-Pass Yield measurement.
+
+### Implementation
+
+**Version**: 1.1 (2026-03-07)
+**Schema**: 8.2.0-cqs-advisory-oi
+**Files**: `cqs_calculator.py`, `governance_aggregator.py`, `governance_weekly_report.py`, `open_items_manager.py`
+**Full Reference**: `docs/intelligence/GOVERNANCE_MEASUREMENT.md`
+
+### Why This Exists
+
+Analysis of dispatch data revealed three fundamental measurement problems:
+
+1. **166 unique self-reported status values** — no standardization, terminals define own success
+2. **Rework invisible** — re-dispatched "successful" tasks counted as multiple successes
+3. **System timeouts pollute metrics** — 30% of dispatches timeout (receipt processing issue), inflating failure rates
+
+### Composite Quality Score (CQS)
+
+Weighted 0-100 score computed from 7 independent signals:
+
+```
+CQS = Status(25%) + Completion(20%) + Effort(15%) + ErrorDensity(10%)
+    + Rework(10%) + T0Advisory(10%) + OIDelta(10%)
+
+Status:       166 raw values -> 5 categories (success=100, partial=60, failure=0)
+              timeout/unknown -> excluded from all metrics
+
+Completion:   Has report? + PR merged? + Gate passed? -> 0-100
+
+Effort:       Tokens used / median for same role
+              <= 0.5x = 100, 1x = 80, 2x = 20, >2x = 0
+
+ErrorDensity: Error messages / total messages ratio
+              0% = 100, <5% = 80, <15% = 50, <30% = 25, >30% = 0
+
+Rework:       Same gate+pr_id dispatched before?
+              First attempt = 100, rework = 0
+
+T0Advisory:   quality_advisory.t0_recommendation decision + risk_score
+              approve=100, followup=60, hold=0 (70/30 blend with inverse risk)
+
+OIDelta:      Open items created vs resolved balance
+              +15/resolved (cap 30), -10/created (cap 30), -20/unresolved target (cap 20)
+              No OI involvement = 50 (neutral)
+```
+
+### SPC Control Charts
+
+Statistical Process Control from manufacturing quality (Toyota/Six Sigma):
+
+```
+UCL = X-bar + 3*sigma     Upper Control Limit
+CL  = X-bar               Center Line (mean)
+LCL = max(0, X-bar - 3*sigma)  Lower Control Limit
+```
+
+Recomputed nightly from 30-day rolling baseline. Point beyond limits has 0.27% probability of occurring by chance.
+
+### Western Electric Anomaly Rules
+
+| Rule | Condition | Severity |
+|------|-----------|----------|
+| Out of control | Point beyond UCL/LCL | Critical |
+| Trend | 7+ consecutive increasing/decreasing | Warning |
+| Shift | 8+ points on same side of center | Warning |
+| Run | 2 of 3 beyond 2-sigma | Info |
+
+### Nightly Aggregation Metrics
+
+Computed per scope (system/terminal/role/gate/model):
+
+| Metric | Formula | Standard |
+|--------|---------|----------|
+| First-Pass Yield | Unique tasks succeeded first / total unique | Toyota TPS |
+| Rework Rate | Total dispatches / unique gate+pr_id | Six Sigma |
+| Gate Velocity | Hours from first dispatch to gate pass | DORA lead time |
+| Mean CQS | Average composite quality score | Composite index |
+| OI Resolution Rate | resolved / (created + resolved) | Quality debt velocity |
+
+### Database
+
+```sql
+-- CQS columns on dispatch_metadata
+cqs REAL, normalized_status TEXT, cqs_components TEXT
+target_open_items TEXT,       -- JSON array ["OI-042"]
+open_items_created INTEGER DEFAULT 0,
+open_items_resolved INTEGER DEFAULT 0
+
+-- Aggregated metrics
+governance_metrics (period, scope, metric_name, value, sample_size)
+
+-- Control limits
+spc_control_limits (metric, scope, center_line, ucl, lcl, sigma)
+
+-- Anomaly alerts
+spc_alerts (alert_type, metric, scope, observed, limit, severity)
+```
+
+### Integration
+
+- **Receipt-time**: CQS computed in `append_receipt.py` and `receipt_processor_v4.sh` (C3b)
+- **Nightly**: Phase 2.5 in `conversation_analyzer_nightly.sh`
+- **Weekly**: `governance_weekly_report.py` -> `docs/governance/week_YYYY_WW.md`
+
+---
+
 ## Performance & Caching
 
 ### Purpose
@@ -1397,7 +1509,7 @@ python3 tests/test_intelligence_integration.py
 
 ---
 
-**Document Version**: 3.0.0
-**Last Updated**: 2026-03-02
+**Document Version**: 4.0.0
+**Last Updated**: 2026-03-07
 **Maintained by**: T-MANAGER
 **Status**: Production Active

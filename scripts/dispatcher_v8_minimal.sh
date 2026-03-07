@@ -1106,6 +1106,34 @@ $receipt_footer"
         log "V8 WARNING: Failed to notify heartbeat ACK monitor (non-fatal)"
     }
 
+    # Log dispatch metadata to quality_intelligence.db (non-fatal)
+    local _dm_cognition _dm_priority _dm_pattern_count _dm_rule_count _dm_instr_chars
+    _dm_cognition=$(vnx_dispatch_extract_cognition "$dispatch_file" 2>/dev/null || echo "normal")
+    _dm_priority=$(vnx_dispatch_extract_priority "$dispatch_file" 2>/dev/null || echo "P1")
+    _dm_pattern_count=$(echo "$intelligence_data" | grep -o '"pattern_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    _dm_rule_count=$(echo "$intelligence_data" | grep -o '"prevention_rule_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    _dm_instr_chars=${#instruction_content}
+    # Extract OI-NNN references from dispatch instructions for target tracking
+    local _dm_target_oi=""
+    _dm_target_oi=$(echo "$instruction_content" | grep -oE 'OI-[0-9]{3,}' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
+    python3 "$VNX_DIR/scripts/log_dispatch_metadata.py" \
+        --dispatch-id "$dispatch_id" \
+        --terminal "$terminal_id" \
+        --track "$track" \
+        --role "$agent_role" \
+        --skill-name "$agent_role" \
+        --gate "$gate" \
+        --cognition "$_dm_cognition" \
+        --priority "$_dm_priority" \
+        --pr-id "${pr_id:-}" \
+        --pattern-count "${_dm_pattern_count:-0}" \
+        --prevention-rule-count "${_dm_rule_count:-0}" \
+        --intelligence-json "$intelligence_data" \
+        --instruction-char-count "${_dm_instr_chars:-0}" \
+        --target-open-items "${_dm_target_oi:-}" 2>/dev/null || {
+        log "V8 WARNING: Failed to log dispatch metadata (non-fatal)"
+    }
+
     # Move dispatch to active (receipt_processor moves to completed on task_complete)
     mv "$dispatch_file" "$ACTIVE_DIR/$filename"
 
