@@ -77,6 +77,7 @@ Smart Tap V7 introduces comprehensive JSON dispatch support with automatic Markd
 - **gate** (optional): Current gate ("planning", "implementation", "review", "testing", "validation")
 - **phase** (optional): Sprint phase identifier (e.g., "sprint.3.2")
 - **cognition** (optional): Processing type ("normal", "focused", "deep")
+- **target_open_items** (optional): JSON array of OI-IDs this dispatch targets for resolution (e.g., `["OI-042", "OI-043"]`). Auto-extracted from instruction text via `OI-\d{3,}` regex by the dispatcher. Used by CQS OI Delta scoring to detect unresolved targets.
 
 ### content (required)
 - **title** (required): Brief task description
