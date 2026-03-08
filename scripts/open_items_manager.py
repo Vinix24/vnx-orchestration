@@ -228,6 +228,8 @@ def close_item(args):
     old_status = item["status"]
     item["status"] = args.status
     item["closed_reason"] = args.reason
+    item["closed_by_dispatch_id"] = getattr(args, 'dispatch_id', None)
+    item["closed_at"] = datetime.now().isoformat()
     item["updated_at"] = datetime.now().isoformat()
 
     save_items(data)
@@ -485,6 +487,78 @@ def generate_markdown(data: dict, digest: dict):
     with open(MARKDOWN_FILE, 'w') as f:
         f.write('\n'.join(lines))
 
+def close_item_programmatic(
+    *,
+    item_id: str,
+    status: str = "done",
+    reason: str = "",
+    dispatch_id: str = "",
+) -> bool:
+    """Thread-safe programmatic API for closing open items.
+
+    Uses fcntl.flock on a dedicated lock file for concurrent terminal safety.
+
+    Returns:
+        True if item was closed, False if not found or already closed.
+    """
+    lock_path = STATE_DIR / "open_items.lock"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            data = load_items()
+
+            item = None
+            for i in data["items"]:
+                if i["id"] == item_id:
+                    item = i
+                    break
+
+            if not item or item["status"] != "open":
+                return False
+
+            item["status"] = status
+            item["closed_reason"] = reason
+            item["closed_by_dispatch_id"] = dispatch_id or None
+            item["closed_at"] = datetime.now().isoformat()
+            item["updated_at"] = datetime.now().isoformat()
+
+            save_items(data)
+
+            audit_log_entry(
+                "close",
+                item_id=item_id,
+                from_status="open",
+                to_status=status,
+                reason=reason,
+                dispatch_id=dispatch_id,
+            )
+
+            generate_digest()
+            return True
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def get_items_by_origin_dispatch(dispatch_id: str) -> List[dict]:
+    """Items created by this dispatch (origin_dispatch_id matches)."""
+    data = load_items()
+    return [
+        item for item in data["items"]
+        if item.get("origin_dispatch_id") == dispatch_id
+    ]
+
+
+def count_items_closed_by_dispatch(dispatch_id: str) -> int:
+    """Count items where closed_by_dispatch_id matches."""
+    data = load_items()
+    return sum(
+        1 for item in data["items"]
+        if item.get("closed_by_dispatch_id") == dispatch_id
+    )
+
+
 def main():
     if _rollback_mode_enabled():
         print(
@@ -516,16 +590,19 @@ def main():
     close_parser.add_argument('--status', default='done',
                              choices=['done'], help='Close status')
     close_parser.add_argument('--reason', required=True, help='Closure reason')
+    close_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID that resolved this item')
 
     # Defer command
     defer_parser = subparsers.add_parser('defer', help='Defer item')
     defer_parser.add_argument('item_id', help='Item ID to defer')
     defer_parser.add_argument('--reason', required=True, help='Deferral reason')
+    defer_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID that deferred this item')
 
     # Wontfix command
     wontfix_parser = subparsers.add_parser('wontfix', help='Mark as wontfix')
     wontfix_parser.add_argument('item_id', help='Item ID to mark wontfix')
     wontfix_parser.add_argument('--reason', required=True, help='Wontfix reason')
+    wontfix_parser.add_argument('--dispatch-id', dest='dispatch_id', default=None, help='Dispatch ID that marked this wontfix')
 
     # Attach evidence command
     evidence_parser = subparsers.add_parser('attach-evidence', help='Attach report evidence to PR open items')

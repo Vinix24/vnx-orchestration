@@ -145,6 +145,7 @@ def initialize_database() -> bool:
                     duration_minutes REAL,
                     has_error_recovery BOOLEAN DEFAULT FALSE,
                     has_context_reset BOOLEAN DEFAULT FALSE,
+                    context_reset_count INTEGER DEFAULT 0,
                     has_large_refactor BOOLEAN DEFAULT FALSE,
                     has_test_cycle BOOLEAN DEFAULT FALSE,
                     primary_activity TEXT,
@@ -201,6 +202,96 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated session_analytics: added session_model column + index')
 
+        # Migration: add dispatch_id column to session_analytics if missing
+        cursor.execute("PRAGMA table_info(session_analytics)")
+        sa_cols = {row[1] for row in cursor.fetchall()}
+        if "dispatch_id" not in sa_cols:
+            cursor.execute("ALTER TABLE session_analytics ADD COLUMN dispatch_id TEXT")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_dispatch_id ON session_analytics (dispatch_id)")
+            conn.commit()
+            log('INFO', 'Migrated session_analytics: added dispatch_id column + index')
+
+        # Migration: add dispatch_id column to report_findings if missing
+        cursor.execute("PRAGMA table_info(report_findings)")
+        rf_cols = {row[1] for row in cursor.fetchall()}
+        if "dispatch_id" not in rf_cols:
+            cursor.execute("ALTER TABLE report_findings ADD COLUMN dispatch_id TEXT")
+            conn.commit()
+            log('INFO', 'Migrated report_findings: added dispatch_id column')
+
+        # Migration: add CQS columns to dispatch_metadata if missing
+        cursor.execute("PRAGMA table_info(dispatch_metadata)")
+        dm_cols = {row[1] for row in cursor.fetchall()}
+        if "cqs" not in dm_cols:
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN cqs REAL")
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN normalized_status TEXT")
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN cqs_components TEXT")
+            conn.commit()
+            log('INFO', 'Migrated dispatch_metadata: added cqs, normalized_status, cqs_components columns')
+
+        # Migration: create governance tables if missing
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='governance_metrics'")
+        if not cursor.fetchone():
+            cursor.executescript("""
+                CREATE TABLE IF NOT EXISTS governance_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    period_start DATE NOT NULL,
+                    period_end DATE NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_value TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    metric_value REAL NOT NULL,
+                    sample_size INTEGER NOT NULL,
+                    computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_gov_metrics_lookup
+                    ON governance_metrics (period_start, scope_type, metric_name);
+
+                CREATE TABLE IF NOT EXISTS spc_control_limits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    metric_name TEXT NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_value TEXT NOT NULL,
+                    center_line REAL NOT NULL,
+                    ucl REAL NOT NULL,
+                    lcl REAL NOT NULL,
+                    sigma REAL NOT NULL,
+                    sample_count INTEGER NOT NULL,
+                    baseline_start DATE,
+                    baseline_end DATE,
+                    computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(metric_name, scope_type, scope_value)
+                );
+
+                CREATE TABLE IF NOT EXISTS spc_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    alert_type TEXT NOT NULL,
+                    metric_name TEXT NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_value TEXT NOT NULL,
+                    observed_value REAL NOT NULL,
+                    control_limit REAL,
+                    description TEXT,
+                    severity TEXT DEFAULT 'warning',
+                    detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    acknowledged_at DATETIME
+                );
+                CREATE INDEX IF NOT EXISTS idx_spc_alerts_lookup
+                    ON spc_alerts (detected_at DESC, severity);
+            """)
+            conn.commit()
+            log('INFO', 'Migrated: created governance_metrics, spc_control_limits, spc_alerts tables')
+
+        # Migration: add CQS enhancement columns (T0 advisory + OI delta) if missing
+        cursor.execute("PRAGMA table_info(dispatch_metadata)")
+        dm_cols_v2 = {row[1] for row in cursor.fetchall()}
+        if "target_open_items" not in dm_cols_v2:
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN target_open_items TEXT")
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN open_items_created INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN open_items_resolved INTEGER DEFAULT 0")
+            conn.commit()
+            log('INFO', 'Migrated dispatch_metadata: added target_open_items, open_items_created, open_items_resolved columns')
+
         log('SUCCESS', 'Database schema initialized successfully')
 
         # Close connection
@@ -238,14 +329,21 @@ def verify_database_structure() -> bool:
             'prevention_rules',
             'session_analytics',
             'improvement_suggestions',
-            'nightly_digests'
+            'nightly_digests',
+            'dispatch_metadata',
+            'governance_metrics',
+            'spc_control_limits',
+            'spc_alerts'
         ]
 
         # Expected views
         expected_views = [
             'high_quality_snippets',
             'files_needing_attention',
-            'open_alerts_summary'
+            'open_alerts_summary',
+            'dispatch_success_by_role',
+            'intelligence_effectiveness',
+            'cost_per_dispatch'
         ]
 
         # Check tables
