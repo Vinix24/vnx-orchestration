@@ -24,6 +24,7 @@ try:
     from vnx_paths import ensure_env
     from quality_advisory import generate_quality_advisory, get_changed_files
     from terminal_snapshot import collect_terminal_snapshot
+    from cqs_calculator import calculate_cqs
 except Exception as exc:  # pragma: no cover - hard fail on bootstrap issue
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
@@ -581,6 +582,61 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
             "error": str(exc),
         }
 
+    # Enrich with open items delta for CQS (best-effort)
+    try:
+        dispatch_id_for_oi = enriched.get("dispatch_id") or enriched.get("metadata", {}).get("dispatch_id")
+        if dispatch_id_for_oi:
+            oim = _get_open_items_manager()
+            resolved_count = oim.count_items_closed_by_dispatch(dispatch_id_for_oi)
+            enriched["open_items_resolved"] = resolved_count
+
+            # Load target_open_items from dispatch_metadata
+            db_path_oi = state_dir / "quality_intelligence.db"
+            if db_path_oi.exists():
+                import sqlite3 as _sqlite3_oi
+                conn_oi = _sqlite3_oi.connect(str(db_path_oi))
+                row = conn_oi.execute(
+                    "SELECT target_open_items FROM dispatch_metadata WHERE dispatch_id=?",
+                    (dispatch_id_for_oi,),
+                ).fetchone()
+                conn_oi.close()
+                if row and row[0]:
+                    try:
+                        enriched["target_open_items"] = json.loads(row[0])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+    except Exception as exc:
+        _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
+
+    # Compute CQS and persist to dispatch_metadata (best-effort)
+    try:
+        db_path = state_dir / "quality_intelligence.db"
+        if db_path.exists():
+            dispatch_id = enriched.get("dispatch_id") or enriched.get("metadata", {}).get("dispatch_id")
+            if dispatch_id:
+                cqs_result = calculate_cqs(enriched, None, db_path, dispatch_id)
+                enriched["cqs"] = cqs_result
+                import sqlite3
+                conn = sqlite3.connect(str(db_path))
+                conn.execute(
+                    """UPDATE dispatch_metadata
+                       SET cqs=?, normalized_status=?, cqs_components=?,
+                           open_items_created=?, open_items_resolved=?
+                       WHERE dispatch_id=?""",
+                    (
+                        cqs_result["cqs"],
+                        cqs_result["normalized_status"],
+                        json.dumps(cqs_result["components"]),
+                        enriched.get("open_items_created", 0),
+                        enriched.get("open_items_resolved", 0),
+                        dispatch_id,
+                    ),
+                )
+                conn.commit()
+                conn.close()
+    except Exception as exc:
+        _emit("WARN", "cqs_calculation_failed", error=str(exc))
+
     return enriched
 
 
@@ -653,21 +709,24 @@ _SEVERITY_MAP = {
 }
 
 
-def _register_quality_open_items(receipt: Dict[str, Any]) -> None:
+def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
     """Best-effort: register quality advisory violations as tracked open items.
 
     Reads t0_recommendation.open_items[] from the enriched receipt, creates
     open items with dedup keys, and ALWAYS writes a sidecar summary for the
     receipt processor to include in T0 notifications (even when clean).
+
+    Returns:
+        Count of newly created open items.
     """
     try:
         advisory = receipt.get("quality_advisory")
         if not isinstance(advisory, dict):
-            return
+            return 0
 
         rec = advisory.get("t0_recommendation")
         if not isinstance(rec, dict):
-            return
+            return 0
 
         dispatch_id = str(receipt.get("dispatch_id") or "unknown")
         report_path = str(receipt.get("report_path") or "")
@@ -752,8 +811,11 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> None:
         except Exception as exc:
             _emit("WARN", "quality_sidecar_write_failed", error=str(exc))
 
+        return len(new_ids)
+
     except Exception as exc:
         _emit("WARN", "quality_oi_registration_failed", error=str(exc))
+        return 0
 
 
 def append_receipt_payload(
@@ -819,7 +881,8 @@ def append_receipt_payload(
     # Best-effort: register quality advisory violations as tracked open items
     # (outside flock to avoid holding the receipt lock during OI registration)
     if result is not None and result.status == "appended":
-        _register_quality_open_items(receipt)
+        created_count = _register_quality_open_items(receipt)
+        receipt["open_items_created"] = created_count
 
     return result
 

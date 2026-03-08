@@ -508,3 +508,148 @@ VALUES ('8.0.4-conversation-mining', 'Add session_analytics, improvement_suggest
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.0.5-session-model', 'Add session_model column to session_analytics for model-based performance tracking');
+
+-- ============================================================================
+-- DISPATCH METADATA (Dispatch Analytics Persistence)
+-- ============================================================================
+
+-- Full dispatch lifecycle tracking: dispatch → session → report → receipt
+CREATE TABLE IF NOT EXISTS dispatch_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dispatch_id TEXT NOT NULL UNIQUE,
+    terminal TEXT NOT NULL,
+    track TEXT NOT NULL,
+    role TEXT,
+    skill_name TEXT,
+    gate TEXT,
+    cognition TEXT DEFAULT 'normal',
+    priority TEXT DEFAULT 'P1',
+    pr_id TEXT,
+    parent_dispatch TEXT,
+    pattern_count INTEGER DEFAULT 0,
+    prevention_rule_count INTEGER DEFAULT 0,
+    intelligence_json TEXT,
+    instruction_char_count INTEGER DEFAULT 0,
+    context_file_count INTEGER DEFAULT 0,
+    dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    outcome_status TEXT,
+    outcome_report_path TEXT,
+    session_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id);
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_terminal ON dispatch_metadata (terminal);
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role);
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate);
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status);
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC);
+
+-- Analytics views for dispatch correlation
+
+CREATE VIEW IF NOT EXISTS dispatch_success_by_role AS
+SELECT
+    role,
+    COUNT(*) as total_dispatches,
+    SUM(CASE WHEN outcome_status = 'success' THEN 1 ELSE 0 END) as successes,
+    ROUND(AVG(CASE WHEN outcome_status = 'success' THEN 1.0 ELSE 0.0 END), 3) as success_rate,
+    AVG(pattern_count) as avg_patterns,
+    AVG(prevention_rule_count) as avg_rules,
+    AVG(instruction_char_count) as avg_instruction_chars
+FROM dispatch_metadata
+WHERE outcome_status IS NOT NULL
+GROUP BY role
+ORDER BY total_dispatches DESC;
+
+CREATE VIEW IF NOT EXISTS intelligence_effectiveness AS
+SELECT
+    CASE WHEN intelligence_json IS NOT NULL AND intelligence_json != '' THEN 'with_intelligence' ELSE 'without_intelligence' END as intelligence_used,
+    COUNT(*) as total,
+    SUM(CASE WHEN outcome_status = 'success' THEN 1 ELSE 0 END) as successes,
+    ROUND(AVG(CASE WHEN outcome_status = 'success' THEN 1.0 ELSE 0.0 END), 3) as success_rate,
+    AVG(pattern_count) as avg_patterns
+FROM dispatch_metadata
+WHERE outcome_status IS NOT NULL
+GROUP BY intelligence_used;
+
+CREATE VIEW IF NOT EXISTS cost_per_dispatch AS
+SELECT
+    dm.dispatch_id,
+    dm.terminal,
+    dm.role,
+    dm.gate,
+    dm.outcome_status,
+    sa.session_model,
+    sa.total_input_tokens,
+    sa.total_output_tokens,
+    sa.tool_calls_total,
+    sa.duration_minutes,
+    dm.pattern_count,
+    dm.instruction_char_count
+FROM dispatch_metadata dm
+LEFT JOIN session_analytics sa ON sa.dispatch_id = dm.dispatch_id
+WHERE dm.outcome_status IS NOT NULL;
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.0.6-dispatch-analytics', 'Add dispatch_metadata table, dispatch_id columns, and analytics views');
+
+-- ============================================================================
+-- GOVERNANCE MEASUREMENT (Objective Quality Scoring + SPC)
+-- ============================================================================
+
+-- Governance metrics aggregated nightly per scope
+CREATE TABLE IF NOT EXISTS governance_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    scope_type TEXT NOT NULL,     -- 'system'|'terminal'|'role'|'gate'|'model'
+    scope_value TEXT NOT NULL,
+    metric_name TEXT NOT NULL,    -- 'fpy'|'rework_rate'|'gate_velocity_hours'|'mean_cqs'|'dispatch_count'
+    metric_value REAL NOT NULL,
+    sample_size INTEGER NOT NULL,
+    computed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gov_metrics_lookup
+    ON governance_metrics (period_start, scope_type, metric_name);
+
+-- SPC control limits (X-bar +/- 3 sigma)
+CREATE TABLE IF NOT EXISTS spc_control_limits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_name TEXT NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_value TEXT NOT NULL,
+    center_line REAL NOT NULL,    -- X-bar (mean)
+    ucl REAL NOT NULL,            -- Upper Control Limit (X-bar + 3 sigma)
+    lcl REAL NOT NULL,            -- Lower Control Limit (X-bar - 3 sigma)
+    sigma REAL NOT NULL,
+    sample_count INTEGER NOT NULL,
+    baseline_start DATE,
+    baseline_end DATE,
+    computed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(metric_name, scope_type, scope_value)
+);
+
+-- SPC anomaly alerts
+CREATE TABLE IF NOT EXISTS spc_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_type TEXT NOT NULL,     -- 'out_of_control'|'trend'|'shift'|'run'
+    metric_name TEXT NOT NULL,
+    scope_type TEXT NOT NULL,
+    scope_value TEXT NOT NULL,
+    observed_value REAL NOT NULL,
+    control_limit REAL,
+    description TEXT,
+    severity TEXT DEFAULT 'warning', -- 'info'|'warning'|'critical'
+    detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    acknowledged_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_spc_alerts_lookup
+    ON spc_alerts (detected_at DESC, severity);
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.1.0-governance', 'Add governance_metrics, spc_control_limits, spc_alerts tables and CQS columns on dispatch_metadata');
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.2.0-cqs-advisory-oi', 'Add target_open_items, open_items_created, open_items_resolved columns to dispatch_metadata for T0 advisory and OI delta CQS components');
