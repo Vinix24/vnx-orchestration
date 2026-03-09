@@ -51,6 +51,36 @@ except ImportError:
     TagIntelligenceEngine = None
 
 
+# Intent-based prevention rule filtering
+INTENT_ANALYSIS = "analysis"
+INTENT_IMPLEMENTATION = "implementation"
+INTENT_TESTING = "testing"
+_ALL_INTENTS = {INTENT_ANALYSIS, INTENT_IMPLEMENTATION, INTENT_TESTING}
+
+ROLE_TO_INTENT = {
+    "debugger": INTENT_ANALYSIS,
+    "architect": INTENT_ANALYSIS,
+    "reviewer": INTENT_ANALYSIS,
+    "planner": INTENT_ANALYSIS,
+    "data-analyst": INTENT_ANALYSIS,
+    "performance-profiler": INTENT_ANALYSIS,
+    "root-cause-analyst": INTENT_ANALYSIS,
+    "t0-researcher": INTENT_ANALYSIS,
+    "backend-developer": INTENT_IMPLEMENTATION,
+    "api-developer": INTENT_IMPLEMENTATION,
+    "frontend-developer": INTENT_IMPLEMENTATION,
+    "python-optimizer": INTENT_IMPLEMENTATION,
+    "supabase-expert": INTENT_IMPLEMENTATION,
+    "monitoring-specialist": INTENT_IMPLEMENTATION,
+    "vnx-manager": INTENT_IMPLEMENTATION,
+    "excel-reporter": INTENT_IMPLEMENTATION,
+    "test-engineer": INTENT_TESTING,
+    "quality-engineer": INTENT_TESTING,
+    "security-engineer": INTENT_TESTING,
+    "validator": INTENT_TESTING,
+}
+
+
 class T0IntelligenceGatherer:
     """T0's intelligence query system with agent validation and pattern matching"""
 
@@ -245,7 +275,7 @@ class T0IntelligenceGatherer:
             preferred_tags=extracted_tags
         )
         tag_analysis = self.analyze_tags_for_task(extracted_tags, phase=gate, terminal=terminal)
-        prevention_rules = self.query_prevention_rules(task_description, extracted_tags)
+        prevention_rules = self.query_prevention_rules(task_description, extracted_tags, agent=agent)
 
         intelligence = {
             "agent_validated": True,
@@ -899,113 +929,142 @@ class T0IntelligenceGatherer:
             print(f"⚠️ Warning: Pattern query failed: {e}")
             return []
 
-    def query_prevention_rules(self, task_description: str, tags: Optional[List[str]] = None) -> List[Dict]:
-        """Generate prevention rules based on task context and known patterns"""
+    def query_prevention_rules(self, task_description: str, tags: Optional[List[str]] = None, agent: Optional[str] = None) -> List[Dict]:
+        """Generate prevention rules based on task context and known patterns.
+
+        Args:
+            task_description: The task text to match rules against.
+            tags: Optional tags for additional context.
+            agent: Optional agent role for intent-based filtering.
+                   Known roles are filtered to relevant rules only.
+                   Unknown roles or None pass all matching rules (backward compatible).
+        """
         rules = []
         desc_lower = task_description.lower()
 
         # Extract keywords to understand task context
         keywords = self.extract_keywords(task_description)
 
-        # Rule 1: SSE/Streaming related warnings
+        # Resolve intent from agent role (None = unknown = no filtering)
+        intent = ROLE_TO_INTENT.get(agent)
+
+        # Rule 1: SSE/Streaming related warnings (all intents)
         if any(kw in desc_lower for kw in ['sse', 'streaming', 'server-sent', 'events']):
             rules.append({
                 'rule': 'SSE Pipeline Memory Management',
                 'warning': 'Ensure proper cleanup of SSE connections to prevent memory leaks',
                 'recommendation': 'Implement connection timeout handlers and cleanup in finally blocks',
                 'confidence': 0.9,
-                'pattern_refs': ['test_sse_performance', 'test_progressive_sse']
+                'pattern_refs': ['test_sse_performance', 'test_progressive_sse'],
+                '_intents': _ALL_INTENTS,
             })
 
-        # Rule 2: Browser/Crawler warnings
+        # Rule 2: Browser/Crawler warnings (all intents)
         if any(kw in desc_lower for kw in ['browser', 'crawler', 'playwright', 'chromium']):
             rules.append({
                 'rule': 'Browser Process Cleanup',
                 'warning': 'Always kill Chromium processes after crawler operations to prevent memory accumulation',
                 'recommendation': 'Use browser_pool.py and chromium_killer.py for proper cleanup',
                 'confidence': 0.95,
-                'pattern_refs': ['browser_pool_validation', 'chromium_memory_optimization']
+                'pattern_refs': ['browser_pool_validation', 'chromium_memory_optimization'],
+                '_intents': _ALL_INTENTS,
             })
 
-        # Rule 3: Authentication/Security warnings
+        # Rule 3: Authentication/Security warnings (implementation only)
         if any(kw in desc_lower for kw in ['auth', 'login', 'security', 'jwt', 'token']):
             rules.append({
                 'rule': 'Authentication Security',
                 'warning': 'Implement proper JWT validation and secure token storage',
                 'recommendation': 'Use environment variables for secrets, validate JWT expiry',
                 'confidence': 0.85,
-                'pattern_refs': ['auth_middleware', 'jwt_validation']
+                'pattern_refs': ['auth_middleware', 'jwt_validation'],
+                '_intents': {INTENT_IMPLEMENTATION},
             })
 
-        # Rule 4: Database/Storage warnings
+        # Rule 4: Database/Storage warnings (implementation + testing)
         if any(kw in desc_lower for kw in ['database', 'storage', 'query', 'supabase', 'sql']):
             rules.append({
                 'rule': 'Database Performance',
                 'warning': 'Avoid N+1 queries and ensure proper indexing for performance',
                 'recommendation': 'Use batch operations and connection pooling, target p95 <50ms',
                 'confidence': 0.8,
-                'pattern_refs': ['storage_optimizer', 'query_performance']
+                'pattern_refs': ['storage_optimizer', 'query_performance'],
+                '_intents': {INTENT_IMPLEMENTATION, INTENT_TESTING},
             })
 
-        # Rule 5: Testing related warnings
+        # Rule 5: Testing related warnings (testing only)
         if any(kw in desc_lower for kw in ['test', 'validate', 'qa', 'coverage']):
             rules.append({
                 'rule': 'Test Coverage Requirements',
                 'warning': 'Ensure ≥80% unit test coverage and ≥70% integration test coverage',
                 'recommendation': 'Include edge cases, error scenarios, and performance tests',
                 'confidence': 0.75,
-                'pattern_refs': ['test_coverage_validation', 'test_edge_cases']
+                'pattern_refs': ['test_coverage_validation', 'test_edge_cases'],
+                '_intents': {INTENT_TESTING},
             })
 
-        # Rule 6: Production deployment warnings
+        # Rule 6: Production deployment warnings (implementation + testing)
         if any(kw in desc_lower for kw in ['production', 'deploy', 'release', 'live']):
             rules.append({
                 'rule': 'Production Safety',
                 'warning': 'Validate memory usage <500MB and p95 response times before production',
                 'recommendation': 'Run production validation tests and monitor resource usage',
                 'confidence': 0.9,
-                'pattern_refs': ['production_validation', 'memory_monitoring']
+                'pattern_refs': ['production_validation', 'memory_monitoring'],
+                '_intents': {INTENT_IMPLEMENTATION, INTENT_TESTING},
             })
 
-        # Rule 7: SME/B2B specific warnings
+        # Rule 7: SME/B2B specific warnings (implementation + testing)
         if any(kw in desc_lower for kw in ['sme', 'b2b', 'business', 'enterprise']):
             rules.append({
                 'rule': 'SME B2B Requirements',
                 'warning': 'Ensure Dutch compliance with KvK/BTW validation and decimal formats',
                 'recommendation': 'Validate business numbers, use proper decimal formatting for Dutch market',
                 'confidence': 0.7,
-                'pattern_refs': ['dutch_compliance', 'b2b_validation']
+                'pattern_refs': ['dutch_compliance', 'b2b_validation'],
+                '_intents': {INTENT_IMPLEMENTATION, INTENT_TESTING},
             })
 
-        # Rule 8: Performance optimization warnings
+        # Rule 8: Performance optimization warnings (analysis + implementation)
         if any(kw in desc_lower for kw in ['optimize', 'performance', 'speed', 'bottleneck']):
             rules.append({
                 'rule': 'Performance Optimization',
                 'warning': 'Profile before optimizing - avoid premature optimization',
                 'recommendation': 'Use proper profiling tools, focus on critical path optimizations',
                 'confidence': 0.8,
-                'pattern_refs': ['performance_profiling', 'optimization_strategy']
+                'pattern_refs': ['performance_profiling', 'optimization_strategy'],
+                '_intents': {INTENT_ANALYSIS, INTENT_IMPLEMENTATION},
             })
 
-        # Rule 9: API development warnings
+        # Rule 9: API development warnings (implementation only)
         if any(kw in desc_lower for kw in ['api', 'endpoint', 'rest', 'graphql']):
             rules.append({
                 'rule': 'API Design Best Practices',
                 'warning': 'Implement proper error handling, rate limiting, and API versioning',
                 'recommendation': 'Use consistent response formats, implement proper status codes',
                 'confidence': 0.75,
-                'pattern_refs': ['api_design', 'error_handling']
+                'pattern_refs': ['api_design', 'error_handling'],
+                '_intents': {INTENT_IMPLEMENTATION},
             })
 
-        # Rule 10: Refactoring warnings
+        # Rule 10: Refactoring warnings (implementation only)
         if any(kw in desc_lower for kw in ['refactor', 'cleanup', 'technical debt', 'improve']):
             rules.append({
                 'rule': 'Refactoring Safety',
                 'warning': 'Ensure comprehensive tests exist before major refactoring',
                 'recommendation': 'Create a refactoring plan, preserve functionality, use feature flags',
                 'confidence': 0.85,
-                'pattern_refs': ['safe_refactoring', 'feature_flags']
+                'pattern_refs': ['safe_refactoring', 'feature_flags'],
+                '_intents': {INTENT_IMPLEMENTATION},
             })
+
+        # Filter by intent (None = unknown role = pass all rules)
+        if intent is not None:
+            rules = [r for r in rules if intent in r.get('_intents', _ALL_INTENTS)]
+
+        # Strip internal field before returning
+        for r in rules:
+            r.pop('_intents', None)
 
         return rules
 
