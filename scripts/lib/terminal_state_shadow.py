@@ -148,6 +148,7 @@ def _gc_expired_leases(terminals: Dict[str, Any]) -> int:
             record["claimed_by"] = None
             record["claimed_at"] = None
             record["lease_expires_at"] = None
+            record["status"] = "idle"
             cleaned += 1
     return cleaned
 
