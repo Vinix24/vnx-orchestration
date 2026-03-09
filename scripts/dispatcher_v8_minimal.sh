@@ -1033,6 +1033,25 @@ $receipt_footer"
         return 1
     fi
 
+    # Resolve worktree path for this terminal (falls back to PROJECT_ROOT)
+    local worktree_path
+    worktree_path=$(python3 "$VNX_DIR/scripts/terminal_state_shadow.py" \
+        get-worktree "$terminal_id" 2>/dev/null || true)
+    worktree_path="${worktree_path:-$PROJECT_ROOT}"
+
+    # Inject Working-Directory header into prompt if using a worktree
+    if [ "$worktree_path" != "$PROJECT_ROOT" ] && [ -n "$worktree_path" ]; then
+        complete_prompt="Working-Directory: ${worktree_path}
+${complete_prompt}"
+        log "V8 WORKTREE: terminal=$terminal_id path=$worktree_path"
+
+        # cd terminal to worktree before dispatching skill
+        if ! tmux_send_best_effort "$target_pane" "cd '${worktree_path}'" Enter; then
+            log "V8 WARNING: Failed to cd to worktree (non-fatal)"
+        fi
+        sleep 0.3
+    fi
+
     # V8 CORE: Hybrid dispatch - skill via send-keys, instruction via paste-buffer
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
 

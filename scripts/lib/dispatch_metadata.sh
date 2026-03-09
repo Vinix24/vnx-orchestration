@@ -134,3 +134,8 @@ vnx_dispatch_extract_requires_provider() {
                | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
     echo "${provider:-}"
 }
+
+vnx_dispatch_extract_working_directory() {
+    local file="$1"
+    sed -n 's/^Working-Directory:[[:space:]]*//p' "$file" | head -1
+}

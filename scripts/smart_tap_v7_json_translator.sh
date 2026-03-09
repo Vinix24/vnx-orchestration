@@ -399,9 +399,19 @@ save_to_queue() {
         return 1
     fi
     
-    # Generate unique filename
-    local dispatch_id=$(generate_dispatch_id)
-    local filename="${dispatch_id}-${track}.md"  # Always save as .md (Markdown)
+    # Extract Dispatch-ID from block content (preserve T0's original ID)
+    local dispatch_id=""
+    if is_json "$block"; then
+        dispatch_id=$(echo "$block" | grep -o '"dispatch_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+    else
+        dispatch_id=$(echo "$processed_block" | sed -n 's/^Dispatch-ID:[[:space:]]*//Ip' | tr -d ' ' | head -1)
+    fi
+    # Fallback to generated ID only if block has no Dispatch-ID
+    if [ -z "$dispatch_id" ]; then
+        dispatch_id=$(generate_dispatch_id)
+        log "WARNING: No Dispatch-ID in block, generated fallback: $dispatch_id"
+    fi
+    local filename="${dispatch_id}.md"
     local filepath="$QUEUE_DIR/$filename"
     
     # Save the processed block (always Markdown format) to file

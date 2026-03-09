@@ -664,6 +664,28 @@ PJSON
 TSJSON
   log "Initial terminal state written (all idle)"
 
+  # ── Worktree initialization (if enabled) ────────────────────────────
+  # Auto-create per-terminal worktrees and register paths in terminal_state.json.
+  # Skip if VNX_WORKTREES=false is set (opt-out).
+  if [ "${VNX_WORKTREES:-true}" != "false" ]; then
+    local worktree_script="$scripts_dir/vnx_worktree_setup.sh"
+    if [ -f "$worktree_script" ]; then
+      log "Initializing per-terminal worktrees..."
+      bash "$worktree_script" init-terminals main 2>&1 | while read -r line; do log "WORKTREE: $line"; done
+
+      # Register worktree paths in terminal_state.json
+      for _wt_t in T1 T2 T3; do
+        local _wt_dir="${PROJECT_ROOT}-wt-${_wt_t}"
+        if [ -d "$_wt_dir" ]; then
+          python3 "$scripts_dir/terminal_state_shadow.py" \
+            set-worktree "$_wt_t" "$_wt_dir" 2>/dev/null || \
+            log "WARNING: Failed to register worktree path for $_wt_t"
+        fi
+      done
+      log "Worktree paths registered in terminal_state.json"
+    fi
+  fi
+
   # ── Conversation capture (pipe-pane) ───────────────────────────────────
   tmux pipe-pane -o -t "$T0" "cat >> '$state_dir/t0_conversation.log'"
   tmux pipe-pane -o -t "$T1" "cat >> '$state_dir/t1_conversation.log'"
