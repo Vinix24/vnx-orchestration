@@ -1046,43 +1046,68 @@ ${complete_prompt}"
         log "V8 WORKTREE: terminal=$terminal_id path=$worktree_path"
 
         # cd terminal to worktree before dispatching skill
-        if ! tmux_send_best_effort "$target_pane" "cd '${worktree_path}'" Enter; then
-            log "V8 WARNING: Failed to cd to worktree (non-fatal)"
+        # Skip for Codex CLI — it runs in the worktree directory already
+        if [[ "$provider" != "codex_cli" && "$provider" != "codex" ]]; then
+            if ! tmux_send_best_effort "$target_pane" "cd '${worktree_path}'" Enter; then
+                log "V8 WARNING: Failed to cd to worktree (non-fatal)"
+            fi
+            sleep 0.3
         fi
-        sleep 0.3
     fi
 
     # V8 CORE: Hybrid dispatch - skill via send-keys, instruction via paste-buffer
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
 
-    # Step 1: Type skill command via send-keys (triggers skill activation)
-    # Use -l (literal) for providers that use $ prefix to prevent tmux key interpretation
-    if ! tmux_send_best_effort "$target_pane" -l "$skill_command"; then
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after skill send failure" "terminal=$terminal_id dispatch=$dispatch_id"
+    # Provider-aware dispatch: Codex CLI paste-buffer replaces typed input,
+    # so prepend skill command to buffer content instead of typing separately.
+    if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
+        # Codex: single paste-buffer with skill + instruction combined
+        if ! echo "${skill_command}${complete_prompt}" | tmux load-buffer -; then
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" "Failed to release claim after tmux load failure" "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            log "V8 ERROR: Failed to load prompt to tmux buffer"
+            return 1
         fi
-        log "V8 ERROR: Failed to send skill command to terminal $target_pane"
-        return 1
-    fi
 
-    # Allow CLI to render the skill command before pasting instruction
-    sleep 0.5
-
-    # Step 2: Load instruction into buffer and paste after typed skill command
-    if ! echo "$complete_prompt" | tmux load-buffer -; then
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after tmux load failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        if ! tmux paste-buffer -t "$target_pane"; then
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" "Failed to release claim after tmux paste failure" "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
+            return 1
         fi
-        log "V8 ERROR: Failed to load prompt to tmux buffer"
-        return 1
-    fi
-
-    if ! tmux paste-buffer -t "$target_pane"; then
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after tmux paste failure" "terminal=$terminal_id dispatch=$dispatch_id"
+    else
+        # Claude Code / others: type skill via send-keys, then paste instruction
+        # Step 1: Type skill command via send-keys (triggers skill activation)
+        # Use -l (literal) for providers that use $ prefix to prevent tmux key interpretation
+        if ! tmux_send_best_effort "$target_pane" -l "$skill_command"; then
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" "Failed to release claim after skill send failure" "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            log "V8 ERROR: Failed to send skill command to terminal $target_pane"
+            return 1
         fi
-        log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-        return 1
+
+        # Allow CLI to render the skill command before pasting instruction
+        sleep 0.5
+
+        # Step 2: Load instruction into buffer and paste after typed skill command
+        if ! echo "$complete_prompt" | tmux load-buffer -; then
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" "Failed to release claim after tmux load failure" "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            log "V8 ERROR: Failed to load prompt to tmux buffer"
+            return 1
+        fi
+
+        if ! tmux paste-buffer -t "$target_pane"; then
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" "Failed to release claim after tmux paste failure" "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
+            return 1
+        fi
     fi
 
     # Add delay before Enter to ensure content is fully pasted and rendered
