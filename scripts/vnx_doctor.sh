@@ -20,6 +20,8 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/archived*' \
     --glob '!**/archive*' \
     --glob '!**/vnx_doctor.sh' \
+    --glob '!**/vnx_worktree_setup.sh' \
+    --glob '!**/vnx_worktree_merge_data.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' || true)
 else
@@ -32,6 +34,8 @@ else
     --exclude-dir='archived*' \
     --exclude-dir='archive*' \
     --exclude='vnx_doctor.sh' \
+    --exclude='vnx_worktree_setup.sh' \
+    --exclude='vnx_worktree_merge_data.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' || true)
 fi
