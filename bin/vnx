@@ -10,7 +10,11 @@ export VNX_EXECUTABLE="$VNX_BIN"
 # CRITICAL: Always compute PROJECT_ROOT from script location.
 # Never inherit from environment — prevents cross-project contamination
 # (e.g. SEOcrawler PROJECT_ROOT leaking into marketing-magic-circle).
+# Preserve VNX_DATA_DIR if explicitly set (worktree isolation)
+_VNX_SAVED_DATA_DIR="${VNX_DATA_DIR:-}"
 unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR
+[ -n "$_VNX_SAVED_DATA_DIR" ] && export VNX_DATA_DIR="$_VNX_SAVED_DATA_DIR"
+unset _VNX_SAVED_DATA_DIR
 
 if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_paths.sh" ]; then
   # shellcheck source=/dev/null
@@ -40,6 +44,14 @@ else
     export VNX_SKILLS_DIR="${VNX_SKILLS_DIR:-$VNX_HOME_DEFAULT/skills}"
   fi
 fi
+
+# Worktree env override: if CWD has .vnx-data/.env_override, source it
+_vnx_cwd_override="$(pwd)/.vnx-data/.env_override"
+if [ -f "$_vnx_cwd_override" ]; then
+  # shellcheck source=/dev/null
+  source "$_vnx_cwd_override"
+fi
+unset _vnx_cwd_override
 
 if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_marked_blocks.sh" ]; then
   # shellcheck source=/dev/null
@@ -419,6 +431,7 @@ cmd_start() {
   fi
   local t1_provider="${VNX_T1_PROVIDER:-claude_code}"
   local t2_provider="${VNX_T2_PROVIDER:-claude_code}"
+  local t3_provider="${VNX_T3_PROVIDER:-claude_code}"
   local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-flash}"
   local codex_model="${VNX_CODEX_MODEL:-gpt-5.1-codex-mini}"
   local t0_flags="${VNX_T0_FLAGS:-}"
@@ -493,11 +506,11 @@ cmd_start() {
   "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
   "T1": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
   "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" },
+  "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" },
   "tracks": {
     "A": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
     "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-    "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" }
+    "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" }
   }
 }
 PJSON
@@ -635,11 +648,11 @@ TSJSON
   "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
   "T1": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
   "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" },
+  "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" },
   "tracks": {
     "A": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
     "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-    "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "claude_code" }
+    "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" }
   }
 }
 PJSON
@@ -855,8 +868,8 @@ RESOLVER
   local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
   local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
 
-  # Provider-aware launch commands for T1 and T2
-  local t1_cmd t2_cmd
+  # Provider-aware launch commands for T1, T2, and T3
+  local t1_cmd t2_cmd t3_cmd
   case "$t1_provider" in
     codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
     gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
@@ -867,11 +880,16 @@ RESOLVER
     gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
     *) t2_cmd="claude --model sonnet $t0_flags" ;;
   esac
+  case "$t3_provider" in
+    codex_cli|codex) t3_cmd="codex -m $codex_model" ;;
+    gemini_cli|gemini) t3_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *) t3_cmd="claude --model opus $t0_flags" ;;
+  esac
 
   tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus $t0_flags" C-m
   tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
   tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus $t0_flags" C-m
+  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_cmd" C-m
 
   # ── Grid balancing (equal pane sizes) ────────────────────────────────
   local win_h half
@@ -887,7 +905,7 @@ RESOLVER
   echo ""
   echo "VNX SESSION LAUNCHED"
   echo ""
-  local t1_label="Claude Sonnet" t2_label="Claude Sonnet"
+  local t1_label="Claude Sonnet" t2_label="Claude Sonnet" t3_label="Claude Opus"
   case "$t1_provider" in
     codex_cli|codex) t1_label="Codex CLI" ;;
     gemini_cli|gemini) t1_label="Gemini CLI" ;;
@@ -896,8 +914,12 @@ RESOLVER
     codex_cli|codex) t2_label="Codex CLI" ;;
     gemini_cli|gemini) t2_label="Gemini CLI" ;;
   esac
+  case "$t3_provider" in
+    codex_cli|codex) t3_label="Codex CLI" ;;
+    gemini_cli|gemini) t3_label="Gemini CLI" ;;
+  esac
   [ -n "$profile_name" ] && echo "Profile: $profile_name"
-  echo "Layout: 2x2 grid  |  T0: Opus  |  T1: $t1_label  |  T2: $t2_label  |  T3: Opus"
+  echo "Layout: 2x2 grid  |  T0: Opus  |  T1: $t1_label  |  T2: $t2_label  |  T3: $t3_label"
   echo ""
   echo "Controls:"
   echo "  Ctrl+G ......... Open dispatch queue popup"
