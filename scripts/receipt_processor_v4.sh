@@ -39,6 +39,11 @@ FLOOD_LOCKFILE="$STATE_DIR/receipt_flood.lock"
 RECEIPT_FILE="$STATE_DIR/t0_receipts.ndjson"
 PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 
+# Outbox directories for guaranteed receipt delivery (outbox pattern)
+RECEIPTS_PENDING_DIR="${VNX_DATA_DIR}/receipts/pending"
+RECEIPTS_PROCESSED_DIR="${VNX_DATA_DIR}/receipts/processed"
+RECEIPT_RETRY_INTERVAL="${VNX_RECEIPT_RETRY_INTERVAL:-10}"  # seconds between pending retry sweeps
+
 # Cross-platform SHA-256 helper (Linux: sha256sum, macOS: shasum -a 256)
 if command -v sha256sum >/dev/null 2>&1; then
     _sha256() { sha256sum "$1" | cut -d' ' -f1; }
@@ -656,37 +661,11 @@ update_track_progress() {
     fi
 }
 
-# Sub-helper: Build model performance line from t0_session_brief.json
-_build_model_line() {
-    local brief_file="$STATE_DIR/t0_session_brief.json"
-    [ ! -f "$brief_file" ] && return 0
-
-    local model_parts=""
-    model_parts=$(python3 -c "
-import json, sys
-try:
-    with open('$brief_file') as f:
-        data = json.load(f)
-    perf = data.get('model_performance', {})
-    parts = []
-    for model, stats in sorted(perf.items()):
-        avg_k = round(stats.get('avg_tokens_per_session', 0) / 1000)
-        err = round(stats.get('error_recovery_rate', 0) * 100)
-        cache = round(stats.get('cache_hit_ratio', 0) * 100)
-        parts.append(f'{model} avg={avg_k}K tok | err={err}% | cache={cache}%')
-    if parts:
-        print(' | '.join(parts))
-except Exception:
-    pass
-" 2>/dev/null)
-
-    [ -z "$model_parts" ] && return 0
-    echo "
-📈 MODEL: $model_parts"
-}
-
 # Sub-helper: Build state line from t0_brief.json
+# Accepts optional override_terminal arg — the terminal sending the receipt
+# is by definition done working, so override its status to "idle".
 _build_state_line() {
+    local override_terminal="${1:-}"
     local brief_file="$STATE_DIR/t0_brief.json"
     [ ! -f "$brief_file" ] && return 0
 
@@ -696,6 +675,12 @@ _build_state_line() {
     t3_st=$(jq -r '.terminals.T3.status // "idle"' "$brief_file" 2>/dev/null)
     q_pending=$(jq -r '.queues.pending // 0' "$brief_file" 2>/dev/null)
     q_active=$(jq -r '.queues.active // 0' "$brief_file" 2>/dev/null)
+
+    # Override: terminal that sends receipt is idle
+    case "$override_terminal" in
+        T1) t1_st="idle" ;; T2) t2_st="idle" ;; T3) t3_st="idle" ;;
+    esac
+
     echo "
 📊 STATE: T1=$t1_st T2=$t2_st T3=$t3_st | Queue: pending=$q_pending active=$q_active"
 }
@@ -718,6 +703,26 @@ _build_quality_line() {
     qs_new_count=$(jq -r '.new_items // 0' "$quality_sidecar" 2>/dev/null)
     qs_new_ids=$(jq -r '.new_item_ids // [] | join(", ")' "$quality_sidecar" 2>/dev/null)
 
+    # Build OI delta: resolved count and total open from open_items.json
+    local oi_delta=""
+    local oi_file="$STATE_DIR/open_items.json"
+    if [ -f "$oi_file" ]; then
+        oi_delta=$(python3 -c "
+import json, sys
+try:
+    with open('$oi_file') as f:
+        items = json.load(f)
+    if not isinstance(items, list):
+        items = items.get('items', [])
+    total_open = sum(1 for i in items if i.get('status', '') not in ('done', 'resolved', 'closed'))
+    resolved = sum(1 for i in items if i.get('status', '') in ('done', 'resolved', 'closed'))
+    new_count = ${qs_new_count:-0}
+    print(f' | OI: +{new_count} new, {resolved} resolved ({total_open} open)')
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+
     if [ "$qs_blocker" -gt 0 ] || [ "$qs_warn" -gt 0 ] 2>/dev/null; then
         local qs_parts=""
         [ "$qs_blocker" -gt 0 ] && qs_parts="${qs_blocker} blocking"
@@ -734,20 +739,15 @@ _build_quality_line() {
             qs_findings=$(jq -r '.findings[:5][] | "  → [\(.severity)] \(.file)\(if .symbol then ":\(.symbol)" else "" end) — \(.message)"' "$quality_sidecar" 2>/dev/null)
         fi
 
-        if [ "$qs_new_count" -gt 0 ] && [ -n "$qs_new_ids" ]; then
-            echo "
-⚠️ QUALITY [${qs_decision}|risk:${qs_risk}]: ${qs_parts} → ${qs_new_count} new OIs (${qs_new_ids})"
-        else
-            echo "
-⚠️ QUALITY [${qs_decision}|risk:${qs_risk}]: ${qs_parts} (all deduplicated)"
-        fi
+        echo "
+⚠️ QUALITY [${qs_decision}|risk:${qs_risk}]: ${qs_parts}${oi_delta}"
         # Append finding details if available
         if [ -n "$qs_findings" ]; then
             echo "$qs_findings"
         fi
     else
         echo "
-✅ QUALITY [${qs_decision}|risk:${qs_risk}]: clean"
+✅ QUALITY [${qs_decision}|risk:${qs_risk}]: clean${oi_delta}"
     fi
 }
 
@@ -768,9 +768,10 @@ check_provenance_quality() {
     fi
 }
 
-# Section F: Build enriched receipt message and deliver to T0 via tmux.
-# Reads _rf_* variables.
-send_receipt_to_t0() {
+# Section F (inner): Build enriched receipt message and paste to T0 tmux pane.
+# Returns 0 on success, 1 if pane unreachable or paste failed.
+# Reads _rf_* variables set by extract_receipt_fields().
+_deliver_receipt_to_t0_pane() {
     local receipt_json="$1"
     local terminal="$2"
 
@@ -791,19 +792,26 @@ send_receipt_to_t0() {
         "blocked") next_action="Resolve blocker" ;;
     esac
 
-    local state_line=$(_build_state_line)
+    # Map status: use "done" instead of "success" in footer (NDJSON unchanged)
+    local footer_status="$_rf_status"
+    [ "$footer_status" = "success" ] && footer_status="done"
+
+    local state_line=$(_build_state_line "$terminal")
     local quality_line=$(_build_quality_line "$dispatch_id")
-    local model_line=$(_build_model_line)
+
+    # Git line: only show for DIRTY_HIGH (actionable); skip CLEAN and DIRTY_LOW
     local git_quality
     git_quality=$(check_provenance_quality "$receipt_json")
     local git_line=""
-    if [ "$git_quality" != "CLEAN" ]; then
+    if [ "$git_quality" = "DIRTY_HIGH" ]; then
         local git_ref
         git_ref=$(echo "$receipt_json" | jq -r '.provenance.git_ref // "?"' 2>/dev/null)
-        git_line=" | Git: ${git_quality} (ref:${git_ref:0:8})"
+        git_line="
+⚠️ Git: ${git_quality} (ref:${git_ref:0:8})"
     fi
 
-    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${_rf_status} | ID: ${dispatch_id} | Next: ${next_action} | Report: ${report_path}${quality_line}${state_line}${model_line}${git_line}"
+    local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${footer_status} | ID: ${dispatch_id} | Next: ${next_action}${quality_line}${state_line}${git_line}
+Report: ${report_path}"
     echo "$receipt_msg" | tmux load-buffer -
     if ! tmux paste-buffer -t "$t0_pane" 2>/dev/null; then
         log "ERROR" "Failed to paste receipt to T0 pane $t0_pane"
@@ -816,6 +824,55 @@ send_receipt_to_t0() {
     tmux send-keys -t "$t0_pane" Enter
 
     log "INFO" "Receipt delivered to T0 (pane: $t0_pane)"
+}
+
+# Section F: Outbox wrapper — write-first, then deliver.
+# Persists receipt to receipts/pending/ before attempting tmux delivery.
+# On success: moves file to receipts/processed/.
+# On failure: leaves file in receipts/pending/ for _retry_pending_receipts().
+send_receipt_to_t0() {
+    local receipt_json="$1"
+    local terminal="$2"
+
+    # Ensure outbox directories exist
+    mkdir -p "$RECEIPTS_PENDING_DIR" "$RECEIPTS_PROCESSED_DIR"
+
+    # Write-first: persist before any delivery attempt (guarantees no data loss)
+    local pending_file="$RECEIPTS_PENDING_DIR/$(date +%s)-${terminal}-$RANDOM.json"
+    printf '%s\n' "$receipt_json" > "$pending_file"
+
+    if _deliver_receipt_to_t0_pane "$receipt_json" "$terminal"; then
+        mv "$pending_file" "$RECEIPTS_PROCESSED_DIR/$(basename "$pending_file")"
+        return 0
+    else
+        log "WARN" "Receipt queued for retry: $(basename "$pending_file")"
+        return 1
+    fi
+}
+
+# Retry poller: attempt delivery of all receipts still in pending/.
+# Called periodically from _poll_new_reports() and once on startup.
+_retry_pending_receipts() {
+    local pending_files=()
+    while IFS= read -r -d '' f; do
+        pending_files+=("$f")
+    done < <(find "$RECEIPTS_PENDING_DIR" -name "*.json" -type f -print0 2>/dev/null)
+
+    [ ${#pending_files[@]} -eq 0 ] && return 0
+
+    log "INFO" "Retrying ${#pending_files[@]} pending receipt(s)..."
+    for f in "${pending_files[@]}"; do
+        local receipt_json
+        receipt_json=$(cat "$f")
+        local terminal
+        terminal=$(echo "$receipt_json" | jq -r '.terminal // "unknown"' 2>/dev/null)
+        # Re-extract _rf_* fields so _deliver_receipt_to_t0_pane() has the right context
+        extract_receipt_fields "$receipt_json" 2>/dev/null || true
+        if _deliver_receipt_to_t0_pane "$receipt_json" "$terminal"; then
+            mv "$f" "$RECEIPTS_PROCESSED_DIR/$(basename "$f")"
+            log "INFO" "Pending receipt delivered: $(basename "$f")"
+        fi
+    done
 }
 
 # ─── Main orchestrator ───────────────────────────────────────────────────────
@@ -874,6 +931,30 @@ process_single_report() {
 
     # C2. Move dispatch from active/ → completed/ on task finish (non-fatal)
     _move_dispatch_to_completed
+
+    # C3. Update dispatch_metadata outcome in quality DB (non-fatal)
+    if [ -n "$_rf_dispatch_id" ] && { [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] || [ "$_rf_event_type" = "task_timeout" ]; }; then
+        python3 -c "
+import sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, str(Path('$SCRIPTS_DIR') / 'lib'))
+from vnx_paths import ensure_env
+p = ensure_env()
+db = Path(p['VNX_STATE_DIR']) / 'quality_intelligence.db'
+if not db.exists(): sys.exit(0)
+conn = sqlite3.connect(str(db))
+conn.execute(
+    'UPDATE dispatch_metadata SET outcome_status=?, outcome_report_path=?, completed_at=? WHERE dispatch_id=? AND outcome_status IS NULL',
+    ('$_rf_status', '${report_path:-}', '$_rf_timestamp', '$_rf_dispatch_id')
+)
+conn.commit()
+conn.close()
+" 2>/dev/null || log "WARN" "Failed to update dispatch_metadata outcome (non-fatal)"
+
+        # C3b. Compute and store CQS (non-fatal)
+        python3 "$SCRIPTS_DIR/update_dispatch_cqs.py" --dispatch-id "$_rf_dispatch_id" 2>/dev/null \
+            || log "WARN" "Failed to update dispatch CQS (non-fatal)"
+    fi
 
     # D. Attach PR evidence on success (non-fatal)
     attach_pr_evidence "$receipt_json" "$report_path"
@@ -945,12 +1026,19 @@ process_pending_reports() {
 # (5+ GB observed). Polling at 5s is effectively free (<1ms per cycle) and
 # eliminates the entire class of process-lifecycle bugs.
 _poll_new_reports() {
-    log "INFO" "Using polling mode (${POLL_INTERVAL}s intervals)"
+    log "INFO" "Using polling mode (${POLL_INTERVAL}s intervals, receipt retry every ${RECEIPT_RETRY_INTERVAL}s)"
+    local _retry_cycles=$(( RECEIPT_RETRY_INTERVAL / POLL_INTERVAL ))
+    [ "$_retry_cycles" -lt 1 ] && _retry_cycles=1
+    local _cycle=0
     while true; do
         for report in "$UNIFIED_REPORTS"/*.md; do
             [ -f "$report" ] || continue
             should_process_report "$report" && process_single_report "$report"
         done
+        _cycle=$(( _cycle + 1 ))
+        if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
+            _retry_pending_receipts
+        fi
         sleep "$POLL_INTERVAL"
     done
 }
@@ -976,6 +1064,9 @@ monitor_new_reports() {
         fi
     done
     [ "$catchup_count" -gt 0 ] && log "INFO" "Startup catchup complete: $catchup_count reports processed"
+
+    # Startup: deliver any receipts that were pending when this process was last down
+    _retry_pending_receipts
 
     # Polling mode — simple, no external processes, no orphan risk.
     _poll_new_reports
