@@ -27,10 +27,6 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Dismiss marker: when user closes popup with Q, this file is touched.
-# Popup only auto-opens when new items arrive AFTER the dismiss timestamp.
-DISMISS_MARKER="$STATE_DIR/.queue_popup_dismissed"
-
 # Initialize
 mkdir -p "$QUEUE_DIR" "$PENDING_DIR" "$STATE_DIR"
 
@@ -130,27 +126,13 @@ show_enhanced_notification_async() {
         tmux rename-window -t "${project_session}:0" "VNX!(1)" 2>/dev/null || true
     fi
 
-    # 5. AUTO-OPEN POPUP
-    # Skip if user recently dismissed the popup (dismiss marker is newer than oldest queue item)
-    local dismissed=false
-    if [ -f "$DISMISS_MARKER" ]; then
-        local dismiss_ts oldest_queue_ts
-        dismiss_ts=$(stat -f%m "$DISMISS_MARKER" 2>/dev/null || stat -c%Y "$DISMISS_MARKER" 2>/dev/null || echo 0)
-        oldest_queue_ts=$(find "$QUEUE_DIR" -type f -name "*.md" -exec stat -f%m {} \; 2>/dev/null | sort -n | head -1 || echo 0)
-        # If dismiss is newer than all queue items, user already saw and dismissed these
-        if [ -n "$oldest_queue_ts" ] && [ "$dismiss_ts" -ge "$oldest_queue_ts" ]; then
-            dismissed=true
-        fi
-    fi
-
+    # 5. AUTO-OPEN POPUP (RESTORED FUNCTIONALITY)
     # Check if popup is already running to avoid duplicates
-    if [ "$dismissed" = true ]; then
-        echo "Popup dismissed by user, skipping auto-open (Ctrl+G to reopen)"
-    elif ! is_popup_running; then
+    if ! is_popup_running; then
         echo "Opening queue popup via tmux..."
         if [ -n "$project_session" ]; then
             echo "Creating VNX-Queue window in session: $project_session"
-            tmux new-window -t "$project_session" -n "VNX-Queue" "bash '$POPUP_SCRIPT'; touch '$DISMISS_MARKER'; tmux kill-window" 2>/dev/null || true
+            tmux new-window -t "$project_session" -n "VNX-Queue" "bash '$POPUP_SCRIPT'; tmux kill-window" 2>/dev/null || true
         else
             echo "No project tmux session found for $PROJECT_ROOT - cannot open popup"
         fi
@@ -168,8 +150,8 @@ echo -e "${BLUE}Watching for new dispatches...${NC}"
 echo "Press Ctrl+C to stop"
 echo ""
 
-# If queue already has items on watcher startup, raise popup — but only if not
-# previously dismissed by the user. This prevents popup spam on watcher restarts.
+# If queue already has items on watcher startup, raise popup immediately.
+# Wait briefly for tmux session to be fully registered (race condition at startup).
 if [ "$LAST_COUNT" -gt 0 ]; then
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}✓ $LAST_COUNT queued dispatch(es) on startup${NC}"
@@ -195,21 +177,10 @@ while true; do
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "${GREEN}✓ $NEW_FILES new dispatch(es) detected!${NC}"
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-        # Clear dismiss marker — genuinely new dispatch(es) arrived
-        rm -f "$DISMISS_MARKER"
-
+        
         # Show enhanced non-intrusive notification instead of auto-launching popup
         show_enhanced_notification_async "$NEW_FILES new dispatch(es) detected" "$NEW_FILES"
-
-        # Auto-accept: move queue files directly to pending when VNX_AUTO_ACCEPT=1
-        if [ "${VNX_AUTO_ACCEPT:-0}" = "1" ]; then
-            find "$QUEUE_DIR" -name "*.md" -type f | while read -r qfile; do
-                mv "$qfile" "$PENDING_DIR/$(basename "$qfile")"
-                log "Auto-accepted (VNX_AUTO_ACCEPT=1): $(basename "$qfile")"
-            done
-        fi
-
+        
         LAST_COUNT=$CURRENT_COUNT
     elif [ "$CURRENT_COUNT" -lt "$LAST_COUNT" ]; then
         # Files were processed/removed
