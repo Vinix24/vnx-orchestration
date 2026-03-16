@@ -14,6 +14,8 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from terminal_state_shadow import (  # noqa: E402
     TerminalUpdate,
     default_lease_expires,
+    get_worktree_path,
+    set_worktree_path,
     update_terminal_state,
 )
 from vnx_paths import ensure_env  # noqa: E402
@@ -29,11 +31,45 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--last-activity", default=None, help="Last activity timestamp (ISO8601)")
     parser.add_argument("--lease-seconds", type=int, default=None, help="Auto-generate lease_expires_at from now")
     parser.add_argument("--clear-claim", action="store_true", help="Clear claim fields")
+    parser.add_argument("--worktree-path", default=None, help="Worktree directory path for this terminal")
     parser.add_argument("--state-dir", default=None, help="Override state directory (defaults to VNX_STATE_DIR)")
     return parser
 
 
 def main() -> int:
+    # Support subcommand mode: get-worktree <terminal_id>
+    if len(sys.argv) >= 2 and sys.argv[1] == "get-worktree":
+        terminal_id = sys.argv[2] if len(sys.argv) > 2 else None
+        if not terminal_id:
+            print("Usage: terminal_state_shadow.py get-worktree <terminal_id>", file=sys.stderr)
+            return 1
+        paths = ensure_env()
+        state_dir_flag = None
+        if "--state-dir" in sys.argv:
+            idx = sys.argv.index("--state-dir")
+            state_dir_flag = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+        state_dir = state_dir_flag or paths["VNX_STATE_DIR"]
+        wt_path = get_worktree_path(state_dir, terminal_id)
+        if wt_path:
+            print(wt_path)
+        return 0
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "set-worktree":
+        terminal_id = sys.argv[2] if len(sys.argv) > 2 else None
+        wt_path = sys.argv[3] if len(sys.argv) > 3 else None
+        if not terminal_id or not wt_path:
+            print("Usage: terminal_state_shadow.py set-worktree <terminal_id> <path>", file=sys.stderr)
+            return 1
+        paths = ensure_env()
+        state_dir_flag = None
+        if "--state-dir" in sys.argv:
+            idx = sys.argv.index("--state-dir")
+            state_dir_flag = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+        state_dir = state_dir_flag or paths["VNX_STATE_DIR"]
+        set_worktree_path(state_dir, terminal_id, wt_path)
+        print(json.dumps({"terminal_id": terminal_id, "worktree_path": wt_path}))
+        return 0
+
     args = _build_parser().parse_args()
     paths = ensure_env()
     state_dir = args.state_dir or paths["VNX_STATE_DIR"]
@@ -50,6 +86,7 @@ def main() -> int:
         lease_expires_at=lease_expires_at,
         last_activity=args.last_activity,
         clear_claim=args.clear_claim,
+        worktree_path=args.worktree_path,
     )
 
     record = update_terminal_state(state_dir=state_dir, update=update)
