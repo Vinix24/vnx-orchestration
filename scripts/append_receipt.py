@@ -301,7 +301,7 @@ def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
     git_common_dir = _safe_subprocess(["git", "rev-parse", "--git-common-dir"], cwd=git_root) or ""
     in_worktree = bool(git_dir and git_common_dir and git_dir != git_common_dir)
 
-    return {
+    provenance = {
         "git_ref": git_ref,
         "branch": branch,
         "is_dirty": is_dirty,
@@ -311,6 +311,9 @@ def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
         "captured_at": captured_at,
         "captured_by": "append_receipt",
     }
+    if in_worktree:
+        provenance["worktree_path"] = str(git_root)
+    return provenance
 
 
 def _resolve_session_id(receipt: Dict[str, Any]) -> str:

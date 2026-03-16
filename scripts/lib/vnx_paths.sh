@@ -33,8 +33,15 @@ export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
 # If VNX_HOME is under the legacy hidden vnx dir layout, trust derived project root.
 if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
   if [ -n "${PROJECT_ROOT:-}" ] && [ "$PROJECT_ROOT" != "$PROJECT_ROOT_DEFAULT" ]; then
-    # Reset dependent vars so defaults are recomputed consistently.
-    unset VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
+    # Preserve explicit VNX_DATA_DIR override (worktree isolation)
+    _vnx_saved_data_dir="${VNX_DATA_DIR:-}"
+    unset VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
+    if [ -n "$_vnx_saved_data_dir" ]; then
+      VNX_DATA_DIR="$_vnx_saved_data_dir"
+    else
+      unset VNX_DATA_DIR
+    fi
+    unset _vnx_saved_data_dir
   fi
   export PROJECT_ROOT="$PROJECT_ROOT_DEFAULT"
 else

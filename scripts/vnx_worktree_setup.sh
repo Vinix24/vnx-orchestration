@@ -74,6 +74,54 @@ cmd_remove() {
     fi
 }
 
+cmd_init_terminals() {
+    local base_ref="${1:-main}"
+    for t in T1 T2 T3; do
+        local track
+        case "$t" in T1) track="A";; T2) track="B";; T3) track="C";; esac
+        local wt_dir="${PROJECT_ROOT}-wt-${t}"
+        local branch="track/${track}"
+
+        if [ -d "$wt_dir" ]; then
+            echo "[$t] Worktree exists: $wt_dir ($(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown))"
+        else
+            git -C "$PROJECT_ROOT" worktree add -b "$branch" "$wt_dir" "$base_ref" 2>/dev/null || \
+            git -C "$PROJECT_ROOT" worktree add "$wt_dir" "$branch" 2>/dev/null || {
+                echo "[$t] ERROR: Failed to create worktree (branch $branch may already exist)"
+                continue
+            }
+            # Symlink .venv (shared across all worktrees)
+            ln -sf "${PROJECT_ROOT}/.venv" "$wt_dir/.venv"
+            # Symlink .claude/vnx-system (orchestration is shared, read-only for workers)
+            mkdir -p "$wt_dir/.claude" 2>/dev/null || true
+            ln -sf "${PROJECT_ROOT}/.claude/vnx-system" "$wt_dir/.claude/vnx-system" 2>/dev/null || true
+            # Symlink .vnx-data (runtime data is shared)
+            ln -sf "${PROJECT_ROOT}/.vnx-data" "$wt_dir/.vnx-data" 2>/dev/null || true
+            echo "[$t] Created: $wt_dir (branch: $branch)"
+        fi
+    done
+}
+
+cmd_sync() {
+    local sync_errors=0
+    for t in T1 T2 T3; do
+        local wt_dir="${PROJECT_ROOT}-wt-${t}"
+        [ -d "$wt_dir" ] || continue
+        local branch
+        branch="$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+        echo "[$t] Syncing $branch with main..."
+        if git -C "$wt_dir" fetch origin main 2>/dev/null && \
+           git -C "$wt_dir" rebase origin/main 2>/dev/null; then
+            echo "[$t] OK — rebased on origin/main"
+        else
+            echo "[$t] CONFLICT — manual resolve needed in $wt_dir"
+            git -C "$wt_dir" rebase --abort 2>/dev/null || true
+            sync_errors=$((sync_errors + 1))
+        fi
+    done
+    [ "$sync_errors" -eq 0 ] || echo "WARNING: $sync_errors worktree(s) had conflicts"
+}
+
 cmd_list() {
     echo "VNX-managed worktrees:"
     git -C "$PROJECT_ROOT" worktree list | grep -- "-wt-" || echo "  (none)"
@@ -82,13 +130,17 @@ cmd_list() {
 case "${1:-help}" in
     create) shift; cmd_create "$@" ;;
     remove) shift; cmd_remove "$@" ;;
+    init-terminals) shift; cmd_init_terminals "$@" ;;
+    sync)   cmd_sync ;;
     list)   cmd_list ;;
     *)
-        echo "Usage: vnx_worktree_setup.sh {create|remove|list} [args...]"
+        echo "Usage: vnx_worktree_setup.sh {create|remove|init-terminals|sync|list} [args...]"
         echo ""
-        echo "  create <name> [base_ref]  Create worktree at <project>-wt-<name>"
-        echo "  remove <name>             Remove worktree (fails if dirty)"
-        echo "  list                      Show VNX-managed worktrees"
+        echo "  create <name> [base_ref]     Create worktree at <project>-wt-<name>"
+        echo "  remove <name>                Remove worktree (fails if dirty)"
+        echo "  init-terminals [base_ref]    Create T1/T2/T3 worktrees with track branches"
+        echo "  sync                         Rebase all terminal worktrees on origin/main"
+        echo "  list                         Show VNX-managed worktrees"
         exit 1
         ;;
 esac

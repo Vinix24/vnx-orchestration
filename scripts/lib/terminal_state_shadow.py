@@ -31,6 +31,7 @@ class TerminalUpdate:
     lease_expires_at: Optional[str] = None
     last_activity: Optional[str] = None
     clear_claim: bool = False
+    worktree_path: Optional[str] = None
 
 
 def _now_iso() -> str:
@@ -71,7 +72,7 @@ def validate_terminal_record(record: Dict[str, Any]) -> None:
     if record["version"] < 1:
         raise TerminalStateValidationError("version must be >= 1")
 
-    optional_fields = ["claimed_by", "claimed_at", "lease_expires_at", "last_activity"]
+    optional_fields = ["claimed_by", "claimed_at", "lease_expires_at", "last_activity", "worktree_path"]
     for field in optional_fields:
         if field in record and record[field] is not None and not isinstance(record[field], str):
             raise TerminalStateValidationError(f"{field} must be string or null")
@@ -153,6 +154,32 @@ def _gc_expired_leases(terminals: Dict[str, Any]) -> int:
     return cleaned
 
 
+def get_worktree_path(state_dir: str | Path, terminal_id: str) -> Optional[str]:
+    """Return the worktree_path for a terminal, or None if not set."""
+    state_root = Path(state_dir)
+    state_file = state_root / TERMINAL_STATE_FILENAME
+    document = _load_document(state_file)
+    record = document.get("terminals", {}).get(terminal_id, {})
+    return record.get("worktree_path")
+
+
+def set_worktree_path(state_dir: str | Path, terminal_id: str, path: str) -> None:
+    """Set the worktree_path for a terminal (creates record if needed)."""
+    update = TerminalUpdate(
+        terminal_id=terminal_id,
+        status="idle",
+        worktree_path=path,
+    )
+    # Preserve existing status
+    state_root = Path(state_dir)
+    state_file = state_root / TERMINAL_STATE_FILENAME
+    document = _load_document(state_file)
+    existing = document.get("terminals", {}).get(terminal_id, {})
+    if existing.get("status"):
+        update.status = existing["status"]
+    update_terminal_state(state_dir, update)
+
+
 def update_terminal_state(state_dir: str | Path, update: TerminalUpdate) -> Dict[str, Any]:
     if not update.terminal_id:
         raise TerminalStateValidationError("terminal_id is required")
@@ -195,6 +222,10 @@ def update_terminal_state(state_dir: str | Path, update: TerminalUpdate) -> Dict
         if update.last_activity is not None:
             last_activity = update.last_activity or None
 
+        worktree_path = existing.get("worktree_path")
+        if update.worktree_path is not None:
+            worktree_path = update.worktree_path or None
+
         record = {
             "terminal_id": update.terminal_id,
             "status": update.status,
@@ -204,6 +235,8 @@ def update_terminal_state(state_dir: str | Path, update: TerminalUpdate) -> Dict
             "last_activity": last_activity or _now_iso(),
             "version": version,
         }
+        if worktree_path:
+            record["worktree_path"] = worktree_path
         validate_terminal_record(record)
         terminals[update.terminal_id] = record
         document["schema_version"] = SCHEMA_VERSION

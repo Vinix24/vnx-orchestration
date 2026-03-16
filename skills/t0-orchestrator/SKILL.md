@@ -49,6 +49,17 @@ Run this loop each orchestration cycle.
 - Require evidence and scope alignment.
 - Reject or follow up on missing deliverables.
 
+1b. Verify worker claims against code.
+- NEVER close open items based solely on receipt status or worker self-reporting.
+- Spot-check at least 3 specific claims per receipt using Grep/Read tools.
+- Verification checklist:
+  a. Claimed file was actually modified: `git log --oneline -1 -- <file>`
+  b. Specific fix is present in code: Grep for the change
+  c. Old problem pattern no longer exists: Grep for old pattern = 0 matches
+- If verification fails on ANY claim: reject receipt, do not close items, re-dispatch with specific failure evidence.
+- Test pass counts are acceptable evidence (automated, not self-reported).
+- Code change descriptions are NOT acceptable evidence without code verification.
+
 2. Open-items governance.
 - Always check open items before PR completion.
 - Close only evidence-backed items.
@@ -105,6 +116,15 @@ bash .claude/skills/t0-orchestrator/scripts/deliverable_review.sh blockers PR-X
 ```
 
 ### 6.2 Resolve
+
+Before closing any item, VERIFY the fix against actual code:
+```bash
+# Example verification before closing
+grep -r "old_pattern" src/        # Must return 0 matches
+grep -r "new_pattern" src/        # Must return expected matches
+git log --oneline -1 -- <file>    # Must show recent commit
+```
+Only then proceed to close:
 
 ```bash
 python .claude/vnx-system/scripts/open_items_manager.py close OI-XXX --reason "evidence: ..."
