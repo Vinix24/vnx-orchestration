@@ -20,6 +20,8 @@ PENDING_DIR="$VNX_DISPATCH_DIR/pending"
 SCRIPTS_DIR="$VNX_DIR/scripts"
 STATE_DIR="$VNX_STATE_DIR"
 POPUP_SCRIPT="$SCRIPTS_DIR/queue_ui_enhanced.sh"
+STALE_PENDING_MINUTES="${VNX_STALE_PENDING_MINUTES:-3}"   # minutes before a pending dispatch is re-offered
+CATCHUP_INTERVAL_CYCLES="${VNX_CATCHUP_INTERVAL_CYCLES:-150}"  # poll cycles between catchup sweeps (~5min at 2s/cycle)
 
 # Colors
 GREEN='\033[0;32m'
@@ -142,6 +144,28 @@ show_enhanced_notification_async() {
     fi
 }
 
+# Scan pending/ for dispatches older than STALE_PENDING_MINUTES and touch them.
+# This resets mtime so the dispatcher sees them as new entries (seen-key is dispatch-id:mtime).
+# Prevents dispatches from getting permanently stuck when a terminal was blocked or the
+# dispatcher missed the file on first scan.
+_stale_pending_catchup() {
+    local now
+    now=$(date +%s)
+    local stale_threshold=$(( STALE_PENDING_MINUTES * 60 ))
+    local found=0
+    while IFS= read -r -d '' f; do
+        local mtime
+        mtime=$(stat -f%m "$f" 2>/dev/null || stat -c%Y "$f" 2>/dev/null || echo 0)
+        local age_secs=$(( now - mtime ))
+        if [ "$age_secs" -ge "$stale_threshold" ]; then
+            touch "$f"
+            echo "[catchup] Re-offered stale pending dispatch: $(basename "$f") (age: $((age_secs/60))m)"
+            found=$(( found + 1 ))
+        fi
+    done < <(find "$PENDING_DIR" -name "*.md" -type f -print0 2>/dev/null)
+    [ "$found" -gt 0 ] && echo "[catchup] Re-offered $found stale dispatch(es) in pending/"
+}
+
 # Track last count to detect changes
 LAST_COUNT=$(count_files "$QUEUE_DIR")
 
@@ -149,6 +173,9 @@ LAST_COUNT=$(count_files "$QUEUE_DIR")
 echo -e "${BLUE}Watching for new dispatches...${NC}"
 echo "Press Ctrl+C to stop"
 echo ""
+
+# Startup catchup: re-offer any stale pending dispatches from before this process started
+_stale_pending_catchup
 
 # If queue already has items on watcher startup, raise popup immediately.
 # Wait briefly for tmux session to be fully registered (race condition at startup).
@@ -167,6 +194,7 @@ if [ "$LAST_COUNT" -gt 0 ]; then
     done
 fi
 
+_catchup_cycle=0
 while true; do
     # Count files in queue
     CURRENT_COUNT=$(count_files "$QUEUE_DIR")
@@ -198,6 +226,12 @@ while true; do
         echo -e "${YELLOW}Note: $PENDING_COUNT dispatch(es) in pending (auto-processing)${NC}"
     fi
     
+    # Periodic stale-pending catchup sweep
+    _catchup_cycle=$(( _catchup_cycle + 1 ))
+    if [ $(( _catchup_cycle % CATCHUP_INTERVAL_CYCLES )) -eq 0 ]; then
+        _stale_pending_catchup
+    fi
+
     # Wait before next check
     sleep 2
 done
