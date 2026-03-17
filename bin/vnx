@@ -86,6 +86,8 @@ Commands:
   bootstrap-hooks    Deploy SessionStart hooks to .claude/hooks/ + settings.json
   start [--profile X] Launch VNX tmux session (interactive profile selection)
                      Profiles: claude-only, claude-codex, claude-gemini, full-multi
+  start --preset <name>  Start with a saved startup preset
+  start --last           Start with last-used startup configuration
   stop               Stop VNX tmux session and orchestration processes
   doctor             Validate layout, dependencies, and path hygiene
   smoke              Run one-shot local receipt pipeline smoke test
@@ -112,10 +114,14 @@ ensure_runtime_layout() {
     "$VNX_REPORTS_DIR" \
     "$VNX_DB_DIR" \
     "$VNX_DATA_DIR/receipts" \
-    "$VNX_DATA_DIR/profiles"
+    "$VNX_DATA_DIR/profiles" \
+    "$VNX_DATA_DIR/startup_presets"
 
   # Write provider profiles if they don't exist yet (idempotent).
   _write_profiles_if_missing "$VNX_DATA_DIR/profiles"
+
+  # Write default startup presets if they don't exist yet (idempotent).
+  _write_default_presets_if_missing "$VNX_DATA_DIR/startup_presets"
 }
 
 _write_profiles_if_missing() {
@@ -160,6 +166,271 @@ VNX_T1_PROVIDER=codex_cli
 VNX_T2_PROVIDER=gemini_cli
 ENV
   fi
+}
+
+_write_default_presets_if_missing() {
+  local dir="$1"
+
+  if [ ! -f "$dir/full-auto.env" ]; then
+    cat > "$dir/full-auto.env" <<'ENV'
+# Preset: full-auto
+# All Claude, skip-permissions on all workers
+VNX_T0_PROVIDER=claude_code
+VNX_T1_PROVIDER=claude_code
+VNX_T2_PROVIDER=claude_code
+VNX_T3_PROVIDER=claude_code
+VNX_T0_SKIP_PERMISSIONS=0
+VNX_T1_SKIP_PERMISSIONS=1
+VNX_T2_SKIP_PERMISSIONS=1
+VNX_T3_SKIP_PERMISSIONS=1
+VNX_QUEUE_POPUP_ENABLED=1
+ENV
+  fi
+
+  if [ ! -f "$dir/review-mode.env" ]; then
+    cat > "$dir/review-mode.env" <<'ENV'
+# Preset: review-mode
+# All Claude, no skip-permissions (manual approval)
+VNX_T0_PROVIDER=claude_code
+VNX_T1_PROVIDER=claude_code
+VNX_T2_PROVIDER=claude_code
+VNX_T3_PROVIDER=claude_code
+VNX_T0_SKIP_PERMISSIONS=0
+VNX_T1_SKIP_PERMISSIONS=0
+VNX_T2_SKIP_PERMISSIONS=0
+VNX_T3_SKIP_PERMISSIONS=0
+VNX_QUEUE_POPUP_ENABLED=1
+ENV
+  fi
+
+  if [ ! -f "$dir/claude-codex-auto.env" ]; then
+    cat > "$dir/claude-codex-auto.env" <<'ENV'
+# Preset: claude-codex-auto
+# T1=Codex, T2=Claude, skip-permissions on T1
+VNX_T0_PROVIDER=claude_code
+VNX_T1_PROVIDER=codex_cli
+VNX_T2_PROVIDER=claude_code
+VNX_T3_PROVIDER=claude_code
+VNX_T0_SKIP_PERMISSIONS=0
+VNX_T1_SKIP_PERMISSIONS=1
+VNX_T2_SKIP_PERMISSIONS=1
+VNX_T3_SKIP_PERMISSIONS=0
+VNX_QUEUE_POPUP_ENABLED=1
+ENV
+  fi
+}
+
+# ── Interactive Startup Menu ─────────────────────────────────────────────────
+# Presents saved presets and custom per-terminal configuration.
+# Sets VNX_T{0..3}_PROVIDER, VNX_T{0..3}_SKIP_PERMISSIONS, VNX_QUEUE_POPUP_ENABLED.
+# Returns 0 on success, 1 on abort.
+_interactive_startup_menu() {
+  local presets_dir="$1"
+  mkdir -p "$presets_dir"
+
+  # Collect available presets
+  local -a preset_files preset_names preset_descs
+  local i=0
+
+  # Always show last-used first if it exists
+  local last_used_target=""
+  if [ -L "$presets_dir/last-used.env" ] && [ -f "$presets_dir/last-used.env" ]; then
+    last_used_target="$(readlink "$presets_dir/last-used.env" 2>/dev/null || true)"
+    last_used_target="$(basename "${last_used_target%.env}")"
+  fi
+
+  for f in "$presets_dir/"*.env; do
+    [ -f "$f" ] || continue
+    local bname
+    bname="$(basename "${f%.env}")"
+    [ "$bname" = "last-used" ] && continue
+    preset_files+=("$f")
+    preset_names+=("$bname")
+    local desc
+    desc="$(grep '^# Preset:' "$f" 2>/dev/null | head -1 | sed 's/^# Preset: //')"
+    local detail
+    detail="$(sed -n '3p' "$f" 2>/dev/null | sed 's/^# //')"
+    preset_descs+=("${detail:-$desc}")
+    i=$((i + 1))
+  done
+
+  echo ""
+  echo "  ╔═══════════════════════════════════════════════════╗"
+  echo "  ║              VNX Startup Configuration            ║"
+  echo "  ╠═══════════════════════════════════════════════════╣"
+  echo "  ║                                                   ║"
+  echo "  ║  Saved presets:                                   ║"
+
+  local j=1
+  for idx in "${!preset_names[@]}"; do
+    local marker=""
+    [ "${preset_names[$idx]}" = "$last_used_target" ] && marker=" (last)"
+    printf "  ║    %d) %-15s %-28s║\n" "$j" "${preset_names[$idx]}${marker}" "${preset_descs[$idx]:0:28}"
+    j=$((j + 1))
+  done
+
+  echo "  ║    c) Custom configuration...                     ║"
+  echo "  ║                                                   ║"
+  echo "  ╠═══════════════════════════════════════════════════╣"
+  if [ -n "$last_used_target" ]; then
+    echo "  ║  Quick start: press Enter for '$last_used_target'     ║"
+  else
+    echo "  ║  Quick start: press Enter for first preset        ║"
+  fi
+  echo "  ╚═══════════════════════════════════════════════════╝"
+  echo ""
+  printf "  Select [1-%d/c]: " "${#preset_names[@]}"
+  local choice
+  read -r choice
+
+  # Default: load last-used or first preset
+  if [ -z "$choice" ]; then
+    if [ -n "$last_used_target" ] && [ -f "$presets_dir/last-used.env" ]; then
+      source "$presets_dir/last-used.env"
+      log "Loaded preset: last-used ($last_used_target)"
+      return 0
+    elif [ "${#preset_files[@]}" -gt 0 ]; then
+      source "${preset_files[0]}"
+      _update_last_used "$presets_dir" "${preset_files[0]}"
+      log "Loaded preset: ${preset_names[0]}"
+      return 0
+    fi
+  fi
+
+  # Custom configuration
+  if [ "$choice" = "c" ] || [ "$choice" = "C" ]; then
+    _custom_terminal_config "$presets_dir"
+    return $?
+  fi
+
+  # Numeric preset selection
+  if [ -n "$choice" ] && [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le "${#preset_names[@]}" ] 2>/dev/null; then
+    local sel_idx=$((choice - 1))
+    source "${preset_files[$sel_idx]}"
+    _update_last_used "$presets_dir" "${preset_files[$sel_idx]}"
+    log "Loaded preset: ${preset_names[$sel_idx]}"
+    return 0
+  fi
+
+  echo "  Invalid choice."
+  return 1
+}
+
+_custom_terminal_config() {
+  local presets_dir="$1"
+
+  echo ""
+  echo "  Terminal Configuration"
+  echo "  ──────────────────────"
+  echo "  T0 (Orchestrator):  Claude Opus    [fixed]"
+
+  # T1 provider
+  printf "  T1 (Track A):       [1] Claude  [2] Codex  [3] Gemini  → "
+  local t1_choice
+  read -r t1_choice
+  case "$t1_choice" in
+    2) export VNX_T1_PROVIDER=codex_cli ;;
+    3) export VNX_T1_PROVIDER=gemini_cli ;;
+    *) export VNX_T1_PROVIDER=claude_code ;;
+  esac
+
+  # T2 provider
+  printf "  T2 (Track B):       [1] Claude  [2] Codex  [3] Gemini  → "
+  local t2_choice
+  read -r t2_choice
+  case "$t2_choice" in
+    2) export VNX_T2_PROVIDER=codex_cli ;;
+    3) export VNX_T2_PROVIDER=gemini_cli ;;
+    *) export VNX_T2_PROVIDER=claude_code ;;
+  esac
+
+  # T3 provider
+  printf "  T3 (Track C):       [1] Claude  [2] Codex  [3] Gemini  → "
+  local t3_choice
+  read -r t3_choice
+  case "$t3_choice" in
+    2) export VNX_T3_PROVIDER=codex_cli ;;
+    3) export VNX_T3_PROVIDER=gemini_cli ;;
+    *) export VNX_T3_PROVIDER=claude_code ;;
+  esac
+
+  export VNX_T0_PROVIDER=claude_code
+
+  echo ""
+  echo "  Permission Mode"
+  echo "  ───────────────"
+  printf "  T0: Skip permissions?  [y/N] → "
+  local sp0; read -r sp0
+  [ "$sp0" = "y" ] || [ "$sp0" = "Y" ] && export VNX_T0_SKIP_PERMISSIONS=1 || export VNX_T0_SKIP_PERMISSIONS=0
+
+  printf "  T1: Skip permissions?  [y/N] → "
+  local sp1; read -r sp1
+  [ "$sp1" = "y" ] || [ "$sp1" = "Y" ] && export VNX_T1_SKIP_PERMISSIONS=1 || export VNX_T1_SKIP_PERMISSIONS=0
+
+  printf "  T2: Skip permissions?  [y/N] → "
+  local sp2; read -r sp2
+  [ "$sp2" = "y" ] || [ "$sp2" = "Y" ] && export VNX_T2_SKIP_PERMISSIONS=1 || export VNX_T2_SKIP_PERMISSIONS=0
+
+  printf "  T3: Skip permissions?  [y/N] → "
+  local sp3; read -r sp3
+  [ "$sp3" = "y" ] || [ "$sp3" = "Y" ] && export VNX_T3_SKIP_PERMISSIONS=1 || export VNX_T3_SKIP_PERMISSIONS=0
+
+  echo ""
+  echo "  Queue Popup"
+  echo "  ───────────"
+  printf "  Enable queue popup watcher? [Y/n] → "
+  local qp; read -r qp
+  [ "$qp" = "n" ] || [ "$qp" = "N" ] && export VNX_QUEUE_POPUP_ENABLED=0 || export VNX_QUEUE_POPUP_ENABLED=1
+
+  echo ""
+  printf "  Save as preset? [name/N] → "
+  local save_name
+  read -r save_name
+
+  if [ -n "$save_name" ] && [ "$save_name" != "N" ] && [ "$save_name" != "n" ]; then
+    local preset_file="$presets_dir/${save_name}.env"
+    cat > "$preset_file" <<ENV
+# Preset: $save_name
+# Custom configuration
+VNX_T0_PROVIDER=${VNX_T0_PROVIDER}
+VNX_T1_PROVIDER=${VNX_T1_PROVIDER}
+VNX_T2_PROVIDER=${VNX_T2_PROVIDER}
+VNX_T3_PROVIDER=${VNX_T3_PROVIDER}
+VNX_T0_SKIP_PERMISSIONS=${VNX_T0_SKIP_PERMISSIONS}
+VNX_T1_SKIP_PERMISSIONS=${VNX_T1_SKIP_PERMISSIONS}
+VNX_T2_SKIP_PERMISSIONS=${VNX_T2_SKIP_PERMISSIONS}
+VNX_T3_SKIP_PERMISSIONS=${VNX_T3_SKIP_PERMISSIONS}
+VNX_QUEUE_POPUP_ENABLED=${VNX_QUEUE_POPUP_ENABLED}
+ENV
+    log "Preset saved: $preset_file"
+    _update_last_used "$presets_dir" "$preset_file"
+  else
+    # Write a temporary last-used even without saving
+    local tmp_file="$presets_dir/_last_custom.env"
+    cat > "$tmp_file" <<ENV
+# Preset: _last_custom
+# Unsaved custom configuration
+VNX_T0_PROVIDER=${VNX_T0_PROVIDER}
+VNX_T1_PROVIDER=${VNX_T1_PROVIDER}
+VNX_T2_PROVIDER=${VNX_T2_PROVIDER}
+VNX_T3_PROVIDER=${VNX_T3_PROVIDER}
+VNX_T0_SKIP_PERMISSIONS=${VNX_T0_SKIP_PERMISSIONS}
+VNX_T1_SKIP_PERMISSIONS=${VNX_T1_SKIP_PERMISSIONS}
+VNX_T2_SKIP_PERMISSIONS=${VNX_T2_SKIP_PERMISSIONS}
+VNX_T3_SKIP_PERMISSIONS=${VNX_T3_SKIP_PERMISSIONS}
+VNX_QUEUE_POPUP_ENABLED=${VNX_QUEUE_POPUP_ENABLED}
+ENV
+    _update_last_used "$presets_dir" "$tmp_file"
+  fi
+
+  return 0
+}
+
+_update_last_used() {
+  local presets_dir="$1"
+  local target_file="$2"
+  rm -f "$presets_dir/last-used.env"
+  ln -s "$target_file" "$presets_dir/last-used.env"
 }
 
 write_default_config_if_missing() {
@@ -361,18 +632,57 @@ cmd_start() {
     log "Cleanup complete."
   fi
 
-  # ── Profile support: vnx start --profile <name> ─────────────────────
+  # ── Profile/preset support ──────────────────────────────────────────
   local profile_name=""
+  local preset_name=""
+  local use_last=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --profile|-p) profile_name="$2"; shift 2 ;;
       --profile=*) profile_name="${1#*=}"; shift ;;
+      --preset) preset_name="$2"; shift 2 ;;
+      --preset=*) preset_name="${1#*=}"; shift ;;
+      --last) use_last=true; shift ;;
       *) shift ;;
     esac
   done
 
-  # Load profile: flag > interactive menu > config.env fallback
-  if [ -n "$profile_name" ]; then
+  local presets_dir="$runtime_dir/startup_presets"
+  mkdir -p "$presets_dir"
+
+  # Load configuration: --preset > --last > --profile > interactive menu > config.env
+  if [ -n "$preset_name" ]; then
+    # --preset <name>: load a saved startup preset directly
+    local preset_file="$presets_dir/${preset_name}.env"
+    if [ -f "$preset_file" ]; then
+      # shellcheck source=/dev/null
+      source "$preset_file"
+      _update_last_used "$presets_dir" "$preset_file"
+      log "Loaded preset: $preset_name ($preset_file)"
+    else
+      err "Preset not found: $preset_file"
+      echo "Available presets:"
+      ls "$presets_dir/"*.env 2>/dev/null | while read -r f; do
+        local bname; bname="$(basename "${f%.env}")"
+        [ "$bname" = "last-used" ] && continue
+        echo "  $bname"
+      done
+      exit 1
+    fi
+  elif [ "$use_last" = true ]; then
+    # --last: load last-used preset
+    if [ -f "$presets_dir/last-used.env" ]; then
+      # shellcheck source=/dev/null
+      source "$presets_dir/last-used.env"
+      local last_target
+      last_target="$(readlink "$presets_dir/last-used.env" 2>/dev/null || echo "unknown")"
+      log "Loaded last-used preset: $(basename "${last_target%.env}")"
+    else
+      err "No last-used preset found. Run 'vnx start' interactively first."
+      exit 1
+    fi
+  elif [ -n "$profile_name" ]; then
+    # --profile <name>: legacy profile support (backwards compatible)
     local profile_file="$runtime_dir/profiles/${profile_name}.env"
     if [ -f "$profile_file" ]; then
       # shellcheck source=/dev/null
@@ -386,39 +696,10 @@ cmd_start() {
       done
       exit 1
     fi
-  elif [ -d "$runtime_dir/profiles" ] && ls "$runtime_dir/profiles/"*.env >/dev/null 2>&1 && [ -t 0 ]; then
-    # Interactive profile selection when profiles exist and stdin is a terminal
-    echo ""
-    echo "  VNX Provider Profiles"
-    echo "  ─────────────────────"
-    local -a profile_files profile_names
-    local i=1
-    for f in "$runtime_dir/profiles/"*.env; do
-      local name
-      name="$(basename "${f%.env}")"
-      profile_files+=("$f")
-      profile_names+=("$name")
-      # Read first comment line as description
-      local desc
-      desc="$(grep '^# VNX Profile:' "$f" 2>/dev/null | head -1 | sed 's/^# VNX Profile: //')"
-      local detail
-      detail="$(grep '^# T0:' "$f" 2>/dev/null | head -1 | sed 's/^# //')"
-      printf "  %d) %-16s %s\n" "$i" "$name" "${desc:+- $desc}"
-      [ -n "$detail" ] && printf "     %-16s %s\n" "" "$detail"
-      i=$((i + 1))
-    done
-    echo ""
-    printf "  Select profile [1-%d]: " "${#profile_names[@]}"
-    local choice
-    read -r choice
-    if [ -n "$choice" ] && [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le "${#profile_names[@]}" ] 2>/dev/null; then
-      local idx=$((choice - 1))
-      profile_name="${profile_names[$idx]}"
-      # shellcheck source=/dev/null
-      source "${profile_files[$idx]}"
-      log "Loaded profile: $profile_name (${profile_files[$idx]})"
-    else
-      echo "  Invalid choice. Using default (config.env or claude-only)."
+  elif [ -t 0 ]; then
+    # Interactive mode: show startup menu when stdin is a terminal
+    if ! _interactive_startup_menu "$presets_dir"; then
+      # Menu aborted or invalid choice — fall back to config.env or defaults
       if [ -f "$runtime_dir/config.env" ]; then
         source "$runtime_dir/config.env"
         log "Loaded project config: $runtime_dir/config.env"
@@ -435,6 +716,16 @@ cmd_start() {
   local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-flash}"
   local codex_model="${VNX_CODEX_MODEL:-gpt-5.1-codex-mini}"
   local t0_flags="${VNX_T0_FLAGS:-}"
+
+  # Skip-permissions flags (from preset/custom config)
+  local t0_skip="${VNX_T0_SKIP_PERMISSIONS:-0}"
+  local t1_skip="${VNX_T1_SKIP_PERMISSIONS:-0}"
+  local t2_skip="${VNX_T2_SKIP_PERMISSIONS:-0}"
+  local t3_skip="${VNX_T3_SKIP_PERMISSIONS:-0}"
+
+  # Queue popup toggle (from preset/custom config)
+  local queue_popup_enabled="${VNX_QUEUE_POPUP_ENABLED:-1}"
+  export VNX_QUEUE_POPUP_ENABLED="$queue_popup_enabled"
 
   if ! command -v tmux >/dev/null 2>&1; then
     err "tmux is required for 'vnx start'. Install: brew install tmux"
@@ -477,26 +768,41 @@ cmd_start() {
       T2="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T2" '$2==p {print $1; exit}')"
       T3="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T3" '$2==p {print $1; exit}')"
 
-      local t1_cmd t2_cmd
+      # Build launch commands with skip-permissions support (re-heal path)
+      local t0_reheal_cmd t1_cmd t2_cmd t3_reheal_cmd
+      local t0_sf="" t1_sf="" t2_sf="" t3_sf=""
+      [ "$t0_skip" = "1" ] && t0_sf=" --dangerously-skip-permissions"
+      [ "$t3_skip" = "1" ] && t3_sf=" --dangerously-skip-permissions"
+      t0_reheal_cmd="claude --model opus $t0_flags$t0_sf"
+      t3_reheal_cmd="claude --model opus $t0_flags$t3_sf"
+
       case "$t1_provider" in
-        codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
+        codex_cli|codex)
+          [ "$t1_skip" = "1" ] && t1_sf=" --full-auto"
+          t1_cmd="codex -m $codex_model$t1_sf" ;;
         gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-        *) t1_cmd="claude --model sonnet" ;;
+        *)
+          [ "$t1_skip" = "1" ] && t1_sf=" --dangerously-skip-permissions"
+          t1_cmd="claude --model sonnet$t1_sf" ;;
       esac
       case "$t2_provider" in
-        codex_cli|codex) t2_cmd="codex -m $codex_model" ;;
+        codex_cli|codex)
+          [ "$t2_skip" = "1" ] && t2_sf=" --full-auto"
+          t2_cmd="codex -m $codex_model$t2_sf" ;;
         gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-        *) t2_cmd="claude --model sonnet" ;;
+        *)
+          [ "$t2_skip" = "1" ] && t2_sf=" --dangerously-skip-permissions"
+          t2_cmd="claude --model sonnet$t2_sf" ;;
       esac
 
       local node_path="$HOME/.nvm/versions/node/v20.18.2/bin"
       local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
       local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
 
-      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus $t0_flags" C-m
+      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_reheal_cmd" C-m
       [ -n "$T1" ] && tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
       [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && claude --model opus $t0_flags" C-m
+      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_reheal_cmd" C-m
 
       if [ -n "$T0" ] && [ -n "$T1" ] && [ -n "$T2" ] && [ -n "$T3" ]; then
         cat > "$state_dir/panes.json" <<PJSON
@@ -536,7 +842,7 @@ TSJSON
       # Re-start orchestration processes (they were killed by vnx_kill_all_orchestration above)
       if [ -f "$scripts_dir/vnx_supervisor_simple.sh" ]; then
         cd "$scripts_dir"
-        nohup bash ./vnx_supervisor_simple.sh start > "$log_dir/supervisor.log" 2>&1 &
+        VNX_QUEUE_POPUP_ENABLED="$queue_popup_enabled" nohup bash ./vnx_supervisor_simple.sh start > "$log_dir/supervisor.log" 2>&1 &
         log "Supervisor re-started (PID: $!)"
         cd "$PROJECT_ROOT"
         sleep 2
@@ -709,7 +1015,7 @@ TSJSON
   # ── Orchestration components (if available) ────────────────────────────
   if [ -f "$scripts_dir/vnx_supervisor_simple.sh" ]; then
     cd "$scripts_dir"
-    nohup bash ./vnx_supervisor_simple.sh start > "$log_dir/supervisor.log" 2>&1 &
+    VNX_QUEUE_POPUP_ENABLED="$queue_popup_enabled" nohup bash ./vnx_supervisor_simple.sh start > "$log_dir/supervisor.log" 2>&1 &
     log "Supervisor started (PID: $!)"
     cd "$PROJECT_ROOT"
     sleep 2
@@ -869,24 +1175,46 @@ RESOLVER
   local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
 
   # Provider-aware launch commands for T1, T2, and T3
-  local t1_cmd t2_cmd t3_cmd
+  # Skip-permissions: --dangerously-skip-permissions for Claude, --full-auto for Codex, --yolo already on Gemini
+  local t0_cmd t1_cmd t2_cmd t3_cmd
+  local t0_skip_flag="" t1_skip_flag="" t2_skip_flag="" t3_skip_flag=""
+
+  # T0 skip-permissions (Claude only)
+  [ "$t0_skip" = "1" ] && t0_skip_flag=" --dangerously-skip-permissions"
+  t0_cmd="claude --model opus $t0_flags$t0_skip_flag"
+
   case "$t1_provider" in
-    codex_cli|codex) t1_cmd="codex -m $codex_model" ;;
-    gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-    *) t1_cmd="claude --model sonnet $t0_flags" ;;
+    codex_cli|codex)
+      [ "$t1_skip" = "1" ] && t1_skip_flag=" --full-auto"
+      t1_cmd="codex -m $codex_model$t1_skip_flag" ;;
+    gemini_cli|gemini)
+      t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *)
+      [ "$t1_skip" = "1" ] && t1_skip_flag=" --dangerously-skip-permissions"
+      t1_cmd="claude --model sonnet $t0_flags$t1_skip_flag" ;;
   esac
   case "$t2_provider" in
-    codex_cli|codex) t2_cmd="codex -m $codex_model" ;;
-    gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-    *) t2_cmd="claude --model sonnet $t0_flags" ;;
+    codex_cli|codex)
+      [ "$t2_skip" = "1" ] && t2_skip_flag=" --full-auto"
+      t2_cmd="codex -m $codex_model$t2_skip_flag" ;;
+    gemini_cli|gemini)
+      t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *)
+      [ "$t2_skip" = "1" ] && t2_skip_flag=" --dangerously-skip-permissions"
+      t2_cmd="claude --model sonnet $t0_flags$t2_skip_flag" ;;
   esac
   case "$t3_provider" in
-    codex_cli|codex) t3_cmd="codex -m $codex_model" ;;
-    gemini_cli|gemini) t3_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-    *) t3_cmd="claude --model opus $t0_flags" ;;
+    codex_cli|codex)
+      [ "$t3_skip" = "1" ] && t3_skip_flag=" --full-auto"
+      t3_cmd="codex -m $codex_model$t3_skip_flag" ;;
+    gemini_cli|gemini)
+      t3_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *)
+      [ "$t3_skip" = "1" ] && t3_skip_flag=" --dangerously-skip-permissions"
+      t3_cmd="claude --model opus $t0_flags$t3_skip_flag" ;;
   esac
 
-  tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && claude --model opus $t0_flags" C-m
+  tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
   tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
   tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
   tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_cmd" C-m
@@ -919,7 +1247,20 @@ RESOLVER
     gemini_cli|gemini) t3_label="Gemini CLI" ;;
   esac
   [ -n "$profile_name" ] && echo "Profile: $profile_name"
+  [ -n "$preset_name" ] && echo "Preset: $preset_name"
   echo "Layout: 2x2 grid  |  T0: Opus  |  T1: $t1_label  |  T2: $t2_label  |  T3: $t3_label"
+
+  # Show skip-permissions status
+  local skip_summary=""
+  [ "$t0_skip" = "1" ] && skip_summary="${skip_summary}T0 "
+  [ "$t1_skip" = "1" ] && skip_summary="${skip_summary}T1 "
+  [ "$t2_skip" = "1" ] && skip_summary="${skip_summary}T2 "
+  [ "$t3_skip" = "1" ] && skip_summary="${skip_summary}T3 "
+  if [ -n "$skip_summary" ]; then
+    echo "Skip-permissions: ${skip_summary}"
+  fi
+  [ "$queue_popup_enabled" = "0" ] && echo "Queue popup: disabled"
+
   echo ""
   echo "Controls:"
   echo "  Ctrl+G ......... Open dispatch queue popup"
