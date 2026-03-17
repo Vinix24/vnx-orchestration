@@ -666,9 +666,15 @@ cmd_start() {
     log "Cleanup complete."
   fi
 
-  # ── Intelligence hydration: import if export is newer than DB ────────
+  # ── Intelligence: export current state, then import if needed ────────
   local _intel_meta="$VNX_INTELLIGENCE_DIR/db_export/_export_meta.json"
   local _db_file="$state_dir/quality_intelligence.db"
+  # Export first: capture intelligence from previous session (since vnx stop may never run)
+  if [ -f "$_db_file" ]; then
+    log "[start] Exporting intelligence to .vnx-intelligence/..."
+    cmd_intelligence_export || log "[start] WARN: intelligence export failed (non-fatal)"
+  fi
+  # Then import if export is newer than DB (e.g. from git merge)
   if [ -f "$_intel_meta" ]; then
     local _need_import=false
     if [ ! -f "$_db_file" ]; then
