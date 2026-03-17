@@ -112,14 +112,31 @@ cmd_init_terminals() {
             mkdir -p "$wt_dir/.claude" 2>/dev/null || true
             ln -sf "${PROJECT_ROOT}/.claude/vnx-system" "$wt_dir/.claude/vnx-system" 2>/dev/null || true
             # Isolated .vnx-data with intelligence snapshot (Option 1C)
-            local main_data="${PROJECT_ROOT}/.vnx-data"
+            # Use VNX_*_DIR basename conventions to derive subdirectory names
+            local _state_sub; _state_sub="$(basename "$VNX_STATE_DIR")"
+            local _db_sub; _db_sub="$(basename "$VNX_DB_DIR")"
+            local _reports_sub; _reports_sub="$(basename "$VNX_REPORTS_DIR")"
+            local _dispatch_sub; _dispatch_sub="$(basename "$VNX_DISPATCH_DIR")"
+            local _logs_sub; _logs_sub="$(basename "$VNX_LOGS_DIR")"
+            local _pids_sub; _pids_sub="$(basename "$VNX_PIDS_DIR")"
+            local _locks_sub; _locks_sub="$(basename "$VNX_LOCKS_DIR")"
+            local main_data="$VNX_DATA_DIR"
             local wt_data="$wt_dir/.vnx-data"
-            mkdir -p "$wt_data"/{state,dispatches/{pending,active,completed,rejected,failed},unified_reports,database,logs,pids,locks,receipts,profiles,startup_presets}
+            mkdir -p "$wt_data/$_state_sub" \
+                     "$wt_data/$_dispatch_sub"/{pending,active,completed,rejected,failed} \
+                     "$wt_data/$_reports_sub" \
+                     "$wt_data/$_db_sub" \
+                     "$wt_data/$_logs_sub" \
+                     "$wt_data/$_pids_sub" \
+                     "$wt_data/$_locks_sub" \
+                     "$wt_data/receipts" \
+                     "$wt_data/profiles" \
+                     "$wt_data/startup_presets"
             # Snapshot intelligence from main
             for db_name in intelligence.db quality_intelligence.db unified_state.db vnx_intelligence.db; do
-                [ -f "$main_data/database/$db_name" ] && cp "$main_data/database/$db_name" "$wt_data/database/$db_name" 2>/dev/null || true
+                [ -f "$main_data/$_db_sub/$db_name" ] && cp "$main_data/$_db_sub/$db_name" "$wt_data/$_db_sub/$db_name" 2>/dev/null || true
             done
-            [ -f "$main_data/state/t0_receipts.ndjson" ] && cp "$main_data/state/t0_receipts.ndjson" "$wt_data/state/t0_receipts.ndjson" 2>/dev/null || true
+            [ -f "$VNX_STATE_DIR/t0_receipts.ndjson" ] && cp "$VNX_STATE_DIR/t0_receipts.ndjson" "$wt_data/$_state_sub/t0_receipts.ndjson" 2>/dev/null || true
             [ -d "$main_data/startup_presets" ] && cp -R "$main_data/startup_presets/." "$wt_data/startup_presets/" 2>/dev/null || true
             # Write snapshot metadata
             echo "snapshot_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$wt_data/.snapshot_meta"

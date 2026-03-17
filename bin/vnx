@@ -2159,17 +2159,21 @@ _snapshot_intelligence() {
   local wt_data="$2"
   local copied=0
 
+  # Derive subdirectory names from VNX_*_DIR conventions
+  local _db_sub; _db_sub="$(basename "$VNX_DB_DIR")"
+  local _state_sub; _state_sub="$(basename "$VNX_STATE_DIR")"
+
   # Snapshot intelligence databases
   for db_name in intelligence.db quality_intelligence.db unified_state.db vnx_intelligence.db; do
-    if [ -f "$main_data/database/$db_name" ]; then
-      cp "$main_data/database/$db_name" "$wt_data/database/$db_name"
+    if [ -f "$main_data/$_db_sub/$db_name" ]; then
+      cp "$main_data/$_db_sub/$db_name" "$wt_data/$_db_sub/$db_name"
       copied=$((copied + 1))
     fi
   done
 
   # Snapshot receipt history (learning loop context)
-  if [ -f "$main_data/state/t0_receipts.ndjson" ]; then
-    cp "$main_data/state/t0_receipts.ndjson" "$wt_data/state/t0_receipts.ndjson"
+  if [ -f "$main_data/$_state_sub/t0_receipts.ndjson" ]; then
+    cp "$main_data/$_state_sub/t0_receipts.ndjson" "$wt_data/$_state_sub/t0_receipts.ndjson"
     copied=$((copied + 1))
   fi
 
