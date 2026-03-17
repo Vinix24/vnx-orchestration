@@ -2,9 +2,43 @@
 set -euo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_PROJECT_DIR="${1:-$PWD}"
+
+# Parse arguments
+LAYOUT="vnx"  # default layout
+TARGET_PROJECT_DIR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --layout)
+      LAYOUT="$2"; shift 2
+      ;;
+    --layout=*)
+      LAYOUT="${1#*=}"; shift
+      ;;
+    *)
+      if [ -z "$TARGET_PROJECT_DIR" ]; then
+        TARGET_PROJECT_DIR="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+TARGET_PROJECT_DIR="${TARGET_PROJECT_DIR:-$PWD}"
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
-TARGET_VNX_DIR="$TARGET_PROJECT_DIR/.vnx"
+
+# Layout determines install directory
+case "$LAYOUT" in
+  vnx)
+    TARGET_VNX_DIR="$TARGET_PROJECT_DIR/.vnx"
+    ;;
+  claude)
+    TARGET_VNX_DIR="$TARGET_PROJECT_DIR/.claude/vnx-system"
+    ;;
+  *)
+    echo "ERROR: Unknown layout '$LAYOUT'. Use 'vnx' (default) or 'claude'." >&2
+    exit 1
+    ;;
+esac
 
 # Directories/files to install via simple copy (non-docs).
 SHIP_PATHS=(
@@ -211,8 +245,12 @@ if git -C "$SRC_ROOT" remote get-url origin >/dev/null 2>&1; then
   log "[install] Saved origin: $(cat "$TARGET_VNX_DIR/.vnx-origin")"
 fi
 
+# Persist layout choice for vnx doctor auto-detection
+echo "$LAYOUT" > "$TARGET_VNX_DIR/.layout"
+log "[install] Layout: $LAYOUT (saved to $TARGET_VNX_DIR/.layout)"
+
 log "[install] Completed without root."
 log "[install] Next steps:"
-log "  $TARGET_PROJECT_DIR/.vnx/bin/vnx init"
-log "  $TARGET_PROJECT_DIR/.vnx/bin/vnx doctor"
-log "  $TARGET_PROJECT_DIR/.vnx/bin/vnx start"
+log "  $TARGET_VNX_DIR/bin/vnx init"
+log "  $TARGET_VNX_DIR/bin/vnx doctor"
+log "  $TARGET_VNX_DIR/bin/vnx start"
