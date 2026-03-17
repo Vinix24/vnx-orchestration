@@ -62,6 +62,34 @@ export LEGACY_REPORTS_DIR="${LEGACY_REPORTS_DIR:-$VNX_HOME/unified_reports}"
 # Git-tracked intelligence directory (portable across worktrees).
 export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$PROJECT_ROOT/.vnx-intelligence}"
 
+# ── Worktree PROJECT_ROOT override ──────────────────────────────
+# When CWD is a git worktree of the same project, override PROJECT_ROOT
+# and re-derive all data paths so each worktree gets its own session.
+_vnx_cwd="$(pwd)"
+if [ "$_vnx_cwd" != "$PROJECT_ROOT" ]; then
+  _vnx_main_wt="$(git -C "$_vnx_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || true
+  if [ -n "${_vnx_main_wt:-}" ] && [ "$_vnx_main_wt" = "$PROJECT_ROOT" ]; then
+    export PROJECT_ROOT="$_vnx_cwd"
+    # Re-derive data paths for this worktree (unless explicitly overridden)
+    if [ -z "${_vnx_saved_data_dir:-}" ] && { [ -z "${VNX_DATA_DIR:-}" ] || [ "$VNX_DATA_DIR" = "$_vnx_main_wt/.vnx-data" ]; }; then
+      export VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+      export VNX_STATE_DIR="$VNX_DATA_DIR/state"
+      export VNX_DISPATCH_DIR="$VNX_DATA_DIR/dispatches"
+      export VNX_LOGS_DIR="$VNX_DATA_DIR/logs"
+      export VNX_PIDS_DIR="$VNX_DATA_DIR/pids"
+      export VNX_LOCKS_DIR="$VNX_DATA_DIR/locks"
+      export VNX_REPORTS_DIR="$VNX_DATA_DIR/unified_reports"
+      export VNX_DB_DIR="$VNX_DATA_DIR/database"
+    fi
+    export VNX_INTELLIGENCE_DIR="$PROJECT_ROOT/.vnx-intelligence"
+    # Re-derive skills dir
+    if [ -d "$PROJECT_ROOT/.claude/skills" ]; then
+      export VNX_SKILLS_DIR="$PROJECT_ROOT/.claude/skills"
+    fi
+  fi
+fi
+unset _vnx_cwd _vnx_main_wt
+
 # Skills live outside dist; prefer a configured value, then fallback to known locations.
 if [ -z "${VNX_SKILLS_DIR:-}" ]; then
   if [ -d "$PROJECT_ROOT/.claude/skills" ]; then
