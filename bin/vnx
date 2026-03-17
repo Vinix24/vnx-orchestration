@@ -94,8 +94,18 @@ Commands:
   cost-report        Aggregate model usage + estimated cost from receipts
   package-check      Fail if runtime artifacts exist inside dist
   update [url] [branch]  Pull latest VNX from origin and re-install
+  update --pin <tag>     Pin VNX version (respects lock on future updates)
+  update --check         Dry-run: show current vs available version
+  update --latest        Update ignoring version.lock
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
+
+Worktree commands (data isolation):
+  worktree-start     Initialize isolated .vnx-data with intelligence snapshot
+  worktree-stop      Merge intelligence back to main and clean up
+  worktree-refresh   Update intelligence snapshot from main
+  worktree-status    Show worktree isolation status
+
   help               Show this help text
 USAGE
   }
@@ -1446,6 +1456,55 @@ cmd_doctor() {
     log "[doctor] WARN: Quality intelligence DB not found. Run: vnx init-db"
   fi
 
+  # Worktree isolation checks
+  if _detect_worktree_context 2>/dev/null; then
+    log "[doctor] INFO: Running in git worktree: $_WT_ROOT"
+    local wt_data="$_WT_ROOT/.vnx-data"
+    if [ -L "$wt_data" ]; then
+      err "[doctor] WARN: .vnx-data is a SYMLINK (old model). Run 'vnx worktree-start' to migrate to isolated model."
+    elif [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
+      local snap_date
+      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2)
+      log "[doctor] OK worktree: isolated .vnx-data (snapshot: ${snap_date:-unknown})"
+      # Check snapshot freshness (warn if >14 days old)
+      if command -v python3 >/dev/null 2>&1 && [ -n "$snap_date" ]; then
+        local days_old
+        days_old=$(python3 -c "
+from datetime import datetime, timezone
+try:
+    snap = datetime.fromisoformat('$snap_date'.replace('Z','+00:00'))
+    print((datetime.now(timezone.utc) - snap).days)
+except:
+    print(-1)
+" 2>/dev/null)
+        if [ "${days_old:-0}" -ge 14 ]; then
+          log "[doctor] WARN: Intelligence snapshot is ${days_old} days old. Consider: vnx worktree-refresh"
+        fi
+      fi
+      # Check .env_override exists
+      if [ ! -f "$wt_data/.env_override" ]; then
+        err "[doctor] WARN: Missing .env_override in worktree. Run 'vnx worktree-start' to fix."
+      else
+        log "[doctor] OK worktree: .env_override present"
+      fi
+    elif [ -d "$wt_data" ]; then
+      err "[doctor] WARN: .vnx-data exists but no snapshot metadata. Run 'vnx worktree-start'."
+    else
+      err "[doctor] WARN: No .vnx-data in worktree. Run 'vnx worktree-start'."
+    fi
+  fi
+
+  # Version freshness check
+  if [ -f "$VNX_HOME/.vnx-origin" ]; then
+    local current_version=""
+    if [ -f "$VNX_HOME/version.lock" ]; then
+      current_version="$(head -1 "$VNX_HOME/version.lock" | tr -d '[:space:]')"
+      log "[doctor] OK version: pinned to $current_version"
+    else
+      log "[doctor] INFO: No version lock. Run 'vnx update --pin <tag>' to pin."
+    fi
+  fi
+
   ensure_write_access || failed=1
   run_path_hygiene_check || failed=1
   if [ "$do_package_check" -eq 1 ]; then
@@ -2077,24 +2136,344 @@ SETTINGS
   log "[bootstrap-hooks] Done"
 }
 
+# ── vnx worktree-* ─────────────────────────────────────────────────────
+# Worktree data isolation: snapshot + write-overlay (Option 1C + 3B)
+
+_detect_worktree_context() {
+  # Returns: 0 if in a worktree, 1 if in main repo
+  # Sets: _WT_ROOT (worktree toplevel), _MAIN_ROOT (main repo root)
+  local git_common_dir
+  git_common_dir="$(git -C "$PROJECT_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  _MAIN_ROOT="$(cd "$git_common_dir" && cd .. && pwd)"
+  _WT_ROOT="$(git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)" || return 1
+
+  if [ "$_MAIN_ROOT" != "$_WT_ROOT" ]; then
+    return 0  # We're in a worktree
+  fi
+  return 1  # We're in the main repo
+}
+
+_snapshot_intelligence() {
+  # Copy intelligence data from main to worktree .vnx-data/
+  local main_data="$1"
+  local wt_data="$2"
+  local copied=0
+
+  # Snapshot intelligence databases
+  for db_name in intelligence.db quality_intelligence.db unified_state.db vnx_intelligence.db; do
+    if [ -f "$main_data/database/$db_name" ]; then
+      cp "$main_data/database/$db_name" "$wt_data/database/$db_name"
+      copied=$((copied + 1))
+    fi
+  done
+
+  # Snapshot receipt history (learning loop context)
+  if [ -f "$main_data/state/t0_receipts.ndjson" ]; then
+    cp "$main_data/state/t0_receipts.ndjson" "$wt_data/state/t0_receipts.ndjson"
+    copied=$((copied + 1))
+  fi
+
+  # Snapshot startup presets
+  if [ -d "$main_data/startup_presets" ]; then
+    cp -R "$main_data/startup_presets/." "$wt_data/startup_presets/" 2>/dev/null || true
+    copied=$((copied + 1))
+  fi
+
+  # Write snapshot metadata
+  cat > "$wt_data/.snapshot_meta" <<META
+snapshot_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+source_dir=$main_data
+source_project=$_MAIN_ROOT
+META
+
+  log "[worktree-start] Snapshot: $copied items copied from main"
+}
+
+cmd_worktree_start() {
+  # Detect if we're in a worktree
+  if ! _detect_worktree_context; then
+    err "[worktree-start] Not in a git worktree. Run from a worktree directory."
+    err "[worktree-start] Create one with: vnx_worktree_setup.sh create <name>"
+    return 1
+  fi
+
+  local wt_data="$_WT_ROOT/.vnx-data"
+  local main_data="$_MAIN_ROOT/.vnx-data"
+
+  # Check if main has .vnx-data
+  if [ ! -d "$main_data" ]; then
+    err "[worktree-start] Main repo has no .vnx-data at: $main_data"
+    err "[worktree-start] Run 'vnx init' in the main repo first."
+    return 1
+  fi
+
+  # If .vnx-data is a symlink (old model), remove it first
+  if [ -L "$wt_data" ]; then
+    log "[worktree-start] Removing old symlink: $wt_data → $(readlink "$wt_data")"
+    rm "$wt_data"
+  fi
+
+  # Create isolated .vnx-data directory
+  if [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
+    log "[worktree-start] Worktree already initialized: $wt_data"
+    log "[worktree-start] Use 'vnx worktree-refresh' to update intelligence snapshot."
+    return 0
+  fi
+
+  log "[worktree-start] Initializing isolated .vnx-data for worktree: $_WT_ROOT"
+
+  # Create directory structure (reuse ensure_runtime_layout via env override)
+  export VNX_DATA_DIR="$wt_data"
+  export VNX_STATE_DIR="$wt_data/state"
+  export VNX_DISPATCH_DIR="$wt_data/dispatches"
+  export VNX_LOGS_DIR="$wt_data/logs"
+  export VNX_PIDS_DIR="$wt_data/pids"
+  export VNX_LOCKS_DIR="$wt_data/locks"
+  export VNX_REPORTS_DIR="$wt_data/unified_reports"
+  export VNX_DB_DIR="$wt_data/database"
+  ensure_runtime_layout
+
+  # Snapshot intelligence from main
+  _snapshot_intelligence "$main_data" "$wt_data"
+
+  # Write .env_override (Option 3B: auto-generated)
+  cat > "$wt_data/.env_override" <<OVERRIDE
+# Auto-generated by vnx worktree-start ($(date -u +%Y-%m-%dT%H:%M:%SZ))
+# Worktree: $_WT_ROOT
+# Main repo: $_MAIN_ROOT
+export VNX_DATA_DIR='$wt_data'
+OVERRIDE
+
+  # Create inbox directory on main for optional receipt relay
+  mkdir -p "$main_data/inbox"
+
+  log "[worktree-start] Isolated .vnx-data created: $wt_data"
+  log "[worktree-start] .env_override written for VNX_DATA_DIR isolation"
+  log "[worktree-start] Done. Run 'vnx doctor' to verify."
+}
+
+cmd_worktree_stop() {
+  local merge_only=false
+  local skip_merge=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --merge-only) merge_only=true; shift ;;
+      --skip-merge) skip_merge=true; shift ;;
+      *) err "[worktree-stop] Unknown option: $1"; return 1 ;;
+    esac
+  done
+
+  if ! _detect_worktree_context; then
+    err "[worktree-stop] Not in a git worktree."
+    return 1
+  fi
+
+  local wt_data="$_WT_ROOT/.vnx-data"
+  local main_data="$_MAIN_ROOT/.vnx-data"
+
+  if [ ! -d "$wt_data" ] || [ -L "$wt_data" ]; then
+    err "[worktree-stop] No isolated .vnx-data found in worktree."
+    return 1
+  fi
+
+  # Merge intelligence back to main
+  if [ "$skip_merge" = false ]; then
+    local merge_script="$VNX_HOME/scripts/vnx_worktree_merge_data.sh"
+    if [ -f "$merge_script" ]; then
+      log "[worktree-stop] Merging intelligence data back to main..."
+      bash "$merge_script" "$wt_data"
+    else
+      err "[worktree-stop] Merge script not found: $merge_script"
+      err "[worktree-stop] Data preserved in: $wt_data"
+      return 1
+    fi
+
+    # Clean up inbox relay files on main
+    local wt_name
+    wt_name="$(basename "$_WT_ROOT")"
+    rm -f "$main_data/inbox/wt-${wt_name}.ndjson" 2>/dev/null || true
+  fi
+
+  if [ "$merge_only" = true ]; then
+    log "[worktree-stop] Merge complete (--merge-only). Data preserved in: $wt_data"
+    return 0
+  fi
+
+  # Clean up worktree .vnx-data
+  log "[worktree-stop] Cleaning up worktree .vnx-data..."
+  rm -rf "$wt_data"
+
+  log "[worktree-stop] Done. Worktree intelligence merged to main."
+}
+
+cmd_worktree_refresh() {
+  if ! _detect_worktree_context; then
+    err "[worktree-refresh] Not in a git worktree."
+    return 1
+  fi
+
+  local wt_data="$_WT_ROOT/.vnx-data"
+  local main_data="$_MAIN_ROOT/.vnx-data"
+
+  if [ ! -d "$wt_data" ] || [ -L "$wt_data" ]; then
+    err "[worktree-refresh] No isolated .vnx-data found. Run 'vnx worktree-start' first."
+    return 1
+  fi
+
+  if [ ! -d "$main_data" ]; then
+    err "[worktree-refresh] Main repo .vnx-data not found: $main_data"
+    return 1
+  fi
+
+  log "[worktree-refresh] Updating intelligence snapshot from main..."
+  _snapshot_intelligence "$main_data" "$wt_data"
+  log "[worktree-refresh] Done. Intelligence snapshot updated."
+}
+
+cmd_worktree_status() {
+  log "VNX Worktree Status"
+  log "==================="
+  log ""
+
+  # Show current context
+  if _detect_worktree_context; then
+    log "Current: WORKTREE ($_WT_ROOT)"
+    log "Main:    $_MAIN_ROOT"
+    local wt_data="$_WT_ROOT/.vnx-data"
+    if [ -L "$wt_data" ]; then
+      log "Data:    SYMLINKED (old model) → $(readlink "$wt_data")"
+      log "         WARNING: Run 'vnx worktree-start' to migrate to isolated model"
+    elif [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
+      local snap_date
+      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2)
+      log "Data:    ISOLATED (snapshot: ${snap_date:-unknown})"
+    elif [ -d "$wt_data" ]; then
+      log "Data:    DIRECTORY (no snapshot metadata)"
+    else
+      log "Data:    NONE — run 'vnx worktree-start'"
+    fi
+  else
+    log "Current: MAIN REPO ($PROJECT_ROOT)"
+  fi
+
+  log ""
+
+  # List all VNX-managed worktrees
+  log "Worktrees:"
+  local wt_list
+  wt_list="$(git -C "$PROJECT_ROOT" worktree list 2>/dev/null)" || true
+  if [ -z "$wt_list" ]; then
+    log "  (none)"
+    return 0
+  fi
+
+  echo "$wt_list" | while IFS= read -r line; do
+    local wt_path
+    wt_path="$(echo "$line" | awk '{print $1}')"
+    local wt_branch
+    wt_branch="$(echo "$line" | sed 's/.*\[//' | sed 's/\]//')"
+
+    # Check isolation status
+    local status_icon="?"
+    local wt_vnx_data="$wt_path/.vnx-data"
+    if [ -L "$wt_vnx_data" ]; then
+      status_icon="SYMLINK"
+    elif [ -d "$wt_vnx_data" ] && [ -f "$wt_vnx_data/.snapshot_meta" ]; then
+      status_icon="ISOLATED"
+    elif [ -d "$wt_vnx_data" ]; then
+      status_icon="DIR"
+    else
+      status_icon="NONE"
+    fi
+
+    log "  $wt_path [$wt_branch] data=$status_icon"
+  done
+}
+
 # ── vnx update ─────────────────────────────────────────────────────────
 VNX_ORIGIN_URL="https://github.com/Vinix24/vnx-orchestration-system.git"
 VNX_ORIGIN_FILE="$VNX_HOME/.vnx-origin"
+VNX_VERSION_LOCK="$VNX_HOME/version.lock"
 
 cmd_update() {
   local origin_url branch="main"
+  local do_pin=""
+  local do_check=false
+  local ignore_lock=false
+  local positional=()
 
-  # Resolve origin: CLI arg > .vnx-origin file > default
-  if [ -n "${1:-}" ]; then
-    origin_url="$1"
+  # Parse flags
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pin)
+        do_pin="$2"; shift 2
+        ;;
+      --pin=*)
+        do_pin="${1#*=}"; shift
+        ;;
+      --check)
+        do_check=true; shift
+        ;;
+      --latest)
+        ignore_lock=true; shift
+        ;;
+      *)
+        positional+=("$1"); shift
+        ;;
+    esac
+  done
+
+  # Handle --pin: just write the lock file and exit
+  if [ -n "$do_pin" ]; then
+    echo "$do_pin" > "$VNX_VERSION_LOCK"
+    log "[update] Version pinned to: $do_pin"
+    log "[update] Lock file: $VNX_VERSION_LOCK"
+    return 0
+  fi
+
+  # Resolve origin: positional arg > .vnx-origin file > default
+  if [ "${#positional[@]}" -ge 1 ]; then
+    origin_url="${positional[0]}"
   elif [ -f "$VNX_ORIGIN_FILE" ]; then
     origin_url="$(head -1 "$VNX_ORIGIN_FILE" | tr -d '[:space:]')"
   else
     origin_url="$VNX_ORIGIN_URL"
   fi
 
-  if [ -n "${2:-}" ]; then
-    branch="$2"
+  if [ "${#positional[@]}" -ge 2 ]; then
+    branch="${positional[1]}"
+  fi
+
+  # Respect version lock (unless --latest)
+  if [ "$ignore_lock" = false ] && [ -f "$VNX_VERSION_LOCK" ]; then
+    local locked_version
+    locked_version="$(head -1 "$VNX_VERSION_LOCK" | tr -d '[:space:]')"
+    if [ -n "$locked_version" ]; then
+      branch="$locked_version"
+      log "[update] Using pinned version: $locked_version (from version.lock)"
+      log "[update] Use --latest to ignore the lock."
+    fi
+  fi
+
+  # Handle --check: dry-run
+  if [ "$do_check" = true ]; then
+    log "[update] Check mode (dry-run)"
+    log "[update] Origin: $origin_url"
+    log "[update] Branch/tag: $branch"
+    if [ -f "$VNX_VERSION_LOCK" ]; then
+      log "[update] Version lock: $(head -1 "$VNX_VERSION_LOCK" | tr -d '[:space:]')"
+    else
+      log "[update] Version lock: none"
+    fi
+    # Try to fetch remote refs to show available version
+    local remote_sha
+    remote_sha="$(git ls-remote "$origin_url" "$branch" 2>/dev/null | head -1 | cut -f1)" || true
+    if [ -n "$remote_sha" ]; then
+      log "[update] Remote SHA: ${remote_sha:0:12}"
+    else
+      log "[update] Remote: unable to fetch (check network/URL)"
+    fi
+    return 0
   fi
 
   log "[update] Pulling latest VNX from: $origin_url (branch: $branch)"
@@ -2104,7 +2483,7 @@ cmd_update() {
   trap 'rm -rf "$tmpdir"' EXIT
 
   if ! git clone --depth 1 --branch "$branch" "$origin_url" "$tmpdir" 2>/dev/null; then
-    err "Failed to clone $origin_url"
+    err "Failed to clone $origin_url (branch: $branch)"
     return 1
   fi
 
@@ -2163,6 +2542,18 @@ main() {
       ;;
     update)
       cmd_update "$@"
+      ;;
+    worktree-start)
+      cmd_worktree_start
+      ;;
+    worktree-stop)
+      cmd_worktree_stop "$@"
+      ;;
+    worktree-refresh)
+      cmd_worktree_refresh
+      ;;
+    worktree-status)
+      cmd_worktree_status
       ;;
     patch-agent-files)
       cmd_patch_agent_files
