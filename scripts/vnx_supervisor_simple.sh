@@ -210,7 +210,11 @@ start_all() {
     # dispatch_ack_watcher is also deprecated - heartbeat_ack_monitor socket path is canonical ACK flow
     # start_process "ack_dispatcher" "ack_dispatcher_v2.sh"
     start_process "heartbeat_ack_monitor" "heartbeat_ack_monitor.py"
-    start_process "queue_watcher" "queue_popup_watcher.sh"
+    if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
+      start_process "queue_watcher" "queue_popup_watcher.sh"
+    else
+      log "Queue popup watcher disabled (VNX_QUEUE_POPUP_ENABLED=0)"
+    fi
     start_process "dashboard" "generate_valid_dashboard.sh"
     start_process "state_manager" "unified_state_manager_v2.py"
     start_process "intelligence_daemon" "intelligence_daemon.py"
@@ -338,16 +342,14 @@ monitor() {
                 log "WARNING: Log rotation check failed"
         fi
         receipt_item="${RECEIPT_SERVICE_NAME}:${RECEIPT_SCRIPT}"
+        # Build process list (conditionally include queue_watcher)
+        local _monitor_items="dispatcher:dispatcher_v8_minimal.sh smart_tap:smart_tap_v7_json_translator.sh $receipt_item heartbeat_ack_monitor:heartbeat_ack_monitor.py"
+        if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
+            _monitor_items="$_monitor_items queue_watcher:queue_popup_watcher.sh"
+        fi
+        _monitor_items="$_monitor_items dashboard:generate_valid_dashboard.sh state_manager:unified_state_manager_v2.py intelligence_daemon:intelligence_daemon.py recommendations_engine:recommendations_engine_daemon.sh"
         # Check each process
-        for item in "dispatcher:dispatcher_v8_minimal.sh" \
-                   "smart_tap:smart_tap_v7_json_translator.sh" \
-                   "$receipt_item" \
-                   "heartbeat_ack_monitor:heartbeat_ack_monitor.py" \
-                   "queue_watcher:queue_popup_watcher.sh" \
-                   "dashboard:generate_valid_dashboard.sh" \
-                   "state_manager:unified_state_manager_v2.py" \
-                   "intelligence_daemon:intelligence_daemon.py" \
-                   "recommendations_engine:recommendations_engine_daemon.sh"; do
+        for item in $_monitor_items; do
 
             IFS=':' read -r name script <<< "$item"
 
