@@ -53,6 +53,34 @@ if [ -f "$_vnx_cwd_override" ]; then
 fi
 unset _vnx_cwd_override
 
+# ── Worktree PROJECT_ROOT override ──────────────────────────────
+# When CWD is a git worktree of the same project, override PROJECT_ROOT
+# and re-derive all data paths so each worktree gets its own session.
+_vnx_cwd="$(pwd)"
+if [ "$_vnx_cwd" != "$PROJECT_ROOT" ]; then
+  _vnx_main_wt="$(git -C "$_vnx_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || true
+  if [ -n "${_vnx_main_wt:-}" ] && [ "$_vnx_main_wt" = "$PROJECT_ROOT" ]; then
+    export PROJECT_ROOT="$_vnx_cwd"
+    # Re-derive data paths for this worktree (unless explicitly overridden via env)
+    if [ -z "${VNX_DATA_DIR:-}" ] || [ "$VNX_DATA_DIR" = "$_vnx_main_wt/.vnx-data" ]; then
+      export VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+      export VNX_STATE_DIR="$VNX_DATA_DIR/state"
+      export VNX_DISPATCH_DIR="$VNX_DATA_DIR/dispatches"
+      export VNX_LOGS_DIR="$VNX_DATA_DIR/logs"
+      export VNX_PIDS_DIR="$VNX_DATA_DIR/pids"
+      export VNX_LOCKS_DIR="$VNX_DATA_DIR/locks"
+      export VNX_REPORTS_DIR="$VNX_DATA_DIR/unified_reports"
+      export VNX_DB_DIR="$VNX_DATA_DIR/database"
+    fi
+    export VNX_INTELLIGENCE_DIR="$PROJECT_ROOT/.vnx-intelligence"
+    # Re-derive skills dir
+    if [ -d "$PROJECT_ROOT/.claude/skills" ]; then
+      export VNX_SKILLS_DIR="$PROJECT_ROOT/.claude/skills"
+    fi
+  fi
+fi
+unset _vnx_cwd _vnx_main_wt
+
 if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_marked_blocks.sh" ]; then
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/../scripts/lib/vnx_marked_blocks.sh"
@@ -599,12 +627,17 @@ vnx_kill_all_orchestration() {
 
   unset VNX_KILL_SCOPE
 
-  # Broad sweep: kill any remaining processes containing our scripts_dir.
-  # This catches child processes and anything we may have missed above.
+  # Broad sweep: kill remaining processes scoped to THIS project's VNX_DATA_DIR.
+  # Only kills processes whose command line contains our data dir path,
+  # so other worktrees/projects are not affected.
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     [ "$pid" != "$$" ] || continue  # Don't kill ourselves
-    kill -TERM "$pid" 2>/dev/null || true
+    local _cmd
+    _cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$_cmd" == *"$VNX_DATA_DIR"* ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
   done < <(pgrep -f "$scripts_dir" 2>/dev/null || true)
 
   # Clean up stale locks and PID files so new processes can acquire them
@@ -648,21 +681,26 @@ cmd_start() {
   local dispatch_dir="${VNX_DISPATCH_DIR:-$runtime_dir/dispatches}"
   local log_dir="$runtime_dir/logs"
 
-  # ── Cleanup: kill any existing VNX processes for THIS project ────────
-  # Supervisor is killed first to prevent it from respawning children.
-  # Pattern is scoped to PROJECT_ROOT so other projects are not affected.
-  local vnx_scripts_pattern="$VNX_HOME/scripts"
+  # ── Cleanup: kill existing VNX session for THIS project/worktree ────
+  # Session name is unique per project/worktree, so this only affects us.
+  if tmux has-session -t "$session_name" 2>/dev/null; then
+    log "Killing existing VNX session: $session_name"
+    tmux kill-session -t "$session_name" 2>/dev/null || true
+    sleep 1
+  fi
+
+  # Kill orphan orchestration processes scoped to THIS project's data dir.
+  # Processes are matched by VNX_DATA_DIR in their command line (log redirects).
+  local _kill_scope="$runtime_dir"
   local stale_count
-  stale_count=$(pgrep -f "$vnx_scripts_pattern" 2>/dev/null | wc -l | tr -d ' ')
+  stale_count=$(pgrep -f "$_kill_scope" 2>/dev/null | wc -l | tr -d ' ')
   if [ "$stale_count" -gt 0 ]; then
-    log "Cleaning up $stale_count stale VNX process(es) for this project..."
-    pkill -f "vnx_supervisor.*$(basename "$PROJECT_ROOT")" 2>/dev/null || true
-    pkill -f "$vnx_scripts_pattern" 2>/dev/null || true
-    pkill -f "$VNX_HOME/dashboard" 2>/dev/null || true
+    log "Cleaning up $stale_count orphan VNX process(es)..."
+    pkill -f "vnx_supervisor.*$_kill_scope" 2>/dev/null || true
+    pkill -f "$_kill_scope" 2>/dev/null || true
     sleep 1
     # Force kill anything that didn't exit cleanly
-    pkill -9 -f "$vnx_scripts_pattern" 2>/dev/null || true
-    pkill -9 -f "$VNX_HOME/dashboard" 2>/dev/null || true
+    pkill -9 -f "$_kill_scope" 2>/dev/null || true
     log "Cleanup complete."
   fi
 
