@@ -1213,6 +1213,11 @@ RESOLVER
       [ "$t3_skip" = "1" ] && t3_skip_flag=" --dangerously-skip-permissions"
       t3_cmd="claude --model opus $t0_flags$t3_skip_flag" ;;
   esac
+  case "$t3_provider" in
+    codex_cli|codex) t3_cmd="codex -m $codex_model" ;;
+    gemini_cli|gemini) t3_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
+    *) t3_cmd="claude --model opus $t0_flags" ;;
+  esac
 
   tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
   tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
