@@ -100,6 +100,10 @@ Commands:
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
 
+Intelligence commands (git-tracked project knowledge):
+  intelligence-export  Export SQLite + state to .vnx-intelligence/ (NDJSON)
+  intelligence-import  Import .vnx-intelligence/ NDJSON into SQLite
+
 Worktree commands (data isolation):
   worktree-start     Initialize isolated .vnx-data with intelligence snapshot
   worktree-stop      Merge intelligence back to main and clean up
@@ -462,6 +466,14 @@ CFG
   log "[init] Wrote config: $VNX_CONFIG_FILE"
 }
 
+cmd_intelligence_export() {
+  python3 "$VNX_HOME/scripts/intelligence_export.py"
+}
+
+cmd_intelligence_import() {
+  python3 "$VNX_HOME/scripts/intelligence_import.py"
+}
+
 cmd_init() {
   ensure_runtime_layout
   write_default_config_if_missing
@@ -476,6 +488,12 @@ cmd_init() {
 
   # Initialize quality intelligence database (idempotent — uses IF NOT EXISTS).
   cmd_init_db || true
+
+  # If git-tracked intelligence exists, hydrate SQLite from it.
+  if [ -d "$VNX_INTELLIGENCE_DIR/db_export" ]; then
+    log "[init] Found .vnx-intelligence/ — importing into SQLite..."
+    cmd_intelligence_import || true
+  fi
 
   log "[init] Runtime root ready: $VNX_DATA_DIR"
   log "[init] Done. Next: vnx doctor"
@@ -613,6 +631,12 @@ cmd_stop() {
   else
     log "No VNX session running."
   fi
+
+  # Export intelligence to git-tracked directory after session cleanup.
+  if [ -d "$VNX_INTELLIGENCE_DIR" ] || [ -f "$VNX_STATE_DIR/quality_intelligence.db" ]; then
+    log "[stop] Exporting intelligence to .vnx-intelligence/..."
+    cmd_intelligence_export || log "[stop] WARN: intelligence export failed (non-fatal)"
+  fi
 }
 
 cmd_start() {
@@ -640,6 +664,22 @@ cmd_start() {
     pkill -9 -f "$vnx_scripts_pattern" 2>/dev/null || true
     pkill -9 -f "$VNX_HOME/dashboard" 2>/dev/null || true
     log "Cleanup complete."
+  fi
+
+  # ── Intelligence hydration: import if export is newer than DB ────────
+  local _intel_meta="$VNX_INTELLIGENCE_DIR/db_export/_export_meta.json"
+  local _db_file="$state_dir/quality_intelligence.db"
+  if [ -f "$_intel_meta" ]; then
+    local _need_import=false
+    if [ ! -f "$_db_file" ]; then
+      _need_import=true
+    elif [ "$_intel_meta" -nt "$_db_file" ]; then
+      _need_import=true
+    fi
+    if [ "$_need_import" = true ]; then
+      log "[start] Intelligence export is newer than DB — importing..."
+      cmd_intelligence_import || log "[start] WARN: intelligence import failed (non-fatal)"
+    fi
   fi
 
   # ── Profile/preset support ──────────────────────────────────────────
@@ -2237,8 +2277,17 @@ cmd_worktree_start() {
   export VNX_DB_DIR="$wt_data/database"
   ensure_runtime_layout
 
-  # Snapshot intelligence from main
-  _snapshot_intelligence "$main_data" "$wt_data"
+  # Hydrate intelligence: prefer git-tracked .vnx-intelligence/ (already in worktree via git),
+  # fall back to snapshot from main's .vnx-data/ for projects without .vnx-intelligence/.
+  if [ -d "$_WT_ROOT/.vnx-intelligence/db_export" ]; then
+    log "[worktree-start] Found .vnx-intelligence/ in worktree — importing into SQLite..."
+    if ! cmd_intelligence_import; then
+      log "[worktree-start] WARN: intelligence import failed, falling back to snapshot"
+      _snapshot_intelligence "$main_data" "$wt_data"
+    fi
+  else
+    _snapshot_intelligence "$main_data" "$wt_data"
+  fi
 
   # Write .env_override (Option 3B: auto-generated)
   cat > "$wt_data/.env_override" <<OVERRIDE
@@ -2280,16 +2329,28 @@ cmd_worktree_stop() {
     return 1
   fi
 
-  # Merge intelligence back to main
+  # Export intelligence: prefer git-tracked .vnx-intelligence/ export, fall back to merge script.
   if [ "$skip_merge" = false ]; then
-    local merge_script="$VNX_HOME/scripts/vnx_worktree_merge_data.sh"
-    if [ -f "$merge_script" ]; then
-      log "[worktree-stop] Merging intelligence data back to main..."
-      bash "$merge_script" "$wt_data"
+    if [ -d "$_WT_ROOT/.vnx-intelligence" ] || [ -f "$wt_data/state/quality_intelligence.db" ]; then
+      log "[worktree-stop] Exporting intelligence to .vnx-intelligence/..."
+      if ! cmd_intelligence_export; then
+        log "[worktree-stop] WARN: intelligence export failed, falling back to merge script"
+        local merge_script="$VNX_HOME/scripts/vnx_worktree_merge_data.sh"
+        if [ -f "$merge_script" ]; then
+          bash "$merge_script" "$wt_data"
+        fi
+      fi
     else
-      err "[worktree-stop] Merge script not found: $merge_script"
-      err "[worktree-stop] Data preserved in: $wt_data"
-      return 1
+      # Fallback: use legacy merge script for projects without .vnx-intelligence/
+      local merge_script="$VNX_HOME/scripts/vnx_worktree_merge_data.sh"
+      if [ -f "$merge_script" ]; then
+        log "[worktree-stop] Merging intelligence data back to main..."
+        bash "$merge_script" "$wt_data"
+      else
+        err "[worktree-stop] Merge script not found: $merge_script"
+        err "[worktree-stop] Data preserved in: $wt_data"
+        return 1
+      fi
     fi
 
     # Clean up inbox relay files on main
@@ -2546,6 +2607,12 @@ main() {
       ;;
     update)
       cmd_update "$@"
+      ;;
+    intelligence-export)
+      cmd_intelligence_export
+      ;;
+    intelligence-import)
+      cmd_intelligence_import
       ;;
     worktree-start)
       cmd_worktree_start

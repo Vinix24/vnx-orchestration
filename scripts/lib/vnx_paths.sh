@@ -59,6 +59,9 @@ export VNX_REPORTS_DIR="${VNX_REPORTS_DIR:-$VNX_DATA_DIR/unified_reports}"
 export VNX_DB_DIR="${VNX_DB_DIR:-$VNX_DATA_DIR/database}"
 export LEGACY_REPORTS_DIR="${LEGACY_REPORTS_DIR:-$VNX_HOME/unified_reports}"
 
+# Git-tracked intelligence directory (portable across worktrees).
+export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$PROJECT_ROOT/.vnx-intelligence}"
+
 # Skills live outside dist; prefer a configured value, then fallback to known locations.
 if [ -z "${VNX_SKILLS_DIR:-}" ]; then
   if [ -d "$PROJECT_ROOT/.claude/skills" ]; then
