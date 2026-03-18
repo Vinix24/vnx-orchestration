@@ -740,7 +740,7 @@ When completing your task, create a markdown report with:
 
 **Report Format**: Structured markdown with clear sections and evidence-based findings.
 
-Write your report to: \`.vnx-data/unified_reports/\`
+Write your report to: \`${VNX_DATA_DIR}/unified_reports/\`
 Filename: \`$(date +%Y%m%d-%H%M%S)-${track}-<short-title>.md\`
 
 ---

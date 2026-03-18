@@ -331,6 +331,33 @@ validate_block() {
                 return 1
             fi
             
+            # Reject blocks where [[TARGET:X]] and [[DONE]] appear on the same line
+            # (this is always the popup UI summary row, never a real dispatch)
+            if echo "$block" | grep -q '\[\[TARGET:.*\]\].*\[\[DONE\]\]'; then
+                log "Rejected block - TARGET+DONE on same line (UI summary, not a dispatch)"
+                return 1
+            fi
+
+            # Reject blocks containing box-drawing characters (UI table rendering
+            # from queue_ui_enhanced.sh popup — not real dispatches)
+            if echo "$block" | grep -qE '[┌┐└┘├┤┬┴┼─│═║╔╗╚╝╠╣╦╩╬]'; then
+                log "Rejected block - contains box-drawing chars (UI table, not a dispatch)"
+                return 1
+            fi
+
+            # Reject blocks that contain shell prompt output (T0 discussing dispatches)
+            if echo "$block" | grep -qE '(Cogitated for|^❯ |^> ja |Shell cwd was reset)'; then
+                log "Rejected block - contains T0 conversation output, not a dispatch"
+                return 1
+            fi
+
+            # Reject blocks missing mandatory dispatch structure
+            # Real dispatches always have "Role:" somewhere as a field (with optional leading whitespace/ANSI)
+            if ! echo "$block" | grep -q 'Role:'; then
+                log "Rejected block - no 'Role:' field found (not a real dispatch)"
+                return 1
+            fi
+
             # Reject blocks that are too short (less than 3 lines of actual content)
             local line_count=$(echo "$block" | grep -v "^\s*$" | wc -l)
             if [ "$line_count" -lt 4 ]; then
@@ -413,12 +440,12 @@ save_to_queue() {
     fi
     local filename="${dispatch_id}.md"
     local filepath="$QUEUE_DIR/$filename"
-    
+
     # Save the processed block (always Markdown format) to file
     echo "$processed_block" > "$filepath"
-    
+
     log "✓ Queued dispatch for Track $track: $filename (Markdown format)"
-    
+
     # DO NOT copy to pending - must go through authorization UI first!
     # User must accept in popup before dispatch moves from queue → pending
     

@@ -213,7 +213,8 @@ start_all() {
     if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
       start_process "queue_watcher" "queue_popup_watcher.sh"
     else
-      log "Queue popup watcher disabled (VNX_QUEUE_POPUP_ENABLED=0)"
+      log "Queue popup disabled — starting auto-accept watcher instead"
+      start_process "queue_watcher" "queue_auto_accept.sh"
     fi
     start_process "dashboard" "generate_valid_dashboard.sh"
     start_process "state_manager" "unified_state_manager_v2.py"
