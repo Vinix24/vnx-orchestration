@@ -533,7 +533,7 @@ Progress: {progress_bar} {percent}%
             if '# Feature:' not in content and '## Feature:' not in content:
                 return False, "Missing feature title (expected '# Feature:' or '## Feature:')"
 
-            if 'Dependencies:' not in content:
+            if 'Dependencies:' not in content and 'Dependencies**:' not in content:
                 return False, "Missing dependencies section"
 
             # Extract PR definitions (simple regex-based parsing)
@@ -668,7 +668,7 @@ Progress: {progress_bar} {percent}%
                 details['cognition'] = 'normal'
 
             # SPRINT 2: Extract dependencies
-            deps_match = re.search(r'Dependencies:\s*\[([^\]]*)\]', pr_section, re.IGNORECASE)
+            deps_match = re.search(r'\*{0,2}Dependencies\*{0,2}:\s*\[([^\]]*)\]', pr_section, re.IGNORECASE)
             if deps_match:
                 deps_str = deps_match.group(1).strip()
                 if deps_str:
@@ -765,7 +765,7 @@ Progress: {progress_bar} {percent}%
 
             # Parse dependencies: Dependencies: [PR-1, PR-2] or Dependencies: []
             deps = []
-            dep_match = re.search(r'Dependencies:\s*\[([^\]]*)\]', section)
+            dep_match = re.search(r'\*{0,2}Dependencies\*{0,2}:\s*\[([^\]]*)\]', section)
             if dep_match and dep_match.group(1).strip():
                 deps = [d.strip() for d in dep_match.group(1).split(',') if d.strip()]
 
@@ -989,8 +989,20 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             print(f"   Use --force to overwrite")
             return False
 
-        # Ensure queue directory exists
-        queue_dir.mkdir(parents=True, exist_ok=True)
+        # Auto-approve mode: when popup is disabled, go directly to pending
+        auto_approve = os.environ.get('VNX_QUEUE_POPUP_ENABLED', '1') == '0'
+        target_dir = self.dispatch_dir / ("pending" if auto_approve else "queue")
+        target_file = target_dir / dispatch_id_file
+
+        # Ensure target directory exists
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Safety check: prevent duplicate promotion
+        if target_file.exists() and not force:
+            target_name = "pending" if auto_approve else "queue"
+            print(f"❌ Dispatch already in {target_name}: {dispatch_id}")
+            print(f"   Use --force to overwrite")
+            return False
 
         # Atomic move: temp + rename pattern
         import shutil
@@ -1000,17 +1012,19 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             # Extract PR-ID for audit
             pr_id = self.extract_v2_metadata(staging_file).get('pr_id')
 
-            # Copy to queue with temp name (atomic preparation)
-            temp_file = queue_dir / f".{dispatch_id_file}.tmp"
+            # Copy to target with temp name (atomic preparation)
+            temp_file = target_dir / f".{dispatch_id_file}.tmp"
             shutil.copy2(staging_file, temp_file)
 
             # Atomic rename (OS-level atomic operation)
-            if force and queue_file.exists():
-                queue_file.unlink()
-            temp_file.rename(queue_file)
+            if force and target_file.exists():
+                target_file.unlink()
+            temp_file.rename(target_file)
 
             # Remove from staging (cleanup phase)
             staging_file.unlink()
+
+            target_name = "pending (auto-approved)" if auto_approve else "queue"
 
             # Log promotion with JSONL
             self._log_audit({
@@ -1019,18 +1033,20 @@ Size Estimate: {pr.get('size', 'unknown')} lines
                 'dispatch_id': dispatch_id,
                 'pr_id': pr_id,
                 'from': str(staging_file),
-                'to': str(queue_file),
+                'to': str(target_file),
+                'auto_approved': auto_approve,
                 'forced': force,
                 'actor': 'T0'
             })
 
             # SPRINT 1: Log queue event for T0 audit trail
             if pr_id:
-                self.log_queue_event("promote", pr_id, dispatch_id=dispatch_id, from_location="staging", to_location="queue", forced=force)
+                self.log_queue_event("promote", pr_id, dispatch_id=dispatch_id, from_location="staging", to_location=target_name, forced=force)
 
             print(f"✅ Promoted dispatch: {dispatch_id}")
-            print(f"📁 Now in queue: {queue_file}")
-            print(f"🔔 Popup will detect shortly")
+            print(f"📁 Now in {target_name}: {target_file}")
+            if not auto_approve:
+                print(f"🔔 Popup will detect shortly")
 
             return True
 
