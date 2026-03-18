@@ -18,7 +18,7 @@ VNX coordinates work across 4 terminals (T0-T3) with human gates at every step:
 1. T0 creates a dispatch → human promotes it (approval gate)
 2. Dispatcher sends the dispatch into the worker's conversation (T1/T2/T3)
 3. Workers execute their assigned task based on what they received
-4. Workers write reports to `.vnx-data/unified_reports/`
+4. Workers write reports to `$VNX_DATA_DIR/unified_reports/`
 5. Receipt processor generates NDJSON audit trail
 6. T0 reviews receipts and advances quality gates
 

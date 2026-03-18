@@ -67,6 +67,11 @@ def resolve_paths() -> Dict[str, str]:
         "VNX_DB_DIR": str(Path(os.environ.get("VNX_DB_DIR") or (vnx_data_dir / "database")).expanduser()),
     }
 
+    # Git-tracked intelligence directory (portable across worktrees)
+    paths["VNX_INTELLIGENCE_DIR"] = str(
+        Path(os.environ.get("VNX_INTELLIGENCE_DIR") or (project_root / ".vnx-intelligence")).expanduser()
+    )
+
     if "VNX_SKILLS_DIR" in os.environ:
         paths["VNX_SKILLS_DIR"] = os.environ["VNX_SKILLS_DIR"]
     else:
