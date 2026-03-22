@@ -67,6 +67,11 @@ trap cleanup EXIT
 
 log_msg "=== Nightly conversation analysis starting ==="
 
+# Phase 0: Ensure DB schema is up to date (runs migrations if needed)
+log_msg "Phase 0: Running DB schema migrations..."
+python3 "$SCRIPT_DIR/quality_db_init.py" 2>&1 | tee -a "$LOG_FILE"
+log_msg "Phase 0 complete"
+
 # Optionally start Ollama if not running and available
 OLLAMA_STARTED=false
 if ! pgrep -x "ollama" >/dev/null 2>&1; then
@@ -98,12 +103,28 @@ python3 "$SCRIPT_DIR/conversation_analyzer.py" \
 ANALYZER_EXIT=${PIPESTATUS[0]}
 log_msg "Phase 1 complete (exit=$ANALYZER_EXIT)"
 
+# Phase 1.5: Cross-reference sessions, dispatches, and receipts
+log_msg "Phase 1.5: Running session-dispatch linkage..."
+if python3 "$SCRIPT_DIR/link_sessions_dispatches.py" 2>&1 | tee -a "$LOG_FILE"; then
+    log_msg "Phase 1.5 complete: session-dispatch linkage updated"
+else
+    log_msg "Phase 1.5 WARNING: session-dispatch linkage failed (non-fatal)"
+fi
+
 # Phase 2: Generate T0 session brief (model-based, auto — read-only state file)
 log_msg "Phase 2: Generating T0 session brief..."
 if python3 "$SCRIPT_DIR/generate_t0_session_brief.py" 2>&1 | tee -a "$LOG_FILE"; then
     log_msg "Phase 2 complete: t0_session_brief.json updated"
 else
     log_msg "Phase 2 WARNING: session brief generation failed (non-fatal)"
+fi
+
+# Phase 2.5: Governance metrics aggregation + SPC
+log_msg "Phase 2.5: Computing governance metrics..."
+if python3 "$SCRIPT_DIR/governance_aggregator.py" --backfill 2>&1 | tee -a "$LOG_FILE"; then
+    log_msg "Phase 2.5 complete: governance metrics updated"
+else
+    log_msg "Phase 2.5 WARNING: governance aggregation failed (non-fatal)"
 fi
 
 # Phase 3: Generate suggested edits (human-in-the-loop, pending review)

@@ -1,0 +1,248 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #070b16;
+  --color-card: #0a1430;
+  --color-card-hover: #0d1a3d;
+  --color-card-border: rgba(255, 255, 255, 0.12);
+  --color-primary: #0a2463;
+  --color-accent: #f97316;
+  --color-accent-gold: #facc15;
+  --color-foreground: #f4f4f9;
+  --color-muted: rgba(244, 244, 249, 0.65);
+  --color-success: #50fa7b;
+  --color-warning: #facc15;
+  --color-error: #ff6b6b;
+
+  --color-chart-t-manager: #f97316;
+  --color-chart-t0: #6B8AE6;
+  --color-chart-t1: #50fa7b;
+  --color-chart-t2: #facc15;
+  --color-chart-t3: #9B6BE6;
+  --color-chart-unknown: #6B6B6B;
+
+  --color-model-opus: #f97316;
+  --color-model-sonnet: #6B8AE6;
+}
+
+html,
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ===== Animations ===== */
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* ===== Glassmorphism Card ===== */
+
+.glass-card {
+  background: linear-gradient(
+    135deg,
+    rgba(10, 20, 48, 0.85) 0%,
+    rgba(10, 20, 48, 0.65) 100%
+  );
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
+}
+
+.glass-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
+}
+
+.glass-card:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+/* ===== Animate In ===== */
+
+.animate-in {
+  animation: fadeInUp 0.5s ease-out both;
+}
+
+.animate-in-fast {
+  animation: fadeIn 0.3s ease-out both;
+}
+
+/* Stagger children */
+.stagger-children > * {
+  animation: fadeInUp 0.4s ease-out both;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 60ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 180ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 300ms; }
+
+/* ===== Page Transition ===== */
+
+.page-enter {
+  animation: fadeIn 0.35s ease-out both;
+}
+
+/* ===== Recharts tooltip override for dark mode ===== */
+
+.recharts-default-tooltip {
+  background: linear-gradient(135deg, rgba(10, 20, 48, 0.95) 0%, rgba(10, 20, 48, 0.85) 100%) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+  padding: 12px 16px !important;
+}
+
+.recharts-tooltip-item {
+  color: var(--color-foreground) !important;
+}
+
+.recharts-tooltip-label {
+  color: var(--color-muted) !important;
+  font-size: 11px !important;
+  margin-bottom: 6px !important;
+}
+
+/* ===== Scrollbar styling ===== */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+/* ===== Table Row Hover ===== */
+
+.table-row-hover {
+  transition: background-color 0.15s ease;
+}
+
+.table-row-hover:hover {
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
+/* ===== Section Header ===== */
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.section-header h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--color-foreground);
+}
+
+.section-header .accent-bar {
+  width: 4px;
+  height: 28px;
+  border-radius: 2px;
+  background: var(--color-accent);
+}
+
+/* ===== Recharts Legend ===== */
+
+.recharts-legend-item-text {
+  color: var(--color-muted) !important;
+  font-size: 11px !important;
+}
+
+/* ===== Number Display ===== */
+
+.kpi-value {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-value-sm {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}

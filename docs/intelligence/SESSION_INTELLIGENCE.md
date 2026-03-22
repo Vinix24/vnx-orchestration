@@ -1,7 +1,8 @@
 # Session Intelligence & Human-in-the-Loop System Tuning
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Added**: 2026-03-03
+**Updated**: 2026-03-07 (governance measurement integration)
 
 ## Overview
 
@@ -221,14 +222,23 @@ Show the last 20 applied edits with timestamps and content.
 
 ## Nightly Pipeline
 
-The `conversation_analyzer_nightly.sh` runs as a 4-phase pipeline:
+The `conversation_analyzer_nightly.sh` runs as a 6-phase pipeline:
 
 ```bash
+# Phase 0: DB schema migrations (governance tables, CQS columns)
+python3 scripts/quality_db_init.py
+
 # Phase 1: Session analysis (parse + heuristics + deep analysis)
 python3 scripts/conversation_analyzer.py --max-sessions 50 --deep-budget 20
 
+# Phase 1.5: Session-dispatch linkage (cross-reference sessions with dispatches)
+python3 scripts/link_sessions_dispatches.py
+
 # Phase 2: T0 session brief (auto — read-only state file)
 python3 scripts/generate_t0_session_brief.py
+
+# Phase 2.5: Governance metrics aggregation + SPC anomaly detection
+python3 scripts/governance_aggregator.py --backfill
 
 # Phase 3: Suggested edits (human-in-the-loop)
 python3 scripts/generate_suggested_edits.py
@@ -237,8 +247,16 @@ python3 scripts/generate_suggested_edits.py
 python3 scripts/send_digest_email.py
 ```
 
-Phases 2-4 are non-fatal — if they fail, the pipeline continues.
+All phases after Phase 1 are non-fatal — if they fail, the pipeline continues.
 Phase 4 is skipped entirely when `VNX_DIGEST_EMAIL` or `VNX_SMTP_PASS` are not set.
+
+### Phase 2.5: Governance Measurement
+
+Phase 2.5 is documented in detail in `GOVERNANCE_MEASUREMENT.md`. It computes:
+- **CQS backfill** for dispatches that completed before the governance system was installed
+- **FPY, rework rate, gate velocity, mean CQS** per scope (system/terminal/role/gate/model)
+- **SPC control limits** (X-bar +/- 3 sigma from 30-day baseline)
+- **Anomaly detection** via Western Electric rules (out-of-control, trend, shift, run)
 
 ## Email Digest (Opt-in)
 
@@ -325,9 +343,13 @@ Run: `python3 -m pytest tests/test_conversation_analyzer.py -v`
 | `scripts/generate_suggested_edits.py` | Suggestion engine |
 | `scripts/apply_suggested_edits.py` | Accept/reject/apply CLI |
 | `scripts/send_digest_email.py` | Opt-in email digest sender (SMTP) |
-| `scripts/conversation_analyzer_nightly.sh` | 4-phase nightly runner |
-| `scripts/receipt_processor_v4.sh` | MODEL footer in receipts |
-| `schemas/quality_intelligence.sql` | Schema v8.0.5 with session_model |
-| `scripts/quality_db_init.py` | ALTER TABLE migration |
+| `scripts/conversation_analyzer_nightly.sh` | 6-phase nightly runner (incl. governance) |
+| `scripts/governance_aggregator.py` | Phase 2.5: FPY/rework/SPC computation |
+| `scripts/governance_weekly_report.py` | Weekly governance markdown report |
+| `scripts/lib/cqs_calculator.py` | CQS calculation engine + status normalization |
+| `scripts/update_dispatch_cqs.py` | Standalone CQS update CLI |
+| `scripts/receipt_processor_v4.sh` | MODEL footer + CQS update (section C3b) |
+| `schemas/quality_intelligence.sql` | Schema v8.1.0 with governance tables |
+| `scripts/quality_db_init.py` | Migrations (CQS columns, governance tables) |
 | `bin/vnx` | `suggest` subcommand |
 | `tests/test_conversation_analyzer.py` | 44 tests |

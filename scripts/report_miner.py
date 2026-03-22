@@ -122,6 +122,13 @@ class ReportMiner:
         if status_match:
             metadata['status'] = status_match.group(1)
 
+        # Extract dispatch_id from report metadata
+        dispatch_match = re.search(r'\|\s*\*\*Dispatch-ID\*\*\s*\|\s*([^\|]+?)\s*\|', content)
+        if not dispatch_match:
+            dispatch_match = re.search(r'Dispatch-ID:\s*(\S+)', content)
+        if dispatch_match:
+            metadata['dispatch_id'] = dispatch_match.group(1).strip()
+
         return metadata
 
     def extract_tags(self, content: str) -> List[str]:
@@ -438,8 +445,8 @@ class ReportMiner:
             '''INSERT INTO report_findings
             (report_path, report_date, terminal, task_type,
              patterns_found, antipatterns_found, prevention_rules_found,
-             tags_found, summary, age_category)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             tags_found, summary, age_category, dispatch_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (report_path,
              metadata.get('date'),
              metadata.get('terminal'),
@@ -449,7 +456,8 @@ class ReportMiner:
              len(findings.get('prevention_rules', [])),
              json.dumps(all_tags),
              metadata.get('task_description', ''),
-             self.get_age_category(report_path))
+             self.get_age_category(report_path),
+             metadata.get('dispatch_id'))
         )
 
         self.conn.commit()

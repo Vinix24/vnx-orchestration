@@ -71,9 +71,9 @@ terminals/T0/                     # <project> orchestrator
 ├── CLAUDE.md                     # Project-specific instructions
 └── modules/                      # Project-specific modules
 
-terminals/T1/                     # Track A worker
-terminals/T2/                     # Track B worker
-terminals/T3/                     # Track C specialist
+terminals/T1/                     # Worker (any task)
+terminals/T2/                     # Worker (any task)
+terminals/T3/                     # Worker (any task)
 ```
 
 ### 2. Project-Specific Folders

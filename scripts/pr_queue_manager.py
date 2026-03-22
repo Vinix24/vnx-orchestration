@@ -6,6 +6,7 @@ Manages PR queue with dependency tracking and state persistence
 """
 
 import os
+import re
 import sys
 import json
 import yaml
@@ -846,7 +847,7 @@ Progress: {progress_bar} {percent}%
 
         # Generate dispatch ID
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        pr_descriptor = pr['title'].lower().replace(' ', '-')[:30]
+        pr_descriptor = re.sub(r'[^a-z0-9-]', '-', pr['title'].lower())[:30].strip('-')
         dispatch_id = f"{timestamp}-{pr_descriptor}-{track}"
 
         # SPRINT 2: Map track to terminal (A→T1, B→T2, C→T3)
@@ -1418,7 +1419,7 @@ Size Estimate: {pr.get('size', 'unknown')} lines
 
                 # Generate dispatch ID
                 timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-                pr_descriptor = pr_data['title_from_header'].lower().replace(' ', '-')[:30]
+                pr_descriptor = re.sub(r'[^a-z0-9-]', '-', pr_data['title_from_header'].lower())[:30].strip('-')
                 track = pr_data['track']
                 terminal = track_to_terminal.get(track, 'T1')
                 dispatch_id = f"{timestamp}-{pr_descriptor}-{track}"
