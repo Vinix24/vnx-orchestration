@@ -165,17 +165,55 @@ cmd_doctor() {
   check_required_path "$TERMINALS_TEMPLATE_DIR/T3.md" file || failed=1
   check_required_path "$VNX_SKILLS_DIR/skills.yaml" file || failed=1
 
-  # Hooks checks
+  # Hooks and settings checks
   check_required_path "$PROJECT_ROOT/.claude/hooks/sessionstart.sh" file || failed=1
-  if [ -f "$PROJECT_ROOT/.claude/settings.json" ]; then
-    if grep -q '"hooks"' "$PROJECT_ROOT/.claude/settings.json" 2>/dev/null; then
+  local settings_file="$PROJECT_ROOT/.claude/settings.json"
+  if [ -f "$settings_file" ]; then
+    # Validate JSON syntax
+    if command -v jq &>/dev/null; then
+      if jq empty "$settings_file" 2>/dev/null; then
+        log "[doctor] OK settings: valid JSON"
+      else
+        err "[doctor] settings.json is not valid JSON"
+        failed=1
+      fi
+    elif command -v python3 &>/dev/null; then
+      if python3 -c "import json; json.load(open('$settings_file'))" 2>/dev/null; then
+        log "[doctor] OK settings: valid JSON"
+      else
+        err "[doctor] settings.json is not valid JSON"
+        failed=1
+      fi
+    fi
+
+    # Validate structure via merge engine
+    local validate_script="$VNX_HOME/scripts/vnx_settings_merge.py"
+    if [ -f "$validate_script" ] && command -v python3 &>/dev/null; then
+      if python3 "$validate_script" --validate --project-root "$PROJECT_ROOT" --vnx-home "$VNX_HOME" 2>/dev/null; then
+        log "[doctor] OK settings: structure valid"
+      else
+        err "[doctor] settings.json structure validation failed"
+        failed=1
+      fi
+    fi
+
+    # Check hooks section exists
+    if grep -q '"hooks"' "$settings_file" 2>/dev/null; then
       log "[doctor] OK hooks: settings.json has hooks section"
     else
       err "[doctor] Missing hooks section in .claude/settings.json"
       failed=1
     fi
+
+    # Check permissions section exists
+    if grep -q '"permissions"' "$settings_file" 2>/dev/null; then
+      log "[doctor] OK permissions: settings.json has permissions section"
+    else
+      err "[doctor] Missing permissions section in .claude/settings.json"
+      failed=1
+    fi
   else
-    err "[doctor] Missing .claude/settings.json"
+    err "[doctor] Missing .claude/settings.json (run: vnx regen-settings --full)"
     failed=1
   fi
 
