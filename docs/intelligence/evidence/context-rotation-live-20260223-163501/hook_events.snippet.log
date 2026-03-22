@@ -1,0 +1,3 @@
+[VNX:hook 17:31:30] Handover doc detected: /Users/vincentvandeth/Development/SEOcrawler_v2/.vnx-data/rotation_handovers/20260223-120000-T1-ROTATION-HANDOVER.md (terminal: T1)
+[VNX:hook 17:31:30] Lock acquired: rotation_T1
+[VNX:hook 17:31:31] Rotation script started for T1 (PID: 46518)

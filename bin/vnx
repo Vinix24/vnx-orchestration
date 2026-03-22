@@ -973,6 +973,15 @@ TSJSON
           cd "$PROJECT_ROOT"
         fi
       fi
+
+      # Re-heal is complete — do NOT fall through to fresh-start path.
+      log "Session re-heal complete. Attaching..."
+      if [ -z "${TMUX:-}" ]; then
+        exec tmux attach-session -t "$session_name"
+      else
+        tmux switch-client -t "$session_name"
+      fi
+      return 0
     else
       log "VNX session already running. Attaching..."
       if [ -z "${TMUX:-}" ]; then

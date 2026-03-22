@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
+
+  body {
+    width: 1200px; height: 630px;
+    font-family: 'Inter', sans-serif;
+    background: #0A2463; color: #ffffff;
+    overflow: hidden;
+  }
+
+  .container {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    padding: 60px 72px;
+    position: relative;
+  }
+
+  .container::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .accent-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 6px; background: #F97316;
+  }
+
+  .header {
+    position: relative; z-index: 1;
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+
+  .series-tag {
+    font-size: 16px; font-weight: 600;
+    color: #F97316; letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  .part-badge {
+    font-size: 15px; font-weight: 600;
+    color: #F97316; letter-spacing: 1px;
+    text-transform: uppercase;
+    background: rgba(249,115,22,0.15);
+    border: 1px solid rgba(249,115,22,0.3);
+    border-radius: 6px; padding: 10px 20px;
+  }
+
+  .main-content {
+    position: relative; z-index: 1;
+    display: flex; flex-direction: column; gap: 36px;
+  }
+
+  .diagram {
+    display: flex; align-items: center; gap: 24px;
+  }
+
+  .provider-box {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 12px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 20px 28px;
+    min-width: 130px;
+  }
+
+  .provider-name {
+    font-size: 18px; font-weight: 600;
+    color: rgba(255,255,255,0.8);
+  }
+
+  .provider-type {
+    font-size: 12px; font-weight: 300;
+    color: rgba(255,255,255,0.35);
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  .arrow-block {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 4px;
+  }
+
+  .arrow-line {
+    font-size: 28px; color: rgba(255,255,255,0.3);
+  }
+
+  .arrow-label {
+    font-size: 11px; font-weight: 600;
+    color: rgba(255,255,255,0.3);
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  .watcher-box {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+    background: rgba(249,115,22,0.15);
+    border: 2px solid #F97316;
+    border-radius: 8px;
+    padding: 24px 36px;
+  }
+
+  .watcher-icon {
+    font-size: 28px; color: #F97316;
+  }
+
+  .watcher-name {
+    font-size: 20px; font-weight: 800;
+    color: #F97316;
+  }
+
+  .watcher-desc {
+    font-size: 13px; font-weight: 300;
+    color: rgba(255,255,255,0.5);
+  }
+
+  .headline {
+    font-size: 44px; font-weight: 800;
+    line-height: 1.1; letter-spacing: -1px;
+  }
+
+  .headline em { font-style: normal; color: #F97316; }
+
+  .subline {
+    font-size: 21px; font-weight: 300;
+    color: rgba(255,255,255,0.5);
+  }
+
+  .footer {
+    position: relative; z-index: 1;
+    display: flex; justify-content: space-between; align-items: flex-end;
+  }
+
+  .author-name {
+    font-size: 20px; font-weight: 600;
+    color: rgba(255,255,255,0.8);
+  }
+  .author-url {
+    font-size: 16px; font-weight: 400;
+    color: rgba(255,255,255,0.4);
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="accent-bar"></div>
+
+    <div class="header">
+      <div class="series-tag">Glass Box Governance</div>
+      <div class="part-badge">Part 4 of 5</div>
+    </div>
+
+    <div class="main-content">
+      <div class="diagram">
+        <div class="provider-box">
+          <span class="provider-name">Claude</span>
+          <span class="provider-type">Anthropic</span>
+        </div>
+        <div class="provider-box">
+          <span class="provider-name">Codex</span>
+          <span class="provider-type">OpenAI</span>
+        </div>
+        <div class="provider-box">
+          <span class="provider-name">Gemini</span>
+          <span class="provider-type">Google</span>
+        </div>
+
+        <div class="arrow-block">
+          <span class="arrow-line">→</span>
+          <span class="arrow-label">files</span>
+        </div>
+
+        <div class="watcher-box">
+          <span class="watcher-icon">👁</span>
+          <span class="watcher-name">External Watcher</span>
+          <span class="watcher-desc">provider-neutral · agent-unaware</span>
+        </div>
+      </div>
+
+      <div>
+        <div class="headline">The <em>External Watcher</em> Pattern</div>
+        <div class="subline">Swap providers without rewriting monitoring. Watch the filesystem, not the API.</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div>
+        <div class="author-name">Vincent van Deth</div>
+        <div class="author-url">vincentvandeth.nl</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

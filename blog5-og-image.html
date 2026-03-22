@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
+
+  body {
+    width: 1200px; height: 630px;
+    font-family: 'Inter', sans-serif;
+    background: #0A2463; color: #ffffff;
+    overflow: hidden;
+  }
+
+  .container {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    padding: 60px 72px;
+    position: relative;
+  }
+
+  .container::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .accent-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 6px; background: #F97316;
+  }
+
+  .header {
+    position: relative; z-index: 1;
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+
+  .series-tag {
+    font-size: 16px; font-weight: 600;
+    color: #F97316; letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  .part-badge {
+    font-size: 15px; font-weight: 600;
+    color: #F97316; letter-spacing: 1px;
+    text-transform: uppercase;
+    background: rgba(249,115,22,0.15);
+    border: 1px solid rgba(249,115,22,0.3);
+    border-radius: 6px; padding: 10px 20px;
+  }
+
+  .main-content {
+    position: relative; z-index: 1;
+    display: flex; flex-direction: column; gap: 40px;
+  }
+
+  .verdict-display {
+    display: flex; gap: 40px; align-items: flex-start;
+  }
+
+  .agent-side {
+    display: flex; flex-direction: column; gap: 12px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px; padding: 28px 32px;
+    min-width: 340px;
+  }
+
+  .agent-label {
+    font-size: 13px; font-weight: 600;
+    color: rgba(255,255,255,0.35);
+    text-transform: uppercase; letter-spacing: 2px;
+  }
+
+  .agent-report {
+    font-size: 22px; font-weight: 300;
+    color: rgba(255,255,255,0.7);
+    line-height: 1.5;
+  }
+
+  .confidence {
+    font-size: 56px; font-weight: 900;
+    color: rgba(255,255,255,0.25);
+    line-height: 1;
+  }
+
+  .vs {
+    font-size: 24px; font-weight: 300;
+    color: rgba(255,255,255,0.2);
+    align-self: center;
+    padding-top: 20px;
+  }
+
+  .gate-side {
+    display: flex; flex-direction: column; gap: 12px;
+    background: rgba(249,115,22,0.1);
+    border: 2px solid #F97316;
+    border-radius: 8px; padding: 28px 32px;
+    min-width: 340px;
+  }
+
+  .gate-label {
+    font-size: 13px; font-weight: 600;
+    color: #F97316;
+    text-transform: uppercase; letter-spacing: 2px;
+  }
+
+  .gate-verdict {
+    font-size: 56px; font-weight: 900;
+    color: #F97316; line-height: 1;
+  }
+
+  .gate-reasons {
+    font-size: 16px; font-weight: 300;
+    color: rgba(255,255,255,0.5);
+    line-height: 1.6;
+  }
+
+  .headline {
+    font-size: 44px; font-weight: 800;
+    line-height: 1.1; letter-spacing: -1px;
+  }
+
+  .headline em { font-style: normal; color: #F97316; }
+
+  .subline {
+    font-size: 21px; font-weight: 300;
+    color: rgba(255,255,255,0.5);
+  }
+
+  .footer {
+    position: relative; z-index: 1;
+    display: flex; justify-content: space-between; align-items: flex-end;
+  }
+
+  .author-name {
+    font-size: 20px; font-weight: 600;
+    color: rgba(255,255,255,0.8);
+  }
+  .author-url {
+    font-size: 16px; font-weight: 400;
+    color: rgba(255,255,255,0.4);
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="accent-bar"></div>
+
+    <div class="header">
+      <div class="series-tag">Glass Box Governance</div>
+      <div class="part-badge">Part 5 of 5</div>
+    </div>
+
+    <div class="main-content">
+      <div class="verdict-display">
+        <div class="agent-side">
+          <span class="agent-label">Agent self-report</span>
+          <span class="agent-report">Task complete.<br>All tests passing.</span>
+          <span class="confidence">0.97</span>
+        </div>
+
+        <span class="vs">vs</span>
+
+        <div class="gate-side">
+          <span class="gate-label">Quality gate verdict</span>
+          <span class="gate-verdict">HOLD</span>
+          <span class="gate-reasons">847-line file<br>73-line function<br>circular test validation</span>
+        </div>
+      </div>
+
+      <div>
+        <div class="headline">Async <em>Quality Gates</em></div>
+        <div class="subline">The agent's self-assessment is input, not verdict.</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div>
+        <div class="author-name">Vincent van Deth</div>
+        <div class="author-url">vincentvandeth.nl</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

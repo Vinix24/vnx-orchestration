@@ -121,6 +121,7 @@ class SessionMetrics:
     project_path: str = ""
     terminal: str = "unknown"
     session_date: str = ""
+    dispatch_id: str = ""
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     cache_creation_tokens: int = 0
@@ -145,6 +146,7 @@ class SessionMetrics:
 class SessionFlags:
     has_error_recovery: bool = False
     has_context_reset: bool = False
+    context_reset_count: int = 0
     has_large_refactor: bool = False
     has_test_cycle: bool = False
     primary_activity: str = "unknown"
@@ -166,6 +168,9 @@ class RunStats:
 
 class SessionParser:
     """Parse a Claude Code JSONL session into structured metrics."""
+
+    DISPATCH_TABLE_RE = re.compile(r'\|\s*\*\*Dispatch-ID\*\*\s*\|\s*([^\|]+?)\s*\|')
+    DISPATCH_HEADER_RE = re.compile(r'Dispatch-ID:\s*(\S+)')
 
     @staticmethod
     def session_id_from_path(jsonl_path: Path) -> str:
@@ -244,6 +249,17 @@ class SessionParser:
 
                 elif msg_type == "user":
                     metrics.user_message_count += 1
+                    # Extract dispatch_id from first few user messages
+                    if not metrics.dispatch_id and metrics.user_message_count <= 3:
+                        content = record.get("message", {}).get("content", "")
+                        text = content if isinstance(content, str) else " ".join(
+                            b.get("text", "") for b in content if isinstance(b, dict)
+                        ) if isinstance(content, list) else ""
+                        m = self.DISPATCH_TABLE_RE.search(text)
+                        if not m:
+                            m = self.DISPATCH_HEADER_RE.search(text)
+                        if m:
+                            metrics.dispatch_id = m.group(1).strip()
                     messages.append(record)
 
                 elif msg_type == "system":
@@ -306,7 +322,8 @@ class HeuristicDetector:
 
         tool_sequence = self._extract_tool_sequence(messages)
         flags.has_error_recovery = self._detect_error_recovery(messages)
-        flags.has_context_reset = self._detect_context_reset(messages)
+        flags.context_reset_count = self._count_context_resets(messages)
+        flags.has_context_reset = flags.context_reset_count > 0
         flags.has_test_cycle = self._detect_test_cycle(tool_sequence, messages)
         flags.primary_activity = self._classify_activity(metrics)
 
@@ -339,17 +356,19 @@ class HeuristicDetector:
                             error_count += 1
         return error_count >= 2
 
-    def _detect_context_reset(self, messages: List[dict]) -> bool:
+    def _count_context_resets(self, messages: List[dict]) -> int:
+        """Count context compaction/rotation events in session."""
+        count = 0
         for record in messages:
             if record.get("type") == "system":
                 subtype = record.get("subtype", "")
                 if "compaction" in subtype or "summary" in subtype:
-                    return True
-                # Check data field for context limit mentions
+                    count += 1
+                    continue
                 data = record.get("data", "")
                 if isinstance(data, str) and "context" in data.lower():
-                    return True
-        return False
+                    count += 1
+        return count
 
     def _detect_test_cycle(self, tool_sequence: List[str],
                            messages: List[dict]) -> bool:
@@ -845,12 +864,12 @@ class ConversationAnalyzer:
                 tool_task_count, tool_other_count,
                 message_count, user_message_count, assistant_message_count,
                 duration_minutes,
-                has_error_recovery, has_context_reset,
+                has_error_recovery, has_context_reset, context_reset_count,
                 has_large_refactor, has_test_cycle, primary_activity,
                 deep_analysis_json, deep_analysis_model, deep_analysis_at,
-                file_size_bytes, analyzer_version, session_model
+                file_size_bytes, analyzer_version, session_model, dispatch_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             metrics.session_id, metrics.project_path, metrics.terminal,
             metrics.session_date,
@@ -863,6 +882,7 @@ class ConversationAnalyzer:
             metrics.message_count, metrics.user_message_count,
             metrics.assistant_message_count, metrics.duration_minutes,
             flags.has_error_recovery, flags.has_context_reset,
+            flags.context_reset_count,
             flags.has_large_refactor, flags.has_test_cycle,
             flags.primary_activity,
             json.dumps(deep_result) if deep_result else None,
@@ -870,6 +890,7 @@ class ConversationAnalyzer:
             (datetime.now().isoformat() if deep_result else None),
             metrics.file_size_bytes, ANALYZER_VERSION,
             metrics.session_model or "unknown",
+            metrics.dispatch_id or None,
         ))
         self.conn.commit()
 

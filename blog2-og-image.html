@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
+
+  body {
+    width: 1200px;
+    height: 630px;
+    font-family: 'Inter', sans-serif;
+    background: #0A2463;
+    color: #ffffff;
+    overflow: hidden;
+  }
+
+  .container {
+    width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    justify-content: space-between;
+    padding: 60px 72px;
+    position: relative;
+  }
+
+  .container::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .accent-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 6px; background: #F97316;
+  }
+
+  .series-tag {
+    position: relative; z-index: 1;
+    font-size: 16px; font-weight: 600;
+    color: #F97316; letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  .main-content {
+    position: relative; z-index: 1;
+    display: flex; flex-direction: column; gap: 32px;
+  }
+
+  .timeline {
+    display: flex; align-items: center; gap: 0;
+  }
+
+  .time-block {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 0 28px;
+    position: relative;
+  }
+
+  .time-block:not(:last-child)::after {
+    content: '';
+    position: absolute; right: 0; top: 50%;
+    width: 1px; height: 60px; transform: translateY(-50%);
+    background: rgba(255,255,255,0.15);
+  }
+
+  .time-value {
+    font-size: 52px; font-weight: 900;
+    line-height: 1; letter-spacing: -1px;
+  }
+
+  .time-value.danger { color: #F97316; }
+
+  .time-label {
+    font-size: 15px; font-weight: 300;
+    color: rgba(255,255,255,0.5);
+    margin-top: 8px; text-align: center;
+  }
+
+  .headline {
+    font-size: 44px; font-weight: 800;
+    line-height: 1.15; letter-spacing: -1px;
+    max-width: 900px;
+  }
+
+  .headline em {
+    font-style: normal; color: #F97316;
+  }
+
+  .subline {
+    font-size: 22px; font-weight: 300;
+    color: rgba(255,255,255,0.55);
+    max-width: 700px;
+  }
+
+  .footer {
+    position: relative; z-index: 1;
+    display: flex; justify-content: space-between;
+    align-items: flex-end;
+  }
+
+  .author-name {
+    font-size: 20px; font-weight: 600;
+    color: rgba(255,255,255,0.8);
+  }
+  .author-url {
+    font-size: 16px; font-weight: 400;
+    color: rgba(255,255,255,0.4);
+  }
+
+  .part-badge {
+    font-size: 15px; font-weight: 600;
+    color: #F97316; letter-spacing: 1px;
+    text-transform: uppercase;
+    background: rgba(249,115,22,0.15);
+    border: 1px solid rgba(249,115,22,0.3);
+    border-radius: 6px; padding: 10px 20px;
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="accent-bar"></div>
+
+    <div class="series-tag">Glass Box Governance</div>
+
+    <div class="main-content">
+      <div class="timeline">
+        <div class="time-block">
+          <span class="time-value">2:00</span>
+          <span class="time-label">agent hallucinates<br>dependency</span>
+        </div>
+        <div class="time-block">
+          <span class="time-value">2:12</span>
+          <span class="time-label">second agent "fixes"<br>failing tests</span>
+        </div>
+        <div class="time-block">
+          <span class="time-value">2:40</span>
+          <span class="time-label">3 files rewritten<br>tests passing</span>
+        </div>
+        <div class="time-block">
+          <span class="time-value danger">8:00</span>
+          <span class="time-label">discovery — can't<br>reconstruct WHY</span>
+        </div>
+      </div>
+
+      <div class="headline">The <em>Cascade of Doom</em></div>
+      <div class="subline">When AI agents fix each other's mistakes, and nobody can trace what happened.</div>
+    </div>
+
+    <div class="footer">
+      <div>
+        <div class="author-name">Vincent van Deth</div>
+        <div class="author-url">vincentvandeth.nl</div>
+      </div>
+      <div class="part-badge">Part 2 of 5</div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-03-03
+**Last Updated**: 2026-03-09
 
 ---
 
@@ -28,7 +28,7 @@
 - Error contract standard: `orchestration/ERROR_CONTRACT_STANDARD.md`
 
 ### Technical Deep Dives
-- Intelligence system (v3.0 — code + doc ingestion): `core/technical/INTELLIGENCE_SYSTEM.md`
+- Intelligence system (v4.0 — code + doc ingestion + governance): `core/technical/INTELLIGENCE_SYSTEM.md`
 - Dispatcher system (V7 legacy + V8 current): `core/technical/DISPATCHER_SYSTEM.md`
 - State management: `core/technical/STATE_MANAGEMENT.md`
 - Report lifecycle: `core/technical/REPORT_LIFECYCLE.md`
@@ -42,6 +42,8 @@
 - Multi-model guide (Claude + Codex + Gemini): `operations/MULTI_MODEL_GUIDE.md`
 - Receipt pipeline (V8.1 + quality advisory): `operations/RECEIPT_PIPELINE.md`
 - Receipt processing flow: `operations/RECEIPT_PROCESSING_FLOW.md`
+- **Autonomous production guide**: `operations/AUTONOMOUS_PRODUCTION_GUIDE.md` (preflight, waves, quality gates, git automation)
+- **Wave mapping**: `operations/VNX_AGENT_TEAM_WAVE_MAPPING.md` (70 PRs, 24 waves, 5 fases — Digital Agent Team)
 
 ---
 
@@ -58,12 +60,16 @@
 ## Intelligence
 
 - Intelligence overview: `intelligence/README.md`
-- T0 orchestration intelligence: `intelligence/T0_ORCHESTRATION_INTELLIGENCE.md`
+- **Governance Measurement (SPC + CQS)**: `intelligence/GOVERNANCE_MEASUREMENT.md`
 - **Session Intelligence & System Tuning**: `intelligence/SESSION_INTELLIGENCE.md`
+- T0 orchestration intelligence: `intelligence/T0_ORCHESTRATION_INTELLIGENCE.md`
 - Tag taxonomy: `intelligence/TAG_TAXONOMY.md`
 - Cost tracking guide: `intelligence/COST_TRACKING_GUIDE.md`
 - Hook integration report (context rotation): `intelligence/VNX_HOOK_INTEGRATION_REPORT.md`
 - Rotation test report (v2.4): `intelligence/VNX_ROTATION_TEST_REPORT.md`
+
+### Governance Reports
+- Weekly governance reports: `governance/week_YYYY_WW.md`
 
 ---
 
@@ -101,6 +107,18 @@
 
 ---
 
+## Dashboard (Unified Control Plane)
+
+- Architecture section: `core/00_VNX_ARCHITECTURE.md` → [Unified Dashboard](#unified-dashboard)
+- [README](../dashboard/README.md) — Dashboard overview and quick start
+- [PRD](../dashboard/PRD.md) — Product requirements, views, acceptance criteria
+- [TTD](../dashboard/TTD.md) — Technical design, API contract, token metrics specification
+
+**Pages**: Overview, System Monitor, Terminals, Open Items, PR Queue, Token Analysis, Models, Usage & Costs
+**Stack**: Next.js 15 (port 3100) + Python backend (port 4173) + 7s polling
+
+---
+
 ## Scripts Reference
 
 See `SCRIPTS_INDEX.md` for a complete inventory of all VNX scripts.
@@ -124,6 +142,7 @@ docs/
   operations/            # Operational guides & monitoring
 
   intelligence/          # Intelligence system reference
+  governance/            # Weekly governance reports (SPC + CQS)
 
   orchestration/         # PR workflow, T0 guides, contracts
 
@@ -132,4 +151,9 @@ docs/
   architecture/          # Architecture studies & proposals
 
   internal/              # Internal docs (maintainer notes + publication drafts)
+
+dashboard/                 # Token Usage Dashboard (separate from docs/)
+  README.md                # Overview and quick start
+  PRD.md                   # Product requirements
+  TTD.md                   # Technical design
 ```
