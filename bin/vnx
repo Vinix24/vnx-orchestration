@@ -175,6 +175,9 @@ Worktree commands:
   worktree-refresh   Update intelligence snapshot from main
   worktree-status    Show worktree isolation status
 
+Gate commands (pre-merge verification):
+  gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
+
 Runtime commands:
   recover            Recover from unclean shutdown or stale state
                      Options: --aggressive, --dry-run
@@ -1726,6 +1729,9 @@ main() {
       ;;
     suggest)
       python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
+      ;;
+    gate-check)
+      python3 "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
       ;;
     register)
       cmd_register "$@"
