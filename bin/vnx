@@ -133,6 +133,7 @@ Commands:
   bootstrap-skills   Create/link ./\.claude/skills from shipped dist skills
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
   bootstrap-hooks    Deploy SessionStart hooks to .claude/hooks/ + settings.json
+  regen-settings     Patch-manage settings.json (--merge|--full|--validate)
   start [--profile X] Launch VNX tmux session (interactive profile selection)
                      Profiles: claude-only, claude-codex, claude-gemini, full-multi
   start --preset <name>  Start with a saved startup preset
@@ -1177,112 +1178,34 @@ cmd_bootstrap_hooks() {
   chmod +x "$project_hooks_dir/sessionstart.sh"
   log "[bootstrap-hooks] Deployed: $project_hooks_dir/sessionstart.sh"
 
-  # ── Step 2: Ensure settings.json has hooks section ────────────────
-  local hook_script_path="$project_hooks_dir/sessionstart.sh"
+  # ── Step 2: Ensure settings.json has hooks + VNX keys ──────────────
+  # Delegate to regen-settings for patch-based merge (PR-2).
+  # Load the command if not already available.
+  if ! type cmd_regen_settings &>/dev/null; then
+    _load_command "regen_settings" 2>/dev/null || true
+  fi
 
-  if [ ! -f "$project_settings" ]; then
-    # No settings.json exists — create minimal one with hooks
-    cat > "$project_settings" <<SETTINGS
-{
-  "permissions": {
-    "allow": [
-      "Read(**)",
-      "Grep(**)",
-      "Glob(**)",
-      "Bash(ls *)",
-      "Bash(ls)",
-      "Bash(find *)",
-      "Bash(cat *)",
-      "Bash(echo *)",
-      "Bash(pwd)",
-      "Bash(pwd *)",
-      "Bash(which *)",
-      "Bash(whoami)",
-      "Bash(head *)",
-      "Bash(tail *)",
-      "Bash(wc *)",
-      "Bash(sort *)",
-      "Bash(grep *)",
-      "Bash(awk *)",
-      "Bash(sed *)",
-      "Bash(jq *)",
-      "Bash(python3 *)",
-      "Bash(python *)",
-      "Bash(node *)",
-      "Bash(git status*)",
-      "Bash(git log*)",
-      "Bash(git diff*)",
-      "Bash(git branch*)",
-      "Bash(git show*)",
-      "Bash(git remote*)",
-      "Bash(tmux *)",
-      "Bash(ps *)",
-      "Bash(pgrep *)",
-      "Bash(date)",
-      "Bash(date *)",
-      "Bash(uname *)"
-    ],
-    "deny": [
-      "Bash(rm -rf *)",
-      "Bash(sudo *)",
-      "Bash(chmod *)",
-      "Bash(chown *)",
-      "Bash(mkfs *)",
-      "Bash(dd *)"
-    ]
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash $hook_script_path",
-            "timeout": 3000
-          }
-        ]
-      }
-    ]
-  }
-}
-SETTINGS
-    log "[bootstrap-hooks] Created: $project_settings (with hooks)"
-
-  elif command -v jq &> /dev/null; then
-    # settings.json exists AND jq available — merge hooks section
-    if jq -e '.hooks' "$project_settings" > /dev/null 2>&1; then
-      log "[bootstrap-hooks] Keeping existing hooks in: $project_settings"
-    else
-      # Add hooks section to existing settings.json
-      local tmp_settings="${project_settings}.tmp"
-      jq --arg hook_path "bash $hook_script_path" '. + {
-        "hooks": {
-          "SessionStart": [
-            {
-              "matcher": "*",
-              "hooks": [
-                {
-                  "type": "command",
-                  "command": $hook_path,
-                  "timeout": 3000
-                }
-              ]
-            }
-          ]
-        }
-      }' "$project_settings" > "$tmp_settings" && mv "$tmp_settings" "$project_settings"
-      log "[bootstrap-hooks] Added hooks section to: $project_settings"
-    fi
-
+  if type cmd_regen_settings &>/dev/null; then
+    cmd_regen_settings --merge --no-backup
   else
-    # settings.json exists but no jq — warn user
-    if grep -q '"hooks"' "$project_settings" 2>/dev/null; then
-      log "[bootstrap-hooks] Keeping existing hooks in: $project_settings"
-    else
-      log "[bootstrap-hooks] WARN: Cannot merge hooks into existing $project_settings (install jq)"
-      log "[bootstrap-hooks] WARN: Add this to your settings.json manually:"
-      log '  "hooks": { "SessionStart": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "bash '"$hook_script_path"'", "timeout": 3000 }] }] }'
+    # Fallback: minimal hooks-only merge (pre-PR-2 compatibility)
+    log "[bootstrap-hooks] WARN: regen-settings not available, using legacy merge"
+    local hook_script_path="$project_hooks_dir/sessionstart.sh"
+    if [ ! -f "$project_settings" ]; then
+      log "[bootstrap-hooks] WARN: No settings.json — run 'vnx regen-settings --full' to create"
+    elif command -v jq &>/dev/null; then
+      if ! jq -e '.hooks' "$project_settings" >/dev/null 2>&1; then
+        local tmp_settings="${project_settings}.tmp"
+        jq --arg hook_path "bash $hook_script_path" '. + {
+          "hooks": {
+            "SessionStart": [{
+              "matcher": "*",
+              "hooks": [{"type": "command", "command": $hook_path, "timeout": 3000}]
+            }]
+          }
+        }' "$project_settings" > "$tmp_settings" && mv "$tmp_settings" "$project_settings"
+        log "[bootstrap-hooks] Added hooks section to: $project_settings"
+      fi
     fi
   fi
 
@@ -1703,6 +1626,9 @@ main() {
       ;;
     bootstrap-hooks)
       cmd_bootstrap_hooks
+      ;;
+    regen-settings)
+      cmd_regen_settings "$@"
       ;;
     start)
       cmd_start "$@"
