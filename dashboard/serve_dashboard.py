@@ -16,16 +16,17 @@ It serves `.claude/vnx-system` so these paths work:
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 class DualStackHTTPServer(ThreadingHTTPServer):
@@ -74,6 +75,157 @@ TERMINAL_TRACK_MAP = {
     "T2": "B",
     "T3": "C",
 }
+
+
+DB_PATH = CANONICAL_STATE_DIR / "quality_intelligence.db"
+
+# ---------- Token Stats API ----------
+
+_GROUP_SQL = {
+    "day": "session_date",
+    "week": "strftime('%Y-W%W', session_date)",
+    "month": "strftime('%Y-%m', session_date)",
+}
+
+
+def _get_db() -> sqlite3.Connection | None:
+    if not DB_PATH.exists() or DB_PATH.stat().st_size == 0:
+        return None
+    conn = sqlite3.connect(str(DB_PATH), timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
+    conn = _get_db()
+    if conn is None:
+        return []
+
+    date_from = (params.get("from") or [None])[0]
+    date_to = (params.get("to") or [None])[0]
+    group = (params.get("group") or ["day"])[0]
+    terminal = (params.get("terminal") or [None])[0]
+    model = (params.get("model") or [None])[0]
+
+    if group not in _GROUP_SQL:
+        group = "day"
+
+    group_expr = _GROUP_SQL[group]
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not date_from:
+        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    if not date_to:
+        date_to = today
+
+    conditions = ["session_date >= ?", "session_date <= ?"]
+    bind = [date_from, date_to]
+
+    if terminal:
+        conditions.append("terminal = ?")
+        bind.append(terminal)
+    if model:
+        conditions.append("session_model = ?")
+        bind.append(model)
+
+    where = " AND ".join(conditions)
+
+    sql = f"""
+        SELECT
+            {group_expr} AS period,
+            terminal,
+            session_model AS model,
+            COUNT(*) AS sessions,
+            SUM(assistant_message_count) AS api_calls,
+            ROUND(AVG(
+                (total_input_tokens + cache_creation_tokens + cache_read_tokens) * 1.0
+                / NULLIF(assistant_message_count, 0)
+            ) / 1000.0, 0) AS context_per_call_K,
+            ROUND(
+                SUM(cache_read_tokens) * 100.0
+                / NULLIF(SUM(total_input_tokens + cache_creation_tokens + cache_read_tokens), 0), 1
+            ) AS cache_hit_pct,
+            ROUND(AVG(
+                (total_input_tokens + cache_creation_tokens) * 1.0
+                / NULLIF(assistant_message_count, 0)
+            ) / 1000.0, 1) AS new_per_call_K,
+            ROUND(AVG(
+                total_output_tokens * 1.0
+                / NULLIF(assistant_message_count, 0)
+            ) / 1000.0, 1) AS output_per_call_K,
+            SUM(total_output_tokens) AS total_output_tokens,
+            SUM(total_input_tokens) AS total_input_tokens,
+            SUM(cache_creation_tokens) AS total_cache_creation_tokens,
+            SUM(cache_read_tokens) AS total_cache_read_tokens,
+            SUM(COALESCE(context_reset_count, CASE WHEN has_context_reset THEN 1 ELSE 0 END)) AS context_rotations,
+            GROUP_CONCAT(DISTINCT primary_activity) AS activities
+        FROM session_analytics
+        WHERE {where}
+        GROUP BY period, terminal, model
+        ORDER BY period DESC, terminal
+    """
+
+    try:
+        rows = conn.execute(sql, bind).fetchall()
+        result = [dict(r) for r in rows]
+    finally:
+        conn.close()
+    return result
+
+
+def _query_token_sessions(params: dict[str, list[str]]) -> list[dict]:
+    conn = _get_db()
+    if conn is None:
+        return []
+
+    date = (params.get("date") or [None])[0]
+    terminal = (params.get("terminal") or [None])[0]
+
+    if not date:
+        return []
+
+    conditions = ["session_date = ?"]
+    bind: list[str] = [date]
+
+    if terminal:
+        conditions.append("terminal = ?")
+        bind.append(terminal)
+
+    where = " AND ".join(conditions)
+
+    sql = f"""
+        SELECT
+            session_id,
+            terminal,
+            session_model AS model,
+            session_date AS date,
+            assistant_message_count AS api_calls,
+            ROUND(
+                (total_input_tokens + cache_creation_tokens + cache_read_tokens) * 1.0
+                / NULLIF(assistant_message_count, 0) / 1000.0, 0
+            ) AS context_per_call_K,
+            ROUND(
+                cache_read_tokens * 100.0
+                / NULLIF(total_input_tokens + cache_creation_tokens + cache_read_tokens, 0), 1
+            ) AS cache_hit_pct,
+            ROUND(
+                total_output_tokens * 1.0
+                / NULLIF(assistant_message_count, 0) / 1000.0, 1
+            ) AS output_per_call_K,
+            duration_minutes,
+            primary_activity,
+            tool_calls_total,
+            has_error_recovery
+        FROM session_analytics
+        WHERE {where}
+        ORDER BY assistant_message_count DESC
+    """
+
+    try:
+        rows = conn.execute(sql, bind).fetchall()
+        result = [dict(r) for r in rows]
+    finally:
+        conn.close()
+    return result
 
 
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
@@ -173,6 +325,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return str(canonical_path)
             return str(LEGACY_STATE_DIR.joinpath(*rel_parts))
         return super().translate_path(path)
+
+    def do_GET(self) -> None:
+        parsed = urlsplit(self.path)
+        path = unquote(parsed.path)
+        params = parse_qs(parsed.query)
+
+        if path == "/api/token-stats":
+            result = _query_token_stats(params)
+            _json_response(self, HTTPStatus.OK, {"data": result, "count": len(result)})
+            return
+
+        if path == "/api/token-stats/sessions":
+            result = _query_token_sessions(params)
+            _json_response(self, HTTPStatus.OK, {"data": result, "count": len(result)})
+            return
+
+        # Fall through to static file serving
+        super().do_GET()
 
     def end_headers(self) -> None:
         """Add no-cache headers for JSON state files to ensure live updates."""

@@ -59,7 +59,7 @@ bash /path/to/.claude/vnx-system/demo/setup_demo.sh
 
 ### System Overview
 
-VNX is a multi-terminal orchestration system enabling parallel development across three tracks (A/B/C) with centralized control through T0. Built on tmux and Claude Code with template-based prompting and file-based message passing.
+VNX is a multi-terminal orchestration system enabling parallel development across track-agnostic workers with centralized control through T0. Built on tmux and Claude Code with template-based prompting and file-based message passing.
 
 **Version 7.1.2 Enhanced State Monitoring**:
 - **Terminal State Monitoring**: Real-time tracking of T0/T1/T2/T3 status and activity
@@ -109,22 +109,22 @@ cat .vnx-data/state/dashboard_status.json | jq .  # System metrics
 ### Terminal Layout & Roles
 ```
 ┌────────────────────┬────────────────────┐
-│    T0 - Brain      │    T1 - Track A    │
+│    T0 - Brain      │    T1 - Worker     │
 │    (Opus, R/O)     │    (Sonnet, R/W)   │
 │    Pane: %0        │    Pane: %1        │
 ├────────────────────┼────────────────────┤
-│    T2 - Track B    │    T3 - Deep Work  │
+│    T2 - Worker     │    T3 - Deep Work  │
 │    (Sonnet, R/W)   │    (Opus, R/W)     │
 │    Pane: %2        │    Pane: %3        │
 └────────────────────┴────────────────────┘
 ```
 
-| Terminal | Role | Model | Permissions | Track | Pane ID |
-|----------|------|-------|-------------|-------|---------|
-| T0 | Orchestrator | Opus | Read-Only | - | %0 |
-| T1 | Crawler Dev | Sonnet | Full R/W | A | %1 |
-| T2 | Storage Dev | Sonnet | Full R/W | B | %2 |
-| T3 | Deep Analysis | Opus | Full R/W | C | %3 |
+| Terminal | Role | Model | Permissions | Pane ID |
+|----------|------|-------|-------------|---------|
+| T0 | Orchestrator | Opus | Read-Only | %0 |
+| T1 | Worker | Sonnet | Full R/W | %1 |
+| T2 | Worker | Sonnet | Full R/W | %2 |
+| T3 | Worker | Opus | Full R/W | %3 |
 
 ### Complete Message Flow Diagram
 ```
@@ -159,7 +159,7 @@ cat .vnx-data/state/dashboard_status.json | jq .  # System metrics
         ▼            ▼            ▼
     ┌───────┐   ┌───────┐   ┌───────┐
     │  T1   │   │  T2   │   │  T3   │
-    │Track A│   │Track B│   │Track C│
+    │Worker │   │Track B│   │Track C│
     └───┬───┘   └───┬───┘   └───┬───┘
         │           │           │
         ▼           ▼           ▼
@@ -493,25 +493,25 @@ The project-level `.claude/settings.json` contains smart SessionStart and UserPr
 - Read-only permissions emphasis
 - Gate progression rules
 
-#### T1 Bootstrap (Track A - Crawler)
+#### T1 Bootstrap (Worker — Sonnet)
 - Output order: .md FIRST, receipt LAST
 - Memory limit: <85MB
 - Dutch market formats
 - 405 tests requirement
 - Plugin architecture reminders
 
-#### T2 Bootstrap (Track B - Storage)
+#### T2 Bootstrap (Worker — Sonnet)
 - RAG pipeline: multilingual-e5-small
 - Query performance: <50ms p95
 - GPT-4o-mini for keywords
 - Supabase hybrid search
 - Storage architecture patterns
 
-#### T3 Bootstrap (Track C - Deep Work)
+#### T3 Bootstrap (Worker — Opus)
 - Investigation workflow phases
 - Report structure template
-- Track C receipt requirements
-- Cross-track analysis framework
+- Receipt requirements
+- Cross-terminal analysis framework
 - Evidence-based findings
 
 ## Critical Operating Rules
@@ -528,12 +528,12 @@ The project-level `.claude/settings.json` contains smart SessionStart and UserPr
 2. Verify file exists
 3. Write final receipt LAST with valid report_path
 
-### Track C Targeting (T0)
+### Opus Worker Targeting (T0)
 Use [[TARGET:C]] for:
 - Deep investigations requiring Opus
-- Cross-track analysis
+- Cross-terminal analysis
 - Architecture decisions
-- Complex problems beyond A/B
+- Complex problems requiring deeper reasoning
 
 ### Dutch Market Requirements
 - KvK: 8 digits, modulus 11 check
@@ -546,7 +546,7 @@ Use [[TARGET:C]] for:
 | Issue | Check | Solution |
 |-------|-------|----------|
 | Receipt not reaching T0 | `pgrep -f receipt_notifier` | Check panes.json mapping |
-| Wrong TARGET | T0 decision tree | Review Track C criteria |
+| Wrong TARGET | T0 decision tree | Review Opus worker criteria |
 | Output order violation | Terminal bootstrap | Enforce .md before receipt |
 | Process down | Heartbeat logs | Restart VNX_HYBRID_FINAL |
 

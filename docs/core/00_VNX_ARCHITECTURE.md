@@ -1,11 +1,11 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-02-23
+**Last Updated**: 2026-03-06
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
-**Version**: 10.0.0
+**Version**: 11.0.0
 
 ---
 
@@ -20,7 +20,8 @@
 8. [Open Items System](#open-items-system)
 9. [Staging Workflow](#staging-workflow)
 10. [Multi-Provider Dispatch](#multi-provider-dispatch)
-11. [Demo & Distribution](#demo--distribution)
+11. [Unified Dashboard](#unified-dashboard)
+12. [Demo & Distribution](#demo--distribution)
 
 ---
 
@@ -165,7 +166,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - Full prompt generation (1500+ tokens)
 - See `core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference
 
-### 3. ACK Dispatcher V2 (`ack_dispatcher_v2.sh` + `dispatch_ack_watcher.sh`)
+### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`) — Current
 
 **Purpose**: Acknowledgment receipt processing and timeout management
 
@@ -174,7 +175,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - Tracks acknowledgment timestamps
 - Manages timeout detection
 - Updates dispatch status
-- Coordinates with Receipt Notifier
+- Replaces legacy `ack_dispatcher_v2.sh` + `dispatch_ack_watcher.sh`
 
 ### 4. Receipt Processor V4 (`receipt_processor_v4.sh`) - Primary
 
@@ -190,13 +191,11 @@ VNX is a file-based orchestration system enabling parallel development across mu
 
 **Governance**: Receipt processor is evidence-only. T0 reviews evidence, closes satisfied open items, and completes PRs when all blockers/warnings are resolved.
 
-### 5. Receipt Notifier (`receipt_notifier.sh`) - Optional/Legacy
+### 5. Receipt Notifier (`receipt_notifier.sh`) — Deprecated
 
-**Purpose**: Legacy receipt delivery (richer markdown formatting and footer support). Kept as a fallback/reference but not required for production operation.
+**Purpose**: Legacy receipt delivery. Replaced by Receipt Processor V4 which handles parsing, appending, and delivery in one process.
 
-**Functionality**:
-- Parses reports with `report_parser.py` and appends to `t0_receipts.ndjson`
-- Can attach an optional “T0 action request” footer template
+**Note**: Kept in codebase as reference. Not started by supervisor.
 
 ### 6. Report Parser (`report_parser.py`)
 
@@ -327,28 +326,23 @@ VNX is a file-based orchestration system enabling parallel development across mu
 │     ├─► Sends ACK receipt (task_ack)                           │
 │     └─► Begins execution                                        │
 │                                                                  │
-│  6. ACK Dispatcher Processes Acknowledgment                     │
+│  6. Heartbeat ACK Monitor Processes Acknowledgment              │
 │     ├─► Detects task_ack receipt                               │
 │     ├─► Updates dispatch status                                │
 │     ├─► Starts timeout tracking                                │
-│     └─► Notifies T0 via Receipt Notifier                       │
+│     └─► Updates terminal state                                  │
 │                                                                  │
 │  7. Worker Executes Task                                        │
 │     ├─► Performs requested work                                │
 │     ├─► Creates markdown report                                │
 │     └─► Writes completion receipt (task_complete)              │
 │                                                                  │
-│  8. Report Watcher Extracts Receipt                             │
-│     ├─► Detects new report in reports/{track}/                 │
-│     ├─► Parses structured data                                 │
-│     ├─► Generates automated receipt                            │
-│     └─► Writes to t0_receipts.ndjson                           │
-│                                                                  │
-│  9. Receipt Notifier Delivers to T0                             │
-│     ├─► Monitors track receipt files                           │
-│     ├─► Cursor-based delivery                                  │
-│     ├─► Prevents processing locks                              │
-│     └─► Delivers to T0 terminal                                │
+│  8. Receipt Processor V4 Handles Report                         │
+│     ├─► Detects new report in unified_reports/                 │
+│     ├─► Parses structured data via report_parser.py            │
+│     ├─► Attaches evidence to open items (does NOT close)       │
+│     ├─► Appends to t0_receipts.ndjson                          │
+│     └─► Delivers receipt to T0 via tmux paste                  │
 │                                                                  │
 │  10. Intelligence Aggregator Updates Context                    │
 │      ├─► Consolidates all system state                         │
@@ -521,12 +515,16 @@ Terminal status is determined by receipt-based activity detection.
 - Cleans up stale PID files
 
 **Core Processes** (managed by supervisor):
-- `smart_tap.pid`
-- `dispatcher.pid`
-- `receipt_processor.pid`
-- `queue_popup_watcher.pid`
-- `generate_t0_brief.pid`
-- `vnx_supervisor.pid`
+- `dispatcher.pid` — `dispatcher_v8_minimal.sh`
+- `smart_tap.pid` — `smart_tap_v7_json_translator.sh`
+- `receipt_processor.pid` — `receipt_processor_v4.sh`
+- `heartbeat_ack_monitor.pid` — `heartbeat_ack_monitor.py`
+- `queue_watcher.pid` — `queue_popup_watcher.sh`
+- `dashboard.pid` — `generate_valid_dashboard.sh`
+- `state_manager.pid` — `unified_state_manager_v2.py`
+- `intelligence_daemon.pid` — `intelligence_daemon.py`
+- `recommendations_engine.pid` — `recommendations_engine_daemon.sh`
+- `vnx_supervisor.pid` — self
 
 ### Project-Scoped Process Isolation (V8.2)
 
@@ -661,6 +659,28 @@ Level 5 (Full): 20K+ tokens
 - Output: `state/unified_state.ndjson`
 - Feeds: Intelligence Aggregator
 
+### Governance Measurement System (v8.1.0)
+
+**Integration Status**: OPERATIONAL (2026-03-07)
+
+Replaces self-reported status with objective quality scoring using SPC (Statistical Process Control).
+
+**3-Layer Architecture**:
+```
+Layer 1: CQS Calculator     -> Per dispatch, real-time, 0-100 composite score
+Layer 2: Nightly Aggregation -> FPY, rework rate, SPC control charts
+Layer 3: Weekly Report       -> Controlled model/role analysis, actionable items
+```
+
+**Key Metrics**:
+- **Composite Quality Score (CQS)**: Weighted score from status normalization (30%), completion signals (25%), effort efficiency (20%), error density (15%), rework detection (10%)
+- **First-Pass Yield (FPY)**: % of unique tasks succeeded on first attempt (Toyota/Six Sigma standard)
+- **SPC Anomaly Detection**: Western Electric rules (out-of-control, trend, shift, run)
+
+**Database**: `governance_metrics`, `spc_control_limits`, `spc_alerts` tables in quality_intelligence.db
+
+**Full Reference**: `docs/intelligence/GOVERNANCE_MEASUREMENT.md`
+
 ---
 
 ## File System Layout
@@ -746,17 +766,21 @@ project-root/
 - Smart Tap V7 (JSON/Markdown auto-translation)
 - Dispatcher V8 Minimal (Native skills, multi-provider, 87% token reduction)
 - Receipt Processor V4 (Report → receipt → T0 delivery)
-- T0 Brief Generator (< 2KB decision snapshot with PYTHONPATH fix)
+- Heartbeat ACK Monitor (ACK processing + timeout tracking)
+- Queue Popup Watcher (dispatch review UI)
+- Dashboard Generator (Real-time metrics → `dashboard_status.json`)
+- Unified State Manager V2 (state consolidation, 5s cycle)
+- Intelligence Daemon (real-time intelligence updates)
+- Recommendations Engine (T0 dispatch suggestions, 30s cycle)
+- VNX Supervisor (Health monitoring, 10s checks, auto-restart)
 - Quality Advisory Pipeline (file size warnings on every completion)
 - PR Queue Manager (parallel PRs, staging → promote workflow)
-- Queue Popup Watcher (dispatch review UI)
-- VNX Supervisor (Health monitoring, 10s checks)
-- Dashboard Generator (Real-time metrics)
+- Unified Dashboard (Next.js control plane, 8 pages)
 
-### Deprecated Components
-- ACK Dispatcher V2 — replaced by skill-triggered receipts
-- Report Watcher — replaced by Receipt Processor V4
-- Receipt Notifier — legacy, kept as fallback reference
+### Deprecated Components (not started by supervisor)
+- ACK Dispatcher V2 (`ack_dispatcher_v2.sh`) — replaced by `heartbeat_ack_monitor.py`
+- Report Watcher (`report_watcher.sh`) — replaced by Receipt Processor V4
+- Receipt Notifier (`receipt_notifier.sh`) — replaced by Receipt Processor V4
 - Dispatcher V7 — reference only (see `core/technical/DISPATCHER_SYSTEM.md`)
 
 ### Terminal Status
@@ -949,6 +973,50 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 
 ---
 
+## Unified Dashboard
+
+### Architecture
+
+The VNX dashboard is a unified Next.js 15 control plane combining system monitoring and token analytics.
+
+**Stack**:
+- Frontend: Next.js 15 App Router (`dashboard/token-dashboard/`, port 3100)
+- Backend: Python FastAPI (`dashboard/serve_dashboard.py`, port 4173)
+- Data: State files in `.vnx-data/state/` (proxied via Next.js rewrites)
+- Polling: 7-second auto-refresh via `usePolling` hook
+
+### Pages
+
+| Page | Route | Data Source | Features |
+|------|-------|-------------|----------|
+| Overview | `/` | `dashboard_status.json` + token stats | Health banner, 4 KPI cards, recommendations, charts |
+| System | `/system` | `dashboard_status.json` | Process list with restart buttons, queue stats, gates |
+| Terminals | `/terminals` | `terminal_state.json` + `dashboard_status.json` | Status cards, unlock buttons, token comparison |
+| Open Items | `/open-items` | `open_items_digest.json` | Severity filters, text search, recent closures |
+| PR Queue | `/pr-queue` | `pr_queue_state.json` | Progress bar, PR table with status pills |
+| Token Analysis | `/tokens` | Token stats API | Context/call trends, cache efficiency |
+| Models | `/models` | Token stats API | Model distribution, performance comparison |
+| Usage & Costs | `/usage` | Token stats API | Cost estimation per model and terminal |
+
+### Key Features
+- **Process Management**: Restart any supervised process from the System page (POST `/api/restart-process`)
+- **Terminal Unlock**: Unlock stuck terminals from Terminals page (POST `/api/unlock-terminal`)
+- **T0 Status**: Shows "In control" (T0 is always the orchestrator, never idle/blocked)
+- **Terminal Status Normalization**: Maps raw statuses (working/active/busy/claimed → working, blocked/error/failed/timeout → blocked)
+- **Glassmorphism Design**: Dark theme with VNX brand colors (orange, blue, gold)
+
+### Startup
+
+```bash
+# Backend (port 4173)
+python dashboard/serve_dashboard.py &
+
+# Frontend (port 3100)
+cd dashboard/token-dashboard && npm run dev
+```
+
+---
+
 ## Demo & Distribution
 
 ### VNX CLI (`bin/vnx`)
@@ -1011,10 +1079,11 @@ Creates a complete LeadFlow SaaS project with:
 
 ---
 
-**Document Status**: Production Active (V10.0 Multi-Provider + Quality Advisory)
-**Last Major Update**: 2026-02-18 (Multi-provider dispatch, process isolation, quality advisory, demo system)
+**Document Status**: Production Active (V11.0 Unified Dashboard + Process Alignment)
+**Last Major Update**: 2026-03-06 (Unified Dashboard, deprecated process cleanup, supervisor alignment)
 **Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs)
 **Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
 **Intelligence Version**: v1.2.0 (Open Items + Staging)
+**Dashboard**: Next.js 15 Unified Control Plane (8 pages, 7s polling)
 **Governance Model**: Deliverable-based (T0 sole authority, evidence tracking, no auto-completion)
 **Maintainer**: T-MANAGER (VNX Orchestration Expert)
