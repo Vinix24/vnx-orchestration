@@ -1,0 +1,49 @@
+{
+  "_comment": "VNX Dispatch Contract Verification Configuration",
+  "_phase": "2a",
+  "_phase_description": "Phase 2a: contract blocks are optional. Verification runs only when a contract block is present in the dispatch. No dispatches are required to carry contracts.",
+
+  "phase": "2a",
+
+  "contract_required": false,
+  "contract_required_for_tracks": [],
+  "contract_required_for_risk_levels": [],
+
+  "verification": {
+    "enabled": true,
+    "trigger_on_events": ["task_complete"],
+    "lightweight_only": true,
+    "timeout_seconds": 30,
+    "bash_check_timeout_seconds": 10
+  },
+
+  "disallowed_bash_patterns": [
+    "rm\\s+-rf",
+    "sudo",
+    "mkfs",
+    "dd\\s+if=",
+    "shutdown",
+    "reboot",
+    "kill\\s+-9",
+    "pytest",
+    "python\\s+-m\\s+pytest"
+  ],
+
+  "phase_rollout": {
+    "2a": {
+      "description": "Optional contracts. Verification conditional on contract presence.",
+      "contract_required": false,
+      "scope": "all dispatches may include contracts; none are required"
+    },
+    "2b": {
+      "description": "Contracts required for high-risk and implementation dispatches.",
+      "contract_required_for_tracks": ["B", "C"],
+      "contract_required_for_risk_levels": ["high"]
+    },
+    "2c": {
+      "description": "Contracts are the default for all relevant PRs. Explicit opt-out reason required.",
+      "contract_required": true,
+      "opt_out_requires_reason": true
+    }
+  }
+}
