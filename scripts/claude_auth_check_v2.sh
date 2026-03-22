@@ -4,8 +4,22 @@
 
 set -euo pipefail
 
-# Add NVM path if needed
-export PATH="$HOME/.nvm/versions/node/v20.18.2/bin:$PATH"
+# Add NVM node path dynamically
+_AUTH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_AUTH_SCRIPT_DIR/lib/vnx_paths.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$_AUTH_SCRIPT_DIR/lib/vnx_paths.sh"
+  _auth_node_path="$(_resolve_node_path 2>/dev/null)" || _auth_node_path=""
+  [ -n "$_auth_node_path" ] && export PATH="$_auth_node_path:$PATH"
+  unset _auth_node_path
+else
+  # Fallback: try nvm current or system node
+  _auth_nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+  _auth_node_dir="$(find "$_auth_nvm_dir/versions/node" -maxdepth 1 -name 'v*' -type d 2>/dev/null | sort -V | tail -1)"
+  [ -n "$_auth_node_dir" ] && [ -x "$_auth_node_dir/bin/node" ] && export PATH="$_auth_node_dir/bin:$PATH"
+  unset _auth_nvm_dir _auth_node_dir
+fi
+unset _AUTH_SCRIPT_DIR
 
 # Color codes for output
 RED='\033[0;31m'

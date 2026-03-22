@@ -126,9 +126,7 @@ start_process() {
     cd "$SCRIPTS_DIR"
     # Check if it's a Python script
     if [[ "$script" == *.py ]]; then
-        if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
-            source "$PROJECT_ROOT/.venv/bin/activate"
-        fi
+        _activate_venv 2>/dev/null || true
         nohup python "$script_path" >> "$log_file" 2>&1 &
     else
         nohup bash "$script_path" >> "$log_file" 2>&1 &

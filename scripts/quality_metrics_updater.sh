@@ -16,8 +16,8 @@ DASHBOARD_FILE="$STATE_DIR/dashboard_status.json"
 TEMP_DASHBOARD="$STATE_DIR/dashboard_status.json.tmp"
 UPDATE_INTERVAL=30  # Update every 30 seconds
 
-# Python venv activation
-source "$PROJECT_ROOT/.venv/bin/activate"
+# Python venv activation (dynamic resolution)
+_activate_venv || echo "[quality_metrics_updater] WARN: No venv found, using system python"
 
 echo "[$(date)] Quality Metrics Updater starting..."
 echo "[$(date)] Update interval: ${UPDATE_INTERVAL}s"
