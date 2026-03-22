@@ -959,6 +959,30 @@ conn.close()
     # D. Attach PR evidence on success (non-fatal)
     attach_pr_evidence "$receipt_json" "$report_path"
 
+    # D2. Contract verification (Phase 2a: conditional on contract presence, non-fatal)
+    # Runs lightweight claim checks only when the dispatch contains a ## Contract block.
+    # Does NOT trigger test suites — only file existence, pattern, and git-diff checks.
+    if [ -n "$_rf_dispatch_id" ] && [ "$_rf_event_type" = "task_complete" ]; then
+        local verify_result
+        verify_result=$(python3 "$SCRIPTS_DIR/verify_claims.py" --dispatch-id "$_rf_dispatch_id" --store 2>/dev/null)
+        local verify_rc=$?
+        if [ $verify_rc -eq 0 ]; then
+            local verdict
+            verdict=$(echo "$verify_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','unknown'))" 2>/dev/null)
+            if [ "$verdict" = "pass" ]; then
+                log "INFO" "CONTRACT VERIFIED: dispatch=$_rf_dispatch_id verdict=pass"
+            elif [ "$verdict" = "no_contract" ]; then
+                log "DEBUG" "No contract block in dispatch=$_rf_dispatch_id (Phase 2a: skip)"
+            else
+                log "INFO" "CONTRACT RESULT: dispatch=$_rf_dispatch_id verdict=$verdict"
+            fi
+        elif [ $verify_rc -eq 1 ]; then
+            log "WARN" "CONTRACT FAILED: dispatch=$_rf_dispatch_id — one or more claims failed"
+        else
+            log "WARN" "Contract verification error for dispatch=$_rf_dispatch_id (rc=$verify_rc, non-fatal)"
+        fi
+    fi
+
     # E. Update progress state for tracked terminals (non-fatal)
     update_track_progress "$receipt_json" "$terminal"
 
