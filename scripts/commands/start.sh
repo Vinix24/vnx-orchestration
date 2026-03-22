@@ -224,14 +224,17 @@ cmd_start() {
           t2_cmd="claude --model sonnet$t2_sf" ;;
       esac
 
-      local node_path="$HOME/.nvm/versions/node/v20.18.2/bin"
+      local node_path=""
+      node_path="$(_resolve_node_path 2>/dev/null)" || node_path=""
       local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
       local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
+      local path_prefix="$VNX_HOME/bin"
+      [ -n "$node_path" ] && path_prefix="$path_prefix:$node_path"
 
-      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_reheal_cmd" C-m
-      [ -n "$T1" ] && tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
-      [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_reheal_cmd" C-m
+      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_reheal_cmd" C-m
+      [ -n "$T1" ] && tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
+      [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
+      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_reheal_cmd" C-m
 
       if [ -n "$T0" ] && [ -n "$T1" ] && [ -n "$T2" ] && [ -n "$T3" ]; then
         cat > "$state_dir/panes.json" <<PJSON
@@ -608,9 +611,12 @@ RESOLVER
   # ENV FIX: Unset stale VNX vars from tmux global env, then re-export
   # correct values for current project. This prevents cross-project
   # contamination (e.g. SEOcrawler paths leaking into marketing-magic-circle).
-  local node_path="$HOME/.nvm/versions/node/v20.18.2/bin"
+  local node_path=""
+  node_path="$(_resolve_node_path 2>/dev/null)" || node_path=""
   local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
   local env_set="export PROJECT_ROOT='$PROJECT_ROOT' VNX_HOME='$VNX_HOME' VNX_DATA_DIR='$VNX_DATA_DIR' VNX_SKILLS_DIR='${VNX_SKILLS_DIR:-}'"
+  local path_prefix="$VNX_HOME/bin"
+  [ -n "$node_path" ] && path_prefix="$path_prefix:$node_path"
 
   # Provider-aware launch commands for T1, T2, and T3
   # Skip-permissions: --dangerously-skip-permissions for Claude, --full-auto for Codex, --yolo already on Gemini
@@ -651,10 +657,10 @@ RESOLVER
       [ "$t3_skip" = "1" ] && t3_skip_flag=" --dangerously-skip-permissions"
       t3_cmd="claude --model opus $t0_flags$t3_skip_flag" ;;
   esac
-  tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
-  tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
-  tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$VNX_HOME/bin:$node_path:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_cmd" C-m
+  tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
+  tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
+  tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
+  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_cmd" C-m
 
   # ── Grid balancing (equal pane sizes) ────────────────────────────────
   local win_h half

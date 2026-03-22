@@ -115,6 +115,36 @@ cmd_doctor() {
   check_recommended_tool codex
   check_recommended_tool gemini
 
+  # Path resolution checks (PR-1: centralized resolvers)
+  local resolved_node_path=""
+  resolved_node_path="$(_resolve_node_path 2>/dev/null)" || resolved_node_path=""
+  if [ -n "$resolved_node_path" ] && [ -x "$resolved_node_path/node" ]; then
+    log "[doctor] OK node path: $resolved_node_path"
+  else
+    log "[doctor] WARN: Node path not resolved. MCP servers may fail in tmux. Set VNX_NODE_PATH or install nvm."
+  fi
+
+  local resolved_venv=""
+  resolved_venv="$(_resolve_venv_path 2>/dev/null)" || resolved_venv=""
+  if [ -n "$resolved_venv" ] && [ -f "$resolved_venv" ]; then
+    log "[doctor] OK venv: $resolved_venv"
+  else
+    log "[doctor] WARN: Python venv not found. Quality services may use system python."
+  fi
+
+  local resolved_project_root=""
+  resolved_project_root="$(_resolve_project_root 2>/dev/null)" || resolved_project_root=""
+  if [ -n "$resolved_project_root" ] && [ -d "$resolved_project_root" ]; then
+    if [ "$resolved_project_root" = "$PROJECT_ROOT" ] || [ "$(cd "$resolved_project_root" && pwd)" = "$(cd "$PROJECT_ROOT" && pwd)" ]; then
+      log "[doctor] OK project root: $PROJECT_ROOT"
+    else
+      log "[doctor] WARN: Resolved project root ($resolved_project_root) differs from PROJECT_ROOT ($PROJECT_ROOT)"
+    fi
+  else
+    err "[doctor] Project root resolution failed"
+    failed=1
+  fi
+
   check_required_path "$VNX_CONFIG_DIR" dir || failed=1
   check_required_path "$VNX_CONFIG_FILE" file || failed=1
 
