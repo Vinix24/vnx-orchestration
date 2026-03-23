@@ -862,6 +862,58 @@ bash .claude/vnx-system/scripts/vnx_preflight.sh
 
 ---
 
+## VNX Upgrade: New Operational Capabilities
+
+The following capabilities are available after the VNX upgrade (one-command worktree lifecycle + deterministic gates).
+
+### Feature Worktree Lifecycle
+
+The primary worktree flow replaces per-terminal worktrees:
+
+```
+vnx new-worktree <feature-name>   # Create isolated feature worktree
+  → work in worktree              # All terminals share one worktree
+vnx merge-preflight <name>        # GO/NO-GO from runtime state
+vnx finish-worktree <name>        # Governance-aware closure
+```
+
+**Deprecated**: `vnx start` auto-creating per-terminal worktrees (`-wt-T1/T2/T3`). Legacy mode via `VNX_WORKTREES=true` still works but is not recommended.
+
+### Session Recovery
+
+After crash or unclean shutdown:
+```bash
+vnx recover              # Standard: clear locks, reset claims, restart processes
+vnx recover --aggressive # Force-clean all stale state
+vnx recover --dry-run    # Preview without changes
+```
+
+### Stale State Cleanup
+
+Remove orphan PIDs and stale locks without affecting live sessions:
+```bash
+vnx cleanup --dry-run    # Preview
+vnx cleanup              # Execute
+```
+
+### Settings Management
+
+VNX now patches only its owned keys in `settings.json`:
+```bash
+vnx regen-settings --merge  # Update VNX keys, preserve project config
+vnx regen-settings --full   # Full regeneration (first-time init)
+```
+
+### Deterministic Gates
+
+Contract blocks in dispatches enable automated verification:
+- **Receipt-time** (lightweight): `verify_claims.py` checks file existence, git changes, patterns
+- **Pre-merge** (heavy): `vnx gate-check --pr <PR-ID>` runs pytest, AST, artifacts, CQS
+
+This reduces T0 review scope to semantic review for PRs covered by deterministic gates.
+
+---
+
 ## Referenties
 
 ### Source Documenten

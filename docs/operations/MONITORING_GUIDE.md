@@ -1126,7 +1126,109 @@ tail -f .claude/vnx-system/logs/*.log | grep -i "error\|warning"
 
 ---
 
+## Operator Commands (VNX Upgrade)
+
+The following commands provide unified visibility and scoped process controls. They replace the need to manually inspect PID files, lock directories, and state JSON.
+
+### `vnx status` — Session Overview
+
+Shows session state, terminal status, queue progress, and open items at a glance:
+
+```bash
+vnx status
+```
+
+Output includes:
+- **Session**: tmux session name and active/stopped status
+- **Terminals**: T1–T3 with status (idle/working/blocked), claimed dispatch, worktree
+- **Dispatches**: Count of pending and active dispatches
+- **Queue**: Progress bar with completed/total PRs
+- **Open Items**: Count by severity (blocker/warn/info)
+
+### `vnx ps` — Process Listing
+
+Shows PID, parent PID, uptime, and health for all managed VNX processes:
+
+```bash
+vnx ps          # Human-readable table
+vnx ps --json   # Structured JSON output
+```
+
+Columns: NAME, PID, PPID, UPTIME, HEALTH (ok/DEAD).
+
+### `vnx cleanup` — Orphan Removal
+
+Detects and removes dead PID files and stale lock directories without affecting healthy processes:
+
+```bash
+vnx cleanup             # Remove orphans
+vnx cleanup --dry-run   # Preview without changes
+```
+
+Safety: only removes PID files for processes that are no longer running. Never kills live processes. Stale lock directories are removed only when the holding PID is dead.
+
+### `vnx restart <process>` — Process Restart
+
+Restarts a specific managed process with graceful stop and health check:
+
+```bash
+vnx restart dispatcher
+vnx restart receipt_processor
+vnx restart smart_tap
+```
+
+Known processes: dispatcher, smart_tap, receipt_processor, heartbeat_ack_monitor, queue_watcher, dashboard, state_manager, intelligence_daemon, recommendations_engine, vnx_supervisor.
+
+### `vnx recover` — Session Recovery
+
+Recovers a session after crash or unclean shutdown:
+
+```bash
+vnx recover              # Standard recovery (6 actions)
+vnx recover --aggressive # Force-clean stale state
+vnx recover --dry-run    # Preview recovery actions
+```
+
+Recovery actions: clear stale locks, remove orphan PIDs, reset terminal claims, restart core processes, re-export intelligence, validate with doctor.
+
+### PID Metadata Model
+
+Managed processes now write enhanced `.meta.json` files alongside PID files:
+
+```json
+{
+  "name": "dispatcher",
+  "pid": 12345,
+  "ppid": 1001,
+  "started_at": "2026-03-23T06:00:00Z",
+  "owner": "vincent",
+  "command": "bash /path/to/dispatcher_v8_minimal.sh"
+}
+```
+
+Location: `.vnx-data/pids/<name>.meta.json`. Used by `vnx ps` for PPID and start timestamp. Written on process start and restart.
+
+### Lock Lifecycle
+
+- **Acquisition**: Atomic `mkdir` in `.vnx-data/locks/<name>.lock/`
+- **Heartbeat**: Lock directory contains `pid` and `fingerprint` files
+- **Stale detection**: `vnx cleanup` checks if holding PID is alive
+- **Expiry**: Terminal state leases auto-expire (GC on every write)
+
+### Troubleshooting: Common Recovery Scenarios
+
+| Scenario | Command | What It Does |
+|----------|---------|-------------|
+| Duplicate dispatcher | `vnx cleanup && vnx restart dispatcher` | Removes stale PID, starts fresh |
+| Terminal stuck "working" | `vnx recover` | Clears expired terminal claims |
+| All processes dead | `vnx recover --aggressive` | Force-cleans state, restarts all |
+| Lock directory stuck | `vnx cleanup` | Removes lock if holding PID dead |
+| Need to check health | `vnx ps --json` | Machine-readable process status |
+
+---
+
 **Version History**:
+- **9.0** (2026-03-23): Operator commands (status, ps, cleanup, restart, recover), PID metadata, lock lifecycle
 - **8.1** (2026-02-09): Dashboard live sync, auto-discovery PR system, cache headers, 60s update cycle
 - **8.0** (2026-01-26): Consolidated from 6 operational guides, added intelligence monitoring
 - **7.3** (2026-01-12): Template compilation monitoring, V7.3 features
