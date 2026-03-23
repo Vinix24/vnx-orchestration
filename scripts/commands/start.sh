@@ -425,12 +425,13 @@ TSJSON
   log "Initial terminal state written (all idle)"
 
   # ── Worktree initialization (if enabled) ────────────────────────────
-  # Auto-create per-terminal worktrees and register paths in terminal_state.json.
-  # Skip if VNX_WORKTREES=false is set (opt-out).
-  if [ "${VNX_WORKTREES:-true}" != "false" ]; then
+  # Per-terminal worktrees are DEPRECATED. Use 'vnx new-worktree <name>' instead.
+  # Legacy opt-in: set VNX_WORKTREES=true explicitly to re-enable.
+  if [ "${VNX_WORKTREES:-false}" = "true" ]; then
+    log "DEPRECATED: per-terminal worktrees are deprecated. Use 'vnx new-worktree <name>' for feature worktrees."
     local worktree_script="$scripts_dir/vnx_worktree_setup.sh"
     if [ -f "$worktree_script" ]; then
-      log "Initializing per-terminal worktrees..."
+      log "Initializing per-terminal worktrees (legacy mode)..."
       bash "$worktree_script" init-terminals main 2>&1 | while read -r line; do log "WORKTREE: $line"; done
 
       # Register worktree paths in terminal_state.json

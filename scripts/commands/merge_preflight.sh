@@ -194,20 +194,53 @@ except Exception as e:
         IFS='|' read -r pq_completed pq_active pq_pending pq_blocked pq_total <<< "$pq_first"
 
         if [ "$pq_active" -gt 0 ] 2>/dev/null; then
-          warnings=$((warnings + 1))
-          details="${details}\n  WARN: $pq_active PR(s) still in_progress"
+          verdict="NO-GO"
+          blockers=$((blockers + 1))
+          details="${details}\n  BLOCKER: $pq_active PR(s) still in_progress"
           while IFS= read -r line; do
             [[ "$line" == ACTIVE:* ]] && details="${details} (${line#ACTIVE:})"
           done <<< "$pq_status"
         fi
 
         if [ "$pq_blocked" -gt 0 ] 2>/dev/null; then
-          warnings=$((warnings + 1))
-          details="${details}\n  WARN: $pq_blocked PR(s) blocked"
+          verdict="NO-GO"
+          blockers=$((blockers + 1))
+          details="${details}\n  BLOCKER: $pq_blocked PR(s) blocked"
         fi
 
         details="${details}\n  INFO: PR queue: $pq_completed/$pq_total completed"
       fi
+    fi
+  fi
+
+  # ── Check 3b: Gate-check results ──────────────────────────────────────
+  local gate_results_dir="$wt_data/state/gate_results"
+  if [ -d "$gate_results_dir" ] && command -v python3 &>/dev/null; then
+    local gate_holds
+    gate_holds="$(python3 -c "
+import json, os, glob, sys
+gate_dir = '$gate_results_dir'
+holds = []
+for f in sorted(glob.glob(os.path.join(gate_dir, '*.json')), reverse=True):
+    try:
+        with open(f) as fh:
+            data = json.load(fh)
+        if data.get('verdict') == 'HOLD':
+            pr_id = data.get('pr_id', os.path.basename(f).replace('.json',''))
+            holds.append(pr_id)
+    except Exception:
+        pass
+print('|'.join(holds))
+" 2>/dev/null)" || true
+
+    if [ -n "$gate_holds" ]; then
+      IFS='|' read -ra hold_prs <<< "$gate_holds"
+      for pr_id in "${hold_prs[@]}"; do
+        [ -n "$pr_id" ] || continue
+        verdict="NO-GO"
+        blockers=$((blockers + 1))
+        details="${details}\n  BLOCKER: Gate HOLD for $pr_id"
+      done
     fi
   fi
 
