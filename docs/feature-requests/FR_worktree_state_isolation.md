@@ -1,5 +1,17 @@
 # Feature Request: Native Worktree State Isolation
 
+> **Status: IMPLEMENTED**
+>
+> This feature request has been fully implemented across:
+> - **PR-3**: One-Command Worktree Creation (`vnx new-worktree`)
+> - **PR-4**: Governance-Aware Finish Flow (`vnx merge-preflight`, `vnx finish-worktree`)
+>
+> Key implementation details:
+> - Each feature worktree gets isolated `.vnx-data/` with intelligence snapshot
+> - `cmd_worktree_start` creates isolation; `cmd_worktree_stop` merges intelligence back
+> - Non-destructive merge strategy: `.vnx-intelligence/` export (preferred) or INSERT OR IGNORE fallback
+> - Governance gates block closure on unresolved open items unless `--force`
+
 **Status**: Proposed
 **Priority**: P2
 **Component**: vnx core (bin/vnx, vnx_paths.sh)

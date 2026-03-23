@@ -1,5 +1,11 @@
 # Multi-Agent Git Isolation: Industry Research & VNX Architecture Decision
 
+> **Status**: This research document is partially superseded by the implementation in PR-3 (One-Command Worktree Creation) and PR-4 (Governance-Aware Finish Flow).
+>
+> **Current standard**: One feature worktree per feature/fix branch via `vnx new-worktree <name>`.
+> Per-terminal worktrees are **deprecated** (`VNX_WORKTREES=false` is the default since VNX V8).
+> The isolation model described here (isolated `.vnx-data`, intelligence snapshots, `.env_override`) has been implemented as designed.
+
 **Date**: 2026-03-09
 **Author**: Vincent van Deth (VNX Digital)
 **Status**: Adopted

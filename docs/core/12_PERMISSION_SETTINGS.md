@@ -91,6 +91,44 @@ If permission prompts still appear:
 3. **Verify paths**: Paths must be relative to `.claude` directory
 4. **Check syntax**: JSON must be valid with proper nesting
 
+## Patch-Based Settings Management
+
+VNX uses a patch-based model for `settings.json` — it manages only its own keys, preserving all project and user configuration.
+
+### Ownership Model
+
+| Owner | Keys |
+|-------|------|
+| **VNX** | `hooks`, `env.VNX_*`, baseline `permissions.allow`, baseline `permissions.deny` |
+| **Project/User** | Extra `env` keys, `permissions.ask`, `additionalDirectories`, any non-VNX keys |
+
+### Merge Semantics
+
+- `permissions.allow`: union (deduplicated) — VNX baseline + project entries
+- `permissions.deny`: union (deduplicated) — deny takes precedence over allow
+- `permissions.ask` and `additionalDirectories`: preserved as-is (project-owned)
+- `hooks`: replaced entirely (VNX-owned)
+- `env`: VNX_* keys replaced, project keys preserved
+
+### Commands
+
+```bash
+vnx regen-settings --merge      # Merge VNX keys into existing settings.json
+vnx regen-settings --full       # Generate complete settings.json (first-time init)
+vnx regen-settings --validate   # Validate settings.json structure
+vnx regen-settings --dry-run    # Preview changes without writing
+```
+
+### Introspection
+
+The `_vnx_meta` key in settings.json records which keys VNX manages:
+```json
+"_vnx_meta": {
+  "managed_keys": ["hooks", "env.VNX_*", "permissions.allow(vnx_baseline)", "permissions.deny(vnx_baseline)"],
+  "generated_at": "2026-03-23T..."
+}
+```
+
 ## Future Improvements
 
 Currently, Claude Code doesn't support `additionalDirectories` in project-specific settings files (feature request #3146). When this feature is added, we could have more granular control per terminal.

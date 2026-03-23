@@ -1,35 +1,43 @@
-# Contributing
+# Contributing to VNX
 
-Thanks for contributing to VNX.
+## Development Workflow
 
-## Scope for contributions
+1. **Create a feature worktree**:
+   ```bash
+   vnx new-worktree my-feature --branch feature/my-feature
+   cd ../your-project-wt-my-feature
+   ```
 
-We accept focused PRs for:
+2. **Start VNX session**:
+   ```bash
+   vnx start
+   ```
 
-- portability and packaging improvements
-- CLI reliability (`init`, `start`, `doctor`, `patch-agent-files`)
-- documentation and examples
-- test coverage and CI hardening
+3. **Work within dispatches** -- T0 creates dispatches, workers execute scoped tasks.
 
-Out of scope for this repo:
+4. **Settings management** -- if you need to update VNX settings:
+   ```bash
+   vnx regen-settings --merge  # Patches VNX-owned keys only
+   ```
 
-- paid/enterprise-only features
-- broad architecture rewrites without prior alignment
+5. **Pre-merge verification**:
+   ```bash
+   vnx merge-preflight my-feature   # Check governance state
+   vnx gate-check --pr PR-X         # Run deterministic gate checks
+   ```
 
-## Workflow
+6. **Close the worktree**:
+   ```bash
+   vnx finish-worktree my-feature --delete-branch
+   ```
 
-1. Fork and create a branch.
-2. Keep PRs small and scoped to one logical change.
-3. Include tests or smoke commands when behavior changes.
-4. Ensure CI is green.
+## Code Standards
 
-## No merge timeline guarantee
+- All shell changes must pass `bash -n`
+- PRs should be 150-300 lines
+- Every change goes through a dispatch
+- `.vnx-data/` is runtime state -- never commit it
 
-Maintainers review PRs as time allows. Opening a PR does not guarantee merge timing.
+## Layout
 
-## PR checklist
-
-- [ ] Change is scoped and documented
-- [ ] `vnx doctor` smoke path works
-- [ ] No runtime artifacts added to dist
-- [ ] No secrets committed
+`.vnx/` is the primary layout. Legacy `.claude/vnx-system/` is compatibility-only.
