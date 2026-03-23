@@ -1522,6 +1522,32 @@ tracks:
 }
 ```
 
+### New State Directories (VNX V8)
+
+| Directory | Purpose |
+|-----------|---------|
+| `gate_results/` | Per-PR gate check results (`<PR-ID>.json`) with per-check GO/HOLD verdicts |
+| `verification_results/` | Contract verification output from `verify_claims.py` |
+| `dispatch_payloads/` | Temp files for large tmux dispatch payloads (>50KB); auto-cleaned by `vnx recover` |
+
+### Lock Lifecycle (V8)
+
+Process locks in `.vnx-data/locks/<name>.lock/` now include:
+- `pid` — process ID
+- `fingerprint` — canonicalized script path
+- `created_at` — epoch timestamp when lock was acquired
+- `heartbeat` — epoch timestamp, updated periodically by long-running processes
+
+**Stale-lock expiry**: Locks older than `VNX_LOCK_MAX_AGE` (default 3600s) are auto-cleaned on next acquisition attempt, even if the PID still exists.
+
+**Unclean-shutdown marker**: `.vnx-data/locks/.unclean_shutdown` is written before risky operations and cleared on clean exit. `vnx recover` detects and clears this.
+
+### PID Metadata
+
+PID files in `.vnx-data/pids/` store:
+- `<name>.pid` — process ID
+- `<name>.pid.fingerprint` — script path fingerprint for ownership validation
+
 ### Version History
 
 **Version 2.0 (2026-01-26)**:

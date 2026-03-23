@@ -58,6 +58,36 @@ V8.2 supports multiple PRs in progress simultaneously across different tracks:
 - Multiple tracks can run in parallel (e.g., PR-2 on Track A + PR-5 on Track B)
 - Backward compatible: reads old single-string format
 
+### Singleton Enforcement (V8)
+
+The dispatcher uses `vnx_proc_acquire_lock()` with:
+- Atomic `mkdir` for lock acquisition
+- PID + fingerprint validation
+- **Timestamp-based stale expiry**: locks include `created_at` and `heartbeat` timestamps; locks older than `VNX_LOCK_MAX_AGE` (default 3600s) are auto-expired
+
+### Large Payload Transport (V8)
+
+`tmux_load_buffer_safe()` prevents silent truncation of large dispatch payloads:
+- Payloads > `VNX_DISPATCH_MAX_INLINE` (default 50KB) are written to a temp file at `$VNX_DATA_DIR/dispatch_payloads/`
+- `tmux load-buffer <file>` replaces stdin pipe
+- Temp files are cleaned after successful delivery; stale files (>60min) cleaned by `vnx recover`
+
+### Retry with Exponential Backoff (V8)
+
+`tmux_retry(max_attempts, command...)` wraps all tmux delivery operations:
+- 3 attempts with exponential backoff (1s, 2s, 4s)
+- Applies to: `tmux_load_buffer_safe`, `tmux paste-buffer`, `tmux send-keys`
+
+### Recovery Command (V8)
+
+`vnx recover [--aggressive] [--dry-run]` performs 6 recovery actions:
+1. Clear stale process locks (age + PID death detection)
+2. Kill orphan processes (scoped to project)
+3. Move incomplete dispatches from `active/` to `failed/`
+4. Reset stale terminal claims to idle
+5. Clear unclean-shutdown marker
+6. Clean stale payload temp files
+
 ---
 
 ## V7.3 Legacy Reference

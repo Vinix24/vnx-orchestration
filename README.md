@@ -60,8 +60,7 @@ cd /path/to/your/project
 vnx start
 ```
 
-> **Layout note**: `.vnx/` is the default and recommended layout.
-> Legacy `.claude/vnx-system/` is supported via `--layout claude` but deprecated.
+> **Layout**: `.vnx/` is the primary and recommended layout. Legacy `.claude/vnx-system/` remains supported via `--layout claude` but is deprecated.
 
 `vnx start` creates a tmux session with a 2x2 grid:
 
@@ -104,6 +103,37 @@ Or pass a profile directly to skip the menu:
 
 T0 (orchestrator) and T3 (deep specialist) always run Claude Opus.
 Profile `.env` files are idempotent — edit them freely to customize provider assignments.
+
+## Feature Workflow
+
+VNX uses **one feature worktree per feature/fix** as the standard development model.
+
+```bash
+# Start a new feature
+vnx new-worktree my-feature --branch feature/my-feature
+
+# Work in the worktree
+cd ../your-project-wt-my-feature
+vnx start
+
+# When done: check governance state
+vnx merge-preflight my-feature
+
+# Close with governance gates
+vnx finish-worktree my-feature --delete-branch
+```
+
+> **Deprecated**: Per-terminal worktrees (`VNX_WORKTREES=true`) are deprecated.
+> Use `vnx new-worktree` for all new development.
+
+## Settings Management
+
+VNX uses patch-based settings management. VNX owns hooks, `VNX_*` environment variables, and baseline permissions. Project-specific configuration is preserved.
+
+```bash
+vnx regen-settings --merge   # Merge VNX keys into existing settings.json
+vnx regen-settings --full    # Generate complete settings.json (first-time)
+```
 
 ## Demo (no LLM required)
 
@@ -197,6 +227,20 @@ See the [context rotation dry-run demo](demo/dry-run-context-rotation/) for a vi
 | `vnx worktree create <name>` | Create a git worktree for a feature plan |
 | `vnx worktree remove <name>` | Remove a worktree (fails if uncommitted changes) |
 | `vnx worktree list` | List VNX-managed worktrees |
+| `vnx new-worktree <name>` | Create fully bootstrapped feature worktree (one command) |
+| `vnx finish-worktree <name>` | Close worktree with governance gates + intelligence merge |
+| `vnx merge-preflight <name>` | Governance check: GO or NO-GO verdict for worktree merge |
+| `vnx regen-settings --merge` | Patch VNX-owned keys into settings.json (preserves project config) |
+| `vnx gate-check --pr <ID>` | Run deterministic pre-merge gate checks for a PR |
+| `vnx status` | Show session, queue, terminal, and open-item state |
+| `vnx ps` | Show VNX process status with PID metadata |
+| `vnx cleanup` | Detect and remove orphan processes and stale state |
+| `vnx restart <process>` | Restart a managed VNX process |
+| `vnx recover` | Recover from unclean shutdown or stale state |
+| `vnx register [path]` | Register project in ~/.vnx/projects.json |
+| `vnx list-projects` | List all registered VNX projects |
+| `vnx unregister [path]` | Remove project from registry |
+| `vnx install-shell-helper` | Add vnx() function to shell RC |
 | `vnx package-check` | Fail if runtime artifacts exist inside dist |
 
 ## Updating
