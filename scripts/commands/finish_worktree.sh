@@ -111,13 +111,31 @@ HELP
   local git_branch
   git_branch="$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 
+  # Block removal if worktree has uncommitted changes (unless --force)
+  local dirty_files
+  dirty_files="$(git -C "$wt_dir" status --porcelain 2>/dev/null || true)"
+  if [ -n "$dirty_files" ]; then
+    if [ "$force" = true ]; then
+      log "[finish-worktree] WARN: Worktree has uncommitted changes — proceeding with --force"
+    else
+      err "[finish-worktree] Worktree has uncommitted changes:"
+      echo "$dirty_files" | head -10 >&2
+      err "[finish-worktree] Commit or stash changes first, or use --force to discard."
+      return 1
+    fi
+  fi
+
   log "[finish-worktree] Removing git worktree: $wt_dir"
-  if ! git -C "$PROJECT_ROOT" worktree remove "$wt_dir" --force 2>/dev/null; then
-    # If removal fails (dirty), clean up .vnx-data first and retry
+  # Use --force only when the user explicitly passed --force
+  local _git_rm_args=("$wt_dir")
+  [ "$force" = true ] && _git_rm_args+=("--force")
+
+  if ! git -C "$PROJECT_ROOT" worktree remove "${_git_rm_args[@]}" 2>/dev/null; then
+    # If removal fails, clean up .vnx-data first (untracked) and retry
     if [ -d "$wt_data" ]; then
       rm -rf "$wt_data"
     fi
-    if ! git -C "$PROJECT_ROOT" worktree remove "$wt_dir" --force 2>/dev/null; then
+    if ! git -C "$PROJECT_ROOT" worktree remove "${_git_rm_args[@]}" 2>/dev/null; then
       err "[finish-worktree] Failed to remove worktree. Manual cleanup may be needed."
       err "[finish-worktree] Try: git -C $PROJECT_ROOT worktree remove $wt_dir --force"
       return 1
