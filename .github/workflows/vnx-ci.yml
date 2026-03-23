@@ -43,7 +43,10 @@ jobs:
             --glob "!**/archived*/**" \
             --glob "!**/archive*/**" \
             --glob "!**/*.DEPRECATED" \
-            --glob "!**/test_dashboard_sync.py" || true)
+            --glob "!**/test_dashboard_sync.py" \
+            --glob "!**/intelligence_export.py" \
+            --glob "!**/intelligence_import.py" \
+            --glob "!**/commands/merge_preflight.sh" || true)
           if [ -n "$matches" ]; then
             echo "$matches"
             echo "Legacy path literals detected. Use VNX_STATE_DIR via vnx_paths."
@@ -107,7 +110,10 @@ jobs:
             --glob "!**/archived*/**" \
             --glob "!**/archive*/**" \
             --glob "!**/*.DEPRECATED" \
-            --glob "!**/test_dashboard_sync.py" || true)
+            --glob "!**/test_dashboard_sync.py" \
+            --glob "!**/intelligence_export.py" \
+            --glob "!**/intelligence_import.py" \
+            --glob "!**/commands/merge_preflight.sh" || true)
           if [ -n "$matches" ]; then
             echo "$matches"
             echo "Legacy path literals detected. Use VNX_STATE_DIR via vnx_paths."
