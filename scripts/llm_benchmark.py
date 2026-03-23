@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-VNX_BASE = SCRIPT_DIR.parent  # .claude/vnx-system
+VNX_BASE = SCRIPT_DIR.parent  # VNX dist root
 REPORT_DIR = VNX_BASE / "reports" / "benchmarks"
 PROGRESS_FILE = REPORT_DIR / "benchmark_progress.json"
 

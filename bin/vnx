@@ -120,6 +120,16 @@ _load_command() {
     source "$cmd_file"
     return 0
   fi
+  # Try underscore variant (e.g. new-worktree -> new_worktree.sh)
+  local underscore_name="${name//-/_}"
+  if [ "$underscore_name" != "$name" ]; then
+    cmd_file="${VNX_COMMANDS_DIR}/${underscore_name}.sh"
+    if [ -f "$cmd_file" ]; then
+      # shellcheck source=/dev/null
+      source "$cmd_file"
+      return 0
+    fi
+  fi
   return 1
 }
 
@@ -154,7 +164,9 @@ Intelligence commands (git-tracked project knowledge):
   intelligence-export  Export SQLite + state to .vnx-intelligence/ (NDJSON)
   intelligence-import  Import .vnx-intelligence/ NDJSON into SQLite
 
-Worktree commands (data isolation):
+Worktree commands:
+  new-worktree <name>  Create fully bootstrapped feature worktree (one command)
+                     Options: --branch, --base, --preset, --skip-doctor
   worktree-start     Initialize isolated .vnx-data with intelligence snapshot
   worktree-stop      Merge intelligence back to main and clean up
   worktree-refresh   Update intelligence snapshot from main
@@ -1656,6 +1668,9 @@ main() {
       ;;
     intelligence-import)
       cmd_intelligence_import
+      ;;
+    new-worktree)
+      cmd_new_worktree "$@"
       ;;
     worktree-start)
       cmd_worktree_start
