@@ -98,6 +98,58 @@ tmux_send_best_effort() {
     return 0
 }
 
+# Large-payload tmux buffer loading: uses temp file for payloads > threshold
+# to avoid silent truncation in tmux stdin pipe.
+VNX_DISPATCH_MAX_INLINE="${VNX_DISPATCH_MAX_INLINE:-51200}"  # 50KB default
+VNX_DISPATCH_PAYLOAD_DIR="${VNX_DATA_DIR:-/tmp}/dispatch_payloads"
+
+tmux_load_buffer_safe() {
+    local content="$1"
+    local payload_size=${#content}
+
+    if [ "$payload_size" -gt "$VNX_DISPATCH_MAX_INLINE" ]; then
+        # Large payload: write to temp file to avoid truncation
+        mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
+        local tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/payload_$$.txt"
+        printf '%s' "$content" > "$tmpfile"
+        log "V8 DELIVERY: Large payload (${payload_size}B > ${VNX_DISPATCH_MAX_INLINE}B), using temp file"
+        if tmux load-buffer "$tmpfile"; then
+            rm -f "$tmpfile"
+            return 0
+        else
+            rm -f "$tmpfile"
+            return 1
+        fi
+    else
+        printf '%s' "$content" | tmux load-buffer -
+    fi
+}
+
+# Retry wrapper for tmux delivery operations with exponential backoff.
+# Usage: tmux_retry <max_attempts> <command...>
+tmux_retry() {
+    local max_attempts="$1"
+    shift
+    local attempt=1
+    local delay=1
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if "$@"; then
+            [ "$attempt" -gt 1 ] && log "V8 DELIVERY: Succeeded on attempt $attempt"
+            return 0
+        fi
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            log "V8 DELIVERY: Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    log "V8 DELIVERY: All $max_attempts attempts failed"
+    return 1
+}
+
 # Map track identifier to canonical terminal id.
 track_to_terminal() {
     case "$1" in
@@ -1056,64 +1108,66 @@ ${complete_prompt}"
     fi
 
     # V8 CORE: Hybrid dispatch - skill via send-keys, instruction via paste-buffer
+    # Uses tmux_load_buffer_safe for large payloads (temp file transport)
+    # and tmux_retry for transient tmux failures (3 attempts, exponential backoff).
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
+
+    local _delivery_failed=false
 
     # Provider-aware dispatch: Codex CLI paste-buffer replaces typed input,
     # so prepend skill command to buffer content instead of typing separately.
     if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
         # Codex: single paste-buffer with skill + instruction combined
-        if ! echo "${skill_command}${complete_prompt}" | tmux load-buffer -; then
-            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" "Failed to release claim after tmux load failure" "terminal=$terminal_id dispatch=$dispatch_id"
-            fi
-            log "V8 ERROR: Failed to load prompt to tmux buffer"
-            return 1
+        if ! tmux_retry 3 tmux_load_buffer_safe "${skill_command}${complete_prompt}"; then
+            _delivery_failed=true
+            log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
         fi
 
-        if ! tmux paste-buffer -t "$target_pane"; then
-            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" "Failed to release claim after tmux paste failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        if [ "$_delivery_failed" = false ]; then
+            if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
+                _delivery_failed=true
+                log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
             fi
-            log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-            return 1
         fi
     else
         # Claude Code / others: type skill via send-keys, then paste instruction
         # Step 1: Type skill command via send-keys (triggers skill activation)
         # Use -l (literal) for providers that use $ prefix to prevent tmux key interpretation
-        if ! tmux_send_best_effort "$target_pane" -l "$skill_command"; then
-            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" "Failed to release claim after skill send failure" "terminal=$terminal_id dispatch=$dispatch_id"
-            fi
+        if ! tmux_retry 3 tmux_send_best_effort "$target_pane" -l "$skill_command"; then
+            _delivery_failed=true
             log "V8 ERROR: Failed to send skill command to terminal $target_pane"
-            return 1
         fi
 
-        # Allow CLI to render the skill command before pasting instruction
-        sleep 0.5
+        if [ "$_delivery_failed" = false ]; then
+            # Allow CLI to render the skill command before pasting instruction
+            sleep 0.5
 
-        # Step 2: Load instruction into buffer and paste after typed skill command
-        if ! echo "$complete_prompt" | tmux load-buffer -; then
-            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" "Failed to release claim after tmux load failure" "terminal=$terminal_id dispatch=$dispatch_id"
+            # Step 2: Load instruction into buffer and paste after typed skill command
+            if ! tmux_retry 3 tmux_load_buffer_safe "$complete_prompt"; then
+                _delivery_failed=true
+                log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
             fi
-            log "V8 ERROR: Failed to load prompt to tmux buffer"
-            return 1
         fi
 
-        if ! tmux paste-buffer -t "$target_pane"; then
-            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" "Failed to release claim after tmux paste failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        if [ "$_delivery_failed" = false ]; then
+            if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
+                _delivery_failed=true
+                log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
             fi
-            log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-            return 1
         fi
+    fi
+
+    if [ "$_delivery_failed" = true ]; then
+        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+            log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        fi
+        return 1
     fi
 
     # Add delay before Enter to ensure content is fully pasted and rendered
     sleep 1
 
-    if ! tmux send-keys -t "$target_pane" Enter; then
+    if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
         fi
