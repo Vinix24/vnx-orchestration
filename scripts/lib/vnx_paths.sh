@@ -8,16 +8,36 @@ set -euo pipefail
 # Resolve this file's directory without clobbering the caller's SCRIPT_DIR.
 _VNX_PATHS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Default VNX_HOME to the dist root (parent of bin/ or scripts/).
-if [ -n "${VNX_BIN:-}" ]; then
-  VNX_HOME_DEFAULT="$(cd "$(dirname "$VNX_BIN")/.." && pwd)"
-elif [ -n "${VNX_EXECUTABLE:-}" ]; then
-  VNX_HOME_DEFAULT="$(cd "$(dirname "$VNX_EXECUTABLE")/.." && pwd)"
-elif [ "$(basename "$_VNX_PATHS_DIR")" = "lib" ]; then
-  VNX_HOME_DEFAULT="$(cd "$_VNX_PATHS_DIR/../.." && pwd)"
+# Always compute VNX_HOME from this script's location first (ground truth).
+if [ "$(basename "$_VNX_PATHS_DIR")" = "lib" ]; then
+  _VNX_HOME_FROM_SCRIPT="$(cd "$_VNX_PATHS_DIR/../.." && pwd)"
 else
-  VNX_HOME_DEFAULT="$(cd "$_VNX_PATHS_DIR/.." && pwd)"
+  _VNX_HOME_FROM_SCRIPT="$(cd "$_VNX_PATHS_DIR/.." && pwd)"
 fi
+
+# Default VNX_HOME to the dist root (parent of bin/ or scripts/).
+# Only trust VNX_BIN/VNX_EXECUTABLE if they resolve to the same project tree
+# as this script — prevents cross-project contamination from inherited env vars.
+if [ -n "${VNX_BIN:-}" ]; then
+  _VNX_HOME_FROM_BIN="$(cd "$(dirname "$VNX_BIN")/.." 2>/dev/null && pwd)" || _VNX_HOME_FROM_BIN=""
+  if [ "$_VNX_HOME_FROM_BIN" = "$_VNX_HOME_FROM_SCRIPT" ]; then
+    VNX_HOME_DEFAULT="$_VNX_HOME_FROM_BIN"
+  else
+    VNX_HOME_DEFAULT="$_VNX_HOME_FROM_SCRIPT"
+  fi
+  unset _VNX_HOME_FROM_BIN
+elif [ -n "${VNX_EXECUTABLE:-}" ]; then
+  _VNX_HOME_FROM_EXEC="$(cd "$(dirname "$VNX_EXECUTABLE")/.." 2>/dev/null && pwd)" || _VNX_HOME_FROM_EXEC=""
+  if [ "$_VNX_HOME_FROM_EXEC" = "$_VNX_HOME_FROM_SCRIPT" ]; then
+    VNX_HOME_DEFAULT="$_VNX_HOME_FROM_EXEC"
+  else
+    VNX_HOME_DEFAULT="$_VNX_HOME_FROM_SCRIPT"
+  fi
+  unset _VNX_HOME_FROM_EXEC
+else
+  VNX_HOME_DEFAULT="$_VNX_HOME_FROM_SCRIPT"
+fi
+unset _VNX_HOME_FROM_SCRIPT
 
 # Default project root to the parent of VNX_HOME.
 # Backward compatibility: if VNX_HOME lives under a legacy hidden directory layout, project root is two levels up.
@@ -27,23 +47,29 @@ else
   PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/.." && pwd)"
 fi
 
+# Guard against cross-project env contamination:
+# If inherited VNX_HOME points to a different project tree than VNX_HOME_DEFAULT
+# (computed from this script's location), reset it and all derived paths.
+if [ -n "${VNX_HOME:-}" ] && [ "$VNX_HOME" != "$VNX_HOME_DEFAULT" ]; then
+  # Preserve explicit VNX_DATA_DIR override (worktree isolation)
+  _vnx_saved_data_dir="${VNX_DATA_DIR:-}"
+  unset VNX_HOME VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
+  if [ -n "$_vnx_saved_data_dir" ]; then
+    VNX_DATA_DIR="$_vnx_saved_data_dir"
+  else
+    unset VNX_DATA_DIR
+  fi
+  unset _vnx_saved_data_dir
+fi
 export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
 
-# Guard against cross-project env contamination:
-# If VNX_HOME is under the legacy hidden vnx dir layout, trust derived project root.
+# Derive PROJECT_ROOT from VNX_HOME.
+# If VNX_HOME is under legacy layout, project root is two levels up.
 if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
   if [ -n "${PROJECT_ROOT:-}" ] && [ "$PROJECT_ROOT" != "$PROJECT_ROOT_DEFAULT" ]; then
-    # Preserve explicit VNX_DATA_DIR override (worktree isolation)
-    _vnx_saved_data_dir="${VNX_DATA_DIR:-}"
-    unset VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
-    if [ -n "$_vnx_saved_data_dir" ]; then
-      VNX_DATA_DIR="$_vnx_saved_data_dir"
-    else
-      unset VNX_DATA_DIR
-    fi
-    unset _vnx_saved_data_dir
+    unset PROJECT_ROOT
   fi
-  export PROJECT_ROOT="$PROJECT_ROOT_DEFAULT"
+  export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
 else
   export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
 fi

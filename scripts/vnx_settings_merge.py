@@ -35,7 +35,7 @@ from pathlib import Path
 
 
 def find_vnx_home(project_root: str) -> str:
-    """Resolve VNX_HOME: prefer .vnx/ layout, fall back to .claude/vnx-system/."""
+    """Resolve VNX_HOME: prefer .vnx/ layout, fall back to legacy layout."""
     vnx_primary = os.path.join(project_root, ".vnx")
     vnx_legacy = os.path.join(project_root, ".claude", "vnx-system")
 

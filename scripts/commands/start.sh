@@ -521,8 +521,15 @@ TSJSON
       # Detect project root from pane paths in that session
       _other_root=$(tmux list-panes -t "$_other_session" -F '#{pane_current_path}' 2>/dev/null \
         | head -1 | sed 's|/\.claude/terminals/.*||' || true)
-      if [ -n "$_other_root" ] && [ -d "$_other_root/.claude/vnx-system" ]; then
-        _other_cmd="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR; export PROJECT_ROOT='$_other_root' VNX_HOME='$_other_root/.claude/vnx-system' VNX_DATA_DIR='$_other_root/.vnx-data'; bash '$_other_root/.claude/vnx-system/scripts/queue_ui_enhanced.sh'"
+      # Detect VNX layout: prefer .vnx/ primary, fall back to legacy layout
+      local _other_vnx_home=""
+      if [ -n "$_other_root" ] && [ -d "$_other_root/.vnx" ]; then
+        _other_vnx_home="$_other_root/.vnx"
+      elif [ -n "$_other_root" ] && [ -d "$_other_root/.claude"/"vnx-system" ]; then
+        _other_vnx_home="$_other_root/.claude"/"vnx-system"
+      fi
+      if [ -n "$_other_vnx_home" ]; then
+        _other_cmd="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR; export PROJECT_ROOT='$_other_root' VNX_HOME='$_other_vnx_home' VNX_DATA_DIR='$_other_root/.vnx-data'; bash '$_other_vnx_home/scripts/queue_ui_enhanced.sh'"
         tmux set-option -t "$_other_session" @vnx_popup_cmd "$_other_cmd" 2>/dev/null || true
         log "Backfilled @vnx_popup_cmd on session: $_other_session (project: $_other_root)"
       fi
