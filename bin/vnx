@@ -175,6 +175,10 @@ Worktree commands:
   worktree-refresh   Update intelligence snapshot from main
   worktree-status    Show worktree isolation status
 
+Runtime commands:
+  recover            Recover from unclean shutdown or stale state
+                     Options: --aggressive, --dry-run
+
   help               Show this help text
 USAGE
   }
@@ -1692,6 +1696,9 @@ main() {
       ;;
     worktree-status)
       cmd_worktree_status
+      ;;
+    recover)
+      cmd_recover "$@"
       ;;
     patch-agent-files)
       cmd_patch_agent_files

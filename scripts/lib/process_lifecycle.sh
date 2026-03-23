@@ -216,6 +216,7 @@ vnx_proc_acquire_lock() {
   local log_file="$3"
   local mode="${4:-exit}"
   local reason="${5:-singleton}"
+  local max_age="${VNX_LOCK_MAX_AGE:-3600}"
 
   mkdir -p "$VNX_LOCKS_DIR" "$VNX_PIDS_DIR"
   local lock_dir="$VNX_LOCKS_DIR/${name}.lock"
@@ -224,6 +225,8 @@ vnx_proc_acquire_lock() {
   if mkdir "$lock_dir" 2>/dev/null; then
     echo "$$" > "$lock_dir/pid"
     echo "$fingerprint" > "$lock_dir/fingerprint"
+    date +%s > "$lock_dir/created_at"
+    date +%s > "$lock_dir/heartbeat"
     vnx_proc_write_pidfile "$pid_file" "$$" "$fingerprint"
     return 0
   fi
@@ -246,7 +249,25 @@ vnx_proc_acquire_lock() {
     existing_fingerprint="$fingerprint"
   fi
 
-  if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+  # Check for stale lock by age (heartbeat or created_at)
+  local lock_ts=0
+  if [ -f "$lock_dir/heartbeat" ]; then
+    lock_ts="$(cat "$lock_dir/heartbeat" 2>/dev/null || echo 0)"
+  elif [ -f "$lock_dir/created_at" ]; then
+    lock_ts="$(cat "$lock_dir/created_at" 2>/dev/null || echo 0)"
+  fi
+  local now_ts
+  now_ts="$(date +%s)"
+  local lock_age=$(( now_ts - lock_ts ))
+
+  if [ "$lock_age" -ge "$max_age" ] && [ "$lock_ts" -gt 0 ]; then
+    vnx_proc_log_event "$log_file" "$name" "stale_lock_expired" "${existing_pid:-unknown}" "age=${lock_age}s max=${max_age}s"
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+      kill -TERM "$existing_pid" 2>/dev/null || true
+      vnx_proc_wait_for_exit "$existing_pid" 3 || kill -KILL "$existing_pid" 2>/dev/null || true
+    fi
+    rm -rf "$lock_dir" "$pid_file" "${pid_file}.fingerprint"
+  elif [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
     if [ "$mode" = "stop_existing" ]; then
       if vnx_proc_stop_pid "$name" "$existing_pid" "$existing_fingerprint" "$log_file" "$reason" 5; then
         rm -rf "$lock_dir" "$pid_file" "${pid_file}.fingerprint"
@@ -264,12 +285,59 @@ vnx_proc_acquire_lock() {
   if mkdir "$lock_dir" 2>/dev/null; then
     echo "$$" > "$lock_dir/pid"
     echo "$fingerprint" > "$lock_dir/fingerprint"
+    date +%s > "$lock_dir/created_at"
+    date +%s > "$lock_dir/heartbeat"
     vnx_proc_write_pidfile "$pid_file" "$$" "$fingerprint"
     return 0
   fi
 
   vnx_proc_log_event "$log_file" "$name" "lock_failed" "$$" "$reason"
   return 1
+}
+
+# Renew heartbeat timestamp for held lock (call periodically from long-running processes)
+vnx_proc_heartbeat_lock() {
+  local name="$1"
+  local lock_dir="$VNX_LOCKS_DIR/${name}.lock"
+  if [ -d "$lock_dir" ]; then
+    date +%s > "$lock_dir/heartbeat"
+  fi
+}
+
+# Write unclean-shutdown marker (call before risky operations)
+vnx_proc_mark_unclean() {
+  local marker="$VNX_LOCKS_DIR/.unclean_shutdown"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$marker"
+  echo "$$" >> "$marker"
+}
+
+# Check and clear unclean-shutdown marker
+vnx_proc_check_unclean() {
+  local marker="$VNX_LOCKS_DIR/.unclean_shutdown"
+  [ -f "$marker" ]
+}
+
+vnx_proc_clear_unclean() {
+  rm -f "$VNX_LOCKS_DIR/.unclean_shutdown"
+}
+
+# Get lock age in seconds (returns -1 if no lock)
+vnx_proc_lock_age() {
+  local name="$1"
+  local lock_dir="$VNX_LOCKS_DIR/${name}.lock"
+  if [ ! -d "$lock_dir" ]; then
+    echo "-1"
+    return 1
+  fi
+  local lock_ts=0
+  if [ -f "$lock_dir/heartbeat" ]; then
+    lock_ts="$(cat "$lock_dir/heartbeat" 2>/dev/null || echo 0)"
+  elif [ -f "$lock_dir/created_at" ]; then
+    lock_ts="$(cat "$lock_dir/created_at" 2>/dev/null || echo 0)"
+  fi
+  local now_ts
+  now_ts="$(date +%s)"
+  echo $(( now_ts - lock_ts ))
 }
 
 eval "$__VNX_PROC_SHELLOPTS"
