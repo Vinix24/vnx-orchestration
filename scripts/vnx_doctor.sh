@@ -23,6 +23,11 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/vnx_doctor.sh' \
     --glob '!**/vnx_worktree_setup.sh' \
     --glob '!**/vnx_worktree_merge_data.sh' \
+    --glob '!**/vnx_shell_helper.sh' \
+    --glob '!**/commands/registry.sh' \
+    --glob '!**/intelligence_export.py' \
+    --glob '!**/intelligence_import.py' \
+    --glob '!**/commands/merge_preflight.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' || true)
   # Also check bin/vnx (no extension, so glob won't match it)
@@ -43,6 +48,11 @@ else
     --exclude='vnx_doctor.sh' \
     --exclude='vnx_worktree_setup.sh' \
     --exclude='vnx_worktree_merge_data.sh' \
+    --exclude='vnx_shell_helper.sh' \
+    --exclude='registry.sh' \
+    --exclude='intelligence_export.py' \
+    --exclude='intelligence_import.py' \
+    --exclude='merge_preflight.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' || true)
   # Also check bin/vnx
