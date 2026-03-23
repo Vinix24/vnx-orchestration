@@ -265,6 +265,14 @@ def _extract_shortstat_value(shortstat: str, token: str) -> int:
 
 
 def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
+    # Resolve the PROJECT root, not the vnx-system root.
+    # CLAUDE_PROJECT_DIR points to the actual project worktree.
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    if project_dir:
+        probe = _safe_subprocess(["git", "rev-parse", "--show-toplevel"], cwd=Path(project_dir))
+        if probe:
+            repo_root = Path(project_dir)
+
     git_root_raw = _safe_subprocess(["git", "rev-parse", "--show-toplevel"], cwd=repo_root)
     captured_at = _utc_now_iso()
 
