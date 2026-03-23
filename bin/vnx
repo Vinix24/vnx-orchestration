@@ -167,6 +167,9 @@ Intelligence commands (git-tracked project knowledge):
 Worktree commands:
   new-worktree <name>  Create fully bootstrapped feature worktree (one command)
                      Options: --branch, --base, --preset, --skip-doctor
+  merge-preflight <name>  Governance check: GO or NO-GO verdict for worktree merge
+  finish-worktree <name>  Close worktree with governance gates + intelligence merge
+                     Options: --delete-branch, --force
   worktree-start     Initialize isolated .vnx-data with intelligence snapshot
   worktree-stop      Merge intelligence back to main and clean up
   worktree-refresh   Update intelligence snapshot from main
@@ -1671,6 +1674,12 @@ main() {
       ;;
     new-worktree)
       cmd_new_worktree "$@"
+      ;;
+    merge-preflight)
+      cmd_merge_preflight "$@"
+      ;;
+    finish-worktree)
+      cmd_finish_worktree "$@"
       ;;
     worktree-start)
       cmd_worktree_start
