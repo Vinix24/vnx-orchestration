@@ -29,23 +29,39 @@ Install on macOS:
 brew install tmux jq fswatch
 ```
 
-## Quickstart
+## Quickstart (2 commands)
 
 ```bash
-# 1. Clone
-git clone https://github.com/Vinix24/vnx-orchestration.git
-cd vnx-orchestration
+# 1. Install VNX into your project (default layout: .vnx/)
+curl -sL https://raw.githubusercontent.com/Vinix24/vnx-orchestration-system/main/install-remote.sh | bash -s -- /path/to/your/project
 
-# 2. Install into your project
-./install.sh /path/to/your/project
-
-# 3. Initialize, validate, and launch
+# 2. Launch
 cd /path/to/your/project
-.vnx/bin/vnx bootstrap-skills     # Copy skills to .claude/, .agents/, .gemini/
-.vnx/bin/vnx bootstrap-terminals  # Create terminal CLAUDE.md files
-.vnx/bin/vnx doctor               # Validate toolchain and layout
-.vnx/bin/vnx start                # Launch tmux session (interactive profile selection)
+.vnx/bin/vnx start
 ```
+
+`install-remote.sh` handles clone, install, init, bootstrap, and doctor in one step.
+
+### Manual install (alternative)
+
+```bash
+git clone https://github.com/Vinix24/vnx-orchestration-system.git
+cd vnx-orchestration-system
+./install.sh /path/to/your/project
+cd /path/to/your/project
+.vnx/bin/vnx init && .vnx/bin/vnx doctor && .vnx/bin/vnx start
+```
+
+### Optional: global shell helper
+
+```bash
+.vnx/bin/vnx install-shell-helper   # Adds vnx() to ~/.zshrc or ~/.bashrc
+# Then from any project directory:
+vnx start
+```
+
+> **Layout note**: `.vnx/` is the default and recommended layout.
+> Legacy `.claude/vnx-system/` is supported via `--layout claude` but deprecated.
 
 `vnx start` creates a tmux session with a 2x2 grid:
 

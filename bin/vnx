@@ -179,6 +179,15 @@ Runtime commands:
   recover            Recover from unclean shutdown or stale state
                      Options: --aggressive, --dry-run
 
+Project registry:
+  register [path] [name]  Register project in ~/.vnx/projects.json
+  list-projects           List all registered VNX projects
+  unregister [path]       Remove project from registry
+
+Shell helper:
+  install-shell-helper    Add vnx() function to shell RC (~/.zshrc or ~/.bashrc)
+                     Options: --print, --uninstall, --shell bash|zsh
+
   help               Show this help text
 USAGE
   }
@@ -1717,6 +1726,18 @@ main() {
       ;;
     suggest)
       python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
+      ;;
+    register)
+      cmd_register "$@"
+      ;;
+    list-projects)
+      cmd_list_projects
+      ;;
+    unregister)
+      cmd_unregister "$@"
+      ;;
+    install-shell-helper)
+      bash "$VNX_HOME/scripts/vnx_shell_helper.sh" "$@"
       ;;
     help|-h|--help)
       usage
