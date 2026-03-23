@@ -198,12 +198,17 @@ cmd_start() {
       T3="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T3" '$2==p {print $1; exit}')"
 
       # Build launch commands with skip-permissions support (re-heal path)
+      # Model selection: use VNX_T{n}_MODEL env vars if set, otherwise defaults.
       local t0_reheal_cmd t1_cmd t2_cmd t3_reheal_cmd
       local t0_sf="" t1_sf="" t2_sf="" t3_sf=""
+      local t0_model="${VNX_T0_MODEL:-opus}"
+      local t1_model="${VNX_T1_MODEL:-sonnet}"
+      local t2_model="${VNX_T2_MODEL:-sonnet}"
+      local t3_model="${VNX_T3_MODEL:-opus}"
       [ "$t0_skip" = "1" ] && t0_sf=" --dangerously-skip-permissions"
       [ "$t3_skip" = "1" ] && t3_sf=" --dangerously-skip-permissions"
-      t0_reheal_cmd="claude --model opus $t0_flags$t0_sf"
-      t3_reheal_cmd="claude --model opus $t0_flags$t3_sf"
+      t0_reheal_cmd="claude --model $t0_model $t0_flags$t0_sf"
+      t3_reheal_cmd="claude --model $t3_model $t0_flags$t3_sf"
 
       case "$t1_provider" in
         codex_cli|codex)
@@ -212,7 +217,7 @@ cmd_start() {
         gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
         *)
           [ "$t1_skip" = "1" ] && t1_sf=" --dangerously-skip-permissions"
-          t1_cmd="claude --model sonnet$t1_sf" ;;
+          t1_cmd="claude --model $t1_model$t1_sf" ;;
       esac
       case "$t2_provider" in
         codex_cli|codex)
@@ -221,7 +226,7 @@ cmd_start() {
         gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
         *)
           [ "$t2_skip" = "1" ] && t2_sf=" --dangerously-skip-permissions"
-          t2_cmd="claude --model sonnet$t2_sf" ;;
+          t2_cmd="claude --model $t2_model$t2_sf" ;;
       esac
 
       local node_path=""
@@ -240,15 +245,15 @@ cmd_start() {
         cat > "$state_dir/panes.json" <<PJSON
 {
   "session": "$session_name",
-  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
-  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
-  "T1": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" },
+  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
+  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
+  "T1": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
+  "T2": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
+  "T3": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" },
   "tracks": {
-    "A": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-    "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-    "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" }
+    "A": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
+    "B": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
+    "C": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" }
   }
 }
 PJSON
@@ -391,15 +396,15 @@ TSJSON
   cat > "$state_dir/panes.json" <<PJSON
 {
   "session": "$session_name",
-  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
-  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "opus", "provider": "claude_code" },
-  "T1": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" },
+  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
+  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
+  "T1": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
+  "T2": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
+  "T3": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" },
   "tracks": {
-    "A": { "pane_id": "$T1", "track": "A", "model": "sonnet", "provider": "$t1_provider" },
-    "B": { "pane_id": "$T2", "track": "B", "model": "sonnet", "provider": "$t2_provider" },
-    "C": { "pane_id": "$T3", "track": "C", "model": "opus", "role": "deep", "provider": "$t3_provider" }
+    "A": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
+    "B": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
+    "C": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" }
   }
 }
 PJSON
@@ -630,10 +635,15 @@ RESOLVER
   # Skip-permissions: --dangerously-skip-permissions for Claude, --full-auto for Codex, --yolo already on Gemini
   local t0_cmd t1_cmd t2_cmd t3_cmd
   local t0_skip_flag="" t1_skip_flag="" t2_skip_flag="" t3_skip_flag=""
+  # Model selection: use VNX_T{n}_MODEL env vars if set, otherwise defaults.
+  local t0_model="${VNX_T0_MODEL:-opus}"
+  local t1_model="${VNX_T1_MODEL:-sonnet}"
+  local t2_model="${VNX_T2_MODEL:-sonnet}"
+  local t3_model="${VNX_T3_MODEL:-opus}"
 
   # T0 skip-permissions (Claude only)
   [ "$t0_skip" = "1" ] && t0_skip_flag=" --dangerously-skip-permissions"
-  t0_cmd="claude --model opus $t0_flags$t0_skip_flag"
+  t0_cmd="claude --model $t0_model $t0_flags$t0_skip_flag"
 
   case "$t1_provider" in
     codex_cli|codex)
@@ -643,7 +653,7 @@ RESOLVER
       t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
     *)
       [ "$t1_skip" = "1" ] && t1_skip_flag=" --dangerously-skip-permissions"
-      t1_cmd="claude --model sonnet $t0_flags$t1_skip_flag" ;;
+      t1_cmd="claude --model $t1_model $t0_flags$t1_skip_flag" ;;
   esac
   case "$t2_provider" in
     codex_cli|codex)
@@ -653,7 +663,7 @@ RESOLVER
       t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
     *)
       [ "$t2_skip" = "1" ] && t2_skip_flag=" --dangerously-skip-permissions"
-      t2_cmd="claude --model sonnet $t0_flags$t2_skip_flag" ;;
+      t2_cmd="claude --model $t2_model $t0_flags$t2_skip_flag" ;;
   esac
   case "$t3_provider" in
     codex_cli|codex)
@@ -663,7 +673,7 @@ RESOLVER
       t3_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
     *)
       [ "$t3_skip" = "1" ] && t3_skip_flag=" --dangerously-skip-permissions"
-      t3_cmd="claude --model opus $t0_flags$t3_skip_flag" ;;
+      t3_cmd="claude --model $t3_model $t0_flags$t3_skip_flag" ;;
   esac
   tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
   tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m

@@ -436,16 +436,13 @@ def _resolve_model_provider(terminal: str, state_dir: Path) -> Dict[str, str]:
             pass
 
     # Priority 2: Terminal naming convention heuristic (fallback)
+    # Model is NOT guessed — it must come from panes.json or remain "unknown".
+    # Hardcoding model defaults leads to incorrect receipt metadata when
+    # terminals run a different model than the startup default.
     if provider == "unknown":
         upper = terminal.upper()
         if upper in ("T0", "T1", "T2", "T3", "T-MANAGER"):
             provider = "claude_code"
-            # Default models for Claude terminals (can be overridden in panes.json)
-            if model == "unknown":
-                if upper == "T0":
-                    model = "claude-opus-4.6"
-                elif upper in ("T1", "T2", "T3", "T-MANAGER"):
-                    model = "claude-sonnet-4.5"
         elif "GEMINI" in upper or upper.startswith("GEM-"):
             provider = "gemini_cli"
             if model == "unknown":
