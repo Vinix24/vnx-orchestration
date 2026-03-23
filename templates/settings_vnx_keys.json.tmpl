@@ -1,0 +1,71 @@
+{
+  "_vnx_meta": {
+    "version": "2.0",
+    "managed_keys": ["hooks", "env.VNX_*", "permissions.allow(vnx_baseline)", "permissions.deny(vnx_baseline)"],
+    "description": "VNX-owned settings keys. Merged by 'vnx regen-settings --merge'."
+  },
+  "env": {
+    "VNX_CONTEXT_ROTATION_ENABLED": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Grep(**)",
+      "Glob(**)",
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(echo *)",
+      "Bash(pwd)",
+      "Bash(pwd *)",
+      "Bash(which *)",
+      "Bash(whoami)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(sort *)",
+      "Bash(grep *)",
+      "Bash(awk *)",
+      "Bash(sed *)",
+      "Bash(jq *)",
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Bash(node *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(git show*)",
+      "Bash(git remote*)",
+      "Bash(tmux *)",
+      "Bash(ps *)",
+      "Bash(pgrep *)",
+      "Bash(date)",
+      "Bash(date *)",
+      "Bash(uname *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(sudo *)",
+      "Bash(chmod *)",
+      "Bash(chown *)",
+      "Bash(mkfs *)",
+      "Bash(dd *)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash {{PROJECT_ROOT}}/.claude/hooks/sessionstart.sh",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}

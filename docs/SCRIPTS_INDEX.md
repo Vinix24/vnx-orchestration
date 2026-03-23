@@ -1,7 +1,8 @@
 # SCRIPTS_INDEX
 
-Inventory of script files under `.claude/vnx-system/scripts` (extensions containing `.sh` or `.py`, excluding `__pycache__` and `.pyc`).
-Evidence is based on ripgrep matches in `.claude/vnx-system/scripts`, `.claude/vnx-system/docs`, `.claude/vnx-system/configs`, `.claude/vnx-system/bin`, `.claude/vnx-system/dashboard`, `.claude/vnx-system/tests`, `.claude/terminals`, and `.claude/settings*.json`, plus a repo-wide safety scan and Python import analysis.
+Inventory of script files under `.vnx/scripts/` (primary layout) and `.claude/vnx-system/scripts/` (legacy compatibility).
+
+**Architecture note**: As of the VNX upgrade, `bin/vnx` dispatches new commands to sourced scripts in `scripts/commands/` (CLI loader pattern from PR-0). Heavy logic is delegated to Python scripts in `scripts/`. Path resolution uses `scripts/lib/vnx_paths.sh` (bash) and `scripts/lib/vnx_paths.py` (Python).
 
 ## Active
 - `build_t0_quality_digest.py`
@@ -195,6 +196,50 @@ Evidence is based on ripgrep matches in `.claude/vnx-system/scripts`, `.claude/v
 - `send_digest_email.py`
   Evidence: `.claude/vnx-system/scripts/send_digest_email.py`, `.claude/vnx-system/scripts/conversation_analyzer_nightly.sh` (Phase 4)
   Purpose: Opt-in email digest sender. Reads t0_session_brief.json and pending_edits.json, formats digest, sends via SMTP. Requires VNX_DIGEST_EMAIL + VNX_SMTP_PASS env vars.
+
+## CLI Command Loader (PR-0+)
+
+`bin/vnx` dispatches commands to sourced scripts in `scripts/commands/`. This pattern keeps the main CLI thin while new commands live in dedicated files.
+
+- `scripts/commands/start.sh` — Extracted tmux session launch (from monolithic `bin/vnx`)
+- `scripts/commands/stop.sh` — Extracted session teardown
+- `scripts/commands/doctor.sh` — Extracted health validation and path hygiene
+- `scripts/commands/new_worktree.sh` — One-command feature worktree creation (`vnx new-worktree`)
+- `scripts/commands/finish_worktree.sh` — Governance-aware worktree closure (`vnx finish-worktree`)
+- `scripts/commands/merge_preflight.sh` — GO/NO-GO merge preflight (`vnx merge-preflight`)
+- `scripts/commands/regen_settings.sh` — Patch-based settings management (`vnx regen-settings`)
+- `scripts/commands/recover.sh` — Session recovery after crash (`vnx recover`)
+- `scripts/commands/registry.sh` — Project registry management (`vnx registry`)
+
+## Verification & Gate Scripts (PR-5, PR-6)
+
+- `scripts/verify_claims.py` — Lightweight receipt-time contract verification. Runs 5 fast checks (file_exists, file_changed, pattern_match, no_pattern, bash_check) against dispatch contract blocks. Phase 2a: runs only when a contract block is present.
+- `scripts/pre_merge_gate.py` — Heavy deterministic pre-merge gate (`vnx gate-check --pr <ID>`). Runs 9 checks: open items, CQS threshold, git cleanliness, contract verification, quality advisory, pytest, PR size, artifact validation, shell syntax. Produces GO/HOLD verdict.
+- `scripts/lib/contract_parser.py` — Contract block parser for dispatch markdown files. Extracts structured `Claim` and `ContractBlock` objects from `## Contract` sections.
+- `scripts/lib/contract_config.json` — Phase 2a configuration for contract verification scope and enforcement level.
+
+## Process UX Scripts (PR-7)
+
+- `scripts/vnx_process_ux.py` — Operator-facing visibility and process controls:
+  - `vnx status` — Session overview (terminals, queue progress, open items)
+  - `vnx ps` — Process listing with PID, parent PID, uptime, health
+  - `vnx cleanup` — Orphan PID and stale lock removal (supports `--dry-run`)
+  - `vnx restart <process>` — Managed process restart with health check
+
+## Settings & Worktree Scripts (PR-2, PR-3)
+
+- `scripts/vnx_settings_merge.py` — Python merge engine for `settings.json` patch management. VNX updates only its owned keys (hooks, env, permissions) while preserving project-specific configuration.
+- `scripts/vnx_shell_helper.sh` — Optional global shell `vnx()` helper function. Resolves project-local `vnx` binary in both `.vnx/` and legacy `.claude/vnx-system/` layouts.
+
+## Enhanced Libraries (PR-0, PR-1)
+
+- `scripts/lib/process_lifecycle.sh` — Enhanced PID-safe process management: ownership validation, atomic mkdir locking, fingerprint matching, graceful stop with SIGTERM/SIGKILL fallback, duplicate cleanup.
+- `scripts/lib/vnx_paths.sh` — Centralized path resolution. Eliminates hardcoded paths. Resolves VNX_HOME, PROJECT_ROOT, VNX_DATA_DIR, and all subdirectories. Worktree-aware with per-worktree isolation.
+- `scripts/lib/vnx_paths.py` — Python equivalent of `vnx_paths.sh`. Provides `resolve_paths()` and `ensure_env()` for path resolution in Python scripts.
+- `scripts/lib/cqs_calculator.py` — Composite Quality Score calculator (7 weighted components).
+- `scripts/lib/quality_advisory.py` — Quality advisory pipeline: file size, function size, linting, dead code, test coverage hygiene checks.
+- `scripts/lib/result_contract.py` — Shared Result contract helpers for CLI exit code stability.
+- `scripts/lib/terminal_state_shadow.py` — Shadow writer for `terminal_state.json` with fcntl locking, lease expiry, atomic writes.
 
 ## Legacy
 - `ack_register.sh`

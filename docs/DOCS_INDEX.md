@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-03-09
+**Last Updated**: 2026-03-23
 
 ---
 
@@ -38,11 +38,11 @@
 
 ## Operations
 
-- Monitoring guide: `operations/MONITORING_GUIDE.md`
+- Monitoring guide (v9.0): `operations/MONITORING_GUIDE.md` (operator commands: status, ps, cleanup, restart, recover)
 - Multi-model guide (Claude + Codex + Gemini): `operations/MULTI_MODEL_GUIDE.md`
-- Receipt pipeline (V8.1 + quality advisory): `operations/RECEIPT_PIPELINE.md`
+- Receipt pipeline (V8.1 + contract verification): `operations/RECEIPT_PIPELINE.md`
 - Receipt processing flow: `operations/RECEIPT_PROCESSING_FLOW.md`
-- **Autonomous production guide**: `operations/AUTONOMOUS_PRODUCTION_GUIDE.md` (preflight, waves, quality gates, git automation)
+- **Autonomous production guide**: `operations/AUTONOMOUS_PRODUCTION_GUIDE.md` (preflight, waves, quality gates, worktree lifecycle)
 - **Wave mapping**: `operations/VNX_AGENT_TEAM_WAVE_MAPPING.md` (70 PRs, 24 waves, 5 fases — Digital Agent Team)
 
 ---
@@ -119,9 +119,14 @@
 
 ---
 
+## Migration & Upgrade
+
+- **Migration guide**: `MIGRATION_GUIDE.md` — Upgrade paths: worktrees, settings, verification, layout (`.claude/vnx-system/` to `.vnx/`)
+- **Dispatch guide** (updated): `DISPATCH_GUIDE.md` — Now includes contract blocks and deterministic verification
+
 ## Scripts Reference
 
-See `SCRIPTS_INDEX.md` for a complete inventory of all VNX scripts.
+See `SCRIPTS_INDEX.md` for a complete inventory of all VNX scripts (updated with CLI loader, verification, process UX, and library scripts).
 
 ---
 

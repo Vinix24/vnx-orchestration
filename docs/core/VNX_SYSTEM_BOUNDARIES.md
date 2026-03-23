@@ -167,6 +167,17 @@ vnx-orchestration-system/
 - ❌ unified_reports folder
 - ❌ orchestration-docs content (project-specific)
 
+### Updated Config Ownership (V8)
+
+| Resource | Owner | Notes |
+|----------|-------|-------|
+| `settings.json` | **Shared** (patch-managed) | VNX patches only VNX-owned keys via `regen-settings --merge` |
+| `.vnx-data/state/gate_results/` | VNX | Per-PR deterministic gate results |
+| `.vnx-data/state/verification_results/` | VNX | Contract verification output |
+| `.vnx-intelligence/` | **Shared** | Git-tracked, merge-safe; VNX exports, project may extend |
+| `.vnx-data/dispatch_payloads/` | VNX | Temp transport files, auto-cleaned |
+| `~/.vnx/projects.json` | VNX | Global project registry |
+
 ## Configuration Interface
 
 When deploying VNX to a new project:

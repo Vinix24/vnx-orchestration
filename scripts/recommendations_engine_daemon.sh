@@ -11,10 +11,7 @@ enforce_singleton "recommendations_engine_daemon"
 LOOKBACK_MINUTES="${LOOKBACK_MINUTES:-60}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-30}"
 
-if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
-  # shellcheck disable=SC1091
-  source "$PROJECT_ROOT/.venv/bin/activate"
-fi
+_activate_venv 2>/dev/null || true
 
 while true; do
   python3 "$SCRIPTS_DIR/generate_t0_recommendations.py" --lookback "$LOOKBACK_MINUTES"
