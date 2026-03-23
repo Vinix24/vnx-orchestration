@@ -989,6 +989,10 @@ conn.close()
     # F. Send enriched receipt to T0
     send_receipt_to_t0 "$receipt_json" "$terminal"
 
+    # G. Update cost metrics (non-fatal, best-effort)
+    python3 "$SCRIPTS_DIR/cost_tracker.py" 2>/dev/null \
+        || log "WARN" "Failed to update cost metrics (non-fatal)"
+
     return 0
 }
 

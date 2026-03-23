@@ -27,15 +27,17 @@ except Exception as exc:
 class Pricing:
     input_per_million: float
     output_per_million: float
+    cache_read_per_million: float = 0.0
+    cache_write_per_million: float = 0.0
 
 
-# USD per 1M tokens (source: AGENT_TEAMS/VNX_MULTIMODEL_ARCHITECTURE.MD)
+# USD per 1M tokens (source: anthropic.com/pricing, 2026-03-23)
 MODEL_PRICING: Dict[str, Pricing] = {
     # Keep prior model keys for historical receipts.
-    "claude-opus-4.5": Pricing(5.00, 25.00),
-    "claude-sonnet-4.5": Pricing(3.00, 15.00),
-    "claude-opus-4.6": Pricing(5.00, 25.00),
-    "claude-sonnet-4.6": Pricing(3.00, 15.00),
+    "claude-opus-4.5": Pricing(15.00, 75.00, 0.30, 3.75),
+    "claude-sonnet-4.5": Pricing(3.00, 15.00, 0.30, 3.75),
+    "claude-opus-4.6": Pricing(15.00, 75.00, 0.30, 3.75),
+    "claude-sonnet-4.6": Pricing(3.00, 15.00, 0.30, 3.75),
     "gpt-5.3-codex": Pricing(2.00, 16.00),
     "gpt-5.2-codex": Pricing(1.75, 14.00),
     "gpt-5.1-codex": Pricing(1.25, 10.00),
@@ -224,7 +226,13 @@ def _infer_model(receipt: Dict[str, Any], terminal: str, terminal_map: Dict[str,
     return "unknown"
 
 
-def _estimate_cost(model: str, input_tokens: Optional[int], output_tokens: Optional[int]) -> Optional[float]:
+def _estimate_cost(
+    model: str,
+    input_tokens: Optional[int],
+    output_tokens: Optional[int],
+    cache_read_tokens: Optional[int] = None,
+    cache_creation_tokens: Optional[int] = None,
+) -> Optional[float]:
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         return None
@@ -232,7 +240,9 @@ def _estimate_cost(model: str, input_tokens: Optional[int], output_tokens: Optio
         return None
     input_cost = (input_tokens / 1_000_000) * pricing.input_per_million
     output_cost = (output_tokens / 1_000_000) * pricing.output_per_million
-    return round(input_cost + output_cost, 8)
+    cache_read_cost = ((cache_read_tokens or 0) / 1_000_000) * pricing.cache_read_per_million
+    cache_write_cost = ((cache_creation_tokens or 0) / 1_000_000) * pricing.cache_write_per_million
+    return round(input_cost + output_cost + cache_read_cost + cache_write_cost, 8)
 
 
 def _new_usage_bucket() -> Dict[str, Any]:
