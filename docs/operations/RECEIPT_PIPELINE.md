@@ -77,6 +77,8 @@ Markdown Reports (Terminal) → Automated Parsing → Receipt Generation → T0 
    ↓
 7. report_parser.py extracts structured receipt
    ↓
+7b. Contract verification (Phase 2a — if contract block exists)
+   ↓
 8. Receipt appended to t0_receipts.ndjson
    ↓
 9. Receipt formatted for T0 delivery
@@ -102,6 +104,44 @@ receipt_processor_v4.sh
         ↓
 T0 pane (Enter + Enter)
 ```
+
+## Contract Verification Stage (Step D2)
+
+After report parsing and before receipt storage, the receipt processor runs lightweight contract verification when a dispatch includes a `## Contract` block.
+
+**Trigger**: Receipt with `task_complete` status and a dispatch ID that maps to a dispatch file containing a contract block.
+
+**Script**: `scripts/verify_claims.py`
+
+**Behavior**:
+- **Phase 2a (current)**: Verification runs only when a contract block exists. Dispatches without contracts continue processing normally.
+- **Non-fatal**: Verification errors are logged but never block receipt processing. The receipt pipeline continues regardless of verification outcome.
+- **Fast checks only**: file_exists, file_changed, pattern_match, no_pattern, bash_check. No test suite execution (that happens at pre-merge gate time).
+- **Results stored**: `.vnx-data/state/verification_results/{dispatch_id}_{timestamp}.json`
+
+**Integration point** (receipt_processor_v4.sh):
+```bash
+# Step D2: Contract verification (Phase 2a)
+verify_result=$(python3 "$SCRIPTS_DIR/verify_claims.py" \
+    --dispatch-id "$dispatch_id" --store 2>/dev/null)
+```
+
+**Result format**:
+```json
+{
+  "dispatch_id": "20260322-205106-gate-enforcement-C",
+  "verified_at": "2026-03-22T20:30:45Z",
+  "verdict": "pass",
+  "total_claims": 3,
+  "passed": 3,
+  "failed": 0,
+  "results": [ ... ]
+}
+```
+
+The verdict is included in the receipt for T0 review. At pre-merge time, `vnx gate-check` runs heavier checks (pytest, AST, artifacts) on top of the contract verification.
+
+---
 
 ## Cost Metrics Stage (Phase M2)
 
