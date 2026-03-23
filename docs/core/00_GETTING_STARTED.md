@@ -55,6 +55,70 @@ bash /path/to/.claude/vnx-system/demo/setup_demo.sh
 
 ---
 
+## Feature Development Workflow
+
+The primary workflow for new features uses feature worktrees:
+
+### 1. Create a Feature Worktree
+
+```bash
+vnx new-worktree my-feature --branch feature/my-feature --base main
+```
+
+This creates a git worktree, initializes isolated `.vnx-data`, bootstraps skills/terminals/hooks, merges settings, and validates with `vnx doctor`.
+
+### 2. Work in the Worktree
+
+```bash
+cd ../your-project-wt-my-feature
+vnx start
+```
+
+### 3. Monitor Session State
+
+```bash
+vnx status          # Session overview: terminals, queue, open items
+vnx ps              # Process health with PID metadata
+```
+
+### 4. Pre-Merge Check
+
+```bash
+vnx merge-preflight my-feature
+```
+
+Returns GO or NO-GO based on: git cleanliness, open items, PR queue status, active processes, and gate-check results.
+
+### 5. Close the Worktree
+
+```bash
+vnx finish-worktree my-feature --delete-branch
+```
+
+Runs merge-preflight, stops worktree processes, merges intelligence back to main, removes worktree.
+
+### Settings Management
+
+VNX settings are patch-managed -- VNX updates only its owned keys:
+
+```bash
+vnx regen-settings --merge   # Update VNX keys, preserve project config
+```
+
+### Shell Helper
+
+For global `vnx` access from any project directory:
+
+```bash
+vnx install-shell-helper   # Adds vnx() to ~/.zshrc or ~/.bashrc
+```
+
+The helper walks up from CWD to find the project-local `.vnx/bin/vnx` or `.claude/vnx-system/bin/vnx`.
+
+> **Deprecated**: Per-terminal worktrees are deprecated. Use `vnx new-worktree` for all new development.
+
+---
+
 ## Historical Notes (V7.1.2)
 
 ### System Overview

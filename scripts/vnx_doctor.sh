@@ -7,13 +7,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/vnx_paths.sh
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 
-PATTERN='\.claude/vnx-system|/Users/'
+PATTERN='\.claude/vnx-system|/Users/|\.nvm/versions/node/v[0-9]'
 SCRIPTS_DIR="$VNX_HOME/scripts"
 TEMPLATES_DIR="$VNX_HOME/templates"
+BIN_DIR="$VNX_HOME/bin"
 
 if command -v rg >/dev/null 2>&1; then
   MATCHES=$(rg -n "$PATTERN" \
-    "$SCRIPTS_DIR" "$TEMPLATES_DIR" \
+    "$SCRIPTS_DIR" "$TEMPLATES_DIR" "$BIN_DIR" \
     --glob '**/*.sh' \
     --glob '**/*.py' \
     --glob "$TEMPLATES_DIR/**/*.md" \
@@ -24,10 +25,16 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/vnx_worktree_merge_data.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' || true)
+  # Also check bin/vnx (no extension, so glob won't match it)
+  if [ -f "$BIN_DIR/vnx" ]; then
+    local_matches=$(rg -n "$PATTERN" "$BIN_DIR/vnx" || true)
+    [ -n "$local_matches" ] && MATCHES="${MATCHES:+$MATCHES
+}$local_matches"
+  fi
 else
   # Fallback to grep if ripgrep is unavailable
   MATCHES=$(grep -R -n -E "$PATTERN" \
-    "$SCRIPTS_DIR" "$TEMPLATES_DIR" \
+    "$SCRIPTS_DIR" "$TEMPLATES_DIR" "$BIN_DIR" \
     --include='*.sh' \
     --include='*.py' \
     --include='*.md' \
@@ -38,6 +45,12 @@ else
     --exclude='vnx_worktree_merge_data.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' || true)
+  # Also check bin/vnx
+  if [ -f "$BIN_DIR/vnx" ]; then
+    local_matches=$(grep -n -E "$PATTERN" "$BIN_DIR/vnx" || true)
+    [ -n "$local_matches" ] && MATCHES="${MATCHES:+$MATCHES
+}$local_matches"
+  fi
 fi
 
 if [ -n "$MATCHES" ]; then

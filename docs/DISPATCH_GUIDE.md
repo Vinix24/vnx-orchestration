@@ -198,6 +198,52 @@ The human stays in control at two points: approving dispatches (step 4) and the 
 
 ---
 
+## 6. Contract Blocks (Deterministic Verification)
+
+Dispatches can include a `## Contract` section that defines verifiable assertions about expected outcomes. Contracts enable automated receipt-time and pre-merge verification, reducing T0's review scope to semantic review.
+
+### Contract Block Format
+
+Add a `## Contract` section to any dispatch:
+
+```markdown
+## Contract
+- file_exists: scripts/pre_merge_gate.py
+- file_changed: bin/vnx
+- pattern_match: "def run_gate_checks" in scripts/pre_merge_gate.py
+- no_pattern: "hardcoded_path" in scripts/lib/vnx_paths.sh
+- bash_check: `bash -n bin/vnx`
+```
+
+### Claim Types
+
+| Type | Syntax | What It Checks |
+|------|--------|----------------|
+| `file_exists` | `- file_exists: <path>` | File exists at path |
+| `file_changed` | `- file_changed: <path>` | File appears in `git diff` |
+| `pattern_match` | `- pattern_match: "<regex>" in <path>` | Regex found in file |
+| `no_pattern` | `- no_pattern: "<regex>" in <path>` | Regex NOT found in file |
+| `bash_check` | `- bash_check: \`<command>\`` | Shell command exits 0 |
+
+### Two Verification Stages
+
+**Stage 1: Receipt-time (lightweight)** — Runs automatically via `verify_claims.py` when the receipt processor ingests a completion report. Fast checks only (no test suites). Non-fatal: failures are logged but don't block receipt processing. Results stored in `.vnx-data/state/verification_results/`.
+
+**Stage 2: Pre-merge gate (heavy)** — Runs on demand via `vnx gate-check --pr <PR-ID>`. Includes everything from Stage 1 plus: pytest execution, AST/quality advisory checks, PR size validation, artifact verification (PDF/XLSX), and shell syntax checks. Produces a deterministic GO or HOLD verdict.
+
+### Phase Rollout
+
+- **Phase 2a** (current): Contract blocks are optional. Verification runs only when a contract block is present in the dispatch. No enforcement.
+- **Phase 2b** (next): Contracts required for high-risk and implementation dispatches. Lightweight verification failures create open items.
+- **Phase 2c** (target): Contracts are the default for all relevant PRs. Explicit opt-out reason required for dispatches without contracts.
+
+### Related Scripts
+- `scripts/verify_claims.py` — Lightweight receipt-time verifier
+- `scripts/pre_merge_gate.py` — Heavy pre-merge gate engine
+- `scripts/lib/contract_parser.py` — Contract block parser
+
+---
+
 ## Why This Beats "Comment and Wait"
 
 | Annotating a plan | VNX dispatches |

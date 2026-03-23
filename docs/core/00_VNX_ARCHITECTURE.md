@@ -42,6 +42,20 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - **Multi-Model Coordination**: Opus (T0, T3) + Sonnet (T1, T2), Codex CLI (T1 alternative)
 - **Git Worktree Isolation**: One worktree per feature plan; all agents share it, auto-commit per task, provenance in every receipt
 
+### Worktree Model
+
+VNX uses **one feature worktree per feature/fix** as the standard development model. Each worktree gets:
+- Isolated `.vnx-data/` directory (not shared with main repo)
+- Intelligence snapshot from main repo
+- Full bootstrap: skills, terminals, hooks, settings
+
+**Commands**:
+- `vnx new-worktree <name>` -- creates git worktree + full bootstrap in one step
+- `vnx merge-preflight <name>` -- governance GO/NO-GO verdict
+- `vnx finish-worktree <name>` -- governance-gated closure with intelligence merge-back
+
+> **Deprecated**: Per-terminal worktrees (`VNX_WORKTREES=true`) are deprecated since VNX V8.
+
 ### Architecture Diagram
 
 ```
@@ -681,6 +695,16 @@ Layer 3: Weekly Report       -> Controlled model/role analysis, actionable items
 
 **Full Reference**: `docs/intelligence/GOVERNANCE_MEASUREMENT.md`
 
+### Deterministic Gates
+
+VNX implements a three-tier verification pipeline:
+
+1. **Contract blocks** -- dispatches include machine-checkable success criteria
+2. **Lightweight verification** (`verify_claims.py`) -- runs after receipt processing; checks file changes, existence, patterns
+3. **Pre-merge gate** (`vnx gate-check --pr <PR-ID>`) -- heavy checks: pytest, AST, artifact verification, shell syntax
+
+Gate results are stored in `.vnx-data/state/gate_results/<PR-ID>.json` with per-check GO/HOLD verdicts.
+
 ---
 
 ## File System Layout
@@ -971,6 +995,14 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 - Detects when `PROJECT_ROOT` doesn't match the script's location
 - Unsets `VNX_DATA_DIR`, `VNX_STATE_DIR`, `VNX_DISPATCH_DIR` to prevent data writes to wrong project
 
+### Path Resolution
+
+`scripts/lib/vnx_paths.sh` provides dynamic path resolution:
+- `_resolve_node_path()` -- finds node via VNX_NODE_PATH > nvm > system PATH
+- `_resolve_venv_path()` -- finds Python venv in project or main worktree
+- `_resolve_project_root()` -- git-based resolution with worktree awareness
+- Cross-project contamination guard: validates inherited VNX_HOME matches computed default
+
 ---
 
 ## Unified Dashboard
@@ -1031,7 +1063,22 @@ vnx update            # Pull latest VNX from GitHub remote (.vnx-origin)
 vnx cost-report       # Token usage and cost metrics
 ```
 
+### Command Loader Architecture
+
+`bin/vnx` acts as a thin dispatcher. New commands are loaded from `scripts/commands/<name>.sh` via the `_load_command()` function, which sources the file and calls `cmd_<name>()`. This keeps the main script stable while allowing commands to be added independently.
+
+Extracted commands: `start`, `stop`, `doctor`, `regen-settings`, `new-worktree`, `merge-preflight`, `finish-worktree`, `recover`, `registry`, `status`, `ps`, `cleanup`, `restart`.
+
 ### Project Configuration
+
+### Settings Patch Management
+
+`settings.json` is patch-managed, not wholly VNX-owned:
+- **VNX owns**: `hooks`, `env.VNX_*`, baseline `permissions.allow/deny`
+- **Project owns**: extra `env` keys, `permissions.ask`, `additionalDirectories`
+- **Merge semantics**: `allow/deny` use union with deny-over-allow precedence
+
+Commands: `vnx regen-settings --merge` (update VNX keys) | `--full` (first-time init) | `--validate` (check structure).
 
 **`config.env`** (`.vnx-data/config.env`): Auto-sourced by `vnx start`:
 ```bash

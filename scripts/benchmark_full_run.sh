@@ -4,8 +4,8 @@
 # Part 2: Coding v2 (8 tasks) -- 6 local model runs (8 phases)
 # Total: 15 phases, estimated 10-14 hours
 #
-# Usage: nohup bash .claude/vnx-system/scripts/benchmark_full_run.sh > /dev/null 2>&1 &
-# Monitor: tail -f .claude/vnx-system/reports/benchmarks/full_run_*.log
+# Usage: nohup bash scripts/benchmark_full_run.sh > /dev/null 2>&1 &
+# Monitor: tail -f reports/benchmarks/full_run_*.log
 
 set -euo pipefail
 
