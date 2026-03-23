@@ -457,16 +457,83 @@ def _resolve_model_provider(terminal: str, state_dir: Path) -> Dict[str, str]:
     return {"model": model, "provider": provider}
 
 
+def _extract_session_token_usage(session_id: str, terminal: str) -> Optional[Dict[str, int]]:
+    """Extract cumulative token usage from Claude Code JSONL session log.
+
+    Scans the session JSONL for message.usage fields and sums all token counters.
+    Returns None if the session file cannot be found or parsed.
+    """
+    if not session_id or session_id == "unknown":
+        return None
+
+    # Claude Code stores sessions under ~/.claude/projects/<project-key>/<session-id>.jsonl
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.is_dir():
+        return None
+
+    # Search for the session JSONL across all project dirs
+    session_file = None
+    for project_dir in claude_projects.iterdir():
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / f"{session_id}.jsonl"
+        if candidate.is_file():
+            session_file = candidate
+            break
+
+    if not session_file:
+        return None
+
+    totals: Dict[str, int] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+    try:
+        with open(session_file, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    usage = (msg.get("message") or {}).get("usage")
+                    if isinstance(usage, dict):
+                        for key in totals:
+                            totals[key] += usage.get(key, 0)
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+    except (OSError, IOError):
+        return None
+
+    # Only return if we actually found token data
+    if totals["input_tokens"] == 0 and totals["output_tokens"] == 0:
+        return None
+    return totals
+
+
 def _build_session_metadata(receipt: Dict[str, Any], state_dir: Path) -> Dict[str, Any]:
     terminal = str(receipt.get("terminal") or "unknown").strip() or "unknown"
     model_provider = _resolve_model_provider(terminal, state_dir)
-    return {
-        "session_id": _resolve_session_id(receipt),
+    session_id = _resolve_session_id(receipt)
+    metadata: Dict[str, Any] = {
+        "session_id": session_id,
         "terminal": terminal,
         "model": model_provider["model"],
         "provider": model_provider["provider"],
         "captured_at": _utc_now_iso(),
     }
+
+    # Inject token usage from session JSONL (best-effort)
+    try:
+        token_usage = _extract_session_token_usage(session_id, terminal)
+        if token_usage:
+            metadata["token_usage"] = token_usage
+    except Exception:
+        pass
+
+    return metadata
 
 
 def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path] = None) -> Dict[str, Any]:
