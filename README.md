@@ -2,17 +2,9 @@
 
 > Claude Code + Codex CLI + Gemini CLI working together on the same codebase. No conflicts, no lost work, full visibility.
 
-```
-┌──────────────────────┬──────────────────────┐
-│  T0 · Orchestrator   │  T1 · Worker A       │
-│  Plans & dispatches   │  Claude Code         │
-│  tasks to workers     │  (or Codex/Gemini)   │
-├──────────────────────┼──────────────────────┤
-│  T2 · Worker B       │  T3 · Specialist     │
-│  Codex CLI            │  Claude Opus         │
-│  (or Claude/Gemini)   │  Deep review/debug   │
-└──────────────────────┴──────────────────────┘
-```
+![VNX multi-terminal orchestration — T0 orchestrator coordinating Claude Code, Codex CLI, and Claude Opus across parallel tracks](docs/images/vnx-terminals-hero.png)
+
+*T0 orchestrator dispatching work to 3 parallel terminals — each running its own AI coding agent with isolated context.*
 
 VNX is an open-source tmux orchestration toolkit that coordinates AI coding agents across parallel terminals. One orchestrator breaks down work, multiple agents execute simultaneously, and everything is tracked in an append-only audit trail.
 
@@ -54,6 +46,8 @@ T0 breaks work into scoped tasks (150–300 lines) and routes them to worker ter
 
 Press `Ctrl+G` to open the dispatch queue — see pending tasks with role, priority, and git ref.
 
+![VNX dispatch queue showing pending tasks with role, priority, and track assignment](docs/images/vnx-dispatch-queue.png)
+
 ### 2. Execute — Each agent works in isolation
 
 Workers execute tasks using their assigned CLI. VNX supports mixing providers freely:
@@ -76,6 +70,8 @@ vnx cost-report    # See API spend per agent, per task type
 ### 4. Gate — Agents can't merge broken code
 
 Quality gates are deterministic, not LLM-based. The agent proposes, the gate validates: file size limits, test coverage thresholds, open blocker counts. Verdicts: `APPROVE`, `HOLD`, or `ESCALATE`. The LLM never judges its own work.
+
+![VNX quality advisory showing automated code quality checks and gate verdicts](docs/images/vnx-quality-advisory.png)
 
 ### 5. Rotate — Context fills up? No problem.
 
