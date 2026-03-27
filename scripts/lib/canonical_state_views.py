@@ -98,13 +98,13 @@ def _load_context_pressure(state_dir: Path, terminal: str) -> Tuple[int | None, 
     return usage, (int(ts) if isinstance(ts, (int, float)) else None)
 
 
-def _count_pending_dispatches(dispatch_dir: Path) -> int:
-    """Count .md files in dispatches/pending/."""
-    pending_dir = dispatch_dir / "pending"
-    if not pending_dir.is_dir():
+def _count_staging_dispatches(dispatch_dir: Path) -> int:
+    """Count .md files in dispatches/staging/."""
+    staging_dir = dispatch_dir / "staging"
+    if not staging_dir.is_dir():
         return 0
     try:
-        return sum(1 for f in pending_dir.iterdir() if f.suffix == ".md")
+        return sum(1 for f in staging_dir.iterdir() if f.suffix == ".md")
     except Exception:
         return 0
 
@@ -379,11 +379,11 @@ def _dashboard_terminals(snapshot: Dict[str, Any], state_dir: Path | None = None
         }
     }
 
-    # Compute T0 attention: needs review if dispatches are pending promotion
+    # Compute T0 attention: needs review if dispatches are in staging awaiting T0 promotion
     if state_dir is not None:
         ctx_usage_t0, ctx_ts_t0 = _load_context_pressure(state_dir, "T0")
         dispatch_dir = state_dir.parent / "dispatches"
-        pending_count = _count_pending_dispatches(dispatch_dir)
+        staging_count = _count_staging_dispatches(dispatch_dir)
         t0_attention: Dict[str, Any] = {"needs_human": False, "attention": None}
         if ctx_usage_t0 is not None and ctx_usage_t0 > CONTEXT_PRESSURE_THRESHOLD:
             since_ctx_t0 = (
@@ -400,12 +400,12 @@ def _dashboard_terminals(snapshot: Dict[str, Any], state_dir: Path | None = None
                     "jump_target": "T0",
                 },
             }
-        elif pending_count > 0:
+        elif staging_count > 0:
             t0_attention = {
                 "needs_human": True,
                 "attention": {
                     "type": "review-needed",
-                    "reason": f"{pending_count} dispatch(es) awaiting promotion in pending/",
+                    "reason": f"{staging_count} dispatch(es) in staging awaiting review",
                     "since": _now_iso(),
                     "jump_target": "T0",
                 },
