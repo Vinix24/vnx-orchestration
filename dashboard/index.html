@@ -601,6 +601,211 @@
       color: var(--muted);
       padding: 1rem 0 1.5rem;
     }
+
+    /* ── Attention Bar ── */
+    .attention-bar {
+      display: grid;
+      gap: 0.6rem;
+      padding: 0.9rem 1.1rem;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 107, 107, 0.2);
+      background: rgba(255, 107, 107, 0.06);
+      backdrop-filter: blur(10px);
+    }
+
+    .attention-bar.hidden {
+      display: none;
+    }
+
+    .attention-bar-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--red);
+    }
+
+    .attention-bar-header .attention-pulse {
+      width: 0.6rem;
+      height: 0.6rem;
+      border-radius: 50%;
+      background: var(--red);
+      animation: attention-pulse 1.6s ease-in-out infinite;
+    }
+
+    @keyframes attention-pulse {
+      0%, 100% { opacity: 0.4; box-shadow: 0 0 4px rgba(255, 107, 107, 0.3); }
+      50% { opacity: 1; box-shadow: 0 0 14px rgba(255, 107, 107, 0.7); }
+    }
+
+    .attention-items {
+      display: grid;
+      gap: 0.45rem;
+    }
+
+    .attention-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0.75rem;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .attention-item.sev-blocked {
+      border-left: 3px solid var(--red);
+      background: rgba(255, 107, 107, 0.1);
+    }
+
+    .attention-item.sev-review-needed {
+      border-left: 3px solid var(--brand-orange);
+      background: rgba(249, 115, 22, 0.08);
+    }
+
+    .attention-item.sev-stale {
+      border-left: 3px solid var(--yellow);
+      background: rgba(250, 204, 21, 0.07);
+    }
+
+    .attention-item.sev-context-pressure {
+      border-left: 3px solid var(--yellow);
+      background: rgba(250, 204, 21, 0.05);
+    }
+
+    .attention-item-info {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .attention-terminal {
+      font-weight: 700;
+      font-size: 0.95rem;
+      white-space: nowrap;
+    }
+
+    .attention-type-badge {
+      display: inline-block;
+      padding: 0.12rem 0.45rem;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .attention-type-badge.blocked { background: rgba(255,107,107,0.2); color: #ff6b6b; }
+    .attention-type-badge.review-needed { background: rgba(249,115,22,0.2); color: #f97316; }
+    .attention-type-badge.stale { background: rgba(250,204,21,0.2); color: #facc15; }
+    .attention-type-badge.context-pressure { background: rgba(250,204,21,0.15); color: #facc15; }
+
+    .attention-reason {
+      font-size: 0.85rem;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .attention-since {
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .jump-btn {
+      border-radius: 999px;
+      padding: 0.3rem 0.65rem;
+      font-size: 0.75rem;
+      font-weight: 700;
+      border: 1px solid rgba(249, 115, 22, 0.4);
+      background: rgba(249, 115, 22, 0.15);
+      color: var(--brand-orange);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .jump-btn:hover {
+      background: rgba(249, 115, 22, 0.3);
+      border-color: rgba(249, 115, 22, 0.7);
+      box-shadow: 0 0 14px rgba(249, 115, 22, 0.25);
+    }
+
+    .jump-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .jump-btn.success {
+      border-color: rgba(80, 250, 123, 0.5);
+      background: rgba(80, 250, 123, 0.15);
+      color: var(--green);
+    }
+
+    .jump-btn.error {
+      border-color: rgba(255, 107, 107, 0.5);
+      background: rgba(255, 107, 107, 0.15);
+      color: var(--red);
+    }
+
+    /* ── Context Pressure Bar ── */
+    .context-pressure-bar {
+      margin-top: 0.4rem;
+    }
+
+    .context-pressure-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-bottom: 0.2rem;
+    }
+
+    .context-pressure-track {
+      width: 100%;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+    }
+
+    .context-pressure-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.6s ease, background 0.4s ease;
+    }
+
+    .context-pressure-fill.level-ok {
+      background: var(--green);
+    }
+
+    .context-pressure-fill.level-warn {
+      background: var(--yellow);
+    }
+
+    .context-pressure-fill.level-critical {
+      background: var(--red);
+    }
+
+    /* ── Staleness borders ── */
+    .terminal-card.stale-amber {
+      border-color: rgba(250, 204, 21, 0.45);
+      box-shadow: 0 0 12px rgba(250, 204, 21, 0.12);
+    }
+
+    .terminal-card.stale-red {
+      border-color: rgba(255, 107, 107, 0.45);
+      box-shadow: 0 0 12px rgba(255, 107, 107, 0.15);
+    }
   </style>
 </head>
 <body>
@@ -615,6 +820,15 @@
         <div id="refresh-counter">Next refresh in 0s</div>
       </div>
     </header>
+
+    <section id="attention-bar" class="attention-bar hidden">
+      <div class="attention-bar-header">
+        <span class="attention-pulse"></span>
+        <span>Needs Attention</span>
+        <span id="attention-count" style="font-weight:400; color:var(--muted); font-size:0.8rem; text-transform:none; letter-spacing:0;"></span>
+      </div>
+      <div class="attention-items" id="attention-items"></div>
+    </section>
 
     <section class="top-row">
       <article class="panel">
@@ -718,6 +932,111 @@
       return "var(--red)";
     }
 
+    const ATTENTION_SEVERITY_ORDER = { blocked: 4, "review-needed": 3, stale: 2, "context-pressure": 1 };
+
+    function timeSince(isoString) {
+      if (!isoString) return "";
+      const diff = Math.max(0, Math.floor((Date.now() - new Date(isoString).getTime()) / 1000));
+      if (diff < 60) return `${diff}s ago`;
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      return `${Math.floor(diff / 3600)}h ago`;
+    }
+
+    function renderAttentionBar(data) {
+      const bar = document.getElementById("attention-bar");
+      const itemsContainer = document.getElementById("attention-items");
+      const countLabel = document.getElementById("attention-count");
+      if (!bar || !itemsContainer) return;
+
+      const attention = data.attention || {};
+      const terminals = attention.terminals || data.terminals || {};
+      const items = [];
+
+      for (const [tid, info] of Object.entries(terminals)) {
+        if (info && info.needs_human && info.attention) {
+          items.push({ terminal: tid, ...info.attention });
+        }
+      }
+
+      if (items.length === 0) {
+        bar.classList.add("hidden");
+        return;
+      }
+
+      items.sort((a, b) => {
+        const pa = ATTENTION_SEVERITY_ORDER[a.type] || 0;
+        const pb = ATTENTION_SEVERITY_ORDER[b.type] || 0;
+        if (pb !== pa) return pb - pa;
+        return new Date(a.since || 0) - new Date(b.since || 0);
+      });
+
+      bar.classList.remove("hidden");
+      if (countLabel) countLabel.textContent = `(${items.length} terminal${items.length !== 1 ? "s" : ""})`;
+
+      itemsContainer.innerHTML = "";
+      items.forEach((item) => {
+        const el = document.createElement("div");
+        const sevClass = `sev-${item.type || "stale"}`;
+        el.className = `attention-item ${sevClass}`;
+        const typeLabel = (item.type || "").replace(/-/g, " ");
+        el.innerHTML = `
+          <div class="attention-item-info">
+            <span class="attention-terminal">${item.terminal || item.jump_target || "?"}</span>
+            <span class="attention-type-badge ${item.type || ""}">${typeLabel}</span>
+            <span class="attention-reason">${item.reason || ""}</span>
+            <span class="attention-since">${timeSince(item.since)}</span>
+          </div>
+          <button class="jump-btn" type="button" onclick="jumpToTerminal('${item.jump_target || item.terminal}', this)">Jump</button>
+        `;
+        itemsContainer.appendChild(el);
+      });
+    }
+
+    async function jumpToTerminal(terminalId, button) {
+      if (!terminalId) return;
+      button.disabled = true;
+      const prev = button.textContent;
+      button.textContent = "Jumping...";
+      try {
+        const res = await fetch(`/api/jump/${terminalId}`, { method: "POST" });
+        if (!res.ok) throw new Error("jump failed");
+        button.textContent = "Jumped";
+        button.classList.add("success");
+        setTimeout(() => { button.textContent = prev; button.classList.remove("success"); button.disabled = false; }, 1500);
+      } catch (err) {
+        console.error("jump error", err);
+        button.textContent = "Failed";
+        button.classList.add("error");
+        setTimeout(() => { button.textContent = prev; button.classList.remove("error"); button.disabled = false; }, 2000);
+      }
+    }
+
+    function contextPressureHtml(usagePct) {
+      if (usagePct == null) return "";
+      const pct = Math.max(0, Math.min(100, usagePct));
+      const level = pct > 80 ? "level-critical" : pct > 60 ? "level-warn" : "level-ok";
+      return `
+        <div class="context-pressure-bar">
+          <div class="context-pressure-label">
+            <span>Context</span>
+            <span>${pct}%</span>
+          </div>
+          <div class="context-pressure-track">
+            <div class="context-pressure-fill ${level}" style="width:${pct}%"></div>
+          </div>
+        </div>
+      `;
+    }
+
+    function staleClass(info) {
+      const age = info.status_age_seconds;
+      const status = normalizeTerminalStatus(info.status);
+      if (status !== "working" && status !== "idle") return "";
+      if (age != null && age > 300) return "stale-red";
+      if (age != null && age > 180) return "stale-amber";
+      return "";
+    }
+
     function buildList(container, rows) {
       container.innerHTML = "";
       rows.forEach(([label, value]) => {
@@ -729,6 +1048,8 @@
     }
 
     function render(data) {
+      renderAttentionBar(data);
+
       const summary = data.open_items?.summary ?? {};
       const openCount = summary.open_count ?? data.open_items?.open_count ?? "—";
       document.getElementById("open-items-count").textContent = openCount;
@@ -978,17 +1299,21 @@
           }
         }
         const card = document.createElement("div");
-        card.className = "terminal-card";
+        const staleIndicator = staleClass(info);
+        card.className = `terminal-card${staleIndicator ? " " + staleIndicator : ""}`;
         const statusDot = `<span class="status-circle" style="background:${terminalStatusColor(normalizedStatus)}"></span>`;
         const providerLabel = name === "T0" ? "Orchestrator" : getProviderLabel(info.provider);
         const label = `${name} - ${providerLabel}`;
         const unlockControl = (name === "T1" || name === "T2" || name === "T3")
-          ? `<div class="terminal-controls"><button class="restart-btn" type="button" onclick="unlockTerminal('${name}', this)">Unlock</button></div>`
+          ? `<button class="restart-btn" type="button" onclick="unlockTerminal('${name}', this)">Unlock</button>`
           : "";
+        const jumpControl = `<button class="jump-btn" type="button" onclick="jumpToTerminal('${name}', this)">Jump</button>`;
+        const pressureHtml = contextPressureHtml(info.context_usage_pct);
         card.innerHTML = `
           <strong>${label}</strong>
           <span>${statusDot} ${statusText}</span>
-          ${unlockControl}
+          ${pressureHtml}
+          <div class="terminal-controls">${jumpControl} ${unlockControl}</div>
         `;
         grid.appendChild(card);
       });
