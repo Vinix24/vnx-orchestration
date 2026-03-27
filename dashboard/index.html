@@ -42,7 +42,7 @@
     }
 
     main {
-      width: min(1100px, 100%);
+      width: min(1280px, 100%);
       display: flex;
       flex-direction: column;
       gap: 1.25rem;
@@ -796,6 +796,133 @@
       background: var(--red);
     }
 
+    /* ── Confirmation Dialog ── */
+    .confirm-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.72);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+      padding: 2rem;
+      animation: confirm-fade-in 0.15s ease;
+    }
+
+    @keyframes confirm-fade-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .confirm-dialog {
+      background: #0d1b2a;
+      border: 1px solid var(--border-soft);
+      border-radius: 16px;
+      max-width: 420px;
+      width: 100%;
+      padding: 1.4rem;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+    }
+
+    .confirm-dialog h3 {
+      margin: 0 0 0.6rem;
+      font-size: 1.05rem;
+      color: var(--text);
+    }
+
+    .confirm-dialog p {
+      margin: 0 0 1.2rem;
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.6rem;
+    }
+
+    .confirm-btn {
+      border-radius: 10px;
+      padding: 0.45rem 1rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border: 1px solid var(--border-soft);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .confirm-btn-cancel {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+    }
+
+    .confirm-btn-cancel:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text);
+    }
+
+    .confirm-btn-danger {
+      background: rgba(255, 107, 107, 0.15);
+      border-color: rgba(255, 107, 107, 0.35);
+      color: var(--red);
+    }
+
+    .confirm-btn-danger:hover {
+      background: rgba(255, 107, 107, 0.25);
+      border-color: rgba(255, 107, 107, 0.55);
+      box-shadow: 0 0 16px rgba(255, 107, 107, 0.15);
+    }
+
+    .confirm-btn-warn {
+      background: rgba(249, 115, 22, 0.15);
+      border-color: rgba(249, 115, 22, 0.35);
+      color: var(--brand-orange);
+    }
+
+    .confirm-btn-warn:hover {
+      background: rgba(249, 115, 22, 0.25);
+      border-color: rgba(249, 115, 22, 0.55);
+      box-shadow: 0 0 16px rgba(249, 115, 22, 0.15);
+    }
+
+    /* ── Dashboard Health Indicator ── */
+    .health-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 0.78rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .health-dot {
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .health-dot.healthy {
+      background: var(--green);
+      box-shadow: 0 0 8px rgba(80, 250, 123, 0.4);
+    }
+
+    .health-dot.degraded {
+      background: var(--yellow);
+      box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+    }
+
+    .health-dot.unhealthy {
+      background: var(--red);
+      box-shadow: 0 0 8px rgba(255, 107, 107, 0.4);
+    }
+
     /* ── Staleness borders ── */
     .terminal-card.stale-amber {
       border-color: rgba(250, 204, 21, 0.45);
@@ -1003,6 +1130,10 @@
         <p>7-second refresh · powered by `dashboard_status.json`</p>
       </div>
       <div class="header-right">
+        <div id="health-indicator" class="health-indicator">
+          <span id="health-dot" class="health-dot"></span>
+          <span id="health-label">Checking...</span>
+        </div>
         <div id="fetch-status" class="pill">Loading state…</div>
         <div id="refresh-counter">Next refresh in 0s</div>
       </div>
@@ -1574,52 +1705,91 @@
       });
     }
 
+    // ── Confirmation Dialog ─────────────────────────────────────────
+    function showConfirmDialog({ title, message, confirmLabel, confirmClass, onConfirm }) {
+      const overlay = document.createElement("div");
+      overlay.className = "confirm-overlay";
+      const btnClass = confirmClass || "confirm-btn-danger";
+      overlay.innerHTML = `
+        <div class="confirm-dialog">
+          <h3>${title}</h3>
+          <p>${message}</p>
+          <div class="confirm-actions">
+            <button class="confirm-btn confirm-btn-cancel" type="button" data-action="cancel">Cancel</button>
+            <button class="confirm-btn ${btnClass}" type="button" data-action="confirm">${confirmLabel || "Confirm"}</button>
+          </div>
+        </div>
+      `;
+
+      function close() { overlay.remove(); }
+
+      overlay.querySelector('[data-action="cancel"]').addEventListener("click", close);
+      overlay.querySelector('[data-action="confirm"]').addEventListener("click", () => {
+        close();
+        onConfirm();
+      });
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+      document.addEventListener("keydown", function handler(e) {
+        if (e.key === "Escape") { close(); document.removeEventListener("keydown", handler); }
+      });
+
+      document.body.appendChild(overlay);
+    }
+
     async function restartProcess(processName, button) {
-      button.disabled = true;
-      const previousLabel = button.textContent;
-      button.textContent = "Restarting...";
-      try {
-        const res = await fetch("/api/restart-process", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ process: processName }),
-        });
-        if (!res.ok) {
-          throw new Error("restart failed");
-        }
-      } catch (err) {
-        console.error("restart error", err);
-      } finally {
-        button.textContent = previousLabel;
-        button.disabled = false;
-        refresh();
-      }
+      showConfirmDialog({
+        title: `Restart ${processName}?`,
+        message: `This will kill the running process and start a new instance. Active work may be interrupted.`,
+        confirmLabel: "Restart",
+        confirmClass: "confirm-btn-warn",
+        onConfirm: async () => {
+          button.disabled = true;
+          const previousLabel = button.textContent;
+          button.textContent = "Restarting...";
+          try {
+            const res = await fetch("/api/restart-process", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ process: processName }),
+            });
+            if (!res.ok) throw new Error("restart failed");
+          } catch (err) {
+            console.error("restart error", err);
+          } finally {
+            button.textContent = previousLabel;
+            button.disabled = false;
+            refresh();
+          }
+        },
+      });
     }
 
     async function unlockTerminal(terminalId, button) {
-      if (!confirm(`Unlock ${terminalId}? This sets terminal and track to idle and clears active dispatch.`)) {
-        return;
-      }
-
-      button.disabled = true;
-      const previousLabel = button.textContent;
-      button.textContent = "Unlocking...";
-      try {
-        const res = await fetch("/api/unlock-terminal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ terminal: terminalId }),
-        });
-        if (!res.ok) {
-          throw new Error("unlock failed");
-        }
-      } catch (err) {
-        console.error("unlock error", err);
-      } finally {
-        button.textContent = previousLabel;
-        button.disabled = false;
-        refresh();
-      }
+      showConfirmDialog({
+        title: `Unlock ${terminalId}?`,
+        message: `This sets the terminal and track to idle and clears the active dispatch. Any in-progress work context will be lost.`,
+        confirmLabel: "Unlock",
+        confirmClass: "confirm-btn-danger",
+        onConfirm: async () => {
+          button.disabled = true;
+          const previousLabel = button.textContent;
+          button.textContent = "Unlocking...";
+          try {
+            const res = await fetch("/api/unlock-terminal", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ terminal: terminalId }),
+            });
+            if (!res.ok) throw new Error("unlock failed");
+          } catch (err) {
+            console.error("unlock error", err);
+          } finally {
+            button.textContent = previousLabel;
+            button.disabled = false;
+            refresh();
+          }
+        },
+      });
     }
 
     // ── Event Timeline ──────────────────────────────────────────────
@@ -1721,12 +1891,44 @@
       if (el) el.addEventListener("change", refreshTimeline);
     });
 
+    // ── Health Indicator ────────────────────────────────────────────
+    const healthDot = document.getElementById("health-dot");
+    const healthLabel = document.getElementById("health-label");
+    let _lastDataTimestamp = null;
+    let _consecutiveFailures = 0;
+
+    function updateHealth(ok, dataTimestamp) {
+      if (!healthDot || !healthLabel) return;
+      if (ok) {
+        _consecutiveFailures = 0;
+        _lastDataTimestamp = dataTimestamp;
+        const age = dataTimestamp ? Math.floor((Date.now() - new Date(dataTimestamp).getTime()) / 1000) : null;
+        if (age != null && age > 30) {
+          healthDot.className = "health-dot degraded";
+          healthLabel.textContent = `Data ${age}s old`;
+        } else {
+          healthDot.className = "health-dot healthy";
+          healthLabel.textContent = "Healthy";
+        }
+      } else {
+        _consecutiveFailures++;
+        if (_consecutiveFailures >= 3) {
+          healthDot.className = "health-dot unhealthy";
+          healthLabel.textContent = "Disconnected";
+        } else {
+          healthDot.className = "health-dot degraded";
+          healthLabel.textContent = "Retrying...";
+        }
+      }
+    }
+
     async function refresh() {
       try {
         const res = await fetch(STATE_BASE_URL + "?t=" + Date.now(), { cache: "no-store" });
         if (!res.ok) throw new Error("state fetch failed");
         const data = await res.json();
         render(data);
+        updateHealth(true, data.timestamp || null);
         if (fetchStatus) {
           fetchStatus.classList.remove("error");
           fetchStatus.classList.add("ok");
@@ -1734,6 +1936,7 @@
         }
       } catch (err) {
         console.error("dashboard refresh error", err);
+        updateHealth(false, null);
         if (fetchStatus) {
           fetchStatus.classList.remove("ok");
           fetchStatus.classList.add("error");
