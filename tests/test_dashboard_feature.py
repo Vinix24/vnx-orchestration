@@ -582,8 +582,25 @@ class TestComputeTerminalAttention(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if str(SCRIPTS_LIB) not in sys.path:
-            sys.path.insert(0, str(SCRIPTS_LIB))
+        scripts_lib = str(SCRIPTS_LIB)
+        scripts_dir = str(PROJECT_ROOT / "scripts")
+
+        # Remove scripts/ to prevent the CLI wrapper (scripts/terminal_state_shadow.py)
+        # from shadowing the library module (scripts/lib/terminal_state_shadow.py).
+        # test_vnx_process_ux.py adds scripts/ at module load time, which can re-introduce
+        # the shadowing after the module-level cleanup at the top of this file.
+        while scripts_dir in sys.path:
+            sys.path.remove(scripts_dir)
+
+        # Ensure scripts/lib/ is at the front of sys.path.
+        if scripts_lib in sys.path:
+            sys.path.remove(scripts_lib)
+        sys.path.insert(0, scripts_lib)
+
+        # Purge any cached modules that may have been loaded with wrong path resolution.
+        for mod in ("terminal_state_shadow", "terminal_state_reconciler", "canonical_state_views"):
+            sys.modules.pop(mod, None)
+
         import canonical_state_views as csv_mod
         cls.csv = csv_mod
 
