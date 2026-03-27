@@ -183,6 +183,8 @@ Process commands (visibility and control):
   ps [--json]        Show PID, parent PID, uptime, and health for VNX processes
   cleanup [--dry-run]  Remove orphan PIDs and stale locks
   restart <process>  Restart a managed VNX process
+  jump <terminal>    Switch tmux focus to T0/T1/T2/T3 pane
+  jump --attention   Jump to highest-priority terminal needing attention
 
 Runtime commands:
   recover            Recover from unclean shutdown or stale state
@@ -1750,6 +1752,9 @@ main() {
       ;;
     restart)
       python3 "$VNX_HOME/scripts/vnx_process_ux.py" restart "$@"
+      ;;
+    jump)
+      cmd_jump "$@"
       ;;
     register)
       cmd_register "$@"

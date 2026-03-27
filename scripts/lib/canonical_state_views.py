@@ -23,6 +23,16 @@ TERMINALS = ("T1", "T2", "T3")
 TRACK_BY_TERMINAL = {"T1": "A", "T2": "B", "T3": "C"}
 MODEL_BY_TERMINAL = {"T0": "unknown", "T1": "sonnet", "T2": "sonnet", "T3": "opus"}
 
+CONTEXT_PRESSURE_THRESHOLD = 80  # usage % above which context-pressure attention fires
+STALE_WORKING_SECONDS = 180      # working terminal with no update triggers stale attention
+
+ATTENTION_PRIORITY: Dict[str, int] = {
+    "blocked": 4,
+    "review-needed": 3,
+    "stale": 2,
+    "context-pressure": 1,
+}
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -72,6 +82,88 @@ def _safe_load_json(path: Path) -> Dict[str, Any] | None:
     except Exception:
         return None
     return None
+
+
+def _load_context_pressure(state_dir: Path, terminal: str) -> Tuple[int | None, int | None]:
+    """Return (usage_pct, ts) for terminal. usage_pct = 100 - remaining_pct."""
+    path = state_dir / f"context_window_{terminal}.json"
+    data = _safe_load_json(path)
+    if data is None:
+        return None, None
+    remaining = data.get("remaining_pct")
+    ts = data.get("ts")
+    if not isinstance(remaining, (int, float)):
+        return None, None
+    usage = max(0, min(100, 100 - int(remaining)))
+    return usage, (int(ts) if isinstance(ts, (int, float)) else None)
+
+
+def _count_staging_dispatches(dispatch_dir: Path) -> int:
+    """Count .md files in dispatches/staging/."""
+    staging_dir = dispatch_dir / "staging"
+    if not staging_dir.is_dir():
+        return 0
+    try:
+        return sum(1 for f in staging_dir.iterdir() if f.suffix == ".md")
+    except Exception:
+        return 0
+
+
+def _compute_terminal_attention(
+    terminal: str,
+    status: str,
+    last_update: str,
+    status_age_seconds: int | None,
+    context_usage_pct: int | None,
+    context_ts: int | None,
+    stale_after_seconds: int = STALE_WORKING_SECONDS,
+) -> Dict[str, Any]:
+    """Compute attention state for a worker terminal (T1-T3).
+
+    Priority order: blocked > stale > context-pressure.
+    Returns dict with 'needs_human' bool and 'attention' object or None.
+    """
+    since_last = last_update if last_update and last_update != "never" else _now_iso()
+
+    if status == "blocked":
+        return {
+            "needs_human": True,
+            "attention": {
+                "type": "blocked",
+                "reason": f"{terminal} is blocked and requires operator intervention",
+                "since": since_last,
+                "jump_target": terminal,
+            },
+        }
+
+    if status == "working" and status_age_seconds is not None and status_age_seconds > stale_after_seconds:
+        return {
+            "needs_human": True,
+            "attention": {
+                "type": "stale",
+                "reason": f"{terminal} has not reported activity for {status_age_seconds}s while working",
+                "since": since_last,
+                "jump_target": terminal,
+            },
+        }
+
+    if context_usage_pct is not None and context_usage_pct > CONTEXT_PRESSURE_THRESHOLD:
+        since_ctx = (
+            datetime.fromtimestamp(context_ts, tz=timezone.utc).isoformat()
+            if context_ts is not None
+            else _now_iso()
+        )
+        return {
+            "needs_human": True,
+            "attention": {
+                "type": "context-pressure",
+                "reason": f"{terminal} context window at {context_usage_pct}% capacity",
+                "since": since_ctx,
+                "jump_target": terminal,
+            },
+        }
+
+    return {"needs_human": False, "attention": None}
 
 
 def _load_progress_dispatch_map(state_dir: Path) -> Dict[str, str]:
@@ -130,6 +222,7 @@ def build_terminal_snapshot(
     allow_tmux_probe: bool = True,
 ) -> Dict[str, Any]:
     state_root = Path(state_dir)
+    dispatch_dir = state_root.parent / "dispatches"
     progress_dispatch_map = _load_progress_dispatch_map(state_root)
 
     primary_doc, primary_ok, primary_error, primary_age_seconds = _load_primary_terminal_state(
@@ -237,6 +330,21 @@ def build_terminal_snapshot(
             ),
         }
 
+        # Compute attention state
+        ctx_usage, ctx_ts = _load_context_pressure(state_root, terminal)
+        attention_state = _compute_terminal_attention(
+            terminal=terminal,
+            status=normalized_status,
+            last_update=last_update,
+            status_age_seconds=_status_age_seconds(last_update),
+            context_usage_pct=ctx_usage,
+            context_ts=ctx_ts,
+            stale_after_seconds=stale_after_seconds,
+        )
+        terminals[terminal]["needs_human"] = attention_state["needs_human"]
+        terminals[terminal]["attention"] = attention_state["attention"]
+        terminals[terminal]["context_usage_pct"] = ctx_usage
+
     return {
         "generated_at": _now_iso(),
         "source": source,
@@ -265,8 +373,46 @@ def _dashboard_terminals(snapshot: Dict[str, Any], state_dir: Path | None = None
             "current_command": "unknown",
             "directory": "unknown",
             "last_update": "never",
+            "needs_human": False,
+            "attention": None,
+            "context_usage_pct": None,
         }
     }
+
+    # Compute T0 attention: needs review if dispatches are in staging awaiting T0 promotion
+    if state_dir is not None:
+        ctx_usage_t0, ctx_ts_t0 = _load_context_pressure(state_dir, "T0")
+        dispatch_dir = state_dir.parent / "dispatches"
+        staging_count = _count_staging_dispatches(dispatch_dir)
+        t0_attention: Dict[str, Any] = {"needs_human": False, "attention": None}
+        if ctx_usage_t0 is not None and ctx_usage_t0 > CONTEXT_PRESSURE_THRESHOLD:
+            since_ctx_t0 = (
+                datetime.fromtimestamp(ctx_ts_t0, tz=timezone.utc).isoformat()
+                if ctx_ts_t0 is not None
+                else _now_iso()
+            )
+            t0_attention = {
+                "needs_human": True,
+                "attention": {
+                    "type": "context-pressure",
+                    "reason": f"T0 context window at {ctx_usage_t0}% capacity",
+                    "since": since_ctx_t0,
+                    "jump_target": "T0",
+                },
+            }
+        elif staging_count > 0:
+            t0_attention = {
+                "needs_human": True,
+                "attention": {
+                    "type": "review-needed",
+                    "reason": f"{staging_count} dispatch(es) in staging awaiting review",
+                    "since": _now_iso(),
+                    "jump_target": "T0",
+                },
+            }
+        terminals["T0"]["needs_human"] = t0_attention["needs_human"]
+        terminals["T0"]["attention"] = t0_attention["attention"]
+        terminals["T0"]["context_usage_pct"] = ctx_usage_t0
 
     for terminal in TERMINALS:
         info = (snapshot.get("terminals") or {}).get(terminal) or {}
@@ -283,6 +429,9 @@ def _dashboard_terminals(snapshot: Dict[str, Any], state_dir: Path | None = None
         current_task = info.get("current_task")
         if current_task:
             payload["current_task"] = current_task
+        payload["needs_human"] = info.get("needs_human", False)
+        payload["attention"] = info.get("attention")
+        payload["context_usage_pct"] = info.get("context_usage_pct")
         terminals[terminal] = payload
     return terminals
 
@@ -378,6 +527,42 @@ def build_notifier_system_state(
     }
 
 
+def build_attention_summary(
+    state_dir: str | Path,
+    *,
+    stale_after_seconds: int = STALE_WORKING_SECONDS,
+) -> Dict[str, Any]:
+    """Return terminals with attention state for jump command and dashboard."""
+    state_root = Path(state_dir)
+    snapshot = build_terminal_snapshot(
+        state_root,
+        stale_after_seconds=stale_after_seconds,
+        allow_tmux_probe=False,
+    )
+    terminals_summary: Dict[str, Any] = _dashboard_terminals(snapshot, state_root)
+
+    needs_attention = [
+        tid for tid, info in terminals_summary.items()
+        if info.get("needs_human")
+    ]
+    highest = None
+    best_priority = 0
+    for tid in needs_attention:
+        att = (terminals_summary[tid].get("attention") or {})
+        p = ATTENTION_PRIORITY.get(att.get("type", ""), 0)
+        if p > best_priority:
+            best_priority = p
+            highest = tid
+
+    return {
+        "terminals": terminals_summary,
+        "needs_attention_count": len(needs_attention),
+        "needs_attention": needs_attention,
+        "highest_priority": highest,
+        "generated_at": _now_iso(),
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Canonical state projections for VNX scripts")
     parser.add_argument(
@@ -391,6 +576,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("dashboard-terminals", help="Emit dashboard terminals object")
     sub.add_parser("brief-terminals", help="Emit terminal block for t0_brief generation")
     sub.add_parser("notifier-system-state", help="Emit notifier system_state payload")
+    sub.add_parser("attention-summary", help="Emit terminal attention state for jump command")
 
     return parser
 
@@ -405,6 +591,8 @@ def main() -> int:
     state_root = Path(state_dir)
     if args.command == "notifier-system-state":
         payload = build_notifier_system_state(state_root)
+    elif args.command == "attention-summary":
+        payload = build_attention_summary(state_root)
     else:
         snapshot = build_terminal_snapshot(state_root)
         if args.command == "terminal-snapshot":
