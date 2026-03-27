@@ -172,6 +172,22 @@ def _collect_database_info(intel_db: Path) -> Tuple[bool, float]:
     return True, db_size_mb
 
 
+def _collect_session_count(intel_db: Path, warnings: List[str]) -> int:
+    if not intel_db.exists():
+        return 0
+    try:
+        import sqlite3
+        conn = sqlite3.connect(intel_db)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM session_analytics")
+        row = cur.fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except Exception as exc:
+        warnings.append(f"session_count_failed:{exc}")
+        return 0
+
+
 def _collect_usage_tracking(learning_file: Path, warnings: List[str]) -> Tuple[bool, bool]:
     usage_tracking = learning_file.exists()
     recent_usage = False
@@ -213,6 +229,7 @@ def _build_recommendations(
     pattern_count: int,
     coverage: float,
     usage_tracking: bool,
+    session_count: int = 0,
 ) -> List[str]:
     recommendations: List[str] = []
     if not daemon_running:
@@ -225,6 +242,8 @@ def _build_recommendations(
         recommendations.append("Low intelligence coverage - check dispatcher integration")
     if not usage_tracking:
         recommendations.append("Pattern usage tracking not active - check learning loop")
+    if session_count == 0:
+        recommendations.append("Session analytics empty - run: vnx analyze-sessions")
     return recommendations
 
 
@@ -268,6 +287,7 @@ def check_health(human: bool = False) -> int:
     db_exists, db_size_mb = _collect_database_info(state_dir / "quality_intelligence.db")
     health["database_exists"] = db_exists
     health["database_size_mb"] = db_size_mb
+    health["session_analytics_count"] = _collect_session_count(state_dir / "quality_intelligence.db", warnings)
 
     usage_tracking, recent_usage = _collect_usage_tracking(state_dir / "pattern_usage.ndjson", warnings)
     health["usage_tracking_active"] = usage_tracking
@@ -276,8 +296,10 @@ def check_health(human: bool = False) -> int:
     health_status = _determine_health_status(daemon_running, recent_intel, pattern_count, intel_coverage)
     health["health_status"] = health_status
 
+    session_count = int(health.get("session_analytics_count", 0) or 0)
     recommendations = _build_recommendations(
-        vnx_path, daemon_running, recent_intel, pattern_count, intel_coverage, usage_tracking
+        vnx_path, daemon_running, recent_intel, pattern_count, intel_coverage, usage_tracking,
+        session_count=session_count,
     )
     health["recommendations"] = recommendations
     if warnings:
@@ -288,6 +310,7 @@ def check_health(human: bool = False) -> int:
         emit_human(f"Daemon running: {daemon_running}")
         emit_human(f"Recent intelligence: {recent_intel}")
         emit_human(f"Patterns available: {health.get('pattern_count', 0)}")
+        emit_human(f"Session analytics rows: {health.get('session_analytics_count', 0)}")
         emit_human(f"Intelligence coverage: {health.get('intelligence_coverage')}")
         if recommendations:
             emit_human("\nRecommendations:")

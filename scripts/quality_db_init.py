@@ -211,13 +211,23 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated session_analytics: added dispatch_id column + index')
 
-        # Migration: add dispatch_id column to report_findings if missing
-        cursor.execute("PRAGMA table_info(report_findings)")
-        rf_cols = {row[1] for row in cursor.fetchall()}
-        if "dispatch_id" not in rf_cols:
-            cursor.execute("ALTER TABLE report_findings ADD COLUMN dispatch_id TEXT")
+        # Migration: add context_reset_count to session_analytics if missing
+        cursor.execute("PRAGMA table_info(session_analytics)")
+        sa_cols2 = {row[1] for row in cursor.fetchall()}
+        if "context_reset_count" not in sa_cols2:
+            cursor.execute("ALTER TABLE session_analytics ADD COLUMN context_reset_count INTEGER DEFAULT 0")
             conn.commit()
-            log('INFO', 'Migrated report_findings: added dispatch_id column')
+            log('INFO', 'Migrated session_analytics: added context_reset_count column')
+
+        # Migration: add dispatch_id column to report_findings if missing
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='report_findings'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(report_findings)")
+            rf_cols = {row[1] for row in cursor.fetchall()}
+            if "dispatch_id" not in rf_cols:
+                cursor.execute("ALTER TABLE report_findings ADD COLUMN dispatch_id TEXT")
+                conn.commit()
+                log('INFO', 'Migrated report_findings: added dispatch_id column')
 
         # Migration: add CQS columns to dispatch_metadata if missing
         cursor.execute("PRAGMA table_info(dispatch_metadata)")
