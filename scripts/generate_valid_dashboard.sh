@@ -293,6 +293,12 @@ print(json.dumps(summary))
 PY
 }
 
+get_attention_summary() {
+    python3 "$DASHBOARD_SCRIPT_DIR/lib/canonical_state_views.py" \
+        --state-dir "$STATE_DIR" \
+        attention-summary 2>/dev/null || echo "null"
+}
+
 get_recommendations_summary() {
     local rec_file="$STATE_DIR/t0_recommendations.json"
     if [ ! -f "$rec_file" ]; then
@@ -372,6 +378,7 @@ while true; do
     ACTIVE_COUNT=$(count_md "$DISPATCH_DIR/active")
 
     TERMINALS_JSON="$(get_terminal_status_summary)"
+    ATTENTION_JSON="$(get_attention_summary)"
     OPEN_ITEMS_JSON="$(get_open_items_summary)"
     PR_QUEUE_WITH_REGISTRY_JSON="$(get_pr_queue_summary)"
     if [ -z "$PR_QUEUE_WITH_REGISTRY_JSON" ] || [ "$PR_QUEUE_WITH_REGISTRY_JSON" = "null" ]; then
@@ -422,6 +429,7 @@ while true; do
         "totalProcessed": $(safe_count "moved to active" "$VNX_LOGS_DIR/dispatcher.log")
     },
     "locks": $LOCKS_JSON,
+    "attention": $ATTENTION_JSON,
     "terminals": $TERMINALS_JSON,
     "recentActivity": []$QUALITY_SUFFIX
 }

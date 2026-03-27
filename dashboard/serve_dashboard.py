@@ -76,8 +76,227 @@ TERMINAL_TRACK_MAP = {
     "T3": "C",
 }
 
+VALID_TERMINALS = frozenset({"T0", "T1", "T2", "T3"})
+
+VNX_DATA_DIR = CANONICAL_STATE_DIR.parent  # .vnx-data/
+DISPATCHES_DIR = VNX_DATA_DIR / "dispatches"
+REPORTS_DIR = VNX_DATA_DIR / "unified_reports"
+
+DISPATCH_DIR = Path(os.environ.get("VNX_DISPATCH_DIR", str(PROJECT_ROOT / ".vnx-data" / "dispatches")))
+RECEIPTS_PATH = CANONICAL_STATE_DIR / "t0_receipts.ndjson"
 
 DB_PATH = CANONICAL_STATE_DIR / "quality_intelligence.db"
+
+# ---------- Events API ----------
+
+DISPATCH_STAGES = ("staging", "pending", "active", "completed", "rejected")
+
+_EVENT_TYPE_ICONS = {
+    "dispatch_created": "dispatch",
+    "dispatch_promoted": "dispatch",
+    "receipt_complete": "receipt",
+    "task_started": "task",
+    "task_complete": "receipt",
+    "gate_passed": "gate",
+    "gate_failed": "gate",
+    "context_pressure": "context",
+    "open_item_created": "item",
+    "open_item_resolved": "item",
+}
+
+
+def _parse_receipts_events(limit: int = 50) -> list[dict]:
+    """Read last N events from t0_receipts.ndjson, skipping malformed lines."""
+    if not RECEIPTS_PATH.exists():
+        return []
+
+    lines: list[str] = []
+    try:
+        with open(RECEIPTS_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+
+    events: list[dict] = []
+    for line in lines[-(limit):]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        event_type = record.get("event_type") or record.get("event") or "unknown"
+        timestamp = record.get("timestamp") or ""
+        terminal = record.get("terminal") or ""
+        dispatch_id = record.get("dispatch_id") or ""
+        status = record.get("status") or ""
+        gate = record.get("gate") or ""
+
+        pr_id = record.get("pr_id") or ""
+        if not pr_id and record.get("type", "").startswith("PR-"):
+            pr_id = record["type"].split()[0]
+
+        mapped_type = event_type
+        if event_type == "task_complete":
+            if status == "success" and gate:
+                mapped_type = "gate_passed"
+            elif status in ("failure", "failed") and gate:
+                mapped_type = "gate_failed"
+            else:
+                mapped_type = "receipt_complete"
+
+        icon = _EVENT_TYPE_ICONS.get(mapped_type, "event")
+
+        events.append({
+            "type": mapped_type,
+            "icon": icon,
+            "timestamp": timestamp,
+            "terminal": terminal,
+            "dispatch_id": dispatch_id,
+            "pr_id": pr_id,
+            "gate": gate,
+            "status": status,
+            "summary": _event_summary(mapped_type, record),
+        })
+
+    return events
+
+
+def _event_summary(event_type: str, record: dict) -> str:
+    """Build a human-readable one-line summary for an event."""
+    terminal = record.get("terminal") or "?"
+    dispatch_id = record.get("dispatch_id") or ""
+    short_dispatch = dispatch_id.split("-", 2)[-1][:30] if dispatch_id else ""
+    gate = record.get("gate") or ""
+    status = record.get("status") or ""
+
+    if event_type == "gate_passed":
+        return f"{gate} passed"
+    if event_type == "gate_failed":
+        return f"{gate} failed"
+    if event_type == "receipt_complete":
+        return f"Receipt: {short_dispatch} ({status})"
+    if event_type == "task_started":
+        return f"Task started: {short_dispatch}"
+    if event_type == "context_pressure":
+        pct = record.get("context_used_pct", "?")
+        return f"Context pressure {pct}% on {terminal}"
+    if event_type in ("dispatch_created", "dispatch_promoted"):
+        return f"Dispatch {short_dispatch}"
+    return short_dispatch or event_type
+
+
+def _scan_dispatch_events() -> list[dict]:
+    """Scan dispatch directories for lifecycle events based on file timestamps."""
+    events: list[dict] = []
+    if not DISPATCH_DIR.exists():
+        return events
+
+    for stage in DISPATCH_STAGES:
+        stage_dir = DISPATCH_DIR / stage
+        if not stage_dir.is_dir():
+            continue
+        for dispatch_file in stage_dir.iterdir():
+            if not dispatch_file.name.endswith(".md"):
+                continue
+            try:
+                mtime = dispatch_file.stat().st_mtime
+                ts = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            except OSError:
+                continue
+
+            dispatch_id = dispatch_file.stem
+            pr_id = ""
+            try:
+                content = dispatch_file.read_text(encoding="utf-8")
+                for line in content.splitlines()[:20]:
+                    if line.startswith("PR-ID:"):
+                        pr_id = line.split(":", 1)[1].strip()
+                        break
+            except OSError:
+                pass
+
+            if stage == "staging":
+                event_type = "dispatch_created"
+            elif stage in ("pending", "active"):
+                event_type = "dispatch_promoted"
+            elif stage == "completed":
+                event_type = "dispatch_promoted"
+            elif stage == "rejected":
+                event_type = "dispatch_promoted"
+            else:
+                event_type = "dispatch_created"
+
+            icon = _EVENT_TYPE_ICONS.get(event_type, "dispatch")
+            summary = f"Dispatch moved to {stage}"
+
+            events.append({
+                "type": event_type,
+                "icon": icon,
+                "timestamp": ts,
+                "terminal": "",
+                "dispatch_id": dispatch_id,
+                "pr_id": pr_id,
+                "gate": "",
+                "status": stage,
+                "summary": summary,
+            })
+
+    return events
+
+
+def _query_events(params: dict[str, list[str]]) -> dict:
+    """Combine receipt events + dispatch events, filter, sort, and cap at 30."""
+    terminal_filter = (params.get("terminal") or [None])[0]
+    pr_filter = (params.get("pr") or [None])[0]
+    type_filter = (params.get("type") or [None])[0]
+    limit = 30
+
+    receipt_events = _parse_receipts_events(limit=80)
+    dispatch_events = _scan_dispatch_events()
+
+    all_events = receipt_events + dispatch_events
+
+    # Deduplicate: receipt events take priority over dispatch scan for same dispatch_id
+    seen_dispatches: dict[str, dict] = {}
+    unique_events: list[dict] = []
+    for evt in all_events:
+        did = evt.get("dispatch_id")
+        if did and did in seen_dispatches:
+            existing = seen_dispatches[did]
+            if evt.get("type") != existing.get("type"):
+                unique_events.append(evt)
+        else:
+            if did:
+                seen_dispatches[did] = evt
+            unique_events.append(evt)
+
+    # Apply filters
+    filtered: list[dict] = []
+    for evt in unique_events:
+        if terminal_filter and evt.get("terminal") != terminal_filter:
+            continue
+        if pr_filter and evt.get("pr_id") != pr_filter:
+            continue
+        if type_filter and evt.get("type") != type_filter:
+            continue
+        filtered.append(evt)
+
+    # Sort by timestamp descending (most recent first)
+    filtered.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
+
+    return {
+        "events": filtered[:limit],
+        "total": len(filtered),
+        "filters": {
+            "terminal": terminal_filter,
+            "pr": pr_filter,
+            "type": type_filter,
+        },
+    }
+
 
 # ---------- Token Stats API ----------
 
@@ -228,6 +447,133 @@ def _query_token_sessions(params: dict[str, list[str]]) -> list[dict]:
     return result
 
 
+# ---------- Dispatch Kanban API ----------
+
+_DIR_TO_STAGE: dict[str, str] = {
+    "staging": "staging",
+    "pending": "pending",
+    "queue": "pending",
+    "active": "active",
+    "completed": "done",
+    "rejected": "done",
+}
+
+
+def _parse_dispatch_header(text: str) -> dict[str, str]:
+    """Extract key-value metadata from a dispatch markdown header block."""
+    header: dict[str, str] = {}
+    past_target = False
+    started = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[[TARGET:"):
+            past_target = True
+            continue
+        if not past_target:
+            continue
+        if stripped in ("", "Manager Block"):
+            if started:
+                break
+            continue
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            key_norm = key.strip().lower().replace("-", "_").replace(" ", "_")
+            if key_norm in ("context", "instruction"):
+                break
+            header[key_norm] = val.strip()
+            started = True
+        elif started:
+            break
+    return header
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds / 60)}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
+def _scan_receipts() -> dict[str, dict]:
+    """Return dispatch_id → receipt metadata from unified_reports/."""
+    receipts: dict[str, dict] = {}
+    if not REPORTS_DIR.exists():
+        return receipts
+    for path in REPORTS_DIR.glob("*.md"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            rec: dict[str, str] = {}
+            for line in text.splitlines()[:20]:
+                if line.startswith("**Dispatch ID**:"):
+                    rec["dispatch_id"] = line.split(":", 1)[1].strip()
+                elif line.startswith("**PR**:"):
+                    rec["pr"] = line.split(":", 1)[1].strip()
+                elif line.startswith("**Status**:"):
+                    rec["status"] = line.split(":", 1)[1].strip()
+                elif line.startswith("**Gate**:"):
+                    rec["gate"] = line.split(":", 1)[1].strip()
+            if "dispatch_id" in rec:
+                rec["report_file"] = path.name
+                receipts[rec["dispatch_id"]] = rec
+        except Exception:
+            pass
+    return receipts
+
+
+def _scan_dispatches() -> dict:
+    """Scan dispatch directories and return dispatches grouped by Kanban stage."""
+    receipts = _scan_receipts()
+    stages: dict[str, list] = {s: [] for s in ["staging", "pending", "active", "review", "done"]}
+
+    if not DISPATCHES_DIR.exists():
+        return {"stages": stages, "total": 0}
+
+    now = datetime.now(timezone.utc).timestamp()
+
+    for dir_name, base_stage in _DIR_TO_STAGE.items():
+        dir_path = DISPATCHES_DIR / dir_name
+        if not dir_path.exists():
+            continue
+        for path in sorted(dir_path.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                header = _parse_dispatch_header(text)
+                duration_secs = now - path.stat().st_mtime
+                dispatch_id = header.get("dispatch_id", path.stem)
+                receipt = receipts.get(dispatch_id)
+
+                # Promote active dispatches with a filed receipt to "review"
+                stage = "review" if base_stage == "active" and receipt else base_stage
+
+                stages[stage].append({
+                    "id": dispatch_id,
+                    "file": path.name,
+                    "pr_id": header.get("pr_id", "—"),
+                    "track": header.get("track", "—"),
+                    "terminal": header.get("terminal", "—"),
+                    "role": header.get("role", "—"),
+                    "gate": header.get("gate", "—"),
+                    "priority": header.get("priority", "—"),
+                    "status": header.get("status", "—"),
+                    "reason": header.get("reason", "—"),
+                    "dir": dir_name,
+                    "stage": stage,
+                    "duration_secs": int(duration_secs),
+                    "duration_label": _format_duration(duration_secs),
+                    "has_receipt": receipt is not None,
+                    "receipt_status": receipt.get("status") if receipt else None,
+                })
+            except Exception as exc:
+                import sys
+                print(f"[kanban] skipping {path.name}: {exc}", file=sys.stderr)
+
+    total = sum(len(v) for v in stages.values())
+    return {"stages": stages, "total": total}
+
+
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
     payload = json.dumps(payload_obj).encode("utf-8")
     handler.send_response(status)
@@ -310,6 +656,65 @@ def _unlock_terminal(terminal_id: str) -> dict:
     }
 
 
+def _jump_terminal(terminal_id: str) -> dict:
+    """Switch tmux focus to the specified terminal's pane."""
+    if terminal_id not in VALID_TERMINALS:
+        raise ValueError(f"Unknown terminal: {terminal_id}")
+
+    session_name = f"vnx-{PROJECT_ROOT.name}"
+
+    # Check session exists
+    check = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        raise RuntimeError(f"VNX session '{session_name}' not found — is VNX running?")
+
+    # Resolve pane_id from panes.json
+    pane_id = ""
+    panes_file = CANONICAL_STATE_DIR / "panes.json"
+    if panes_file.exists():
+        with contextlib.suppress(Exception):
+            panes_data = json.loads(panes_file.read_text(encoding="utf-8"))
+            entry = panes_data.get(terminal_id) or {}
+            pane_id = str(entry.get("pane_id") or "")
+
+    # Fall back to positional index if pane_id not in panes.json
+    pane_index_map = {"T0": 0, "T1": 1, "T2": 2, "T3": 3}
+    pane_index = pane_index_map[terminal_id]
+
+    # Select window first
+    subprocess.run(
+        ["tmux", "select-window", "-t", f"{session_name}:0"],
+        check=True,
+        capture_output=True,
+    )
+
+    # Select pane by ID (preferred) or by positional index (fallback)
+    if pane_id:
+        subprocess.run(
+            ["tmux", "select-pane", "-t", pane_id],
+            check=True,
+            capture_output=True,
+        )
+        resolved_pane = pane_id
+    else:
+        subprocess.run(
+            ["tmux", "select-pane", "-t", f"{session_name}:0.{pane_index}"],
+            check=True,
+            capture_output=True,
+        )
+        resolved_pane = f"index:{pane_index}"
+
+    return {
+        "status": "ok",
+        "terminal": terminal_id,
+        "pane": resolved_pane,
+        "session": session_name,
+    }
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
@@ -331,6 +736,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         path = unquote(parsed.path)
         params = parse_qs(parsed.query)
 
+        if path == "/api/events":
+            try:
+                result = _query_events(params)
+            except Exception as exc:
+                _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc), "events": []})
+                return
+            _json_response(self, HTTPStatus.OK, result)
+            return
+
         if path == "/api/token-stats":
             result = _query_token_stats(params)
             _json_response(self, HTTPStatus.OK, {"data": result, "count": len(result)})
@@ -339,6 +753,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/token-stats/sessions":
             result = _query_token_sessions(params)
             _json_response(self, HTTPStatus.OK, {"data": result, "count": len(result)})
+            return
+
+        if path == "/api/dispatches":
+            try:
+                result = _scan_dispatches()
+            except Exception as exc:
+                _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                return
+            _json_response(self, HTTPStatus.OK, result)
             return
 
         # Fall through to static file serving
@@ -353,7 +776,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in ("/api/restart-process", "/api/unlock-terminal"):
+        parsed_path = unquote(urlsplit(self.path).path)
+
+        # /api/jump/{terminal} — switch tmux focus to terminal
+        if parsed_path.startswith("/api/jump/"):
+            terminal_id = parsed_path[len("/api/jump/"):]
+            if terminal_id not in VALID_TERMINALS:
+                self.send_error(HTTPStatus.BAD_REQUEST, f"Unknown terminal: {terminal_id}")
+                return
+            try:
+                response = _jump_terminal(terminal_id)
+            except RuntimeError as exc:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+                return
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or b"").decode(errors="replace").strip()
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"tmux error: {stderr or exc}")
+                return
+            except Exception as exc:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Jump failed: {exc}")
+                return
+            _json_response(self, HTTPStatus.OK, response)
+            return
+
+        if parsed_path not in ("/api/restart-process", "/api/unlock-terminal"):
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
 
@@ -365,7 +811,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
             return
 
-        if self.path == "/api/unlock-terminal":
+        if parsed_path == "/api/unlock-terminal":
             terminal_id = data.get("terminal")
             if terminal_id not in TERMINAL_TRACK_MAP:
                 self.send_error(HTTPStatus.BAD_REQUEST, f"Unknown terminal: {terminal_id}")

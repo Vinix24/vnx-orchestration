@@ -42,7 +42,7 @@
     }
 
     main {
-      width: min(1100px, 100%);
+      width: min(1280px, 100%);
       display: flex;
       flex-direction: column;
       gap: 1.25rem;
@@ -601,6 +601,525 @@
       color: var(--muted);
       padding: 1rem 0 1.5rem;
     }
+
+    /* ── Attention Bar ── */
+    .attention-bar {
+      display: grid;
+      gap: 0.6rem;
+      padding: 0.9rem 1.1rem;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 107, 107, 0.2);
+      background: rgba(255, 107, 107, 0.06);
+      backdrop-filter: blur(10px);
+    }
+
+    .attention-bar.hidden {
+      display: none;
+    }
+
+    .attention-bar-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--red);
+    }
+
+    .attention-bar-header .attention-pulse {
+      width: 0.6rem;
+      height: 0.6rem;
+      border-radius: 50%;
+      background: var(--red);
+      animation: attention-pulse 1.6s ease-in-out infinite;
+    }
+
+    @keyframes attention-pulse {
+      0%, 100% { opacity: 0.4; box-shadow: 0 0 4px rgba(255, 107, 107, 0.3); }
+      50% { opacity: 1; box-shadow: 0 0 14px rgba(255, 107, 107, 0.7); }
+    }
+
+    .attention-items {
+      display: grid;
+      gap: 0.45rem;
+    }
+
+    .attention-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.55rem 0.75rem;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .attention-item.sev-blocked {
+      border-left: 3px solid var(--red);
+      background: rgba(255, 107, 107, 0.1);
+    }
+
+    .attention-item.sev-review-needed {
+      border-left: 3px solid var(--brand-orange);
+      background: rgba(249, 115, 22, 0.08);
+    }
+
+    .attention-item.sev-stale {
+      border-left: 3px solid var(--yellow);
+      background: rgba(250, 204, 21, 0.07);
+    }
+
+    .attention-item.sev-context-pressure {
+      border-left: 3px solid var(--yellow);
+      background: rgba(250, 204, 21, 0.05);
+    }
+
+    .attention-item-info {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .attention-terminal {
+      font-weight: 700;
+      font-size: 0.95rem;
+      white-space: nowrap;
+    }
+
+    .attention-type-badge {
+      display: inline-block;
+      padding: 0.12rem 0.45rem;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .attention-type-badge.blocked { background: rgba(255,107,107,0.2); color: #ff6b6b; }
+    .attention-type-badge.review-needed { background: rgba(249,115,22,0.2); color: #f97316; }
+    .attention-type-badge.stale { background: rgba(250,204,21,0.2); color: #facc15; }
+    .attention-type-badge.context-pressure { background: rgba(250,204,21,0.15); color: #facc15; }
+
+    .attention-reason {
+      font-size: 0.85rem;
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .attention-since {
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .jump-btn {
+      border-radius: 999px;
+      padding: 0.3rem 0.65rem;
+      font-size: 0.75rem;
+      font-weight: 700;
+      border: 1px solid rgba(249, 115, 22, 0.4);
+      background: rgba(249, 115, 22, 0.15);
+      color: var(--brand-orange);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .jump-btn:hover {
+      background: rgba(249, 115, 22, 0.3);
+      border-color: rgba(249, 115, 22, 0.7);
+      box-shadow: 0 0 14px rgba(249, 115, 22, 0.25);
+    }
+
+    .jump-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .jump-btn.success {
+      border-color: rgba(80, 250, 123, 0.5);
+      background: rgba(80, 250, 123, 0.15);
+      color: var(--green);
+    }
+
+    .jump-btn.error {
+      border-color: rgba(255, 107, 107, 0.5);
+      background: rgba(255, 107, 107, 0.15);
+      color: var(--red);
+    }
+
+    /* ── Context Pressure Bar ── */
+    .context-pressure-bar {
+      margin-top: 0.4rem;
+    }
+
+    .context-pressure-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      color: var(--muted);
+      margin-bottom: 0.2rem;
+    }
+
+    .context-pressure-track {
+      width: 100%;
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+    }
+
+    .context-pressure-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.6s ease, background 0.4s ease;
+    }
+
+    .context-pressure-fill.level-ok {
+      background: var(--green);
+    }
+
+    .context-pressure-fill.level-warn {
+      background: var(--yellow);
+    }
+
+    .context-pressure-fill.level-critical {
+      background: var(--red);
+    }
+
+    /* ── Confirmation Dialog ── */
+    .confirm-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.72);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+      padding: 2rem;
+      animation: confirm-fade-in 0.15s ease;
+    }
+
+    @keyframes confirm-fade-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .confirm-dialog {
+      background: #0d1b2a;
+      border: 1px solid var(--border-soft);
+      border-radius: 16px;
+      max-width: 420px;
+      width: 100%;
+      padding: 1.4rem;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+    }
+
+    .confirm-dialog h3 {
+      margin: 0 0 0.6rem;
+      font-size: 1.05rem;
+      color: var(--text);
+    }
+
+    .confirm-dialog p {
+      margin: 0 0 1.2rem;
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .confirm-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.6rem;
+    }
+
+    .confirm-btn {
+      border-radius: 10px;
+      padding: 0.45rem 1rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border: 1px solid var(--border-soft);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .confirm-btn-cancel {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+    }
+
+    .confirm-btn-cancel:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text);
+    }
+
+    .confirm-btn-danger {
+      background: rgba(255, 107, 107, 0.15);
+      border-color: rgba(255, 107, 107, 0.35);
+      color: var(--red);
+    }
+
+    .confirm-btn-danger:hover {
+      background: rgba(255, 107, 107, 0.25);
+      border-color: rgba(255, 107, 107, 0.55);
+      box-shadow: 0 0 16px rgba(255, 107, 107, 0.15);
+    }
+
+    .confirm-btn-warn {
+      background: rgba(249, 115, 22, 0.15);
+      border-color: rgba(249, 115, 22, 0.35);
+      color: var(--brand-orange);
+    }
+
+    .confirm-btn-warn:hover {
+      background: rgba(249, 115, 22, 0.25);
+      border-color: rgba(249, 115, 22, 0.55);
+      box-shadow: 0 0 16px rgba(249, 115, 22, 0.15);
+    }
+
+    /* ── Dashboard Health Indicator ── */
+    .health-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 0.78rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .health-dot {
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .health-dot.healthy {
+      background: var(--green);
+      box-shadow: 0 0 8px rgba(80, 250, 123, 0.4);
+    }
+
+    .health-dot.degraded {
+      background: var(--yellow);
+      box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+    }
+
+    .health-dot.unhealthy {
+      background: var(--red);
+      box-shadow: 0 0 8px rgba(255, 107, 107, 0.4);
+    }
+
+    /* ── Staleness borders ── */
+    .terminal-card.stale-amber {
+      border-color: rgba(250, 204, 21, 0.45);
+      box-shadow: 0 0 12px rgba(250, 204, 21, 0.12);
+    }
+
+    .terminal-card.stale-red {
+      border-color: rgba(255, 107, 107, 0.45);
+      box-shadow: 0 0 12px rgba(255, 107, 107, 0.15);
+    }
+
+    /* ── Dispatch Kanban ── */
+    .kanban-board {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.65rem;
+      margin-top: 0.7rem;
+      overflow-x: auto;
+    }
+    @media (max-width: 1000px) { .kanban-board { grid-template-columns: repeat(3, 1fr); } }
+    @media (max-width: 640px)  { .kanban-board { grid-template-columns: repeat(2, 1fr); } }
+    .kanban-column { display: flex; flex-direction: column; gap: 0.45rem; min-width: 130px; }
+    .kanban-col-header {
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.1em; color: var(--muted);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 0.2rem 0.4rem; border-bottom: 1px solid var(--border-soft);
+    }
+    .kanban-col-count {
+      background: rgba(255,255,255,0.08); border-radius: 999px;
+      padding: 0.1rem 0.42rem; font-size: 0.68rem; color: var(--text);
+    }
+    .kanban-col-active .kanban-col-header { color: var(--brand-orange); }
+    .kanban-col-review .kanban-col-header { color: var(--accent-strong); }
+    .kanban-col-done .kanban-col-header   { color: var(--green); }
+    .kanban-card {
+      padding: 0.55rem 0.65rem; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.05);
+      cursor: pointer; transition: border-color 0.18s, background 0.18s;
+      display: grid; gap: 0.28rem;
+    }
+    .kanban-card:hover { border-color: rgba(249,115,22,0.4); background: rgba(249,115,22,0.06); }
+    .kanban-card-id {
+      font-size: 0.68rem; font-weight: 700; color: var(--accent-strong);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .kanban-card-pr { font-size: 0.8rem; font-weight: 600; color: var(--text); }
+    .kanban-card-meta { display: flex; flex-wrap: wrap; gap: 0.28rem; font-size: 0.68rem; color: var(--muted); }
+    .kanban-badge { background: rgba(255,255,255,0.07); border-radius: 4px; padding: 0.1rem 0.32rem; white-space: nowrap; }
+    .kanban-badge.track-a { color: #60a5fa; }
+    .kanban-badge.track-b { color: #a78bfa; }
+    .kanban-badge.track-c { color: var(--accent-strong); }
+    .kanban-empty { font-size: 0.78rem; color: var(--muted); padding: 0.4rem 0.2rem; opacity: 0.55; }
+    .kanban-detail {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.72);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; padding: 2rem;
+    }
+    .kanban-detail-inner {
+      background: #0d1b2a; border: 1px solid var(--border-soft); border-radius: 16px;
+      max-width: 580px; width: 100%; max-height: 80vh; overflow-y: auto;
+      padding: 1.4rem; position: relative;
+    }
+    .kanban-detail-close {
+      position: absolute; top: 0.9rem; right: 0.9rem;
+      background: none; border: 1px solid var(--border-soft); color: var(--muted);
+      border-radius: 8px; padding: 0.28rem 0.6rem; cursor: pointer; font-size: 0.82rem;
+    }
+    .kanban-detail-close:hover { color: var(--text); }
+    .kanban-detail h3 { margin: 0 0 0.9rem; font-size: 0.95rem; padding-right: 3rem; word-break: break-all; color: var(--accent-strong); }
+    .kanban-detail-fields {
+      display: grid; grid-template-columns: auto 1fr;
+      gap: 0.32rem 0.75rem; font-size: 0.84rem; margin-bottom: 0.9rem;
+    }
+    .kanban-detail-fields dt { color: var(--muted); white-space: nowrap; }
+    .kanban-detail-fields dd { margin: 0; color: var(--text); word-break: break-word; }
+    .kanban-receipt-badge {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.22rem 0.6rem; border-radius: 8px; font-size: 0.78rem; margin-top: 0.4rem;
+    }
+    .kanban-receipt-badge.success { background: rgba(80,250,123,0.1); border: 1px solid rgba(80,250,123,0.25); color: var(--green); }
+    .kanban-receipt-badge.filed   { background: rgba(250,204,21,0.08); border: 1px solid rgba(250,204,21,0.2); color: var(--yellow); }
+
+    /* ── Event Timeline ── */
+    .timeline-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+    }
+
+    .timeline-filters {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .timeline-list {
+      display: grid;
+      gap: 0.4rem;
+      margin-top: 0.7rem;
+      max-height: 420px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.12) transparent;
+    }
+
+    .timeline-list::-webkit-scrollbar { width: 5px; }
+    .timeline-list::-webkit-scrollbar-track { background: transparent; }
+    .timeline-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 999px; }
+
+    .timeline-event {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      padding: 0.5rem 0.7rem;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.03);
+      transition: background 0.15s ease;
+    }
+
+    .timeline-event:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .timeline-event-icon {
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      flex-shrink: 0;
+    }
+
+    .timeline-event-icon.icon-receipt { background: rgba(80, 250, 123, 0.15); color: var(--green); }
+    .timeline-event-icon.icon-gate { background: rgba(250, 204, 21, 0.15); color: var(--yellow); }
+    .timeline-event-icon.icon-dispatch { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+    .timeline-event-icon.icon-task { background: rgba(249, 115, 22, 0.15); color: var(--brand-orange); }
+    .timeline-event-icon.icon-context { background: rgba(255, 107, 107, 0.15); color: var(--red); }
+    .timeline-event-icon.icon-item { background: rgba(168, 85, 247, 0.15); color: #a855f7; }
+    .timeline-event-icon.icon-event { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+
+    .timeline-event-body {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .timeline-event-summary {
+      font-size: 0.85rem;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+      min-width: 80px;
+    }
+
+    .timeline-event-terminal {
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.1rem 0.4rem;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .timeline-event-type {
+      font-size: 0.7rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .timeline-event-time {
+      font-size: 0.72rem;
+      color: var(--muted);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .timeline-empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 1.5rem 0;
+      font-size: 0.9rem;
+    }
   </style>
 </head>
 <body>
@@ -611,10 +1130,23 @@
         <p>7-second refresh · powered by `dashboard_status.json`</p>
       </div>
       <div class="header-right">
+        <div id="health-indicator" class="health-indicator">
+          <span id="health-dot" class="health-dot"></span>
+          <span id="health-label">Checking...</span>
+        </div>
         <div id="fetch-status" class="pill">Loading state…</div>
         <div id="refresh-counter">Next refresh in 0s</div>
       </div>
     </header>
+
+    <section id="attention-bar" class="attention-bar hidden">
+      <div class="attention-bar-header">
+        <span class="attention-pulse"></span>
+        <span>Needs Attention</span>
+        <span id="attention-count" style="font-weight:400; color:var(--muted); font-size:0.8rem; text-transform:none; letter-spacing:0;"></span>
+      </div>
+      <div class="attention-items" id="attention-items"></div>
+    </section>
 
     <section class="top-row">
       <article class="panel">
@@ -690,6 +1222,74 @@
       </article>
     </section>
 
+    <section>
+      <article class="panel">
+        <h2>Dispatch Kanban</h2>
+        <div class="kanban-board" id="kanban-board">
+          <div class="kanban-column kanban-col-staging">
+            <div class="kanban-col-header">Staging <span class="kanban-col-count" id="kanban-count-staging">0</span></div>
+            <div id="kanban-cards-staging"></div>
+          </div>
+          <div class="kanban-column kanban-col-pending">
+            <div class="kanban-col-header">Pending <span class="kanban-col-count" id="kanban-count-pending">0</span></div>
+            <div id="kanban-cards-pending"></div>
+          </div>
+          <div class="kanban-column kanban-col-active">
+            <div class="kanban-col-header">Active <span class="kanban-col-count" id="kanban-count-active">0</span></div>
+            <div id="kanban-cards-active"></div>
+          </div>
+          <div class="kanban-column kanban-col-review">
+            <div class="kanban-col-header">Review <span class="kanban-col-count" id="kanban-count-review">0</span></div>
+            <div id="kanban-cards-review"></div>
+          </div>
+          <div class="kanban-column kanban-col-done">
+            <div class="kanban-col-header">Done <span class="kanban-col-count" id="kanban-count-done">0</span></div>
+            <div id="kanban-cards-done"></div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div class="kanban-detail" id="kanban-detail" style="display:none;" role="dialog" aria-modal="true">
+      <div class="kanban-detail-inner">
+        <button class="kanban-detail-close" id="kanban-detail-close" type="button">✕ Close</button>
+        <h3 id="kanban-detail-title">—</h3>
+        <dl class="kanban-detail-fields" id="kanban-detail-fields"></dl>
+        <div id="kanban-detail-receipt"></div>
+      </div>
+    </div>
+
+    <section>
+      <article class="panel">
+        <div class="timeline-header">
+          <h2>Event Timeline</h2>
+          <div class="timeline-filters">
+            <select id="timeline-filter-terminal" class="filter-select">
+              <option value="">All Terminals</option>
+              <option value="T0">T0</option>
+              <option value="T1">T1</option>
+              <option value="T2">T2</option>
+              <option value="T3">T3</option>
+            </select>
+            <select id="timeline-filter-type" class="filter-select">
+              <option value="">All Events</option>
+              <option value="receipt_complete">Receipts</option>
+              <option value="gate_passed">Gates Passed</option>
+              <option value="gate_failed">Gates Failed</option>
+              <option value="task_started">Tasks Started</option>
+              <option value="dispatch_created">Dispatches Created</option>
+              <option value="dispatch_promoted">Dispatches Promoted</option>
+              <option value="context_pressure">Context Pressure</option>
+            </select>
+            <select id="timeline-filter-pr" class="filter-select">
+              <option value="">All PRs</option>
+            </select>
+          </div>
+        </div>
+        <div class="timeline-list" id="timeline-list"></div>
+      </article>
+    </section>
+
     <footer>
       Dashboard generated from `.claude/vnx-system/state/dashboard_status.json`. Serve this directory via `python -m http.server` from `.claude/vnx-system`.
     </footer>
@@ -718,6 +1318,111 @@
       return "var(--red)";
     }
 
+    const ATTENTION_SEVERITY_ORDER = { blocked: 4, "review-needed": 3, stale: 2, "context-pressure": 1 };
+
+    function timeSince(isoString) {
+      if (!isoString) return "";
+      const diff = Math.max(0, Math.floor((Date.now() - new Date(isoString).getTime()) / 1000));
+      if (diff < 60) return `${diff}s ago`;
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      return `${Math.floor(diff / 3600)}h ago`;
+    }
+
+    function renderAttentionBar(data) {
+      const bar = document.getElementById("attention-bar");
+      const itemsContainer = document.getElementById("attention-items");
+      const countLabel = document.getElementById("attention-count");
+      if (!bar || !itemsContainer) return;
+
+      const attention = data.attention || {};
+      const terminals = attention.terminals || data.terminals || {};
+      const items = [];
+
+      for (const [tid, info] of Object.entries(terminals)) {
+        if (info && info.needs_human && info.attention) {
+          items.push({ terminal: tid, ...info.attention });
+        }
+      }
+
+      if (items.length === 0) {
+        bar.classList.add("hidden");
+        return;
+      }
+
+      items.sort((a, b) => {
+        const pa = ATTENTION_SEVERITY_ORDER[a.type] || 0;
+        const pb = ATTENTION_SEVERITY_ORDER[b.type] || 0;
+        if (pb !== pa) return pb - pa;
+        return new Date(a.since || 0) - new Date(b.since || 0);
+      });
+
+      bar.classList.remove("hidden");
+      if (countLabel) countLabel.textContent = `(${items.length} terminal${items.length !== 1 ? "s" : ""})`;
+
+      itemsContainer.innerHTML = "";
+      items.forEach((item) => {
+        const el = document.createElement("div");
+        const sevClass = `sev-${item.type || "stale"}`;
+        el.className = `attention-item ${sevClass}`;
+        const typeLabel = (item.type || "").replace(/-/g, " ");
+        el.innerHTML = `
+          <div class="attention-item-info">
+            <span class="attention-terminal">${item.terminal || item.jump_target || "?"}</span>
+            <span class="attention-type-badge ${item.type || ""}">${typeLabel}</span>
+            <span class="attention-reason">${item.reason || ""}</span>
+            <span class="attention-since">${timeSince(item.since)}</span>
+          </div>
+          <button class="jump-btn" type="button" onclick="jumpToTerminal('${item.jump_target || item.terminal}', this)">Jump</button>
+        `;
+        itemsContainer.appendChild(el);
+      });
+    }
+
+    async function jumpToTerminal(terminalId, button) {
+      if (!terminalId) return;
+      button.disabled = true;
+      const prev = button.textContent;
+      button.textContent = "Jumping...";
+      try {
+        const res = await fetch(`/api/jump/${terminalId}`, { method: "POST" });
+        if (!res.ok) throw new Error("jump failed");
+        button.textContent = "Jumped";
+        button.classList.add("success");
+        setTimeout(() => { button.textContent = prev; button.classList.remove("success"); button.disabled = false; }, 1500);
+      } catch (err) {
+        console.error("jump error", err);
+        button.textContent = "Failed";
+        button.classList.add("error");
+        setTimeout(() => { button.textContent = prev; button.classList.remove("error"); button.disabled = false; }, 2000);
+      }
+    }
+
+    function contextPressureHtml(usagePct) {
+      if (usagePct == null) return "";
+      const pct = Math.max(0, Math.min(100, usagePct));
+      const level = pct > 80 ? "level-critical" : pct > 60 ? "level-warn" : "level-ok";
+      return `
+        <div class="context-pressure-bar">
+          <div class="context-pressure-label">
+            <span>Context</span>
+            <span>${pct}%</span>
+          </div>
+          <div class="context-pressure-track">
+            <div class="context-pressure-fill ${level}" style="width:${pct}%"></div>
+          </div>
+        </div>
+      `;
+    }
+
+    function staleClass(info) {
+      const age = info.status_age_seconds;
+      const status = normalizeTerminalStatus(info.status);
+      if (status !== "working" && status !== "idle") return "";
+      if (age != null && age > 300) return "stale-red";
+      if (age != null && age > 180) return "stale-amber";
+      return "";
+    }
+
     function buildList(container, rows) {
       container.innerHTML = "";
       rows.forEach(([label, value]) => {
@@ -729,6 +1434,8 @@
     }
 
     function render(data) {
+      renderAttentionBar(data);
+
       const summary = data.open_items?.summary ?? {};
       const openCount = summary.open_count ?? data.open_items?.open_count ?? "—";
       document.getElementById("open-items-count").textContent = openCount;
@@ -978,67 +1685,240 @@
           }
         }
         const card = document.createElement("div");
-        card.className = "terminal-card";
+        const staleIndicator = staleClass(info);
+        card.className = `terminal-card${staleIndicator ? " " + staleIndicator : ""}`;
         const statusDot = `<span class="status-circle" style="background:${terminalStatusColor(normalizedStatus)}"></span>`;
         const providerLabel = name === "T0" ? "Orchestrator" : getProviderLabel(info.provider);
         const label = `${name} - ${providerLabel}`;
         const unlockControl = (name === "T1" || name === "T2" || name === "T3")
-          ? `<div class="terminal-controls"><button class="restart-btn" type="button" onclick="unlockTerminal('${name}', this)">Unlock</button></div>`
+          ? `<button class="restart-btn" type="button" onclick="unlockTerminal('${name}', this)">Unlock</button>`
           : "";
+        const jumpControl = `<button class="jump-btn" type="button" onclick="jumpToTerminal('${name}', this)">Jump</button>`;
+        const pressureHtml = contextPressureHtml(info.context_usage_pct);
         card.innerHTML = `
           <strong>${label}</strong>
           <span>${statusDot} ${statusText}</span>
-          ${unlockControl}
+          ${pressureHtml}
+          <div class="terminal-controls">${jumpControl} ${unlockControl}</div>
         `;
         grid.appendChild(card);
       });
     }
 
+    // ── Confirmation Dialog ─────────────────────────────────────────
+    function showConfirmDialog({ title, message, confirmLabel, confirmClass, onConfirm }) {
+      const overlay = document.createElement("div");
+      overlay.className = "confirm-overlay";
+      const btnClass = confirmClass || "confirm-btn-danger";
+      overlay.innerHTML = `
+        <div class="confirm-dialog">
+          <h3>${title}</h3>
+          <p>${message}</p>
+          <div class="confirm-actions">
+            <button class="confirm-btn confirm-btn-cancel" type="button" data-action="cancel">Cancel</button>
+            <button class="confirm-btn ${btnClass}" type="button" data-action="confirm">${confirmLabel || "Confirm"}</button>
+          </div>
+        </div>
+      `;
+
+      function close() { overlay.remove(); }
+
+      overlay.querySelector('[data-action="cancel"]').addEventListener("click", close);
+      overlay.querySelector('[data-action="confirm"]').addEventListener("click", () => {
+        close();
+        onConfirm();
+      });
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+      document.addEventListener("keydown", function handler(e) {
+        if (e.key === "Escape") { close(); document.removeEventListener("keydown", handler); }
+      });
+
+      document.body.appendChild(overlay);
+    }
+
     async function restartProcess(processName, button) {
-      button.disabled = true;
-      const previousLabel = button.textContent;
-      button.textContent = "Restarting...";
-      try {
-        const res = await fetch("/api/restart-process", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ process: processName }),
-        });
-        if (!res.ok) {
-          throw new Error("restart failed");
-        }
-      } catch (err) {
-        console.error("restart error", err);
-      } finally {
-        button.textContent = previousLabel;
-        button.disabled = false;
-        refresh();
-      }
+      showConfirmDialog({
+        title: `Restart ${processName}?`,
+        message: `This will kill the running process and start a new instance. Active work may be interrupted.`,
+        confirmLabel: "Restart",
+        confirmClass: "confirm-btn-warn",
+        onConfirm: async () => {
+          button.disabled = true;
+          const previousLabel = button.textContent;
+          button.textContent = "Restarting...";
+          try {
+            const res = await fetch("/api/restart-process", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ process: processName }),
+            });
+            if (!res.ok) throw new Error("restart failed");
+          } catch (err) {
+            console.error("restart error", err);
+          } finally {
+            button.textContent = previousLabel;
+            button.disabled = false;
+            refresh();
+          }
+        },
+      });
     }
 
     async function unlockTerminal(terminalId, button) {
-      if (!confirm(`Unlock ${terminalId}? This sets terminal and track to idle and clears active dispatch.`)) {
+      showConfirmDialog({
+        title: `Unlock ${terminalId}?`,
+        message: `This sets the terminal and track to idle and clears the active dispatch. Any in-progress work context will be lost.`,
+        confirmLabel: "Unlock",
+        confirmClass: "confirm-btn-danger",
+        onConfirm: async () => {
+          button.disabled = true;
+          const previousLabel = button.textContent;
+          button.textContent = "Unlocking...";
+          try {
+            const res = await fetch("/api/unlock-terminal", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ terminal: terminalId }),
+            });
+            if (!res.ok) throw new Error("unlock failed");
+          } catch (err) {
+            console.error("unlock error", err);
+          } finally {
+            button.textContent = previousLabel;
+            button.disabled = false;
+            refresh();
+          }
+        },
+      });
+    }
+
+    // ── Event Timeline ──────────────────────────────────────────────
+
+    const ICON_SYMBOLS = {
+      receipt: "\u2714", gate: "\u25C6", dispatch: "\u25B6",
+      task: "\u25CF", context: "\u26A0", item: "\u2691", event: "\u2022",
+    };
+
+    const timelineList = document.getElementById("timeline-list");
+    const timelineFilterTerminal = document.getElementById("timeline-filter-terminal");
+    const timelineFilterType = document.getElementById("timeline-filter-type");
+    const timelineFilterPr = document.getElementById("timeline-filter-pr");
+
+    function buildTimelineUrl() {
+      const params = new URLSearchParams();
+      const terminal = timelineFilterTerminal?.value;
+      const type = timelineFilterType?.value;
+      const pr = timelineFilterPr?.value;
+      if (terminal) params.set("terminal", terminal);
+      if (type) params.set("type", type);
+      if (pr) params.set("pr", pr);
+      params.set("t", Date.now());
+      return `/api/events?${params}`;
+    }
+
+    function renderTimelineEvent(evt) {
+      const el = document.createElement("div");
+      el.className = "timeline-event";
+
+      const iconClass = `icon-${evt.icon || "event"}`;
+      const symbol = ICON_SYMBOLS[evt.icon] || ICON_SYMBOLS.event;
+      const typeLabel = (evt.type || "").replace(/_/g, " ");
+
+      let terminalBadge = "";
+      if (evt.terminal) {
+        terminalBadge = `<span class="timeline-event-terminal">${evt.terminal}</span>`;
+      }
+
+      el.innerHTML = `
+        <span class="timeline-event-icon ${iconClass}">${symbol}</span>
+        <div class="timeline-event-body">
+          ${terminalBadge}
+          <span class="timeline-event-summary" title="${(evt.summary || "").replace(/"/g, '&quot;')}">${evt.summary || typeLabel}</span>
+          <span class="timeline-event-type">${typeLabel}</span>
+        </div>
+        <span class="timeline-event-time">${timeSince(evt.timestamp)}</span>
+      `;
+      return el;
+    }
+
+    function renderTimeline(data) {
+      if (!timelineList) return;
+      const events = data.events || [];
+
+      if (events.length === 0) {
+        timelineList.innerHTML = '<div class="timeline-empty">No events found</div>';
         return;
       }
 
-      button.disabled = true;
-      const previousLabel = button.textContent;
-      button.textContent = "Unlocking...";
-      try {
-        const res = await fetch("/api/unlock-terminal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ terminal: terminalId }),
+      timelineList.innerHTML = "";
+      events.forEach((evt) => {
+        timelineList.appendChild(renderTimelineEvent(evt));
+      });
+
+      // Populate PR filter dropdown with unique PR IDs from events
+      if (timelineFilterPr) {
+        const currentPr = timelineFilterPr.value;
+        const prIds = [...new Set(events.map((e) => e.pr_id).filter(Boolean))].sort();
+        const existing = new Set([...timelineFilterPr.options].map((o) => o.value));
+        prIds.forEach((pr) => {
+          if (!existing.has(pr)) {
+            const opt = document.createElement("option");
+            opt.value = pr;
+            opt.textContent = pr;
+            timelineFilterPr.appendChild(opt);
+          }
         });
-        if (!res.ok) {
-          throw new Error("unlock failed");
-        }
+        timelineFilterPr.value = currentPr;
+      }
+    }
+
+    async function refreshTimeline() {
+      try {
+        const res = await fetch(buildTimelineUrl(), { cache: "no-store" });
+        if (!res.ok) throw new Error("events fetch failed");
+        const data = await res.json();
+        renderTimeline(data);
       } catch (err) {
-        console.error("unlock error", err);
-      } finally {
-        button.textContent = previousLabel;
-        button.disabled = false;
-        refresh();
+        console.error("timeline refresh error", err);
+        if (timelineList) {
+          timelineList.innerHTML = '<div class="timeline-empty">Failed to load events</div>';
+        }
+      }
+    }
+
+    // Wire up filter controls to trigger immediate refresh
+    [timelineFilterTerminal, timelineFilterType, timelineFilterPr].forEach((el) => {
+      if (el) el.addEventListener("change", refreshTimeline);
+    });
+
+    // ── Health Indicator ────────────────────────────────────────────
+    const healthDot = document.getElementById("health-dot");
+    const healthLabel = document.getElementById("health-label");
+    let _lastDataTimestamp = null;
+    let _consecutiveFailures = 0;
+
+    function updateHealth(ok, dataTimestamp) {
+      if (!healthDot || !healthLabel) return;
+      if (ok) {
+        _consecutiveFailures = 0;
+        _lastDataTimestamp = dataTimestamp;
+        const age = dataTimestamp ? Math.floor((Date.now() - new Date(dataTimestamp).getTime()) / 1000) : null;
+        if (age != null && age > 30) {
+          healthDot.className = "health-dot degraded";
+          healthLabel.textContent = `Data ${age}s old`;
+        } else {
+          healthDot.className = "health-dot healthy";
+          healthLabel.textContent = "Healthy";
+        }
+      } else {
+        _consecutiveFailures++;
+        if (_consecutiveFailures >= 3) {
+          healthDot.className = "health-dot unhealthy";
+          healthLabel.textContent = "Disconnected";
+        } else {
+          healthDot.className = "health-dot degraded";
+          healthLabel.textContent = "Retrying...";
+        }
       }
     }
 
@@ -1048,6 +1928,7 @@
         if (!res.ok) throw new Error("state fetch failed");
         const data = await res.json();
         render(data);
+        updateHealth(true, data.timestamp || null);
         if (fetchStatus) {
           fetchStatus.classList.remove("error");
           fetchStatus.classList.add("ok");
@@ -1055,12 +1936,15 @@
         }
       } catch (err) {
         console.error("dashboard refresh error", err);
+        updateHealth(false, null);
         if (fetchStatus) {
           fetchStatus.classList.remove("ok");
           fetchStatus.classList.add("error");
           fetchStatus.textContent = "No data (fetch failed)";
         }
       }
+      refreshTimeline();
+      refreshKanban();
     }
 
     let countdown = REFRESH_INTERVAL / 1000;
@@ -1077,6 +1961,107 @@
 
     refresh();
     setInterval(tick, 1000);
+
+    // ── Dispatch Kanban ──────────────────────────────────────────────
+
+    function escHtml(str) {
+      return String(str ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    function showKanbanDetail(card) {
+      const overlay = document.getElementById("kanban-detail");
+      if (!overlay) return;
+      document.getElementById("kanban-detail-title").textContent = card.id;
+
+      const fields = document.getElementById("kanban-detail-fields");
+      fields.innerHTML = "";
+      const defs = [
+        ["PR", card.pr_id], ["Track", card.track], ["Terminal", card.terminal],
+        ["Role", card.role], ["Priority", card.priority], ["Gate", card.gate],
+        ["Stage", card.stage], ["Directory", card.dir],
+        ["Time in stage", card.duration_label], ["Status", card.status],
+        ["Reason", card.reason],
+      ];
+      defs.forEach(([label, val]) => {
+        if (!val || val === "—") return;
+        const dt = document.createElement("dt");
+        const dd = document.createElement("dd");
+        dt.textContent = label;
+        dd.textContent = val;
+        fields.appendChild(dt);
+        fields.appendChild(dd);
+      });
+
+      const receiptEl = document.getElementById("kanban-detail-receipt");
+      receiptEl.innerHTML = "";
+      if (card.has_receipt) {
+        const badge = document.createElement("div");
+        const cls = card.receipt_status === "success" ? "success" : "filed";
+        badge.className = `kanban-receipt-badge ${cls}`;
+        badge.innerHTML = `&#x2713; Receipt filed: <strong>${escHtml(card.receipt_status ?? "filed")}</strong>`;
+        receiptEl.appendChild(badge);
+      }
+
+      overlay.style.display = "flex";
+    }
+
+    function renderKanban(data) {
+      const stages = data.stages ?? {};
+      ["staging", "pending", "active", "review", "done"].forEach(stage => {
+        const cards = stages[stage] ?? [];
+        const container = document.getElementById(`kanban-cards-${stage}`);
+        const counter = document.getElementById(`kanban-count-${stage}`);
+        if (!container) return;
+        if (counter) counter.textContent = cards.length;
+        container.innerHTML = "";
+        if (!cards.length) {
+          container.innerHTML = `<div class="kanban-empty">—</div>`;
+          return;
+        }
+        // Done column: cap at 10 most recent
+        const visible = stage === "done" ? cards.slice(0, 10) : cards;
+        visible.forEach(card => {
+          const el = document.createElement("div");
+          el.className = "kanban-card";
+          const trackClass = `track-${(card.track || "").toLowerCase()}`;
+          const shortId = card.id.length > 28 ? card.id.slice(0, 28) + "…" : card.id;
+          el.innerHTML = `
+            <div class="kanban-card-id" title="${escHtml(card.id)}">${escHtml(shortId)}</div>
+            <div class="kanban-card-pr">${escHtml(card.pr_id)}</div>
+            <div class="kanban-card-meta">
+              <span class="kanban-badge ${trackClass}">${escHtml(card.track)}</span>
+              ${card.terminal !== "—" ? `<span class="kanban-badge">${escHtml(card.terminal)}</span>` : ""}
+              <span class="kanban-badge" title="Time in stage">${escHtml(card.duration_label)}</span>
+            </div>
+          `;
+          el.addEventListener("click", () => showKanbanDetail(card));
+          container.appendChild(el);
+        });
+      });
+    }
+
+    async function refreshKanban() {
+      try {
+        const res = await fetch("/api/dispatches?t=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        renderKanban(data);
+      } catch (err) {
+        console.error("kanban refresh error", err);
+      }
+    }
+
+    // Close kanban overlay on button or backdrop click
+    (function() {
+      const closeBtn = document.getElementById("kanban-detail-close");
+      const overlay = document.getElementById("kanban-detail");
+      if (closeBtn && overlay) {
+        closeBtn.addEventListener("click", () => { overlay.style.display = "none"; });
+        overlay.addEventListener("click", e => { if (e.target === overlay) overlay.style.display = "none"; });
+      }
+    })();
+
+    refreshKanban();
   </script>
 </body>
 </html>
