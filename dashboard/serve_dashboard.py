@@ -76,6 +76,8 @@ TERMINAL_TRACK_MAP = {
     "T3": "C",
 }
 
+VALID_TERMINALS = frozenset({"T0", "T1", "T2", "T3"})
+
 
 DB_PATH = CANONICAL_STATE_DIR / "quality_intelligence.db"
 
@@ -310,6 +312,65 @@ def _unlock_terminal(terminal_id: str) -> dict:
     }
 
 
+def _jump_terminal(terminal_id: str) -> dict:
+    """Switch tmux focus to the specified terminal's pane."""
+    if terminal_id not in VALID_TERMINALS:
+        raise ValueError(f"Unknown terminal: {terminal_id}")
+
+    session_name = f"vnx-{PROJECT_ROOT.name}"
+
+    # Check session exists
+    check = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        raise RuntimeError(f"VNX session '{session_name}' not found — is VNX running?")
+
+    # Resolve pane_id from panes.json
+    pane_id = ""
+    panes_file = CANONICAL_STATE_DIR / "panes.json"
+    if panes_file.exists():
+        with contextlib.suppress(Exception):
+            panes_data = json.loads(panes_file.read_text(encoding="utf-8"))
+            entry = panes_data.get(terminal_id) or {}
+            pane_id = str(entry.get("pane_id") or "")
+
+    # Fall back to positional index if pane_id not in panes.json
+    pane_index_map = {"T0": 0, "T1": 1, "T2": 2, "T3": 3}
+    pane_index = pane_index_map[terminal_id]
+
+    # Select window first
+    subprocess.run(
+        ["tmux", "select-window", "-t", f"{session_name}:0"],
+        check=True,
+        capture_output=True,
+    )
+
+    # Select pane by ID (preferred) or by positional index (fallback)
+    if pane_id:
+        subprocess.run(
+            ["tmux", "select-pane", "-t", pane_id],
+            check=True,
+            capture_output=True,
+        )
+        resolved_pane = pane_id
+    else:
+        subprocess.run(
+            ["tmux", "select-pane", "-t", f"{session_name}:0.{pane_index}"],
+            check=True,
+            capture_output=True,
+        )
+        resolved_pane = f"index:{pane_index}"
+
+    return {
+        "status": "ok",
+        "terminal": terminal_id,
+        "pane": resolved_pane,
+        "session": session_name,
+    }
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
@@ -353,7 +414,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in ("/api/restart-process", "/api/unlock-terminal"):
+        parsed_path = unquote(urlsplit(self.path).path)
+
+        # /api/jump/{terminal} — switch tmux focus to terminal
+        if parsed_path.startswith("/api/jump/"):
+            terminal_id = parsed_path[len("/api/jump/"):]
+            if terminal_id not in VALID_TERMINALS:
+                self.send_error(HTTPStatus.BAD_REQUEST, f"Unknown terminal: {terminal_id}")
+                return
+            try:
+                response = _jump_terminal(terminal_id)
+            except RuntimeError as exc:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(exc))
+                return
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or b"").decode(errors="replace").strip()
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"tmux error: {stderr or exc}")
+                return
+            except Exception as exc:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Jump failed: {exc}")
+                return
+            _json_response(self, HTTPStatus.OK, response)
+            return
+
+        if parsed_path not in ("/api/restart-process", "/api/unlock-terminal"):
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
             return
 
@@ -365,7 +449,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
             return
 
-        if self.path == "/api/unlock-terminal":
+        if parsed_path == "/api/unlock-terminal":
             terminal_id = data.get("terminal")
             if terminal_id not in TERMINAL_TRACK_MAP:
                 self.send_error(HTTPStatus.BAD_REQUEST, f"Unknown terminal: {terminal_id}")
