@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-Quality Digest Builder for T0 Intelligence System
-Purpose: Generate actionable quality digest from quality_intelligence.db
-Output: t0_quality_digest.json with top hotspots and track routing hints
+Quality Digest Builder — 3-Section Format (PR-4)
+Purpose: Generate actionable quality digest with 3 structured sections.
+Sections:
+  1. Operational Defects — code hotspots and critical issues
+  2. Prompt/Config Tuning — prevention rules, low-confidence patterns, pending edits
+  3. Governance Health — SPC alerts, metric anomalies, failed gates
+Output:
+  - quality_digest.ndjson  (append-only per G-L6) in .vnx-data/state/
+  - t0_quality_digest.json (backward compat, latest only)
+Lookback: 24h for receipt-based evidence
 """
 
 import json
 import sqlite3
-import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -28,338 +33,516 @@ except Exception as exc:
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 QUALITY_DB = STATE_DIR / "quality_intelligence.db"
-OUTPUT_FILE = STATE_DIR / "t0_quality_digest.json"
+NDJSON_OUTPUT = STATE_DIR / "quality_digest.ndjson"       # append-only (G-L6)
+JSON_COMPAT_OUTPUT = STATE_DIR / "t0_quality_digest.json"  # backward compat
 
-# quality_intelligence.db schema source-of-truth:
-# - vnx_code_quality table (file-level metrics)
-# - files_needing_attention view (critical/hotspot subset)
+MAX_PER_SECTION = 5
+LOOKBACK_HOURS = 24
+SCHEMA_VERSION = "2.0"
 
-def query_quality_metrics(db_path: Path, limit: int = 20) -> List[Dict[str, Any]]:
-    """
-    Query quality database for top complexity hotspots.
-    """
-    if not db_path.exists():
-        logger.warning(f"Quality database not found: {db_path}")
+
+# ── Evidence helpers ──────────────────────────────────────────────────────────
+
+def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[Dict]:
+    """Load receipts from the last N hours from t0_receipts.ndjson."""
+    receipts_path = state_dir / "t0_receipts.ndjson"
+    if not receipts_path.exists():
         return []
 
-    hotspots = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    receipts: List[Dict] = []
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
+        with open(receipts_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    ts_raw = r.get("timestamp", "")
+                    if ts_raw:
+                        # Normalise: strip sub-seconds, ensure UTC
+                        ts_clean = ts_raw.replace("Z", "+00:00").split(".")[0] + "+00:00"
+                        ts = datetime.fromisoformat(ts_clean)
+                        if ts > cutoff:
+                            receipts.append(r)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError:
+        pass
 
-        query = """
-        SELECT
-            q.file_path,
-            q.complexity_score,
-            q.cyclomatic_complexity,
-            q.cognitive_complexity,
-            q.max_nesting_depth,
-            q.max_function_length,
-            q.critical_issues,
-            q.warning_issues,
-            q.info_issues,
-            q.suggested_track,
-            q.track_confidence,
-            q.last_scan
-        FROM vnx_code_quality q
-        WHERE q.file_path IN (
-            SELECT file_path
-            FROM files_needing_attention
-        )
-        ORDER BY q.complexity_score DESC
-        LIMIT ?
-        """
+    return receipts
 
-        cursor.execute(query, (limit,))
 
-        for (
-            file_path,
-            complexity_score,
-            cyclomatic_complexity,
-            cognitive_complexity,
-            max_nesting_depth,
-            max_function_length,
-            critical_issues,
-            warning_issues,
-            info_issues,
-            suggested_track,
-            track_confidence,
-            last_scan,
-        ) in cursor.fetchall():
-            complexity = float(complexity_score or 0)
-            if complexity >= 90:
-                severity = "critical"
-            elif complexity >= 75:
-                severity = "high"
-            elif complexity >= 50:
-                severity = "medium"
-            else:
-                severity = "low"
+def _build_evidence_map(receipts: List[Dict]) -> Dict[str, Any]:
+    """Build dispatch-level evidence maps from recent receipts."""
+    dispatch_ids: List[str] = []
+    failed_ids: List[str] = []
 
-            hotspots.append(
-                {
-                    "file": file_path,
-                    "complexity": round(complexity, 2),
-                    "cyclomatic_complexity": cyclomatic_complexity,
-                    "cognitive_complexity": cognitive_complexity,
-                    "max_nesting_depth": max_nesting_depth,
-                    "max_function_length": max_function_length,
-                    "critical_issues": int(critical_issues or 0),
-                    "warning_issues": int(warning_issues or 0),
-                    "info_issues": int(info_issues or 0),
-                    "suggested_track": suggested_track or "C",
-                    "track_confidence": round(float(track_confidence or 0), 2),
-                    "severity": severity,
-                    "last_scan": last_scan,
-                }
-            )
+    for r in receipts:
+        did = r.get("dispatch_id") or r.get("task_id") or ""
+        status = str(r.get("status", "")).lower()
+        if did and did not in dispatch_ids:
+            dispatch_ids.append(did)
+        if did and status in ("failed", "fail", "error", "blocked"):
+            if did not in failed_ids:
+                failed_ids.append(did)
 
-        conn.close()
+    return {
+        "dispatch_ids": dispatch_ids[:10],
+        "failed_dispatch_ids": failed_ids[:5],
+    }
 
-    except sqlite3.Error as e:
-        logger.error(f"Database error: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error querying database: {e}")
 
-    return hotspots
-
-def query_recent_issues(db_path: Path, days: int = 7) -> List[Dict[str, Any]]:
-    """
-    Query recent quality issues for trend analysis.
-    """
-    if not db_path.exists():
+def _load_pending_items(state_dir: Path) -> List[Dict]:
+    """Load pending edits/recommendations from pending_edits.json."""
+    path = state_dir / "pending_edits.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return []
+        # Handle both old ("edits") and new ("recommendations") key
+        items = data.get("recommendations") or data.get("edits") or []
+        # Filter to pending status only
+        return [i for i in items if i.get("status", "pending") == "pending"]
+    except (json.JSONDecodeError, OSError):
         return []
 
-    recent_issues = []
 
+# ── Section 1: Operational Defects ───────────────────────────────────────────
+
+def build_operational_defects(
+    db: Optional[sqlite3.Connection],
+    evidence: Dict[str, Any],
+) -> List[Dict]:
+    """Code hotspots and critical issues (top 5)."""
+    if not db:
+        return []
+    recs: List[Dict] = []
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-
-        # Get recently-scanned files that still have issues.
-        query = """
-        SELECT
-            file_path,
-            complexity_score,
-            critical_issues,
-            warning_issues,
-            suggested_track,
-            last_scan
-        FROM vnx_code_quality
-        WHERE datetime(last_scan) > datetime('now', ? || ' days')
-          AND (critical_issues > 0 OR warning_issues > 0)
-        ORDER BY datetime(last_scan) DESC
-        LIMIT 10
-        """
-
-        cursor.execute(query, (f"-{days}",))
-        results = cursor.fetchall()
-
-        for row in results:
-            file_path, complexity, critical_issues, warning_issues, suggested_track, last_scan = row
-            recent_issues.append({
-                "file": file_path,
-                "complexity": round(complexity, 2) if complexity else 0,
-                "critical_issues": int(critical_issues or 0),
-                "warning_issues": int(warning_issues or 0),
-                "suggested_track": suggested_track or "C",
-                "last_scan": last_scan
-            })
-
-        conn.close()
-
-    except Exception as e:
-        logger.error(f"Error querying recent issues: {e}")
-
-    return recent_issues
-
-def build_risk_flags(hotspots: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Build risk flags based on hotspot analysis.
-    """
-    risk_flags = {
-        "critical_count": 0,
-        "high_risk_areas": [],
-        "track_load": {"A": 0, "B": 0, "C": 0}
-    }
-
-    for hotspot in hotspots:
-        # Count critical issues
-        if hotspot.get("severity") == "critical" or hotspot.get("critical_issues", 0) > 0:
-            risk_flags["critical_count"] += 1
-
-        # Track high-risk areas
-        if hotspot.get("complexity", 0) >= 75:
-            risk_flags["high_risk_areas"].append({
-                "file": os.path.basename(hotspot["file"]),
-                "complexity": hotspot["complexity"],
-                "track": hotspot.get("suggested_track") or "C"
-            })
-
-        # Track load distribution
-        track = hotspot.get("suggested_track", "C")
-        risk_flags["track_load"][track] += 1
-
-    # Limit high-risk areas to top 5
-    risk_flags["high_risk_areas"] = sorted(
-        risk_flags["high_risk_areas"],
-        key=lambda x: x["complexity"],
-        reverse=True
-    )[:5]
-
-    return risk_flags
-
-def generate_recommendations(hotspots: List[Dict[str, Any]], risk_flags: Dict[str, Any]) -> List[str]:
-    """
-    Generate actionable recommendations based on quality analysis.
-    """
-    recommendations = []
-
-    # Critical complexity recommendations
-    if risk_flags["critical_count"] > 0:
-        recommendations.append(
-            f"URGENT: {risk_flags['critical_count']} critical complexity hotspots need immediate refactoring"
+        cursor = db.execute(
+            """
+            SELECT q.file_path, q.complexity_score, q.critical_issues,
+                   q.warning_issues, q.cyclomatic_complexity,
+                   q.max_function_length, q.last_scan, q.suggested_track
+            FROM vnx_code_quality q
+            WHERE q.file_path IN (SELECT file_path FROM files_needing_attention)
+            ORDER BY q.critical_issues DESC, q.complexity_score DESC
+            LIMIT ?
+            """,
+            (MAX_PER_SECTION,),
         )
+    except sqlite3.OperationalError as exc:
+        logger.debug(f"operational_defects query failed: {exc}")
+        return []
 
-    # Track load balancing
-    track_loads = risk_flags["track_load"]
-    if track_loads["A"] > track_loads["B"] * 2:
-        recommendations.append("Consider redistributing Track A work to Track B for better load balance")
-    elif track_loads["B"] > track_loads["A"] * 2:
-        recommendations.append("Consider redistributing Track B work to Track A for better load balance")
-
-    # High-risk area recommendations
-    if len(risk_flags["high_risk_areas"]) >= 3:
-        recommendations.append(
-            f"Focus refactoring on {len(risk_flags['high_risk_areas'])} high-complexity files"
+    for row in cursor.fetchall():
+        (file_path, complexity, critical, warning,
+         cyclomatic, max_fn_len, last_scan, track) = row
+        complexity = round(float(complexity or 0), 2)
+        critical = int(critical or 0)
+        warning = int(warning or 0)
+        severity = (
+            "critical" if complexity >= 90 or critical > 0
+            else "high" if complexity >= 75 or warning > 2
+            else "medium"
         )
-
-    # General recommendations
-    if not recommendations:
-        if hotspots:
-            recommendations.append("Quality metrics stable - continue monitoring complexity trends")
-        else:
-            recommendations.append("No quality issues detected - system healthy")
-
-    return recommendations
-
-def build_quality_digest(
-    limit_hotspots: int = 10,
-    recent_days: int = 7
-) -> Dict[str, Any]:
-    """
-    Build the complete quality digest for T0.
-    """
-    # Query quality metrics
-    hotspots = query_quality_metrics(QUALITY_DB, limit_hotspots)
-    recent_issues = query_recent_issues(QUALITY_DB, recent_days)
-
-    # Build risk flags
-    risk_flags = build_risk_flags(hotspots)
-
-    # Generate recommendations
-    recommendations = generate_recommendations(hotspots, risk_flags)
-
-    # Build digest
-    digest = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "schema_version": "1.0",
-        "total_hotspots": _count_total_hotspots(QUALITY_DB),
-        "recent_issues_7d": len(recent_issues),
-        "top_hotspots": hotspots[:10],  # Top 10 complexity hotspots
-        "risk_flags": risk_flags,
-        "track_routing": {
-            "recommended": {
-                track: [h["file"] for h in hotspots if h.get("suggested_track") == track][:3]
-                for track in ["A", "B", "C"]
-            }
-        },
-        "recommendations": recommendations,
-        "metadata": {
-            "database": str(QUALITY_DB),
-            "query_limit": limit_hotspots,
-            "recent_days": recent_days
-        }
-    }
-
-    return digest
-
-def _count_total_hotspots(db_path: Path) -> int:
-    if not db_path.exists():
-        return 0
-    try:
-        conn = sqlite3.connect(str(db_path))
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM files_needing_attention")
-        count = int(cur.fetchone()[0] or 0)
-        conn.close()
-        return count
-    except Exception:
-        return 0
-
-def save_digest(digest: Dict[str, Any], output_path: Path) -> None:
-    """
-    Save digest to JSON file with proper formatting.
-    """
-    try:
-        # Ensure directory exists
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write with pretty formatting
-        with open(output_path, 'w') as f:
-            json.dump(digest, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"✅ Quality digest saved to {output_path}")
-
-    except Exception as e:
-        logger.error(f"Failed to save digest: {e}")
-        raise
-
-def main():
-    """
-    Main entry point for quality digest generation.
-    """
-    logger.info("=== T0 Quality Digest Generator ===")
-
-    # Check database exists
-    if not QUALITY_DB.exists():
-        logger.warning(f"Quality database not found at {QUALITY_DB}")
-        # Create empty digest
-        empty_digest = {
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "schema_version": "1.0",
-            "error": "quality_intelligence.db not found",
-            "total_hotspots": 0,
-            "top_hotspots": [],
-            "risk_flags": {
-                "critical_count": 0,
-                "high_risk_areas": [],
-                "track_load": {"A": 0, "B": 0, "C": 0}
+        recs.append({
+            "rank": len(recs) + 1,
+            "type": "code_hotspot",
+            "title": f"Quality hotspot: {Path(file_path).name}",
+            "severity": severity,
+            "detail": (
+                f"complexity={complexity}, cyclomatic={cyclomatic or '?'}, "
+                f"critical={critical}, warnings={warning}, "
+                f"max_fn_len={max_fn_len or '?'}"
+            ),
+            "action": f"Refactor to reduce complexity — assign to Track {track or 'C'}",
+            "evidence": {
+                "file_paths": [file_path],
+                "receipt_ids": [],
+                "dispatch_ids": evidence["dispatch_ids"][:3],
             },
-            "recommendations": ["Quality database not initialized - run quality scanner first"]
+        })
+    return recs
+
+
+# ── Section 2: Prompt/Config Tuning ──────────────────────────────────────────
+
+def build_prompt_config_tuning(
+    db: Optional[sqlite3.Connection],
+    state_dir: Path,
+    evidence: Dict[str, Any],
+) -> List[Dict]:
+    """Prevention rules, low-confidence patterns, and pending config edits (top 5)."""
+    recs: List[Dict] = []
+
+    # 2a: pending config edits awaiting review
+    pending = _load_pending_items(state_dir)
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    for item in pending[: min(2, MAX_PER_SECTION)]:
+        created_raw = item.get("created_at", "")
+        is_stale = False
+        if created_raw:
+            try:
+                ca = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                if ca.tzinfo is None:
+                    ca = ca.replace(tzinfo=timezone.utc)
+                is_stale = ca < stale_cutoff
+            except ValueError:
+                pass
+
+        ev_ids = item.get("evidence_ids", [])
+        recs.append({
+            "rank": len(recs) + 1,
+            "type": "pending_edit",
+            "title": f"Pending config edit: {item.get('target', 'unknown')}",
+            "severity": "high" if is_stale else "medium",
+            "detail": (
+                f"{'[STALE >7d] ' if is_stale else ''}#{item.get('id', '?')}: "
+                f"{str(item.get('description', item.get('symptom', 'no description')))[:120]}"
+            ),
+            "action": "Review and accept/reject via `vnx suggested-edits review`",
+            "evidence": {
+                "file_paths": [item["target"]] if item.get("target") else [],
+                "receipt_ids": [str(i) for i in (ev_ids or [])[:3]],
+                "dispatch_ids": [],
+            },
+        })
+
+    # 2b: prevention rules from DB
+    if db:
+        remaining = MAX_PER_SECTION - len(recs)
+        try:
+            cursor = db.execute(
+                """
+                SELECT id, tag_combination, rule_type, recommendation, confidence
+                FROM prevention_rules
+                ORDER BY confidence DESC, triggered_count DESC
+                LIMIT ?
+                """,
+                (remaining,),
+            )
+            for row in cursor.fetchall():
+                rule_id, tags_raw, rule_type, recommendation, confidence = row
+                try:
+                    tags = json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
+                    tag_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
+                except (json.JSONDecodeError, TypeError):
+                    tag_str = str(tags_raw or "")
+                recs.append({
+                    "rank": len(recs) + 1,
+                    "type": "prevention_rule",
+                    "title": f"Prevention rule: [{tag_str}]",
+                    "severity": "high" if float(confidence or 0) > 0.7 else "medium",
+                    "detail": (
+                        f"{rule_type}: {str(recommendation or '')[:150]}"
+                    ),
+                    "action": "Review rule and promote to active via operator confirmation",
+                    "evidence": {
+                        "file_paths": [],
+                        "receipt_ids": [str(rule_id)],
+                        "dispatch_ids": evidence["dispatch_ids"][:2],
+                    },
+                })
+        except sqlite3.OperationalError as exc:
+            logger.debug(f"prevention_rules query failed: {exc}")
+
+    # 2c: low-confidence patterns (fill remaining slots)
+    if db:
+        remaining = MAX_PER_SECTION - len(recs)
+        if remaining > 0:
+            try:
+                cursor = db.execute(
+                    """
+                    SELECT pattern_id, pattern_title, confidence, ignored_count, used_count
+                    FROM pattern_usage
+                    WHERE confidence < 0.5
+                    ORDER BY confidence ASC, ignored_count DESC
+                    LIMIT ?
+                    """,
+                    (remaining,),
+                )
+                for row in cursor.fetchall():
+                    pid, title, conf, ignored, used = row
+                    recs.append({
+                        "rank": len(recs) + 1,
+                        "type": "low_confidence_pattern",
+                        "title": f"Low-confidence pattern: {title or pid}",
+                        "severity": "low",
+                        "detail": (
+                            f"confidence={round(float(conf or 0), 3)}, "
+                            f"ignored={ignored or 0}, used={used or 0}"
+                        ),
+                        "action": "Retire pattern or update content to improve adoption",
+                        "evidence": {
+                            "file_paths": [],
+                            "receipt_ids": [str(pid)],
+                            "dispatch_ids": [],
+                        },
+                    })
+            except sqlite3.OperationalError as exc:
+                logger.debug(f"pattern_usage query failed: {exc}")
+
+    return recs[:MAX_PER_SECTION]
+
+
+# ── Section 3: Governance Health ─────────────────────────────────────────────
+
+def build_governance_health(
+    db: Optional[sqlite3.Connection],
+    evidence: Dict[str, Any],
+) -> List[Dict]:
+    """SPC alerts, governance metric anomalies, and failed gates (top 5)."""
+    recs: List[Dict] = []
+
+    # 3a: unacknowledged SPC alerts
+    if db:
+        try:
+            cursor = db.execute(
+                """
+                SELECT id, alert_type, metric_name, scope_type, scope_value,
+                       observed_value, control_limit, description, severity, detected_at
+                FROM spc_alerts
+                WHERE acknowledged_at IS NULL
+                ORDER BY
+                    CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                    detected_at DESC
+                LIMIT ?
+                """,
+                (MAX_PER_SECTION,),
+            )
+            for row in cursor.fetchall():
+                (alert_id, alert_type, metric, scope_type, scope_val,
+                 observed, limit_val, description, severity, detected_at) = row
+                recs.append({
+                    "rank": len(recs) + 1,
+                    "type": "spc_alert",
+                    "title": f"SPC alert: {metric} ({alert_type})",
+                    "severity": severity or "warning",
+                    "detail": (
+                        f"{description or alert_type}: {scope_type}={scope_val}, "
+                        f"observed={round(float(observed or 0), 3)}, "
+                        f"limit={round(float(limit_val), 3) if limit_val is not None else 'N/A'}"
+                    ),
+                    "action": "Investigate metric trend and acknowledge or escalate",
+                    "evidence": {
+                        "file_paths": [],
+                        "receipt_ids": [str(alert_id)],
+                        "dispatch_ids": evidence["dispatch_ids"][:2],
+                    },
+                })
+        except sqlite3.OperationalError as exc:
+            logger.debug(f"spc_alerts query failed: {exc}")
+
+    # 3b: failed gates from recent receipts
+    remaining = MAX_PER_SECTION - len(recs)
+    for did in evidence["failed_dispatch_ids"][:remaining]:
+        recs.append({
+            "rank": len(recs) + 1,
+            "type": "failed_gate",
+            "title": f"Failed gate: {did}",
+            "severity": "high",
+            "detail": f"Dispatch {did} reported failure in last {LOOKBACK_HOURS}h",
+            "action": "Review failure report and create investigation dispatch",
+            "evidence": {
+                "file_paths": [],
+                "receipt_ids": [],
+                "dispatch_ids": [did],
+            },
+        })
+
+    # 3c: governance metrics below threshold
+    if db:
+        remaining = MAX_PER_SECTION - len(recs)
+        if remaining > 0:
+            try:
+                cursor = db.execute(
+                    """
+                    SELECT metric_name, scope_type, scope_value, metric_value, computed_at
+                    FROM governance_metrics
+                    WHERE datetime(computed_at) > datetime('now', '-1 day')
+                      AND metric_value < 0.5
+                    ORDER BY metric_value ASC
+                    LIMIT ?
+                    """,
+                    (remaining,),
+                )
+                for row in cursor.fetchall():
+                    metric_name, scope_type, scope_val, value, computed_at = row
+                    recs.append({
+                        "rank": len(recs) + 1,
+                        "type": "governance_metric",
+                        "title": f"Low governance metric: {metric_name}",
+                        "severity": "medium",
+                        "detail": (
+                            f"{scope_type}={scope_val}, "
+                            f"{metric_name}={round(float(value or 0), 3)} (<0.5)"
+                        ),
+                        "action": "Review governance metrics and address process gaps",
+                        "evidence": {
+                            "file_paths": [],
+                            "receipt_ids": [],
+                            "dispatch_ids": evidence["dispatch_ids"][:2],
+                        },
+                    })
+            except sqlite3.OperationalError as exc:
+                logger.debug(f"governance_metrics query failed: {exc}")
+
+    # Fallback: healthy status when nothing to report
+    if not recs:
+        recs.append({
+            "rank": 1,
+            "type": "governance_status",
+            "title": "No active governance alerts",
+            "severity": "info",
+            "detail": (
+                f"No SPC alerts, failed gates, or metric anomalies "
+                f"in last {LOOKBACK_HOURS}h"
+            ),
+            "action": "System operating within normal parameters",
+            "evidence": {"file_paths": [], "receipt_ids": [], "dispatch_ids": []},
+        })
+
+    return recs[:MAX_PER_SECTION]
+
+
+# ── Digest assembly & output ──────────────────────────────────────────────────
+
+def _assemble_digest(sections: Dict[str, List[Dict]], run_id: str) -> Dict:
+    total = sum(len(v) for v in sections.values())
+    critical_high = sum(
+        1 for s in sections.values()
+        for r in s if r.get("severity") in ("critical", "high")
+    )
+    return {
+        "run_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": SCHEMA_VERSION,
+        "pipeline_run_id": run_id,
+        "lookback_hours": LOOKBACK_HOURS,
+        "sections": {
+            "operational_defects": {
+                "title": "Operational Defects",
+                "description": (
+                    "Code complexity hotspots and critical issues "
+                    "requiring immediate attention"
+                ),
+                "recommendations": sections["operational_defects"],
+            },
+            "prompt_config_tuning": {
+                "title": "Prompt/Config Tuning",
+                "description": (
+                    "Prevention rules, low-confidence patterns, "
+                    "and pending configuration edits"
+                ),
+                "recommendations": sections["prompt_config_tuning"],
+            },
+            "governance_health": {
+                "title": "Governance Health",
+                "description": (
+                    "SPC alerts, governance metric anomalies, "
+                    "and failed quality gates"
+                ),
+                "recommendations": sections["governance_health"],
+            },
+        },
+        "summary": {
+            "total_recommendations": total,
+            "critical_or_high_count": critical_high,
+            "sections": {k: len(v) for k, v in sections.items()},
+        },
+    }
+
+
+def _append_ndjson(digest: Dict, output_path: Path) -> None:
+    """Append one digest record as a single NDJSON line (G-L6 — append-only)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(digest, ensure_ascii=False, separators=(",", ":")) + "\n")
+    logger.info(f"Appended digest run {digest['pipeline_run_id']} to {output_path}")
+
+
+def _write_compat_json(digest: Dict, output_path: Path) -> None:
+    """Write latest digest as pretty JSON for backward-compat consumers."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    compat = {
+        "updated_at": digest["run_at"],
+        "schema_version": digest["schema_version"],
+        "pipeline_run_id": digest["pipeline_run_id"],
+        "lookback_hours": digest["lookback_hours"],
+        # Legacy key kept for older consumers
+        "top_hotspots": digest["sections"]["operational_defects"]["recommendations"],
+        "sections": digest["sections"],
+        "summary": digest["summary"],
+        # Flat recommendation list for scripts that iterate this key
+        "recommendations": [
+            r["title"]
+            for sec in digest["sections"].values()
+            for r in sec["recommendations"]
+            if r.get("severity") in ("critical", "high")
+        ][:5],
+    }
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(compat, fh, indent=2, ensure_ascii=False)
+    logger.info(f"Written compat digest to {output_path}")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    logger.info("=== T0 Quality Digest Builder v2.0 (3-section format) ===")
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # Load evidence from receipts
+    receipts = _load_recent_receipts(STATE_DIR, LOOKBACK_HOURS)
+    evidence = _build_evidence_map(receipts)
+    logger.info(
+        f"Evidence: {len(receipts)} receipts, "
+        f"{len(evidence['dispatch_ids'])} dispatch IDs, "
+        f"{len(evidence['failed_dispatch_ids'])} failures"
+    )
+
+    # Open DB (read-only queries)
+    db: Optional[sqlite3.Connection] = None
+    if QUALITY_DB.exists():
+        db = sqlite3.connect(str(QUALITY_DB))
+    else:
+        logger.warning(f"quality_intelligence.db not found at {QUALITY_DB}")
+
+    try:
+        sections = {
+            "operational_defects": build_operational_defects(db, evidence),
+            "prompt_config_tuning": build_prompt_config_tuning(db, STATE_DIR, evidence),
+            "governance_health": build_governance_health(db, evidence),
         }
-        save_digest(empty_digest, OUTPUT_FILE)
-        return
+    finally:
+        if db:
+            db.close()
 
-    # Build digest
-    digest = build_quality_digest()
+    digest = _assemble_digest(sections, run_id)
 
-    # Save to file
-    save_digest(digest, OUTPUT_FILE)
+    # Output 1: append-only NDJSON (G-L6)
+    _append_ndjson(digest, NDJSON_OUTPUT)
 
-    # Print summary
-    print(f"\n📊 Quality Digest Summary:")
-    print(f"  - Total hotspots: {digest['total_hotspots']}")
-    print(f"  - Critical issues: {digest['risk_flags']['critical_count']}")
-    print(f"  - Track distribution: A={digest['risk_flags']['track_load']['A']}, "
-          f"B={digest['risk_flags']['track_load']['B']}, "
-          f"C={digest['risk_flags']['track_load']['C']}")
+    # Output 2: latest JSON for backward compat
+    _write_compat_json(digest, JSON_COMPAT_OUTPUT)
 
-    if digest['recommendations']:
-        print(f"\n📌 Recommendations:")
-        for rec in digest['recommendations']:
-            print(f"  - {rec}")
+    # Summary
+    s = digest["summary"]
+    print(f"\n📊 Quality Digest ({run_id}):")
+    print(f"  Operational Defects:   {s['sections']['operational_defects']} items")
+    print(f"  Prompt/Config Tuning:  {s['sections']['prompt_config_tuning']} items")
+    print(f"  Governance Health:     {s['sections']['governance_health']} items")
+    print(
+        f"  Total: {s['total_recommendations']} "
+        f"({s['critical_or_high_count']} critical/high)"
+    )
+    print(f"  NDJSON: {NDJSON_OUTPUT}")
+    print(f"  JSON:   {JSON_COMPAT_OUTPUT}")
+
 
 if __name__ == "__main__":
     main()
