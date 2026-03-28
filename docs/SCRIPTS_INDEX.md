@@ -7,6 +7,7 @@ Inventory of script files under `.vnx/scripts/` (primary layout) and `.claude/vn
 ## Active
 - `build_t0_quality_digest.py`
   Evidence: `.claude/vnx-system/docs/operations/MONITORING_GUIDE.md:370`, `.claude/vnx-system/docs/operations/MONITORING_GUIDE.md:927`, `.claude/vnx-system/docs/operations/MONITORING_GUIDE.md:989`
+  Purpose: 3-section quality digest (operational defects, prompt/config tuning, governance health). Outputs append-only NDJSON to `quality_digest.ndjson` (G-L6) + backward-compat JSON. 24h lookback, max 5 recommendations per section with evidence trails.
 - `build_t0_tags_digest.py`
   Evidence: `.claude/vnx-system/scripts/repair_index.py:132`, `.claude/vnx-system/docs/roadmap/implementation/PROJECT_STATUS.md:1119`, `.claude/vnx-system/docs/roadmap/implementation/PROJECT_STATUS.md:1150`
 - `cached_intelligence.py`
@@ -40,6 +41,7 @@ Inventory of script files under `.vnx/scripts/` (primary layout) and `.claude/vn
   Evidence: `.claude/vnx-system/docs/orchestration/OPEN_ITEMS_WORKFLOW.md:116`, `.claude/terminals/T-MANAGER/REPORT_UPDATE_CHANGELOG.md:20`, `.claude/terminals/T-MANAGER/REPORT_UPDATE_CHANGELOG.md:34`
 - `gather_intelligence.py`
   Evidence: `.claude/vnx-system/tests/test_cli_json_output.py:33`, `.claude/vnx-system/tests/test_cli_json_output.py:55`, `.claude/terminals/T-MANAGER/20260128-TRACK-2B-CREATION-SUMMARY.md:60`
+  Purpose: Core intelligence engine with agent validation, pattern matching, and usage signal tracking (PR-0). Includes `record_pattern_offer()`, `record_pattern_adoption()`, and `record_adoption_from_receipt()` for closed-loop learning.
 - `generate_lean_receipt.sh`
   Evidence: `.claude/vnx-system/scripts/generate_lean_receipt.sh:3`, `.claude/vnx-system/docs/implementation/P1_MIGRATION_REPORT.md:39`, `.claude/vnx-system/docs/roadmap/implementation/PROJECT_STATUS.md:1059`
 - `generate_t0_brief.sh`
@@ -64,6 +66,7 @@ Inventory of script files under `.vnx/scripts/` (primary layout) and `.claude/vn
   Evidence: `.claude/vnx-system/configs/t0_hooks_enforced.json:35`, `.claude/vnx-system/docs/implementation/P1_MIGRATION_REPORT.md:92`, `.claude/vnx-system/docs/operations/RECEIPT_PROCESSING_FLOW.md:35`
 - `learning_loop.py`
   Evidence: `.claude/vnx-system/scripts/learning_loop.py:583`, `.claude/vnx-system/docs/core/technical/INTELLIGENCE_SYSTEM.md:665`, `.claude/vnx-system/docs/core/technical/INTELLIGENCE_SYSTEM.md:741`
+  Purpose: Reads adoption signals from usage pipeline and updates `used_count`/`ignored_count` in `pattern_usage`. Adjusts confidence scores (G-L7 audit). Queues unused patterns for archival (G-L4: pending_archival.json) and prevention rules (G-L1: pending_rules.json).
 - `lib/vnx_paths.py`
   Evidence: `.claude/vnx-system/docs/implementation/P1_MIGRATION_REPORT.md:70`, `.claude/vnx-system/docs/roadmap/unified_roadmap/ultimate_vnxsystem/PHASE_P_PR_PROMPTS.md:63`, `.claude/vnx-system/docs/roadmap/unified_roadmap/ultimate_vnxsystem/PROJECT_PLAN_VNX_PACKAGING.md:24`
 - `lib/vnx_paths.sh`
@@ -136,6 +139,7 @@ Inventory of script files under `.vnx/scripts/` (primary layout) and `.claude/vn
   Evidence: `.claude/vnx-system/docs/core/00_VNX_ARCHITECTURE.md:589`, `./claudedocs/00_VNX_ARCHITECTURE.txt:537`
 - `tag_intelligence.py`
   Evidence: `.claude/terminals/T-MANAGER/20260127-SMART-CONTEXT-INTELLIGENCE-INVESTIGATION.md:1070`, `.claude/vnx-system/scripts/tag_intelligence.py:497`, `.claude/vnx-system/docs/roadmap/implementation/PROJECT_STATUS.md:679`
+  Purpose: Tag normalization, pairwise/triple subset generation (PR-3), hierarchical matching, prevention rule lifecycle. Includes RecommendationManager class: structured recommendations with evidence trails (G-L2), cap at 5 pending (G-L8), stale edit detection (>7 days), dedup by target+symptom.
 - `test_complete_v2_flow.sh`
   Evidence: `.claude/vnx-system/scripts/SCRIPT_CLEANUP_REPORT.md:119`
 - `test_pr_dispatch_integration.py`
@@ -180,10 +184,16 @@ Inventory of script files under `.vnx/scripts/` (primary layout) and `.claude/vn
 
 - `conversation_analyzer.py`
   Evidence: `.claude/vnx-system/scripts/conversation_analyzer.py`
-  Purpose: Nightly session mining pipeline — parse JSONL logs, detect patterns, deep analysis, store to session_analytics. Extracts session_model from JSONL for model-based analytics.
+  Purpose: Session mining pipeline — parse JSONL logs, detect patterns, deep analysis, store to session_analytics. Extracts session_model from JSONL. PR-1 fixed path discovery for main repo and worktree contexts; re-runs are idempotent.
 - `conversation_analyzer_nightly.sh`
   Evidence: `.claude/vnx-system/scripts/conversation_analyzer_nightly.sh`
-  Purpose: Nightly 3-phase pipeline runner: (1) conversation_analyzer → (2) generate_t0_session_brief → (3) generate_suggested_edits.
+  Purpose: Legacy nightly runner (superseded by `nightly_intelligence_pipeline.sh` in PR-4).
+- `nightly_intelligence_pipeline.sh`
+  Evidence: `scripts/nightly_intelligence_pipeline.sh`
+  Purpose: Consolidated 11-phase nightly intelligence pipeline (PR-4). Replaces overlapping daily/nightly schedules. PID-based singleton lock, per-phase health tracking to NDJSON, independent failure handling.
+- `userpromptsubmit_worker_intelligence_inject.sh`
+  Evidence: `scripts/userpromptsubmit_worker_intelligence_inject.sh`
+  Purpose: Worker intelligence injection hook for T1-T3 (PR-2). Injects dispatch-specific patterns (<400 tokens), prevention rules, and session insights. Hash-based dedup prevents redundant context. All injections logged to intelligence_usage.ndjson (G-L7).
 - `generate_t0_session_brief.py`
   Evidence: `.claude/vnx-system/scripts/generate_t0_session_brief.py`
   Purpose: Generate model-based session performance brief (`t0_session_brief.json`) for T0 dispatch intelligence. Auto, read-only.
