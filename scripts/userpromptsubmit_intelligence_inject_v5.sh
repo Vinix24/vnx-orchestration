@@ -9,20 +9,22 @@
 # - Output proper JSON decision object for Claude Code 2.1+
 # - Fix unbound variable errors
 # - Output format: {"decision": "allow", "additionalContext": "message"}
+#
+# V5.1 (PR-2):
+# - Removed terminal status injection (redundant with t0_brief.json, already visible)
+# - T0 injection now focuses on quality hotspots and recommendations only
 
 set -euo pipefail
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE_DIR="${VNX_STATE_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)/.vnx-data/state}"
-BRIEF="$CACHE_DIR/t0_brief.json"
 TAGS_DIGEST="$CACHE_DIR/t0_tags_digest.json"
 QUALITY_DIGEST="$CACHE_DIR/t0_quality_digest.json"
 QUALITY="$CACHE_DIR/t0_quality_gates.json"
 RECOMMENDATIONS="$CACHE_DIR/t0_recommendations.json"
 
 # Cache files for change detection
-LAST_HASH="$CACHE_DIR/.last_brief_hash"
 LAST_TAGS_HASH="$CACHE_DIR/.last_tags_hash"
 LAST_QUALITY_HASH="$CACHE_DIR/.last_quality_hash"
 LAST_RECOMMENDATIONS_HASH="$CACHE_DIR/.last_recommendations_hash"
@@ -30,8 +32,7 @@ LAST_RECOMMENDATIONS_HASH="$CACHE_DIR/.last_recommendations_hash"
 # Capture all output messages
 OUTPUT_MESSAGES=""
 
-# Initialize all change flags
-brief_changed=false
+# Initialize change flags (brief removed — terminal status is in t0_brief.json)
 tags_changed=false
 quality_changed=false
 recommendations_changed=false
@@ -46,31 +47,7 @@ add_message() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# Part 1: Check brief changes
-# ═══════════════════════════════════════════════════════════════
-
-# Check if brief exists
-if [[ ! -f "$BRIEF" ]]; then
-  # Intelligence missing - output warning but allow prompt
-  echo '{"decision": "allow", "additionalContext": "⚠️ VNX Intelligence not available - dispatcher not running"}'
-  exit 0
-fi
-
-# Check if brief changed
-current_hash=$(sha256sum "$BRIEF" | cut -d' ' -f1)
-
-if [[ -f "$LAST_HASH" ]]; then
-  last_hash=$(cat "$LAST_HASH")
-  if [[ "$current_hash" != "$last_hash" ]]; then
-    brief_changed=true
-  fi
-else
-  # First run - treat as changed
-  brief_changed=true
-fi
-
-# ═══════════════════════════════════════════════════════════════
-# Part 2: Check tags digest changes
+# Part 1: Check tags digest changes
 # ═══════════════════════════════════════════════════════════════
 
 if [[ -f "$TAGS_DIGEST" ]]; then
@@ -120,34 +97,9 @@ fi
 # ═══════════════════════════════════════════════════════════════
 
 # Nothing changed - output nothing special
-if [[ "$brief_changed" == false ]] && [[ "$tags_changed" == false ]] && [[ "$quality_changed" == false ]] && [[ "$recommendations_changed" == false ]]; then
+if [[ "$tags_changed" == false ]] && [[ "$quality_changed" == false ]] && [[ "$recommendations_changed" == false ]]; then
   echo '{"decision": "allow"}'
   exit 0
-fi
-
-# --- Brief Changed ---
-if [[ "$brief_changed" == true ]]; then
-  # Extract key metrics from brief
-  T1_STATUS=$(jq -r '.terminals.T1.status // "unknown"' "$BRIEF")
-  T1_GATE=$(jq -r '.tracks.A.current_gate // "unknown"' "$BRIEF")
-  T2_STATUS=$(jq -r '.terminals.T2.status // "unknown"' "$BRIEF")
-  T2_GATE=$(jq -r '.tracks.B.current_gate // "unknown"' "$BRIEF")
-  T3_STATUS=$(jq -r '.terminals.T3.status // "unknown"' "$BRIEF")
-  T3_GATE=$(jq -r '.tracks.C.current_gate // "unknown"' "$BRIEF")
-
-  PENDING=$(jq -r '.queues.pending // 0' "$BRIEF")
-  CONFLICTS=$(jq -r '.queues.conflicts // 0' "$BRIEF")
-
-  # Build status message
-  STATUS_MSG="📊 Intelligence Updated:\nT1=${T1_STATUS}@${T1_GATE} | T2=${T2_STATUS}@${T2_GATE} | T3=${T3_STATUS}@${T3_GATE}\nQueue=${PENDING} | Conflicts=${CONFLICTS}"
-
-  # Add next steps hint
-  STATUS_MSG="${STATUS_MSG}\n\nNext steps before creating dispatches:\n1. Check terminal readiness and gate positions\n2. Review active_work and blockers in t0_brief.json\n3. Verify no conflicts with existing dispatches"
-
-  add_message "$STATUS_MSG"
-
-  # Cache current hash
-  echo "$current_hash" > "$LAST_HASH"
 fi
 
 # --- Tags Digest Changed ---
