@@ -515,6 +515,10 @@ configure_terminal_mode() {
         esac
     fi
 
+    # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
+    if [[ "$requires_model" == "opus" ]]; then
+        requires_model="default"
+    fi
     # Step 3: Switch model if specified (only for providers that support /model)
     if [[ -n "$requires_model" ]] && [[ "$requires_model" != "" ]]; then
         if [[ "$provider" == "claude_code" || "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
