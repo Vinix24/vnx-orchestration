@@ -198,18 +198,19 @@ The governance system closes the loop between dispatch quality measurement and f
        |   - SPC alerts summary                                     |
        |                                                            |
        v                                                            |
-  5. LEARNING LOOP (daily 18:00)                                    |
-  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~                                   |
-  learning_loop.py + intelligence_daemon.py                          |
+  5. LEARNING LOOP (nightly, Phase 4 in consolidated pipeline)       |
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~      |
+  learning_loop.py (self-learning pipeline, PR-0)                    |
        |                                                            |
        +-- Pattern confidence adjustment                            |
-       |   - Used patterns: +10% (cap 2.0)                         |
+       |   - Adopted patterns: +10% (cap 2.0)                      |
        |   - Ignored patterns: -5% (floor 0.1)                     |
        |   - Success patterns: +15%                                 |
        |   - Failure patterns: -10%                                 |
+       |   - All changes logged to intelligence_usage.ndjson (G-L7) |
        |                                                            |
-       +-- Pattern archival (unused 30+ days)                       |
-       +-- Prevention rule generation (from tag combinations)       |
+       +-- Pattern archival queued to pending_archival.json (G-L4)  |
+       +-- Prevention rules queued to pending_rules.json (G-L1)     |
        +-- Cache invalidation and preloading                        |
        |                                                            |
        +-------> Feeds back to step 1 (next dispatch) ------------>+
@@ -459,19 +460,28 @@ Raw model comparison (Opus vs Sonnet) is misleading when models handle different
 
 ## Pipeline Integration
 
-### Nightly Pipeline (conversation_analyzer_nightly.sh)
+### Consolidated Nightly Pipeline (nightly_intelligence_pipeline.sh)
+
+The nightly pipeline was consolidated in PR-4 from two overlapping schedules into a single 11-phase pipeline:
 
 ```
 Phase 0:   DB schema migrations (quality_db_init.py)
-Phase 1:   Session parsing (conversation_analyzer.py)
-Phase 1.5: Session-dispatch linkage (link_sessions_dispatches.py)
-Phase 2:   T0 session brief (generate_t0_session_brief.py)
-Phase 2.5: Governance aggregation + SPC  <-- NEW
-Phase 3:   Suggested edits (generate_suggested_edits.py)
-Phase 4:   Email digest (send_digest_email.py)
+Phase 1a:  Code complexity analysis (code_quality_scanner.py)
+Phase 1b:  Extract patterns from code (code_snippet_extractor.py)
+Phase 1c:  Mine documentation (doc_section_extractor.py)
+Phase 2:   Session parsing (conversation_analyzer.py)
+Phase 3:   Session-dispatch linkage (link_sessions_dispatches.py)
+Phase 4:   Learning loop — confidence updates (learning_loop.py)
+Phase 5:   Mark stale edits (tag_intelligence.py stale)
+Phase 6:   T0 session brief (generate_t0_session_brief.py)
+Phase 7:   Governance aggregation + SPC (governance_aggregator.py --backfill)
+Phase 8:   Suggested edits (generate_suggested_edits.py)
+Phase 9:   3-section quality digest (build_t0_quality_digest.py)
+Phase 10:  24h-window recommendations (generate_t0_recommendations.py --lookback 1440)
+Phase 11:  Email digest — opt-in (send_digest_email.py)
 ```
 
-Phase 2.5 includes automatic CQS backfill for any dispatches that were completed before the governance system was installed.
+Each phase runs independently with health gates. Per-phase results are logged to `$VNX_STATE_DIR/nightly_pipeline_phases.ndjson`. Phase 7 includes automatic CQS backfill for any dispatches completed before the governance system was installed.
 
 ### Receipt Processing Pipeline
 

@@ -239,12 +239,126 @@ class T0IntelligenceGatherer:
         except Exception:
             return []
 
+    def _usage_log_path(self) -> Path:
+        """Return path to intelligence_usage.ndjson (canonical audit log)."""
+        from vnx_paths import ensure_env
+        state_dir = Path(ensure_env()["VNX_STATE_DIR"])
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir / "intelligence_usage.ndjson"
+
+    def record_pattern_offer(self, pattern_id: str, terminal: str, dispatch_id: str,
+                              file_path: str = "") -> None:
+        """Log a pattern offer event to intelligence_usage.ndjson (G-L7 audit trail).
+
+        Called when patterns are served to any terminal at dispatch time.
+        """
+        event = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "offer",
+            "pattern_id": pattern_id,
+            "terminal": terminal,
+            "dispatch_id": dispatch_id or "",
+            "file_path": file_path,
+        }
+        try:
+            with open(self._usage_log_path(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
+
+    def record_pattern_adoption(self, pattern_id: str, terminal: str, dispatch_id: str) -> None:
+        """Record that an agent adopted a pattern (edited a file the pattern references).
+
+        Increments pattern_usage.used_count and logs to intelligence_usage.ndjson.
+        """
+        event = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "adoption",
+            "pattern_id": pattern_id,
+            "terminal": terminal,
+            "dispatch_id": dispatch_id or "",
+        }
+        try:
+            with open(self._usage_log_path(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
+
+        if not self.quality_db:
+            return
+        now = datetime.now().isoformat()
+        try:
+            self.quality_db.execute(
+                "UPDATE pattern_usage SET used_count = used_count + 1, last_used = ?, "
+                "updated_at = ? WHERE pattern_hash = ?",
+                (now, now, pattern_id),
+            )
+            self.quality_db.commit()
+        except Exception:
+            pass
+
+    def record_adoption_from_receipt(self, dispatch_id: str, terminal: str,
+                                      report_path: str) -> Dict[str, Any]:
+        """Correlate a completed receipt's file changes with patterns offered for this dispatch.
+
+        Reads intelligence_usage.ndjson for offer events with this dispatch_id,
+        extracts file paths from the report, and records adoptions for matches.
+        """
+        usage_log = self._usage_log_path()
+        if not usage_log.exists():
+            return {"adoptions": 0, "checked": 0}
+
+        # Collect offered patterns for this dispatch
+        offered: Dict[str, str] = {}  # pattern_id -> file_path
+        try:
+            with open(usage_log, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("event_type") == "offer" and rec.get("dispatch_id") == dispatch_id:
+                        pid = rec.get("pattern_id", "")
+                        fp = rec.get("file_path", "")
+                        if pid:
+                            offered[pid] = fp
+        except OSError:
+            return {"adoptions": 0, "checked": 0}
+
+        if not offered:
+            return {"adoptions": 0, "checked": 0}
+
+        # Extract file paths mentioned in the report
+        report_files: set = set()
+        try:
+            text = Path(report_path).read_text(encoding="utf-8", errors="replace")
+            import re as _re
+            for match in _re.finditer(r'[\w./\-]+\.(?:py|sh|ts|js|md|yaml|yml|json|txt)', text):
+                report_files.add(match.group().lower())
+        except OSError:
+            pass
+
+        # Record adoption for patterns whose file_path appears in the report
+        adoptions = 0
+        for pattern_id, fp in offered.items():
+            fp_lower = fp.lower() if fp else ""
+            if fp_lower and any(fp_lower.endswith(rf) or rf.endswith(fp_lower.split("/")[-1])
+                                for rf in report_files):
+                self.record_pattern_adoption(pattern_id, terminal, dispatch_id)
+                adoptions += 1
+
+        return {"adoptions": adoptions, "checked": len(offered)}
+
     def gather_for_dispatch(
         self,
         task_description: str,
         terminal: str,
         agent: Optional[str] = None,
-        gate: Optional[str] = None
+        gate: Optional[str] = None,
+        dispatch_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Main intelligence gathering for T0 dispatch creation"""
 
@@ -277,12 +391,21 @@ class T0IntelligenceGatherer:
         tag_analysis = self.analyze_tags_for_task(extracted_tags, phase=gate, terminal=terminal)
         prevention_rules = self.query_prevention_rules(task_description, extracted_tags, agent=agent)
 
+        # Log offer events to intelligence_usage.ndjson for adoption tracking (G-L7)
+        if dispatch_id and suggested_patterns:
+            for p in suggested_patterns:
+                pid = p.get("pattern_hash", "")
+                if pid:
+                    self.record_pattern_offer(pid, terminal, dispatch_id,
+                                              file_path=str(p.get("file_path", "")))
+
         intelligence = {
             "agent_validated": True,
             "agent": agent,
             "terminal": terminal,
             "task": task_description,
             "timestamp": datetime.now().isoformat(),
+            "dispatch_id": dispatch_id or "",
             "task_paths": task_paths,
             "gate": gate,
 
@@ -1434,17 +1557,18 @@ def main():
         elif command == "gather":
             if len(argv) < 3:
                 if human:
-                    emit_human("Usage: gather_intelligence.py gather <task> <terminal> [agent] [gate] [--human]")
+                    emit_human("Usage: gather_intelligence.py gather <task> <terminal> [agent] [gate] [dispatch_id] [--human]")
                 else:
-                    emit_json({"error": "Missing required arguments", "usage": "gather <task> <terminal> [agent] [gate] [--human]"})
+                    emit_json({"error": "Missing required arguments", "usage": "gather <task> <terminal> [agent] [gate] [dispatch_id] [--human]"})
                 return EXIT_VALIDATION
 
             task = argv[1]
             terminal = argv[2]
             agent = argv[3] if len(argv) > 3 else None
             gate = argv[4] if len(argv) > 4 else None
+            dispatch_id_arg = argv[5] if len(argv) > 5 else None
 
-            result = gatherer.gather_for_dispatch(task, terminal, agent, gate)
+            result = gatherer.gather_for_dispatch(task, terminal, agent, gate, dispatch_id=dispatch_id_arg)
             if human:
                 emit_human(f"Dispatch blocked: {result.get('dispatch_blocked', False)}")
                 if result.get("error"):
@@ -1544,16 +1668,33 @@ def main():
                 emit_json({"task": task, "prevention_rules": rules})
             return EXIT_OK
 
+        elif command == "record-adoption":
+            # Called from receipt_processor_v4.sh after task_complete
+            # Usage: gather_intelligence.py record-adoption <dispatch_id> <terminal> <report_path>
+            if len(argv) < 4:
+                emit_json({"error": "Usage: record-adoption <dispatch_id> <terminal> <report_path>"})
+                return EXIT_VALIDATION
+            dispatch_id_arg = argv[1]
+            terminal_arg = argv[2]
+            report_path_arg = argv[3]
+            result = gatherer.record_adoption_from_receipt(dispatch_id_arg, terminal_arg, report_path_arg)
+            if human:
+                emit_human(f"Adoptions recorded: {result['adoptions']}/{result['checked']}")
+            else:
+                emit_json(result)
+            return EXIT_OK
+
         else:
             if human:
                 emit_human(f"Unknown command: {command}")
-                emit_human("Available commands: list-agents, validate, gather, patterns, keywords, tags, prevention")
+                emit_human("Available commands: list-agents, validate, gather, patterns, keywords, tags, prevention, record-adoption")
             else:
                 emit_json({
                     "error": f"Unknown command: {command}",
-                    "available_commands": ["list-agents", "validate", "gather", "patterns", "keywords", "tags", "prevention"],
+                    "available_commands": ["list-agents", "validate", "gather", "patterns", "keywords", "tags", "prevention", "record-adoption"],
                 })
             return EXIT_VALIDATION
+
     else:
         if gatherer.quality_db:
             try:
@@ -1581,7 +1722,7 @@ def main():
             if stats:
                 emit_human(f"Tag combinations: {stats.get('total_combinations', 0)}")
                 emit_human(f"Prevention rules: {stats.get('total_rules', 0)}")
-            emit_human("\nCommands: list-agents, validate, gather, patterns, keywords, tags, prevention")
+            emit_human("\nCommands: list-agents, validate, gather, patterns, keywords, tags, prevention, record-adoption")
         else:
             emit_json({
                 "version": "1.4.0",
@@ -1590,7 +1731,7 @@ def main():
                 "tag_engine_available": gatherer.tag_engine is not None,
                 "patterns_available": pattern_count,
                 "tag_statistics": stats or None,
-                "commands": ["list-agents", "validate", "gather", "patterns", "keywords", "tags", "prevention"],
+                "commands": ["list-agents", "validate", "gather", "patterns", "keywords", "tags", "prevention", "record-adoption"],
             })
         return EXIT_OK
 

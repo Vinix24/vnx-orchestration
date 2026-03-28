@@ -795,8 +795,8 @@ def main():
     parser.add_argument(
         '--lookback',
         type=int,
-        default=30,
-        help='Minutes to look back for receipts (default: 30)'
+        default=1440,
+        help='Minutes to look back for receipts (default: 1440 = 24h)'
     )
     parser.add_argument(
         '--watch',

@@ -36,8 +36,10 @@ VNX_BASE = Path(PATHS["VNX_HOME"])
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 DB_PATH = STATE_DIR / "quality_intelligence.db"
 
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-ANALYZER_VERSION = "1.0.0"
+CLAUDE_PROJECTS_DIR = Path(
+    os.environ.get("CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects"))
+)
+ANALYZER_VERSION = "1.1.0"
 
 # LLM strategy: auto | claude-only | ollama-only
 LLM_STRATEGY = os.environ.get("VNX_ANALYZER_LLM", "auto")
@@ -780,10 +782,16 @@ class ConversationAnalyzer:
             self.conn.close()
 
     def find_unanalyzed_sessions(self, project_filter: Optional[str] = None,
-                                  terminal_filter: Optional[str] = None) -> List[Path]:
+                                  terminal_filter: Optional[str] = None,
+                                  diagnostics: bool = False) -> List[Path]:
         if not CLAUDE_PROJECTS_DIR.exists():
             log("WARNING", f"Claude projects dir not found: {CLAUDE_PROJECTS_DIR}")
+            if diagnostics:
+                log("INFO", f"  Set CLAUDE_PROJECTS_DIR env var to override")
             return []
+
+        if diagnostics:
+            log("INFO", f"Session source: {CLAUDE_PROJECTS_DIR}")
 
         known_ids = set()
         if self.conn:
@@ -791,7 +799,11 @@ class ConversationAnalyzer:
             cur.execute("SELECT session_id FROM session_analytics")
             known_ids = {row[0] for row in cur.fetchall()}
 
+        if diagnostics:
+            log("INFO", f"Already imported: {len(known_ids)} sessions")
+
         candidates = []
+        project_counts: Dict[str, int] = {}
         for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
             if not project_dir.is_dir():
                 continue
@@ -804,11 +816,24 @@ class ConversationAnalyzer:
                 if terminal != terminal_filter:
                     continue
 
+            dir_candidates = []
             for jsonl_file in project_dir.glob("*.jsonl"):
                 session_id = jsonl_file.stem
                 if session_id in known_ids:
                     continue
-                candidates.append(jsonl_file)
+                dir_candidates.append(jsonl_file)
+
+            if dir_candidates:
+                project_counts[dir_name] = len(dir_candidates)
+                candidates.extend(dir_candidates)
+
+        if diagnostics and project_counts:
+            log("INFO", f"New sessions by project directory:")
+            for dir_name, count in sorted(project_counts.items(), key=lambda x: -x[1])[:15]:
+                terminal = self.parser.detect_terminal(dir_name)
+                log("INFO", f"  [{terminal:>9}] {count:>4} sessions  {dir_name}")
+            if len(project_counts) > 15:
+                log("INFO", f"  ... and {len(project_counts) - 15} more project directories")
 
         candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
         return candidates
@@ -941,7 +966,7 @@ class ConversationAnalyzer:
         run_date = datetime.now().strftime("%Y-%m-%d")
         stats = RunStats()
 
-        sessions = self.find_unanalyzed_sessions(project_filter, terminal_filter)
+        sessions = self.find_unanalyzed_sessions(project_filter, terminal_filter, diagnostics=dry_run)
         log("INFO", f"Found {len(sessions)} unanalyzed sessions")
 
         if not sessions:

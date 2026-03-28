@@ -993,6 +993,13 @@ conn.close()
     python3 "$SCRIPTS_DIR/cost_tracker.py" 2>/dev/null \
         || log "WARN" "Failed to update cost metrics (non-fatal)"
 
+    # H. Record pattern adoption signals for feedback loop (non-fatal, A-5)
+    if [ -n "$_rf_dispatch_id" ] && [ "$_rf_event_type" = "task_complete" ]; then
+        python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
+            "$_rf_dispatch_id" "${terminal:-unknown}" "$report_path" 2>/dev/null \
+            || log "DEBUG" "Pattern adoption recording skipped (non-fatal)"
+    fi
+
     return 0
 }
 
