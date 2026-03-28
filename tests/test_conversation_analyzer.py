@@ -81,6 +81,7 @@ def _create_schema(conn: sqlite3.Connection):
             duration_minutes REAL,
             has_error_recovery BOOLEAN DEFAULT FALSE,
             has_context_reset BOOLEAN DEFAULT FALSE,
+            context_reset_count INTEGER DEFAULT 0,
             has_large_refactor BOOLEAN DEFAULT FALSE,
             has_test_cycle BOOLEAN DEFAULT FALSE,
             primary_activity TEXT,
@@ -90,7 +91,8 @@ def _create_schema(conn: sqlite3.Connection):
             session_model TEXT DEFAULT 'unknown',
             file_size_bytes INTEGER,
             analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            analyzer_version TEXT DEFAULT '1.0.0'
+            analyzer_version TEXT DEFAULT '1.0.0',
+            dispatch_id TEXT
         );
         CREATE TABLE IF NOT EXISTS improvement_suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

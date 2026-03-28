@@ -66,6 +66,18 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [[ \"$PWD\" == */T0 ]]; then {{PROJECT_ROOT}}/scripts/userpromptsubmit_intelligence_inject_v5.sh; elif [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then {{PROJECT_ROOT}}/scripts/userpromptsubmit_worker_intelligence_inject.sh; else echo '{\"decision\": \"allow\"}'; fi",
+            "timeout": 8000
+          }
+        ]
+      }
     ]
   }
 }

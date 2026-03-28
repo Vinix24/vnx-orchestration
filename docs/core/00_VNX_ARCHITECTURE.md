@@ -1,11 +1,11 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-03-06
+**Last Updated**: 2026-03-28
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
-**Version**: 11.0.0
+**Version**: 12.0.0
 
 ---
 
@@ -95,6 +95,8 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 │  │  • Quality Advisory (File analysis)  │                       │
 │  │  • Supervisor (Health monitoring)    │                       │
 │  │  • Queue Popup Watcher (Dispatch UI) │                       │
+│  │  • Dashboard Server (serve_dashboard)│                       │
+│  │  • Nightly Intel Pipeline (02:00)    │                       │
 │  └──────────────────────────────────────┘                       │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -127,6 +129,37 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 - `idle`: Available, no current tasks
 - `offline`: Cannot determine status
 - `missing`: Terminal pane not found
+
+### Attention Model (`terminal_state.json`)
+
+Each terminal entry carries three attention fields computed by `canonical_state_views.py`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `needs_human` | bool | True when operator action is required |
+| `attention` | object or null | Details when `needs_human=true` |
+| `context_usage_pct` | int or null | Context window fill % (from session logs) |
+
+**`attention` object structure**:
+```json
+{
+  "reason": "T2 context window at 87% capacity",
+  "priority": "high",
+  "action": "rotate_context"
+}
+```
+
+**Attention triggers** (computed per terminal):
+- `stale_working` — terminal marked working but no receipt update in >180s
+- `context_pressure` — `context_usage_pct` > 80%
+- `blocked` — terminal status is blocked/error/timeout
+
+**`vnx jump` command** (`scripts/commands/jump.sh`):
+```bash
+vnx jump T2              # Switch tmux focus to T2
+vnx jump --attention     # Focus the highest-priority attention terminal
+```
+The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vnx jump`.
 
 ---
 
@@ -606,35 +639,79 @@ On `vnx start`, the system:
 
 ## Intelligence Systems
 
-### Pattern Matching Engine (PR #2 & PR #8)
+### Pattern Matching Engine
 
 **Integration Status**: ✅ FULLY OPERATIONAL
 
 **Pattern Database**:
-- 1,143 patterns from quality_intelligence.db
+- Patterns stored in `quality_intelligence.db` (`pattern_usage` table)
 - FTS5 full-text search for rapid querying
-- Pattern delivery to every dispatch (PR #8)
-- Usage tracking and confidence adjustment
+- Tag-based pairwise/triple combination matching (`tag_combinations` table)
+- Usage tracking with `used_count`, `ignored_count`, confidence scores
 
-**Intelligence Flow**:
+**Intelligence Flow** (with adoption tracking):
 1. Dispatcher calls `gather_intelligence.py` for every dispatch
 2. Extracts task description and technical keywords
-3. Queries top 5 relevant patterns from database
-4. Embeds patterns in quality_context
-5. Propagates through receipt processor to T0
+3. Queries top relevant patterns from database
+4. Calls `record_pattern_offer(pattern_id, terminal, dispatch_id)` → appends to `intelligence_usage.ndjson` (G-L7 audit)
+5. Patterns injected into terminal via intelligence hook
+6. On receipt processing: `record_adoption_from_receipt()` correlates receipt file changes with offered patterns → increments `pattern_usage.used_count`
+7. `ignored_count` increments when dispatch lifecycle closes without adoption
+
+**Adoption Tracking Files**:
+- `state/intelligence_usage.ndjson` — append-only audit log of offer/adoption events
 
 **Quality Context Structure**:
 ```json
 {
-  "intelligence_version": "1.4.0",
+  "intelligence_version": "2.0.0",
   "agent_validated": true,
   "patterns_available": true,
   "pattern_count": 5,
-  "offered_pattern_hashes": ["a1b2c3...", "d4e5f6...", "g7h8i9...", "j0k1l2...", "m3n4o5..."],
+  "offered_pattern_hashes": ["a1b2c3...", "d4e5f6..."],
   "tags_analyzed": true,
   "reports_mined": false
 }
 ```
+
+### Worker Intelligence Injection (`userpromptsubmit_worker_intelligence_inject.sh`)
+
+**Purpose**: Deliver task-relevant intelligence to T1-T3 workers on every prompt (PR-2).
+
+**Behavior**:
+- Reads the terminal's active dispatch to extract tags/scope
+- Queries `gather_intelligence.py` for relevant patterns (max 3) and prevention rules
+- Injects into prompt context via `UserPromptSubmit` hook
+- Strict token budget: <400 tokens per prompt
+- Degrades gracefully if no dispatch or empty intelligence (A-5)
+- Logs each injection event to `intelligence_usage.ndjson` with timestamp, terminal, dispatch_id, pattern_ids (G-L7)
+
+**Contrast with T0**: T0 injection (`userpromptsubmit_intelligence_inject_v5.sh`) focuses on recommendations and quality hotspots, not terminal status noise.
+
+### Quality Digest V3 (`build_t0_quality_digest.py`)
+
+**Format**: 3 structured sections, append-only NDJSON output to `state/` (G-L6).
+
+| Section | Content |
+|---------|---------|
+| Operational Defects | Top 5 actionable items with receipt/dispatch evidence |
+| Prompt/Config Tuning | Pattern adoption signals, CLAUDE.md patch suggestions |
+| Governance Health | Pending recommendation count, G-L1–G-L8 compliance |
+
+Each recommendation includes `evidence_ids` (receipt IDs, dispatch IDs, file paths) per G-L2.
+
+### Nightly Intelligence Pipeline (`nightly_intelligence_pipeline.sh`)
+
+Consolidates the former two overlapping schedules (18:00 hygiene + 02:00 analysis) into a single ordered pipeline:
+
+```
+02:00 — conversation_analyzer.py     (session analytics)
+     → tag_intelligence.py           (pairwise/triple tag combinations)
+     → build_t0_quality_digest.py    (3-section digest → state/ NDJSON)
+     → generate_t0_recommendations.py (structured recommendations, cap 5)
+```
+
+Each phase has health checks; failure in one phase is recorded without suppressing later phases.
 
 ### T0 Intelligence Aggregator
 
@@ -716,7 +793,7 @@ project-root/
 │   ├── scripts/                     # Active orchestration scripts
 │   │   ├── smart_tap_v7_json_translator.sh
 │   │   ├── dispatcher_v8_minimal.sh    # V8 native skills dispatcher
-│   │   ├── receipt_processor_v4.sh
+│   │   ├── receipt_processor_v4.sh     # + adoption tracking (PR-0)
 │   │   ├── receipt_notifier.sh         # Legacy/fallback
 │   │   ├── report_parser.py
 │   │   ├── append_receipt.py           # Receipt + quality sidecar writer
@@ -726,10 +803,29 @@ project-root/
 │   │   ├── queue_popup_watcher.sh
 │   │   ├── vnx_supervisor_simple.sh
 │   │   ├── pr_queue_manager.py         # PR queue + staging workflow
+│   │   ├── gather_intelligence.py      # + record_pattern_offer/adoption (PR-0)
+│   │   ├── learning_loop.py            # + adoption signal reads, pending_rules queue (PR-0)
+│   │   ├── tag_intelligence.py         # Pairwise/triple tag subsets (PR-3)
+│   │   ├── build_t0_quality_digest.py  # 3-section NDJSON digest (PR-4)
+│   │   ├── conversation_analyzer.py    # Session analytics pipeline (PR-1)
+│   │   ├── check_intelligence_health.py # Includes session count (PR-1)
+│   │   ├── nightly_intelligence_pipeline.sh  # Consolidated 4-phase nightly (PR-4)
+│   │   ├── userpromptsubmit_intelligence_inject_v5.sh   # T0 injection
+│   │   ├── userpromptsubmit_worker_intelligence_inject.sh # T1-T3 injection (PR-2)
+│   │   ├── commands/                   # Extracted CLI command files
+│   │   │   ├── jump.sh                 # vnx jump <terminal> | --attention (dashboard)
+│   │   │   ├── start.sh
+│   │   │   ├── stop.sh
+│   │   │   ├── doctor.sh
+│   │   │   ├── new_worktree.sh
+│   │   │   ├── merge_preflight.sh
+│   │   │   ├── finish_worktree.sh
+│   │   │   ├── recover.sh
+│   │   │   └── regen_settings.sh
 │   │   └── lib/                        # Shared libraries
 │   │       ├── vnx_paths.sh            # Path resolver (cross-project guard)
 │   │       ├── process_lifecycle.sh    # PID-safe process control
-│   │       └── canonical_state_views.py
+│   │       └── canonical_state_views.py # Sole state projection layer (A-2)
 │   │
 │   ├── skills/                      # 18 native skills
 │   │   ├── skills.yaml              # Skill registry
@@ -744,9 +840,14 @@ project-root/
 │   ├── state/                       # State files
 │   │   ├── t0_receipts.ndjson       # Production receipts
 │   │   ├── t0_brief.json            # T0 decision snapshot
-│   │   ├── terminal_state.json      # Terminal status (reconciled)
+│   │   ├── terminal_state.json      # Terminal status + attention model
 │   │   ├── pr_queue_state.yaml      # PR queue tracking
 │   │   ├── quality_intelligence.db  # Quality patterns DB
+│   │   ├── intelligence_usage.ndjson # Append-only pattern offer/adoption audit (G-L7)
+│   │   ├── t0_quality_digest.ndjson # 3-section quality digest, append-only (G-L6)
+│   │   ├── t0_recommendations.json  # Structured recommendations (max 5 pending — G-L8)
+│   │   ├── pending_rules.json       # Pending constraint updates awaiting approval (G-L1)
+│   │   ├── intelligence_health.json # Intelligence pipeline health check
 │   │   ├── open_items.json          # Open items registry
 │   │   └── dashboard_status.json    # Real-time metrics
 │   │
@@ -760,6 +861,10 @@ project-root/
 │   ├── logs/                        # System logs
 │   ├── pids/                        # Process PID files
 │   └── locks/                       # Singleton locks
+│
+├── dashboard/                       # Operator dashboard (git-tracked)
+│   ├── index.html                   # Vanilla HTML/JS UI (no build toolchain)
+│   └── serve_dashboard.py           # Python stdlib HTTP server (port 4173)
 │
 ├── .vnx/                            # VNX config (gitignored)
 │   └── config.yml                   # Project-level VNX config
@@ -789,17 +894,19 @@ project-root/
 ### Active Components ✅
 - Smart Tap V7 (JSON/Markdown auto-translation)
 - Dispatcher V8 Minimal (Native skills, multi-provider, 87% token reduction)
-- Receipt Processor V4 (Report → receipt → T0 delivery)
+- Receipt Processor V4 (Report → receipt → T0 delivery, adoption tracking)
 - Heartbeat ACK Monitor (ACK processing + timeout tracking)
 - Queue Popup Watcher (dispatch review UI)
 - Dashboard Generator (Real-time metrics → `dashboard_status.json`)
 - Unified State Manager V2 (state consolidation, 5s cycle)
 - Intelligence Daemon (real-time intelligence updates)
-- Recommendations Engine (T0 dispatch suggestions, 30s cycle)
+- Recommendations Engine (T0 dispatch suggestions, 30s cycle, max 5 pending — G-L8)
 - VNX Supervisor (Health monitoring, 10s checks, auto-restart)
 - Quality Advisory Pipeline (file size warnings on every completion)
 - PR Queue Manager (parallel PRs, staging → promote workflow)
-- Unified Dashboard (Next.js control plane, 8 pages)
+- Operator Dashboard (vanilla HTML/JS + `serve_dashboard.py`, attention model, jump command)
+- Worker Intelligence Injection (`userpromptsubmit_worker_intelligence_inject.sh` — T1-T3)
+- Nightly Intelligence Pipeline (`nightly_intelligence_pipeline.sh`, 02:00, 4-phase ordered)
 
 ### Deprecated Components (not started by supervisor)
 - ACK Dispatcher V2 (`ack_dispatcher_v2.sh`) — replaced by `heartbeat_ack_monitor.py`
@@ -952,10 +1059,29 @@ python .claude/vnx-system/scripts/pr_queue_manager.py promote <dispatch-id>
 - **Token Savings**: 80-95% reduction
 - **Update Cycle**: 5 seconds
 
-### 4. Quality Intelligence (Phase 2+)
+### 4. Quality Intelligence
 - **Database**: `state/quality_intelligence.db`
 - **Metrics**: Task success rates, error patterns, performance trends
 - **Learning**: Pattern extraction from receipts and reports
+- **Tables**: `pattern_usage`, `session_analytics`, `prevention_rules`, `tag_combinations`
+
+### 5. Adoption Tracking
+- **Offer log**: `record_pattern_offer()` → `intelligence_usage.ndjson`
+- **Adoption detection**: `record_adoption_from_receipt()` correlates receipt file changes with offered patterns
+- **Confidence updates**: `used_count`/`ignored_count` drive per-pattern confidence scores
+- **Governance**: No auto-activation — all generated rules go to `pending_rules.json` (G-L1)
+
+### 6. Worker Intelligence Injection (T1-T3)
+- **Hook**: `userpromptsubmit_worker_intelligence_inject.sh` (registered via `vnx regen-settings --merge`)
+- **Content**: max 3 patterns + relevant prevention rules relevant to active dispatch tags
+- **Budget**: <400 tokens per prompt
+- **Audit**: Every injection logged to `intelligence_usage.ndjson` (G-L7)
+
+### 7. Nightly Intelligence Pipeline
+- **Script**: `nightly_intelligence_pipeline.sh`
+- **Schedule**: 02:00 daily (replaces two overlapping schedules)
+- **Phases**: session analysis → tag intelligence → quality digest → recommendations
+- **Output**: Append-only NDJSON to `state/` (G-L6)
 
 ---
 
@@ -1009,42 +1135,52 @@ Each skill has a `SKILL.md` with YAML frontmatter (required for Codex CLI discov
 
 ### Architecture
 
-The VNX dashboard is a unified Next.js 15 control plane combining system monitoring and token analytics.
+The VNX operator dashboard is a read-only projection over `.vnx-data/state/`. No React, no build toolchain.
 
 **Stack**:
-- Frontend: Next.js 15 App Router (`dashboard/token-dashboard/`, port 3100)
-- Backend: Python FastAPI (`dashboard/serve_dashboard.py`, port 4173)
-- Data: State files in `.vnx-data/state/` (proxied via Next.js rewrites)
-- Polling: 7-second auto-refresh via `usePolling` hook
+- Frontend: `dashboard/index.html` — vanilla HTML/JS with Alpine.js/htmx (no build step)
+- Backend: `dashboard/serve_dashboard.py` — Python stdlib HTTP server (port 4173)
+- State source: `.vnx-data/state/` files via `canonical_state_views.py` (A-2)
+- Polling: 5-second auto-refresh
 
-### Pages
+### Design Constraints (Hard Rules)
+- Dashboard is **read-only** — it never creates, promotes, or modifies dispatches (G-D1, G-D2)
+- `vnx jump` is the only write action (tmux focus switch, fully reversible) (G-D3)
+- No AI assistant that executes VNX commands (G-D4)
+- No new build toolchain (A-4)
+- `serve_dashboard.py` is the only HTTP server (A-5)
+- `canonical_state_views.py` is the sole state projection layer (A-2)
 
-| Page | Route | Data Source | Features |
-|------|-------|-------------|----------|
-| Overview | `/` | `dashboard_status.json` + token stats | Health banner, 4 KPI cards, recommendations, charts |
-| System | `/system` | `dashboard_status.json` | Process list with restart buttons, queue stats, gates |
-| Terminals | `/terminals` | `terminal_state.json` + `dashboard_status.json` | Status cards, unlock buttons, token comparison |
-| Open Items | `/open-items` | `open_items_digest.json` | Severity filters, text search, recent closures |
-| PR Queue | `/pr-queue` | `pr_queue_state.json` | Progress bar, PR table with status pills |
-| Token Analysis | `/tokens` | Token stats API | Context/call trends, cache efficiency |
-| Models | `/models` | Token stats API | Model distribution, performance comparison |
-| Usage & Costs | `/usage` | Token stats API | Cost estimation per model and terminal |
+### UI Components
 
-### Key Features
-- **Process Management**: Restart any supervised process from the System page (POST `/api/restart-process`)
-- **Terminal Unlock**: Unlock stuck terminals from Terminals page (POST `/api/unlock-terminal`)
-- **T0 Status**: Shows "In control" (T0 is always the orchestrator, never idle/blocked)
-- **Terminal Status Normalization**: Maps raw statuses (working/active/busy/claimed → working, blocked/error/failed/timeout → blocked)
-- **Glassmorphism Design**: Dark theme with VNX brand colors (orange, blue, gold)
+| Component | Description |
+|-----------|-------------|
+| **Attention bar** | Top banner — highlights terminals with `needs_human=true` with priority and reason |
+| **Terminal cards** | Status, `context_usage_pct` progress bar, staleness indicator, Jump button |
+| **Dispatch Kanban** | Read-only view: staging / queue / active / completed columns |
+| **Event timeline** | Chronological list from receipts + dispatches with filter controls |
+| **Health indicator** | System-wide health: process count, queue depth, supervisor status |
+| **Confirmation gates** | Dialogs on dangerous actions (restart process, unlock terminal) |
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Serve `dashboard/index.html` |
+| GET | `/api/events` | Event timeline from receipts + dispatch activity |
+| GET | `/api/dispatches` | Dispatch Kanban state (staging/queue/active/completed) |
+| GET | `/api/token-stats` | Token usage summary per terminal |
+| GET | `/api/token-stats/sessions` | Per-session token breakdown |
+| POST | `/api/jump/{terminal}` | Switch tmux focus to terminal (only write action) |
+| POST | `/api/restart-process` | Restart a supervised process (confirmation required) |
+| POST | `/api/unlock-terminal` | Clear terminal lock (confirmation required) |
 
 ### Startup
 
 ```bash
-# Backend (port 4173)
+# Start dashboard server (port 4173)
 python dashboard/serve_dashboard.py &
-
-# Frontend (port 3100)
-cd dashboard/token-dashboard && npm run dev
+# Open http://localhost:4173
 ```
 
 ---
@@ -1061,13 +1197,16 @@ vnx stop              # Stop all orchestration processes
 vnx doctor            # Health check (tools, dirs, templates, path hygiene)
 vnx update            # Pull latest VNX from GitHub remote (.vnx-origin)
 vnx cost-report       # Token usage and cost metrics
+vnx jump <terminal>   # Switch tmux focus to terminal (or --attention for highest-priority)
+vnx analyze-sessions  # Populate session analytics from Claude Code JSONL logs
+vnx analyze-sessions --dry-run  # Diagnose session discovery without writing
 ```
 
 ### Command Loader Architecture
 
 `bin/vnx` acts as a thin dispatcher. New commands are loaded from `scripts/commands/<name>.sh` via the `_load_command()` function, which sources the file and calls `cmd_<name>()`. This keeps the main script stable while allowing commands to be added independently.
 
-Extracted commands: `start`, `stop`, `doctor`, `regen-settings`, `new-worktree`, `merge-preflight`, `finish-worktree`, `recover`, `registry`, `status`, `ps`, `cleanup`, `restart`.
+Extracted commands: `start`, `stop`, `doctor`, `regen-settings`, `new-worktree`, `merge-preflight`, `finish-worktree`, `recover`, `registry`, `status`, `ps`, `cleanup`, `restart`, `jump`.
 
 ### Project Configuration
 
@@ -1126,11 +1265,11 @@ Creates a complete LeadFlow SaaS project with:
 
 ---
 
-**Document Status**: Production Active (V11.0 Unified Dashboard + Process Alignment)
-**Last Major Update**: 2026-03-06 (Unified Dashboard, deprecated process cleanup, supervisor alignment)
+**Document Status**: Production Active (V12.0 — Dashboard Attention Model + Self-Learning Pipeline)
+**Last Major Update**: 2026-03-28 (Attention model, jump command, worker intelligence injection, adoption tracking, nightly pipeline, 3-section quality digest)
 **Dispatcher Version**: V8.2 Minimal (Native Skills + Multi-Provider + Expected Outputs)
 **Token Reduction**: 87% (200 vs 1500 tokens per dispatch)
-**Intelligence Version**: v1.2.0 (Open Items + Staging)
-**Dashboard**: Next.js 15 Unified Control Plane (8 pages, 7s polling)
-**Governance Model**: Deliverable-based (T0 sole authority, evidence tracking, no auto-completion)
+**Intelligence Version**: v2.0.0 (Adoption tracking, worker injection, pairwise tag matching, 3-section digest)
+**Dashboard**: Vanilla HTML/JS + Python HTTP server (port 4173, read-only, attention model)
+**Governance Model**: Deliverable-based (T0 sole authority, evidence tracking, no auto-completion, G-L1–G-L8 enforced)
 **Maintainer**: T-MANAGER (VNX Orchestration Expert)

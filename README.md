@@ -119,9 +119,13 @@ cd /path/to/your/project
 | `vnx doctor` | Validate setup and dependencies |
 | `vnx smoke` | Run pipeline smoke test |
 | `vnx cost-report` | API spend per agent and task |
+| `vnx jump <T0\|T1\|T2\|T3>` | Switch tmux focus to terminal |
+| `vnx jump --attention` | Focus the terminal that needs human attention most |
 | `vnx suggest review` | View AI-generated tuning suggestions |
 | `vnx suggest accept <ids>` | Approve specific suggestions |
 | `vnx suggest apply` | Apply approved tuning edits |
+| `vnx analyze-sessions` | Populate session analytics from Claude Code logs |
+| `vnx analyze-sessions --dry-run` | Diagnose session discovery without writing to DB |
 | `vnx worktree create <name>` | Isolated feature branch worktree |
 | `vnx worktree list` | List active worktrees |
 | `vnx update` | Pull latest VNX version |
@@ -166,10 +170,12 @@ your-project/
 │   ├── ledger/        # Receipt processor
 │   └── skills/        # Skill templates
 ├── .vnx-data/         # State (git-ignored)
-│   ├── ledger.ndjson  # Append-only receipt ledger
-│   ├── dispatch_queue.json
-│   └── profiles/      # Provider configurations
-├── unified_reports/   # Agent reports (git-tracked)
+│   ├── state/         # t0_receipts.ndjson, terminal_state.json, intelligence_usage.ndjson
+│   ├── dispatches/    # staging/ → queue/ → active/ → completed/
+│   └── unified_reports/ # Agent markdown reports
+├── dashboard/         # Operator dashboard (git-tracked)
+│   ├── index.html     # Vanilla HTML/JS UI (no build step)
+│   └── serve_dashboard.py # Python HTTP server (port 4173)
 └── .claude/           # Claude Code config + skills
 ```
 

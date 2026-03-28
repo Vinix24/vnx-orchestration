@@ -1,9 +1,9 @@
-# VNX Tag Taxonomy v1.0
-**Last Updated**: 2026-02-05
+# VNX Tag Taxonomy v2.0
+**Last Updated**: 2026-03-28
 **Owner**: T-MANAGER
 
 **Status**: Active
-**Date**: 2026-01-19
+**Date**: 2026-03-28
 **Purpose**: Standardized tag vocabulary for tag intelligence system
 
 ## Overview
@@ -117,12 +117,28 @@ recommendation: Add transaction isolation, implement row-level locking
 
 When a tag combination appears **2+ times**, the system generates a prevention rule.
 
+### Pairwise & Triple Subsets (v2.0)
+
+Tag combinations are decomposed into **pairwise and triple** subsets before storage and matching. Previously, full n-tuples of 8-12 tags produced nearly unique combinations that never matched. Now:
+
+```
+Input: ["implementation-phase", "sse-streaming", "memory-problem", "high-priority"]
+Output subsets:
+  Pairs:   (implementation-phase, sse-streaming), (implementation-phase, memory-problem), ...
+  Triples: (implementation-phase, sse-streaming, memory-problem), ...
+```
+
+This enables actual pattern detection — pairs like `(sse-streaming, memory-problem)` recur across multiple dispatches and generate meaningful prevention rules.
+
+**Hierarchical matching**: If a pair matches, the system checks whether any triple containing those tags also matches, providing more specific recommendations when available.
+
 ### Rule Components
-- **Tag Combination**: Sorted tuple of normalized tags
+- **Tag Combination**: Sorted pairwise or triple tuple of normalized tags
 - **Rule Type**: Classified based on tag content (critical-prevention, validation-check, etc.)
 - **Description**: Human-readable pattern description
 - **Recommendation**: Actionable steps to prevent recurrence
 - **Confidence**: 0.0-1.0 based on occurrence count (max at 10 occurrences)
+- **Status**: Rules are queued in `pending_rules.json` for operator review (G-L1: never auto-activated)
 
 ### Rule Types
 | Type | Triggered By | Purpose |
@@ -238,15 +254,34 @@ CREATE TABLE prevention_rules (
 4. **Consistent Phrasing**: Use verb-noun format for action tags
 5. **Minimal Set**: Use 2-4 tags per issue for optimal pattern matching
 
-## Future Enhancements
+## Recommendation Manager
 
-- [ ] Auto-suggest tags based on task description (PR #4)
-- [ ] Tag synonyms and semantic matching (PR #5)
-- [ ] Tag confidence scoring based on accuracy (PR #6)
-- [ ] Tag hierarchy for broader pattern matching (PR #7)
+The `RecommendationManager` (in `tag_intelligence.py`) manages structured recommendations derived from tag patterns:
+
+### Recommendation Schema
+```json
+{
+  "type": "claude_md_patch|prevention_rule|routing_hint",
+  "target": "file_path_or_component",
+  "symptom": "detected_issue",
+  "evidence_ids": ["dispatch_1", "receipt_2", "OI-042"],
+  "confidence": 0.75,
+  "created_at": "2026-03-28T14:00:00Z",
+  "id": "sha1_hash_12chars",
+  "status": "pending|superseded|accepted"
+}
+```
+
+### Governance Rules
+- **G-L1**: Prevention rules are never auto-activated — queued in `pending_rules.json`
+- **G-L2**: Evidence trail required — `ValueError` if `evidence_ids` is empty
+- **G-L8**: Maximum 5 active pending recommendations. Excess supersedes lowest-confidence
+- Stale pending edits (>7 days) are automatically flagged for operator review
+- Duplicate recommendations for the same `target + symptom` are merged or superseded
 
 ## References
 
-- Implementation: `.claude/vnx-system/scripts/tag_intelligence.py`
-- Tests: `.claude/vnx-system/tests/test_tag_intelligence.py`
-- Integration: `.claude/vnx-system/scripts/gather_intelligence.py`
+- Tag Intelligence Engine: `scripts/tag_intelligence.py`
+- Recommendation Manager: `scripts/tag_intelligence.py` (RecommendationManager class)
+- Tests: `tests/test_tag_intelligence.py`
+- Integration: `scripts/gather_intelligence.py`

@@ -1,10 +1,10 @@
 # VNX Intelligence System - Technical Reference
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-28
 **Owner**: T-MANAGER
 **Purpose**: Documentation for VNX Intelligence System - Technical Reference.
 
-**Version**: 4.0.0
-**Date**: 2026-03-07
+**Version**: 5.0.0
+**Date**: 2026-03-28
 **Status**: Active
 **Maintainer**: T-MANAGER
 
@@ -663,13 +663,15 @@ python3 scripts/gather_intelligence.py gather \
 ## Tag Intelligence
 
 ### Purpose
-Extracts specific, compound tags from task descriptions for precise pattern matching and prevention rule targeting.
+Extracts specific, compound tags from task descriptions for precise pattern matching and prevention rule targeting. Generates prevention rules from **pairwise and triple** tag subsets (not full n-tuples) for meaningful pattern matching.
 
 ### Implementation
 
-**Version**: 1.0 (Enhanced 2026-01-26)
-**File**: `scripts/gather_intelligence.py` (lines 448-597)
-**Tag Count**: 50+ specific tags across 12 categories
+**Version**: 2.0 (PR-3, Self-Learning Pipeline)
+**Tag Extraction**: `scripts/gather_intelligence.py` (lines 448-597)
+**Tag Combinations**: `scripts/tag_intelligence.py` (943 lines)
+**Recommendation Manager**: `scripts/tag_intelligence.py` (RecommendationManager class)
+**Tag Count**: 50+ specific tags across 12 categories + 23 standardized compound tags
 
 ### Tag Categories & Patterns
 
@@ -750,6 +752,67 @@ def extract_specific_tags(task_description: str) -> List[str]:
     return list(set(tags))  # Remove duplicates
 ```
 
+### Pairwise & Triple Subset Generation (PR-3)
+
+Previously, tag combinations stored full n-tuples (8-12 tags), making each combination nearly unique and preventing meaningful pattern matching. Now `tag_intelligence.py` decomposes into pairwise and triple subsets:
+
+```python
+@staticmethod
+def generate_tag_subsets(tag_tuple: Tuple[str, ...]) -> List[Tuple[str, ...]]:
+    """Decompose n-tuples into pairs & triples for pattern matching."""
+    # Single/pair: passthrough
+    # Triple+: generate pairs and triples only (not full n-tuples)
+    # Example: (a,b,c,d) → [(a,b), (a,c), (a,d), (b,c), (b,d), (c,d),
+    #                        (a,b,c), (a,b,d), (a,c,d), (b,c,d)]
+```
+
+**Hierarchical matching**: If a pair matches, check if any triple containing those tags also matches for more specific rules.
+
+### Prevention Rule Lifecycle
+
+```
+1. Tag subsets generated from dispatch tags (pairs + triples)
+2. Occurrence count incremented in tag_combinations table
+3. At 2+ occurrences: prevention rule generated
+4. Rule confidence: min(occurrence_count / 10.0, 1.0)
+5. Rules queued in pending_rules.json (G-L1: never auto-activated)
+6. Operator reviews and accepts/rejects
+```
+
+### Recommendation Manager
+
+The `RecommendationManager` class (`tag_intelligence.py`) manages structured recommendations with evidence trails:
+
+```python
+class RecommendationManager:
+    MAX_PENDING_RECOMMENDATIONS = 5  # G-L8 cap
+
+    def add_recommendation(self, rec_type: str, target: str, symptom: str,
+                         evidence_ids: List[str], confidence: float) -> Dict
+    def mark_stale_pending_edits(self) -> List[Dict]  # >7 day old edits
+    def get_pending_count(self) -> int
+    def get_pending_recommendations(self) -> List[Dict]
+```
+
+**Recommendation Schema** (G-L2: evidence trail required):
+```json
+{
+  "type": "claude_md_patch|prevention_rule|routing_hint",
+  "target": "file_path_or_component",
+  "symptom": "detected_issue",
+  "evidence_ids": ["dispatch_1", "receipt_2", "OI-042"],
+  "confidence": 0.75,
+  "created_at": "2026-03-28T14:00:00Z",
+  "id": "sha1_hash_12chars",
+  "status": "pending|superseded|accepted"
+}
+```
+
+**Governance**:
+- **G-L2**: `evidence_ids` required — `ValueError` raised if missing
+- **G-L8**: Max 5 active pending recommendations. When cap is reached, lowest-confidence pending recommendation is superseded
+- Stale edits (>7 days) are marked for operator review
+
 ### Hierarchical Tagging
 
 Tags follow a hierarchical structure for better organization:
@@ -807,43 +870,49 @@ python3 scripts/gather_intelligence.py gather \
 
 ---
 
-## Learning Loop
+## Usage Signal Pipeline
 
 ### Purpose
-Implements feedback mechanism that tracks pattern usage, adjusts confidence scores based on real-world effectiveness, and optimizes query performance through intelligent caching.
+Tracks when injected intelligence patterns are offered to terminals and whether they are adopted, closing the feedback loop so confidence scores change based on real-world outcomes.
 
 ### Implementation
 
-**Version**: 1.0 (PR #7)
-**File**: `scripts/learning_loop.py` (342 lines)
-**Integration**: `intelligence_daemon.py` (daily 18:00 execution)
+**Version**: 2.0 (PR-0, Self-Learning Pipeline)
+**Files**: `scripts/gather_intelligence.py` (offer/adoption tracking), `scripts/learning_loop.py` (confidence updates)
+**Audit Log**: `$VNX_STATE_DIR/intelligence_usage.ndjson` (append-only, G-L7)
 
-### Key Features
+### Offer → Adoption → Confidence Cycle
 
-#### 1. Usage Tracking
-- Monitors which patterns are used vs ignored
-- Tracks success/failure rates
-- Records usage frequency and timing
-- Maintains usage history in SQLite
+```
+1. Pattern Offered      gather_intelligence.py → record_pattern_offer()
+   (logged to NDJSON)   → intelligence_usage.ndjson {event_type: "offer"}
 
-#### 2. Confidence Adjustment
-- **Used Patterns**: +10% confidence per usage (cap at 2.0)
-- **Ignored Patterns**: -5% confidence per ignore (floor at 0.1)
-- **Failure Patterns**: Extract and learn from errors
-- **Dynamic Scoring**: Adjusts based on real-world effectiveness
+2. Dispatch Executes    Terminal works on task with injected patterns
 
-#### 3. Pattern Archival
-- Archives patterns unused for 30+ days
-- Preserves pattern history for analysis
-- Reduces database size and query overhead
-- Maintains archived patterns in JSON format at `.claude/vnx-system/state/archive/patterns/`
+3. Receipt Arrives      receipt_processor_v4.sh → record_adoption_from_receipt()
+   (correlation)        Compares receipt file changes with offered patterns
 
-#### 4. Learning Reports
-- Daily generation at 18:00
-- Top/bottom performing patterns
-- Confidence adjustment metrics
-- Prevention rule generation stats
-- Saved to `.claude/vnx-system/state/learning_report_*.json`
+4. Adoption Recorded    Matching file changes → record_pattern_adoption()
+   (logged to NDJSON)   → intelligence_usage.ndjson {event_type: "adoption"}
+
+5. Confidence Updated   learning_loop.py → adjust_confidence()
+   (logged to NDJSON)   → intelligence_usage.ndjson {event_type: "confidence_change"}
+```
+
+### Key Functions
+
+```python
+def record_pattern_offer(self, pattern_id: str, terminal: str, dispatch_id: str,
+                          file_path: str = "") -> None:
+    """Log a pattern offer event to intelligence_usage.ndjson (G-L7 audit trail)."""
+
+def record_pattern_adoption(self, pattern_id: str, terminal: str, dispatch_id: str) -> None:
+    """Record that an agent adopted a pattern (increments pattern_usage.used_count)."""
+
+def record_adoption_from_receipt(self, dispatch_id: str, terminal: str,
+                                 report_path: str) -> Dict[str, Any]:
+    """Correlate completed receipt's file changes with patterns offered for dispatch."""
+```
 
 ### Database Schema
 
@@ -857,6 +926,7 @@ CREATE TABLE pattern_usage (
     success_count INTEGER DEFAULT 0,
     failure_count INTEGER DEFAULT 0,
     last_used TIMESTAMP,
+    last_offered TIMESTAMP,
     confidence REAL DEFAULT 1.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -867,69 +937,125 @@ CREATE TABLE pattern_usage (
 
 ```python
 def adjust_confidence(pattern_id: str, outcome: str) -> float:
-    """Adjust pattern confidence based on outcome."""
     current = get_confidence(pattern_id)
 
     if outcome == "used":
-        # 10% boost, cap at 2.0
-        new_confidence = min(current * 1.10, 2.0)
+        new_confidence = min(current * 1.10, 2.0)   # +10%, cap 2.0
     elif outcome == "ignored":
-        # 5% decay, floor at 0.1
-        new_confidence = max(current * 0.95, 0.1)
+        new_confidence = max(current * 0.95, 0.1)   # -5%, floor 0.1
     elif outcome == "success":
-        # 15% boost for successful resolution
-        new_confidence = min(current * 1.15, 2.0)
+        new_confidence = min(current * 1.15, 2.0)   # +15%
     elif outcome == "failure":
-        # 10% decay for failed application
-        new_confidence = max(current * 0.90, 0.1)
+        new_confidence = max(current * 0.90, 0.1)   # -10%
 
+    # All changes logged to intelligence_usage.ndjson (G-L7)
     return new_confidence
+```
+
+### Governance Enforcement
+
+- **G-L1**: `update_terminal_constraints()` writes to `pending_rules.json`, never directly to active rules
+- **G-L4**: `archive_unused_patterns()` queues to `pending_archival.json` for operator confirmation, never auto-archives
+- **G-L7**: Every offer, adoption, and confidence change is logged with timestamp, source, and old/new value
+
+### Audit Log Format (intelligence_usage.ndjson)
+
+```json
+{"timestamp": "2026-03-28T14:30:00Z", "event_type": "offer", "pattern_id": "abc123", "terminal": "T1", "dispatch_id": "20260328-impl-A"}
+{"timestamp": "2026-03-28T15:00:00Z", "event_type": "adoption", "pattern_id": "abc123", "terminal": "T1", "dispatch_id": "20260328-impl-A"}
+{"timestamp": "2026-03-28T15:01:00Z", "event_type": "confidence_change", "pattern_id": "abc123", "old_value": 1.0, "new_value": 1.1, "source": "adoption_boost"}
+```
+
+### Configuration
+
+```python
+BOOST_RATE = 1.10       # 10% per adoption
+DECAY_RATE = 0.95       # 5% daily for unused
+ARCHIVE_THRESHOLD = 30  # days (queued, not auto-archived per G-L4)
+CONFIDENCE_CAP = 2.0
+CONFIDENCE_FLOOR = 0.1
 ```
 
 ### Operations
 
 ```bash
 # Manual learning cycle
-cd .claude/vnx-system/scripts
-python3 learning_loop.py run
+python3 scripts/learning_loop.py run
 
-# Check status
-python3 learning_loop.py status
+# Check usage stats
+sqlite3 $VNX_STATE_DIR/quality_intelligence.db \
+  "SELECT pattern_id, used_count, ignored_count, confidence FROM pattern_usage WHERE used_count > 0 ORDER BY confidence DESC LIMIT 10"
 
-# View last report
-cat .claude/vnx-system/state/learning_report_$(date +%Y%m%d).json | jq .
+# View pending archival queue (G-L4)
+cat $VNX_STATE_DIR/pending_archival.json | jq '.patterns | length'
+
+# View pending rules queue (G-L1)
+cat $VNX_STATE_DIR/pending_rules.json | jq '.rules | length'
 ```
 
-### Learning Metrics
+---
 
-#### Performance Targets
-- Query latency: <100ms (warm cache)
-- Cache hit rate: >80% (hot patterns)
-- Learning cycle: <60 seconds
-- Pattern ranking update: <5 seconds
+## Intelligence Injection
 
-#### Learning Effectiveness
-- Confidence adjustments: 30-60 per cycle
-- Prevention rules: 5-10 per day
-- Pattern archival: 10-20 per month
-- Usage tracking: 95%+ accuracy
+### Purpose
+Delivers task-relevant intelligence to all terminals (T0-T3), replacing the previous system that only injected terminal status noise into T0.
 
-### Configuration
+### Implementation
 
-```python
-# Learning parameters
-BOOST_RATE = 1.10       # 10% per usage
-DECAY_RATE = 0.95       # 5% per ignore
-ARCHIVE_THRESHOLD = 30  # days
-CONFIDENCE_CAP = 2.0
-CONFIDENCE_FLOOR = 0.1
+**Version**: 2.0 (PR-2, Self-Learning Pipeline)
+**T0 Hook**: `scripts/userpromptsubmit_intelligence_inject_v5.sh` (recommendations + quality hotspots)
+**Worker Hook**: `scripts/userpromptsubmit_worker_intelligence_inject.sh` (dispatch-specific patterns)
+**Registration**: Hooks registered via `vnx regen-settings --merge` (A-9)
 
-# Cache configuration
-PATTERN_CACHE_SIZE = 100   # items
-PATTERN_CACHE_TTL = 900    # 15 min
-REPORT_CACHE_SIZE = 50
-REPORT_CACHE_TTL = 1800    # 30 min
+### T0 vs Worker Injection
+
+| Aspect | T0 Injection | T1-T3 Worker Injection |
+|--------|-------------|------------------------|
+| Content | Recommendations, quality hotspots | Dispatch-relevant patterns, prevention rules |
+| Max Patterns | N/A | 3 |
+| Max Rules | N/A | 2 |
+| Token Budget | <400 tokens | <400 tokens |
+| Dedup | Hash-based | Hash-based |
+
+### Worker Injection Flow
+
+```bash
+# 1. Determine current dispatch from terminal_state.json
+DISPATCH_ID=$(jq -r ".terminals.${TERMINAL_ID}.claimed_by" "$TERMINAL_STATE")
+
+# 2. Query gather_intelligence.py for dispatch-specific patterns
+INTELLIGENCE_JSON=$(python3 "$GATHER_SCRIPT" gather \
+  "$TASK" "$TERMINAL_ID" "${AGENT:-}" "${GATE:-}" "${DISPATCH_ID}")
+
+# 3. Hash-based change detection (skip if unchanged)
+INTEL_HASH=$(echo "$INTELLIGENCE_JSON" | sha256sum | cut -d' ' -f1)
+
+# 4. Inject into Claude Code prompt via additionalContext
+{
+  "decision": "allow",
+  "additionalContext": "=== VNX [T1] Dispatch: ABC-123 | Gate: implementation ===\n..."
+}
 ```
+
+### Injection Audit (G-L7)
+
+Every injection event is logged to `intelligence_usage.ndjson`:
+
+```json
+{
+  "timestamp": "2026-03-28T14:30:00Z",
+  "event_type": "injection",
+  "terminal": "T1",
+  "dispatch_id": "ABC-123",
+  "gate": "implementation",
+  "pattern_ids": ["hash1", "hash2"],
+  "token_estimate": 320
+}
+```
+
+### Safe Degradation (A-5)
+
+Missing dispatch metadata, empty intelligence results, or unavailable database all degrade gracefully to no-op injection — the terminal prompt proceeds without intelligence context. Intelligence never blocks dispatch execution.
 
 ---
 
@@ -1475,41 +1601,15 @@ python3 tests/test_intelligence_integration.py
 
 ### Version History
 
+- **v5.0.0** (2026-03-28) - Self-Learning Pipeline: usage signal tracking (PR-0), session analytics fix (PR-1), task-relevant injection for all terminals (PR-2), pairwise/triple tag subsets + recommendation manager (PR-3), 3-section quality digest + consolidated 11-phase nightly pipeline (PR-4)
 - **v3.0.0** (2026-03-02) - Documentation ingestion (`doc_section_extractor.py`), language-aware filtering, `VNX_DOCS_DIRS` config
 - **v2.0.0** (2026-01-26) - Enhanced relevance scoring, prevention rules, tag intelligence
 - **v1.1.0** (2026-01-19) - Pattern matching engine (PR #2), dispatcher integration (PR #8)
 - **v1.0.0** (2026-01-18) - Agent validation (PR #1)
 
-### Future Enhancements
-
-1. **Machine Learning Integration** (Q2 2026)
-   - Neural network for pattern relevance
-   - Predictive confidence scoring
-   - Anomaly detection
-
-2. **Advanced Caching** (Q2 2026)
-   - Distributed cache support
-   - Query result preloading
-   - Smart cache warming
-
-3. **Real-time Learning** (Q3 2026)
-   - Streaming pattern updates
-   - Live confidence adjustment
-   - Immediate feedback loop
-
-4. **Analytics Dashboard** (Q3 2026)
-   - Pattern effectiveness visualization
-   - Learning curve tracking
-   - Cache performance monitoring
-
-5. **Report Mining** (Q4 2026)
-   - Extract patterns from unified_reports/
-   - Identify recurring failures
-   - Generate prevention suggestions
-
 ---
 
-**Document Version**: 4.0.0
-**Last Updated**: 2026-03-07
+**Document Version**: 5.0.0
+**Last Updated**: 2026-03-28
 **Maintained by**: T-MANAGER
 **Status**: Production Active
