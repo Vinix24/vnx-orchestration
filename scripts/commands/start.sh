@@ -201,10 +201,10 @@ cmd_start() {
       # Model selection: use VNX_T{n}_MODEL env vars if set, otherwise defaults.
       local t0_reheal_cmd t1_cmd t2_cmd t3_reheal_cmd
       local t0_sf="" t1_sf="" t2_sf="" t3_sf=""
-      local t0_model="${VNX_T0_MODEL:-opus}"
+      local t0_model="${VNX_T0_MODEL:-default}"
       local t1_model="${VNX_T1_MODEL:-sonnet}"
       local t2_model="${VNX_T2_MODEL:-sonnet}"
-      local t3_model="${VNX_T3_MODEL:-opus}"
+      local t3_model="${VNX_T3_MODEL:-default}"
       [ "$t0_skip" = "1" ] && t0_sf=" --dangerously-skip-permissions"
       [ "$t3_skip" = "1" ] && t3_sf=" --dangerously-skip-permissions"
       t0_reheal_cmd="claude --model $t0_model $t0_flags$t0_sf"
@@ -636,10 +636,10 @@ RESOLVER
   local t0_cmd t1_cmd t2_cmd t3_cmd
   local t0_skip_flag="" t1_skip_flag="" t2_skip_flag="" t3_skip_flag=""
   # Model selection: use VNX_T{n}_MODEL env vars if set, otherwise defaults.
-  local t0_model="${VNX_T0_MODEL:-opus}"
+  local t0_model="${VNX_T0_MODEL:-default}"
   local t1_model="${VNX_T1_MODEL:-sonnet}"
   local t2_model="${VNX_T2_MODEL:-sonnet}"
-  local t3_model="${VNX_T3_MODEL:-opus}"
+  local t3_model="${VNX_T3_MODEL:-default}"
 
   # T0 skip-permissions (Claude only)
   [ "$t0_skip" = "1" ] && t0_skip_flag=" --dangerously-skip-permissions"
