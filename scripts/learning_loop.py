@@ -5,6 +5,7 @@ Tracks pattern usage, adjusts confidence scores, and optimizes intelligence deli
 Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 """
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -189,6 +190,26 @@ class LearningLoop:
 
         return ignored_patterns
 
+    def _log_confidence_change(self, pattern_id: str, source: str,
+                               old_confidence: float, new_confidence: float) -> None:
+        """Append confidence change event to intelligence_usage.ndjson (G-L7)."""
+        try:
+            paths = ensure_env()
+            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
+            usage_log = state_dir / "intelligence_usage.ndjson"
+            event = {
+                "timestamp": datetime.now().isoformat(),
+                "event_type": "confidence_change",
+                "pattern_id": pattern_id,
+                "source": source,
+                "old_confidence": round(old_confidence, 6),
+                "new_confidence": round(new_confidence, 6),
+            }
+            with open(usage_log, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
+
     def update_confidence_scores(self, used_patterns: Dict[str, List[str]],
                                 ignored_patterns: Dict[str, int]):
         """Update confidence scores based on usage patterns"""
@@ -210,6 +231,7 @@ class LearningLoop:
             # Boost confidence (cap at 2.0)
             old_confidence = metric.confidence
             metric.confidence = min(metric.confidence * metric.boost_rate, 2.0)
+            self._log_confidence_change(pattern_id, "adoption_boost", old_confidence, metric.confidence)
 
             self.learning_stats["confidence_adjustments"] += 1
             print(f"📈 Boosted {pattern_id}: {old_confidence:.3f} → {metric.confidence:.3f}")
@@ -230,6 +252,7 @@ class LearningLoop:
             # Decay confidence (floor at 0.1)
             old_confidence = metric.confidence
             metric.confidence = max(metric.confidence * metric.decay_rate, 0.1)
+            self._log_confidence_change(pattern_id, "ignore_decay", old_confidence, metric.confidence)
 
             # Persist ignored_count increment to DB
             try:
@@ -362,76 +385,112 @@ class LearningLoop:
                 return f"Monitor for recurrence and gather more context"
 
     def update_terminal_constraints(self, new_rules: List[Dict]):
-        """Update terminal constraint files with new prevention rules"""
-        try:
-            # Store new rules in database
-            for rule in new_rules:
-                self.conn.execute('''
-                    INSERT OR REPLACE INTO prevention_rules
-                    (tag_combination, rule_type, description, recommendation, confidence, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    f"terminal:{rule.get('terminal_constraint', 'any')}",
-                    'failure_prevention',
-                    rule['pattern'],
-                    rule['prevention'],
-                    rule['confidence'],
-                    datetime.now().isoformat()
-                ))
+        """Queue new prevention rules for operator confirmation (G-L1: no auto-activation).
 
-            self.conn.commit()
-            print(f"✅ Added {len(new_rules)} new prevention rules")
+        Rules are written to pending_rules.json for operator review.
+        They are NOT inserted directly into prevention_rules table.
+        """
+        if not new_rules:
+            return
+        try:
+            paths = ensure_env()
+            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
+            pending_path = state_dir / "pending_rules.json"
+
+            # Load existing pending rules
+            existing: List[Dict] = []
+            if pending_path.exists():
+                try:
+                    data = json.loads(pending_path.read_text(encoding="utf-8"))
+                    existing = data.get("pending_rules", [])
+                except (json.JSONDecodeError, OSError):
+                    existing = []
+
+            now = datetime.now().isoformat()
+            for rule in new_rules:
+                queued = {
+                    "id": f"rule-{hashlib.sha1((rule['pattern'] + rule.get('terminal_constraint', '')).encode()).hexdigest()[:8]}",
+                    "created_at": now,
+                    "source": "learning_loop",
+                    "rule_type": "failure_prevention",
+                    "pattern": rule["pattern"],
+                    "terminal_constraint": rule.get("terminal_constraint", "any"),
+                    "prevention": rule["prevention"],
+                    "confidence": rule["confidence"],
+                    "occurrence_count": rule.get("occurrence_count", 1),
+                    "status": "pending",
+                }
+                # Deduplicate by id
+                if not any(e.get("id") == queued["id"] for e in existing):
+                    existing.append(queued)
+
+            pending_path.write_text(
+                json.dumps({"pending_rules": existing}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(f"📋 Queued {len(new_rules)} prevention rules for operator review → {pending_path}")
 
         except Exception as e:
-            print(f"❌ Error updating terminal constraints: {e}")
+            print(f"❌ Error queuing prevention rules: {e}")
 
     def archive_unused_patterns(self, threshold_days: int = 30):
-        """Archive patterns that haven't been used in threshold_days"""
-        archive_count = 0
+        """Queue unused low-confidence patterns for operator confirmation (G-L4: no auto-archival).
+
+        Candidates are written to pending_archival.json — NOT auto-archived.
+        """
         archive_date = datetime.now() - timedelta(days=threshold_days)
 
-        patterns_to_archive = []
+        candidates = []
         for pattern_id, metric in self.pattern_metrics.items():
             if not metric.last_used or metric.last_used < archive_date:
-                if metric.confidence < 0.3:  # Only archive low-confidence unused patterns
-                    patterns_to_archive.append(pattern_id)
+                if metric.confidence < 0.3:
+                    candidates.append(pattern_id)
 
-        if patterns_to_archive:
-            # Create archive record
-            archive_file = self.archive_path / f"archived_patterns_{datetime.now().strftime('%Y%m%d')}.json"
-            archive_data = {
-                'archived_at': datetime.now().isoformat(),
-                'reason': f'Unused for {threshold_days} days with low confidence',
-                'patterns': []
-            }
+        if not candidates:
+            return
 
-            for pattern_id in patterns_to_archive:
+        try:
+            paths = ensure_env()
+            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
+            pending_path = state_dir / "pending_archival.json"
+
+            existing: List[Dict] = []
+            if pending_path.exists():
+                try:
+                    data = json.loads(pending_path.read_text(encoding="utf-8"))
+                    existing = data.get("pending_archival", [])
+                except (json.JSONDecodeError, OSError):
+                    existing = []
+
+            existing_ids = {e.get("pattern_id") for e in existing}
+            now = datetime.now().isoformat()
+            added = 0
+            for pattern_id in candidates:
+                if pattern_id in existing_ids:
+                    continue
                 metric = self.pattern_metrics[pattern_id]
-                archive_data['patterns'].append({
-                    'pattern_id': pattern_id,
-                    'title': metric.pattern_title,
-                    'last_used': metric.last_used.isoformat() if metric.last_used else None,
-                    'confidence': metric.confidence,
-                    'used_count': metric.used_count,
-                    'ignored_count': metric.ignored_count
+                existing.append({
+                    "pattern_id": pattern_id,
+                    "title": metric.pattern_title,
+                    "last_used": metric.last_used.isoformat() if metric.last_used else None,
+                    "confidence": round(metric.confidence, 4),
+                    "used_count": metric.used_count,
+                    "ignored_count": metric.ignored_count,
+                    "reason": f"Unused for {threshold_days}+ days with confidence < 0.3",
+                    "queued_at": now,
+                    "status": "pending",
                 })
+                added += 1
 
-                # Mark as archived in database
-                self.conn.execute('''
-                    UPDATE code_snippets
-                    SET quality_score = quality_score * 0.5
-                    WHERE title LIKE ?
-                ''', (f"%{pattern_id}%",))
+            pending_path.write_text(
+                json.dumps({"pending_archival": existing}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(f"📋 Queued {added} patterns for archival confirmation → {pending_path}")
+            self.learning_stats["patterns_archived"] = added
 
-                archive_count += 1
-
-            # Save archive file
-            with open(archive_file, 'w') as f:
-                json.dump(archive_data, f, indent=2)
-
-            self.conn.commit()
-            print(f"📦 Archived {archive_count} unused patterns to {archive_file}")
-            self.learning_stats["patterns_archived"] = archive_count
+        except Exception as e:
+            print(f"❌ Error queuing archival candidates: {e}")
 
     def generate_learning_report(self) -> Dict:
         """Generate comprehensive learning report"""
