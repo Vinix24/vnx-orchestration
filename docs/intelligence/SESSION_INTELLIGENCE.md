@@ -1,8 +1,8 @@
 # Session Intelligence & Human-in-the-Loop System Tuning
 
-**Version**: 1.1.0
+**Version**: 2.0.0
 **Added**: 2026-03-03
-**Updated**: 2026-03-07 (governance measurement integration)
+**Updated**: 2026-03-28 (self-learning pipeline: session discovery fix, consolidated nightly pipeline)
 
 ## Overview
 
@@ -220,39 +220,57 @@ Applied edits are archived to `$VNX_STATE_DIR/edit_history.json`.
 
 Show the last 20 applied edits with timestamps and content.
 
-## Nightly Pipeline
+## Session Discovery & Idempotency (PR-1 Fix)
 
-The `conversation_analyzer_nightly.sh` runs as a 6-phase pipeline:
+The session analyzer previously failed to populate `session_analytics` due to a `CLAUDE_PROJECTS_DIR` path mismatch. PR-1 fixed this by:
+
+1. **Path validation**: Added fallback discovery for Claude Code session logs across both main repo and worktree contexts
+2. **Dry-run diagnostics**: `vnx analyze-sessions --dry-run` reports found sessions and estimated processing time without writing to DB
+3. **Idempotency**: Re-running the analyzer skips already-imported sessions (keyed by `session_id UNIQUE`)
+4. **Downstream consumers**: Once populated, `session_analytics` feeds: session brief, suggested edits, governance metrics, model routing, and session-dispatch linkage
+
+## Consolidated Nightly Intelligence Pipeline (11 Phases)
+
+The `nightly_intelligence_pipeline.sh` consolidates the previously overlapping daily (18:00) and nightly (02:00) pipelines into a single ordered pipeline. Each phase runs independently — a failure in one phase does not block subsequent phases.
+
+**File**: `scripts/nightly_intelligence_pipeline.sh`
+**Schedule**: Daily at 02:00 via launchd plist
+**Lock**: PID-based singleton with stale lock recovery
+
+| Phase | Script | Purpose |
+|-------|--------|---------|
+| 0 | `quality_db_init.py` | Schema migrations |
+| 1a | `code_quality_scanner.py` | Code complexity analysis |
+| 1b | `code_snippet_extractor.py` | Extract patterns from code |
+| 1c | `doc_section_extractor.py` | Mine documentation |
+| 2 | `conversation_analyzer.py --max-sessions 50 --deep-budget 20` | Session parsing + LLM analysis |
+| 3 | `link_sessions_dispatches.py` | Correlate sessions with dispatches |
+| 4 | `learning_loop.py run` | Update pattern confidence, queue archival |
+| 5 | `tag_intelligence.py stale` | Mark 7+ day old edits stale |
+| 6 | `generate_t0_session_brief.py` | Generate session summary |
+| 7 | `governance_aggregator.py --backfill` | Compute metrics, SPC control limits |
+| 8 | `generate_suggested_edits.py` | Generate human-in-loop recommendations |
+| 9 | `build_t0_quality_digest.py` | 3-section quality digest (NDJSON + JSON) |
+| 10 | `generate_t0_recommendations.py --lookback 1440` | 24h-window recommendations |
+| 11 | `send_digest_email.py` | Email digest (optional, env-gated) |
+
+### Pipeline Health Tracking
 
 ```bash
-# Phase 0: DB schema migrations (governance tables, CQS columns)
-python3 scripts/quality_db_init.py
+# Per-phase results (append-only NDJSON)
+$VNX_STATE_DIR/nightly_pipeline_phases.ndjson
 
-# Phase 1: Session analysis (parse + heuristics + deep analysis)
-python3 scripts/conversation_analyzer.py --max-sessions 50 --deep-budget 20
-
-# Phase 1.5: Session-dispatch linkage (cross-reference sessions with dispatches)
-python3 scripts/link_sessions_dispatches.py
-
-# Phase 2: T0 session brief (auto — read-only state file)
-python3 scripts/generate_t0_session_brief.py
-
-# Phase 2.5: Governance metrics aggregation + SPC anomaly detection
-python3 scripts/governance_aggregator.py --backfill
-
-# Phase 3: Suggested edits (human-in-the-loop)
-python3 scripts/generate_suggested_edits.py
-
-# Phase 4: Email digest (opt-in, requires VNX_DIGEST_EMAIL + VNX_SMTP_PASS)
-python3 scripts/send_digest_email.py
+# Summary health file
+$VNX_STATE_DIR/nightly_pipeline_health.json
 ```
 
-All phases after Phase 1 are non-fatal — if they fail, the pipeline continues.
-Phase 4 is skipped entirely when `VNX_DIGEST_EMAIL` or `VNX_SMTP_PASS` are not set.
+### Health Gates
 
-### Phase 2.5: Governance Measurement
+Health checks run between pipeline phases. Each phase result is logged with status, duration, and error (if any). The pipeline continues past failures, recording the failure for operator review.
 
-Phase 2.5 is documented in detail in `GOVERNANCE_MEASUREMENT.md`. It computes:
+### Phase 7: Governance Measurement
+
+Governance aggregation (now Phase 7 in the consolidated pipeline) is documented in detail in `GOVERNANCE_MEASUREMENT.md`. It computes:
 - **CQS backfill** for dispatches that completed before the governance system was installed
 - **FPY, rework rate, gate velocity, mean CQS** per scope (system/terminal/role/gate/model)
 - **SPC control limits** (X-bar +/- 3 sigma from 30-day baseline)
@@ -338,18 +356,25 @@ Run: `python3 -m pytest tests/test_conversation_analyzer.py -v`
 
 | File | Purpose |
 |---|---|
-| `scripts/conversation_analyzer.py` | Session parser with model extraction |
+| `scripts/conversation_analyzer.py` | Session parser with model extraction and path discovery fix (PR-1) |
 | `scripts/generate_t0_session_brief.py` | T0 read-only state file generator |
 | `scripts/generate_suggested_edits.py` | Suggestion engine |
 | `scripts/apply_suggested_edits.py` | Accept/reject/apply CLI |
 | `scripts/send_digest_email.py` | Opt-in email digest sender (SMTP) |
-| `scripts/conversation_analyzer_nightly.sh` | 6-phase nightly runner (incl. governance) |
-| `scripts/governance_aggregator.py` | Phase 2.5: FPY/rework/SPC computation |
+| `scripts/nightly_intelligence_pipeline.sh` | Consolidated 11-phase nightly pipeline (PR-4) |
+| `scripts/conversation_analyzer_nightly.sh` | Legacy nightly runner (superseded by above) |
+| `scripts/governance_aggregator.py` | Phase 7: FPY/rework/SPC computation |
 | `scripts/governance_weekly_report.py` | Weekly governance markdown report |
 | `scripts/lib/cqs_calculator.py` | CQS calculation engine + status normalization |
 | `scripts/update_dispatch_cqs.py` | Standalone CQS update CLI |
 | `scripts/receipt_processor_v4.sh` | MODEL footer + CQS update (section C3b) |
+| `scripts/gather_intelligence.py` | Pattern offer/adoption tracking (PR-0) |
+| `scripts/learning_loop.py` | Confidence adjustment, pending archival (PR-0) |
+| `scripts/tag_intelligence.py` | Pairwise/triple subsets, recommendation manager (PR-3) |
+| `scripts/build_t0_quality_digest.py` | 3-section quality digest with NDJSON (PR-4) |
+| `scripts/userpromptsubmit_worker_intelligence_inject.sh` | Worker intelligence injection (PR-2) |
 | `schemas/quality_intelligence.sql` | Schema v8.1.0 with governance tables |
 | `scripts/quality_db_init.py` | Migrations (CQS columns, governance tables) |
-| `bin/vnx` | `suggest` subcommand |
+| `bin/vnx` | `suggest` and `analyze-sessions` subcommands |
 | `tests/test_conversation_analyzer.py` | 44 tests |
+| `tests/test_learning_feature.py` | Learning pipeline test suite (PR-4) |
