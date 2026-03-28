@@ -1,64 +1,63 @@
 # VNX Intelligence System — Blog Reference Map
 
-> Working reference for blog post. All line numbers verified via grep. Total system: 12 scripts, 8,222 lines of code, 425 tests across 38 files.
+Working reference document mapping all code paths, data flows, and documentation for the VNX self-learning intelligence pipeline. Line numbers verified via grep on 2026-03-28.
 
 ---
 
 ## 1. The Problem (Before)
 
-The intelligence pipeline existed but was completely inert:
+| Symptom | Evidence |
+|---------|----------|
+| Learning loop inert | `pattern_usage` — 31 rows, all `used_count=0`, `ignored_count=0`, `confidence=1.0` |
+| Session analytics empty | `SELECT COUNT(*) FROM session_analytics` → 0 rows |
+| Intelligence = noise | `t0_intelligence.ndjson` — 78MB, 99% `terminal_status` events |
+| Recommendations empty | `t0_recommendations.json` → `"total_recommendations": 0` |
+| Prevention rules empty | `prevention_rules` table → 0 rows |
+| Workers blind | T1-T3 had no intelligence injection hook |
+| Tag tuples useless | Full 8-12 n-tuples — nearly unique, no pattern matching possible |
 
-| Metric | Before | Evidence |
-|--------|--------|----------|
-| `pattern_usage` rows | 31 | All with `used_count=0, ignored_count=0, confidence=1.0` |
-| `session_analytics` rows | 0 | `SELECT COUNT(*) FROM session_analytics` → 0 |
-| `t0_recommendations.json` | Empty | `"total_recommendations": 0` |
-| `prevention_rules` count | 0 | No rules ever generated |
-| `t0_intelligence.ndjson` | 78 MB | 99% `terminal_status` events (noise) |
-| Worker intelligence (T1-T3) | None | No injection hook existed |
-
-**Root causes:**
-- `record_pattern_offer()` / `record_pattern_adoption()` did not exist — no code ever incremented `used_count`
-- `conversation_analyzer.py` failed silently on session discovery (path mismatch)
-- `tag_intelligence.py` generated full 8-12 element n-tuples (nearly unique, no pattern matching possible)
-- `update_terminal_constraints()` auto-activated rules (governance violation)
-- `archive_unused_patterns()` auto-archived without confirmation
+**Root cause**: No component ever called `record_pattern_offer()` or `record_pattern_adoption()` — the feedback loop was open-circuited. Data existed in the DB schema but nothing wrote to it.
 
 ---
 
-## 2. Architecture Overview
+## 2. Architecture Overview — All Intelligence Scripts
 
-### Intelligence Scripts (12 files, 8,222 LOC)
+### Core Python Scripts
 
-| # | File | Lines | Role |
-|---|------|-------|------|
-| 1 | `scripts/learning_loop.py` | 678 | Core learning cycle: extract signals → update confidence → generate rules → archive |
-| 2 | `scripts/gather_intelligence.py` | 1,740 | Pattern offering, adoption tracking, task-relevant queries, relevance scoring |
-| 3 | `scripts/conversation_analyzer.py` | 1,087 | 4-phase session analysis: parse → heuristic → deep LLM → store |
-| 4 | `scripts/tag_intelligence.py` | 942 | Tag combination engine, prevention rules, recommendation manager |
-| 5 | `scripts/intelligence_daemon.py` | 933 | Hourly extraction, daily hygiene, health reporting, PR auto-discovery |
-| 6 | `scripts/build_t0_quality_digest.py` | 548 | 3-section quality digest with evidence trails, NDJSON output |
-| 7 | `scripts/userpromptsubmit_intelligence_inject_v5.sh` | 170 | T0 intelligence injection (hash dedup, quality/tags/recommendations) |
-| 8 | `scripts/userpromptsubmit_worker_intelligence_inject.sh` | 168 | T1-T3 dispatch-scoped intelligence injection (400-token budget) |
-| 9 | `scripts/check_intelligence_health.py` | 346 | Health status: healthy/degraded/unhealthy based on daemon + coverage |
-| 10 | `scripts/receipt_processor_v4.sh` | 1,207 | Receipt processing with flood protection, dedup, rate limiting |
-| 11 | `scripts/generate_t0_session_brief.py` | 252 | Model performance aggregation from session_analytics |
-| 12 | `scripts/conversation_analyzer_nightly.sh` | 151 | Consolidated 7-phase nightly pipeline orchestrator |
+| # | File | Purpose | Key Entry Point |
+|---|------|---------|----------------|
+| 1 | `scripts/learning_loop.py` | Pattern usage tracking, confidence adjustment, prevention rule queuing | `daily_learning_cycle()` :577 |
+| 2 | `scripts/gather_intelligence.py` | Pattern extraction, offer/adoption recording, intelligence serving | `T0IntelligenceGatherer` :84 |
+| 3 | `scripts/conversation_analyzer.py` | Session JSONL parsing, analytics extraction, digest generation | `ConversationAnalyzer` :765 |
+| 4 | `scripts/tag_intelligence.py` | Tag combination analysis, prevention rule generation, recommendation management | `TagIntelligenceEngine` :38 |
+| 5 | `scripts/build_t0_quality_digest.py` | 3-section quality digest, NDJSON append-only output | `_assemble_digest()` :415 |
+| 6 | `scripts/check_intelligence_health.py` | Health verification, session count, usage tracking checks | `check_health()` :250 |
+| 7 | `scripts/intelligence_daemon.py` | Hourly extraction, daily hygiene, PR auto-discovery | `IntelligenceDaemon` :71 |
+| 8 | `scripts/generate_t0_session_brief.py` | Model performance summary from session_analytics | `generate_brief()` :195 |
+| 9 | `scripts/cached_intelligence.py` | TTL cache layer for intelligence patterns | `CachedIntelligence` :130 |
+| 10 | `scripts/intelligence_daemon_monitor.py` | Schema validation, dashboard state sync | `validate_monitor_schema_compatibility()` :38 |
 
-### Key Classes
+### Shell Scripts
 
-| Class | File | Line | Purpose |
-|-------|------|------|---------|
-| `LearningLoop` | `learning_loop.py` | 47 | Confidence scoring, adoption signal processing |
-| `IntelligenceGatherer` | `gather_intelligence.py` | 87 | Pattern queries, offer/adoption tracking |
-| `TagIntelligenceEngine` | `tag_intelligence.py` | 41 | Tag combination analysis, prevention rules |
-| `RecommendationManager` | `tag_intelligence.py` | 714 | Structured recommendations with evidence + caps |
-| `ConversationAnalyzer` | `conversation_analyzer.py` | 765 | 4-phase session analysis orchestrator |
-| `SessionParser` | `conversation_analyzer.py` | 171 | JSONL parsing, token/tool counting |
-| `HeuristicDetector` | `conversation_analyzer.py` | 312 | Pattern detection without LLM |
-| `DeepAnalyzer` | `conversation_analyzer.py` | 445 | LLM-powered deep session analysis |
-| `DigestGenerator` | `conversation_analyzer.py` | 620 | Session digest markdown generation |
-| `IntelligenceDaemon` | `intelligence_daemon.py` | 74 | Daemon loop: hourly + daily + health |
+| # | File | Purpose |
+|---|------|---------|
+| 11 | `scripts/userpromptsubmit_intelligence_inject_v5.sh` | T0 intelligence injection hook (change-detection based) |
+| 12 | `scripts/userpromptsubmit_worker_intelligence_inject.sh` | T1-T3 worker intelligence injection (<400 tokens) |
+| 13 | `scripts/nightly_intelligence_pipeline.sh` | Consolidated 12-phase nightly pipeline |
+| 14 | `scripts/conversation_analyzer_nightly.sh` | Legacy nightly analyzer (superseded by #13) |
+| 15 | `scripts/intelligence_ack.sh` | T0 ACK flag validation for dispatch gating |
+| 16 | `scripts/intelligence_refresh.sh` | Hash cache update on T0 intelligence read |
+| 17 | `scripts/sessionstart_t0_intelligence.sh` | Minimal session-start intelligence summary |
+
+### Supporting Scripts
+
+| File | Purpose |
+|------|---------|
+| `scripts/intelligence_export.py` | Export intelligence DB to NDJSON for git sync |
+| `scripts/intelligence_import.py` | Import NDJSON back into intelligence DB |
+| `scripts/intelligence_queries.py` | Query API for patterns, rules, sessions |
+| `scripts/t0_intelligence_aggregator.py` | Cross-terminal intelligence aggregation |
+| `scripts/query_quality_intelligence.py` | Terminal success rate analysis |
 
 ---
 
@@ -66,244 +65,176 @@ The intelligence pipeline existed but was completely inert:
 
 ```
 offer → adoption → confidence → injection
-  │         │           │            │
-  │         │           │            └─ userpromptsubmit_worker_intelligence_inject.sh:108-154
-  │         │           └─ learning_loop.py:213 (update_confidence_scores)
-  │         └─ gather_intelligence.py:269 (record_pattern_adoption)
-  └─ gather_intelligence.py:249 (record_pattern_offer)
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+ ndjson    ndjson    sqlite     shell hook
 ```
 
 ### Step 1: Pattern Offer
-- **Function:** `IntelligenceGatherer.record_pattern_offer()` — `gather_intelligence.py:249`
-- Logs to `intelligence_usage.ndjson` with `pattern_id`, `terminal`, `dispatch_id`, `timestamp`
-- Called by `_register_offered_patterns()` — `gather_intelligence.py:733`
-- Updates `pattern_usage.last_offered` timestamp in DB
+- **Where**: `gather_intelligence.py:record_pattern_offer()` :249
+- **What**: Logs `{event: "pattern_offer", pattern_id, terminal, dispatch_id}` to `intelligence_usage.ndjson`
+- **When**: Called when patterns are served to any terminal (T0-T3)
 
 ### Step 2: Pattern Adoption
-- **Function:** `IntelligenceGatherer.record_pattern_adoption()` — `gather_intelligence.py:269`
-- Increments `used_count` in `pattern_usage` table
-- Logs adoption event to `intelligence_usage.ndjson`
-- **Function:** `IntelligenceGatherer.record_adoption_from_receipt()` — `gather_intelligence.py:300`
-- Correlates receipt file changes with recently-offered patterns
-- Called post-receipt to detect implicit adoption (file overlap)
+- **Where**: `gather_intelligence.py:record_pattern_adoption()` :269
+- **What**: Correlates receipt file changes with recently-offered patterns
+- **When**: Post-receipt hook checks if edited files match offered pattern references
+- **Effect**: Increments `pattern_usage.used_count` in `quality_intelligence.db`
 
-### Step 3: Confidence Update
-- **Function:** `LearningLoop.update_confidence_scores()` — `learning_loop.py:213`
-- **Boost adopted:** `confidence = min(confidence * 1.10, 2.0)` — `learning_loop.py:233`
-- **Decay ignored:** `confidence = max(confidence * 0.95, 0.1)` — `learning_loop.py:254`
-- All changes logged via `_log_confidence_change()` — `learning_loop.py:193` (G-L7)
+### Step 3: Ignored Pattern Detection
+- **Where**: `learning_loop.py:extract_ignored_patterns()` :147
+- **What**: Patterns offered but not adopted within dispatch lifecycle
+- **Effect**: Increments `pattern_usage.ignored_count`
 
-### Step 4: Intelligence Injection
-- T0: `userpromptsubmit_intelligence_inject_v5.sh` — quality digest + tags + recommendations
-- T1-T3: `userpromptsubmit_worker_intelligence_inject.sh` — dispatch-scoped patterns + prevention rules
+### Step 4: Confidence Update
+- **Where**: `learning_loop.py:update_confidence_scores()` :213
+- **What**: Adjusts confidence based on used/ignored ratio
+- **Audit**: `_log_confidence_change()` :193 — appends `{timestamp, source, old_value, new_value}` to NDJSON (G-L7)
 
-### Orchestration
-- **Daily cycle:** `LearningLoop.daily_learning_cycle()` — `learning_loop.py:577`
-  - Extract used patterns → extract ignored → update confidence → generate prevention rules → archive
-- **Daemon:** `IntelligenceDaemon.run()` — `intelligence_daemon.py:862`
-  - Hourly extraction (3600s interval), daily hygiene at 18:00
+### Step 5: Intelligence Injection
+- **T0**: `userpromptsubmit_intelligence_inject_v5.sh` — recommendations + quality hotspots
+- **T1-T3**: `userpromptsubmit_worker_intelligence_inject.sh` — task-relevant patterns (max 3), prevention rules
+
+### Step 6: Nightly Cycle
+- **Where**: `learning_loop.py:daily_learning_cycle()` :577
+- **Orchestrated by**: `nightly_intelligence_pipeline.sh` phase 4 (:166)
+- **Phases**: load metrics → extract used → extract ignored → update confidence → generate rules → archive candidates → save → report
 
 ---
 
 ## 4. Intelligence Injection
 
-### T0 Path — `userpromptsubmit_intelligence_inject_v5.sh`
+### T0 Path (`userpromptsubmit_intelligence_inject_v5.sh`)
+- Change-detection based: compares hash of tags digest, quality digest, recommendations
+- Only injects when content has changed since last injection
+- Focus: recommendations + quality hotspots (not terminal status)
 
-| Section | Lines | Source File | Hash Cache |
-|---------|-------|-------------|------------|
-| Tags digest | 50-64 | `t0_tags_digest.json` | `.last_tags_hash` |
-| Quality digest | 67-81 | `t0_quality_digest.json` | `.last_quality_hash` |
-| Recommendations | 84-93 | `t0_recommendations.json` | `.last_recommendations_hash` |
+### T1-T3 Path (`userpromptsubmit_worker_intelligence_inject.sh`)
+- **Line 7**: Token budget `<400 tokens (≈1600 chars)`
+- **Line 19-23**: `safe_exit()` — always allows, never blocks dispatch (A-5)
+- **Line 26-32**: Terminal detection from `$VNX_TERMINAL` or `$PWD`
+- **Line 108**: Build injection context section
+- **Line 151**: Enforce 1600 char ceiling (~400 tokens)
+- **Audit**: All injection events logged to `intelligence_usage.ndjson` (G-L7)
+- **Graceful degradation**: Missing dispatch or empty intelligence → `{"decision": "allow"}` (A-5)
 
-**Hash dedup:** SHA256 per source file. Only injects when content hash changes (lines 54, 71, 88).
-**Output format:** `{"decision": "allow", "additionalContext": "..."}` (lines 160-171)
-
-### T1-T3 Path — `userpromptsubmit_worker_intelligence_inject.sh`
-
-| Step | Lines | Description |
-|------|-------|-------------|
-| Terminal detection | 25-34 | Determine `VNX_TERMINAL` from env or PWD |
-| Dispatch resolution | 41-49 | Get `dispatch_id` from `terminal_state.json` `claimed_by` |
-| Dispatch file lookup | 51-63 | Search active/completed/pending/staging dirs |
-| Task extraction | 65-72 | Extract Gate, Role, Task from dispatch metadata |
-| Intelligence query | 74-86 | Call `gather_intelligence.py gather` subcommand |
-| Hash dedup | 98-106 | `.last_worker_intel_hash_{TERMINAL_ID}` |
-| Build output | 108-154 | Max 3 patterns + 2 prevention rules + 2 session insights |
-| Token budget | 151-154 | **400 tokens (≈1600 chars)** — hard ceiling, truncates |
-| Audit logging | 156-161 | Log to `intelligence_usage.ndjson` (G-L7) |
-
-**Example injection output:**
+### Injection Content Structure
+```json
+{
+  "patterns": ["max 3 relevant patterns"],
+  "prevention_rules": ["matching rules for dispatch tags"],
+  "session_insights": ["prior report findings"]
+}
 ```
-=== VNX [T1] Dispatch: 20260328-feat-api-B | Gate: gate_pr2 ===
-Patterns:
-• pattern-42: Use structured error responses in API handlers
-• pattern-17: SSE connection cleanup on client disconnect
-Prevention:
-⚠ rule-3: Validate dispatch scope before file creation
-Context:
-• Prior T1 session showed 23% error recovery rate on API tasks
-```
-
-**Safe degradation (A-5):** `safe_exit()` at line 20 — always returns `{"decision": "allow"}` on any failure.
 
 ---
 
 ## 5. Tag Intelligence
 
 ### Before: Full N-Tuples (Broken)
-- `tag_intelligence.py` generated full tag combinations (8-12 elements)
-- Example: `["implementation-phase", "sse-streaming", "api-handler", "error-handling", "T1", "P1", "gate_pr2", "backend-developer", "refactor"]`
-- Nearly unique per dispatch → no pattern matching possible → 0 prevention rules
+- Tags from dispatches stored as full 8-12 element tuples
+- Example: `["implementation-phase", "sse-streaming", "api", "testing", "T1", "backend", "error-handling", "refactor"]`
+- Nearly unique — no two dispatches share the same full tuple → zero pattern matching
 
 ### After: Pairwise + Triple Subsets
+- **Where**: `tag_intelligence.py:generate_tag_subsets()` :196
+- **Logic** (lines 196-220):
+  - `len <= 3`: use as-is; if triple, also generate pair combinations
+  - `len > 3`: generate all pairs + all triples (never full n-tuple)
+- **Example output**: `["implementation-phase", "sse-streaming"]`, `["api", "testing", "backend"]`
 
-**Function:** `TagIntelligenceEngine.generate_tag_subsets()` — `tag_intelligence.py:196`
-- Decomposes any tag set into **pairs** and **triples** only
-- Example input: `["implementation-phase", "sse-streaming", "api-handler", "error-handling"]`
-- Output pairs: `["api-handler", "error-handling"]`, `["api-handler", "implementation-phase"]`, ...
-- Output triples: `["api-handler", "error-handling", "implementation-phase"]`, ...
-
-**Hierarchical matching:** `TagIntelligenceEngine.query_prevention_rules()` — `tag_intelligence.py:589`
-- Query all subsets of input tags
-- Sort by specificity (longer tuple = more specific = higher priority)
-- Triple match supersedes pair match
-
-### Tag Normalization
-**Function:** `TagIntelligenceEngine.normalize_tags()` — `tag_intelligence.py:131`
-- Standardizes to taxonomy: `design-phase`, `implementation-phase`, `testing-phase`, `review-phase`
-- Component normalization, severity levels, action types
-- Alphabetical sorting, deduplication
+### Hierarchical Matching
+- **Where**: `tag_intelligence.py:analyze_multi_tag_patterns()` :310
+- If a pair matches a known pattern, check if any triple containing those tags also matches
+- Enables progressive specificity: pair → triple → prevention rule
 
 ### Prevention Rule Generation
-**Function:** `TagIntelligenceEngine.analyze_multi_tag_patterns()` — `tag_intelligence.py:310`
-- Triggers at **2+ occurrences** of same tag subset
-- Stores in `prevention_rules` table via `_store_prevention_rule()` — `tag_intelligence.py:548`
-- Rule types: `critical-prevention`, `validation-check`, `performance-optimization`, `memory-management`
-
-### Recommendation Schema
-**Class:** `RecommendationManager` — `tag_intelligence.py:714`
-- Schema: `{type, target, symptom, evidence_ids, confidence, created_at}`
-- Types: `claude_md_patch`, `prevention_rule`, `routing_hint`
-- **Function:** `add_recommendation()` — `tag_intelligence.py:749`
+- **Where**: `tag_intelligence.py:_generate_prevention_rule()` :456
+- **Classification**: `_classify_rule_type()` :491 — critical/validation/performance/memory
+- **Confidence**: Based on occurrence count, capped at 0.95
 
 ---
 
-## 6. Governance Rules — Code Enforcement Points
+## 6. Governance Rules — Code Enforcement Map
 
-| Rule | What | Enforcement Location | Mechanism |
-|------|------|---------------------|-----------|
-| **G-L1** | No auto-activation of rules | `learning_loop.py:387` (`update_terminal_constraints`) | Writes to `pending_rules.json`, not DB |
-| **G-L2** | Evidence trail required | `tag_intelligence.py:766` (`add_recommendation`) | `ValueError` if `evidence_ids` missing/empty |
-| **G-L3** | Confidence is informational | Design principle | No threshold-based auto-actions anywhere |
-| **G-L4** | Archive requires confirmation | `learning_loop.py:436` (`archive_unused_patterns`) | Writes to `pending_archival.json`, not DB delete |
-| **G-L5** | No LLM rules without review | Design principle | LLM outputs → `pending_edits.json` only |
-| **G-L6** | NDJSON append-only | `build_t0_quality_digest.py:460` (`_append_ndjson`) | Append mode file write to `quality_digest.ndjson` |
-| **G-L7** | Injection audit logging | `learning_loop.py:193` (`_log_confidence_change`) | All changes → `intelligence_usage.ndjson` |
-| **G-L7** | (also) | `userpromptsubmit_worker_intelligence_inject.sh:156` | Injection events → `intelligence_usage.ndjson` |
-| **G-L8** | Max 5 pending recommendations | `tag_intelligence.py:800-808` (`add_recommendation`) | Supersedes lowest confidence when full |
+| Rule | Enforcement | File:Line |
+|------|-------------|-----------|
+| **G-L1**: No auto-activation | `update_terminal_constraints()` writes to `pending_rules.json`, not DB | `learning_loop.py:387-434` |
+| **G-L2**: Evidence trail | `add_recommendation()` requires `evidence_ids` parameter | `tag_intelligence.py:749`, test at `test_tag_intelligence.py:505` |
+| **G-L3**: Confidence informational | Confidence used for ranking only, not blocking decisions | `tag_intelligence.py:800-810` |
+| **G-L4**: Archive confirmation | `archive_unused_patterns()` writes to `pending_archival.json` | `learning_loop.py:436-493` |
+| **G-L5**: LLM rules need review | All generated rules go through pending queue → operator | `learning_loop.py:388-391` (docstring) |
+| **G-L6**: NDJSON append-only | `_append_ndjson()` opens file in `"a"` (append) mode | `build_t0_quality_digest.py:460-465` |
+| **G-L7**: Injection audit | `record_pattern_offer()` + `record_pattern_adoption()` log to `intelligence_usage.ndjson` | `gather_intelligence.py:249-298` |
+| **G-L8**: Max 5 pending | `MAX_PENDING_RECOMMENDATIONS = 5`, lowest-confidence superseded when exceeded | `tag_intelligence.py:32, 802-808` |
 
-### Pending Queues (Human-in-the-Loop)
+### Governance Test Coverage
 
-| Queue File | Written By | Purpose |
-|-----------|-----------|---------|
-| `pending_rules.json` | `learning_loop.py:398` | Prevention rules awaiting operator approval |
-| `pending_archival.json` | `learning_loop.py:455` | Low-confidence patterns awaiting archival confirmation |
-| `pending_edits.json` | `tag_intelligence.py:720` | Config/CLAUDE.md edits awaiting review |
-| `t0_recommendations.json` | `tag_intelligence.py:749` | Structured recommendations with evidence |
-
-### Stale Detection
-- `RecommendationManager.mark_stale_pending_edits()` — `tag_intelligence.py:816`
-- Threshold: `STALE_DAYS = 7` — `tag_intelligence.py:35`
-- Pending edits older than 7 days marked for operator review
+| Rule | Test | File:Line |
+|------|------|-----------|
+| G-L1 | `test_update_terminal_constraints_writes_pending_rules_json` | `tests/test_learning_feature.py:639` |
+| G-L2 | `test_add_recommendation_requires_evidence` | `tests/test_tag_intelligence.py:505` |
+| G-L4 | `test_archive_unused_patterns_writes_pending_archival_json` | `tests/test_learning_feature.py:697` |
+| G-L6 | `test_ndjson_output_is_append_only` | `tests/test_learning_feature.py:535` |
+| G-L8 | `test_cap_at_max_pending` | `tests/test_tag_intelligence.py:541` |
 
 ---
 
 ## 7. Quality Digest
 
-**File:** `scripts/build_t0_quality_digest.py` (548 lines)
-
-### Constants
-| Constant | Value | Line |
-|----------|-------|------|
-| `MAX_PER_SECTION` | 5 | 39 |
-| `LOOKBACK_HOURS` | 24 | 40 |
-| `SCHEMA_VERSION` | "2.0" | 41 |
-
-### Three Sections
+### 3-Section Format (`build_t0_quality_digest.py`)
 
 | Section | Function | Line | Content |
 |---------|----------|------|---------|
-| **Operational Defects** | `build_operational_defects()` | 117 | Code hotspots from `vnx_code_quality` table |
-| **Prompt/Config Tuning** | `build_prompt_config_tuning()` | 175 | Prevention rules, low-confidence patterns, pending edits |
-| **Governance Health** | `build_governance_health()` | 295 | SPC alerts, failed gates, governance metrics |
+| Operational Defects | `build_operational_defects()` | :117 | Code hotspots, critical issues from receipts |
+| Prompt/Config Tuning | `build_prompt_config_tuning()` | :175 | Prevention rules, pending edits, config recommendations |
+| Governance Health | `build_governance_health()` | :295 | SPC alerts, governance metrics, compliance status |
 
-### Evidence Trails
-- Each recommendation links to `dispatch_ids`, `receipt_ids`, `file_paths`
-- Evidence map built from receipts: `_build_evidence_map()` — line 78
-- Pending items loaded: `_load_pending_items()` — line 98
+### Digest Assembly
+- **Where**: `_assemble_digest()` :415 — combines all 3 sections
+- **Cap**: Top 5 recommendations per section
+- **Evidence**: Each recommendation includes receipt IDs, file paths, dispatch IDs
+- **Output**: `_append_ndjson()` :460 — append-only NDJSON to `.vnx-data/state/` (G-L6)
+- **Compat**: `_write_compat_json()` :468 — writes latest digest as JSON for backward compatibility
 
-### Output
-- **NDJSON (G-L6):** `_append_ndjson()` — line 460 → `quality_digest.ndjson` (append-only)
-- **JSON (compat):** `_write_compat_json()` — line 468 → `t0_quality_digest.json` (latest only)
-- Assembly: `_assemble_digest()` — line 415
+### Lookback Window
+- Recommendation engine uses 24h lookback (widened from original 60min)
+- Receipts loaded via `_load_recent_receipts()` :46
 
 ---
 
 ## 8. Testing Evidence
 
-### Test Suite: 425 tests across 38 files
-
-#### Intelligence-Specific Test Files (7 files, 91+ learning tests)
+### Test Files
 
 | File | Tests | Focus |
 |------|-------|-------|
-| `tests/test_learning_feature.py` | 26 | Offer/adoption tracking, worker injection, nightly pipeline, digest format, confidence logging |
-| `tests/test_tag_intelligence.py` | 49 | Normalization, subset generation, combinations, prevention rules, recommendations |
-| `tests/test_conversation_analyzer.py` | 44 | Session parsing, heuristics, deep analysis, digest generation, model normalization |
-| `tests/test_pattern_matching.py` | 4 | Database connectivity, keyword extraction, pattern queries |
-| `tests/test_check_intelligence_health_refactor.py` | 4 | Health status thresholds, receipt coverage |
-| `tests/test_intelligence_daemon_paths.py` | 4 | Canonical path behavior (AS-05) |
-| `tests/test_intelligence_daemon_monitor_as07.py` | 3 | Schema compatibility (AS-07) |
+| `tests/test_learning_feature.py` | 26 | Offer/adoption tracking, worker injection, nightly pipeline, digest format, confidence logging, G-L1/G-L4 |
+| `tests/test_tag_intelligence.py` | 29 | Tag normalization, subset generation, combination tracking, prevention rules, recommendation manager, G-L2/G-L8 |
+| `tests/test_conversation_analyzer.py` | 44 | Session parsing, heuristic detection, analytics storage, idempotency, model normalization, digest generation |
+| `tests/test_check_intelligence_health_refactor.py` | 4 | Health status thresholds, receipt coverage, stale detection |
+| `tests/test_intelligence_daemon_paths.py` | 4 | Canonical path writes, rollback mode, dashboard sync |
+| `tests/test_intelligence_daemon_monitor_as07.py` | 3 | Schema compatibility, monitor queries |
+| `tests/test_session_gc.py` | 1 | Session garbage collection dry-run and apply |
 
-**Total intelligence tests: 134**
+**Total test functions across intelligence suite: 131**
 
-#### Key Test Names (by PR)
+### Key Test Names (Governance Verification)
 
-**PR-0 — Usage Signal Pipeline:**
-- `test_record_pattern_offer_writes_ndjson` (test_learning_feature.py:132)
-- `test_record_pattern_adoption_increments_used_count` (test_learning_feature.py:164)
-- `test_record_adoption_from_receipt_correlates_file_paths` (test_learning_feature.py:193)
-- `test_update_terminal_constraints_writes_pending_rules_json` (test_learning_feature.py:639)
-- `test_archive_unused_patterns_writes_pending_archival_json` (test_learning_feature.py:697)
-- `test_log_confidence_change_appends_to_ndjson` (test_learning_feature.py:607)
-
-**PR-1 — Session Analytics:**
-- `test_store_session_analytics` (test_conversation_analyzer.py:391)
-- `test_idempotent_skip` (test_conversation_analyzer.py:426)
-- `test_model_performance_aggregation` (test_conversation_analyzer.py:721)
-- `test_parse_assistant_message` (test_conversation_analyzer.py:201)
-- `test_heuristic_error_recovery` (test_conversation_analyzer.py:276)
-
-**PR-2 — Worker Intelligence Injection:**
-- `test_script_passes_bash_syntax_check` (test_learning_feature.py:240)
-- `test_outputs_allow_when_vnx_terminal_unset_and_pwd_unknown` (test_learning_feature.py:249)
-- `test_outputs_additional_context_with_dispatch` (test_learning_feature.py:291)
-- `test_injection_stays_under_token_budget` (test_learning_feature.py:334)
-
-**PR-3 — Tag Intelligence:**
-- `test_four_tags_generates_pairs_and_triples` (test_tag_intelligence.py:149)
-- `test_large_tuple_no_full_ntuple` (test_tag_intelligence.py:159)
-- `test_cap_at_max_pending` (test_tag_intelligence.py:541)
-- `test_add_recommendation_requires_evidence` (test_tag_intelligence.py:505)
-- `test_mark_stale_pending_edits` (test_tag_intelligence.py:596)
-- `test_hierarchical_ordering` (test_tag_intelligence.py:450)
-
-**PR-4 — Digest + Pipeline:**
-- `test_digest_has_three_sections` (test_learning_feature.py:479)
-- `test_each_section_capped_at_five` (test_learning_feature.py:491)
-- `test_ndjson_output_is_append_only` (test_learning_feature.py:535)
-- `test_evidence_trail_fields_present` (test_learning_feature.py:559)
-- `test_phase_logging_writes_ndjson_entries` (test_learning_feature.py:429)
+| Test | Verifies |
+|------|----------|
+| `test_update_terminal_constraints_writes_pending_rules_json` | G-L1: rules → pending file, not DB |
+| `test_update_terminal_constraints_deduplicates_rules` | G-L1: dedup by rule ID |
+| `test_add_recommendation_requires_evidence` | G-L2: evidence_ids mandatory |
+| `test_archive_unused_patterns_writes_pending_archival_json` | G-L4: archival → pending file |
+| `test_archive_unused_patterns_skips_recent_patterns` | G-L4: recent patterns preserved |
+| `test_ndjson_output_is_append_only` | G-L6: two runs = two lines |
+| `test_log_confidence_change_appends_to_ndjson` | G-L7: audit trail for confidence |
+| `test_cap_at_max_pending` | G-L8: max 5, supersedes lowest |
+| `test_record_pattern_offer_writes_ndjson` | Offer audit trail |
+| `test_record_pattern_adoption_increments_used_count` | Adoption → DB update |
+| `test_digest_has_three_sections` | 3-section digest format |
+| `test_injection_stays_under_token_budget` | <400 token budget |
 
 ---
 
@@ -311,79 +242,67 @@ Context:
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Intelligence scripts | 12 | Architecture overview |
-| Total LOC (intelligence) | 8,222 | wc -l across 12 files |
-| Pattern database | 31 baseline rows | `pattern_usage` table |
-| Confidence boost factor | ×1.10 (cap 2.0) | `learning_loop.py:233` |
-| Confidence decay factor | ×0.95 (floor 0.1) | `learning_loop.py:254` |
-| Token budget (workers) | 400 tokens (≈1600 chars) | `userpromptsubmit_worker_intelligence_inject.sh:151` |
-| Max patterns per injection | 3 | `userpromptsubmit_worker_intelligence_inject.sh:108` |
-| Max prevention rules per injection | 2 | `userpromptsubmit_worker_intelligence_inject.sh:108` |
-| Max session insights per injection | 2 | `userpromptsubmit_worker_intelligence_inject.sh:108` |
-| Max pending recommendations | 5 | `tag_intelligence.py:32` (`MAX_PENDING_RECOMMENDATIONS`) |
-| Stale threshold | 7 days | `tag_intelligence.py:35` (`STALE_DAYS`) |
-| Digest lookback | 24 hours | `build_t0_quality_digest.py:40` (`LOOKBACK_HOURS`) |
-| Max items per digest section | 5 | `build_t0_quality_digest.py:39` (`MAX_PER_SECTION`) |
-| Digest schema version | 2.0 | `build_t0_quality_digest.py:41` |
-| Hourly extraction interval | 3600s | `intelligence_daemon.py:108` |
-| Daily hygiene hour | 18:00 | `intelligence_daemon.py:109` |
-| Deep analysis token threshold | 100,000 | `conversation_analyzer.py:51` |
-| Deep analysis tool threshold | 100 | `conversation_analyzer.py:52` |
-| Session brief lookback | 7 days | `generate_t0_session_brief.py:36` |
-| Receipt max age | 24 hours | `receipt_processor_v4.sh:24` |
-| Receipt rate limit | 10/min | `receipt_processor_v4.sh:25` |
-| Flood threshold | 50 | `receipt_processor_v4.sh:26` |
-| Nightly pipeline phases | 7 | `conversation_analyzer_nightly.sh` (Phase 0-4 + 1.5 + 2.5) |
-| PRs in feature | 5 (PR-0 through PR-4) | FEATURE_PLAN.md |
-| Governance rules | 8 (G-L1 through G-L8) | FEATURE_PLAN.md |
-| Architecture rules | 10 (A-1 through A-10) | FEATURE_PLAN.md |
-| Total tests (project) | 425 | 38 test files |
-| Intelligence tests | 134 | 7 test files |
-| Recommendation types | 3 | `claude_md_patch`, `prevention_rule`, `routing_hint` |
-| Prevention rule types | 4 | `critical-prevention`, `validation-check`, `performance-optimization`, `memory-management` |
+| Intelligence scripts (Python) | 15 | `scripts/` directory |
+| Intelligence scripts (Shell) | 7 | `scripts/` directory |
+| Total test functions | 131 | 7 test files in `tests/` |
+| Nightly pipeline phases | 12 (0-11) | `nightly_intelligence_pipeline.sh` :132-214 |
+| Max patterns per injection | 3 | `userpromptsubmit_worker_intelligence_inject.sh` :7 |
+| Token budget per injection | <400 (~1600 chars) | `userpromptsubmit_worker_intelligence_inject.sh` :7, :151 |
+| Max pending recommendations | 5 | `tag_intelligence.py` :32 (`MAX_PENDING_RECOMMENDATIONS`) |
+| Stale pending edit threshold | 7 days | `tag_intelligence.py:mark_stale_pending_edits()` :816 |
+| Confidence cap | 0.95 | `tag_intelligence.py:_generate_prevention_rule()` :456 |
+| Digest lookback window | 24h | `build_t0_quality_digest.py:_load_recent_receipts()` :46 |
+| Digest sections | 3 (Operational Defects, Prompt/Config Tuning, Governance Health) | `build_t0_quality_digest.py` :117, :175, :295 |
+| Max recommendations per digest section | 5 | `build_t0_quality_digest.py:_assemble_digest()` :415 |
+| Recommendation types (MVP) | 3 (`claude_md_patch`, `prevention_rule`, `routing_hint`) | `tag_intelligence.py:_generate_recommendation()` :508 |
+| PRs in feature | 5 (PR-0 through PR-4) | `FEATURE_PLAN.md` |
+| Governance rules | 8 (G-L1 through G-L8) | `FEATURE_PLAN.md` |
+| Architecture rules | 10 (A-1 through A-10) | `FEATURE_PLAN.md` |
 
 ---
 
-## Nightly Pipeline Phases — `conversation_analyzer_nightly.sh`
+## 10. Data Storage Map
 
-| Phase | Line | Script | Purpose |
-|-------|------|--------|---------|
-| 0 | 71 | `quality_db_init.py` | DB schema migrations |
-| 1 | 97 | `conversation_analyzer.py` | Session parsing + heuristic + deep analysis |
-| 1.5 | 107 | `link_sessions_dispatches.py` | Cross-reference sessions ↔ dispatches ↔ receipts |
-| 2 | 115 | `generate_t0_session_brief.py` | Model performance summary |
-| 2.5 | 123 | `governance_aggregator.py` | Governance metrics + SPC alerts |
-| 3 | 131 | `generate_suggested_edits.py` | `pending_edits.json` (human-in-the-loop) |
-| 4 | 139 | `send_digest_email.py` | Email digest (requires `VNX_DIGEST_EMAIL`) |
-
-Each phase is non-fatal — failure in one phase does not block subsequent phases.
-Singleton enforcement at line 51-60 prevents parallel runs.
+| Data | Location | Format |
+|------|----------|--------|
+| Pattern usage | `quality_intelligence.db` → `pattern_usage` table | SQLite |
+| Session analytics | `quality_intelligence.db` → `session_analytics` table | SQLite |
+| Prevention rules | `quality_intelligence.db` → `prevention_rules` table | SQLite |
+| Tag combinations | `quality_intelligence.db` → `tag_combinations` table | SQLite |
+| Offer/adoption audit | `.vnx-data/state/intelligence_usage.ndjson` | NDJSON (append-only) |
+| Confidence changes | `.vnx-data/state/confidence_changes.ndjson` | NDJSON (append-only) |
+| Quality digest history | `.vnx-data/state/quality_digest.ndjson` | NDJSON (append-only, G-L6) |
+| Recommendations | `.vnx-data/state/t0_recommendations.json` | JSON |
+| Pending rules | `.vnx-data/state/pending_rules.json` | JSON (G-L1) |
+| Pending archival | `.vnx-data/state/pending_archival.json` | JSON (G-L4) |
+| Intelligence health | `.vnx-data/state/intelligence_health.json` | JSON |
+| Pipeline run log | `.vnx-data/state/nightly_pipeline.ndjson` | NDJSON |
+| Receipts | `.vnx-data/state/t0_receipts.ndjson` | NDJSON |
 
 ---
 
-## Database Tables — `quality_intelligence.db`
+## 11. Nightly Pipeline Phases
 
-| Table | Used By | Purpose |
-|-------|---------|---------|
-| `pattern_usage` | `learning_loop.py`, `gather_intelligence.py` | Track offer/adoption counts, confidence scores |
-| `session_analytics` | `conversation_analyzer.py`, `generate_t0_session_brief.py` | Session metrics, model performance |
-| `prevention_rules` | `tag_intelligence.py` | Tag-based prevention rules with confidence |
-| `tag_combinations` | `tag_intelligence.py` | Tag subset tracking with occurrence counts |
-| `code_snippets` | `intelligence_daemon.py` | Extracted code patterns with quality scores |
-| `vnx_code_quality` | `build_t0_quality_digest.py` | Code quality metrics for hotspot detection |
+Consolidated pipeline: `scripts/nightly_intelligence_pipeline.sh`
 
-## State Files — `.vnx-data/state/`
+| Phase | Line | Command | Purpose |
+|-------|------|---------|---------|
+| 0 | :132 | `quality_db_init.py` | DB schema migrations |
+| 1a | :140 | `code_quality_scanner.py` | Quality scan |
+| 1b | :141 | `code_snippet_extractor.py` | Snippet extraction |
+| 1c | :142 | `doc_section_extractor.py` | Documentation extraction |
+| 2 | :145 | `conversation_analyzer.py` | Session analysis |
+| 3 | :150 | `link_sessions_dispatches.py` | Session-dispatch linkage |
+| 4 | :166 | `learning_loop.py run` | Learning cycle (confidence updates) |
+| 5 | :169 | `tag_intelligence.py stale` | Mark stale pending edits |
+| 6 | :172 | `generate_t0_session_brief.py` | T0 session brief |
+| 7 | :175 | `governance_aggregator.py --backfill` | Governance metrics |
+| 8 | :178 | `generate_suggested_edits.py` | Suggested edits |
+| 9 | :181 | `build_t0_quality_digest.py` | Quality digest (NDJSON) |
+| 10 | :184 | `generate_t0_recommendations.py` | Recommendations engine |
 
-| File | Writer | Reader | Format |
-|------|--------|--------|--------|
-| `intelligence_usage.ndjson` | `gather_intelligence.py`, `learning_loop.py`, worker inject | Audit trail | NDJSON (append) |
-| `quality_digest.ndjson` | `build_t0_quality_digest.py` | Trend analysis | NDJSON (append) |
-| `t0_quality_digest.json` | `build_t0_quality_digest.py` | T0 injection | JSON (latest) |
-| `t0_tags_digest.json` | `tag_intelligence.py` | T0 injection | JSON (latest) |
-| `t0_recommendations.json` | `RecommendationManager` | T0 injection | JSON (latest) |
-| `pending_rules.json` | `learning_loop.py` | Operator review | JSON (queue) |
-| `pending_archival.json` | `learning_loop.py` | Operator review | JSON (queue) |
-| `pending_edits.json` | `generate_suggested_edits.py` | Operator review | JSON (queue) |
-| `t0_session_brief.json` | `generate_t0_session_brief.py` | T0 dispatch | JSON (latest) |
-| `intelligence_health.json` | `intelligence_daemon.py` | Dashboard, health check | JSON (latest) |
-| `t0_receipts.ndjson` | `receipt_processor_v4.sh` | Multiple consumers | NDJSON (append) |
+**Error handling**: `run_phase()` :78 — each phase runs independently; failure logged to `nightly_pipeline.ndjson` but does not block subsequent phases.
+
+---
+
+*Generated 2026-03-28 for VNX Self-Learning Intelligence Pipeline blog post preparation.*
