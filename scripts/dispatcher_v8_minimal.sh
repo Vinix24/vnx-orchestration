@@ -16,6 +16,17 @@ source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
 PROJECT_ROOT="${PROJECT_ROOT}"
 VNX_DIR="$VNX_HOME"
 
+# --- Runtime Core defaults (PR-5 cutover) ---
+# VNX_RUNTIME_PRIMARY=1: broker + canonical lease are the authoritative path.
+# Set VNX_RUNTIME_PRIMARY=0 to revert to legacy-only mode (rollback).
+# See docs/runtime_core_rollback.md for full rollback procedure.
+VNX_RUNTIME_PRIMARY="${VNX_RUNTIME_PRIMARY:-1}"
+# Broker authoritative (not shadow) after cutover
+VNX_BROKER_SHADOW="${VNX_BROKER_SHADOW:-0}"
+# Canonical lease active after cutover
+VNX_CANONICAL_LEASE_ACTIVE="${VNX_CANONICAL_LEASE_ACTIVE:-1}"
+export VNX_RUNTIME_PRIMARY VNX_BROKER_SHADOW VNX_CANONICAL_LEASE_ACTIVE
+
 # Source the singleton enforcer
 source "$VNX_DIR/scripts/singleton_enforcer.sh"
 
@@ -283,6 +294,151 @@ release_terminal_claim() {
     return 0
 }
 
+# ===== RUNTIME CORE INTEGRATION (PR-5) =====
+# All functions are non-fatal: failures are logged but never block dispatch.
+# When VNX_RUNTIME_PRIMARY=0, functions return immediately without calling Python.
+
+_rc_enabled() {
+    [[ "${VNX_RUNTIME_PRIMARY:-1}" == "1" ]]
+}
+
+_rc_python() {
+    python3 "$VNX_DIR/scripts/runtime_core_cli.py" "$@" 2>/dev/null
+}
+
+# Register dispatch with broker before any terminal delivery.
+# Writes bundle.json + prompt.txt to .vnx-data/dispatches/<id>/.
+rc_register() {
+    local dispatch_id="$1" terminal_id="$2" track="$3" skill_name="$4" gate="$5"
+    local prompt_file="${6:-}"
+    _rc_enabled || return 0
+
+    local args=(register
+        --dispatch-id "$dispatch_id"
+        --terminal "$terminal_id"
+        --track "$track"
+        --skill "$skill_name"
+        --gate "$gate"
+    )
+    if [[ -n "$prompt_file" ]]; then
+        args+=(--prompt-file "$prompt_file")
+    fi
+
+    if ! _rc_python "${args[@]}" > /dev/null; then
+        log "V8 RUNTIME_CORE: register non-fatal failure dispatch=$dispatch_id"
+    else
+        log "V8 RUNTIME_CORE: registered dispatch=$dispatch_id terminal=$terminal_id"
+    fi
+}
+
+# Check terminal availability via canonical lease before legacy lock check.
+# Outputs BLOCK:<reason> or ALLOW if canonical lease says terminal is busy.
+rc_check_terminal() {
+    local terminal_id="$1" dispatch_id="$2"
+    _rc_enabled || { echo "ALLOW"; return 0; }
+
+    local result
+    result=$(_rc_python check-terminal --terminal "$terminal_id" --dispatch-id "$dispatch_id") || {
+        echo "ALLOW"
+        return 0
+    }
+
+    local available
+    available=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("yes" if d.get("available") else "no")' 2>/dev/null || echo "yes")
+
+    if [[ "$available" == "no" ]]; then
+        local reason
+        reason=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("reason","canonical_lease_conflict"))' 2>/dev/null || echo "canonical_lease_conflict")
+        echo "BLOCK:canonical_lease:$reason"
+    else
+        echo "ALLOW"
+    fi
+}
+
+# Acquire canonical lease alongside terminal_state_shadow write.
+# Returns the lease generation (integer) on stdout for later release.
+rc_acquire_lease() {
+    local terminal_id="$1" dispatch_id="$2"
+    local lease_seconds="${VNX_DISPATCH_LEASE_SECONDS:-600}"
+    _rc_enabled || { echo "0"; return 0; }
+
+    local result
+    result=$(_rc_python acquire-lease \
+        --terminal "$terminal_id" \
+        --dispatch-id "$dispatch_id" \
+        --lease-seconds "$lease_seconds") || {
+        log "V8 RUNTIME_CORE: acquire-lease non-fatal failure terminal=$terminal_id dispatch=$dispatch_id"
+        echo "0"
+        return 0
+    }
+
+    local generation
+    generation=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("generation",0))' 2>/dev/null || echo "0")
+    log "V8 RUNTIME_CORE: lease acquired terminal=$terminal_id generation=$generation"
+    echo "$generation"
+}
+
+# Record delivery start (broker: claimed -> delivering). Returns attempt_id.
+rc_delivery_start() {
+    local dispatch_id="$1" terminal_id="$2"
+    _rc_enabled || { echo ""; return 0; }
+
+    local result
+    result=$(_rc_python delivery-start \
+        --dispatch-id "$dispatch_id" \
+        --terminal "$terminal_id") || {
+        log "V8 RUNTIME_CORE: delivery-start non-fatal failure dispatch=$dispatch_id"
+        echo ""
+        return 0
+    }
+
+    local attempt_id
+    attempt_id=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("attempt_id",""))' 2>/dev/null || echo "")
+    echo "$attempt_id"
+}
+
+# Record delivery success (broker: delivering -> accepted).
+rc_delivery_success() {
+    local dispatch_id="$1" attempt_id="$2"
+    _rc_enabled || return 0
+    [[ -n "$attempt_id" ]] || return 0
+
+    if ! _rc_python delivery-success \
+        --dispatch-id "$dispatch_id" \
+        --attempt-id "$attempt_id" > /dev/null; then
+        log "V8 RUNTIME_CORE: delivery-success non-fatal failure dispatch=$dispatch_id"
+    fi
+}
+
+# Record delivery failure durably (broker: delivering -> failed_delivery).
+rc_delivery_failure() {
+    local dispatch_id="$1" attempt_id="$2" reason="${3:-delivery failed}"
+    _rc_enabled || return 0
+    [[ -n "$attempt_id" ]] || return 0
+
+    if ! _rc_python delivery-failure \
+        --dispatch-id "$dispatch_id" \
+        --attempt-id "$attempt_id" \
+        --reason "$reason" > /dev/null; then
+        log "V8 RUNTIME_CORE: delivery-failure non-fatal failure dispatch=$dispatch_id"
+    fi
+}
+
+# Release canonical lease (leased -> idle).
+rc_release_lease() {
+    local terminal_id="$1" generation="$2"
+    _rc_enabled || return 0
+    [[ -n "$generation" && "$generation" != "0" ]] || return 0
+
+    if ! _rc_python release-lease \
+        --terminal "$terminal_id" \
+        --generation "$generation" > /dev/null; then
+        log "V8 RUNTIME_CORE: release-lease non-fatal failure terminal=$terminal_id"
+    fi
+}
+
+# ===== END RUNTIME CORE INTEGRATION =====
+
 # Source smart pane manager for self-healing pane discovery
 source "$VNX_DIR/scripts/pane_manager_v2.sh"
 
@@ -520,6 +676,10 @@ configure_terminal_mode() {
         requires_model="default"
     fi
     # Step 3: Switch model if specified (only for providers that support /model)
+    # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
+    if [[ "$requires_model" == "opus" ]]; then
+        requires_model="default"
+    fi
     if [[ -n "$requires_model" ]] && [[ "$requires_model" != "" ]]; then
         if [[ "$provider" == "claude_code" || "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
             log "V8 MODE_CONTROL: Switching to model: $requires_model (provider=$provider)"
@@ -1081,12 +1241,41 @@ $instruction_content
 
 $receipt_footer"
 
+    # --- Runtime Core: canonical lease check (before legacy lock) ---
+    # When VNX_RUNTIME_PRIMARY=1, check canonical lease first.
+    # BLOCK from canonical lease blocks dispatch regardless of legacy lock.
+    local _rc_canonical_check
+    _rc_canonical_check=$(rc_check_terminal "$terminal_id" "$dispatch_id")
+    if [[ "$_rc_canonical_check" == BLOCK:* ]]; then
+        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_canonical_check#BLOCK:}"
+        return 1
+    fi
+
     if ! terminal_lock_allows_dispatch "$terminal_id" "$dispatch_id"; then
         return 1
     fi
 
     if ! acquire_terminal_claim "$terminal_id" "$dispatch_id"; then
         return 1
+    fi
+
+    # --- Runtime Core: acquire canonical lease alongside terminal_state_shadow ---
+    local _rc_generation
+    _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id")
+
+    # --- Runtime Core: register dispatch bundle with broker ---
+    # Write prompt to temp file for broker bundle (cleaned up after register)
+    local _rc_prompt_tmpfile=""
+    local _rc_attempt_id=""
+    if _rc_enabled; then
+        _rc_prompt_tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/rc_prompt_${dispatch_id}.txt"
+        mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
+        printf '%s' "$complete_prompt" > "$_rc_prompt_tmpfile"
+        rc_register "$dispatch_id" "$terminal_id" "$track" "$skill_name" "$gate" "$_rc_prompt_tmpfile"
+        rm -f "$_rc_prompt_tmpfile"
+
+        # Record delivery start (queued -> claimed -> delivering)
+        _rc_attempt_id=$(rc_delivery_start "$dispatch_id" "$terminal_id")
     fi
 
     # Resolve worktree path for this terminal (falls back to PROJECT_ROOT)
@@ -1162,6 +1351,10 @@ ${complete_prompt}"
     fi
 
     if [ "$_delivery_failed" = true ]; then
+        # Record failure in broker (durably, never logs-only — G-R3, G-R5)
+        rc_delivery_failure "$dispatch_id" "$_rc_attempt_id" "tmux delivery failed"
+        rc_release_lease "$terminal_id" "$_rc_generation"
+
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
         fi
@@ -1172,12 +1365,18 @@ ${complete_prompt}"
     sleep 1
 
     if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
+        rc_delivery_failure "$dispatch_id" "$_rc_attempt_id" "tmux Enter failed"
+        rc_release_lease "$terminal_id" "$_rc_generation"
+
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
         fi
         log "V8 ERROR: Failed to send Enter to terminal $target_pane"
         return 1
     fi
+
+    # Record delivery success in broker (delivering -> accepted)
+    rc_delivery_success "$dispatch_id" "$_rc_attempt_id"
 
     log "V8 DISPATCH: Successfully sent dispatch to $target_pane"
 
