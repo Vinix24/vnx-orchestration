@@ -138,7 +138,24 @@ def _is_lease_expired(lease_expires_at: str | None) -> bool:
 
 
 def _gc_expired_leases(terminals: Dict[str, Any]) -> int:
-    """Clear claim fields on all terminals with expired leases. Returns count of cleaned entries."""
+    """Clear claim fields on terminals with elapsed TTLs (legacy shadow path only).
+
+    WARNING: This is a blind in-place cleanup — it does NOT create coordination
+    events and does NOT update the canonical terminal_leases SQLite table.
+    It is retained for backward compatibility with legacy consumers that do not
+    use the canonical lease manager (lease_manager.py).
+
+    When VNX_CANONICAL_LEASE_ACTIVE=1 is set in the environment, this function
+    is skipped entirely. Expiry in the canonical path goes through
+    lease_manager.expire() / runtime_coordination.expire_lease(), which creates
+    an auditable lease_expired event per G-R3.
+
+    Returns count of cleaned entries (always 0 when canonical path is active).
+    """
+    import os
+    if os.environ.get("VNX_CANONICAL_LEASE_ACTIVE", "0").strip() == "1":
+        return 0  # canonical lease manager owns expiry; skip blind GC
+
     cleaned = 0
     for record in terminals.values():
         if not isinstance(record, dict):
