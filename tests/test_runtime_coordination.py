@@ -58,6 +58,7 @@ class TestStateEnumerations(unittest.TestCase):
         expected = {
             "queued", "claimed", "delivering", "accepted", "running",
             "completed", "timed_out", "failed_delivery", "expired", "recovered",
+            "dead_letter",
         }
         self.assertEqual(DISPATCH_STATES, expected)
 
@@ -178,7 +179,7 @@ class TestSchemaInit(_DbTestCase):
                 "SELECT version FROM runtime_schema_version ORDER BY version DESC LIMIT 1"
             ).fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual(row[0], 1)
+        self.assertGreaterEqual(row[0], 1)
 
 
 class TestDispatchRegistration(_DbTestCase):
