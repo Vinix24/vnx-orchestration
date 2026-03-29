@@ -502,8 +502,16 @@ class TestShadowGCGuard(unittest.TestCase):
     """Verify that _gc_expired_leases is skipped when VNX_CANONICAL_LEASE_ACTIVE=1."""
 
     def setUp(self):
-        from terminal_state_shadow import _gc_expired_leases
-        self._gc = _gc_expired_leases
+        import importlib.util
+        _name = "terminal_state_shadow_lib"
+        spec = importlib.util.spec_from_file_location(
+            _name,
+            str(SCRIPT_DIR / "lib" / "terminal_state_shadow.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[_name] = mod  # required: @dataclass resolves annotations via sys.modules
+        spec.loader.exec_module(mod)
+        self._gc = mod._gc_expired_leases
 
     def test_gc_skipped_when_canonical_active(self):
         os.environ["VNX_CANONICAL_LEASE_ACTIVE"] = "1"
