@@ -2,8 +2,12 @@
 # VNX Command: recover
 # Recovers a VNX session from unclean shutdown or stale state.
 #
-# Detects and resolves: stale locks, orphan processes, incomplete dispatches,
-# stale terminal claims, and unclean-shutdown markers.
+# PR-5: When runtime core is active (VNX_RUNTIME_PRIMARY=1), recovery uses
+# the canonical runtime recovery engine (vnx_recover_runtime.py) which
+# reconciles leases, incidents, and tmux bindings from canonical state.
+#
+# Legacy recovery (lock/PID/dispatch-file cleanup) runs as fallback when
+# runtime core is inactive or as a complement to runtime recovery.
 #
 # This file is sourced by bin/vnx's command loader. All functions and variables
 # from the main script (log, err, PROJECT_ROOT, VNX_HOME, etc.)
@@ -12,6 +16,8 @@
 cmd_recover() {
   local aggressive=false
   local dry_run=false
+  local json_output=false
+  local legacy_only=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -19,24 +25,36 @@ cmd_recover() {
         aggressive=true; shift ;;
       --dry-run)
         dry_run=true; shift ;;
+      --json)
+        json_output=true; shift ;;
+      --legacy)
+        legacy_only=true; shift ;;
       -h|--help)
         cat <<HELP
 Usage: vnx recover [options]
 
 Recovers a VNX session from unclean shutdown or stale state.
 
+When runtime core is active (default after FP-B cutover), recovery uses
+the canonical runtime recovery engine which reconciles:
+  - Terminal leases (expire stale, recover expired, release orphans)
+  - Dispatch state (timeout stuck, flag for review)
+  - Incident log (summarize, resolve stale, reset budgets)
+  - tmux bindings (verify profile, remap stale panes)
+
+Legacy cleanup (locks, PIDs, dispatch files) always runs as a complement.
+
 Options:
   --aggressive     Force-kill all scoped VNX processes before recovery
   --dry-run        Show what would be recovered without making changes
+  --json           Output runtime recovery report as JSON
+  --legacy         Skip runtime recovery, only run legacy cleanup
   -h, --help       Show this help
 
-Recovery actions:
-  1. Detect and clear stale process locks (age-based + PID check)
-  2. Kill orphan VNX processes scoped to this project
-  3. Move incomplete dispatches from active/ to failed/
-  4. Reset stale terminal claims to idle
-  5. Clear unclean-shutdown marker
-  6. Clean up stale payload temp files
+Rollback guidance:
+  If runtime recovery causes issues, disable it with:
+    python scripts/rollback_runtime_core.py rollback
+  Then run: vnx recover --legacy
 HELP
         return 0
         ;;
@@ -52,6 +70,50 @@ HELP
   done
 
   log "[recover] Starting recovery scan..."
+
+  local runtime_exit=0
+
+  # ── Runtime recovery (canonical state) ──────────────────────────────────
+  if [ "$legacy_only" != true ] && [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ]; then
+    local state_dir="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
+    local scripts_lib="$VNX_HOME/scripts/lib"
+
+    if [ -f "$scripts_lib/vnx_recover_runtime.py" ] && command -v python3 &>/dev/null; then
+      log "[recover] Running canonical runtime recovery..."
+
+      local runtime_args=("--state-dir" "$state_dir")
+      [ "$dry_run" = true ] && runtime_args+=("--dry-run")
+      [ "$json_output" = true ] && runtime_args+=("--json")
+
+      PYTHONPATH="$scripts_lib${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 "$scripts_lib/vnx_recover_runtime.py" "${runtime_args[@]}"
+      runtime_exit=$?
+
+      if [ "$runtime_exit" -eq 0 ]; then
+        log "[recover] Runtime recovery: clean or recovered"
+      elif [ "$runtime_exit" -eq 2 ]; then
+        log "[recover] Runtime recovery: blocked — see report above"
+      else
+        log "[recover] Runtime recovery: partial — some issues remain"
+      fi
+
+      log ""
+    else
+      log "[recover] Runtime recovery engine not available — falling back to legacy"
+    fi
+  else
+    if [ "$legacy_only" = true ]; then
+      log "[recover] Legacy-only mode (--legacy)"
+    else
+      log "[recover] Runtime core inactive — using legacy recovery"
+    fi
+  fi
+
+  # ── Legacy recovery (file-based cleanup) ─────────────────────────────────
+  # Always runs as a complement to runtime recovery. When runtime core is
+  # active, this cleans up file-based artifacts that the runtime engine
+  # does not manage (locks, PIDs, dispatch markdown files, payload temp files).
+  log "[recover] Running legacy cleanup..."
 
   local recovered=0
   local issues=0
@@ -154,7 +216,9 @@ HELP
   fi
 
   # ── Step 3: Move incomplete dispatches to failed/ ──────────────────────
-  log "[recover] Checking for incomplete dispatches..."
+  # NOTE: When runtime core is active, canonical dispatch state is in SQLite.
+  # This step handles legacy markdown dispatch files only.
+  log "[recover] Checking for incomplete dispatch files..."
   local active_dir="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}/active"
   local failed_dir="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}/failed"
 
@@ -178,12 +242,16 @@ HELP
   fi
 
   # ── Step 4: Reset stale terminal claims ────────────────────────────────
-  log "[recover] Checking terminal claims..."
-  local terminal_state="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}/terminal_state.json"
+  # NOTE: When runtime core is active, canonical lease state is in SQLite
+  # (handled by runtime recovery above). This step updates the legacy
+  # terminal_state.json projection only when runtime core is off.
+  if [ "${VNX_RUNTIME_PRIMARY:-1}" != "1" ] || [ "$legacy_only" = true ]; then
+    log "[recover] Checking terminal claims (legacy)..."
+    local terminal_state="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}/terminal_state.json"
 
-  if [ -f "$terminal_state" ] && command -v python3 &>/dev/null; then
-    local stale_claims
-    stale_claims="$(python3 -c "
+    if [ -f "$terminal_state" ] && command -v python3 &>/dev/null; then
+      local stale_claims
+      stale_claims="$(python3 -c "
 import json, sys
 try:
     with open('$terminal_state') as f:
@@ -197,15 +265,15 @@ except Exception:
     print('')
 " 2>/dev/null)" || true
 
-    if [ -n "$stale_claims" ]; then
-      IFS='|' read -ra claim_terminals <<< "$stale_claims"
-      for tid in "${claim_terminals[@]}"; do
-        [ -n "$tid" ] || continue
-        issues=$((issues + 1))
-        if [ "$dry_run" = true ]; then
-          log "  WOULD RESET: $tid claim (working → idle)"
-        else
-          python3 -c "
+      if [ -n "$stale_claims" ]; then
+        IFS='|' read -ra claim_terminals <<< "$stale_claims"
+        for tid in "${claim_terminals[@]}"; do
+          [ -n "$tid" ] || continue
+          issues=$((issues + 1))
+          if [ "$dry_run" = true ]; then
+            log "  WOULD RESET: $tid claim (working → idle)"
+          else
+            python3 -c "
 import json
 with open('$terminal_state') as f:
     data = json.load(f)
@@ -215,10 +283,11 @@ if '$tid' in data:
 with open('$terminal_state', 'w') as f:
     json.dump(data, f, indent=2)
 " 2>/dev/null || true
-          log "  RESET: $tid claim (working → idle)"
-          recovered=$((recovered + 1))
-        fi
-      done
+            log "  RESET: $tid claim (working → idle)"
+            recovered=$((recovered + 1))
+          fi
+        done
+      fi
     fi
   fi
 
@@ -227,7 +296,7 @@ with open('$terminal_state', 'w') as f:
   if [ -f "$unclean_marker" ]; then
     issues=$((issues + 1))
     if [ "$dry_run" = true ]; then
-      log "  WOULD CLEAR: unclean-shutdown marker ($(cat "$unclean_marker" | head -1))"
+      log "  WOULD CLEAR: unclean-shutdown marker"
     else
       rm -f "$unclean_marker"
       log "  CLEARED: unclean-shutdown marker"
@@ -256,16 +325,26 @@ with open('$terminal_state', 'w') as f:
   log ""
   log "════════════════════════════════════════════════════════════════"
   if [ "$dry_run" = true ]; then
-    log " Recovery scan (dry-run): $issues issue(s) found"
+    log " Legacy cleanup (dry-run): $issues issue(s) found"
     log " Run without --dry-run to apply fixes."
   elif [ "$recovered" -gt 0 ]; then
-    log " Recovery complete: $recovered issue(s) resolved"
-    log ""
-    log " Session should be usable. Run 'vnx start' to restart."
+    log " Legacy cleanup: $recovered issue(s) resolved"
   else
-    log " No recovery needed: session state is clean"
+    log " Legacy cleanup: session state is clean"
   fi
+
+  if [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && [ "$legacy_only" != true ]; then
+    log ""
+    log " Runtime core: ACTIVE — canonical recovery ran above"
+    log " Rollback: python scripts/rollback_runtime_core.py rollback"
+  fi
+
   log "════════════════════════════════════════════════════════════════"
 
-  return 0
+  if [ "$recovered" -gt 0 ] || [ "$runtime_exit" -eq 0 ]; then
+    log ""
+    log " Session should be usable. Run 'vnx start' to restart."
+  fi
+
+  return "$runtime_exit"
 }

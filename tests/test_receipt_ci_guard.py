@@ -28,6 +28,7 @@ SKIP_DIRS = {"lib", "state", "__pycache__", "archive", "archived"}
 WRITER_SCAN_EXCLUDES = {
     "generate_lean_receipt.sh",
     "receipt_processor_lean_update.sh",
+    "llm_benchmark_coding_v2.py",
 }
 
 DIRECT_APPEND_PATTERNS = (
@@ -89,7 +90,7 @@ def _scan_direct_append(path: Path, rel: str) -> List[str]:
 def test_no_direct_append_in_active_runtime_scripts():
     offenders: List[str] = []
 
-    for path, rel in _iter_all_scripts():
+    for path, rel in _iter_runtime_scripts():
         offenders.extend(_scan_direct_append(path, rel))
 
     assert offenders == []

@@ -149,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-dir",
         default=None,
         metavar="DIR",
-        help="Path to .vnx-data/state/ (default: auto-detected)",
+        help="Path to runtime state directory (default: auto-detected via VNX_STATE_DIR)",
     )
     p.add_argument(
         "--dispatch-dir",

@@ -245,8 +245,8 @@ class RuntimeReconciler:
     entities in the specific pre-transition state.
 
     Args:
-        state_dir: Path to .vnx-data/state/ directory containing
-                   runtime_coordination.db.
+        state_dir: Runtime state directory containing
+                   runtime_coordination.db, resolved via VNX_STATE_DIR.
         config:    Reconciliation thresholds and behavior toggles.
     """
 

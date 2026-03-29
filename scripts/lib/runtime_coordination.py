@@ -39,6 +39,7 @@ DISPATCH_STATES = frozenset({
     "failed_delivery",
     "expired",
     "recovered",
+    "dead_letter",
 })
 
 LEASE_STATES = frozenset({
@@ -57,10 +58,11 @@ DISPATCH_TRANSITIONS: Dict[str, frozenset] = {
     "accepted":        frozenset({"running", "timed_out"}),
     "running":         frozenset({"completed", "timed_out", "failed_delivery"}),
     "completed":       frozenset(),
-    "timed_out":       frozenset({"recovered", "expired"}),
-    "failed_delivery": frozenset({"recovered", "expired"}),
+    "timed_out":       frozenset({"recovered", "expired", "dead_letter"}),
+    "failed_delivery": frozenset({"recovered", "expired", "dead_letter"}),
     "expired":         frozenset(),
-    "recovered":       frozenset({"queued", "claimed", "expired"}),
+    "recovered":       frozenset({"queued", "claimed", "expired", "dead_letter"}),
+    "dead_letter":     frozenset(),
 }
 
 # Valid lease state transitions: {from_state: set_of_allowed_to_states}
@@ -209,6 +211,8 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
     Idempotent: safe to call multiple times. Uses CREATE TABLE IF NOT EXISTS
     and INSERT OR IGNORE throughout — no destructive operations.
 
+    Applies all available schema migrations in order (v1, v2, ...).
+
     Args:
         state_dir: Directory where runtime_coordination.db lives.
         schema_sql_path: Path to runtime_coordination.sql. Defaults to
@@ -227,6 +231,19 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
     with get_connection(state_dir) as conn:
         conn.executescript(schema_sql)
         conn.commit()
+
+    # Apply incremental migrations (v2, v3, ...) if available
+    schemas_dir = schema_sql_path.parent
+    version = 2
+    while True:
+        migration = schemas_dir / f"runtime_coordination_v{version}.sql"
+        if not migration.exists():
+            break
+        migration_sql = migration.read_text(encoding="utf-8")
+        with get_connection(state_dir) as conn:
+            conn.executescript(migration_sql)
+            conn.commit()
+        version += 1
 
 
 # ---------------------------------------------------------------------------
