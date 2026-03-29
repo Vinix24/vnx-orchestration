@@ -14,7 +14,7 @@ Architecture rules honoured:
   A-R5 — profile recovery does not depend on hard-coded pane index assumptions
   G-R4 — tmux layout changes cannot redefine terminal identity
 
-Profile storage: .vnx-data/state/session_profile.json
+Profile storage: session_profile.json in the runtime state directory (VNX_STATE_DIR)
 
 CLI usage:
   python3 tmux_session_profile.py save   --state-dir <path> --session <name>

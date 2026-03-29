@@ -104,7 +104,7 @@ class LeaseManager:
     def __init__(self, state_dir: str | Path, *, auto_init: bool = True) -> None:
         """
         Args:
-            state_dir: Path to .vnx-data/state/ directory.
+            state_dir: Runtime state directory, resolved via VNX_STATE_DIR.
             auto_init: If True, initialize the schema on first use if needed.
                        Set False in tests that manage init themselves.
         """
