@@ -483,15 +483,27 @@ def intelligence_import(paths: Dict[str, str]) -> StepResult:
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
-def run_init(paths: Dict[str, str], skip_hooks: bool = False) -> List[StepResult]:
+def run_init(paths: Dict[str, str], skip_hooks: bool = False,
+             starter: bool = False) -> List[StepResult]:
     """Execute the full init sequence, returning structured results."""
     results: List[StepResult] = []
 
     results.append(ensure_runtime_layout(paths))
-    results.append(write_profiles(paths))
+
+    if starter:
+        results.append(StepResult("profiles", SKIP,
+                                  "Starter mode: single provider, profiles not needed"))
+    else:
+        results.append(write_profiles(paths))
+
     results.append(write_config(paths))
     results.append(bootstrap_skills(paths))
-    results.append(bootstrap_terminals(paths))
+
+    if starter:
+        # Starter mode: only bootstrap T0
+        results.append(bootstrap_terminals(paths, terminal_ids=["T0"]))
+    else:
+        results.append(bootstrap_terminals(paths))
 
     if not skip_hooks:
         results.append(bootstrap_hooks(paths))
@@ -511,6 +523,10 @@ def main() -> int:
                         help="Skip hooks deployment (useful in CI)")
     parser.add_argument("--json", action="store_true",
                         help="Output results as JSON")
+    parser.add_argument("--starter", action="store_true",
+                        help="Initialize in starter mode (single terminal, no tmux)")
+    parser.add_argument("--operator", action="store_true",
+                        help="Initialize in operator mode (full tmux grid)")
     parser.add_argument("--step", choices=[
         "layout", "profiles", "config", "skills", "terminals",
         "hooks", "agent-files", "init-db", "intelligence-import",
@@ -533,7 +549,8 @@ def main() -> int:
         }
         results = [step_map[args.step]()]
     else:
-        results = run_init(paths, skip_hooks=args.skip_hooks)
+        results = run_init(paths, skip_hooks=args.skip_hooks,
+                           starter=args.starter)
 
     if args.json:
         out = [{"name": r.name, "status": r.status, "message": r.message,
