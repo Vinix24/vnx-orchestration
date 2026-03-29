@@ -624,6 +624,189 @@ class TmuxAdapter:
 
 
 # ---------------------------------------------------------------------------
+# Remap and reheal helpers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RemapResult:
+    """Result of a remap_pane or reheal_panes operation."""
+    remapped: List[str]    # terminal IDs that were remapped
+    missing: List[str]     # terminal IDs not found in live tmux
+    unchanged: List[str]   # terminal IDs whose pane_id was already correct
+    panes_json_updated: bool = False
+
+
+def remap_pane(
+    terminal_id: str,
+    new_pane_id: str,
+    panes_path: Path,
+    state_dir: Optional[Path] = None,
+) -> bool:
+    """Update panes.json with a new pane_id for terminal_id.
+
+    Called when a pane ID changes (e.g. after tmux crash and restart) but
+    terminal identity (T1/T2/T3) remains stable in the lease table.
+
+    Emits a coordination event if state_dir is provided (G-R3).
+    Does NOT touch dispatch registry or lease state (A-R3, A-R4).
+
+    Args:
+        terminal_id:  Terminal whose pane_id drifted (e.g. "T2").
+        new_pane_id:  The current live tmux pane ID (e.g. "%7").
+        panes_path:   Path to panes.json.
+        state_dir:    If provided, emit adapter_pane_remap coordination event.
+
+    Returns:
+        True if panes.json was updated; False if terminal was not found.
+    """
+    panes = _read_panes_json(panes_path)
+    if not panes:
+        return False
+
+    updated = False
+    old_pane_id = ""
+    for key in (terminal_id, terminal_id.upper(), terminal_id.lower()):
+        if key in panes:
+            if not updated:
+                # Capture old pane_id on first match only — subsequent
+                # iterations may be the same key (e.g. "T1".upper() == "T1")
+                # and old_pane_id would already be overwritten to new_pane_id.
+                old_pane_id = panes[key].get("pane_id", "")
+            panes[key]["pane_id"] = new_pane_id
+            updated = True
+
+    # Also update tracks entry if present
+    tracks = panes.get("tracks", {})
+    for entry in panes.values():
+        if isinstance(entry, dict) and entry.get("pane_id") == old_pane_id:
+            entry["pane_id"] = new_pane_id
+    for track_entry in tracks.values():
+        if isinstance(track_entry, dict) and track_entry.get("pane_id") == old_pane_id:
+            track_entry["pane_id"] = new_pane_id
+
+    if not updated:
+        return False
+
+    try:
+        panes_path.write_text(json.dumps(panes, indent=2), encoding="utf-8")
+    except OSError:
+        return False
+
+    # Emit coordination event (A-R3: pane remap is adapter state, not dispatch state)
+    if state_dir is not None:
+        try:
+            from runtime_coordination import _append_event, get_connection
+            with get_connection(state_dir) as conn:
+                _append_event(
+                    conn,
+                    event_type="adapter_pane_remap",
+                    entity_type="terminal",
+                    entity_id=terminal_id,
+                    actor="tmux_adapter",
+                    reason=f"pane_id remapped from {old_pane_id!r} to {new_pane_id!r}",
+                    metadata={"old_pane_id": old_pane_id, "new_pane_id": new_pane_id},
+                )
+                conn.commit()
+        except Exception:
+            pass  # Non-fatal; remap still happened
+
+    return True
+
+
+def reheal_panes(
+    state_dir: Path,
+    session_name: str,
+    project_root: str = "",
+) -> RemapResult:
+    """Reconcile panes.json with live tmux state using work_dir as identity anchor.
+
+    When pane IDs drift (e.g. after session crash), this function rediscovers
+    each terminal by matching its declared work_dir against live pane paths.
+    Matched panes are remapped via remap_pane(). Unmatched panes are reported
+    as missing.
+
+    Identity invariant (G-R4, A-R4): work_dir is the stable anchor.
+    pane_id is derived state that may be updated freely.
+
+    Args:
+        state_dir:     Path to .vnx-data/state/ (contains panes.json and DB).
+        session_name:  tmux session to interrogate.
+        project_root:  Used to derive default work_dirs if not in panes.json.
+
+    Returns:
+        RemapResult describing what was remapped, unchanged, or missing.
+    """
+    panes_path = state_dir / "panes.json"
+    panes = _read_panes_json(panes_path)
+    if not panes:
+        return RemapResult(remapped=[], missing=[], unchanged=[])
+
+    # Get live pane state: pane_id -> work_dir
+    try:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-s", "-t", session_name,
+             "-F", "#{pane_id} #{pane_current_path}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        live_panes: Dict[str, str] = {}
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                parts = line.strip().split(" ", 1)
+                if len(parts) == 2:
+                    live_panes[parts[0]] = parts[1]
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        live_panes = {}
+
+    # Invert: work_dir -> pane_id
+    live_by_dir: Dict[str, str] = {wdir: pid for pid, wdir in live_panes.items() if wdir}
+
+    terms_base = str(Path(project_root) / ".claude" / "terminals") if project_root else ""
+
+    remapped: List[str] = []
+    missing: List[str] = []
+    unchanged: List[str] = []
+    panes_json_updated = False
+
+    for tid in ("T0", "T1", "T2", "T3"):
+        entry = panes.get(tid) or panes.get(tid.lower()) or {}
+        if not isinstance(entry, dict):
+            continue
+
+        declared_pane_id = entry.get("pane_id", "")
+
+        # Determine work_dir for this terminal
+        work_dir = entry.get("work_dir", "")
+        if not work_dir and terms_base:
+            work_dir = str(Path(terms_base) / tid)
+
+        if declared_pane_id and declared_pane_id in live_panes:
+            # pane_id still valid
+            unchanged.append(tid)
+            continue
+
+        # pane_id stale — try to rediscover by work_dir
+        candidate = live_by_dir.get(work_dir, "")
+        if candidate:
+            ok = remap_pane(tid, candidate, panes_path, state_dir=state_dir)
+            if ok:
+                remapped.append(tid)
+                panes_json_updated = True
+                # Reload panes after update so subsequent iterations see fresh data
+                panes = _read_panes_json(panes_path)
+            else:
+                missing.append(tid)
+        else:
+            missing.append(tid)
+
+    return RemapResult(
+        remapped=remapped,
+        missing=missing,
+        unchanged=unchanged,
+        panes_json_updated=panes_json_updated,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Module-level factory
 # ---------------------------------------------------------------------------
 
