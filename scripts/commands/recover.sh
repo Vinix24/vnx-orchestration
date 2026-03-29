@@ -110,228 +110,63 @@ HELP
   fi
 
   # ── Legacy recovery (file-based cleanup) ─────────────────────────────────
-  # Always runs as a complement to runtime recovery. When runtime core is
-  # active, this cleans up file-based artifacts that the runtime engine
-  # does not manage (locks, PIDs, dispatch markdown files, payload temp files).
+  # PR-3: Delegated to Python module (vnx_recover_legacy.py) for testability.
+  # Falls back to inline bash if Python is unavailable.
   log "[recover] Running legacy cleanup..."
 
   local recovered=0
   local issues=0
+  local scripts_lib="$VNX_HOME/scripts/lib"
+  local _legacy_exit=0
 
-  # ── Step 1: Detect and clear stale locks ───────────────────────────────
-  log "[recover] Checking for stale locks..."
-  local max_age="${VNX_LOCK_MAX_AGE:-3600}"
+  if [ -f "$scripts_lib/vnx_recover_legacy.py" ] && command -v python3 &>/dev/null; then
+    local legacy_args=(
+      "--locks-dir" "${VNX_LOCKS_DIR:-$VNX_DATA_DIR/locks}"
+      "--pids-dir" "${VNX_PIDS_DIR:-$VNX_DATA_DIR/pids}"
+      "--dispatch-dir" "${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}"
+      "--state-dir" "${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
+      "--data-dir" "${VNX_DATA_DIR:-}"
+      "--max-lock-age" "${VNX_LOCK_MAX_AGE:-3600}"
+    )
+    [ "$dry_run" = true ] && legacy_args+=("--dry-run")
+    [ "$legacy_only" = true ] && legacy_args+=("--legacy-only")
+    [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && legacy_args+=("--runtime-primary")
 
-  if [ -d "${VNX_LOCKS_DIR:-}" ]; then
-    local lock_dir
-    for lock_dir in "$VNX_LOCKS_DIR"/*.lock; do
-      [ -d "$lock_dir" ] || continue
-      local lock_name
-      lock_name="$(basename "$lock_dir" .lock)"
-      local lock_pid=""
-      [ -f "$lock_dir/pid" ] && lock_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-
-      local stale_reason=""
-
-      # Check 1: PID not running
-      if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
-        stale_reason="process_dead"
+    PYTHONPATH="$scripts_lib${PYTHONPATH:+:$PYTHONPATH}" \
+      python3 "$scripts_lib/vnx_recover_legacy.py" "${legacy_args[@]}"
+    _legacy_exit=$?
+  else
+    log "[recover] Python legacy cleanup not available — using inline fallback"
+    # Minimal inline fallback: just clear unclean marker and stale PIDs
+    local unclean_marker="${VNX_LOCKS_DIR:-}/.unclean_shutdown"
+    if [ -f "$unclean_marker" ]; then
+      if [ "$dry_run" != true ]; then
+        rm -f "$unclean_marker"
+        log "  CLEARED: unclean-shutdown marker"
+        recovered=1
       fi
-
-      # Check 2: Lock age exceeds max
-      if [ -z "$stale_reason" ]; then
-        local lock_ts=0
-        [ -f "$lock_dir/heartbeat" ] && lock_ts="$(cat "$lock_dir/heartbeat" 2>/dev/null || echo 0)"
-        [ "$lock_ts" -eq 0 ] && [ -f "$lock_dir/created_at" ] && lock_ts="$(cat "$lock_dir/created_at" 2>/dev/null || echo 0)"
-        local now_ts
-        now_ts="$(date +%s)"
-        local age=$(( now_ts - lock_ts ))
-        if [ "$lock_ts" -gt 0 ] && [ "$age" -ge "$max_age" ]; then
-          stale_reason="expired (age=${age}s, max=${max_age}s)"
-        fi
-      fi
-
-      # Check 3: No PID file at all (orphan lock dir)
-      if [ -z "$stale_reason" ] && [ -z "$lock_pid" ]; then
-        stale_reason="orphan_lock (no PID)"
-      fi
-
-      if [ -n "$stale_reason" ]; then
-        issues=$((issues + 1))
-        if [ "$dry_run" = true ]; then
-          log "  WOULD CLEAR: $lock_name ($stale_reason, PID: ${lock_pid:-none})"
-        else
-          # Kill the process if still running (expired case)
-          if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-            kill -TERM "$lock_pid" 2>/dev/null || true
-            sleep 1
-            kill -0 "$lock_pid" 2>/dev/null && kill -KILL "$lock_pid" 2>/dev/null || true
-          fi
-          rm -rf "$lock_dir"
-          rm -f "$VNX_PIDS_DIR/${lock_name}.pid" "$VNX_PIDS_DIR/${lock_name}.pid.fingerprint" 2>/dev/null || true
-          log "  CLEARED: $lock_name ($stale_reason, PID: ${lock_pid:-none})"
-          recovered=$((recovered + 1))
-        fi
-      fi
-    done
+    fi
   fi
 
-  # ── Step 2: Kill orphan processes (aggressive mode) ────────────────────
+  # ── Aggressive mode (shell-level, not in Python) ─────────────────────
+  # Process killing via pgrep/pkill stays in shell since it needs the
+  # vnx_kill_all_orchestration function and shell process context.
   if [ "$aggressive" = true ]; then
     log "[recover] Aggressive mode: killing all scoped VNX processes..."
     if [ "$dry_run" = true ]; then
       local orphan_count
       orphan_count="$(pgrep -f "${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}" 2>/dev/null | grep -v "^$$\$" | wc -l | tr -d ' ')"
       log "  WOULD KILL: $orphan_count process(es) scoped to $VNX_DATA_DIR"
-      issues=$((issues + orphan_count))
     else
-      local scripts_dir="$VNX_HOME/scripts"
-      vnx_kill_all_orchestration "$scripts_dir" "${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}" "recovery"
+      local _scripts_dir="$VNX_HOME/scripts"
+      vnx_kill_all_orchestration "$_scripts_dir" "${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}" "recovery"
       log "  KILLED: All scoped orchestration processes"
-      recovered=$((recovered + 1))
-    fi
-  else
-    # Non-aggressive: only kill processes with stale PID files
-    if [ -d "${VNX_PIDS_DIR:-}" ]; then
-      local pid_file
-      for pid_file in "$VNX_PIDS_DIR"/*.pid; do
-        [ -f "$pid_file" ] || continue
-        local pid
-        pid="$(cat "$pid_file" 2>/dev/null || true)"
-        local proc_name
-        proc_name="$(basename "${pid_file%.pid}")"
-
-        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-          if [ "$dry_run" = true ]; then
-            log "  WOULD CLEAN: stale PID file for $proc_name (PID: $pid, not running)"
-          else
-            rm -f "$pid_file" "${pid_file}.fingerprint"
-            log "  CLEANED: stale PID file for $proc_name (PID: $pid)"
-            recovered=$((recovered + 1))
-          fi
-          issues=$((issues + 1))
-        fi
-      done
-    fi
-  fi
-
-  # ── Step 3: Move incomplete dispatches to failed/ ──────────────────────
-  # NOTE: When runtime core is active, canonical dispatch state is in SQLite.
-  # This step handles legacy markdown dispatch files only.
-  log "[recover] Checking for incomplete dispatch files..."
-  local active_dir="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}/active"
-  local failed_dir="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}/failed"
-
-  if [ -d "$active_dir" ]; then
-    local dispatch_file
-    for dispatch_file in "$active_dir"/*.md; do
-      [ -f "$dispatch_file" ] || continue
-      issues=$((issues + 1))
-      local dispatch_name
-      dispatch_name="$(basename "$dispatch_file")"
-
-      if [ "$dry_run" = true ]; then
-        log "  WOULD MOVE: $dispatch_name → failed/ (incomplete)"
-      else
-        mkdir -p "$failed_dir"
-        mv "$dispatch_file" "$failed_dir/${dispatch_name%.md}.recovered.md"
-        log "  MOVED: $dispatch_name → failed/ (recovered)"
-        recovered=$((recovered + 1))
-      fi
-    done
-  fi
-
-  # ── Step 4: Reset stale terminal claims ────────────────────────────────
-  # NOTE: When runtime core is active, canonical lease state is in SQLite
-  # (handled by runtime recovery above). This step updates the legacy
-  # terminal_state.json projection only when runtime core is off.
-  if [ "${VNX_RUNTIME_PRIMARY:-1}" != "1" ] || [ "$legacy_only" = true ]; then
-    log "[recover] Checking terminal claims (legacy)..."
-    local terminal_state="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}/terminal_state.json"
-
-    if [ -f "$terminal_state" ] && command -v python3 &>/dev/null; then
-      local stale_claims
-      stale_claims="$(python3 -c "
-import json, sys
-try:
-    with open('$terminal_state') as f:
-        data = json.load(f)
-    stale = []
-    for tid, info in data.items():
-        if info.get('status') == 'working':
-            stale.append(tid)
-    print('|'.join(stale))
-except Exception:
-    print('')
-" 2>/dev/null)" || true
-
-      if [ -n "$stale_claims" ]; then
-        IFS='|' read -ra claim_terminals <<< "$stale_claims"
-        for tid in "${claim_terminals[@]}"; do
-          [ -n "$tid" ] || continue
-          issues=$((issues + 1))
-          if [ "$dry_run" = true ]; then
-            log "  WOULD RESET: $tid claim (working → idle)"
-          else
-            python3 -c "
-import json
-with open('$terminal_state') as f:
-    data = json.load(f)
-if '$tid' in data:
-    data['$tid']['status'] = 'idle'
-    data['$tid']['claimed_by'] = None
-with open('$terminal_state', 'w') as f:
-    json.dump(data, f, indent=2)
-" 2>/dev/null || true
-            log "  RESET: $tid claim (working → idle)"
-            recovered=$((recovered + 1))
-          fi
-        done
-      fi
-    fi
-  fi
-
-  # ── Step 5: Clear unclean-shutdown marker ──────────────────────────────
-  local unclean_marker="${VNX_LOCKS_DIR:-}/.unclean_shutdown"
-  if [ -f "$unclean_marker" ]; then
-    issues=$((issues + 1))
-    if [ "$dry_run" = true ]; then
-      log "  WOULD CLEAR: unclean-shutdown marker"
-    else
-      rm -f "$unclean_marker"
-      log "  CLEARED: unclean-shutdown marker"
-      recovered=$((recovered + 1))
-    fi
-  fi
-
-  # ── Step 6: Clean up stale payload temp files ──────────────────────────
-  local payload_dir="${VNX_DATA_DIR:-}/dispatch_payloads"
-  if [ -d "$payload_dir" ]; then
-    local stale_payloads
-    stale_payloads="$(find "$payload_dir" -name 'payload_*.txt' -type f -mmin +60 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "$stale_payloads" -gt 0 ]; then
-      issues=$((issues + stale_payloads))
-      if [ "$dry_run" = true ]; then
-        log "  WOULD CLEAN: $stale_payloads stale payload temp file(s)"
-      else
-        find "$payload_dir" -name 'payload_*.txt' -type f -mmin +60 -delete 2>/dev/null || true
-        log "  CLEANED: $stale_payloads stale payload temp file(s)"
-        recovered=$((recovered + stale_payloads))
-      fi
     fi
   fi
 
   # ── Summary ───────────────────────────────────────────────────────────
   log ""
   log "════════════════════════════════════════════════════════════════"
-  if [ "$dry_run" = true ]; then
-    log " Legacy cleanup (dry-run): $issues issue(s) found"
-    log " Run without --dry-run to apply fixes."
-  elif [ "$recovered" -gt 0 ]; then
-    log " Legacy cleanup: $recovered issue(s) resolved"
-  else
-    log " Legacy cleanup: session state is clean"
-  fi
 
   if [ "${VNX_RUNTIME_PRIMARY:-1}" = "1" ] && [ "$legacy_only" != true ]; then
     log ""
@@ -341,7 +176,7 @@ with open('$terminal_state', 'w') as f:
 
   log "════════════════════════════════════════════════════════════════"
 
-  if [ "$recovered" -gt 0 ] || [ "$runtime_exit" -eq 0 ]; then
+  if [ "$runtime_exit" -eq 0 ]; then
     log ""
     log " Session should be usable. Run 'vnx start' to restart."
   fi
