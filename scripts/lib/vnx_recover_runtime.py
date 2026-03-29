@@ -720,7 +720,7 @@ def run_recovery(
     6. Cutover check — report runtime core status and rollback guidance
 
     Args:
-        state_dir: Path to .vnx-data/state/ directory.
+        state_dir: Runtime state directory, resolved via VNX_STATE_DIR.
         dry_run: When True, detect issues but do not modify state.
 
     Returns:

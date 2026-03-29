@@ -10,7 +10,7 @@ Usage:
     python scripts/runtime_reconciler_cli.py [OPTIONS]
 
 Options:
-    --state-dir PATH         Override state directory (default: .vnx-data/state/)
+    --state-dir PATH         Override runtime state directory (default: resolved via VNX_STATE_DIR)
     --dry-run                Detect issues without modifying state
     --auto-recover-dispatches  Auto-recover timed_out/failed_delivery dispatches
     --no-auto-recover-leases   Don't auto-recover expired leases to idle

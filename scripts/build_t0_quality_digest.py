@@ -7,7 +7,7 @@ Sections:
   2. Prompt/Config Tuning — prevention rules, low-confidence patterns, pending edits
   3. Governance Health — SPC alerts, metric anomalies, failed gates
 Output:
-  - quality_digest.ndjson  (append-only per G-L6) in .vnx-data/state/
+  - quality_digest.ndjson  (append-only per G-L6) in runtime state directory
   - t0_quality_digest.json (backward compat, latest only)
 Lookback: 24h for receipt-based evidence
 """

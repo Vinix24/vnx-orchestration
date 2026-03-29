@@ -243,8 +243,8 @@ class TmuxAdapter:
     All delivery attempts are recorded as coordination events.
 
     Args:
-        state_dir:    Path to .vnx-data/state/ (contains runtime_coordination.db
-                      and panes.json).
+        state_dir:    Runtime state directory (contains runtime_coordination.db
+                      and panes.json), resolved via VNX_STATE_DIR.
         primary_path: If True, use load-dispatch path. If False, legacy path.
                       Overrides VNX_ADAPTER_PRIMARY env flag when provided.
     """
@@ -729,7 +729,7 @@ def reheal_panes(
     pane_id is derived state that may be updated freely.
 
     Args:
-        state_dir:     Path to .vnx-data/state/ (contains panes.json and DB).
+        state_dir:     Runtime state directory (contains panes.json and DB), resolved via VNX_STATE_DIR.
         session_name:  tmux session to interrogate.
         project_root:  Used to derive default work_dirs if not in panes.json.
 
@@ -814,7 +814,7 @@ def load_adapter(state_dir: str | Path) -> Optional["TmuxAdapter"]:
     """Return a TmuxAdapter if VNX_TMUX_ADAPTER_ENABLED=1 (default), else None.
 
     Args:
-        state_dir: Path to .vnx-data/state/.
+        state_dir: Runtime state directory, resolved via VNX_STATE_DIR.
 
     Returns:
         Configured TmuxAdapter or None if adapter is disabled.

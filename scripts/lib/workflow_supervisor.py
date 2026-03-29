@@ -180,7 +180,7 @@ class WorkflowSupervisor:
     budgets durably and routes unrecoverable dispatches to dead-letter.
 
     Args:
-        state_dir: Path to .vnx-data/state/ containing runtime_coordination.db.
+        state_dir: Runtime state directory containing runtime_coordination.db, resolved via VNX_STATE_DIR.
         auto_init: Initialize schema on construction (default True).
     """
 
