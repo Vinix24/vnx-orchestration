@@ -232,6 +232,21 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
         conn.executescript(schema_sql)
         conn.commit()
 
+    # Determine the current schema version to skip already-applied migrations.
+    # This is critical for idempotency: migrations that use ALTER TABLE ADD COLUMN
+    # (e.g., v4) will fail on re-run because SQLite does not support
+    # ALTER TABLE ADD COLUMN IF NOT EXISTS.
+    current_version = 1
+    with get_connection(state_dir) as conn:
+        try:
+            row = conn.execute(
+                "SELECT MAX(version) FROM runtime_schema_version"
+            ).fetchone()
+            if row and row[0] is not None:
+                current_version = row[0]
+        except sqlite3.OperationalError:
+            pass  # Table may not exist yet on first init
+
     # Apply incremental migrations (v2, v3, ...) if available
     schemas_dir = schema_sql_path.parent
     version = 2
@@ -239,6 +254,9 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
         migration = schemas_dir / f"runtime_coordination_v{version}.sql"
         if not migration.exists():
             break
+        if version <= current_version:
+            version += 1
+            continue
         migration_sql = migration.read_text(encoding="utf-8")
         with get_connection(state_dir) as conn:
             conn.executescript(migration_sql)
