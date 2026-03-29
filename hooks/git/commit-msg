@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# VNX Git Hook: commit-msg
+# Validates trace token presence in commit messages.
+#
+# Behavior depends on VNX_PROVENANCE_ENFORCEMENT:
+#   "0" (default/shadow): warn if no trace token, allow commit
+#   "1" (enforced): block commit if no trace token found
+#
+# CLI-agnostic: works with any Git client. Does not depend on
+# any specific AI CLI tool. (G-R8, A-R6)
+#
+# Spec: docs/core/42_FPD_PROVENANCE_CONTRACT.md Section 4.1
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+ENFORCEMENT="${VNX_PROVENANCE_ENFORCEMENT:-0}"
+LEGACY_ACCEPTED="${VNX_PROVENANCE_LEGACY_ACCEPTED:-1}"
+
+# Read commit message
+COMMIT_MSG="$(cat "$COMMIT_MSG_FILE")"
+
+# Skip empty messages (git will abort anyway)
+if [ -z "${COMMIT_MSG// /}" ]; then
+    exit 0
+fi
+
+# ── Find the validator script ────────────────────────────────────────
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_VNX_ROOT="${_SCRIPT_DIR}/../.."
+_VALIDATOR=""
+
+for _candidate in \
+    "${VNX_HOME:-}/scripts/lib/trace_token_validator.py" \
+    "$_VNX_ROOT/scripts/lib/trace_token_validator.py" \
+    "$_VNX_ROOT/.claude/vnx-system/scripts/lib/trace_token_validator.py"; do
+    if [ -f "$_candidate" ]; then
+        _VALIDATOR="$_candidate"
+        break
+    fi
+done
+
+# ── Inline fallback if validator not found ───────────────────────────
+if [ -z "$_VALIDATOR" ]; then
+    # Check for preferred format
+    if echo "$COMMIT_MSG" | grep -qE '^Dispatch-ID:\s+\S+'; then
+        exit 0
+    fi
+
+    # Check legacy formats
+    if [ "$LEGACY_ACCEPTED" = "1" ]; then
+        if echo "$COMMIT_MSG" | grep -qE 'dispatch:\S+'; then
+            exit 0
+        fi
+        if echo "$COMMIT_MSG" | grep -qE '\bPR-[0-9]+\b'; then
+            exit 0
+        fi
+        if echo "$COMMIT_MSG" | grep -qE '\bFP-[A-Z]\b'; then
+            exit 0
+        fi
+    fi
+
+    # No trace token found
+    if [ "$ENFORCEMENT" = "1" ]; then
+        echo "[VNX] ERROR: No trace token found in commit message." >&2
+        echo "[VNX] Add 'Dispatch-ID: <dispatch-id>' to the commit body." >&2
+        echo "[VNX] Set VNX_CURRENT_DISPATCH_ID or add manually." >&2
+        echo "[VNX] Use --no-verify to bypass (logged as governance override)." >&2
+        exit 1
+    else
+        echo "[VNX] WARNING: No trace token in commit message (shadow mode)." >&2
+        exit 0
+    fi
+fi
+
+# ── Use Python validator ────────────────────────────────────────────
+RESULT="$(echo "$COMMIT_MSG" | python3 "$_VALIDATOR" validate - 2>/dev/null)" || true
+
+if [ -z "$RESULT" ]; then
+    # Validator failed — don't block commits due to tooling errors
+    echo "[VNX] WARNING: Trace token validator returned no result." >&2
+    exit 0
+fi
+
+VALID="$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))" 2>/dev/null)" || true
+SEVERITY="$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('severity', 'info'))" 2>/dev/null)" || true
+MESSAGE="$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('message', ''))" 2>/dev/null)" || true
+
+if [ "$VALID" = "True" ]; then
+    # Token found — check for legacy warning
+    if [ "$SEVERITY" = "warning" ]; then
+        echo "[VNX] $MESSAGE" >&2
+    fi
+    exit 0
+fi
+
+# No valid trace token
+if [ "$ENFORCEMENT" = "1" ]; then
+    echo "[VNX] ERROR: $MESSAGE" >&2
+    echo "[VNX] Add 'Dispatch-ID: <dispatch-id>' to the commit body." >&2
+    echo "[VNX] Use --no-verify to bypass (logged as governance override)." >&2
+    exit 1
+else
+    echo "[VNX] WARNING: $MESSAGE (shadow mode — commit allowed)" >&2
+    exit 0
+fi
