@@ -704,7 +704,13 @@ vnx_kill_all_orchestration() {
     fi
   done < <(pgrep -f "$scripts_dir" 2>/dev/null || true)
 
-  # Clean up stale locks and PID files so new processes can acquire them
+  # Clean up locks and PID files ONLY after all processes have been killed above.
+  # This is an operator-initiated teardown path (stop/restart/recover), NOT a
+  # steady-state runtime operation. Per A-R10: no blind lock or PID wipe in
+  # steady-state paths. This cleanup is safe here because:
+  #   1. All orchestration processes were already terminated above
+  #   2. This function is only called from explicit operator commands (vnx start/stop/recover)
+  #   3. Locks and PIDs are only valid for the processes that held them (now dead)
   if [ -d "${VNX_LOCKS_DIR:-}" ]; then
     rm -rf "$VNX_LOCKS_DIR"/*.lock 2>/dev/null || true
   fi
