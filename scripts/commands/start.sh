@@ -139,6 +139,10 @@ cmd_start() {
     source "$runtime_dir/config.env"
     log "Loaded project config: $runtime_dir/config.env"
   fi
+  # PR-3: Provider configuration now uses Python module (vnx_start_runtime.py)
+  # for unified command building. Shell vars are still read from env for
+  # backward compat, but the Python module is the source of truth for
+  # command construction (eliminates duplicated case statements).
   local t1_provider="${VNX_T1_PROVIDER:-claude_code}"
   local t2_provider="${VNX_T2_PROVIDER:-claude_code}"
   local t3_provider="${VNX_T3_PROVIDER:-claude_code}"
@@ -399,41 +403,27 @@ TSJSON
   tmux set -t "$session_name" -g pane-border-format "#{pane_title}"
   tmux set -t "$session_name" -g mouse on
 
-  # ── Panes state file (used by dispatcher/orchestration) ────────────────
-  cat > "$state_dir/panes.json" <<PJSON
+  # ── State files (panes.json + terminal_state.json) ─────────────────────
+  # PR-3: Delegated to Python for consistency and testability.
+  PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
+    python3 "$VNX_HOME/scripts/lib/vnx_start_runtime.py" write-state \
+      --state-dir "$state_dir" \
+      --session "$session_name" \
+      --panes "{\"T0\":\"$T0\",\"T1\":\"$T1\",\"T2\":\"$T2\",\"T3\":\"$T3\"}" \
+    2>/dev/null || {
+      # Fallback: write inline if Python fails (resilience)
+      log "[start] WARN: Python state writer failed, using inline fallback"
+      local _ts; _ts="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+      cat > "$state_dir/panes.json" <<PJSON
 {
   "session": "$session_name",
-  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
-  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
-  "T1": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" },
-  "tracks": {
-    "A": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
-    "B": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
-    "C": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" }
-  }
+  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "${VNX_T0_MODEL:-default}", "provider": "claude_code" },
+  "T1": { "pane_id": "$T1", "track": "A", "model": "${VNX_T1_MODEL:-sonnet}", "provider": "$t1_provider" },
+  "T2": { "pane_id": "$T2", "track": "B", "model": "${VNX_T2_MODEL:-sonnet}", "provider": "$t2_provider" },
+  "T3": { "pane_id": "$T3", "track": "C", "model": "${VNX_T3_MODEL:-default}", "role": "deep", "provider": "${VNX_T3_PROVIDER:-claude_code}" }
 }
 PJSON
-
-  # ── Declarative session profile (PR-3: A-R4, A-R5) ──────────────────────
-  # Saved immediately after panes.json so that doctor/recover/jump can
-  # use work_dir-based identity instead of brittle pane index assumptions.
-  python3 "$VNX_HOME/scripts/lib/tmux_session_profile.py" save \
-    --state-dir "$state_dir" \
-    --session "$session_name" \
-    --project-root "$PROJECT_ROOT" \
-    2>/dev/null || log "[start] WARN: session profile save failed (non-fatal)"
-
-  # ── Initial terminal state (all idle) ──────────────────────────────────
-  # Write terminal_state.json BEFORE orchestration starts so that:
-  # 1. T0 sees all terminals as "idle" (ready for dispatch)
-  # 2. The reconciler doesn't fall back to tmux probing (which may
-  #    misdetect Claude/Codex startup activity as "working")
-  # 3. Fresh installs immediately show correct state
-  local _ts
-  _ts="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
-  cat > "$state_dir/terminal_state.json" <<TSJSON
+      cat > "$state_dir/terminal_state.json" <<TSJSON
 {
   "schema_version": 1,
   "terminals": {
@@ -443,7 +433,15 @@ PJSON
   }
 }
 TSJSON
-  log "Initial terminal state written (all idle)"
+    }
+  log "State files written (panes.json + terminal_state.json)"
+
+  # ── Declarative session profile (PR-3: A-R4, A-R5) ──────────────────────
+  python3 "$VNX_HOME/scripts/lib/tmux_session_profile.py" save \
+    --state-dir "$state_dir" \
+    --session "$session_name" \
+    --project-root "$PROJECT_ROOT" \
+    2>/dev/null || log "[start] WARN: session profile save failed (non-fatal)"
 
   # ── Worktree initialization (if enabled) ────────────────────────────
   # Per-terminal worktrees are DEPRECATED. Use 'vnx new-worktree <name>' instead.
@@ -612,17 +610,12 @@ RESOLVER
   fi
 
   # ── Clean tmux environment (prevent cross-project contamination) ──────
-  # When a tmux server already has VNX sessions from another project,
-  # its global environment carries stale PROJECT_ROOT, VNX_HOME, etc.
-  # New panes inherit these stale vars → Claude Code resolves wrong
-  # project root → skills from wrong project or no skills at all.
-  #
-  # Fix 1: Remove VNX vars from tmux GLOBAL environment so they don't
-  #         leak into other projects' new panes.
-  # Fix 2: Set session-level env vars that override tmux global env.
-  for _vnx_var in PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR \
-                  VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR \
-                  VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR; do
+  # PR-3: VNX_VARS list is canonical in vnx_start_runtime.py. Shell reads it
+  # via Python to stay in sync. Falls back to hardcoded list if Python unavailable.
+  local _vnx_vars_list
+  _vnx_vars_list="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "from vnx_start_runtime import VNX_VARS; print(' '.join(VNX_VARS))" 2>/dev/null)" \
+    || _vnx_vars_list="PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
+  for _vnx_var in $_vnx_vars_list; do
     tmux set-environment -g -u "$_vnx_var" 2>/dev/null || true
   done
   tmux set-environment -t "$session_name" PROJECT_ROOT "$PROJECT_ROOT"
