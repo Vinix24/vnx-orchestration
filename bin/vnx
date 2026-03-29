@@ -567,21 +567,24 @@ cmd_intelligence_import() {
 }
 
 cmd_init() {
+  # PR-1: Python-led init orchestrator (unified bootstrap).
+  # Falls back to inline bash if Python entrypoint is unavailable.
+  local init_script="$VNX_HOME/scripts/vnx_init.py"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$init_script" ]; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$init_script" "$@"
+    return $?
+  fi
+
+  # Legacy fallback (pre-PR-1)
   ensure_runtime_layout
   write_default_config_if_missing
 
-  # Onboarding: ensure skills + terminals + hooks exist for a fresh project.
   cmd_bootstrap_skills || true
   cmd_bootstrap_terminals || true
   cmd_bootstrap_hooks || true
-
-  # Multi-provider instruction files (AGENTS.md for Codex, GEMINI.md for Gemini).
   cmd_patch_agent_files || true
-
-  # Initialize quality intelligence database (idempotent — uses IF NOT EXISTS).
   cmd_init_db || true
 
-  # If git-tracked intelligence exists, hydrate SQLite from it.
   if [ -d "$VNX_INTELLIGENCE_DIR/db_export" ]; then
     log "[init] Found .vnx-intelligence/ — importing into SQLite..."
     cmd_intelligence_import || true
@@ -1661,7 +1664,7 @@ main() {
 
   case "$cmd" in
     init)
-      cmd_init
+      cmd_init "$@"
       ;;
     init-db)
       cmd_init_db

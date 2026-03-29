@@ -87,6 +87,15 @@ check_required_path() {
 }
 
 cmd_doctor() {
+  # PR-1: Python-led doctor (unified health checks).
+  # Falls back to inline bash if Python entrypoint is unavailable.
+  local doctor_script="$VNX_HOME/scripts/vnx_doctor.py"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$doctor_script" ]; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$doctor_script" "$@"
+    return $?
+  fi
+
+  # Legacy fallback (pre-PR-1)
   local failed=0
   local do_package_check="${VNX_DOCTOR_PACKAGE_CHECK:-0}"
   local do_runtime_check=0
