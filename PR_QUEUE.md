@@ -22,10 +22,10 @@ Progress: ██████████ 100%
 PR-0 (no dependencies)
 PR-0 → PR-1
 PR-0 → PR-2
-PR-1 → PR-2 → PR-3
-PR-2 → PR-4
 PR-0 → PR-5
-PR-3 → PR-4 → PR-5 → PR-6
+PR-1, PR-2 → PR-3
+PR-2 → PR-4
+PR-3, PR-4, PR-5 → PR-6
 PR-6 → PR-7
 PR-7 → PR-8
 ```
