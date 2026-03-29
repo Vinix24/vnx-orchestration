@@ -42,6 +42,7 @@ class VNXMode(str, Enum):
 
 TIER_UNIVERSAL: FrozenSet[str] = frozenset({
     "init", "doctor", "status", "recover", "help", "update",
+    "setup", "install-check", "install-validate",
 })
 
 TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({

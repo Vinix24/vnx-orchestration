@@ -6,6 +6,7 @@ SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Parse arguments
 LAYOUT="vnx"  # default layout
 TARGET_PROJECT_DIR=""
+DO_CHECK=false
 while [ $# -gt 0 ]; do
   case "$1" in
     --layout)
@@ -13,6 +14,34 @@ while [ $# -gt 0 ]; do
       ;;
     --layout=*)
       LAYOUT="${1#*=}"; shift
+      ;;
+    --check)
+      DO_CHECK=true; shift
+      ;;
+    -h|--help)
+      cat <<HELP
+Usage: install.sh [TARGET_DIR] [--layout vnx|claude] [--check]
+
+Arguments:
+  TARGET_DIR        Project directory to install into (default: current dir)
+
+Options:
+  --layout <type>   Installation layout: 'vnx' (default) or 'claude'
+  --check           Check prerequisites only (dry-run, no files written)
+  -h, --help        Show this help text
+
+Examples:
+  bash install.sh                          # Install to current directory
+  bash install.sh /path/to/project         # Install to specific project
+  bash install.sh --check                  # Check prerequisites only
+  bash install.sh --layout claude ./proj   # Hidden layout install
+
+Post-install:
+  .vnx/bin/vnx setup              # One-command setup (recommended)
+  .vnx/bin/vnx setup --starter    # Starter mode (no tmux needed)
+  .vnx/bin/vnx setup --operator   # Operator mode (full tmux grid)
+HELP
+      exit 0
       ;;
     *)
       if [ -z "$TARGET_PROJECT_DIR" ]; then
@@ -25,6 +54,64 @@ done
 
 TARGET_PROJECT_DIR="${TARGET_PROJECT_DIR:-$PWD}"
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
+
+# ── Prerequisite validation ──────────────────────────────────────────────
+# Run Python install validator if available, fall back to inline checks.
+_check_prereqs() {
+  local validator="$SRC_ROOT/scripts/vnx_install.py"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$validator" ]; then
+    python3 "$validator" --check
+    return $?
+  fi
+
+  # Inline fallback: check minimum required tools
+  local fails=0
+  echo ""
+  echo "VNX Install — Prerequisite Check"
+  echo "─────────────────────────────────"
+
+  if command -v python3 >/dev/null 2>&1; then
+    echo "  [PASS] python3: $(which python3)"
+  else
+    echo "  [FAIL] python3: not found (required)"
+    fails=$((fails + 1))
+  fi
+
+  if command -v bash >/dev/null 2>&1; then
+    echo "  [PASS] bash: $(which bash)"
+  else
+    echo "  [FAIL] bash: not found (required)"
+    fails=$((fails + 1))
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    echo "  [PASS] git: $(which git)"
+  else
+    echo "  [FAIL] git: not found (required)"
+    fails=$((fails + 1))
+  fi
+
+  echo ""
+  if [ "$fails" -gt 0 ]; then
+    echo "FAILED — $fails prerequisite(s) missing"
+    return 1
+  fi
+  echo "READY — all prerequisites met"
+  return 0
+}
+
+if [ "$DO_CHECK" = true ]; then
+  _check_prereqs
+  exit $?
+fi
+
+# Run prereq check before install (non-blocking for backward compat)
+if ! _check_prereqs; then
+  echo ""
+  echo "WARNING: Prerequisites not fully met. Install may produce a broken setup."
+  echo "Run 'install.sh --check' for details, or press Enter to continue anyway."
+  read -r _continue || true
+fi
 
 # Layout determines install directory
 case "$LAYOUT" in
@@ -251,6 +338,14 @@ log "[install] Layout: $LAYOUT (saved to $TARGET_VNX_DIR/.layout)"
 
 log "[install] Completed without root."
 log "[install] Next steps:"
-log "  $TARGET_VNX_DIR/bin/vnx init"
-log "  $TARGET_VNX_DIR/bin/vnx doctor"
-log "  $TARGET_VNX_DIR/bin/vnx start"
+log ""
+log "  Quick start (recommended):"
+log "    $TARGET_VNX_DIR/bin/vnx setup              # One-command setup"
+log "    $TARGET_VNX_DIR/bin/vnx setup --starter    # Starter mode (no tmux)"
+log "    $TARGET_VNX_DIR/bin/vnx setup --operator   # Operator mode (full grid)"
+log ""
+log "  Manual steps (if you prefer):"
+log "    $TARGET_VNX_DIR/bin/vnx init"
+log "    $TARGET_VNX_DIR/bin/vnx doctor"
+log "    $TARGET_VNX_DIR/bin/vnx register"
+log "    $TARGET_VNX_DIR/bin/vnx install-shell-helper"

@@ -202,6 +202,11 @@ Shell helper:
   install-shell-helper    Add vnx() function to shell RC (~/.zshrc or ~/.bashrc)
                      Options: --print, --uninstall, --shell bash|zsh
 
+  setup              One-command project setup (init + doctor + register)
+                     Options: --starter (default), --operator, --skip-doctor
+  install-check      Check prerequisites without installing
+  install-validate   Validate an existing VNX installation
+
   demo               Showcase VNX without API keys or project setup
                      Sub-commands: replay [scenario], dashboard, setup, list
   demo --replay <scenario>  Replay a recorded governance flow
@@ -637,9 +642,9 @@ _check_mode_gate() {
     return 0
   fi
 
-  # Skip gating for init, help, demo (always allowed)
+  # Skip gating for init, setup, help, demo (always allowed)
   case "$cmd" in
-    init|help|-h|--help|demo) return 0 ;;
+    init|setup|install-check|install-validate|help|-h|--help|demo) return 0 ;;
   esac
 
   # Skip if mode.json doesn't exist (pre-init state)
@@ -1341,6 +1346,24 @@ cmd_bootstrap_hooks() {
 _detect_worktree_context() {
   # Returns: 0 if in a worktree, 1 if in main repo
   # Sets: _WT_ROOT (worktree toplevel), _MAIN_ROOT (main repo root)
+  # PR-3: Delegates to Python module (vnx_worktree.py) when available.
+  local _wt_json
+  _wt_json="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+import json
+from vnx_worktree import detect_worktree_context
+ctx = detect_worktree_context('$PROJECT_ROOT')
+print(json.dumps({'is_worktree': ctx.is_worktree, 'wt': ctx.worktree_root, 'main': ctx.main_root}))
+" 2>/dev/null)" || _wt_json=""
+
+  if [ -n "$_wt_json" ]; then
+    local _is_wt
+    _is_wt="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['is_worktree'])" 2>/dev/null)"
+    _WT_ROOT="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['wt'])" 2>/dev/null)"
+    _MAIN_ROOT="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['main'])" 2>/dev/null)"
+    [ "$_is_wt" = "True" ] && return 0 || return 1
+  fi
+
+  # Fallback: inline git commands (pre-PR-3 behavior)
   local git_common_dir
   git_common_dir="$(git -C "$PROJECT_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 1
   _MAIN_ROOT="$(cd "$git_common_dir" && cd .. && pwd)"
@@ -1863,6 +1886,15 @@ main() {
       ;;
     install-shell-helper)
       bash "$VNX_HOME/scripts/vnx_shell_helper.sh" "$@"
+      ;;
+    setup)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_setup.py" "$@"
+      ;;
+    install-check)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --check "$@"
+      ;;
+    install-validate)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --validate "$@"
       ;;
     demo)
       cmd_demo "$@"
