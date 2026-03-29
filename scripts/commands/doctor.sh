@@ -89,11 +89,30 @@ check_required_path() {
 cmd_doctor() {
   local failed=0
   local do_package_check="${VNX_DOCTOR_PACKAGE_CHECK:-0}"
+  local do_runtime_check=0
+  local runtime_verbose=0
+  local runtime_json=0
+  local runtime_preflight=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --package-check|--strict)
         do_package_check=1
+        ;;
+      --runtime)
+        do_runtime_check=1
+        ;;
+      --runtime-verbose)
+        do_runtime_check=1
+        runtime_verbose=1
+        ;;
+      --runtime-json)
+        do_runtime_check=1
+        runtime_json=1
+        ;;
+      --preflight)
+        do_runtime_check=1
+        runtime_preflight=1
         ;;
       -h|--help)
         usage
@@ -289,6 +308,27 @@ except:
   run_path_hygiene_check || failed=1
   if [ "$do_package_check" -eq 1 ]; then
     run_package_check || failed=1
+  fi
+
+  # Runtime health checks (PR-4: canonical state validation)
+  if [ "$do_runtime_check" -eq 1 ] && command -v python3 >/dev/null 2>&1; then
+    local runtime_script="$VNX_HOME/scripts/lib/vnx_doctor_runtime.py"
+    if [ -f "$runtime_script" ]; then
+      log "[doctor] Running runtime health checks..."
+      local runtime_args="--state-dir $VNX_STATE_DIR"
+      if [ "$runtime_json" -eq 1 ]; then
+        runtime_args="$runtime_args --json"
+      elif [ "$runtime_preflight" -eq 1 ]; then
+        runtime_args="$runtime_args --preflight-only"
+      elif [ "$runtime_verbose" -eq 1 ]; then
+        runtime_args="$runtime_args --verbose"
+      fi
+      if ! PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$runtime_script" $runtime_args; then
+        failed=1
+      fi
+    else
+      log "[doctor] WARN: Runtime check script not found: $runtime_script"
+    fi
   fi
 
   if [ "$failed" -ne 0 ]; then
