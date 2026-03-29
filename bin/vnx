@@ -1777,6 +1777,12 @@ main() {
     unregister)
       cmd_unregister "$@"
       ;;
+    install-git-hooks)
+      cmd_install_git_hooks
+      ;;
+    uninstall-git-hooks)
+      cmd_uninstall_git_hooks
+      ;;
     install-shell-helper)
       bash "$VNX_HOME/scripts/vnx_shell_helper.sh" "$@"
       ;;

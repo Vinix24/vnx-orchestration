@@ -25,6 +25,7 @@ try:
     from quality_advisory import generate_quality_advisory, get_changed_files
     from terminal_snapshot import collect_terminal_snapshot
     from cqs_calculator import calculate_cqs
+    from receipt_provenance import enrich_receipt_provenance, validate_receipt_provenance
 except Exception as exc:  # pragma: no cover - hard fail on bootstrap issue
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
@@ -601,6 +602,25 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
                 "status": "unavailable",
                 "error": str(exc),
             }
+
+    # Enrich with provenance linkage fields (PR-2: dispatch_id, trace_token, etc.)
+    try:
+        enrich_receipt_provenance(enriched)
+        # Validate provenance and log gaps (best-effort)
+        prov_validation = validate_receipt_provenance(enriched)
+        if prov_validation.gaps:
+            gap_summaries = [g.to_dict() for g in prov_validation.gaps]
+            enriched.setdefault("provenance_validation", {
+                "chain_status": prov_validation.chain_status,
+                "gaps": gap_summaries,
+            })
+            for gap in prov_validation.gaps:
+                if gap.severity in ("warning", "error"):
+                    _emit("WARN", "provenance_gap_detected",
+                           gap_type=gap.gap_type, entity_id=gap.entity_id,
+                           description=gap.description)
+    except Exception as exc:
+        _emit("WARN", "provenance_enrichment_failed", error=str(exc))
 
     # Collect terminal snapshot (best-effort)
     try:

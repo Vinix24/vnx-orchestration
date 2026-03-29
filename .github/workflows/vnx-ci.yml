@@ -72,6 +72,43 @@ jobs:
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
 
+  trace-token-check:
+    name: Trace Token Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare expected repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Run trace token validation
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+          VNX_PROVENANCE_ENFORCEMENT: "0"
+          VNX_PROVENANCE_LEGACY_ACCEPTED: "1"
+        run: |
+          set -euo pipefail
+          bash "$VNX_HOME/scripts/ci_trace_token_check.sh" "${{ github.event.pull_request.base.ref || 'main' }}"
+
+      - name: Run trace token validator tests
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          python3 "$VNX_HOME/tests/test_trace_token_validator.py"
+
   profile-b:
     name: Profile B (snapshot integration)
     runs-on: ubuntu-latest

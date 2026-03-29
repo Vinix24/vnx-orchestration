@@ -1,82 +1,81 @@
-# Feature: VNX Execution Modes, Headless Routing, And Intelligence Quality
+# Feature: VNX Safe Autonomy, Governance Envelopes, And End-To-End Provenance
 
 **Status**: Complete
 **Priority**: P1
-**Branch**: `feature/execution-modes-intelligence-routing`
-**Baseline**: FP-A and FP-B merged on `main`; canonical runtime coordination, recovery supervision, tmux operator shell hardening, `vnx doctor`, and `vnx recover` are available
-**Runtime policy**: T0 on Claude Opus; coding remains interactive-first in tmux; non-coding and structured synthesis may route to headless CLI targets; no Agent SDK dependency; execution remains CLI-agnostic across Claude, Codex, and future CLI targets
+**Branch**: `feature/safe-autonomy-governance`
+**Baseline**: FP-A, FP-B, and FP-C merged on `main`; canonical runtime coordination, bounded recovery, mixed execution routing, headless CLI targets, bounded intelligence, and recommendation usefulness measurement are available
+**Runtime policy**: T0 on Claude Opus; autonomy remains governance-first; coding and non-coding execution modes from FP-C stay intact; provenance enforcement must remain CLI-agnostic across Claude CLI, Codex CLI, and future CLI targets
 
-This feature expands VNX beyond a single interactive execution shape. FP-A made dispatching durable. FP-B made the runtime recoverable. FP-C now adds multiple execution modes, bounded headless delivery for non-coding work, inbound event/channel intake, and a stricter intelligence system that is short, task-specific, and measurable.
+This feature is the policy and control layer that sits on top of the hardened runtime. FP-A made runtime truth explicit. FP-B made recovery and operator control reliable. FP-C added multiple execution modes and bounded intelligence. FP-D now defines what VNX may do automatically, what must always be gated, how escalation states are encoded, and how dispatch, receipt, commit, and PR/featureplan become bidirectionally traceable.
 
 Primary objective:
-Introduce task-class based execution routing so VNX can choose between interactive tmux workers, headless CLI workers, and inbound channel-driven dispatch creation without collapsing everything into the same terminal path.
+Introduce explicit autonomy envelopes and governance evaluation so VNX can act automatically within policy while preserving T0 authority, escalation points, and reviewable evidence.
 
 Secondary objective:
-Reduce intelligence noise by limiting injection to evidence-backed items at dispatch-create and resume time, then measure whether recommendations actually improve outcomes before FP-D expands autonomy.
+Close the remaining provenance gap by making CLI-agnostic traceability enforceable across Git metadata and NDJSON receipts, with optional CI/server-side backstops.
 
 Estimated effort: ~10-14 engineering days across PR-0 through PR-5.
 
 ## Design Principles
-- Preserve the FP-A/FP-B control plane; execution targets are selected from canonical state, not from pane preference
-- Keep coding interactive by default; do not force headless on workflows that need live terminal intervention
-- Keep the system CLI-first and SDK-agnostic
-- Treat headless execution as a durable worker class, not a shell shortcut
-- Inject less intelligence, not more; every injected item must carry evidence metadata
-- Measure recommendation usefulness before promoting stronger self-learning behavior
+- Preserve T0 as the decision center for completion, merges, and governance exceptions
+- Keep autonomy bounded by explicit policy, not by optimistic runtime behavior
+- Separate low-risk automatic actions from high-risk gated actions
+- Treat provenance as a first-class control surface, not documentation after the fact
+- Keep Git enforcement CLI-agnostic and receipt-aware
+- Prefer additive guardrails and visibility over hidden automation
 
 ## Governance Rules
 
 | # | Rule | Rationale |
 |---|------|-----------|
-| G-R1 | **Execution target selection must be explicit and reviewable** | Prevents hidden routing drift |
-| G-R2 | **Coding stays interactive unless a policy explicitly says otherwise** | Avoids degrading operator control |
-| G-R3 | **Headless execution must remain durable and receipt-producing** | Headless work cannot become an opaque side path |
-| G-R4 | **Inbound channel events must become canonical dispatches before work starts** | Preserves governance and evidence flow |
-| G-R5 | **Intelligence injection is bounded** — maximum 3 items, only at dispatch-create or resume | Keeps context short and relevant |
-| G-R6 | **Every intelligence item must carry evidence metadata** — `confidence`, `evidence_count`, `last_seen`, and scope tags | Prevents advisory noise from looking authoritative |
-| G-R7 | **Recommendation adoption must be measurable before it becomes policy** | Stops premature self-learning |
-| G-R8 | **No execution-mode change may bypass T0 authority or receipts** | Preserves governance-first orchestration |
+| G-R1 | **Every automatic action must map to a policy class** | No implicit autonomy |
+| G-R2 | **High-risk actions are always gated** | Prevents silent governance bypass |
+| G-R3 | **Repeated failure loops escalate to hold or escalate states** | Stops endless retry autonomy |
+| G-R4 | **Completion and merge authority remain with T0 or an explicit human gate** | Preserves governance-first model |
+| G-R5 | **Georchestreerd werk must carry a trace token** — prefer `dispatch:<id>` while accepting approved legacy refs | Makes Git-native traceability enforceable |
+| G-R6 | **Receipts remain the primary evidence layer** | Commit metadata is a pointer, not the whole truth |
+| G-R7 | **Dispatch, receipt, commit, and PR/featureplan must be bidirectionally traceable** | End-to-end provenance must survive tool changes |
+| G-R8 | **No CLI-specific hook system may be the primary enforcement layer** | Enforcement must survive tool changes |
 
 ## Architecture Rules
 
 | # | Rule | Description |
 |---|------|-------------|
-| A-R1 | **Execution targets are canonical runtime entities** — not inferred from pane IDs or CLI names |
-| A-R2 | **Task classes drive routing** — `coding_interactive`, `research_structured`, `docs_synthesis`, `ops_watchdog`, `channel_response` |
-| A-R3 | **Headless adapters are CLI-based** — no Agent SDK required for this feature |
-| A-R4 | **Inbound events land in a durable inbox** before broker routing |
-| A-R5 | **Intelligence selection runs only on create/resume paths** |
-| A-R6 | **Recommendation usefulness metrics are first-class runtime data** |
-| A-R7 | **Routing, injection, and recommendation decisions must emit events** |
-| A-R8 | **Legacy all-through-tmux behavior remains available as fallback during cutover** |
-| A-R9 | **Execution mode cutover must be reversible** |
-| A-R10 | **No channel/event intake may directly mutate runtime state without broker registration** |
+| A-R1 | **Policy matrix is canonical data** — not buried in prose only |
+| A-R2 | **Escalation states are explicit** — `info`, `review_required`, `hold`, `escalate` |
+| A-R3 | **Autonomy evaluation emits runtime events** |
+| A-R4 | **Git provenance enforcement is implemented at Git/CI level** |
+| A-R5 | **Receipt schema carries commit linkage fields where needed** |
+| A-R6 | **prepare-commit-msg / commit-msg may assist locally, but CI/server checks remain the durable backstop** |
+| A-R7 | **Policy overrides are durable governance events** |
+| A-R8 | **Provenance checks must tolerate approved legacy references during transition** |
+| A-R9 | **No silent policy mutation from recommendation logic** |
+| A-R10 | **Autonomy rollout must be reversible by feature flag or policy switch** |
 
 ## Source Of Truth
-- Task class registry: canonical runtime tables under `.vnx-data/state/`
-- Execution target registry: canonical runtime state with target type, capability tags, and health
-- Inbound channel/event inbox: durable file/queue plus runtime registration
-- Headless execution attempts: dispatch attempts and receipts in canonical runtime state
-- Intelligence catalog and selection metadata: canonical runtime state plus existing intelligence stores
-- Recommendation usefulness metrics: canonical runtime state and exported analytics summaries
-- tmux mappings: derived state only for interactive targets
+- Autonomy policy matrix: canonical runtime/config state
+- Escalation and override events: canonical runtime events plus receipts
+- Provenance registry: canonical mapping between dispatch, receipt, commit, and PR/featureplan
+- Git enforcement: local hooks plus optional CI/server-side validation
+- Receipt evidence: `t0_receipts.ndjson` and related runtime receipt outputs
+- PR/featureplan linkage: queue and feature plan metadata plus PR context
 
 ## Known Failure Surface (Evidence / Problem Statement)
-1. **All work still looks too terminal-shaped**: coding and non-coding tasks share the same interactive delivery assumptions
-2. **Headless execution is under-modeled**: there is no canonical way to represent a CLI worker that is not a tmux pane
-3. **Channel/event intake is not first-class**: inbound signals have no durable inbox-to-dispatch path
-4. **Intelligence injection is still too noisy**: advisory content is not strongly tied to measurable benefit
-5. **Recommendations lack causal evidence**: there is not enough before/after signal to trust self-learning decisions
-6. **Future autonomy depends on cleaner routing and cleaner intelligence**: FP-D should not be built on ambiguous task classes or noisy injections
+1. **Autonomy boundaries are not yet encoded sharply enough**: too much depends on operator discipline instead of policy evaluation
+2. **Retries and recovery can still appear autonomous without clear governance framing**: FP-B bounded behavior needs policy meaning
+3. **Git-native traceability is still weaker than runtime traceability**: receipts and dispatches are richer than commits
+4. **Local-only enforcement is bypassable**: CLI-specific or local-only hooks are not enough
+5. **Legacy workflows still allow partial provenance gaps**: commit -> dispatch -> receipt and the reverse path are not universally enforced
+6. **FP-D must not accidentally become full self-governing automation**: policy needs to bound autonomy, not erase oversight
 
 ## What MUST NOT Be Done
-1. Do NOT remove tmux in this feature
-2. Do NOT require the Anthropic Agent SDK or any other SDK-only control surface
-3. Do NOT route coding work headless by default
-4. Do NOT inject continuous ambient intelligence into every worker turn
-5. Do NOT let channel events bypass dispatch creation and receipt flow
-6. Do NOT explode execution target types beyond what operators can understand
-7. Do NOT let recommendation logic mutate runtime behavior silently
+1. Do NOT allow autonomous merge or PR completion in this feature
+2. Do NOT remove T0 authority from completion, merge, or exception handling
+3. Do NOT rely on Claude-specific hooks as the primary provenance enforcement path
+4. Do NOT force a single provider- or CLI-specific trace format beyond the approved token contract
+5. Do NOT allow receipts without enough linkage to reconstruct the provenance chain
+6. Do NOT let recommendation logic rewrite policy automatically
+7. Do NOT collapse `hold` and `escalate` into generic error noise
 
 ## Dependency Flow
 ```text
@@ -89,155 +88,155 @@ PR-3, PR-4 -> PR-5
 
 ---
 
-## PR-0: Task Classes, Execution Targets, And Intelligence Contract
-**Track**: C
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @architect
-**Requires-Model**: opus
-**Estimated Time**: 1-2 days
-**Dependencies**: []
-
-### Description
-Define the FP-C contract surface first: task classes, execution target types, routing invariants, and the bounded intelligence contract. Later PRs should implement against one clear model instead of improvising execution shapes.
-
-### Scope
-- Define canonical task classes and their default execution target mappings
-- Define canonical execution target types: `interactive_tmux_claude`, `interactive_tmux_codex`, `headless_claude_cli`, `headless_codex_cli`, `channel_adapter`
-- Define routing invariants and fallback rules
-- Define the intelligence item contract with evidence metadata and bounded count
-- Define recommendation classes and acceptance semantics
-- Create an FP-C certification matrix covering routing, inbox, intelligence, and measurement
-
-### Success Criteria
-- Task classes and execution target types are explicit and non-overlapping
-- Coding versus non-coding routing is clearly bounded
-- Intelligence items have one canonical schema and maximum payload shape
-- FP-C has a certification matrix for later cutover and review
-
-### Quality Gate
-`gate_pr0_execution_contracts`:
-- [ ] Canonical task classes and execution target types are documented and unambiguous
-- [ ] Routing invariants define defaults and fallback behavior clearly
-- [ ] Intelligence item contract includes confidence, evidence_count, last_seen, and scope tags
-- [ ] Recommendation classes and acceptance semantics are explicit
-- [ ] FP-C certification matrix covers routing, inbox, injection, and usefulness measurement
-
----
-
-## PR-1: Headless CLI Target Registry And Dispatch Adapter
-**Track**: B
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: High
-**Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Estimated Time**: 2-3 days
-**Dependencies**: [PR-0]
-
-### Description
-Add a durable headless worker path that can execute structured non-coding dispatches via CLI adapters without pretending they are tmux panes.
-
-### Scope
-- Add canonical execution target registry entries for headless CLI workers
-- Implement headless adapter interface for CLI-driven dispatch execution
-- Support at least one bounded headless path for structured research/docs tasks
-- Register headless attempts and receipts in the same runtime flow as interactive workers
-- Add health and capability metadata for headless targets
-- Preserve interactive tmux fallback for unsupported task classes
-
-### Success Criteria
-- Non-coding dispatches can target a headless CLI worker without using tmux prompt delivery
-- Headless execution produces durable attempts and receipts
-- Execution target health and capability are queryable from canonical state
-- Unsupported work can fall back to the existing interactive path safely
-
-### Quality Gate
-`gate_pr1_headless_cli_targets`:
-- [ ] Canonical execution target registry includes headless CLI worker types
-- [ ] Headless adapter executes at least one structured non-coding task class end-to-end
-- [ ] Headless attempts and receipts are durably recorded
-- [ ] Interactive fallback remains available when headless routing is not allowed
-- [ ] Tests cover target registration, adapter execution, and fallback behavior
-
----
-
-## PR-2: Inbound Event Inbox And Channel-To-Dispatch Routing
-**Track**: B
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: High
-**Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Estimated Time**: 2-3 days
-**Dependencies**: [PR-0]
-
-### Description
-Create the durable inbox layer for inbound events and channel-originated tasks so external signals can become canonical dispatches before execution starts.
-
-### Scope
-- Add a durable inbound inbox for channel/event payloads
-- Implement channel/session mapping and dedupe keys
-- Translate inbox items into broker-registered dispatches
-- Map task class and routing hints from inbound events
-- Add bounded retry semantics for inbox processing
-- Emit runtime events for accept, route, reject, and dead-letter decisions
-
-### Success Criteria
-- Inbound events can be durably stored before routing
-- Channel-driven work enters the same dispatch lifecycle as internal tasks
-- Dedupe and retry prevent duplicate dispatch storms
-- Routing hints are visible and reviewable from canonical state
-
-### Quality Gate
-`gate_pr2_inbound_inbox_and_routing`:
-- [ ] Inbound events are durably persisted before dispatch creation
-- [ ] Channel/session mapping and dedupe keys prevent duplicate dispatch creation
-- [ ] Inbox processing emits runtime events for route, reject, retry, and dead-letter outcomes
-- [ ] Broker-registered dispatches preserve channel origin metadata
-- [ ] Tests cover inbox persistence, dedupe, retry, and dispatch translation
-
----
-
-## PR-3: Intelligence Selection Policy And Bounded Injection
+## PR-0: Autonomy Policy Matrix, Escalation Model, And Provenance Contract
 **Track**: C
 **Priority**: P1
 **Complexity**: High
 **Risk**: High
 **Skill**: @architect
 **Requires-Model**: opus
+**Estimated Time**: 1-2 days
+**Dependencies**: []
+
+### Description
+Lock the FP-D contract before implementation starts: what VNX may do automatically, what is always gated, how escalation states work, and what the end-to-end provenance contract requires from dispatches, receipts, commits, and PRs.
+
+### Scope
+- Define canonical policy classes and decision types
+- Define automatic, gated, and forbidden action classes
+- Define escalation states and transition semantics
+- Define CLI-agnostic trace token rules, including accepted legacy refs
+- Define bidirectional provenance contract across dispatch, receipt, commit, and PR/featureplan
+- Create FP-D certification matrix for autonomy and provenance
+
+### Success Criteria
+- Policy classes and action classes are explicit and non-overlapping
+- Escalation states and transitions are unambiguous
+- Provenance contract is explicit enough for hooks, receipts, and CI to implement
+- FP-D certification matrix covers autonomy envelopes and provenance checks
+
+### Quality Gate
+`gate_pr0_policy_and_provenance_contract`:
+- [ ] Canonical policy matrix distinguishes automatic, gated, and forbidden actions
+- [ ] Escalation states and transitions are documented and non-overlapping
+- [ ] Trace token contract defines preferred and accepted legacy formats
+- [ ] Provenance contract covers dispatch, receipt, commit, and PR/featureplan in both directions
+- [ ] FP-D certification matrix covers autonomy and provenance behavior
+
+---
+
+## PR-1: Governance Evaluation Engine And Escalation State Tracking
+**Track**: B
+**Priority**: P1
+**Complexity**: Medium
+**Risk**: High
+**Skill**: @backend-developer
+**Requires-Model**: sonnet
 **Estimated Time**: 2-3 days
 **Dependencies**: [PR-0]
 
 ### Description
-Replace broad, noisy intelligence injection with a strict selection policy that injects only evidence-backed items at dispatch-create and resume time.
+Implement the runtime policy evaluation layer so recovery, retries, routing, and overrides can be classified and escalated through one governance-aware engine.
 
 ### Scope
-- Implement intelligence selection policy for create/resume paths only
-- Enforce maximum injection set: one proven pattern, one failure-prevention rule, one recent comparable incident
-- Attach evidence metadata and scope tags to each injected item
-- Add routing-aware filtering so different task classes get different intelligence slices
-- Add safe fallback when no intelligence meets the minimum evidence threshold
-- Emit events for injection decisions and suppression decisions
+- Add governance policy evaluation module
+- Persist escalation state and override events
+- Classify actions into automatic, gated, or forbidden outcomes
+- Integrate with runtime events from FP-A/FP-B/FP-C
+- Add operator-readable summaries of holds and escalations
+- Keep feature-flagged rollout for policy enforcement
 
 ### Success Criteria
-- Intelligence payloads are shorter, more relevant, and evidence-backed
-- Injection no longer behaves as generic context stuffing
-- Different task classes can receive different intelligence slices safely
-- Suppressed or missing intelligence is explicit, not silent
+- Runtime actions can be evaluated against a canonical policy matrix
+- Escalation states are durable and reviewable
+- Forbidden actions are blocked before execution
+- Holds and escalations become visible without log archaeology
 
 ### Quality Gate
-`gate_pr3_bounded_intelligence_injection`:
-- [ ] Intelligence is injected only at dispatch-create and resume paths
-- [ ] Injection payload is bounded to at most three evidence-backed items
-- [ ] Each intelligence item includes confidence, evidence_count, last_seen, and scope tags
-- [ ] Task-class-aware filtering changes the selected items when routing context changes
-- [ ] Tests cover bounded payload enforcement, evidence thresholds, and suppression behavior
+`gate_pr1_governance_evaluator`:
+- [ ] Policy evaluation returns automatic, gated, or forbidden outcomes deterministically
+- [ ] Escalation state transitions are durably recorded
+- [ ] Override events are explicit and reviewable
+- [ ] Forbidden actions are blocked before execution
+- [ ] Tests cover policy evaluation, hold/escalate transitions, and override recording
 
 ---
 
-## PR-4: Recommendation Usefulness Metrics And Acceptance Loop
+## PR-2: Receipt Provenance Enrichment And Bidirectional Linkage
+**Track**: B
+**Priority**: P1
+**Complexity**: Medium
+**Risk**: High
+**Skill**: @backend-developer
+**Requires-Model**: sonnet
+**Estimated Time**: 2-3 days
+**Dependencies**: [PR-0]
+
+### Description
+Strengthen the receipt layer so it can point cleanly to commits, PRs, and featureplan context, and so provenance can be reconstructed from receipts without manual digging.
+
+### Scope
+- Enrich receipt schema where needed with commit/PR provenance fields
+- Add mapping helpers between dispatches, receipts, and commit identities
+- Ensure provenance survives mixed execution and headless paths
+- Add receipt-side validation helpers for missing or broken provenance links
+- Export operator-readable provenance summaries
+- Preserve backward compatibility with existing receipt readers where possible
+
+### Success Criteria
+- Receipts can participate in the full provenance chain in both directions
+- Mixed execution paths no longer create provenance blind spots
+- Missing provenance linkage is detectable, not silent
+- Existing evidence-first model remains intact
+
+### Quality Gate
+`gate_pr2_receipt_provenance`:
+- [ ] Receipts carry enough linkage to connect dispatch, commit, and PR context
+- [ ] Bidirectional provenance reconstruction works from the receipt layer
+- [ ] Missing or broken receipt provenance is detectable through validation
+- [ ] Mixed execution paths preserve receipt linkage
+- [ ] Tests cover receipt enrichment, linkage reconstruction, and backward-compatible reads
+
+---
+
+## PR-3: CLI-Agnostic Git Traceability Enforcement
+**Track**: C
+**Priority**: P1
+**Complexity**: Medium
+**Risk**: Medium
+**Skill**: @architect
+**Requires-Model**: opus
+**Estimated Time**: 2-3 days
+**Dependencies**: [PR-0]
+
+### Description
+Implement Git-native provenance enforcement that works regardless of whether work is performed through Claude CLI, Codex CLI, or another future CLI.
+
+### Scope
+- Add `prepare-commit-msg` and/or `commit-msg` support for trace token assistance and validation
+- Support preferred `dispatch:<id>` token plus approved legacy refs
+- Add CI/server-side validation path for trace token enforcement
+- Document operator and worker expectations for traceability
+- Ensure enforcement remains tool-agnostic and does not depend on one AI CLI
+- Add bypass/override handling as explicit governance events rather than silent skips
+
+### Success Criteria
+- Git commits can be validated for traceability independent of the CLI used
+- Local hooks assist but are not the only enforcement path
+- Approved legacy refs remain accepted during transition
+- Traceability failures are explicit and actionable
+
+### Quality Gate
+`gate_pr3_git_traceability`:
+- [ ] Git traceability enforcement works without depending on a specific AI CLI
+- [ ] Preferred dispatch token and approved legacy refs are both handled correctly
+- [ ] CI or server-side validation can detect missing trace tokens
+- [ ] Local hook behavior and override handling are documented and testable
+- [ ] Tests cover valid, invalid, and legacy trace token cases
+
+---
+
+## PR-4: Provenance Verification, Audit Views, And Advisory Guardrails
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -248,33 +247,33 @@ Replace broad, noisy intelligence injection with a strict selection policy that 
 **Dependencies**: [PR-1, PR-2]
 
 ### Description
-Add the measurement loop for recommendations so VNX can track whether a prompt patch, routing patch, or guardrail suggestion actually helped.
+Add the verification and audit surfaces that let operators and T0 check whether the provenance chain is intact and whether autonomy decisions stayed within policy.
 
 ### Scope
-- Add recommendation usefulness metrics and acceptance tracking
-- Measure first-pass success, redispatch rate, open-item carry-over, ack timeout rate, repeated failure rate, and operator override rate
-- Link recommendation acceptance to before/after outcome windows
-- Export operator-readable usefulness summaries by recommendation class
-- Keep the loop advisory-only; no automatic policy mutation
-- Align metrics with headless and channel-originated dispatch paths
+- Build provenance verification routines across dispatch, receipt, commit, and PR metadata
+- Add operator/T0 audit views or reports for policy outcomes and provenance completeness
+- Surface missing links, broken chains, and override events clearly
+- Add advisory guardrails that recommend intervention before governance drift becomes hidden
+- Keep the output reviewable and evidence-oriented
+- Ensure compatibility with existing receipts and queue state
 
 ### Success Criteria
-- Recommendation classes have measurable before/after outcomes
-- Accepted versus ignored recommendations are distinguishable in runtime data
-- Operators can inspect usefulness by recommendation class
-- The learning loop remains advisory instead of self-mutating
+- Operators can verify provenance completeness without manual log archaeology
+- Broken provenance chains are surfaced before merge/closure steps
+- Governance audit views show where autonomy acted and where it was gated
+- Advisory guardrails strengthen oversight without mutating policy
 
 ### Quality Gate
-`gate_pr4_recommendation_usefulness_metrics`:
-- [ ] Recommendation acceptance and outcome windows are durably recorded
-- [ ] Usefulness metrics cover the declared recommendation classes
-- [ ] Before/after measurement can distinguish adopted from ignored recommendations
-- [ ] Metrics work across headless and channel-originated dispatches
-- [ ] Tests cover acceptance tracking, metric aggregation, and advisory-only behavior
+`gate_pr4_provenance_verification`:
+- [ ] Provenance verification can detect broken links across dispatch, receipt, commit, and PR data
+- [ ] Audit views surface policy outcomes, overrides, and broken chains clearly
+- [ ] Advisory guardrails are evidence-backed and non-mutating
+- [ ] Verification remains compatible with existing queue and receipt flows
+- [ ] Tests cover complete, partial, and broken provenance chains
 
 ---
 
-## PR-5: Mixed Execution Routing Cutover And FP-C Certification
+## PR-5: Safe Autonomy Cutover, Provenance Enforcement Rollout, And FP-D Certification
 **Track**: C
 **Priority**: P1
 **Complexity**: High
@@ -285,26 +284,26 @@ Add the measurement loop for recommendations so VNX can track whether a prompt p
 **Dependencies**: [PR-3, PR-4]
 
 ### Description
-Cut over from all-through-tmux assumptions to the certified mixed execution model only after headless routing, inbox registration, bounded intelligence, and usefulness measurement are all proven.
+Cut over to the explicit autonomy envelope and provenance-enforced governance path only after the policy engine, receipt linkage, Git traceability, and audit views are all proven.
 
 ### Scope
-- Enable mixed execution routing according to canonical task class rules
-- Keep interactive coding as the default route while routing eligible non-coding work headless
-- Wire bounded intelligence injection into the live dispatch path
-- Add rollback controls for mixed execution cutover
-- Certify FP-C against the PR-0 matrix and document residual risks
-- Update operator documentation for execution target selection and intelligence review
+- Enable safe autonomy envelopes through policy-backed evaluation
+- Roll out provenance enforcement with documented fallback/transition behavior
+- Integrate audit and verification outputs into operator/T0 review flow
+- Add rollback controls for autonomy and provenance enforcement changes
+- Certify FP-D against the PR-0 matrix and document residual risks
+- Confirm that FP-D does not grant autonomous merge or completion authority
 
 ### Success Criteria
-- Mixed execution routing works without breaking interactive coding defaults
-- Eligible non-coding work can flow headless with receipts and runtime events
-- Bounded intelligence is visible and reviewable in live dispatches
-- FP-C ends with a certified cutover path that leaves FP-D unblocked
+- Automatic actions occur only within explicit policy envelopes
+- High-risk actions remain gated and visible
+- Provenance enforcement is active without binding the system to one CLI
+- FP-D ends with certified autonomy and provenance controls on top of FP-A through FP-C
 
 ### Quality Gate
-`gate_pr5_mixed_execution_cutover`:
-- [ ] Interactive coding remains the default route after cutover
-- [ ] Eligible non-coding task classes can route headless end-to-end with receipts
-- [ ] Live dispatches show bounded intelligence injection and routing decisions in evidence trails
-- [ ] Cutover includes rollback controls and certification evidence
-- [ ] Full FP-C verification passes before feature closure
+`gate_pr5_safe_autonomy_cutover`:
+- [ ] Policy-backed autonomy is limited to approved automatic action classes
+- [ ] High-risk actions remain gated after cutover
+- [ ] Provenance enforcement is active and reviewable across Git and receipt layers
+- [ ] Rollback controls and transition guidance are documented
+- [ ] Full FP-D verification passes before feature closure

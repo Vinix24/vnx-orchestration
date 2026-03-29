@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# VNX Git Hook: prepare-commit-msg
+# Auto-injects Dispatch-ID trace token into commit messages.
+#
+# CLI-agnostic: reads VNX_CURRENT_DISPATCH_ID from environment,
+# not from any specific AI CLI state. Works with any Git client.
+#
+# Spec: docs/core/42_FPD_PROVENANCE_CONTRACT.md Section 4.1
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="${2:-}"
+
+# Skip for merge commits, squash, and amend — these have their own provenance
+case "$COMMIT_SOURCE" in
+    merge|squash)
+        exit 0
+        ;;
+esac
+
+# No dispatch context — nothing to inject
+if [ -z "${VNX_CURRENT_DISPATCH_ID:-}" ]; then
+    exit 0
+fi
+
+# Find the validator script
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_VNX_ROOT="${_SCRIPT_DIR}/../.."
+_VALIDATOR=""
+
+# Search order: VNX_HOME, relative from hook location, common paths
+for _candidate in \
+    "${VNX_HOME:-}/scripts/lib/trace_token_validator.py" \
+    "$_VNX_ROOT/scripts/lib/trace_token_validator.py" \
+    "$_VNX_ROOT/.claude/vnx-system/scripts/lib/trace_token_validator.py"; do
+    if [ -f "$_candidate" ]; then
+        _VALIDATOR="$_candidate"
+        break
+    fi
+done
+
+if [ -z "$_VALIDATOR" ]; then
+    # Fallback: inline injection without the Python library
+    if ! grep -q "^Dispatch-ID:" "$COMMIT_MSG_FILE" 2>/dev/null; then
+        printf '\nDispatch-ID: %s\n' "$VNX_CURRENT_DISPATCH_ID" >> "$COMMIT_MSG_FILE"
+    fi
+    exit 0
+fi
+
+# Use the Python validator for injection
+python3 "$_VALIDATOR" inject "$COMMIT_MSG_FILE"
