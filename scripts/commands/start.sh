@@ -274,6 +274,13 @@ TSJSON
         tmux pipe-pane -o -t "$T1" "cat >> '$state_dir/t1_conversation.log'"
         tmux pipe-pane -o -t "$T2" "cat >> '$state_dir/t2_conversation.log'"
         tmux pipe-pane -o -t "$T3" "cat >> '$state_dir/t3_conversation.log'"
+
+        # Save declarative session profile (PR-3: A-R4, A-R5)
+        python3 "$VNX_HOME/scripts/lib/tmux_session_profile.py" save \
+          --state-dir "$state_dir" \
+          --session "$session_name" \
+          --project-root "$PROJECT_ROOT" \
+          2>/dev/null || log "[start] WARN: session profile save failed (non-fatal)"
       fi
 
       # Re-start orchestration processes (they were killed by vnx_kill_all_orchestration above)
@@ -408,6 +415,15 @@ TSJSON
   }
 }
 PJSON
+
+  # ── Declarative session profile (PR-3: A-R4, A-R5) ──────────────────────
+  # Saved immediately after panes.json so that doctor/recover/jump can
+  # use work_dir-based identity instead of brittle pane index assumptions.
+  python3 "$VNX_HOME/scripts/lib/tmux_session_profile.py" save \
+    --state-dir "$state_dir" \
+    --session "$session_name" \
+    --project-root "$PROJECT_ROOT" \
+    2>/dev/null || log "[start] WARN: session profile save failed (non-fatal)"
 
   # ── Initial terminal state (all idle) ──────────────────────────────────
   # Write terminal_state.json BEFORE orchestration starts so that:
