@@ -1,4 +1,4 @@
-# PR Queue - Feature: VNX Execution Modes, Headless Routing, And Intelligence Quality
+# PR Queue - Feature: VNX Safe Autonomy, Governance Envelopes, And End-To-End Provenance
 
 ## Progress Overview
 Total: 6 PRs | Complete: 6 | Active: 0 | Queued: 0 | Blocked: 0
@@ -7,12 +7,12 @@ Progress: ██████████ 100%
 ## Status
 
 ### ✅ Completed PRs
-- PR-0: Task Classes, Execution Targets, And Intelligence Contract
-- PR-1: Headless CLI Target Registry And Dispatch Adapter
-- PR-3: Intelligence Selection Policy And Bounded Injection
-- PR-2: Inbound Event Inbox And Channel-To-Dispatch Routing
-- PR-4: Recommendation Usefulness Metrics And Acceptance Loop
-- PR-5: Mixed Execution Routing Cutover And FP-C Certification
+- PR-0: Autonomy Policy Matrix, Escalation Model, And Provenance Contract
+- PR-1: Governance Evaluation Engine And Escalation State Tracking
+- PR-3: CLI-Agnostic Git Traceability Enforcement
+- PR-2: Receipt Provenance Enrichment And Bidirectional Linkage
+- PR-4: Provenance Verification, Audit Views, And Advisory Guardrails
+- PR-5: Safe Autonomy Cutover, Provenance Enforcement Rollout, And FP-D Certification
 
 ## Dependency Flow
 ```
