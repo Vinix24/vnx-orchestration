@@ -57,6 +57,16 @@ from runtime_coordination import (
     InvalidStateError,
 )
 
+try:
+    from intelligence_selector import (
+        IntelligenceSelector,
+        InjectionResult,
+        select_intelligence,
+    )
+    _SELECTOR_AVAILABLE = True
+except ImportError:
+    _SELECTOR_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -143,10 +153,14 @@ class DispatchBroker:
         dispatch_dir: str | Path,
         *,
         shadow_mode: bool = True,
+        quality_db_path: str | Path | None = None,
+        intelligence_enabled: bool = True,
     ) -> None:
         self._state_dir = Path(state_dir)
         self._dispatch_dir = Path(dispatch_dir)
         self._shadow_mode = shadow_mode
+        self._quality_db_path = Path(quality_db_path) if quality_db_path else None
+        self._intelligence_enabled = intelligence_enabled and _SELECTOR_AVAILABLE
 
     @property
     def shadow_mode(self) -> bool:
@@ -175,6 +189,8 @@ class DispatchBroker:
         intelligence_refs: Optional[List[Any]] = None,
         target_profile: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        task_class: Optional[str] = None,
+        skill_name: Optional[str] = None,
     ) -> RegisterResult:
         """Register a dispatch durably in the DB and write its bundle to disk.
 
@@ -229,6 +245,30 @@ class DispatchBroker:
         # Write bundle directory and files atomically
         bundle_dir.mkdir(parents=True, exist_ok=True)
 
+        # Run bounded intelligence selection (FP-C PR-3)
+        intelligence_payload = None
+        if self._intelligence_enabled:
+            try:
+                selector = IntelligenceSelector(
+                    quality_db_path=self._quality_db_path,
+                    coord_db_state_dir=self._state_dir,
+                )
+                injection_result = selector.select(
+                    dispatch_id=dispatch_id,
+                    injection_point="dispatch_create",
+                    task_class=task_class,
+                    skill_name=skill_name,
+                    scope_tags=None,
+                    track=track,
+                    gate=gate,
+                )
+                selector.emit_event(injection_result)
+                selector.record_injection(injection_result)
+                intelligence_payload = injection_result.to_payload_dict()
+                selector.close()
+            except Exception:
+                intelligence_payload = None
+
         bundle_data: Dict[str, Any] = {
             "dispatch_id": dispatch_id,
             "bundle_version": 1,
@@ -243,6 +283,8 @@ class DispatchBroker:
             "target_profile": target_profile or {},
             "metadata": metadata or {},
         }
+        if intelligence_payload is not None:
+            bundle_data["intelligence_payload"] = intelligence_payload
 
         prompt_path = bundle_dir / "prompt.txt"
         _write_atomic(prompt_path, prompt)
@@ -463,6 +505,48 @@ class DispatchBroker:
             )
             conn.commit()
 
+    def inject_intelligence_on_resume(
+        self,
+        dispatch_id: str,
+        *,
+        task_class: Optional[str] = None,
+        skill_name: Optional[str] = None,
+        track: Optional[str] = None,
+        gate: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Run bounded intelligence selection for a resumed dispatch.
+
+        Called when a recovered dispatch is re-delivered. Returns the
+        intelligence_payload dict or None if selection is disabled or
+        no items meet thresholds.
+
+        Does NOT modify the immutable bundle on disk. The caller is
+        responsible for including the payload in the re-delivery context.
+        """
+        if not self._intelligence_enabled:
+            return None
+
+        try:
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                dispatch_id=dispatch_id,
+                injection_point="dispatch_resume",
+                task_class=task_class,
+                skill_name=skill_name,
+                track=track,
+                gate=gate,
+            )
+            selector.emit_event(result)
+            selector.record_injection(result)
+            payload = result.to_payload_dict()
+            selector.close()
+            return payload if result.items_injected > 0 else None
+        except Exception:
+            return None
+
     def get_bundle(self, dispatch_id: str) -> Optional[Dict[str, Any]]:
         """Return parsed bundle.json for dispatch_id, or None if not found.
 
@@ -530,17 +614,23 @@ class DispatchBroker:
 def load_broker(
     state_dir: str | Path,
     dispatch_dir: str | Path,
+    *,
+    quality_db_path: str | Path | None = None,
 ) -> Optional[DispatchBroker]:
     """Return a DispatchBroker if VNX_BROKER_ENABLED=1 (default), else None.
 
     Shadow mode is determined by VNX_BROKER_SHADOW (default "1" = shadow ON).
+    Intelligence injection is determined by VNX_INTELLIGENCE_INJECTION
+    (default "1" = enabled).
 
     This function is the standard entry point for production code that
     needs to optionally use the broker without hard-failing when disabled.
 
     Args:
-        state_dir:    Directory containing runtime_coordination.db.
-        dispatch_dir: Root directory for dispatch bundle storage.
+        state_dir:       Directory containing runtime_coordination.db.
+        dispatch_dir:    Root directory for dispatch bundle storage.
+        quality_db_path: Path to quality_intelligence.db. If None, intelligence
+                         injection queries run but return empty results.
 
     Returns:
         Configured DispatchBroker instance, or None if broker is disabled.
@@ -552,6 +642,8 @@ def load_broker(
         state_dir,
         dispatch_dir,
         shadow_mode=config["shadow_mode"],
+        quality_db_path=quality_db_path,
+        intelligence_enabled=config["intelligence_enabled"],
     )
 
 
@@ -569,7 +661,9 @@ def broker_config_from_env() -> Dict[str, Any]:
     """
     enabled = os.environ.get("VNX_BROKER_ENABLED", "1").strip() != "0"
     shadow_mode = os.environ.get("VNX_BROKER_SHADOW", "1").strip() != "0"
+    intelligence_enabled = os.environ.get("VNX_INTELLIGENCE_INJECTION", "1").strip() != "0"
     return {
         "enabled": enabled,
         "shadow_mode": shadow_mode,
+        "intelligence_enabled": intelligence_enabled,
     }
