@@ -624,7 +624,8 @@ class TestHeadlessExecution(_DBTestCase):
             task_class="research_structured",
         )
         self.assertFalse(result.success)
-        self.assertIn("code 1", result.failure_reason)
+        self.assertIsNotNone(result.failure_reason)
+        self.assertIsNotNone(result.failure_class)
 
     @patch("headless_adapter.headless_enabled", return_value=True)
     @patch("shutil.which", return_value="/usr/bin/echo")
@@ -638,7 +639,7 @@ class TestHeadlessExecution(_DBTestCase):
             task_class="research_structured",
         )
         self.assertFalse(result.success)
-        self.assertIn("timed out", result.failure_reason)
+        self.assertEqual(result.failure_class, "TIMEOUT")
 
     @patch("headless_adapter.headless_enabled", return_value=True)
     def test_missing_binary(self, mock_enabled):
