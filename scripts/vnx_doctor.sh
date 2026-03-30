@@ -27,6 +27,7 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/commands/registry.sh' \
     --glob '!**/intelligence_export.py' \
     --glob '!**/intelligence_import.py' \
+    --glob '!**/vnx_install.py' \
     --glob '!**/commands/merge_preflight.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' || true)
@@ -52,6 +53,7 @@ else
     --exclude='registry.sh' \
     --exclude='intelligence_export.py' \
     --exclude='intelligence_import.py' \
+    --exclude='vnx_install.py' \
     --exclude='merge_preflight.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' || true)

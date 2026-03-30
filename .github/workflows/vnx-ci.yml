@@ -46,6 +46,7 @@ jobs:
             --glob "!**/test_dashboard_sync.py" \
             --glob "!**/intelligence_export.py" \
             --glob "!**/intelligence_import.py" \
+            --glob "!**/vnx_install.py" \
             --glob "!**/commands/merge_preflight.sh" || true)
           if [ -n "$matches" ]; then
             echo "$matches"
@@ -211,6 +212,7 @@ jobs:
             --glob "!**/test_dashboard_sync.py" \
             --glob "!**/intelligence_export.py" \
             --glob "!**/intelligence_import.py" \
+            --glob "!**/vnx_install.py" \
             --glob "!**/commands/merge_preflight.sh" || true)
           if [ -n "$matches" ]; then
             echo "$matches"
