@@ -165,6 +165,7 @@ Worktree commands:
 
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
+  roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Process commands (visibility and control):
   status             Show session, terminals, queue, and open-item summary
@@ -1838,6 +1839,9 @@ main() {
       ;;
     gate-check)
       python3 "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
+      ;;
+    roadmap)
+      cmd_roadmap "$@"
       ;;
     status)
       python3 "$VNX_HOME/scripts/vnx_process_ux.py" status "$@"

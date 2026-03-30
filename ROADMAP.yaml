@@ -1,0 +1,16 @@
+roadmap_id: vnx-roadmap-autopilot
+title: VNX Multi-Feature Roadmap
+
+features:
+  - feature_id: roadmap-autopilot
+    title: Roadmap Autopilot, Auto-Next Feature Loading, and Multi-Reviewer Gates
+    plan_path: roadmap/features/roadmap-autopilot/FEATURE_PLAN.md
+    branch_name: feature/roadmap-autopilot-review-gates
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+      - claude_github_optional
+    depends_on: []
+    status: planned
