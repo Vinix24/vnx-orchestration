@@ -457,7 +457,7 @@ def patch_agent_files(paths: Dict[str, str]) -> StepResult:
 def intelligence_import(paths: Dict[str, str]) -> StepResult:
     """Import git-tracked intelligence into SQLite."""
     intel_dir = Path(paths.get("VNX_INTELLIGENCE_DIR",
-                               Path(paths["PROJECT_ROOT"]) / ".vnx-intelligence"))
+                               Path(paths.get("VNX_CANONICAL_ROOT") or paths["VNX_HOME"]) / ".vnx-intelligence"))
     export_dir = intel_dir / "db_export"
 
     if not export_dir.is_dir():

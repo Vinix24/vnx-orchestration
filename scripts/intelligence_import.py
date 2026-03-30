@@ -24,9 +24,10 @@ def _db_path(paths: dict[str, str]) -> Path:
 
 
 def _intelligence_dir(paths: dict[str, str]) -> Path:
-    return Path(paths.get("VNX_INTELLIGENCE_DIR", "")) or (
-        Path(paths["PROJECT_ROOT"]) / ".vnx-intelligence"
-    )
+    configured = paths.get("VNX_INTELLIGENCE_DIR")
+    if configured:
+        return Path(configured)
+    return Path(paths.get("VNX_CANONICAL_ROOT") or paths["VNX_HOME"]) / ".vnx-intelligence"
 
 
 def _schema_path(paths: dict[str, str]) -> Path:

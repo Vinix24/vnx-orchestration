@@ -23,12 +23,17 @@ else
   VNX_HOME_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
   if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
     PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/../.." && pwd)"
+  elif git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel >/dev/null 2>&1 && [ "$(git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" = "$VNX_HOME_DEFAULT" ]; then
+    PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
   else
     PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/.." && pwd)"
   fi
+  VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$VNX_HOME_DEFAULT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
 
   export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
   export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
+  export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
   export VNX_DATA_DIR="${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}"
   export VNX_STATE_DIR="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
   export VNX_DISPATCH_DIR="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}"
@@ -37,6 +42,7 @@ else
   export VNX_LOCKS_DIR="${VNX_LOCKS_DIR:-$VNX_DATA_DIR/locks}"
   export VNX_REPORTS_DIR="${VNX_REPORTS_DIR:-$VNX_DATA_DIR/unified_reports}"
   export VNX_DB_DIR="${VNX_DB_DIR:-$VNX_DATA_DIR/database}"
+  export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$VNX_CANONICAL_ROOT/.vnx-intelligence}"
 
   if [ -d "$PROJECT_ROOT_DEFAULT/.claude/skills" ]; then
     export VNX_SKILLS_DIR="$PROJECT_ROOT_DEFAULT/.claude/skills"
@@ -50,36 +56,15 @@ _vnx_cwd_override="$(pwd)/.vnx-data/.env_override"
 if [ -f "$_vnx_cwd_override" ]; then
   # shellcheck source=/dev/null
   source "$_vnx_cwd_override"
+  export VNX_STATE_DIR="$VNX_DATA_DIR/state"
+  export VNX_DISPATCH_DIR="$VNX_DATA_DIR/dispatches"
+  export VNX_LOGS_DIR="$VNX_DATA_DIR/logs"
+  export VNX_PIDS_DIR="$VNX_DATA_DIR/pids"
+  export VNX_LOCKS_DIR="$VNX_DATA_DIR/locks"
+  export VNX_REPORTS_DIR="$VNX_DATA_DIR/unified_reports"
+  export VNX_DB_DIR="$VNX_DATA_DIR/database"
 fi
 unset _vnx_cwd_override
-
-# ── Worktree PROJECT_ROOT override ──────────────────────────────
-# When CWD is a git worktree of the same project, override PROJECT_ROOT
-# and re-derive all data paths so each worktree gets its own session.
-_vnx_cwd="$(pwd)"
-if [ "$_vnx_cwd" != "$PROJECT_ROOT" ]; then
-  _vnx_main_wt="$(git -C "$_vnx_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || true
-  if [ -n "${_vnx_main_wt:-}" ] && [ "$_vnx_main_wt" = "$PROJECT_ROOT" ]; then
-    export PROJECT_ROOT="$_vnx_cwd"
-    # Re-derive data paths for this worktree (unless explicitly overridden via env)
-    if [ -z "${VNX_DATA_DIR:-}" ] || [ "$VNX_DATA_DIR" = "$_vnx_main_wt/.vnx-data" ]; then
-      export VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
-      export VNX_STATE_DIR="$VNX_DATA_DIR/state"
-      export VNX_DISPATCH_DIR="$VNX_DATA_DIR/dispatches"
-      export VNX_LOGS_DIR="$VNX_DATA_DIR/logs"
-      export VNX_PIDS_DIR="$VNX_DATA_DIR/pids"
-      export VNX_LOCKS_DIR="$VNX_DATA_DIR/locks"
-      export VNX_REPORTS_DIR="$VNX_DATA_DIR/unified_reports"
-      export VNX_DB_DIR="$VNX_DATA_DIR/database"
-    fi
-    export VNX_INTELLIGENCE_DIR="$PROJECT_ROOT/.vnx-intelligence"
-    # Re-derive skills dir
-    if [ -d "$PROJECT_ROOT/.claude/skills" ]; then
-      export VNX_SKILLS_DIR="$PROJECT_ROOT/.claude/skills"
-    fi
-  fi
-fi
-unset _vnx_cwd _vnx_main_wt
 
 if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_marked_blocks.sh" ]; then
   # shellcheck source=/dev/null
@@ -161,8 +146,8 @@ Commands:
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
 
 Intelligence commands (git-tracked project knowledge):
-  intelligence-export  Export SQLite + state to .vnx-intelligence/ (NDJSON)
-  intelligence-import  Import .vnx-intelligence/ NDJSON into SQLite
+  intelligence-export  Export SQLite + state to canonical .vnx-intelligence/ (NDJSON)
+  intelligence-import  Import canonical .vnx-intelligence/ NDJSON into SQLite
   analyze-sessions     Mine Claude Code session logs → session_analytics DB
                        Options: --dry-run, --max-sessions N, --deep-budget N,
                                 --project-filter STR, --terminal-filter T0..T3
@@ -607,7 +592,7 @@ cmd_init() {
     cmd_init_db || true
 
     if [ -d "$VNX_INTELLIGENCE_DIR/db_export" ]; then
-      log "[init] Found .vnx-intelligence/ — importing into SQLite..."
+      log "[init] Found intelligence export at $VNX_INTELLIGENCE_DIR — importing into SQLite..."
       cmd_intelligence_import || true
     fi
 

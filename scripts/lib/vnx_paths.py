@@ -7,6 +7,7 @@ Allows environment overrides while defaulting to dist/runtime-relative paths.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Dict
 
@@ -27,36 +28,82 @@ def _resolve_vnx_home() -> Path:
     return here.parent.parent
 
 
+def _is_embedded_layout(vnx_home: Path) -> bool:
+    return vnx_home.name == "vnx-system" and vnx_home.parent.name == ".claude"
+
+
+def _git_toplevel(path: Path) -> Path | None:
+    try:
+        output = subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    if not output:
+        return None
+    return Path(output).expanduser().resolve()
+
+
+def _git_common_root(path: Path) -> Path | None:
+    try:
+        output = subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    if not output:
+        return None
+    common_dir = Path(output).expanduser().resolve()
+    return common_dir.parent if common_dir.name == ".git" else common_dir
+
+
+def _default_project_root(vnx_home: Path) -> Path:
+    if _is_embedded_layout(vnx_home):
+        return vnx_home.parent.parent.resolve()
+
+    git_root = _git_toplevel(vnx_home)
+    if git_root == vnx_home:
+        # Standalone repo/worktree layout: runtime/bootstrap stay local to the repo checkout.
+        return vnx_home.resolve()
+
+    return vnx_home.parent.resolve()
+
+
+def _default_canonical_root(vnx_home: Path) -> Path:
+    git_root = _git_toplevel(vnx_home)
+    if git_root == vnx_home:
+        return _git_common_root(vnx_home) or vnx_home.resolve()
+    return vnx_home.resolve()
+
+
 def _resolve_project_root(vnx_home: Path) -> Path:
+    default_root = _default_project_root(vnx_home)
     project_root_env = os.environ.get("PROJECT_ROOT")
     if project_root_env:
         candidate = Path(project_root_env).expanduser().resolve()
-        # Only trust the env var if vnx_home actually lives under that project.
-        # This prevents cross-project pollution when multiple VNX installs coexist
-        # (e.g. PROJECT_ROOT from project A leaking into project B's scripts).
-        try:
-            vnx_home.relative_to(candidate)
+        if candidate == default_root:
             return candidate
-        except ValueError:
-            pass  # env var points to a different project — ignore it
 
-    # Backward compatibility: VNX_HOME under a legacy hidden directory layout
-    if vnx_home.name == "vnx-system" and vnx_home.parent.name == ".claude":
-        return vnx_home.parent.parent
-
-    # Default: parent of dist root (.vnx -> project root)
-    return vnx_home.parent
+    return default_root
 
 
 def resolve_paths() -> Dict[str, str]:
     vnx_home = _resolve_vnx_home()
     project_root = _resolve_project_root(vnx_home)
+    canonical_root = Path(
+        os.environ.get("VNX_CANONICAL_ROOT") or _default_canonical_root(vnx_home)
+    ).expanduser().resolve()
 
     vnx_data_dir = Path(os.environ.get("VNX_DATA_DIR") or (project_root / ".vnx-data")).expanduser().resolve()
 
     paths = {
         "VNX_HOME": str(vnx_home),
         "PROJECT_ROOT": str(project_root),
+        "VNX_CANONICAL_ROOT": str(canonical_root),
         "VNX_DATA_DIR": str(vnx_data_dir),
         "VNX_STATE_DIR": str(Path(os.environ.get("VNX_STATE_DIR") or (vnx_data_dir / "state")).expanduser()),
         "VNX_DISPATCH_DIR": str(Path(os.environ.get("VNX_DISPATCH_DIR") or (vnx_data_dir / "dispatches")).expanduser()),
@@ -69,7 +116,7 @@ def resolve_paths() -> Dict[str, str]:
 
     # Git-tracked intelligence directory (portable across worktrees)
     paths["VNX_INTELLIGENCE_DIR"] = str(
-        Path(os.environ.get("VNX_INTELLIGENCE_DIR") or (project_root / ".vnx-intelligence")).expanduser()
+        Path(os.environ.get("VNX_INTELLIGENCE_DIR") or (canonical_root / ".vnx-intelligence")).expanduser().resolve()
     )
 
     if "VNX_SKILLS_DIR" in os.environ:

@@ -44,7 +44,7 @@ cmd_start() {
   local _db_file="$state_dir/quality_intelligence.db"
   # Export first: capture intelligence from previous session (since vnx stop may never run)
   if [ -f "$_db_file" ]; then
-    log "[start] Exporting intelligence to .vnx-intelligence/..."
+    log "[start] Exporting intelligence to $VNX_INTELLIGENCE_DIR"
     cmd_intelligence_export || log "[start] WARN: intelligence export failed (non-fatal)"
   fi
   # Then import if export is newer than DB (e.g. from git merge)
@@ -56,7 +56,7 @@ cmd_start() {
       _need_import=true
     fi
     if [ "$_need_import" = true ]; then
-      log "[start] Intelligence export is newer than DB — importing..."
+      log "[start] Intelligence export at $VNX_INTELLIGENCE_DIR is newer than DB — importing..."
       cmd_intelligence_import || log "[start] WARN: intelligence import failed (non-fatal)"
     fi
   fi

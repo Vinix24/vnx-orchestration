@@ -80,8 +80,9 @@ def vnx_env(tmp_path):
         "VNX_LOCKS_DIR": str(data_dir / "locks"),
         "VNX_REPORTS_DIR": str(data_dir / "unified_reports"),
         "VNX_DB_DIR": str(data_dir / "database"),
+        "VNX_CANONICAL_ROOT": str(vnx_home),
         "VNX_SKILLS_DIR": str(project_root / ".claude" / "skills"),
-        "VNX_INTELLIGENCE_DIR": str(project_root / ".vnx-intelligence"),
+        "VNX_INTELLIGENCE_DIR": str(vnx_home / ".vnx-intelligence"),
     }
     return paths
 
@@ -185,6 +186,29 @@ class TestBootstrapSkills:
         shutil.rmtree(str(Path(vnx_env["VNX_HOME"]) / "skills"))
         result = bootstrap_skills(vnx_env)
         assert result.status == FAIL
+
+    def test_worktree_bootstrap_stays_local(self, vnx_env, tmp_path):
+        canonical_root = Path(vnx_env["VNX_HOME"])
+        worktree_root = tmp_path / "worktree-project"
+        worktree_root.mkdir()
+
+        wt_paths = dict(vnx_env)
+        wt_paths["PROJECT_ROOT"] = str(worktree_root)
+        wt_paths["VNX_DATA_DIR"] = str(worktree_root / ".vnx-data")
+        wt_paths["VNX_STATE_DIR"] = str(worktree_root / ".vnx-data" / "state")
+        wt_paths["VNX_DISPATCH_DIR"] = str(worktree_root / ".vnx-data" / "dispatches")
+        wt_paths["VNX_LOGS_DIR"] = str(worktree_root / ".vnx-data" / "logs")
+        wt_paths["VNX_PIDS_DIR"] = str(worktree_root / ".vnx-data" / "pids")
+        wt_paths["VNX_LOCKS_DIR"] = str(worktree_root / ".vnx-data" / "locks")
+        wt_paths["VNX_REPORTS_DIR"] = str(worktree_root / ".vnx-data" / "unified_reports")
+        wt_paths["VNX_DB_DIR"] = str(worktree_root / ".vnx-data" / "database")
+        wt_paths["VNX_SKILLS_DIR"] = str(worktree_root / ".claude" / "skills")
+
+        result = bootstrap_skills(wt_paths)
+
+        assert result.status == PASS
+        assert (worktree_root / ".claude" / "skills" / "skills.yaml").exists()
+        assert not (canonical_root / ".claude" / "skills").exists()
 
 
 # ---------------------------------------------------------------------------
