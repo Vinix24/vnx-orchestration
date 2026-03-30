@@ -378,7 +378,7 @@ Review-Stack: {review_stack or 'none'}
                 if not pr.get('dependencies'):
                     content += f"{pr['id']} (no dependencies)\n"
                 else:
-                    deps_str = " → ".join(pr['dependencies'])
+                    deps_str = ", ".join(pr['dependencies'])
                     content += f"{deps_str} → {pr['id']}\n"
             content += "```\n"
 
