@@ -10,6 +10,7 @@ Covers:
 """
 
 import json
+import logging.handlers
 import os
 import sys
 import tempfile
@@ -743,6 +744,60 @@ class TestHeadlessAttemptRecording(_DBTestCase):
         event_types = [e["event_type"] for e in events]
         self.assertIn("headless_subprocess_start", event_types)
         self.assertIn("headless_execution_completed", event_types)
+
+
+class TestEmitEventDebugLogging(_DBTestCase):
+    """Tests for _emit_event debug logging on failure (AC-1 through AC-5)."""
+
+    def test_emit_event_failure_does_not_break_flow(self):
+        """AC-3: Event emission failures must not break execution flow."""
+        adapter = HeadlessAdapter(self.state_dir, self.dispatch_dir)
+        # Force a DB error by closing the connection factory path
+        with patch("headless_adapter.get_connection", side_effect=RuntimeError("DB gone")):
+            # Must not raise
+            adapter._emit_event(
+                "test_event",
+                dispatch_id="d-fail-emit-1",
+                metadata={"key": "value"},
+            )
+
+    def test_emit_event_failure_logs_debug(self):
+        """AC-1/AC-2: Failure emits debug log with event_type, dispatch_id, and exception."""
+        adapter = HeadlessAdapter(self.state_dir, self.dispatch_dir)
+        with patch("headless_adapter.get_connection", side_effect=RuntimeError("DB gone")):
+            with self.assertLogs("headless_adapter", level="DEBUG") as cm:
+                adapter._emit_event(
+                    "test_event",
+                    dispatch_id="d-fail-emit-2",
+                )
+        log_output = "\n".join(cm.output)
+        self.assertIn("test_event", log_output)
+        self.assertIn("d-fail-emit-2", log_output)
+        self.assertIn("DB gone", log_output)
+
+    def test_emit_event_success_no_debug_log(self):
+        """AC-5: Successful emission does not produce debug log output."""
+        self._register_dispatch("d-success-emit-1")
+        adapter = HeadlessAdapter(self.state_dir, self.dispatch_dir)
+        import logging as _logging
+        logger = _logging.getLogger("headless_adapter")
+        handler = _logging.handlers.MemoryHandler(capacity=100)
+        handler.setLevel(_logging.DEBUG)
+        logger.addHandler(handler)
+        try:
+            adapter._emit_event(
+                "headless_subprocess_start",
+                dispatch_id="d-success-emit-1",
+            )
+            handler.flush()
+            debug_records = [
+                r for r in handler.buffer
+                if r.levelno == _logging.DEBUG
+                and "Event emission failed" in r.getMessage()
+            ]
+            self.assertEqual(len(debug_records), 0)
+        finally:
+            logger.removeHandler(handler)
 
 
 if __name__ == "__main__":

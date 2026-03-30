@@ -23,6 +23,7 @@ Feature flags:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -43,6 +44,8 @@ from runtime_coordination import (
     update_attempt,
 )
 
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -634,7 +637,12 @@ class HeadlessAdapter:
                 )
                 conn.commit()
         except Exception:
-            pass
+            logger.debug(
+                "Event emission failed: event_type=%s dispatch_id=%s",
+                event_type,
+                dispatch_id,
+                exc_info=True,
+            )
 
 
 # ---------------------------------------------------------------------------
