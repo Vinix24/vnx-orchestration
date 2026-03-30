@@ -10,6 +10,9 @@ VNX is an open-source tmux orchestration toolkit that coordinates AI coding agen
 
 **No framework to import. No cloud dependency. No database. Just bash + python + tmux.**
 
+Current release: `v0.5.0`  
+See [CHANGELOG.md](CHANGELOG.md) for the release summary.
+
 ## Why
 
 You're already using AI coding agents. But when you try to run multiple agents on the same project:
