@@ -1,14 +1,17 @@
-# VNX — Governance-First Multi-Agent Orchestration
+# VNX — Governance-First Orchestration for AI CLI Workers
 
-> Run multiple AI coding agents in parallel with full audit trails, quality gates, and human approval at every step.
+> Run Claude Code, Codex, and Gemini CLI in parallel with receipts, quality gates, provenance, and human oversight.
 
 ![VNX multi-terminal orchestration — T0 orchestrator coordinating Claude Code, Codex CLI, and Claude Opus across parallel tracks](docs/images/vnx-terminals-hero.png)
 
-*T0 orchestrator dispatching work to 3 parallel terminals — each running its own AI coding agent with isolated context.*
+*T0 orchestrator dispatching work to parallel workers with isolated context and explicit governance.*
 
-VNX is an open-source orchestration system that coordinates AI coding agents across parallel terminals. One orchestrator breaks down work, multiple agents execute simultaneously, and everything is tracked in an append-only audit trail. No agent can merge code without passing deterministic quality gates and explicit human approval.
+VNX is an open-source governance-first orchestration runtime for AI CLI workflows. One orchestrator breaks down work, interactive and headless workers execute in parallel, and everything is tracked through receipts, quality gates, and end-to-end provenance.
 
-**LLM-agnostic. No cloud dependency. No database. File-based state you can grep, diff, and version.**
+**No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
+
+Current release: `v0.5.0`
+See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
 ## The Problem
 
