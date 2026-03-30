@@ -1,14 +1,14 @@
-# VNX — Run Multiple AI Coding Agents in Parallel
+# VNX — Governance-First Orchestration for AI CLI Workers
 
-> Claude Code + Codex CLI + Gemini CLI working together on the same codebase. No conflicts, no lost work, full visibility.
+> Run Claude Code, Codex, and Gemini CLI in parallel with receipts, quality gates, provenance, and human oversight.
 
 ![VNX multi-terminal orchestration — T0 orchestrator coordinating Claude Code, Codex CLI, and Claude Opus across parallel tracks](docs/images/vnx-terminals-hero.png)
 
-*T0 orchestrator dispatching work to 3 parallel terminals — each running its own AI coding agent with isolated context.*
+*T0 orchestrator dispatching work to parallel workers with isolated context and explicit governance.*
 
-VNX is an open-source tmux orchestration toolkit that coordinates AI coding agents across parallel terminals. One orchestrator breaks down work, multiple agents execute simultaneously, and everything is tracked in an append-only audit trail.
+VNX is an open-source governance-first orchestration runtime for AI CLI workflows. One orchestrator breaks down work, interactive and headless workers execute in parallel, and everything is tracked through receipts, quality gates, and end-to-end provenance.
 
-**No framework to import. No cloud dependency. No database. Just bash + python + tmux.**
+**No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
 Current release: `v0.5.0`  
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
