@@ -245,7 +245,7 @@ _finish_wt_merge_intelligence() {
   # Strategy 1: Export to git-tracked .vnx-intelligence/ (preferred)
   local merged=false
   if [ -d "$wt_dir/.vnx-intelligence" ] || [ -f "$wt_data/database/quality_intelligence.db" ]; then
-    log "[finish-worktree] Exporting intelligence to .vnx-intelligence/..."
+    log "[finish-worktree] Exporting intelligence to $VNX_INTELLIGENCE_DIR"
     if cmd_intelligence_export 2>/dev/null; then
       merged=true
     fi

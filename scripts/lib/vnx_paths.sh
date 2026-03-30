@@ -6,20 +6,53 @@ __VNX_PATHS_SHELLOPTS="$(set +o)"
 set -euo pipefail
 
 # Resolve this file's directory without clobbering the caller's SCRIPT_DIR.
-_VNX_PATHS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_VNX_PATHS_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+_vnx_canon_dir() {
+  if [ -d "$1" ]; then
+    (cd -P "$1" && pwd -P)
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+_vnx_is_embedded_layout() {
+  [ "$(basename "$1")" = "vnx-system" ] && [ "$(basename "$(dirname "$1")")" = ".claude" ]
+}
+
+_vnx_git_toplevel() {
+  local git_root=""
+  git_root="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || true
+  if [ -n "$git_root" ]; then
+    _vnx_canon_dir "$git_root"
+  fi
+}
+
+_vnx_git_common_root() {
+  local common_dir=""
+  common_dir="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || true
+  if [ -z "$common_dir" ]; then
+    return 0
+  fi
+  if [ "$(basename "$common_dir")" = ".git" ]; then
+    _vnx_canon_dir "$(dirname "$common_dir")"
+  else
+    _vnx_canon_dir "$common_dir"
+  fi
+}
 
 # Always compute VNX_HOME from this script's location first (ground truth).
 if [ "$(basename "$_VNX_PATHS_DIR")" = "lib" ]; then
-  _VNX_HOME_FROM_SCRIPT="$(cd "$_VNX_PATHS_DIR/../.." && pwd)"
+  _VNX_HOME_FROM_SCRIPT="$(cd -P "$_VNX_PATHS_DIR/../.." && pwd -P)"
 else
-  _VNX_HOME_FROM_SCRIPT="$(cd "$_VNX_PATHS_DIR/.." && pwd)"
+  _VNX_HOME_FROM_SCRIPT="$(cd -P "$_VNX_PATHS_DIR/.." && pwd -P)"
 fi
 
 # Default VNX_HOME to the dist root (parent of bin/ or scripts/).
 # Only trust VNX_BIN/VNX_EXECUTABLE if they resolve to the same project tree
 # as this script — prevents cross-project contamination from inherited env vars.
 if [ -n "${VNX_BIN:-}" ]; then
-  _VNX_HOME_FROM_BIN="$(cd "$(dirname "$VNX_BIN")/.." 2>/dev/null && pwd)" || _VNX_HOME_FROM_BIN=""
+  _VNX_HOME_FROM_BIN="$(cd -P "$(dirname "$VNX_BIN")/.." 2>/dev/null && pwd -P)" || _VNX_HOME_FROM_BIN=""
   if [ "$_VNX_HOME_FROM_BIN" = "$_VNX_HOME_FROM_SCRIPT" ]; then
     VNX_HOME_DEFAULT="$_VNX_HOME_FROM_BIN"
   else
@@ -27,7 +60,7 @@ if [ -n "${VNX_BIN:-}" ]; then
   fi
   unset _VNX_HOME_FROM_BIN
 elif [ -n "${VNX_EXECUTABLE:-}" ]; then
-  _VNX_HOME_FROM_EXEC="$(cd "$(dirname "$VNX_EXECUTABLE")/.." 2>/dev/null && pwd)" || _VNX_HOME_FROM_EXEC=""
+  _VNX_HOME_FROM_EXEC="$(cd -P "$(dirname "$VNX_EXECUTABLE")/.." 2>/dev/null && pwd -P)" || _VNX_HOME_FROM_EXEC=""
   if [ "$_VNX_HOME_FROM_EXEC" = "$_VNX_HOME_FROM_SCRIPT" ]; then
     VNX_HOME_DEFAULT="$_VNX_HOME_FROM_EXEC"
   else
@@ -38,14 +71,29 @@ else
   VNX_HOME_DEFAULT="$_VNX_HOME_FROM_SCRIPT"
 fi
 unset _VNX_HOME_FROM_SCRIPT
+VNX_HOME_DEFAULT="$(_vnx_canon_dir "$VNX_HOME_DEFAULT")"
 
-# Default project root to the parent of VNX_HOME.
-# Backward compatibility: if VNX_HOME lives under a legacy hidden directory layout, project root is two levels up.
-if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
-  PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/../.." && pwd)"
+# Default runtime/bootstrap root.
+# Embedded layout keeps runtime in the parent project; standalone repo/worktree
+# layout keeps runtime local to the checkout itself.
+_VNX_HOME_GIT_ROOT="$(_vnx_git_toplevel "$VNX_HOME_DEFAULT")"
+if _vnx_is_embedded_layout "$VNX_HOME_DEFAULT"; then
+  PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/../.." && pwd -P)"
+elif [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
+  PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
 else
-  PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/.." && pwd)"
+  PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/.." && pwd -P)"
 fi
+
+# Canonical repo root owns git-tracked intelligence/provenance.
+VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+if [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
+  _VNX_HOME_COMMON_ROOT="$(_vnx_git_common_root "$VNX_HOME_DEFAULT")"
+  if [ -n "$_VNX_HOME_COMMON_ROOT" ]; then
+    VNX_CANONICAL_ROOT_DEFAULT="$_VNX_HOME_COMMON_ROOT"
+  fi
+fi
+unset _VNX_HOME_GIT_ROOT _VNX_HOME_COMMON_ROOT
 
 # Guard against cross-project env contamination:
 # If inherited VNX_HOME points to a different project tree than VNX_HOME_DEFAULT
@@ -53,7 +101,7 @@ fi
 if [ -n "${VNX_HOME:-}" ] && [ "$VNX_HOME" != "$VNX_HOME_DEFAULT" ]; then
   # Preserve explicit VNX_DATA_DIR override (worktree isolation)
   _vnx_saved_data_dir="${VNX_DATA_DIR:-}"
-  unset VNX_HOME VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
+  unset VNX_HOME PROJECT_ROOT VNX_CANONICAL_ROOT VNX_INTELLIGENCE_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
   if [ -n "$_vnx_saved_data_dir" ]; then
     VNX_DATA_DIR="$_vnx_saved_data_dir"
   else
@@ -63,16 +111,24 @@ if [ -n "${VNX_HOME:-}" ] && [ "$VNX_HOME" != "$VNX_HOME_DEFAULT" ]; then
 fi
 export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
 
-# Derive PROJECT_ROOT from VNX_HOME.
-# If VNX_HOME is under legacy layout, project root is two levels up.
-if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
-  if [ -n "${PROJECT_ROOT:-}" ] && [ "$PROJECT_ROOT" != "$PROJECT_ROOT_DEFAULT" ]; then
+# Reject inherited PROJECT_ROOT/VNX_CANONICAL_ROOT values unless they match the
+# resolver's current layout model exactly.
+if [ -n "${PROJECT_ROOT:-}" ]; then
+  _vnx_current_project_root="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd)" || _vnx_current_project_root="$PROJECT_ROOT"
+  if [ "$_vnx_current_project_root" != "$PROJECT_ROOT_DEFAULT" ]; then
     unset PROJECT_ROOT
   fi
-  export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
-else
-  export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
 fi
+if [ -n "${VNX_CANONICAL_ROOT:-}" ]; then
+  _vnx_current_canonical_root="$(cd "$VNX_CANONICAL_ROOT" 2>/dev/null && pwd)" || _vnx_current_canonical_root="$VNX_CANONICAL_ROOT"
+  if [ "$_vnx_current_canonical_root" != "$VNX_CANONICAL_ROOT_DEFAULT" ]; then
+    unset VNX_CANONICAL_ROOT
+  fi
+fi
+unset _vnx_current_project_root _vnx_current_canonical_root
+
+export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
+export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
 
 # Data directory (runtime root).
 export VNX_DATA_DIR="${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}"
@@ -86,18 +142,20 @@ export VNX_DB_DIR="${VNX_DB_DIR:-$VNX_DATA_DIR/database}"
 export LEGACY_REPORTS_DIR="${LEGACY_REPORTS_DIR:-$VNX_HOME/unified_reports}"
 
 # Git-tracked intelligence directory (portable across worktrees).
-export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$PROJECT_ROOT/.vnx-intelligence}"
+export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$VNX_CANONICAL_ROOT/.vnx-intelligence}"
 
 # ── Worktree PROJECT_ROOT override ──────────────────────────────
 # When CWD is a git worktree of the same project, override PROJECT_ROOT
 # and re-derive all data paths so each worktree gets its own session.
 _vnx_cwd="$(pwd)"
 if [ "$_vnx_cwd" != "$PROJECT_ROOT" ]; then
-  _vnx_main_wt="$(git -C "$_vnx_cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || true
-  if [ -n "${_vnx_main_wt:-}" ] && [ "$_vnx_main_wt" = "$PROJECT_ROOT" ]; then
-    export PROJECT_ROOT="$_vnx_cwd"
+  _vnx_cwd_git_root="$(_vnx_git_toplevel "$_vnx_cwd")"
+  _vnx_cwd_common_root="$(_vnx_git_common_root "$_vnx_cwd")"
+  _vnx_project_common_root="$(_vnx_git_common_root "$PROJECT_ROOT")"
+  if [ -n "${_vnx_cwd_git_root:-}" ] && [ -n "${_vnx_cwd_common_root:-}" ] && [ "$_vnx_cwd_common_root" = "$_vnx_project_common_root" ] && [ "$_vnx_cwd_git_root" != "$PROJECT_ROOT" ]; then
+    export PROJECT_ROOT="$_vnx_cwd_git_root"
     # Re-derive data paths for this worktree (unless explicitly overridden)
-    if [ -z "${_vnx_saved_data_dir:-}" ] && { [ -z "${VNX_DATA_DIR:-}" ] || [ "$VNX_DATA_DIR" = "$_vnx_main_wt/.vnx-data" ]; }; then
+    if [ -z "${_vnx_saved_data_dir:-}" ] && { [ -z "${VNX_DATA_DIR:-}" ] || [ "$VNX_DATA_DIR" = "$_vnx_project_common_root/.vnx-data" ]; }; then
       export VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
       export VNX_STATE_DIR="$VNX_DATA_DIR/state"
       export VNX_DISPATCH_DIR="$VNX_DATA_DIR/dispatches"
@@ -107,14 +165,13 @@ if [ "$_vnx_cwd" != "$PROJECT_ROOT" ]; then
       export VNX_REPORTS_DIR="$VNX_DATA_DIR/unified_reports"
       export VNX_DB_DIR="$VNX_DATA_DIR/database"
     fi
-    export VNX_INTELLIGENCE_DIR="$PROJECT_ROOT/.vnx-intelligence"
     # Re-derive skills dir
     if [ -d "$PROJECT_ROOT/.claude/skills" ]; then
       export VNX_SKILLS_DIR="$PROJECT_ROOT/.claude/skills"
     fi
   fi
 fi
-unset _vnx_cwd _vnx_main_wt
+unset _vnx_cwd _vnx_cwd_git_root _vnx_cwd_common_root _vnx_project_common_root
 
 # Skills live outside dist; prefer a configured value, then fallback to known locations.
 if [ -z "${VNX_SKILLS_DIR:-}" ]; then
@@ -245,5 +302,6 @@ _export_node_path() {
 }
 
 unset _VNX_PATHS_DIR
+unset -f _vnx_canon_dir _vnx_is_embedded_layout _vnx_git_toplevel _vnx_git_common_root
 eval "$__VNX_PATHS_SHELLOPTS"
 unset __VNX_PATHS_SHELLOPTS

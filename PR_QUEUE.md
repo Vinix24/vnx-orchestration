@@ -1,31 +1,28 @@
-# PR Queue - Feature: VNX Adoption, Packaging, Pythonization, And Public Onboarding
+# PR Queue - Feature: Headless Run Observability Burn-In
 
 ## Progress Overview
-Total: 9 PRs | Complete: 9 | Active: 0 | Queued: 0 | Blocked: 0
+Total: 5 PRs | Complete: 5 | Active: 0 | Queued: 0 | Blocked: 0
 Progress: ██████████ 100%
 
 ## Status
 
 ### ✅ Completed PRs
-- PR-0: Productization Contract, User Modes, And Pythonization Matrix
-- PR-1: Python Init, Bootstrap, And Doctor Unification
-- PR-2: Starter Mode And No-tmux Demo Path
-- PR-3: Pythonization Of Start, Recover, And Worktree-Sensitive Logic
-- PR-4: Packaging, Install Surface, And Public CLI Entry Points
-- PR-5: README, Positioning, And Public Comparison Rewrite
-- PR-6: Public Example Flows And Operator Onboarding Docs
-- PR-7: QA, Review, And Certification Hardening
-- PR-8: Adoption Cutover And Release Readiness
+- PR-0: Headless Run Contract And Failure Taxonomy
+- PR-1: Run Registry, Heartbeats, And Output Timestamps
+- PR-2: Structured Logs, Artifacts, And Exit Classification
+- PR-3: Operator Inspection, Recovery Hooks, And Smoke Paths
+- PR-4: Burn-In Certification And Residual Risk Report
+
+### 🔧 Post-Burn-In Fixups
+- Worktree path resolution hardening for standalone git worktree layout
+- Canonical intelligence sync hardening so worktree runtime stays local while intelligence flows to the canonical main repo
+- Doctor/start/finish-worktree path reporting alignment and regression coverage
 
 ## Dependency Flow
 ```
 PR-0 (no dependencies)
-PR-0 → PR-1
-PR-0 → PR-2
-PR-0 → PR-5
-PR-1, PR-2 → PR-3
-PR-2 → PR-4
-PR-3, PR-4, PR-5 → PR-6
-PR-6 → PR-7
-PR-7 → PR-8
+PR-0 -> PR-1
+PR-0 -> PR-2
+PR-1, PR-2 -> PR-3
+PR-3 -> PR-4
 ```
