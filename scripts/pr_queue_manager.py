@@ -90,7 +90,6 @@ class PRQueueManager:
                 file=sys.stderr,
             )
 
-        self.queue_file = "PR_QUEUE.md"
         # Store state in project's VNX_STATE_DIR (not script-relative) to prevent
         # cross-project contamination when multiple projects share the same vnx-system.
         self.state_file = self.vnx_state_dir / "pr_queue_state.json"
@@ -98,6 +97,7 @@ class PRQueueManager:
         self.vnx_state_file = self.vnx_state_dir / "pr_queue_state.yaml"
         self.vnx_queue_json = self.vnx_state_dir / "pr_queue.json"
         self.project_root = project_root
+        self.queue_file = self.project_root / "PR_QUEUE.md"
         self.state = {}
         self.load_queue()
 
@@ -129,10 +129,25 @@ class PRQueueManager:
             self.state['active'] = [self.state['active']] if self.state['active'] else []
         elif self.state.get('active') is None:
             self.state['active'] = []
+        self.state.setdefault('feature_metadata', {})
+
+    @staticmethod
+    def _fresh_state(feature_name: Optional[str] = None, feature_metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return {
+            "feature": feature_name,
+            "feature_metadata": feature_metadata or {},
+            "prs": [],
+            "completed": [],
+            "active": [],
+            "blocked": [],
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
 
     def save_state(self):
         """Save current state to JSON file"""
         self.state["updated_at"] = datetime.now().isoformat()
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state_file, 'w') as f:
             json.dump(self.state, f, indent=2)
 
@@ -293,14 +308,27 @@ class PRQueueManager:
         percent = int(complete / total * 100) if total > 0 else 0
         progress_bar = '█' * int(percent / 10) + '░' * (10 - int(percent / 10))
 
+        feature_metadata = self.state.get('feature_metadata') or {}
         content = f"""# PR Queue - Feature: {self.state.get('feature', 'Unknown')}
 
 ## Progress Overview
 Total: {total} PRs | Complete: {complete} | Active: {active} | Queued: {queued} | Blocked: {blocked}
 Progress: {progress_bar} {percent}%
 
+"""
+        if feature_metadata:
+            review_stack = feature_metadata.get("review_stack") or []
+            if isinstance(review_stack, list):
+                review_stack = ",".join(review_stack)
+            content += f"""## Governance Metadata
+Risk-Class: {feature_metadata.get('risk_class', 'unknown')}
+Merge-Policy: {feature_metadata.get('merge_policy', 'human')}
+Review-Stack: {review_stack or 'none'}
+
 ## Status
 """
+        else:
+            content += "## Status\n"
 
         # Completed PRs
         if self.state['completed']:
@@ -317,7 +345,11 @@ Progress: {progress_bar} {percent}%
                 pr = next((p for p in self.state['prs'] if p['id'] == active_id), None)
                 if pr:
                     track = pr.get('track', '?')
-                    content += f"- {pr['id']}: {pr['title']} (Track {track}, skill: {pr['skill']})\n"
+                    content += (
+                        f"- {pr['id']}: {pr['title']} "
+                        f"(Track {track}, skill: {pr['skill']}, risk: {pr.get('risk_class', 'unknown')}, "
+                        f"merge: {pr.get('merge_policy', 'human')})\n"
+                    )
 
         # Queued PRs
         queued_prs = [pr for pr in self.state['prs'] if pr['status'] == 'queued']
@@ -325,7 +357,11 @@ Progress: {progress_bar} {percent}%
             content += "\n### ⏳ Queued PRs\n"
             for pr in queued_prs:
                 deps = f" (dependencies: {', '.join(pr['dependencies'])})" if pr.get('dependencies') else " (dependencies: none)"
-                content += f"- {pr['id']}: {pr['title']}{deps}\n"
+                content += (
+                    f"- {pr['id']}: {pr['title']}{deps} "
+                    f"[risk={pr.get('risk_class', 'unknown')}, merge={pr.get('merge_policy', 'human')}, "
+                    f"review={','.join(pr.get('review_stack', [])) or 'none'}]\n"
+                )
 
         # Blocked PRs
         if self.state.get('blocked'):
@@ -357,17 +393,27 @@ Progress: {progress_bar} {percent}%
 
     def clear_queue(self):
         """Clear the queue and start fresh"""
-        self.state = {
-            "feature": None,
-            "prs": [],
-            "completed": [],
-            "active": [],
-            "blocked": [],
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
+        self.state = self._fresh_state()
         self.save_state()
         self.update_markdown()
+
+    def _parse_feature_metadata(self, content: str) -> Dict[str, Any]:
+        def extract(name: str, default: str = "") -> str:
+            match = re.search(rf'^\*\*{re.escape(name)}\*\*:\s*(.+)$', content, re.MULTILINE)
+            if match:
+                return match.group(1).strip()
+            match = re.search(rf'^{re.escape(name)}:\s*(.+)$', content, re.MULTILINE)
+            if match:
+                return match.group(1).strip()
+            return default
+
+        review_stack_raw = extract("Review-Stack", "")
+        review_stack = [item.strip() for item in review_stack_raw.split(",") if item.strip()]
+        return {
+            "risk_class": extract("Risk-Class", "medium").lower(),
+            "merge_policy": extract("Merge-Policy", "human").lower(),
+            "review_stack": review_stack,
+        }
 
     def get_status_summary(self) -> Dict:
         """Get a summary of the current queue status"""
@@ -578,6 +624,7 @@ Progress: {progress_bar} {percent}%
         """
         # Try multiple paths to find FEATURE_PLAN.md
         possible_paths = [
+            self.project_root / "FEATURE_PLAN.md",
             Path(__file__).parent.parent.parent / "FEATURE_PLAN.md",  # From scripts/
             Path.cwd() / "FEATURE_PLAN.md",  # From current working directory
             Path.cwd() / ".." / "FEATURE_PLAN.md"  # One level up
@@ -615,6 +662,9 @@ Progress: {progress_bar} {percent}%
                 'complexity': 'Medium',  # default
                 'cognition': 'normal',  # default
                 'requires_model': None,  # default
+                'risk_class': 'medium',
+                'merge_policy': 'human',
+                'review_stack': [],
                 'dependencies': [],  # default
                 'description': '',
                 'scope': '',
@@ -658,6 +708,20 @@ Progress: {progress_bar} {percent}%
                 model_match = re.match(r'\*\*Requires-Model\*\*:\s*(.+)', line, re.IGNORECASE)
                 if model_match:
                     details['requires_model'] = model_match.group(1).strip()
+
+                risk_class_match = re.match(r'\*\*Risk-Class\*\*:\s*(.+)', line, re.IGNORECASE)
+                if risk_class_match:
+                    details['risk_class'] = risk_class_match.group(1).strip().lower()
+
+                merge_policy_match = re.match(r'\*\*Merge-Policy\*\*:\s*(.+)', line, re.IGNORECASE)
+                if merge_policy_match:
+                    details['merge_policy'] = merge_policy_match.group(1).strip().lower()
+
+                review_stack_match = re.match(r'\*\*Review-Stack\*\*:\s*(.+)', line, re.IGNORECASE)
+                if review_stack_match:
+                    details['review_stack'] = [
+                        item.strip() for item in review_stack_match.group(1).split(',') if item.strip()
+                    ]
 
             # SPRINT 2: Derive cognition from complexity
             complexity_lower = details['complexity'].lower()
@@ -789,6 +853,13 @@ Progress: {progress_bar} {percent}%
                 'risk': extract_field('Risk', 'Medium'),
                 'skill': extract_field('Skill', 'backend-developer'),
                 'estimated_time': extract_field('Estimated Time', 'unknown'),
+                'risk_class': extract_field('Risk-Class', 'medium').lower(),
+                'merge_policy': extract_field('Merge-Policy', 'human').lower(),
+                'review_stack': [
+                    item.strip()
+                    for item in str(extract_field('Review-Stack', '') or '').split(',')
+                    if item.strip()
+                ],
                 'dependencies': deps,
                 'gate': gate,
             }
@@ -844,6 +915,9 @@ Progress: {progress_bar} {percent}%
         priority = (pr_details.get('priority') if pr_details else None) or pr.get('priority', 'P1')
         cognition = (pr_details.get('cognition') if pr_details else None) or 'normal'
         requires_model = (pr_details.get('requires_model') if pr_details else None) or None
+        risk_class = (pr_details.get('risk_class') if pr_details else None) or pr.get('risk_class', 'medium')
+        merge_policy = (pr_details.get('merge_policy') if pr_details else None) or pr.get('merge_policy', 'human')
+        review_stack = (pr_details.get('review_stack') if pr_details else None) or pr.get('review_stack', [])
 
         # Generate dispatch ID
         timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
@@ -859,13 +933,12 @@ Progress: {progress_bar} {percent}%
 
         if pr_details:
             # Extract full PR section from FEATURE_PLAN.md for complete context
-            feature_plan_path = Path(__file__).parent.parent.parent / "FEATURE_PLAN.md"
-            for path in [feature_plan_path, Path.cwd() / "FEATURE_PLAN.md"]:
+            feature_plan_path = self.project_root / "FEATURE_PLAN.md"
+            for path in [feature_plan_path, Path(__file__).parent.parent.parent / "FEATURE_PLAN.md", Path.cwd() / "FEATURE_PLAN.md"]:
                 if path.exists():
                     with open(path, 'r') as f:
                         content = f.read()
                     # Find full PR section
-                    import re
                     pr_pattern = f'## {pr_id}:(.+?)(?=\n##\\s+PR-|$)'
                     match = re.search(pr_pattern, content, re.DOTALL)
                     if match:
@@ -887,7 +960,10 @@ Track: {track}
 Terminal: {terminal}
 Gate: {pr.get('gate', 'implementation')}
 Priority: {priority}
-Cognition: {cognition}"""
+Cognition: {cognition}
+Risk-Class: {risk_class}
+Merge-Policy: {merge_policy}
+Review-Stack: {','.join(review_stack) if review_stack else 'none'}"""
 
         # SPRINT 2: Add Requires-Model if specified
         if requires_model:
@@ -1114,6 +1190,18 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             if priority_match:
                 metadata['priority'] = priority_match.group(1).strip()
 
+            risk_class_match = re.search(r'Risk-Class:\s*(.+)', content)
+            if risk_class_match:
+                metadata['risk_class'] = risk_class_match.group(1).strip()
+
+            merge_policy_match = re.search(r'Merge-Policy:\s*(.+)', content)
+            if merge_policy_match:
+                metadata['merge_policy'] = merge_policy_match.group(1).strip()
+
+            review_stack_match = re.search(r'Review-Stack:\s*(.+)', content)
+            if review_stack_match:
+                metadata['review_stack'] = review_stack_match.group(1).strip()
+
             return metadata
 
         except Exception as e:
@@ -1160,6 +1248,9 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             print(f"   Track: {metadata.get('track', 'N/A')}")
             print(f"   Gate: {metadata.get('gate', 'N/A')}")
             print(f"   Priority: {metadata.get('priority', 'N/A')}")
+            print(f"   Risk-Class: {metadata.get('risk_class', 'N/A')}")
+            print(f"   Merge-Policy: {metadata.get('merge_policy', 'N/A')}")
+            print(f"   Review-Stack: {metadata.get('review_stack', 'N/A')}")
 
             # Show first 30 lines of content
             lines = content.split('\n')
@@ -1358,6 +1449,7 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             # Parse feature name
             feature_match = re.search(r'#\s*Feature:\s*(.+?)(?:\n|$)', content)
             feature_name = feature_match.group(1).strip() if feature_match else "Unknown Feature"
+            feature_metadata = self._parse_feature_metadata(content)
 
             # Parse ALL PR metadata directly from plan content
             parsed_prs = self._parse_all_prs_from_plan(content)
@@ -1376,15 +1468,7 @@ Size Estimate: {pr.get('size', 'unknown')} lines
             print(f"🎯 Generating batch dispatches to staging/\n")
 
             # Reset internal state with new feature data
-            self.state = {
-                "feature": feature_name,
-                "prs": [],
-                "completed": [],
-                "active": [],
-                "blocked": [],
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }
+            self.state = self._fresh_state(feature_name=feature_name, feature_metadata=feature_metadata)
 
             for pr_data in parsed_prs:
                 self.state['prs'].append({
@@ -1397,6 +1481,9 @@ Size Estimate: {pr.get('size', 'unknown')} lines
                     'track': pr_data['track'],
                     'priority': pr_data['priority'],
                     'gate': pr_data['gate'],
+                    'risk_class': pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium')),
+                    'merge_policy': pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human')),
+                    'review_stack': pr_data.get('review_stack', feature_metadata.get('review_stack', [])),
                 })
 
             self.save_state()
@@ -1454,6 +1541,9 @@ Terminal: {terminal}
 Gate: {pr_data['gate']}
 Priority: {pr_data['priority']}
 Cognition: {cognition}
+Risk-Class: {pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium'))}
+Merge-Policy: {pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human'))}
+Review-Stack: {','.join(pr_data.get('review_stack', feature_metadata.get('review_stack', []))) or 'none'}
 Dispatch-ID: {dispatch_id}
 PR-ID: {pr_id}
 Parent-Dispatch: none
@@ -1479,6 +1569,11 @@ Size Estimate: {pr_data['estimated_time']}
                 print(f"✅ Created {pr_id}: {dispatch_id}")
                 print(f"   Role: {skill} | Track: {track} | Terminal: {terminal}")
                 print(f"   Priority: {pr_data['priority']} | Cognition: {cognition}")
+                print(
+                    f"   Risk: {pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium'))} | "
+                    f"Merge: {pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human'))} | "
+                    f"Review: {','.join(pr_data.get('review_stack', feature_metadata.get('review_stack', []))) or 'none'}"
+                )
                 print(f"   Dependencies: {deps_str}")
                 created += 1
 
@@ -1522,6 +1617,52 @@ Size Estimate: {pr_data['estimated_time']}
             print(f"❌ Batch generation failed: {e}")
             import traceback
             traceback.print_exc()
+            return False, 0
+
+    def load_feature_plan(self, feature_plan_path: str) -> tuple[bool, int]:
+        """
+        Materialize one feature plan into active root FEATURE_PLAN.md/PR_QUEUE.md state
+        without generating dispatches.
+        """
+        valid, error = self.validate_feature_plan(feature_plan_path)
+        if not valid:
+            print(f"❌ Invalid feature plan: {error}")
+            return False, 0
+
+        try:
+            content = Path(feature_plan_path).read_text(encoding="utf-8")
+            feature_match = re.search(r'#\s*Feature:\s*(.+?)(?:\n|$)', content)
+            feature_name = feature_match.group(1).strip() if feature_match else "Unknown Feature"
+            feature_metadata = self._parse_feature_metadata(content)
+            parsed_prs = self._parse_all_prs_from_plan(content)
+            if not parsed_prs:
+                print("❌ No PRs found in feature plan")
+                return False, 0
+
+            self.state = self._fresh_state(feature_name=feature_name, feature_metadata=feature_metadata)
+            for pr_data in parsed_prs:
+                self.state["prs"].append(
+                    {
+                        "id": pr_data["id"],
+                        "title": pr_data["title_from_header"],
+                        "size": pr_data.get("estimated_time", "unknown"),
+                        "dependencies": pr_data["dependencies"],
+                        "skill": pr_data["skill"],
+                        "status": "queued",
+                        "track": pr_data["track"],
+                        "priority": pr_data["priority"],
+                        "gate": pr_data["gate"],
+                        "risk_class": pr_data.get("risk_class", feature_metadata.get("risk_class", "medium")),
+                        "merge_policy": pr_data.get("merge_policy", feature_metadata.get("merge_policy", "human")),
+                        "review_stack": pr_data.get("review_stack", feature_metadata.get("review_stack", [])),
+                    }
+                )
+
+            self.save_state()
+            self.update_markdown()
+            return True, len(parsed_prs)
+        except Exception as e:
+            print(f"❌ Failed to load feature plan: {e}")
             return False, 0
 
     def list_staging_dispatches(self) -> None:
