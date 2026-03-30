@@ -120,6 +120,27 @@ vnx_dispatch_extract_requires_model() {
     echo "${model:-}"
 }
 
+vnx_dispatch_extract_risk_class() {
+    local file="$1"
+    local risk_class
+    risk_class=$(sed -n 's/^Risk-Class:[[:space:]]*//Ip' "$file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    echo "${risk_class:-medium}"
+}
+
+vnx_dispatch_extract_merge_policy() {
+    local file="$1"
+    local merge_policy
+    merge_policy=$(sed -n 's/^Merge-Policy:[[:space:]]*//Ip' "$file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    echo "${merge_policy:-human}"
+}
+
+vnx_dispatch_extract_review_stack() {
+    local file="$1"
+    local review_stack
+    review_stack=$(sed -n 's/^Review-Stack:[[:space:]]*//Ip' "$file" 2>/dev/null | sed 's/#.*//')
+    echo "${review_stack:-none}"
+}
+
 vnx_dispatch_extract_requires_mcp() {
     local file="$1"
     local mcp

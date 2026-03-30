@@ -19,6 +19,9 @@ Terminal: <T1|T2|T3>
 Priority: <P0|P1|P2>
 Cognition: <normal|deep>
 Requires-Model: <opus|sonnet>
+Risk-Class: <low|medium|high>
+Merge-Policy: <human|conditional_auto>
+Review-Stack: <gemini_review,codex_gate,claude_github_optional>
 Dispatch-ID: <YYYYMMDD-HHMMSS-descriptor-track>
 Parent-Dispatch: <dispatch-id or "none">
 PR-ID: <PR-X or "none">
@@ -126,6 +129,9 @@ Every Manager Block MUST have:
 ### Optional Fields (Use When Needed)
 - `Gate`: investigation, planning, implementation, review, testing, integration (mode selection only)
 - `Requires-Model`: opus or sonnet (force specific model)
+- `Risk-Class`: low, medium, or high
+- `Merge-Policy`: human or conditional_auto
+- `Review-Stack`: comma-separated reviewer gates
 - `Mode`: planning, thinking, normal (terminal mode)
 - `ClearContext`: true/false (default: true)
 - `ForceNormalMode`: true/false (reset mode first)
@@ -162,6 +168,9 @@ Terminal: T1
 Priority: P1
 Cognition: normal
 Requires-Model: sonnet
+Risk-Class: medium
+Merge-Policy: human
+Review-Stack: gemini_review,codex_gate,claude_github_optional
 Dispatch-ID: 20260203-153000-storage-fix-A
 Parent-Dispatch: none
 PR-ID: PR-4
@@ -201,3 +210,4 @@ Check `.claude/skills/skills.yaml` for current list. Common skills:
 6. **V8 UPDATE**: Dispatcher uses skills from `.claude/skills/`, not agent templates
 7. **Required Fields**: All V2 fields must be present (Role, Dispatch-ID, Parent-Dispatch, PR-ID, Reason)
 8. **Context Format**: Use `[[@path]]` format for context files
+9. **Governance Metadata**: Set Risk-Class, Merge-Policy, and Review-Stack explicitly for any PR-backed dispatch
