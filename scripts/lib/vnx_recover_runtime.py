@@ -450,6 +450,167 @@ def _phase_dispatch_reconciliation(
         ))
 
 
+def _phase_headless_reconciliation(
+    state_dir: Path,
+    report: RecoveryReport,
+    dry_run: bool,
+) -> None:
+    """Reconcile headless runs: detect stale/hung runs, transition to failed.
+
+    PR-3: Uses headless observability signals (heartbeat, last_output) to
+    identify runs that are stuck and transition them to terminal state so
+    operators get clear diagnostics instead of ambiguous "running" entries.
+    """
+    try:
+        from headless_run_registry import HeadlessRunRegistry
+    except ImportError:
+        report.actions.append(RecoveryAction(
+            phase="headless",
+            action="import_check",
+            target="headless_run_registry",
+            outcome="skipped",
+            detail="headless_run_registry module not available",
+        ))
+        return
+
+    registry = HeadlessRunRegistry(state_dir)
+    headless_reconciled = 0
+
+    # Detect stale heartbeats (running but no heartbeat for > 2x interval)
+    stale_runs = registry.list_stale()
+    for run in stale_runs:
+        if not dry_run:
+            try:
+                registry.transition(
+                    run.run_id,
+                    "failing",
+                    actor=RECOVERY_ACTOR,
+                    reason="vnx recover: stale heartbeat detected",
+                )
+                registry.transition(
+                    run.run_id,
+                    "failed",
+                    failure_class="INFRA_FAIL",
+                    actor=RECOVERY_ACTOR,
+                    reason="vnx recover: run failed due to stale heartbeat",
+                )
+                headless_reconciled += 1
+            except Exception as exc:
+                report.actions.append(RecoveryAction(
+                    phase="headless",
+                    action="fail_stale_run",
+                    target=run.run_id,
+                    outcome="error",
+                    detail=str(exc),
+                ))
+                continue
+
+        report.actions.append(RecoveryAction(
+            phase="headless",
+            action="fail_stale_run",
+            target=run.run_id[:12],
+            outcome="applied" if not dry_run else "skipped",
+            detail=f"Stale heartbeat — dispatch {run.dispatch_id[:12]}",
+        ))
+
+    # Detect hung runs (running but no output for > threshold)
+    hung_runs = registry.list_hung()
+    for run in hung_runs:
+        # Skip if already handled as stale above
+        if any(r.run_id == run.run_id for r in stale_runs):
+            continue
+
+        if not dry_run:
+            try:
+                registry.transition(
+                    run.run_id,
+                    "failing",
+                    actor=RECOVERY_ACTOR,
+                    reason="vnx recover: no-output hang detected",
+                )
+                registry.transition(
+                    run.run_id,
+                    "failed",
+                    failure_class="NO_OUTPUT",
+                    actor=RECOVERY_ACTOR,
+                    reason="vnx recover: run failed due to no-output hang",
+                )
+                headless_reconciled += 1
+            except Exception as exc:
+                report.actions.append(RecoveryAction(
+                    phase="headless",
+                    action="fail_hung_run",
+                    target=run.run_id,
+                    outcome="error",
+                    detail=str(exc),
+                ))
+                continue
+
+        report.actions.append(RecoveryAction(
+            phase="headless",
+            action="fail_hung_run",
+            target=run.run_id[:12],
+            outcome="applied" if not dry_run else "skipped",
+            detail=f"No-output hang — dispatch {run.dispatch_id[:12]}",
+        ))
+
+    # Detect init runs that never started (stuck in init)
+    init_runs = registry.list_by_state("init")
+    for run in init_runs:
+        if run.started_at:
+            from headless_run_registry import _seconds_since
+            age = _seconds_since(run.started_at)
+            if age > 300:  # 5 minutes stuck in init
+                if not dry_run:
+                    try:
+                        registry.transition(
+                            run.run_id,
+                            "running",
+                            actor=RECOVERY_ACTOR,
+                            reason="vnx recover: forcing init->running for stuck run",
+                        )
+                        registry.transition(
+                            run.run_id,
+                            "failing",
+                            actor=RECOVERY_ACTOR,
+                            reason="vnx recover: init stuck for >5m",
+                        )
+                        registry.transition(
+                            run.run_id,
+                            "failed",
+                            failure_class="INFRA_FAIL",
+                            actor=RECOVERY_ACTOR,
+                            reason="vnx recover: run never started",
+                        )
+                        headless_reconciled += 1
+                    except Exception as exc:
+                        report.actions.append(RecoveryAction(
+                            phase="headless",
+                            action="fail_stuck_init",
+                            target=run.run_id,
+                            outcome="error",
+                            detail=str(exc),
+                        ))
+                        continue
+
+                report.actions.append(RecoveryAction(
+                    phase="headless",
+                    action="fail_stuck_init",
+                    target=run.run_id[:12],
+                    outcome="applied" if not dry_run else "skipped",
+                    detail=f"Stuck in init for {age:.0f}s — dispatch {run.dispatch_id[:12]}",
+                ))
+
+    if headless_reconciled == 0 and not stale_runs and not hung_runs:
+        report.actions.append(RecoveryAction(
+            phase="headless",
+            action="check_headless_runs",
+            target="headless_registry",
+            outcome="applied",
+            detail="No stuck headless runs detected",
+        ))
+
+
 def _phase_incident_reconciliation(
     state_dir: Path,
     report: RecoveryReport,
@@ -715,9 +876,10 @@ def run_recovery(
     1. Preflight — run doctor checks, abort on hard blockers
     2. Lease reconciliation — expire stale, recover expired, release orphans
     3. Dispatch reconciliation — timeout stuck, flag for review
-    4. Incident reconciliation — summarize, resolve stale, reset budgets
-    5. tmux reconciliation — verify profile, remap stale panes
-    6. Cutover check — report runtime core status and rollback guidance
+    4. Headless reconciliation — detect stale/hung headless runs (PR-3)
+    5. Incident reconciliation — summarize, resolve stale, reset budgets
+    6. tmux reconciliation — verify profile, remap stale panes
+    7. Cutover check — report runtime core status and rollback guidance
 
     Args:
         state_dir: Runtime state directory, resolved via VNX_STATE_DIR.
@@ -740,13 +902,16 @@ def run_recovery(
     # Phase 3: Dispatch reconciliation
     _phase_dispatch_reconciliation(sd, report, dry_run)
 
-    # Phase 4: Incident reconciliation
+    # Phase 4: Headless run reconciliation (PR-3)
+    _phase_headless_reconciliation(sd, report, dry_run)
+
+    # Phase 5: Incident reconciliation
     _phase_incident_reconciliation(sd, report, dry_run)
 
-    # Phase 5: tmux reconciliation
+    # Phase 6: tmux reconciliation
     _phase_tmux_reconciliation(sd, report, dry_run)
 
-    # Phase 6: Cutover check
+    # Phase 7: Cutover check
     _phase_cutover_check(sd, report)
 
     # Emit recovery event (G-R3)
