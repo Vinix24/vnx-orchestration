@@ -22,7 +22,7 @@ cmd_stop() {
 
   # Export intelligence to git-tracked directory after session cleanup.
   if [ -d "$VNX_INTELLIGENCE_DIR" ] || [ -f "$VNX_STATE_DIR/quality_intelligence.db" ]; then
-    log "[stop] Exporting intelligence to .vnx-intelligence/..."
+    log "[stop] Exporting intelligence to $VNX_INTELLIGENCE_DIR"
     cmd_intelligence_export || log "[stop] WARN: intelligence export failed (non-fatal)"
   fi
 }

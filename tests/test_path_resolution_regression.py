@@ -16,6 +16,7 @@ across main repo and worktrees).
 
 import os
 import sys
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,7 +39,7 @@ def _clean_env(monkeypatch, keys=None):
         "VNX_DATA_DIR", "VNX_STATE_DIR", "VNX_DISPATCH_DIR",
         "VNX_LOGS_DIR", "VNX_PIDS_DIR", "VNX_LOCKS_DIR",
         "VNX_REPORTS_DIR", "VNX_DB_DIR", "VNX_SKILLS_DIR",
-        "VNX_INTELLIGENCE_DIR",
+        "VNX_CANONICAL_ROOT", "VNX_INTELLIGENCE_DIR",
     ]
     for k in keys:
         monkeypatch.delenv(k, raising=False)
@@ -58,7 +59,7 @@ class TestDefaultResolution:
             "VNX_HOME", "PROJECT_ROOT", "VNX_DATA_DIR", "VNX_STATE_DIR",
             "VNX_DISPATCH_DIR", "VNX_LOGS_DIR", "VNX_PIDS_DIR",
             "VNX_LOCKS_DIR", "VNX_REPORTS_DIR", "VNX_DB_DIR",
-            "VNX_SKILLS_DIR", "VNX_INTELLIGENCE_DIR",
+            "VNX_SKILLS_DIR", "VNX_CANONICAL_ROOT", "VNX_INTELLIGENCE_DIR",
         }
         assert required.issubset(set(paths.keys())), f"Missing: {required - set(paths.keys())}"
 
@@ -186,6 +187,8 @@ class TestLegacyLayout:
         monkeypatch.setenv("VNX_HOME", str(vnx_home))
         paths = vnx_paths.resolve_paths()
         assert paths["PROJECT_ROOT"] == str(project.resolve())
+        assert paths["VNX_CANONICAL_ROOT"] == str(vnx_home.resolve())
+        assert paths["VNX_INTELLIGENCE_DIR"] == str((vnx_home / ".vnx-intelligence").resolve())
 
     def test_non_legacy_layout_project_root(self, tmp_path, monkeypatch):
         _clean_env(monkeypatch)
@@ -269,13 +272,14 @@ class TestSkillsDirectory:
 # ---------------------------------------------------------------------------
 
 class TestIntelligenceDirectory:
-    """VNX_INTELLIGENCE_DIR defaults to PROJECT_ROOT/.vnx-intelligence."""
+    """VNX_INTELLIGENCE_DIR defaults to canonical repo root, not runtime root."""
 
     def test_default_location(self, monkeypatch):
         _clean_env(monkeypatch)
         paths = vnx_paths.resolve_paths()
         expected_suffix = ".vnx-intelligence"
         assert paths["VNX_INTELLIGENCE_DIR"].endswith(expected_suffix)
+        assert paths["VNX_INTELLIGENCE_DIR"].startswith(paths["VNX_CANONICAL_ROOT"])
 
     def test_env_override(self, tmp_path, monkeypatch):
         _clean_env(monkeypatch)
@@ -284,6 +288,63 @@ class TestIntelligenceDirectory:
         monkeypatch.setenv("VNX_INTELLIGENCE_DIR", str(custom_intel))
         paths = vnx_paths.resolve_paths()
         assert paths["VNX_INTELLIGENCE_DIR"] == str(custom_intel)
+
+
+def _init_git_repo(repo_root: Path) -> None:
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_root, check=True, capture_output=True)
+    (repo_root / "README.md").write_text("root\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True)
+
+
+class TestGitWorktreeLayout:
+    """Standalone git worktree repos keep runtime local and intelligence canonical."""
+
+    def test_standalone_worktree_uses_local_runtime_and_canonical_intelligence(self, tmp_path, monkeypatch):
+        _clean_env(monkeypatch)
+        project_root = tmp_path / "project"
+        canonical_root = project_root / ".claude" / "vnx-system"
+        _init_git_repo(canonical_root)
+
+        worktree_root = tmp_path / "vnx-system-wt-upgrade"
+        subprocess.run(
+            ["git", "-C", str(canonical_root), "worktree", "add", "-b", "feature/test-paths", str(worktree_root)],
+            check=True,
+            capture_output=True,
+        )
+
+        monkeypatch.setenv("VNX_HOME", str(worktree_root))
+        paths = vnx_paths.resolve_paths()
+
+        assert paths["VNX_HOME"] == str(worktree_root.resolve())
+        assert paths["PROJECT_ROOT"] == str(worktree_root.resolve())
+        assert paths["VNX_DATA_DIR"] == str((worktree_root / ".vnx-data").resolve())
+        assert paths["VNX_CANONICAL_ROOT"] == str(canonical_root.resolve())
+        assert paths["VNX_INTELLIGENCE_DIR"] == str((canonical_root / ".vnx-intelligence").resolve())
+
+    def test_parent_project_root_env_is_rejected_for_standalone_worktree(self, tmp_path, monkeypatch):
+        _clean_env(monkeypatch)
+        project_root = tmp_path / "project"
+        canonical_root = project_root / ".claude" / "vnx-system"
+        _init_git_repo(canonical_root)
+
+        worktree_root = tmp_path / "vnx-system-wt-upgrade"
+        subprocess.run(
+            ["git", "-C", str(canonical_root), "worktree", "add", "-b", "feature/test-leakage", str(worktree_root)],
+            check=True,
+            capture_output=True,
+        )
+
+        monkeypatch.setenv("VNX_HOME", str(worktree_root))
+        monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+        paths = vnx_paths.resolve_paths()
+
+        assert paths["PROJECT_ROOT"] == str(worktree_root.resolve())
+        assert paths["VNX_DATA_DIR"] == str((worktree_root / ".vnx-data").resolve())
+        assert paths["VNX_INTELLIGENCE_DIR"] == str((canonical_root / ".vnx-intelligence").resolve())
 
 
 # ---------------------------------------------------------------------------
