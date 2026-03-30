@@ -10,64 +10,84 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-Current release: `v0.5.0`  
+Current release: `v0.5.0`
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
-## Why
+## The Problem
 
-You're already using AI coding agents. But when you try to run multiple agents on the same project:
+You're already using AI coding agents. But when you run multiple agents on the same project:
 
 - They edit the same files and create merge conflicts
 - Context windows fill up mid-task, losing all progress
 - You can't tell which agent did what, or why something broke
 - There's no way to stop an agent from merging bad code
 
-VNX solves all four.
+Most multi-agent frameworks solve orchestration. VNX solves **governance** — the audit trails, quality gates, and human checkpoints that make multi-agent workflows trustworthy.
 
-## Try It Now (No API Keys Needed)
+## Three Ways to Run VNX
 
-Replay a real 6-PR development session with governance pipeline — dispatches, receipts, quality verdicts, everything:
+VNX supports three modes. All share the same runtime model — receipts, provenance, and governance controls work in every mode.
+
+### Starter Mode — Get running in 5 minutes
+
+Single terminal, one AI provider, sequential dispatch. No tmux required.
 
 ```bash
 git clone https://github.com/Vinix24/vnx-orchestration.git
-cd vnx-orchestration/demo/dry-run
-./replay.sh --fast
+cd vnx-orchestration && ./install.sh /path/to/your/project
+cd /path/to/your/project
+vnx init --starter
+vnx doctor        # Validate everything
+vnx status        # See your healthy state
 ```
 
-Context rotation demo — watch VNX intercept a full context window and seamlessly resume:
+Starter mode gives you scoped dispatches, structured receipts, and a full audit trail — without the multi-terminal setup. When you're ready for parallel agents, upgrade with `vnx init --operator`.
+
+### Operator Mode — Full multi-agent orchestration
+
+Four-terminal tmux grid, multiple AI providers, parallel tracks, quality gates, worktrees, and dashboard.
 
 ```bash
-cd demo/dry-run-context-rotation
-./replay.sh --fast
+vnx init --operator
+vnx doctor
+vnx start                  # Launch the 2x2 tmux grid
+vnx start claude-codex     # T1: Codex CLI, T2: Claude Code
+vnx start claude-gemini    # T1: Gemini CLI, T2: Claude Code
+vnx start full-multi       # T1: Codex CLI, T2: Gemini CLI
 ```
-
-## How It Works
-
-### 1. Dispatch — The orchestrator assigns tasks
-
-T0 breaks work into scoped tasks (150–300 lines) and routes them to worker terminals. Each worker runs its own CLI with its own context window. No shared state between agents.
 
 Press `Ctrl+G` to open the dispatch queue — see pending tasks with role, priority, and git ref.
 
 ![VNX dispatch queue showing pending tasks with role, priority, and track assignment](docs/images/vnx-dispatch-queue.png)
 
-### 2. Execute — Each agent works in isolation
+### Demo Mode — See it without setup
 
-Workers execute tasks using their assigned CLI. VNX supports mixing providers freely:
+Replay real orchestration sessions with no API keys and no project setup:
 
 ```bash
-vnx start claude-only     # All terminals run Claude Code
-vnx start claude-codex    # T1: Codex CLI, T2: Claude Code
-vnx start claude-gemini   # T1: Gemini CLI, T2: Claude Code
-vnx start full-multi      # T1: Codex CLI, T2: Gemini CLI
+vnx demo                              # Launch demo with sample state
+vnx demo --replay governance-pipeline # Replay a real 6-PR session
+vnx demo --dashboard                  # Dashboard with sample data
 ```
+
+Demo mode uses temp directories — nothing touches your project.
+
+## How It Works
+
+### 1. Dispatch — The orchestrator assigns tasks
+
+T0 breaks work into scoped tasks (150-300 lines) and routes them to worker terminals. Each worker runs its own CLI with its own context window. No shared state between agents.
+
+### 2. Execute — Each agent works in isolation
+
+Workers execute tasks using their assigned CLI. VNX supports mixing providers freely — Claude Code, Codex CLI, Gemini CLI, or Kimi CLI. The orchestration layer doesn't care which model runs where.
 
 ### 3. Track — Every decision is recorded
 
-When a worker completes a task, VNX appends a structured receipt to an NDJSON ledger: what was dispatched, what was produced, which files changed, git commit, duration, cost. After 1,100+ entries, patterns emerge that you can't see any other way.
+Every agent action generates a structured receipt in an append-only NDJSON ledger: what was dispatched, what was produced, which files changed, git commit, duration, cost. After 1,400+ entries, patterns emerge that you can't see any other way.
 
 ```bash
-vnx cost-report    # See API spend per agent, per task type
+vnx cost-report    # API spend per agent, per task type
 ```
 
 ### 4. Gate — Agents can't merge broken code
@@ -76,7 +96,7 @@ Quality gates are deterministic, not LLM-based. The agent proposes, the gate val
 
 ![VNX quality advisory showing automated code quality checks and gate verdicts](docs/images/vnx-quality-advisory.png)
 
-### 5. Rotate — Context fills up? No problem.
+### 5. Rotate — Context fills up? No problem
 
 Long-running tasks exhaust context windows. VNX handles this automatically:
 
@@ -94,7 +114,7 @@ Zero human intervention. Zero lost work. The receipt ledger maintains a complete
 ### Prerequisites
 
 - macOS or Linux
-- tmux, bash, python3, git, jq, fswatch
+- tmux (operator mode only), bash, python3, git, jq, fswatch
 - At least one AI CLI: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), or [Gemini CLI](https://github.com/google-gemini/gemini-cli)
 
 ```bash
@@ -106,34 +126,66 @@ git clone https://github.com/Vinix24/vnx-orchestration.git
 cd vnx-orchestration
 ./install.sh /path/to/your/project
 
-# Initialize and launch
+# Initialize
 cd /path/to/your/project
-.vnx/bin/vnx bootstrap-skills
-.vnx/bin/vnx bootstrap-terminals
-.vnx/bin/vnx doctor    # Validate everything
-.vnx/bin/vnx start     # Launch the tmux grid
+vnx init                # Interactive: choose starter or operator
+vnx doctor              # Validate everything
 ```
+
+Starter mode needs only bash, python3, git, and jq. Operator mode additionally requires tmux and fswatch.
 
 ## Commands
 
+Commands are tiered by mode. Running an operator-only command in starter mode returns a clear error with upgrade instructions.
+
+### Universal (all modes)
+
 | Command | What it does |
 |---------|-------------|
-| `vnx start [profile]` | Launch the 2×2 tmux grid |
+| `vnx init` | Initialize VNX project (with mode selection) |
 | `vnx doctor` | Validate setup and dependencies |
-| `vnx smoke` | Run pipeline smoke test |
+| `vnx status` | Show current state and mode |
+| `vnx recover` | Recover from failures |
+| `vnx help` | Show available commands for current mode |
+| `vnx update` | Pull latest VNX version |
+
+### Starter + Operator
+
+| Command | What it does |
+|---------|-------------|
+| `vnx staging-list` | List pending dispatches |
+| `vnx promote` | Promote a dispatch |
+| `vnx gate-check` | Run quality gate check |
 | `vnx cost-report` | API spend per agent and task |
-| `vnx jump <T0\|T1\|T2\|T3>` | Switch tmux focus to terminal |
-| `vnx jump --attention` | Focus the terminal that needs human attention most |
+| `vnx analyze-sessions` | Populate session analytics |
 | `vnx suggest review` | View AI-generated tuning suggestions |
 | `vnx suggest accept <ids>` | Approve specific suggestions |
 | `vnx suggest apply` | Apply approved tuning edits |
-| `vnx analyze-sessions` | Populate session analytics from Claude Code logs |
-| `vnx analyze-sessions --dry-run` | Diagnose session discovery without writing to DB |
+| `vnx bootstrap-skills` | Install skill templates |
+| `vnx bootstrap-terminals` | Configure terminal grid |
+
+### Operator Only
+
+| Command | What it does |
+|---------|-------------|
+| `vnx start [profile]` | Launch the 2x2 tmux grid |
+| `vnx stop` | Stop tmux session |
+| `vnx jump <T0\|T1\|T2\|T3>` | Switch tmux focus to terminal |
+| `vnx jump --attention` | Focus the terminal needing human attention |
 | `vnx worktree create <name>` | Isolated feature branch worktree |
 | `vnx worktree list` | List active worktrees |
-| `vnx update` | Pull latest VNX version |
+| `vnx merge-preflight` | Pre-merge governance check |
+| `vnx smoke` | Run pipeline smoke test |
 
-## Git Worktrees
+### Demo Only
+
+| Command | What it does |
+|---------|-------------|
+| `vnx demo` | Launch demo with sample state |
+| `vnx demo --replay <scenario>` | Replay a recorded orchestration flow |
+| `vnx demo --dashboard` | Dashboard with sample data |
+
+## Git Worktrees (Operator Mode)
 
 Isolate feature work from `main`. Each worktree gets its own branch — all agents work in the worktree, `main` stays clean.
 
@@ -148,20 +200,17 @@ Receipts track `in_worktree: true/false` and commit provenance (`CLEAN`, `DIRTY_
 
 ## Session Intelligence
 
-VNX mines session logs to find patterns and generate tuning suggestions. Runs nightly, nothing auto-applied:
+VNX mines session logs to find patterns and generate tuning suggestions. Nothing is auto-applied:
 
 1. **Analyze** — Parse logs, detect patterns, extract model performance
 2. **Brief** — Aggregate into T0-readable state file
 3. **Suggest** — Generate tuning proposals (MEMORY, rules, skills)
-4. **Email** — Optional digest to your inbox
 
 ```bash
 vnx suggest review         # See what's proposed
 vnx suggest accept 1,3,5   # Approve specific edits
 vnx suggest apply          # Apply to target files
 ```
-
-Example insight: "Sonnet used 12% fewer tool calls than Opus for similar tasks."
 
 ## Project Structure
 
@@ -173,9 +222,9 @@ your-project/
 │   ├── ledger/        # Receipt processor
 │   └── skills/        # Skill templates
 ├── .vnx-data/         # State (git-ignored)
-│   ├── state/         # t0_receipts.ndjson, terminal_state.json, intelligence_usage.ndjson
+│   ├── state/         # t0_receipts.ndjson, terminal_state.json
 │   ├── dispatches/    # staging/ → queue/ → active/ → completed/
-│   └── unified_reports/ # Agent markdown reports
+│   └── mode.json      # Current mode (starter/operator)
 ├── dashboard/         # Operator dashboard (git-tracked)
 │   ├── index.html     # Vanilla HTML/JS UI (no build step)
 │   └── serve_dashboard.py # Python HTTP server (port 4173)
@@ -184,14 +233,41 @@ your-project/
 
 All state lives on the filesystem. No database, no cloud dependency.
 
+## Who Is VNX For?
+
+**Solo developers** managing 2-4 AI agents who need to know what each agent did, when, and why. Start with starter mode, graduate to operator mode when you need parallel tracks.
+
+**Small engineering teams** (2-5 people) coordinating AI-assisted feature work across branches and worktrees with traceable provenance.
+
+**Compliance-aware organizations** that need audit trails for AI-generated code — every change traces back to a dispatch, a human approval, and a quality gate verdict.
+
+VNX is **not** a consumer AI chat wrapper, a CI/CD replacement, or a no-code tool. It's an orchestration system for developers who want governance over their AI workflows.
+
+See [Who Should Use VNX](docs/audience_and_use_cases.md) for detailed use cases and audience fit.
+
+## How VNX Compares
+
+| | VNX | Raw Claude Code | OpenClaw / CrewAI / LangGraph |
+|---|-----|----------------|-------------------------------|
+| **Multi-agent coordination** | Built-in (T0-T3 grid) | Manual (multiple terminals) | Framework-level orchestration |
+| **Audit trail** | Append-only NDJSON ledger | Chat logs only | Varies; often requires custom logging |
+| **Quality gates** | Deterministic, non-LLM | None built-in | Framework-dependent |
+| **Human approval** | Mandatory on every dispatch | Per-tool approval | Configurable but not default |
+| **Context rotation** | Automatic handover | Manual /clear | Not typically handled |
+| **LLM-agnostic** | Yes (Claude, Codex, Gemini, Kimi) | Claude only | Varies by framework |
+| **Setup complexity** | `git clone` + `vnx init` | `npm install` | pip install + code integration |
+
+Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) | [VNX vs Multi-Agent Frameworks](docs/comparisons/vnx_vs_frameworks.md)
+
 ## Architecture & Docs
 
 | Document | Description |
 |----------|-------------|
-| [Architecture](docs/manifesto/ARCHITECTURE.md) | System design, components, data flow |
+| [Architecture](docs/manifesto/ARCHITECTURE.md) | Glass Box Governance design and data flow |
+| [Productization Contract](docs/productization_contract.md) | User modes, command surface, migration plan |
 | [Dispatch Guide](docs/DISPATCH_GUIDE.md) | How T0 routes tasks to workers |
-| [Open Method](docs/manifesto/OPEN_METHOD.md) | Development philosophy |
 | [Limitations](docs/manifesto/LIMITATIONS.md) | Known constraints and failure modes |
+| [Open Method](docs/manifesto/OPEN_METHOD.md) | Development philosophy |
 
 ## CI
 
@@ -205,8 +281,6 @@ Two offline GitHub Actions workflows (no API calls, no secrets):
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **Most valuable contributions:** test coverage, failure-mode hardening, provider adapters, docs clarity.
-
-**Future direction:** Rust/Go production engine — contributions especially welcome.
 
 ## Blog
 
