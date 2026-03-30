@@ -1,28 +1,21 @@
-# PR Queue - Feature: Headless Run Observability Burn-In
+# PR Queue - Feature: Dependency Chain Test
 
 ## Progress Overview
-Total: 5 PRs | Complete: 5 | Active: 0 | Queued: 0 | Blocked: 0
-Progress: ██████████ 100%
+Total: 3 PRs | Complete: 2 | Active: 0 | Queued: 1 | Blocked: 0
+Progress: ██████░░░░ 66%
 
 ## Status
 
 ### ✅ Completed PRs
-- PR-0: Headless Run Contract And Failure Taxonomy
-- PR-1: Run Registry, Heartbeats, And Output Timestamps
-- PR-2: Structured Logs, Artifacts, And Exit Classification
-- PR-3: Operator Inspection, Recovery Hooks, And Smoke Paths
-- PR-4: Burn-In Certification And Residual Risk Report
+- PR-1: Base
+- PR-2: Middle
 
-### 🔧 Post-Burn-In Fixups
-- Worktree path resolution hardening for standalone git worktree layout
-- Canonical intelligence sync hardening so worktree runtime stays local while intelligence flows to the canonical main repo
-- Doctor/start/finish-worktree path reporting alignment and regression coverage
+### ⏳ Queued PRs
+- PR-3: Top (dependencies: PR-2) [risk=unknown, merge=human, review=none]
 
 ## Dependency Flow
 ```
-PR-0 (no dependencies)
-PR-0 -> PR-1
-PR-0 -> PR-2
-PR-1, PR-2 -> PR-3
-PR-3 -> PR-4
+PR-1 (no dependencies)
+PR-1 → PR-2
+PR-2 → PR-3
 ```
