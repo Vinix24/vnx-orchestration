@@ -118,11 +118,20 @@ def check_tools() -> List[CheckResult]:
 def check_path_resolution(paths: Dict[str, str]) -> List[CheckResult]:
     results = []
     project_root = Path(paths["PROJECT_ROOT"])
+    canonical_root = Path(paths.get("VNX_CANONICAL_ROOT", paths["VNX_HOME"]))
+    intelligence_dir = Path(paths["VNX_INTELLIGENCE_DIR"])
 
     if project_root.is_dir():
-        results.append(CheckResult("path", PASS, f"Project root: {project_root}"))
+        results.append(CheckResult("path", PASS, f"Runtime root: {project_root}"))
     else:
-        results.append(CheckResult("path", FAIL, f"Project root missing: {project_root}"))
+        results.append(CheckResult("path", FAIL, f"Runtime root missing: {project_root}"))
+
+    if canonical_root.is_dir():
+        results.append(CheckResult("path", PASS, f"Canonical root: {canonical_root}"))
+    else:
+        results.append(CheckResult("path", FAIL, f"Canonical root missing: {canonical_root}"))
+
+    results.append(CheckResult("path", PASS, f"Intelligence dir: {intelligence_dir}"))
 
     # Node path (for MCP servers in tmux)
     node_path = _resolve_node_path()
@@ -363,7 +372,7 @@ def detect_worktree() -> Tuple[bool, Optional[str], Optional[str]]:
         common_dir = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             capture_output=True, text=True, timeout=5,
-        ).stdout.strip().rstrip("/.git")
+        ).stdout.strip()
 
         toplevel = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -372,7 +381,7 @@ def detect_worktree() -> Tuple[bool, Optional[str], Optional[str]]:
 
         if common_dir and toplevel and common_dir != toplevel:
             # Normalize: git-common-dir ends with /.git, strip it
-            main_root = common_dir.replace("/.git", "") if common_dir.endswith("/.git") else common_dir
+            main_root = common_dir[:-5] if common_dir.endswith("/.git") else common_dir
             return True, toplevel, main_root
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
