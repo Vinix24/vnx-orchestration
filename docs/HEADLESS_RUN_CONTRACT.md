@@ -151,6 +151,67 @@ The run registry must persist these fields for every active or recently-complete
 - A run that is `running` with `last_output_at` older than a configurable threshold (default: 120 seconds) is a **no-output hang candidate**.
 - This field is the primary signal for detecting hung processes that are alive but unproductive.
 
+### 3.4 CLI Binary and Flags Resolution
+
+This section documents how the headless adapter resolves which CLI binary and flags to use for a given run. Understanding this precedence is critical for operators configuring custom CLI binaries.
+
+#### 3.4.1 Binary Resolution Precedence (3-Tier)
+
+The CLI binary is resolved in strict priority order. The **first match wins**; lower tiers are never consulted once a higher tier provides a value.
+
+| Priority | Source | Scope | Description |
+|----------|--------|-------|-------------|
+| **1 (highest)** | `HEADLESS_CLI_DEFAULTS[target_type]["binary"]` | Per target type | Hardcoded in `headless_adapter.py`. If the `target_type` key exists in the defaults dict, its `binary` value is used unconditionally. |
+| **2** | `VNX_HEADLESS_CLI` environment variable | Global | Read via `headless_cli_binary()`. Only consulted when `target_type` is **not** a key in `HEADLESS_CLI_DEFAULTS`. |
+| **3 (lowest)** | Hardcoded default `"claude"` | Global | Returned by `headless_cli_binary()` when `VNX_HEADLESS_CLI` is unset or empty. |
+
+Current `HEADLESS_CLI_DEFAULTS` keys:
+
+| `target_type` | Binary | Flags |
+|----------------|--------|-------|
+| `headless_claude_cli` | `claude` | `--print --output-format text` |
+| `headless_codex_cli` | `codex` | `--quiet` |
+
+#### 3.4.2 Flags Resolution
+
+Flags follow the same lookup as the binary. When `target_type` is found in `HEADLESS_CLI_DEFAULTS`, the associated `args` list is used. When the fallback path is taken (tier 2 or 3 binary), default flags `["--print"]` are applied.
+
+There is **no merging** of flags between tiers. The entire `{binary, args}` tuple comes from one source:
+- Either the `HEADLESS_CLI_DEFAULTS` entry (tier 1), or
+- The fallback tuple `{headless_cli_binary(), ["--print"]}` (tier 2/3).
+
+#### 3.4.3 Conflict Behavior
+
+**Scenario**: An operator sets `VNX_HEADLESS_CLI=custom_binary` but the dispatch uses a `target_type` that exists in `HEADLESS_CLI_DEFAULTS` (e.g., `headless_claude_cli`).
+
+**Result**: `VNX_HEADLESS_CLI` is **silently ignored**. The tier-1 lookup succeeds, so `headless_cli_binary()` is never called. The run uses `claude` (not `custom_binary`) with `["--print", "--output-format", "text"]`.
+
+```
+# Example: operator expects custom_binary, but gets claude
+export VNX_HEADLESS_CLI=custom_binary
+
+# Dispatch with target_type = "headless_claude_cli"
+# -> HEADLESS_CLI_DEFAULTS["headless_claude_cli"] exists
+# -> binary = "claude", args = ["--print", "--output-format", "text"]
+# -> VNX_HEADLESS_CLI is never consulted
+
+# Dispatch with target_type = "experimental_runner"
+# -> HEADLESS_CLI_DEFAULTS["experimental_runner"] does NOT exist
+# -> Fallback: binary = headless_cli_binary() = "custom_binary"
+# -> args = ["--print"]
+```
+
+#### 3.4.4 Operator Configuration Guide
+
+| Goal | Action |
+|------|--------|
+| Override CLI binary for a **known** target type (`headless_claude_cli`, `headless_codex_cli`) | Modify `HEADLESS_CLI_DEFAULTS` in `headless_adapter.py` (code change required) |
+| Set CLI binary for **unknown/custom** target types | Set `VNX_HEADLESS_CLI` env var — this is the correct and intended use |
+| Change the global default when nothing else is configured | Set `VNX_HEADLESS_CLI` env var |
+| Verify which binary a run actually used | Check the run's log artifact header or coordination events |
+
+**Key takeaway**: `VNX_HEADLESS_CLI` is a **fallback**, not an override. It has no effect when the dispatch's `target_type` is listed in `HEADLESS_CLI_DEFAULTS`.
+
 ---
 
 ## 4. Failure Taxonomy
