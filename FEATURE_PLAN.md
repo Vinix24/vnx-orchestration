@@ -1,131 +1,142 @@
-# Feature: VNX Safe Autonomy, Governance Envelopes, And End-To-End Provenance
+# Feature: VNX Adoption, Packaging, Pythonization, And Public Onboarding
 
 **Status**: Complete
 **Priority**: P1
-**Branch**: `feature/safe-autonomy-governance`
-**Baseline**: FP-A, FP-B, and FP-C merged on `main`; canonical runtime coordination, bounded recovery, mixed execution routing, headless CLI targets, bounded intelligence, and recommendation usefulness measurement are available
-**Runtime policy**: T0 on Claude Opus; autonomy remains governance-first; coding and non-coding execution modes from FP-C stay intact; provenance enforcement must remain CLI-agnostic across Claude CLI, Codex CLI, and future CLI targets
+**Branch**: `feature/adoption-packaging-pythonization`
+**Baseline**: FP-A through FP-D merged on `main`; control plane, recovery, execution modes, bounded intelligence, autonomy envelopes, and provenance controls are now available
+**Runtime policy**: Preserve governance-first behavior while making VNX materially easier to install, understand, test, and market; replace bash with Python where stateful logic and packaging benefits justify it; keep tmux available for full operator mode and optional for starter/demo flows
 
-This feature is the policy and control layer that sits on top of the hardened runtime. FP-A made runtime truth explicit. FP-B made recovery and operator control reliable. FP-C added multiple execution modes and bounded intelligence. FP-D now defines what VNX may do automatically, what must always be gated, how escalation states are encoded, and how dispatch, receipt, commit, and PR/featureplan become bidirectionally traceable.
+This feature is the productization layer after the major FP-A through FP-D architecture upgrade. The system is now much stronger internally, but still too heavy, too shell-shaped, and too insider-dependent for broad adoption. This feature focuses on public onboarding, simpler execution modes, packaging, and selective Pythonization of the most failure-prone bash orchestration surfaces.
 
 Primary objective:
-Introduce explicit autonomy envelopes and governance evaluation so VNX can act automatically within policy while preserving T0 authority, escalation points, and reviewable evidence.
+Make VNX materially easier to adopt and explain without weakening governance, provenance, or runtime reliability.
 
 Secondary objective:
-Close the remaining provenance gap by making CLI-agnostic traceability enforceable across Git metadata and NDJSON receipts, with optional CI/server-side backstops.
+Move the highest-value remaining bash-heavy logic into testable Python paths and add stricter QA/certification so adoption work does not regress the core runtime.
 
-Estimated effort: ~10-14 engineering days across PR-0 through PR-5.
+Estimated effort: ~16-24 engineering days across PR-0 through PR-8.
 
 ## Design Principles
-- Preserve T0 as the decision center for completion, merges, and governance exceptions
-- Keep autonomy bounded by explicit policy, not by optimistic runtime behavior
-- Separate low-risk automatic actions from high-risk gated actions
-- Treat provenance as a first-class control surface, not documentation after the fact
-- Keep Git enforcement CLI-agnostic and receipt-aware
-- Prefer additive guardrails and visibility over hidden automation
+- public adoption must not weaken governance
+- starter mode must be simpler, not fake
+- Python should replace bash where logic is branching, stateful, path-sensitive, or recovery-sensitive
+- shell should remain only where it is the thinnest useful wrapper
+- docs, install path, examples, and command surface must tell one coherent story
+- this feature needs stricter certification than FP-A through FP-D because it touches product surface and operator ergonomics at the same time
 
 ## Governance Rules
 
 | # | Rule | Rationale |
 |---|------|-----------|
-| G-R1 | **Every automatic action must map to a policy class** | No implicit autonomy |
-| G-R2 | **High-risk actions are always gated** | Prevents silent governance bypass |
-| G-R3 | **Repeated failure loops escalate to hold or escalate states** | Stops endless retry autonomy |
-| G-R4 | **Completion and merge authority remain with T0 or an explicit human gate** | Preserves governance-first model |
-| G-R5 | **Georchestreerd werk must carry a trace token** — prefer `dispatch:<id>` while accepting approved legacy refs | Makes Git-native traceability enforceable |
-| G-R6 | **Receipts remain the primary evidence layer** | Commit metadata is a pointer, not the whole truth |
-| G-R7 | **Dispatch, receipt, commit, and PR/featureplan must be bidirectionally traceable** | End-to-end provenance must survive tool changes |
-| G-R8 | **No CLI-specific hook system may be the primary enforcement layer** | Enforcement must survive tool changes |
+| G-R1 | **Adoption work must preserve FP-D governance controls** | Productization cannot undo safety |
+| G-R2 | **Starter/demo flows must still emit receipts and traceable runtime state** | Simpler UX must not create opaque behavior |
+| G-R3 | **Pythonization must be value-ranked** — migrate the most failure-prone bash logic first | Refactor effort must buy reliability |
+| G-R4 | **Public docs must match actual runtime behavior** | Marketing and onboarding cannot drift from reality |
+| G-R5 | **Every major UX simplification needs explicit QA evidence** | Avoid “looks easier” without operational proof |
+| G-R6 | **No closure without push, PR, CI, and metadata consistency** | Lessons from FP-A through FP-D |
+| G-R7 | **No fake commit-to-PR mapping in closure notes** | Closure evidence must stay truthful |
+| G-R8 | **No claimed test totals without real repo test file verification** | Prevent invented or stale evidence |
+
+## Closure And Evidence Rules
+
+| # | Rule | Description |
+|---|------|-------------|
+| C-R1 | **No PR is "complete" while it exists only locally** | Push and PR state are part of closure evidence |
+| C-R2 | **No PR is "merge-ready" while CI is red, unstable, or unknown** | Local green is not enough for closure |
+| C-R3 | **`FEATURE_PLAN.md` and `PR_QUEUE.md` must match real execution state** | Metadata drift invalidates closure claims |
+| C-R4 | **Closure notes must map commits to PRs truthfully** | Do not fake one-commit-per-PR neatness |
+| C-R5 | **Claimed test suites must reference real test files and executable commands** | Prevent stale or invented test evidence |
+| C-R6 | **Staging must be filtered to current-feature dispatches before promotion** | Old staged dispatches must not contaminate new feature execution |
+| C-R7 | **QA/certification must include an independent adversarial review pass** | This feature touches public product surface and needs stronger skepticism |
 
 ## Architecture Rules
 
 | # | Rule | Description |
 |---|------|-------------|
-| A-R1 | **Policy matrix is canonical data** — not buried in prose only |
-| A-R2 | **Escalation states are explicit** — `info`, `review_required`, `hold`, `escalate` |
-| A-R3 | **Autonomy evaluation emits runtime events** |
-| A-R4 | **Git provenance enforcement is implemented at Git/CI level** |
-| A-R5 | **Receipt schema carries commit linkage fields where needed** |
-| A-R6 | **prepare-commit-msg / commit-msg may assist locally, but CI/server checks remain the durable backstop** |
-| A-R7 | **Policy overrides are durable governance events** |
-| A-R8 | **Provenance checks must tolerate approved legacy references during transition** |
-| A-R9 | **No silent policy mutation from recommendation logic** |
-| A-R10 | **Autonomy rollout must be reversible by feature flag or policy switch** |
+| A-R1 | **Starter mode, operator mode, and demo mode share the same canonical runtime model** |
+| A-R2 | **Install, bootstrap, doctor, and recover should converge on Python-led entrypoints where feasible** |
+| A-R3 | **tmux remains first-class for operator mode, optional for starter/demo** |
+| A-R4 | **Path resolution must stay deterministic across main repo and worktrees** |
+| A-R5 | **Public CLI entrypoints must be explicit and documented** |
+| A-R6 | **README and examples must reflect interactive plus headless reality post-FP-C** |
+| A-R7 | **QA/certification must validate starter mode, operator mode, docs, CI, and install flows** |
+| A-R8 | **Thin shell wrappers are acceptable; heavy orchestration logic should move to Python if it improves determinism** |
 
 ## Source Of Truth
-- Autonomy policy matrix: canonical runtime/config state
-- Escalation and override events: canonical runtime events plus receipts
-- Provenance registry: canonical mapping between dispatch, receipt, commit, and PR/featureplan
-- Git enforcement: local hooks plus optional CI/server-side validation
-- Receipt evidence: `t0_receipts.ndjson` and related runtime receipt outputs
-- PR/featureplan linkage: queue and feature plan metadata plus PR context
+- packaging and install surface: canonical public CLI entrypoints
+- onboarding profiles: starter mode, operator mode, demo mode
+- runtime state: existing FP-A through FP-D control plane and receipt model
+- docs and examples: README, onboarding guides, comparison docs, example flows
+- QA/certification evidence: test suites, smoke tests, CI checks, certification reports
 
 ## Known Failure Surface (Evidence / Problem Statement)
-1. **Autonomy boundaries are not yet encoded sharply enough**: too much depends on operator discipline instead of policy evaluation
-2. **Retries and recovery can still appear autonomous without clear governance framing**: FP-B bounded behavior needs policy meaning
-3. **Git-native traceability is still weaker than runtime traceability**: receipts and dispatches are richer than commits
-4. **Local-only enforcement is bypassable**: CLI-specific or local-only hooks are not enough
-5. **Legacy workflows still allow partial provenance gaps**: commit -> dispatch -> receipt and the reverse path are not universally enforced
-6. **FP-D must not accidentally become full self-governing automation**: policy needs to bound autonomy, not erase oversight
+1. **VNX still feels too insider-only**: setup and usage assume operator familiarity with tmux and internal conventions
+2. **Public onboarding is weaker than the runtime**: the system is better than the docs and install surface suggest
+3. **Too much shell logic still owns important branching and path handling**: that increases fragility and makes testing harder
+4. **README/product story still undersells the post-FP-D architecture**: governance and mixed execution are not explained cleanly
+5. **Starter mode is missing or too implicit**: first-run experience is not good enough for broad adoption
+6. **Closure discipline must improve**: FP-A through FP-D repeatedly showed that code can be good while governance metadata and closure evidence are still wrong
 
 ## What MUST NOT Be Done
-1. Do NOT allow autonomous merge or PR completion in this feature
-2. Do NOT remove T0 authority from completion, merge, or exception handling
-3. Do NOT rely on Claude-specific hooks as the primary provenance enforcement path
-4. Do NOT force a single provider- or CLI-specific trace format beyond the approved token contract
-5. Do NOT allow receipts without enough linkage to reconstruct the provenance chain
-6. Do NOT let recommendation logic rewrite policy automatically
-7. Do NOT collapse `hold` and `escalate` into generic error noise
+1. Do NOT rip out tmux for operator mode
+2. Do NOT collapse governance to make onboarding feel easier
+3. Do NOT rewrite every shell script indiscriminately
+4. Do NOT ship a public onboarding path that depends on undocumented tribal knowledge
+5. Do NOT market VNX as a mass-market consumer product
+6. Do NOT close PRs/features without push/PR/CI/metadata consistency
+7. Do NOT accept self-reported completion without independent verification
 
 ## Dependency Flow
 ```text
 PR-0 -> PR-1
 PR-0 -> PR-2
-PR-0 -> PR-3
-PR-1, PR-2 -> PR-4
-PR-3, PR-4 -> PR-5
+PR-0 -> PR-5
+PR-1, PR-2 -> PR-3
+PR-2 -> PR-4
+PR-3, PR-4, PR-5 -> PR-6
+PR-6 -> PR-7
+PR-7 -> PR-8
 ```
 
 ---
 
-## PR-0: Autonomy Policy Matrix, Escalation Model, And Provenance Contract
+## PR-0: Productization Contract, User Modes, And Pythonization Matrix
 **Track**: C
 **Priority**: P1
 **Complexity**: High
-**Risk**: High
+**Risk**: Medium
 **Skill**: @architect
 **Requires-Model**: opus
 **Estimated Time**: 1-2 days
 **Dependencies**: []
 
 ### Description
-Lock the FP-D contract before implementation starts: what VNX may do automatically, what is always gated, how escalation states work, and what the end-to-end provenance contract requires from dispatches, receipts, commits, and PRs.
+Define what VNX is trying to become publicly, which user modes exist, and which bash-heavy areas should be migrated first.
 
 ### Scope
-- Define canonical policy classes and decision types
-- Define automatic, gated, and forbidden action classes
-- Define escalation states and transition semantics
-- Define CLI-agnostic trace token rules, including accepted legacy refs
-- Define bidirectional provenance contract across dispatch, receipt, commit, and PR/featureplan
-- Create FP-D certification matrix for autonomy and provenance
+- Define `starter`, `operator`, and `demo` mode contracts
+- Define public adoption success criteria
+- Define bash-to-Python prioritization matrix ranked by reliability gain
+- Identify critical path-sensitive and recovery-sensitive shell logic
+- Define command-surface goals for public onboarding
 
 ### Success Criteria
-- Policy classes and action classes are explicit and non-overlapping
-- Escalation states and transitions are unambiguous
-- Provenance contract is explicit enough for hooks, receipts, and CI to implement
-- FP-D certification matrix covers autonomy envelopes and provenance checks
+- user modes are explicit and non-overlapping
+- Pythonization targets are prioritized by operational value
+- onboarding success criteria are measurable
+- later PRs have one productization contract to implement against
 
 ### Quality Gate
-`gate_pr0_policy_and_provenance_contract`:
-- [ ] Canonical policy matrix distinguishes automatic, gated, and forbidden actions
-- [ ] Escalation states and transitions are documented and non-overlapping
-- [ ] Trace token contract defines preferred and accepted legacy formats
-- [ ] Provenance contract covers dispatch, receipt, commit, and PR/featureplan in both directions
-- [ ] FP-D certification matrix covers autonomy and provenance behavior
+`gate_pr0_productization_contract`:
+- [ ] Starter, operator, and demo modes are defined clearly
+- [ ] Bash-to-Python targets are prioritized by reliability value
+- [ ] Public onboarding success criteria are measurable
+- [ ] Public command-surface goals are explicit
+- [ ] Contract is reviewable enough to anchor later QA and docs work
 
 ---
 
-## PR-1: Governance Evaluation Engine And Escalation State Tracking
+## PR-1: Python Init, Bootstrap, And Doctor Unification
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -136,70 +147,139 @@ Lock the FP-D contract before implementation starts: what VNX may do automatical
 **Dependencies**: [PR-0]
 
 ### Description
-Implement the runtime policy evaluation layer so recovery, retries, routing, and overrides can be classified and escalated through one governance-aware engine.
+Unify bootstrap, init, and doctor under Python-led entrypoints to reduce scattered shell setup logic and improve deterministic validation.
 
 ### Scope
-- Add governance policy evaluation module
-- Persist escalation state and override events
-- Classify actions into automatic, gated, or forbidden outcomes
-- Integrate with runtime events from FP-A/FP-B/FP-C
-- Add operator-readable summaries of holds and escalations
-- Keep feature-flagged rollout for policy enforcement
+- Add Python entrypoints for init/bootstrap/doctor orchestration
+- Migrate high-value branching from bash to Python
+- Keep shell wrappers thin where needed
+- Improve dependency and path validation output
+- Preserve backward-compatible command names
 
 ### Success Criteria
-- Runtime actions can be evaluated against a canonical policy matrix
-- Escalation states are durable and reviewable
-- Forbidden actions are blocked before execution
-- Holds and escalations become visible without log archaeology
+- new users can initialize VNX through one clear flow
+- doctor results are more actionable and less shell-fragile
+- bootstrap logic becomes easier to test and reason about
+- main repo and worktree path handling remain correct
 
 ### Quality Gate
-`gate_pr1_governance_evaluator`:
-- [ ] Policy evaluation returns automatic, gated, or forbidden outcomes deterministically
-- [ ] Escalation state transitions are durably recorded
-- [ ] Override events are explicit and reviewable
-- [ ] Forbidden actions are blocked before execution
-- [ ] Tests cover policy evaluation, hold/escalate transitions, and override recording
+`gate_pr1_python_bootstrap_doctor`:
+- [ ] Python-led init/bootstrap/doctor entrypoints work end-to-end
+- [ ] Shell wrappers remain thin and non-authoritative
+- [ ] Dependency and path failures are explicit and actionable
+- [ ] Main repo and worktree contexts are regression-tested
+- [ ] Tests cover init and doctor flows
 
 ---
 
-## PR-2: Receipt Provenance Enrichment And Bidirectional Linkage
+## PR-2: Starter Mode And No-tmux Demo Path
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
-**Risk**: High
+**Risk**: Medium
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
 **Estimated Time**: 2-3 days
 **Dependencies**: [PR-0]
 
 ### Description
-Strengthen the receipt layer so it can point cleanly to commits, PRs, and featureplan context, and so provenance can be reconstructed from receipts without manual digging.
+Create a materially simpler first-run experience that does not require full tmux operator mode on day one.
 
 ### Scope
-- Enrich receipt schema where needed with commit/PR provenance fields
-- Add mapping helpers between dispatches, receipts, and commit identities
-- Ensure provenance survives mixed execution and headless paths
-- Add receipt-side validation helpers for missing or broken provenance links
-- Export operator-readable provenance summaries
-- Preserve backward compatibility with existing receipt readers where possible
+- Add starter mode profile
+- Add no-tmux demo or dry-run path
+- Preserve receipts and canonical runtime state
+- Define exactly what starter mode can and cannot do
+- Add feature flags and rollback controls for simplified modes
 
 ### Success Criteria
-- Receipts can participate in the full provenance chain in both directions
-- Mixed execution paths no longer create provenance blind spots
-- Missing provenance linkage is detectable, not silent
-- Existing evidence-first model remains intact
+- first-time users can see VNX work without full operator-grid setup
+- starter/demo flows remain governance-compatible
+- demo path improves learnability and marketing value
+- simplified modes do not fork the runtime model
 
 ### Quality Gate
-`gate_pr2_receipt_provenance`:
-- [ ] Receipts carry enough linkage to connect dispatch, commit, and PR context
-- [ ] Bidirectional provenance reconstruction works from the receipt layer
-- [ ] Missing or broken receipt provenance is detectable through validation
-- [ ] Mixed execution paths preserve receipt linkage
-- [ ] Tests cover receipt enrichment, linkage reconstruction, and backward-compatible reads
+`gate_pr2_starter_mode`:
+- [ ] Starter mode works without full operator-grid setup
+- [ ] No-tmux demo path remains traceable and receipt-producing
+- [ ] Limits of starter/demo mode are explicitly documented
+- [ ] Rollback controls exist for simplified-mode rollout
+- [ ] Tests cover starter-mode setup and basic execution
 
 ---
 
-## PR-3: CLI-Agnostic Git Traceability Enforcement
+## PR-3: Pythonization Of Start, Recover, And Worktree-Sensitive Logic
+**Track**: B
+**Priority**: P1
+**Complexity**: High
+**Risk**: High
+**Skill**: @backend-developer
+**Requires-Model**: sonnet
+**Estimated Time**: 2-3 days
+**Dependencies**: [PR-1, PR-2]
+
+### Description
+Move the most failure-prone orchestration shell flows into Python where stateful logic, path resolution, and recovery semantics are easier to test and maintain.
+
+### Scope
+- Migrate critical parts of `start`, `recover`, and worktree-sensitive path logic into Python
+- Reduce ambiguous env/path resolution logic
+- Preserve existing command names through thin shell wrappers where needed
+- Add regression tests for path and mode handling
+
+### Success Criteria
+- fewer shell-driven path and state bugs
+- more deterministic start/recover behavior
+- improved testability of key orchestration flows
+- starter and operator modes share the same runtime truth
+
+### Quality Gate
+`gate_pr3_pythonize_critical_shell_paths`:
+- [ ] Start and recover critical logic moves into Python modules
+- [ ] Worktree path handling is deterministic and test-covered
+- [ ] Starter and operator modes share canonical runtime expectations
+- [ ] Shell wrappers stay thin
+- [ ] Regressions are covered for shared path/state logic
+
+---
+
+## PR-4: Packaging, Install Surface, And Public CLI Entry Points
+**Track**: B
+**Priority**: P1
+**Complexity**: Medium
+**Risk**: Medium
+**Skill**: @backend-developer
+**Requires-Model**: sonnet
+**Estimated Time**: 2-3 days
+**Dependencies**: [PR-2]
+
+### Description
+Make VNX easier to install and invoke like a real product instead of a manually wired internal tool.
+
+### Scope
+- Standardize public CLI entrypoint strategy
+- Improve install surface for clean project setup
+- Reduce manual path assumptions
+- Document supported install and invocation modes
+- Tighten install-time validation and failure messaging
+
+### Success Criteria
+- install path is clearer and less intimidating
+- public command surface is easier to explain
+- fewer manual path edits are needed
+- packaging story matches the actual runtime
+
+### Quality Gate
+`gate_pr4_packaging_surface`:
+- [ ] Public CLI entrypoint strategy is coherent
+- [ ] Install flow is clearer and less path-fragile
+- [ ] Supported install and invocation modes are documented
+- [ ] Install-time failures are explicit and actionable
+- [ ] Tests cover public entrypoint and install assumptions
+
+---
+
+## PR-5: README, Positioning, And Public Comparison Rewrite
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -210,33 +290,32 @@ Strengthen the receipt layer so it can point cleanly to commits, PRs, and featur
 **Dependencies**: [PR-0]
 
 ### Description
-Implement Git-native provenance enforcement that works regardless of whether work is performed through Claude CLI, Codex CLI, or another future CLI.
+Rewrite the public-facing explanation of VNX so it reflects the post-FP-D system and its real market position.
 
 ### Scope
-- Add `prepare-commit-msg` and/or `commit-msg` support for trace token assistance and validation
-- Support preferred `dispatch:<id>` token plus approved legacy refs
-- Add CI/server-side validation path for trace token enforcement
-- Document operator and worker expectations for traceability
-- Ensure enforcement remains tool-agnostic and does not depend on one AI CLI
-- Add bypass/override handling as explicit governance events rather than silent skips
+- Rewrite README positioning and quickstart
+- Add comparison pages versus OpenClaw and Claude Code
+- Add target audience and use-case docs
+- Align messaging with starter mode and operator mode
+- Remove outdated framing that undersells the runtime
 
 ### Success Criteria
-- Git commits can be validated for traceability independent of the CLI used
-- Local hooks assist but are not the only enforcement path
-- Approved legacy refs remain accepted during transition
-- Traceability failures are explicit and actionable
+- README reflects the real post-FP-D system
+- quickstart is materially clearer
+- positioning is sharper for the intended audience
+- comparisons are honest and differentiating
 
 ### Quality Gate
-`gate_pr3_git_traceability`:
-- [ ] Git traceability enforcement works without depending on a specific AI CLI
-- [ ] Preferred dispatch token and approved legacy refs are both handled correctly
-- [ ] CI or server-side validation can detect missing trace tokens
-- [ ] Local hook behavior and override handling are documented and testable
-- [ ] Tests cover valid, invalid, and legacy trace token cases
+`gate_pr5_readme_and_positioning`:
+- [ ] README reflects the current architecture and intended audience
+- [ ] Quickstart supports a realistic first-run path
+- [ ] Comparison language is clear and non-confused
+- [ ] Messaging aligns with starter mode and operator mode
+- [ ] Outdated architectural claims are removed
 
 ---
 
-## PR-4: Provenance Verification, Audit Views, And Advisory Guardrails
+## PR-6: Public Example Flows And Operator Onboarding Docs
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -244,66 +323,103 @@ Implement Git-native provenance enforcement that works regardless of whether wor
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
 **Estimated Time**: 2-3 days
-**Dependencies**: [PR-1, PR-2]
+**Dependencies**: [PR-3, PR-4, PR-5]
 
 ### Description
-Add the verification and audit surfaces that let operators and T0 check whether the provenance chain is intact and whether autonomy decisions stayed within policy.
+Ship example flows and onboarding docs that map VNX to real use cases instead of internal abstractions only.
 
 ### Scope
-- Build provenance verification routines across dispatch, receipt, commit, and PR metadata
-- Add operator/T0 audit views or reports for policy outcomes and provenance completeness
-- Surface missing links, broken chains, and override events clearly
-- Add advisory guardrails that recommend intervention before governance drift becomes hidden
-- Keep the output reviewable and evidence-oriented
-- Ensure compatibility with existing receipts and queue state
+- Add example flow for coding orchestration
+- Add example flow for structured research/headless work
+- Add example flow for content or non-coding orchestration
+- Add operator onboarding docs for starter and operator modes
+- Ensure examples stay governance-compatible
 
 ### Success Criteria
-- Operators can verify provenance completeness without manual log archaeology
-- Broken provenance chains are surfaced before merge/closure steps
-- Governance audit views show where autonomy acted and where it was gated
-- Advisory guardrails strengthen oversight without mutating policy
+- users can map VNX to real use cases quickly
+- examples reinforce the mixed execution model
+- onboarding docs reduce dependence on tribal knowledge
+- examples and docs support the rewritten README
 
 ### Quality Gate
-`gate_pr4_provenance_verification`:
-- [ ] Provenance verification can detect broken links across dispatch, receipt, commit, and PR data
-- [ ] Audit views surface policy outcomes, overrides, and broken chains clearly
-- [ ] Advisory guardrails are evidence-backed and non-mutating
-- [ ] Verification remains compatible with existing queue and receipt flows
-- [ ] Tests cover complete, partial, and broken provenance chains
+`gate_pr6_examples_and_onboarding`:
+- [ ] Coding example flow is realistic and current
+- [ ] Headless structured-task example is realistic and current
+- [ ] Content/non-coding example shows the right orchestration model
+- [ ] Operator onboarding docs cover starter and operator modes clearly
+- [ ] Examples remain governance-compatible
 
 ---
 
-## PR-5: Safe Autonomy Cutover, Provenance Enforcement Rollout, And FP-D Certification
+## PR-7: QA, Review, And Certification Hardening
+**Track**: C
+**Priority**: P1
+**Complexity**: High
+**Risk**: High
+**Skill**: @quality-engineer
+**Requires-Model**: opus
+**Estimated Time**: 2-3 days
+**Dependencies**: [PR-6]
+
+### Description
+Add stricter QA and review gates than FP-A through FP-D had, specifically because this feature touches runtime behavior, install UX, docs, and public expectations at once.
+
+### Scope
+- Add stronger CI/smoke checks for starter mode, operator mode, and install flows
+- Add review/certification checklist for docs correctness and command correctness
+- Add path-resolution regression tests
+- Add public quickstart validation
+- Add feature certification report for adoption readiness
+- Add an independent closure-verification pass that checks push/PR/CI/metadata consistency before acceptance
+
+### Success Criteria
+- adoption feature has stronger evidence than earlier feature bundles
+- install and onboarding regressions are caught in CI
+- docs and commands are checked against each other
+- review/QA path is explicit instead of ad hoc
+
+### Quality Gate
+`gate_pr7_qa_and_certification`:
+- [ ] CI covers starter mode, operator mode, and install/quickstart smoke paths
+- [ ] Docs and public command examples are validated against actual behavior
+- [ ] Path-resolution regressions are covered
+- [ ] Certification report summarizes adoption readiness and residual risks
+- [ ] Review and QA evidence is strong enough for public-facing rollout
+- [ ] Independent closure verification catches no push/PR/CI/metadata inconsistencies
+
+---
+
+## PR-8: Adoption Cutover And Release Readiness
 **Track**: C
 **Priority**: P1
 **Complexity**: High
 **Risk**: High
 **Skill**: @t0-orchestrator
 **Requires-Model**: opus
-**Estimated Time**: 2-3 days
-**Dependencies**: [PR-3, PR-4]
+**Estimated Time**: 1-2 days
+**Dependencies**: [PR-7]
 
 ### Description
-Cut over to the explicit autonomy envelope and provenance-enforced governance path only after the policy engine, receipt linkage, Git traceability, and audit views are all proven.
+Certify that VNX is materially easier to adopt and safer to market publicly without weakening the architectural guarantees gained in FP-A through FP-D.
 
 ### Scope
-- Enable safe autonomy envelopes through policy-backed evaluation
-- Roll out provenance enforcement with documented fallback/transition behavior
-- Integrate audit and verification outputs into operator/T0 review flow
-- Add rollback controls for autonomy and provenance enforcement changes
-- Certify FP-D against the PR-0 matrix and document residual risks
-- Confirm that FP-D does not grant autonomous merge or completion authority
+- Certify starter mode, operator mode, and demo mode
+- Certify Pythonized command surface and install path
+- Certify docs/readme/example consistency
+- Document residual adoption risks
+- Confirm that governance and provenance guarantees remain intact
 
 ### Success Criteria
-- Automatic actions occur only within explicit policy envelopes
-- High-risk actions remain gated and visible
-- Provenance enforcement is active without binding the system to one CLI
-- FP-D ends with certified autonomy and provenance controls on top of FP-A through FP-C
+- VNX is materially easier to install, understand, and demonstrate
+- governance and provenance guarantees remain intact
+- docs, examples, and install path tell one coherent story
+- release readiness is explicitly documented
 
 ### Quality Gate
-`gate_pr5_safe_autonomy_cutover`:
-- [ ] Policy-backed autonomy is limited to approved automatic action classes
-- [ ] High-risk actions remain gated after cutover
-- [ ] Provenance enforcement is active and reviewable across Git and receipt layers
-- [ ] Rollback controls and transition guidance are documented
-- [ ] Full FP-D verification passes before feature closure
+`gate_pr8_adoption_release_readiness`:
+- [ ] Starter, operator, and demo modes all pass certification
+- [ ] Install and command surface are materially simpler than before
+- [ ] Governance and provenance guarantees remain intact
+- [ ] Docs, examples, and onboarding path are coherent and current
+- [ ] Release-readiness report is explicit about residual risks and next steps
+- [ ] Final closure evidence includes push, PR, CI, metadata, and truthful commit mapping

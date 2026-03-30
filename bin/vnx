@@ -202,6 +202,16 @@ Shell helper:
   install-shell-helper    Add vnx() function to shell RC (~/.zshrc or ~/.bashrc)
                      Options: --print, --uninstall, --shell bash|zsh
 
+  setup              One-command project setup (init + doctor + register)
+                     Options: --starter (default), --operator, --skip-doctor
+  install-check      Check prerequisites without installing
+  install-validate   Validate an existing VNX installation
+
+  demo               Showcase VNX without API keys or project setup
+                     Sub-commands: replay [scenario], dashboard, setup, list
+  demo --replay <scenario>  Replay a recorded governance flow
+  demo --dashboard          Launch dashboard with sample data
+
   help               Show this help text
 USAGE
   }
@@ -567,28 +577,98 @@ cmd_intelligence_import() {
 }
 
 cmd_init() {
-  ensure_runtime_layout
-  write_default_config_if_missing
+  # Parse --starter / --operator flags before forwarding to Python init.
+  local mode_flag=""
+  local init_args=()
+  for arg in "$@"; do
+    case "$arg" in
+      --starter)  mode_flag="starter" ;;
+      --operator) mode_flag="operator" ;;
+      *)          init_args+=("$arg") ;;
+    esac
+  done
 
-  # Onboarding: ensure skills + terminals + hooks exist for a fresh project.
-  cmd_bootstrap_skills || true
-  cmd_bootstrap_terminals || true
-  cmd_bootstrap_hooks || true
+  # PR-1: Python-led init orchestrator (unified bootstrap).
+  # Falls back to inline bash if Python entrypoint is unavailable.
+  local init_script="$VNX_HOME/scripts/vnx_init.py"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$init_script" ]; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$init_script" "${init_args[@]+"${init_args[@]}"}"
+    local rc=$?
+    [ $rc -ne 0 ] && return $rc
+  else
+    # Legacy fallback (pre-PR-1)
+    ensure_runtime_layout
+    write_default_config_if_missing
 
-  # Multi-provider instruction files (AGENTS.md for Codex, GEMINI.md for Gemini).
-  cmd_patch_agent_files || true
+    cmd_bootstrap_skills || true
+    cmd_bootstrap_terminals || true
+    cmd_bootstrap_hooks || true
+    cmd_patch_agent_files || true
+    cmd_init_db || true
 
-  # Initialize quality intelligence database (idempotent — uses IF NOT EXISTS).
-  cmd_init_db || true
+    if [ -d "$VNX_INTELLIGENCE_DIR/db_export" ]; then
+      log "[init] Found .vnx-intelligence/ — importing into SQLite..."
+      cmd_intelligence_import || true
+    fi
 
-  # If git-tracked intelligence exists, hydrate SQLite from it.
-  if [ -d "$VNX_INTELLIGENCE_DIR/db_export" ]; then
-    log "[init] Found .vnx-intelligence/ — importing into SQLite..."
-    cmd_intelligence_import || true
+    log "[init] Runtime root ready: $VNX_DATA_DIR"
   fi
 
-  log "[init] Runtime root ready: $VNX_DATA_DIR"
+  # PR-2: Write mode.json based on --starter / --operator flag.
+  # If no flag given, default to operator (backward compat).
+  if [ -z "$mode_flag" ]; then
+    mode_flag="operator"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+from vnx_mode import VNXMode, write_mode
+write_mode(VNXMode('$mode_flag'))
+print(f'[init] Mode set: $mode_flag')
+"
+  fi
+
   log "[init] Done. Next: vnx doctor"
+}
+
+# ── Mode gating ──────────────────────────────────────────────────────────
+# PR-2: Check if a command is allowed in the current mode.
+# Uses Python vnx_mode.py for mode detection and command tier enforcement.
+# Disabled when VNX_MODE_GATING_ENABLED=0 (rollback control).
+_check_mode_gate() {
+  local cmd="$1"
+
+  # Rollback control: disable gating entirely
+  if [ "${VNX_MODE_GATING_ENABLED:-1}" = "0" ]; then
+    return 0
+  fi
+
+  # Skip gating for init, setup, help, demo (always allowed)
+  case "$cmd" in
+    init|setup|install-check|install-validate|help|-h|--help|demo) return 0 ;;
+  esac
+
+  # Skip if mode.json doesn't exist (pre-init state)
+  local mode_file="$VNX_DATA_DIR/mode.json"
+  [ -f "$mode_file" ] || return 0
+
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+import sys
+from vnx_mode import check_command_allowed, ModeGateError
+try:
+    check_command_allowed('$cmd')
+except ModeGateError as e:
+    print(f'Error: {e}', file=sys.stderr)
+    sys.exit(1)
+" 2>&1
+    return $?
+  fi
+  return 0
+}
+
+# ── Demo command ─────────────────────────────────────────────────────────
+cmd_demo() {
+  PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/lib/vnx_demo.py" "$@"
 }
 
 cmd_init_db() {
@@ -1266,6 +1346,24 @@ cmd_bootstrap_hooks() {
 _detect_worktree_context() {
   # Returns: 0 if in a worktree, 1 if in main repo
   # Sets: _WT_ROOT (worktree toplevel), _MAIN_ROOT (main repo root)
+  # PR-3: Delegates to Python module (vnx_worktree.py) when available.
+  local _wt_json
+  _wt_json="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "
+import json
+from vnx_worktree import detect_worktree_context
+ctx = detect_worktree_context('$PROJECT_ROOT')
+print(json.dumps({'is_worktree': ctx.is_worktree, 'wt': ctx.worktree_root, 'main': ctx.main_root}))
+" 2>/dev/null)" || _wt_json=""
+
+  if [ -n "$_wt_json" ]; then
+    local _is_wt
+    _is_wt="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['is_worktree'])" 2>/dev/null)"
+    _WT_ROOT="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['wt'])" 2>/dev/null)"
+    _MAIN_ROOT="$(echo "$_wt_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['main'])" 2>/dev/null)"
+    [ "$_is_wt" = "True" ] && return 0 || return 1
+  fi
+
+  # Fallback: inline git commands (pre-PR-3 behavior)
   local git_common_dir
   git_common_dir="$(git -C "$PROJECT_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 1
   _MAIN_ROOT="$(cd "$git_common_dir" && cd .. && pwd)"
@@ -1659,9 +1757,12 @@ main() {
   # function from scripts/commands/<name>.sh, overriding any inline definition.
   _load_command "$cmd" 2>/dev/null || true
 
+  # PR-2: Mode gating — check if command is allowed in current mode.
+  _check_mode_gate "$cmd" || exit 1
+
   case "$cmd" in
     init)
-      cmd_init
+      cmd_init "$@"
       ;;
     init-db)
       cmd_init_db
@@ -1785,6 +1886,18 @@ main() {
       ;;
     install-shell-helper)
       bash "$VNX_HOME/scripts/vnx_shell_helper.sh" "$@"
+      ;;
+    setup)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_setup.py" "$@"
+      ;;
+    install-check)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --check "$@"
+      ;;
+    install-validate)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 "$VNX_HOME/scripts/vnx_install.py" --validate "$@"
+      ;;
+    demo)
+      cmd_demo "$@"
       ;;
     help|-h|--help)
       usage

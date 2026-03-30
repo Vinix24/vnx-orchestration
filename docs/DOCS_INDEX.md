@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-03-23
+**Last Updated**: 2026-03-29
 
 ---
 
@@ -119,6 +119,15 @@
 
 ---
 
+## Onboarding & Examples
+
+- **Onboarding guide**: `onboarding/ONBOARDING_GUIDE.md` — Starter and operator mode setup, first dispatch, daily workflow
+- **Example: Coding orchestration**: `examples/example_coding_orchestration.md` — Feature development with parallel agents
+- **Example: Headless research**: `examples/example_headless_research.md` — Structured analysis without interactive tmux
+- **Example: Content orchestration**: `examples/example_content_orchestration.md` — Documentation and non-coding tasks
+
+---
+
 ## Migration & Upgrade
 
 - **Migration guide**: `MIGRATION_GUIDE.md` — Upgrade paths: worktrees, settings, verification, layout (`.claude/vnx-system/` to `.vnx/`)
@@ -156,6 +165,10 @@ docs/
   architecture/          # Architecture studies & proposals
 
   internal/              # Internal docs (maintainer notes + publication drafts)
+
+  onboarding/            # Onboarding guides (starter + operator)
+
+  examples/              # Example flows (coding, research, content)
 
 dashboard/                 # Token Usage Dashboard (separate from docs/)
   README.md                # Overview and quick start
