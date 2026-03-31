@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Governance closure verification for VNX feature branches."""
+"""Governance closure verification for VNX feature branches.
+
+Includes review-contract enforcement: closure cannot be claimed unless
+the contractually required review gates have produced evidence and the
+deterministic findings are clean.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +20,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
+from review_contract import ReviewContract
+from codex_final_gate import enforce_codex_gate, CodexFinalGateReceipt
 
 
 @dataclass(frozen=True)
@@ -172,6 +180,182 @@ def _validate_test_claims(claims: Dict[str, Any], project_root: Path) -> List[Ch
     return results
 
 
+def _find_gate_result(gate: str, pr_id: str, results_dir: Path) -> Optional[Dict[str, Any]]:
+    """Search for a gate result file matching the PR and gate name."""
+    pr_slug = pr_id.lower().replace("-", "")
+    # Contract-based results: {pr_slug}-{gate}-contract.json
+    contract_path = results_dir / f"{pr_slug}-{gate}-contract.json"
+    if contract_path.exists():
+        try:
+            return json.loads(_read_text(contract_path))
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Legacy pattern: pr-{number}-{gate}.json — scan for matching gate
+    for path in results_dir.glob(f"*-{gate}*.json"):
+        try:
+            data = json.loads(_read_text(path))
+            if data.get("pr_id") == pr_id or data.get("gate") == gate:
+                return data
+        except (json.JSONDecodeError, OSError):
+            continue
+    return None
+
+
+def _validate_review_evidence(
+    contract: ReviewContract,
+    results_dir: Path,
+) -> List[CheckResult]:
+    """Validate review contract presence and gate results against the review stack.
+
+    Checks:
+    1. Review contract has required fields (pr_id, review_stack)
+    2. Each gate in the review stack has a result
+    3. Required gates (codex for high-risk) have passing verdicts
+    4. Optional gates have explicit state (contributed or intentionally absent)
+    5. Content hash consistency between contract and gate receipts
+    6. No unresolved error-severity deterministic findings
+    """
+    checks: List[CheckResult] = []
+
+    if not contract.pr_id:
+        checks.append(CheckResult("review_contract", "FAIL", "review contract missing pr_id"))
+        return checks
+
+    if not contract.review_stack:
+        checks.append(CheckResult("review_contract", "FAIL", "review contract has empty review_stack"))
+        return checks
+
+    checks.append(CheckResult(
+        "review_contract",
+        "PASS",
+        f"review contract present for {contract.pr_id} "
+        f"(stack: {', '.join(contract.review_stack)})",
+    ))
+
+    for gate in contract.review_stack:
+        result = _find_gate_result(gate, contract.pr_id, results_dir)
+
+        if gate == "claude_github_optional":
+            if result is None:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    f"no evidence for optional gate {gate} — state must be explicit",
+                ))
+            elif result.get("was_intentionally_absent") or result.get("contributed_evidence"):
+                state = result.get("state", "unknown")
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "PASS",
+                    f"{gate} state explicit: {state}",
+                ))
+            else:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    f"{gate} state is ambiguous — neither contributed evidence nor intentionally absent",
+                ))
+
+        elif gate == "codex_gate":
+            enforcement = enforce_codex_gate(contract)
+            if enforcement.required:
+                if result is None:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
+                    ))
+                else:
+                    verdict = result.get("verdict", "missing")
+                    if verdict == "pass":
+                        checks.append(CheckResult(
+                            f"gate_{gate}",
+                            "PASS",
+                            "codex gate passed",
+                        ))
+                    else:
+                        checks.append(CheckResult(
+                            f"gate_{gate}",
+                            "FAIL",
+                            f"codex gate verdict: {verdict}",
+                        ))
+            else:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "PASS",
+                    "codex gate not required by risk policy",
+                ))
+
+        elif gate == "gemini_review":
+            if result is None:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    f"no gate result for required reviewer {gate}",
+                ))
+            else:
+                status = result.get("status", "missing")
+                blocking_count = result.get("blocking_count", 0)
+                if status == "pass" and blocking_count == 0:
+                    advisory_count = result.get("advisory_count", 0)
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "PASS",
+                        f"gemini review passed ({advisory_count} advisory, 0 blocking)",
+                    ))
+                else:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        f"gemini review status: {status}, {blocking_count} blocking finding(s)",
+                    ))
+
+        else:
+            if result is None:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    f"no gate result for unknown gate {gate}",
+                ))
+            else:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "PASS",
+                    f"gate {gate} result present",
+                ))
+
+    # Content hash consistency
+    for gate in contract.review_stack:
+        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        if result and contract.content_hash:
+            result_hash = result.get("contract_hash") or result.get("content_hash") or ""
+            if result_hash and result_hash != contract.content_hash:
+                checks.append(CheckResult(
+                    f"hash_{gate}",
+                    "FAIL",
+                    f"{gate} receipt hash mismatch — evidence is stale "
+                    f"(contract={contract.content_hash[:8]}.. receipt={result_hash[:8]}..)",
+                ))
+
+    # Deterministic findings — error-severity blocks closure
+    error_findings = [f for f in contract.deterministic_findings if f.severity == "error"]
+    if error_findings:
+        checks.append(CheckResult(
+            "deterministic_findings",
+            "FAIL",
+            f"{len(error_findings)} unresolved error-severity deterministic finding(s)",
+        ))
+    else:
+        total = len(contract.deterministic_findings)
+        checks.append(CheckResult(
+            "deterministic_findings",
+            "PASS",
+            f"{total} deterministic finding(s), 0 errors",
+        ))
+
+    return checks
+
+
 def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) -> CheckResult:
     staging_dir = Path(paths["VNX_DISPATCH_DIR"]) / "staging"
     if not staging_dir.exists():
@@ -199,6 +383,8 @@ def verify_closure(
     branch: str,
     mode: str,
     claim_file: Optional[Path] = None,
+    review_contract: Optional[ReviewContract] = None,
+    gate_results_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     feature = _parse_feature_plan(feature_plan)
     queue = _parse_pr_queue(pr_queue)
@@ -298,6 +484,28 @@ def verify_closure(
     checks.extend(_validate_test_claims(claims, project_root))
     checks.append(_check_stale_staging(paths, feature["pr_ids"]))
 
+    # Review contract and gate evidence enforcement
+    review_evidence_summary: Optional[Dict[str, Any]] = None
+    if review_contract is not None:
+        effective_results_dir = gate_results_dir
+        if effective_results_dir is None:
+            effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
+        checks.extend(_validate_review_evidence(review_contract, effective_results_dir))
+        review_evidence_summary = {
+            "contract_pr_id": review_contract.pr_id,
+            "contract_hash": review_contract.content_hash,
+            "review_stack": review_contract.review_stack,
+            "risk_class": review_contract.risk_class,
+            "deterministic_finding_count": len(review_contract.deterministic_findings),
+            "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
+        }
+    else:
+        checks.append(CheckResult(
+            "review_contract",
+            "FAIL",
+            "no review contract provided — closure requires contract-backed evidence",
+        ))
+
     verdict = "pass" if all(check.status == "PASS" for check in checks) else "fail"
     payload = {
         "verdict": verdict,
@@ -307,6 +515,7 @@ def verify_closure(
         "checks": [check.__dict__ for check in checks],
         "pr": pr,
         "claim_file": str(claim_file) if claim_file else None,
+        "review_evidence": review_evidence_summary,
     }
     return payload
 
@@ -322,6 +531,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--branch", default=None)
     parser.add_argument("--mode", choices=("pre_merge", "post_merge"), default="pre_merge")
     parser.add_argument("--claim-file", default=None)
+    parser.add_argument("--review-contract", default=None, help="Path to review contract JSON")
+    parser.add_argument("--gate-results-dir", default=None, help="Directory containing gate result JSONs")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--emit-receipt", action="store_true")
     args = parser.parse_args(argv)
@@ -331,6 +542,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     branch = args.branch or _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
     claim_file = Path(args.claim_file) if args.claim_file else _default_claim_file(paths)
 
+    contract: Optional[ReviewContract] = None
+    if args.review_contract:
+        contract_path = Path(args.review_contract)
+        if contract_path.exists():
+            contract = ReviewContract.from_json(contract_path.read_text(encoding="utf-8"))
+
+    gate_results_dir: Optional[Path] = None
+    if args.gate_results_dir:
+        gate_results_dir = Path(args.gate_results_dir)
+
     result = verify_closure(
         project_root=project_root,
         feature_plan=(project_root / args.feature_plan if not Path(args.feature_plan).is_absolute() else Path(args.feature_plan)),
@@ -338,6 +559,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         branch=branch,
         mode=args.mode,
         claim_file=claim_file if claim_file.exists() else None,
+        review_contract=contract,
+        gate_results_dir=gate_results_dir,
     )
 
     if args.emit_receipt:
@@ -349,6 +572,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             feature_title=result.get("feature_title"),
             verifier="closure_verifier.py",
             checks=result["checks"],
+            review_evidence=result.get("review_evidence"),
         )
 
     if args.json:
