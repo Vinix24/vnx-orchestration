@@ -18,7 +18,7 @@ Trial target sequence:
 - Feature B must not begin before Feature A is merged and independently closure-verified.
 - Branch/worktree transition correctness is part of the trial, not an assumed external step.
 - No pseudo-parallelism: one terminal may not carry two active dispatches at the same time.
-- Headless review jobs must return structured receipts, not only prose.
+- Headless review jobs must return structured receipts and normalized markdown reports, not only prose.
 - Gemini review and Codex final gate must be exercised on real PRs where policy requires them.
 - Interactive Claude control must use attach/jump/resume/recover semantics, not terminal injection assumptions.
 
@@ -87,12 +87,14 @@ Define the contract for the headless review jobs used during the trial so Gemini
 
 ### Scope
 - define required receipt schema for headless review jobs
+- define required normalized report path under `$VNX_DATA_DIR/unified_reports/headless/`
 - define pass, fail, blocked, advisory, and residual-risk fields
 - define how review jobs bind to review contracts and PR ids
 - define how T0 should treat missing or contradictory review evidence
 
 ### Success Criteria
 - headless review jobs have a structured receipt contract
+- headless review jobs have a deterministic normalized report contract
 - Gemini and Codex results are usable as closure evidence
 - missing or contradictory review evidence becomes explicit
 - the contract fits the current review-contract architecture
@@ -100,6 +102,7 @@ Define the contract for the headless review jobs used during the trial so Gemini
 ### Quality Gate
 `gate_pr1_headless_review_contract`:
 - [ ] Headless review receipts define pass, fail, blocked, advisory findings, and residual risk explicitly
+- [ ] Headless review results define a required report path under `$VNX_DATA_DIR/unified_reports/headless/`
 - [ ] Review receipts link deterministically to PR id and review contract id
 - [ ] Missing or contradictory review evidence is explicitly representable
 - [ ] Contract aligns with current review-contract and closure-verifier architecture
@@ -139,6 +142,7 @@ Execute and certify Feature A (`Inline Stale Lease Reconciliation`) under the ne
 - [ ] All Feature A required tests pass
 - [ ] Gemini review receipt exists and all blocking findings are closed where policy requires review
 - [ ] Codex final gate receipt exists and all required checks pass where policy requires final gate
+- [ ] Required headless review reports exist at the report paths referenced by the gate results
 - [ ] Feature A closure evidence and residual risk note are complete before transition
 
 ---
@@ -213,6 +217,7 @@ Execute and certify Feature B (`Conversation Resume And Latest-First Timeline`) 
 - [ ] All Feature B required tests pass
 - [ ] Gemini review receipt exists and all blocking findings are closed where policy requires review
 - [ ] Codex final gate receipt exists and all required checks pass where policy requires final gate
+- [ ] Required headless review reports exist at the report paths referenced by the gate results
 - [ ] Feature B closure evidence and residual risk note are complete after the validated transition
 
 ---
