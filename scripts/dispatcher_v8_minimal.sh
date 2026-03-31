@@ -398,15 +398,31 @@ rc_delivery_start() {
 }
 
 # Record delivery success (broker: delivering -> accepted).
+# Idempotent: duplicate acceptance returns noop=true instead of failing.
 rc_delivery_success() {
     local dispatch_id="$1" attempt_id="$2"
     _rc_enabled || return 0
     [[ -n "$attempt_id" ]] || return 0
 
-    if ! _rc_python delivery-success \
+    local result
+    if result=$(_rc_python delivery-success \
         --dispatch-id "$dispatch_id" \
-        --attempt-id "$attempt_id" > /dev/null; then
-        log "V8 RUNTIME_CORE: delivery-success non-fatal failure dispatch=$dispatch_id"
+        --attempt-id "$attempt_id" 2>/dev/null); then
+        # Check if this was a no-op (duplicate acceptance)
+        local is_noop
+        is_noop=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop","false"))' 2>/dev/null || echo "false")
+        if [[ "$is_noop" == "True" || "$is_noop" == "true" ]]; then
+            log "V8 RUNTIME_CORE: delivery-success idempotent no-op dispatch=$dispatch_id (already accepted/beyond)"
+        fi
+    else
+        # Check if this was a terminal-state rejection vs real error
+        local is_rejected
+        is_rejected=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop_rejected","false"))' 2>/dev/null || echo "false")
+        if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
+            log "V8 RUNTIME_CORE: delivery-success rejected dispatch=$dispatch_id (terminal state)"
+        else
+            log "V8 RUNTIME_CORE: delivery-success non-fatal failure dispatch=$dispatch_id"
+        fi
     fi
 }
 
