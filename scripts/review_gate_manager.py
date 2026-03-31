@@ -51,6 +51,21 @@ class ReviewGateManager:
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
+    def _canonical_report_path(self, report_path: str) -> str:
+        if not report_path:
+            return ""
+
+        path = Path(report_path)
+        if path.is_absolute():
+            return str(path)
+
+        if path.parts and path.parts[0] == ".vnx-data":
+            data_root = Path(self.paths["VNX_DATA_DIR"]).resolve().parent
+            return str((data_root / path).resolve())
+
+        project_root = Path(self.paths["PROJECT_ROOT"])
+        return str((project_root / path).resolve())
+
     def _request_path(self, gate: str, pr_number: int) -> Path:
         return self.requests_dir / f"pr-{pr_number}-{gate}.json"
 
@@ -309,10 +324,11 @@ class ReviewGateManager:
             "completed_at": completed_at or _utc_now(),
         }
         receipt = ClaudeGitHubReviewReceipt.from_result_payload(result_payload)
+        canonical_report_path = self._canonical_report_path(report_path)
 
         full_payload = receipt.to_dict()
         full_payload["findings"] = raw_findings
-        full_payload["report_path"] = report_path
+        full_payload["report_path"] = canonical_report_path
         full_payload["required_reruns"] = list(required_reruns or [])
         full_payload["residual_risk"] = full_payload.get("residual_risk", "")
 
@@ -450,6 +466,7 @@ class ReviewGateManager:
             "required_reruns": list(required_reruns or []),
             "recorded_at": receipt.reviewed_at,
         }
+        payload["report_path"] = self._canonical_report_path(payload["report_path"])
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         emit_governance_receipt(
             "review_gate_result",
@@ -466,7 +483,7 @@ class ReviewGateManager:
             blocking_count=receipt.blocking_count,
             residual_risk=payload["residual_risk"],
             contract_hash=contract_hash,
-            report_path=report_path,
+            report_path=payload["report_path"],
             required_reruns=payload["required_reruns"],
         )
         return payload
