@@ -10,6 +10,9 @@ This document defines what a headless run is in VNX terms, which state it must e
 
 All subsequent implementation PRs (PR-1 through PR-4) share this contract as their single source of truth.
 
+For headless review-gate specific evidence requirements, also see:
+- [45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md)
+
 ---
 
 ## 1. Headless Run Identity Contract
@@ -138,6 +141,8 @@ The run registry must persist these fields for every active or recently-complete
 | `log_artifact_path` | `str?` | completing/failing | Path to persisted stdout/stderr log |
 | `output_artifact_path` | `str?` | completing | Path to structured output file |
 | `receipt_id` | `str?` | terminal | Receipt emitted for this run |
+
+For review-gate runs, `output_artifact_path` is not sufficient by itself. A normalized operator-readable markdown report must also exist under `$VNX_DATA_DIR/unified_reports/` (root level, not a subdirectory), and the corresponding `review_gate_result` must reference that report path. This ensures the receipt processor fires a receipt to T0.
 
 ### 3.2 Heartbeat Contract
 

@@ -259,7 +259,7 @@ def _write_gate_result(results_dir, gate, pr_id, data):
     return path
 
 
-def _make_gemini_result(pr_id="PR-0", status="pass", blocking_count=0, advisory_count=0, contract_hash="abcdef1234567890"):
+def _make_gemini_result(pr_id="PR-0", status="pass", blocking_count=0, advisory_count=0, contract_hash="abcdef1234567890", report_path=""):
     return {
         "gate": "gemini_review",
         "pr_id": pr_id,
@@ -267,10 +267,11 @@ def _make_gemini_result(pr_id="PR-0", status="pass", blocking_count=0, advisory_
         "blocking_count": blocking_count,
         "advisory_count": advisory_count,
         "contract_hash": contract_hash,
+        "report_path": report_path,
     }
 
 
-def _make_codex_result(pr_id="PR-0", verdict="pass", contract_hash="abcdef1234567890"):
+def _make_codex_result(pr_id="PR-0", verdict="pass", contract_hash="abcdef1234567890", report_path=""):
     return {
         "gate": "codex_final_gate",
         "pr_id": pr_id,
@@ -278,6 +279,7 @@ def _make_codex_result(pr_id="PR-0", verdict="pass", contract_hash="abcdef123456
         "required": True,
         "content_hash": contract_hash,
         "contract_hash": contract_hash,
+        "report_path": report_path,
     }
 
 
@@ -590,6 +592,14 @@ class TestClosureVerifierContractEnforcement:
         monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
         monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
 
+        # Create report files that report_path will reference.
+        reports_dir = tmp_path / "headless_reports"
+        reports_dir.mkdir(parents=True)
+        gemini_report = reports_dir / "gemini-PR-0.md"
+        gemini_report.write_text("# Gemini Review\n")
+        codex_report = reports_dir / "codex-PR-0.md"
+        codex_report.write_text("# Codex Gate\n")
+
         contract = _make_contract(
             review_stack=["gemini_review", "codex_gate", "claude_github_optional"],
             risk_class="high",
@@ -598,8 +608,10 @@ class TestClosureVerifierContractEnforcement:
             ],
         )
         results_dir = tmp_path / "results"
-        _write_gate_result(results_dir, "gemini_review", "PR-0", _make_gemini_result())
-        _write_gate_result(results_dir, "codex_gate", "PR-0", _make_codex_result())
+        _write_gate_result(results_dir, "gemini_review", "PR-0",
+                           _make_gemini_result(report_path=str(gemini_report)))
+        _write_gate_result(results_dir, "codex_gate", "PR-0",
+                           _make_codex_result(report_path=str(codex_report)))
         _write_gate_result(results_dir, "claude_github_optional", "PR-0",
                            _make_claude_result(state="not_configured"))
 

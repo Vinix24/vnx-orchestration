@@ -283,11 +283,17 @@ class ReviewGateManager:
         contract_hash: str = "",
         completed_at: str = "",
         pr_number: Optional[int] = None,
+        report_path: str = "",
+        required_reruns: Optional[List[str]] = None,
     ) -> ClaudeGitHubReviewReceipt:
         """Record a Claude GitHub review result linked to a ReviewContract.
 
         Classifies findings into advisory/blocking and persists the result
         with the contract_hash so T0 can correlate with the original contract.
+
+        Per the headless review evidence contract, ``report_path`` and
+        ``required_reruns`` are persisted so the closure verifier can validate
+        the full evidence chain.
         """
         raw_findings = findings or []
         result_payload: Dict[str, Any] = {
@@ -306,9 +312,12 @@ class ReviewGateManager:
 
         full_payload = receipt.to_dict()
         full_payload["findings"] = raw_findings
+        full_payload["report_path"] = report_path
+        full_payload["required_reruns"] = list(required_reruns or [])
+        full_payload["residual_risk"] = full_payload.get("residual_risk", "")
 
-        result_path = self.results_dir / f"{pr_id.lower().replace('-', '')}-claude_github_optional-contract.json"
-        result_path.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
+        result_file = self.results_dir / f"{pr_id.lower().replace('-', '')}-claude_github_optional-contract.json"
+        result_file.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
 
         emit_governance_receipt(
             "review_gate_result",
@@ -399,6 +408,8 @@ class ReviewGateManager:
         residual_risk: Optional[str] = None,
         contract_hash: str = "",
         pr_id: str = "",
+        report_path: str = "",
+        required_reruns: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Record a review gate result with explicit advisory/blocking finding classification.
 
@@ -408,6 +419,10 @@ class ReviewGateManager:
 
         Both lists are always present in the payload so downstream consumers can
         act on the classification without re-parsing the raw findings list.
+
+        Per the headless review evidence contract, ``report_path`` and
+        ``required_reruns`` are persisted in every gate result so the closure
+        verifier can validate the full evidence chain.
         """
         raw_findings = findings or []
         receipt = GeminiReviewReceipt.from_raw_findings(
@@ -429,8 +444,10 @@ class ReviewGateManager:
             "blocking_findings": [f.to_dict() for f in receipt.blocking_findings],
             "advisory_count": receipt.advisory_count,
             "blocking_count": receipt.blocking_count,
-            "residual_risk": residual_risk,
+            "residual_risk": residual_risk or "",
             "contract_hash": contract_hash,
+            "report_path": report_path,
+            "required_reruns": list(required_reruns or []),
             "recorded_at": receipt.reviewed_at,
         }
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -447,8 +464,10 @@ class ReviewGateManager:
             blocking_findings=payload["blocking_findings"],
             advisory_count=receipt.advisory_count,
             blocking_count=receipt.blocking_count,
-            residual_risk=residual_risk,
+            residual_risk=payload["residual_risk"],
             contract_hash=contract_hash,
+            report_path=report_path,
+            required_reruns=payload["required_reruns"],
         )
         return payload
 
