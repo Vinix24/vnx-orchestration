@@ -433,6 +433,24 @@ class TestRecordClaudeGitHubResult:
         assert saved["state"] == STATE_COMPLETED
         assert saved["contributed_evidence"] is True
 
+    def test_result_canonicalizes_relative_report_path(self, review_env, monkeypatch):
+        monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
+
+        manager = rgm.ReviewGateManager()
+        manager.record_claude_github_result(
+            pr_id="PR-4",
+            branch="feature/test",
+            status="pass",
+            summary="Clean",
+            contract_hash="hash999",
+            report_path=".vnx-data/unified_reports/claude-review.md",
+        )
+
+        result_file = manager.results_dir / "pr4-claude_github_optional-contract.json"
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        expected = str((review_env / ".vnx-data/unified_reports/claude-review.md").resolve())
+        assert saved["report_path"] == expected
+
     def test_result_governance_receipt_includes_contract_hash(self, review_env, monkeypatch):
         receipts = []
         monkeypatch.setattr(

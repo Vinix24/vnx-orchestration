@@ -98,3 +98,23 @@ def test_record_result_persists_structured_review_output(review_env, monkeypatch
     assert saved["status"] == "pass"
     assert saved["findings"][0]["title"] == "Minor wording"
     assert payload["residual_risk"] == "low"
+
+
+def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatch):
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+    manager = rgm.ReviewGateManager()
+
+    report_rel = ".vnx-data/unified_reports/review.md"
+    payload = manager.record_result(
+        gate="codex_gate",
+        pr_number=9,
+        branch="feature/docs",
+        status="pass",
+        summary="No blocking findings",
+        report_path=report_rel,
+    )
+
+    expected = str((review_env / report_rel).resolve())
+    saved = json.loads((manager.results_dir / "pr-9-codex_gate.json").read_text(encoding="utf-8"))
+    assert payload["report_path"] == expected
+    assert saved["report_path"] == expected
