@@ -337,6 +337,32 @@ def _validate_review_evidence(
                     f"(contract={contract.content_hash[:8]}.. receipt={result_hash[:8]}..)",
                 ))
 
+    # Report path validation — per headless review evidence contract, every
+    # pass/fail gate result must carry a report_path pointing to a real file
+    # under $VNX_DATA_DIR/unified_reports/headless/.
+    for gate in contract.review_stack:
+        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        if result and result.get("status") in ("pass", "fail"):
+            report_path = result.get("report_path", "")
+            if not report_path:
+                checks.append(CheckResult(
+                    f"report_{gate}",
+                    "FAIL",
+                    f"{gate} gate result is missing required report_path field",
+                ))
+            elif not Path(report_path).exists():
+                checks.append(CheckResult(
+                    f"report_{gate}",
+                    "FAIL",
+                    f"{gate} report_path does not exist: {report_path}",
+                ))
+            else:
+                checks.append(CheckResult(
+                    f"report_{gate}",
+                    "PASS",
+                    f"{gate} normalized report exists at {report_path}",
+                ))
+
     # Deterministic findings — error-severity blocks closure
     error_findings = [f for f in contract.deterministic_findings if f.severity == "error"]
     if error_findings:
