@@ -62,8 +62,8 @@ An **execution target** is a runtime entity that can execute dispatches. Each ta
 |---|---|---|---|---|
 | `interactive_tmux_claude` | Claude Code running in a tmux pane | tmux send-keys / paste-buffer | Via receipt processor monitoring pane output | No (Claude CLI) |
 | `interactive_tmux_codex` | Codex CLI running in a tmux pane | tmux send-keys / paste-buffer | Via receipt processor monitoring pane output | No (Codex CLI) |
-| `headless_claude_cli` | Claude Code invoked as a subprocess with `--print` or piped input | CLI subprocess spawn | Via stdout/stderr capture and structured output parsing | No (Claude CLI) |
-| `headless_codex_cli` | Codex CLI invoked as a subprocess | CLI subprocess spawn | Via stdout/stderr capture and structured output parsing | No (Codex CLI) |
+| `headless_claude_cli` | Claude Code invoked as a subprocess with `--print` or piped input | CLI subprocess spawn | Via stdout/stderr capture, structured output parsing, and normalized report projection for review-grade runs | No (Claude CLI) |
+| `headless_codex_cli` | Codex CLI invoked as a subprocess | CLI subprocess spawn | Via stdout/stderr capture, structured output parsing, and normalized report projection for review-grade runs | No (Codex CLI) |
 | `channel_adapter` | Adapter that translates inbound channel events into dispatches | Inbox file/queue → broker registration | Via adapter completion callback | Yes (adapter-defined) |
 
 ### Execution Target Registry Entry Schema
@@ -90,6 +90,7 @@ Each registered execution target in the runtime state has this canonical shape:
 3. **Capabilities are declared, not inferred**: Each target declares which task classes it can execute. The router trusts declared capabilities.
 4. **Health is queryable**: Every target must support health checks. Unhealthy targets are excluded from routing.
 5. **Channel adapters are not terminals**: Channel adapters do not occupy T1/T2/T3 slots. They are registered separately.
+6. **Review-grade headless runs emit report evidence**: When a headless run is used for governance review evidence, it must also emit a normalized markdown report under `$VNX_DATA_DIR/unified_reports/headless/`.
 
 ### 2.2 Target Health States
 
