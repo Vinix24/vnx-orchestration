@@ -1,27 +1,34 @@
-# PR Queue - Feature: Double-Feature Trial Certification
+# PR Queue - Awaiting Re-Initialization
 
-## Progress Overview
-Total: 6 PRs | Complete: 0 | Active: 0 | Queued: 0 | Blocked: 0
-Progress: ░░░░░░░░░░ 0%
+This queue file was intentionally reset for a fresh T0 restart.
 
-## Governance Metadata
-Risk-Class: high
-Merge-Policy: human
-Review-Stack: gemini_review,codex_gate,claude_github_optional
+## Active Feature
+`FEATURE_PLAN.md` currently points to:
+- **Deterministic Queue State Reconciliation**
 
-## Status
+## Current State
+- queue is **not initialized**
+- no staged, pending, active, or rejected dispatches should be treated as valid execution truth
+- T0 must rebuild queue state from `FEATURE_PLAN.md` using the local queue tooling before dispatching
 
-### ⏳ Ready To Initialize
-- Run `python3 scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md`
-- Promote only `PR-0` first
-- Do not start Feature A execution before the PR-0/PR-1 contracts are accepted
+## Bootstrap Commands
 
-## Dependency Flow
+```bash
+python3 scripts/validate_skill.py --list
+python3 scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
+python3 scripts/pr_queue_manager.py staging-list
+python3 scripts/pr_queue_manager.py status
 ```
-PR-0 (no dependencies)
-PR-1 (no dependencies)
-PR-0, PR-1 → PR-2
-PR-2 → PR-3
-PR-3 → PR-4
-PR-4 → PR-5
-```
+
+## Chain Context
+Feature 1 of 4 in the unattended hardening chain:
+1. **Deterministic Queue State Reconciliation** (current)
+2. Fail-Closed Terminal Dispatch Guard
+3. Failed Delivery Lease Cleanup And Runtime State Reconciliation
+4. Verified Provider And Model Routing Enforcement
+
+## Notes For T0
+- Treat any missing or contradictory queue projection as stale until rebuilt
+- Require Gemini review on every non-trivial PR
+- Require Codex final gate on every PR in this chain unless an explicit feature contract says otherwise
+- Do not ask for routine user confirmation during the chain
