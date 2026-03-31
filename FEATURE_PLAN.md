@@ -1,6 +1,6 @@
 # Feature: Review Contracts, Acceptance Idempotency, And Auto-Next Trials
 
-**Status**: Draft
+**Status**: Complete
 **Priority**: P0
 **Branch**: `feature/review-contract-gates-and-idempotency`
 **Risk-Class**: high
