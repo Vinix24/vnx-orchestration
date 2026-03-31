@@ -18,6 +18,12 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from auto_merge_policy import codex_final_gate_required
+from review_contract import ReviewContract
+from gemini_prompt_renderer import (
+    GeminiReviewReceipt,
+    MissingContractFieldError,
+    render_gemini_prompt,
+)
 
 
 DEFAULT_REVIEW_STACK = ["gemini_review", "codex_gate", "claude_github_optional"]
@@ -120,6 +126,57 @@ class ReviewGateManager:
         self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
+    def request_gemini_with_contract(
+        self,
+        *,
+        contract: ReviewContract,
+        mode: str = "per_pr",
+    ) -> Dict[str, Any]:
+        """Request a Gemini review driven by a canonical ReviewContract.
+
+        Renders a deliverable-aware prompt from the contract and persists the
+        request payload including the rendered prompt text and contract hash.
+
+        Raises:
+            MissingContractFieldError: when the contract is missing required fields.
+        """
+        prompt = render_gemini_prompt(contract)
+        available = self._gemini_available()
+        payload: Dict[str, Any] = {
+            "gate": "gemini_review",
+            "status": "queued" if available else "blocked",
+            "provider": "gemini_cli",
+            "branch": contract.branch,
+            "pr_id": contract.pr_id,
+            "pr_number": None,
+            "review_mode": mode,
+            "risk_class": contract.risk_class,
+            "changed_files": contract.changed_files,
+            "contract_hash": contract.content_hash,
+            "prompt": prompt,
+            "requested_at": _utc_now(),
+        }
+        if not available:
+            payload["reason"] = "gemini_not_available"
+
+        pr_slug = contract.pr_id.lower().replace("-", "")
+        request_file = self.requests_dir / f"{pr_slug}-gemini_review-contract.json"
+        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        emit_governance_receipt(
+            "review_gate_request",
+            status=payload["status"],
+            terminal="T0",
+            pr_id=contract.pr_id,
+            branch=contract.branch,
+            gate="gemini_review",
+            review_mode=mode,
+            risk_class=contract.risk_class,
+            contract_hash=contract.content_hash,
+            changed_files=contract.changed_files,
+        )
+        return payload
+
     def _request_codex(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
     ) -> Dict[str, Any]:
@@ -190,16 +247,41 @@ class ReviewGateManager:
         summary: str,
         findings: Optional[List[Dict[str, Any]]] = None,
         residual_risk: Optional[str] = None,
+        contract_hash: str = "",
+        pr_id: str = "",
     ) -> Dict[str, Any]:
-        payload = {
+        """Record a review gate result with explicit advisory/blocking finding classification.
+
+        Findings are classified by their ``severity`` field:
+        - ``"blocking"`` or ``"error"`` severity → blocking_findings
+        - all other values → advisory_findings
+
+        Both lists are always present in the payload so downstream consumers can
+        act on the classification without re-parsing the raw findings list.
+        """
+        raw_findings = findings or []
+        receipt = GeminiReviewReceipt.from_raw_findings(
+            pr_id=pr_id or str(pr_number),
+            raw_findings=raw_findings,
+            contract_hash=contract_hash,
+            reviewed_at=_utc_now(),
+        )
+
+        payload: Dict[str, Any] = {
             "gate": gate,
             "pr_number": pr_number,
+            "pr_id": pr_id or str(pr_number),
             "branch": branch,
             "status": status,
             "summary": summary,
-            "findings": findings or [],
+            "findings": raw_findings,
+            "advisory_findings": [f.to_dict() for f in receipt.advisory_findings],
+            "blocking_findings": [f.to_dict() for f in receipt.blocking_findings],
+            "advisory_count": receipt.advisory_count,
+            "blocking_count": receipt.blocking_count,
             "residual_risk": residual_risk,
-            "recorded_at": _utc_now(),
+            "contract_hash": contract_hash,
+            "recorded_at": receipt.reviewed_at,
         }
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         emit_governance_receipt(
@@ -207,11 +289,16 @@ class ReviewGateManager:
             status=status,
             terminal="T0",
             pr_number=pr_number,
+            pr_id=pr_id or str(pr_number),
             branch=branch,
             gate=gate,
             summary=summary,
-            findings=payload["findings"],
+            advisory_findings=payload["advisory_findings"],
+            blocking_findings=payload["blocking_findings"],
+            advisory_count=receipt.advisory_count,
+            blocking_count=receipt.blocking_count,
             residual_risk=residual_risk,
+            contract_hash=contract_hash,
         )
         return payload
 
