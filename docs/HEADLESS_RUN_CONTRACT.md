@@ -142,7 +142,7 @@ The run registry must persist these fields for every active or recently-complete
 | `output_artifact_path` | `str?` | completing | Path to structured output file |
 | `receipt_id` | `str?` | terminal | Receipt emitted for this run |
 
-For review-gate runs, `output_artifact_path` is not sufficient by itself. A normalized operator-readable markdown report must also exist under `$VNX_DATA_DIR/unified_reports/headless/`, and the corresponding `review_gate_result` must reference that report path.
+For review-gate runs, `output_artifact_path` is not sufficient by itself. A normalized operator-readable markdown report must also exist under `$VNX_DATA_DIR/unified_reports/` (root level, not a subdirectory), and the corresponding `review_gate_result` must reference that report path. This ensures the receipt processor fires a receipt to T0.
 
 ### 3.2 Heartbeat Contract
 

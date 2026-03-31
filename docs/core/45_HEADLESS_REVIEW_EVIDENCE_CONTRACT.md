@@ -66,7 +66,9 @@ It is the durable proof that T0 asked for the gate.
 
 Every headless review job MUST produce an operator-readable markdown report under:
 
-`$VNX_DATA_DIR/unified_reports/headless/`
+`$VNX_DATA_DIR/unified_reports/`
+
+This is the same directory that interactive terminal workers write to. The receipt processor scans this directory (root level, non-recursive) to fire receipts to T0. Headless reports MUST be written here — not in a subdirectory — so they are visible to the receipt pipeline.
 
 Recommended filename pattern:
 
@@ -148,9 +150,9 @@ Headless review jobs are not exempt from the normal VNX evidence flow.
 
 They may keep raw subprocess logs elsewhere, but they still MUST project a normalized markdown report into:
 
-`$VNX_DATA_DIR/unified_reports/headless/`
+`$VNX_DATA_DIR/unified_reports/`
 
-This keeps headless review evidence inside the same operator-visible report surface as interactive worker reports.
+This keeps headless review evidence inside the same operator-visible report surface as interactive worker reports and ensures the receipt processor fires receipts to T0.
 
 ## 7. Trial And Feature Plan Requirements
 

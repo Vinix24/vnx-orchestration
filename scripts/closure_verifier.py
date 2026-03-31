@@ -339,7 +339,7 @@ def _validate_review_evidence(
 
     # Report path validation — per headless review evidence contract, every
     # pass/fail gate result must carry a report_path pointing to a real file
-    # under $VNX_DATA_DIR/unified_reports/headless/.
+    # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir)
         if result and result.get("status") in ("pass", "fail"):

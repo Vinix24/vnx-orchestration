@@ -70,9 +70,9 @@ Stages are strictly sequential. No stage may begin while a prior stage is incomp
 |---|----------|----------|-------------------|
 | A-1 | All Feature A PRs have passing tests | CI / test output | Test command exit code 0, test files exist on disk |
 | A-2 | Gemini review gate result exists for each PR where review-stack requires it | `$VNX_STATE_DIR/review_gates/results/` | File exists, `status` field is `pass`, `blocking_count` is 0 |
-| A-3 | Gemini review normalized report exists | `$VNX_DATA_DIR/unified_reports/headless/` | File exists at the `report_path` referenced by the gate result |
+| A-3 | Gemini review normalized report exists | `$VNX_DATA_DIR/unified_reports/` | File exists at the `report_path` referenced by the gate result |
 | A-4 | Codex final gate result exists for each PR where review-stack requires it | `$VNX_STATE_DIR/review_gates/results/` | File exists, `status` field is `pass`, `blocking_count` is 0 |
-| A-5 | Codex final gate normalized report exists | `$VNX_DATA_DIR/unified_reports/headless/` | File exists at the `report_path` referenced by the gate result |
+| A-5 | Codex final gate normalized report exists | `$VNX_DATA_DIR/unified_reports/` | File exists at the `report_path` referenced by the gate result |
 | A-6 | Claude GitHub optional gate has explicit state | `$VNX_STATE_DIR/review_gates/results/` | State is `not_configured`, `configured_dry_run`, or `pass` — never silently absent |
 | A-7 | Contract hash consistency | Gate request and result files | `contract_hash` in result matches `contract_hash` in request and review contract |
 | A-8 | Closure verifier passes for Feature A | Closure verifier output | `verdict: pass` with all checks satisfied |
@@ -170,9 +170,9 @@ Identical structure to Stage 1, but for Feature B:
 |---|----------|----------|-------------------|
 | B-1 | All Feature B PRs have passing tests | CI / test output | Test command exit code 0, test files exist on disk |
 | B-2 | Gemini review gate result exists for each PR where review-stack requires it | `$VNX_STATE_DIR/review_gates/results/` | File exists, `status` field is `pass`, `blocking_count` is 0 |
-| B-3 | Gemini review normalized report exists | `$VNX_DATA_DIR/unified_reports/headless/` | File exists at the `report_path` referenced by the gate result |
+| B-3 | Gemini review normalized report exists | `$VNX_DATA_DIR/unified_reports/` | File exists at the `report_path` referenced by the gate result |
 | B-4 | Codex final gate result exists for each PR where review-stack requires it | `$VNX_STATE_DIR/review_gates/results/` | File exists, `status` field is `pass`, `blocking_count` is 0 |
-| B-5 | Codex final gate normalized report exists | `$VNX_DATA_DIR/unified_reports/headless/` | File exists at the `report_path` referenced by the gate result |
+| B-5 | Codex final gate normalized report exists | `$VNX_DATA_DIR/unified_reports/` | File exists at the `report_path` referenced by the gate result |
 | B-6 | Claude GitHub optional gate has explicit state | `$VNX_STATE_DIR/review_gates/results/` | State is `not_configured`, `configured_dry_run`, or `pass` — never silently absent |
 | B-7 | Contract hash consistency | Gate request and result files | `contract_hash` in result matches `contract_hash` in request and review contract |
 | B-8 | Closure verifier passes for Feature B | Closure verifier output | `verdict: pass` with all checks satisfied |
@@ -273,7 +273,7 @@ For each required gate on each PR, the following chain MUST be complete:
 ```
 1. Review contract materialized     → scripts/lib/review_contract.py output
 2. Gate request record exists       → $VNX_STATE_DIR/review_gates/requests/{pr_slug}-{gate}-contract.json
-3. Normalized markdown report exists → $VNX_DATA_DIR/unified_reports/headless/YYYYMMDD-HHMMSS-HEADLESS-{gate}-{pr-id}.md
+3. Normalized markdown report exists → $VNX_DATA_DIR/unified_reports/YYYYMMDD-HHMMSS-HEADLESS-{gate}-{pr-id}.md
 4. Structured gate result exists    → $VNX_STATE_DIR/review_gates/results/{pr_slug}-{gate}-contract.json
 5. contract_hash matches across 1-4 → SHA256 prefix consistent in contract, request, and result
 ```

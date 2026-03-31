@@ -71,7 +71,7 @@ class HeadlessReviewReceipt:
     status: str  # pass | fail | blocked | pending | not_configured | configured_dry_run
     summary: str
     contract_hash: str
-    report_path: str  # path under $VNX_DATA_DIR/unified_reports/headless/
+    report_path: str  # path under $VNX_DATA_DIR/unified_reports/
     blocking_findings: List[Dict[str, Any]] = field(default_factory=list)
     advisory_findings: List[Dict[str, Any]] = field(default_factory=list)
     blocking_count: int = 0

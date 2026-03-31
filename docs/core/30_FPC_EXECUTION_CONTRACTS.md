@@ -90,7 +90,7 @@ Each registered execution target in the runtime state has this canonical shape:
 3. **Capabilities are declared, not inferred**: Each target declares which task classes it can execute. The router trusts declared capabilities.
 4. **Health is queryable**: Every target must support health checks. Unhealthy targets are excluded from routing.
 5. **Channel adapters are not terminals**: Channel adapters do not occupy T1/T2/T3 slots. They are registered separately.
-6. **Review-grade headless runs emit report evidence**: When a headless run is used for governance review evidence, it must also emit a normalized markdown report under `$VNX_DATA_DIR/unified_reports/headless/`.
+6. **Review-grade headless runs emit report evidence**: When a headless run is used for governance review evidence, it must also emit a normalized markdown report under `$VNX_DATA_DIR/unified_reports/` (the same directory as interactive terminal reports, so the receipt processor picks it up).
 
 ### 2.2 Target Health States
 
