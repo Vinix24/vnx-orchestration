@@ -679,6 +679,46 @@ def _query_conversations(params: dict[str, list[str]]) -> dict:
     return result
 
 
+def _resume_conversation(data: dict) -> dict:
+    """Validate and build a resume command for a conversation session (PR-3)."""
+    from conversation_read_model import ConversationReadModel
+    from conversation_resume import resume_conversation
+
+    session_id = data.get("session_id", "")
+    if not session_id:
+        return {"ok": False, "error": "missing_session_id", "message": "session_id is required", "session_id": ""}
+
+    operator_cwd = data.get("cwd", str(PROJECT_ROOT))
+    force = bool(data.get("force", False))
+
+    db_path = str(CLAUDE_INDEX_DB)
+    if not CLAUDE_INDEX_DB.exists():
+        return {"ok": False, "error": "session_not_found", "message": "Conversation index not found", "session_id": session_id}
+
+    # Discover worktree roots
+    worktree_roots: list[str] = [str(PROJECT_ROOT)]
+    parent = PROJECT_ROOT.parent
+    base = PROJECT_ROOT.name.split("-wt")[0] if "-wt" in PROJECT_ROOT.name else PROJECT_ROOT.name
+    for sibling in parent.iterdir():
+        if sibling.is_dir() and sibling.name.startswith(base):
+            worktree_roots.append(str(sibling))
+
+    model = ConversationReadModel(
+        claude_index_db=db_path,
+        worktree_roots=worktree_roots,
+        receipt_path=str(RECEIPTS_PATH),
+    )
+
+    result = resume_conversation(
+        session_id=session_id,
+        model=model,
+        operator_cwd=operator_cwd,
+        worktree_roots=worktree_roots,
+        force=force,
+    )
+    return result.to_dict()
+
+
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
     payload = json.dumps(payload_obj).encode("utf-8")
     handler.send_response(status)
@@ -911,6 +951,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Jump failed: {exc}")
                 return
             _json_response(self, HTTPStatus.OK, response)
+            return
+
+        # /api/conversations/resume — validate and return resume command
+        if parsed_path == "/api/conversations/resume":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            try:
+                result = _resume_conversation(data)
+            except Exception as exc:
+                _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc), "session_id": data.get("session_id", "")})
+                return
+            status = HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT
+            _json_response(self, status, result)
             return
 
         if parsed_path not in ("/api/restart-process", "/api/unlock-terminal"):
