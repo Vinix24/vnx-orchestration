@@ -87,7 +87,7 @@ Define the contract for the headless review jobs used during the trial so Gemini
 
 ### Scope
 - define required receipt schema for headless review jobs
-- define required normalized report path under `$VNX_DATA_DIR/unified_reports/headless/`
+- define required normalized report path under `$VNX_DATA_DIR/unified_reports/`
 - define pass, fail, blocked, advisory, and residual-risk fields
 - define how review jobs bind to review contracts and PR ids
 - define how T0 should treat missing or contradictory review evidence
@@ -102,7 +102,7 @@ Define the contract for the headless review jobs used during the trial so Gemini
 ### Quality Gate
 `gate_pr1_headless_review_contract`:
 - [ ] Headless review receipts define pass, fail, blocked, advisory findings, and residual risk explicitly
-- [ ] Headless review results define a required report path under `$VNX_DATA_DIR/unified_reports/headless/`
+- [ ] Headless review results define a required report path under `$VNX_DATA_DIR/unified_reports/`
 - [ ] Review receipts link deterministically to PR id and review contract id
 - [ ] Missing or contradictory review evidence is explicitly representable
 - [ ] Contract aligns with current review-contract and closure-verifier architecture
