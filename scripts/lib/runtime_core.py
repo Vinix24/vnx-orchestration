@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
-from runtime_coordination import InvalidTransitionError, init_schema
+from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema
 from tmux_adapter import TmuxAdapter, load_adapter
 
 _RUNTIME_PRIMARY_FLAG = "VNX_RUNTIME_PRIMARY"
@@ -223,10 +223,31 @@ class RuntimeCore:
         dispatch_id: str,
         attempt_id: str,
     ) -> Dict[str, Any]:
-        """Record successful delivery. Transitions: delivering -> accepted."""
+        """Record successful delivery. Transitions: delivering -> accepted.
+
+        Idempotent: duplicate acceptance for an already-accepted dispatch
+        returns success=True with noop=True. Terminal-state dispatches
+        return success=False with noop_rejected=True.
+        """
         try:
-            self._broker.deliver_success(dispatch_id, attempt_id, actor="dispatcher")
-            return {"success": True, "dispatch_id": dispatch_id}
+            result = self._broker.deliver_success(dispatch_id, attempt_id, actor="dispatcher")
+            if result.get("noop"):
+                return {
+                    "success": True,
+                    "dispatch_id": dispatch_id,
+                    "noop": True,
+                    "current_state": result.get("current_state"),
+                    "reason": result.get("reason"),
+                }
+            return {"success": True, "dispatch_id": dispatch_id, "noop": False}
+        except DuplicateTransitionError as exc:
+            return {
+                "success": False,
+                "dispatch_id": dispatch_id,
+                "noop_rejected": True,
+                "current_state": exc.current_state,
+                "error": str(exc),
+            }
         except Exception as exc:
             return {"success": False, "dispatch_id": dispatch_id, "error": str(exc)}
 
