@@ -130,13 +130,19 @@ def cmd_delivery_start(args: argparse.Namespace) -> None:
 
 
 def cmd_delivery_success(args: argparse.Namespace) -> None:
-    """Record successful delivery (delivering -> accepted)."""
+    """Record successful delivery (delivering -> accepted).
+
+    Idempotent: duplicate acceptance returns exit 0 with noop=true.
+    Terminal-state rejection returns exit 1 with noop_rejected=true.
+    """
     core = _require_core()
     result = core.delivery_success(
         dispatch_id=args.dispatch_id,
         attempt_id=args.attempt_id,
     )
-    _out(result, 0 if result.get("success") else 1)
+    # No-op (duplicate acceptance) is still success from the caller's perspective
+    exit_code = 0 if result.get("success") or result.get("noop") else 1
+    _out(result, exit_code)
 
 
 def cmd_delivery_failure(args: argparse.Namespace) -> None:

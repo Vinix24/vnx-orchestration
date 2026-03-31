@@ -303,7 +303,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
         state = self.load_state()
         current_id = state.get("current_active_feature")
         if not current_id:
-            result = {"verdict": "idle", "reason": "no_active_feature", "state": state}
+            result = {"verdict": "idle", "reason": "no_active_feature"}
             state["last_closure_verification_result"] = result
             state["updated_at"] = utc_now_iso()
             self._save_state(state)
