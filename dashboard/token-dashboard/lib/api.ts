@@ -1,4 +1,4 @@
-import type { TokenStats, SessionDetail, GroupBy } from './types';
+import type { TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse } from './types';
 
 const BASE_URL = '/api/token-stats';
 
@@ -34,4 +34,23 @@ export async function fetchSessions(
   }
   const json = await res.json();
   return json.data;
+}
+
+export async function fetchConversations(
+  sortOrder: SortOrder,
+  terminal?: string,
+  worktree?: string,
+  limit?: number
+): Promise<ConversationsResponse> {
+  const params = new URLSearchParams({ sort: sortOrder });
+  if (terminal) params.set('terminal', terminal);
+  if (worktree) params.set('worktree', worktree);
+  if (limit) params.set('limit', String(limit));
+  params.set('group', 'worktree');
+
+  const res = await fetch(`/api/conversations?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch conversations: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
 }
