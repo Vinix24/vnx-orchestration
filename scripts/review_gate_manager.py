@@ -18,6 +18,20 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from auto_merge_policy import codex_final_gate_required
+from review_contract import ReviewContract
+from gemini_prompt_renderer import (
+    GeminiReviewReceipt,
+    MissingContractFieldError,
+    render_gemini_prompt,
+)
+from claude_github_receipt import (
+    ClaudeGitHubReviewReceipt,
+    STATE_NOT_CONFIGURED,
+    STATE_CONFIGURED_DRY_RUN,
+    STATE_REQUESTED,
+    STATE_BLOCKED,
+    STATE_COMPLETED,
+)
 
 
 DEFAULT_REVIEW_STACK = ["gemini_review", "codex_gate", "claude_github_optional"]
@@ -120,6 +134,199 @@ class ReviewGateManager:
         self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
+    def request_gemini_with_contract(
+        self,
+        *,
+        contract: ReviewContract,
+        mode: str = "per_pr",
+    ) -> Dict[str, Any]:
+        """Request a Gemini review driven by a canonical ReviewContract.
+
+        Renders a deliverable-aware prompt from the contract and persists the
+        request payload including the rendered prompt text and contract hash.
+
+        Raises:
+            MissingContractFieldError: when the contract is missing required fields.
+        """
+        prompt = render_gemini_prompt(contract)
+        available = self._gemini_available()
+        payload: Dict[str, Any] = {
+            "gate": "gemini_review",
+            "status": "queued" if available else "blocked",
+            "provider": "gemini_cli",
+            "branch": contract.branch,
+            "pr_id": contract.pr_id,
+            "pr_number": None,
+            "review_mode": mode,
+            "risk_class": contract.risk_class,
+            "changed_files": contract.changed_files,
+            "contract_hash": contract.content_hash,
+            "prompt": prompt,
+            "requested_at": _utc_now(),
+        }
+        if not available:
+            payload["reason"] = "gemini_not_available"
+
+        pr_slug = contract.pr_id.lower().replace("-", "")
+        request_file = self.requests_dir / f"{pr_slug}-gemini_review-contract.json"
+        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        emit_governance_receipt(
+            "review_gate_request",
+            status=payload["status"],
+            terminal="T0",
+            pr_id=contract.pr_id,
+            branch=contract.branch,
+            gate="gemini_review",
+            review_mode=mode,
+            risk_class=contract.risk_class,
+            contract_hash=contract.content_hash,
+            changed_files=contract.changed_files,
+        )
+        return payload
+
+    def request_claude_github_with_contract(
+        self,
+        *,
+        contract: ReviewContract,
+        mode: str = "per_pr",
+    ) -> ClaudeGitHubReviewReceipt:
+        """Request a Claude GitHub review driven by a canonical ReviewContract.
+
+        Determines the explicit review state from environment configuration and
+        persists the request payload linked to the contract hash. The returned
+        receipt makes the state auditable so T0 can see whether the GitHub
+        review contributed evidence or was intentionally absent.
+
+        State semantics:
+          - ``not_configured``     — gh CLI missing or env var not set
+          - ``configured_dry_run`` — env configured; trigger env var not set
+          - ``requested``          — gh pr comment successfully posted
+          - ``blocked``            — trigger attempted but gh CLI call failed
+
+        The receipt is linked to the ReviewContract via ``contract_hash``.
+        """
+        configured = self._claude_github_configured()
+        requested_at = _utc_now()
+        comment_body = os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
+
+        if not configured:
+            state = STATE_NOT_CONFIGURED
+            reason: Optional[str] = "claude_github_not_configured"
+            stderr_detail: Optional[str] = None
+        elif os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") != "1":
+            state = STATE_CONFIGURED_DRY_RUN
+            reason = None
+            stderr_detail = None
+        else:
+            proc = subprocess.run(
+                ["gh", "pr", "comment", str(contract.pr_id), "--body", comment_body],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                state = STATE_REQUESTED
+                reason = None
+                stderr_detail = None
+            else:
+                state = STATE_BLOCKED
+                reason = "claude_github_trigger_failed"
+                stderr_detail = proc.stderr.strip()
+
+        receipt = ClaudeGitHubReviewReceipt(
+            pr_id=contract.pr_id,
+            state=state,
+            contract_hash=contract.content_hash,
+            branch=contract.branch,
+            pr_number=None,
+            gh_comment_body=comment_body if state == STATE_REQUESTED else "",
+            reason=reason,
+            requested_at=requested_at,
+        )
+
+        payload = receipt.to_dict()
+        if stderr_detail:
+            payload["stderr"] = stderr_detail
+        payload["review_mode"] = mode
+        payload["risk_class"] = contract.risk_class
+        payload["changed_files"] = contract.changed_files
+
+        pr_slug = contract.pr_id.lower().replace("-", "")
+        request_file = self.requests_dir / f"{pr_slug}-claude_github_optional-contract.json"
+        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        emit_governance_receipt(
+            "review_gate_request",
+            status=state,
+            terminal="T0",
+            pr_id=contract.pr_id,
+            branch=contract.branch,
+            gate="claude_github_optional",
+            review_mode=mode,
+            risk_class=contract.risk_class,
+            contract_hash=contract.content_hash,
+            changed_files=contract.changed_files,
+            contributed_evidence=receipt.contributed_evidence(),
+            was_intentionally_absent=receipt.was_intentionally_absent(),
+        )
+        return receipt
+
+    def record_claude_github_result(
+        self,
+        *,
+        pr_id: str,
+        branch: str,
+        status: str,
+        summary: str,
+        findings: Optional[List[Dict[str, Any]]] = None,
+        contract_hash: str = "",
+        completed_at: str = "",
+        pr_number: Optional[int] = None,
+    ) -> ClaudeGitHubReviewReceipt:
+        """Record a Claude GitHub review result linked to a ReviewContract.
+
+        Classifies findings into advisory/blocking and persists the result
+        with the contract_hash so T0 can correlate with the original contract.
+        """
+        raw_findings = findings or []
+        result_payload: Dict[str, Any] = {
+            "gate": "claude_github_optional",
+            "pr_id": pr_id,
+            "pr_number": pr_number,
+            "branch": branch,
+            "status": status,
+            "summary": summary,
+            "findings": raw_findings,
+            "contract_hash": contract_hash,
+            "requested_at": "",
+            "completed_at": completed_at or _utc_now(),
+        }
+        receipt = ClaudeGitHubReviewReceipt.from_result_payload(result_payload)
+
+        full_payload = receipt.to_dict()
+        full_payload["findings"] = raw_findings
+
+        result_path = self.results_dir / f"{pr_id.lower().replace('-', '')}-claude_github_optional-contract.json"
+        result_path.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
+
+        emit_governance_receipt(
+            "review_gate_result",
+            status=status,
+            terminal="T0",
+            pr_id=pr_id,
+            branch=branch,
+            gate="claude_github_optional",
+            summary=summary,
+            advisory_findings=[f.to_dict() for f in receipt.advisory_findings],
+            blocking_findings=[f.to_dict() for f in receipt.blocking_findings],
+            advisory_count=receipt.advisory_count,
+            blocking_count=receipt.blocking_count,
+            contract_hash=contract_hash,
+            contributed_evidence=receipt.contributed_evidence(),
+        )
+        return receipt
+
     def _request_codex(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
     ) -> Dict[str, Any]:
@@ -190,16 +397,41 @@ class ReviewGateManager:
         summary: str,
         findings: Optional[List[Dict[str, Any]]] = None,
         residual_risk: Optional[str] = None,
+        contract_hash: str = "",
+        pr_id: str = "",
     ) -> Dict[str, Any]:
-        payload = {
+        """Record a review gate result with explicit advisory/blocking finding classification.
+
+        Findings are classified by their ``severity`` field:
+        - ``"blocking"`` or ``"error"`` severity → blocking_findings
+        - all other values → advisory_findings
+
+        Both lists are always present in the payload so downstream consumers can
+        act on the classification without re-parsing the raw findings list.
+        """
+        raw_findings = findings or []
+        receipt = GeminiReviewReceipt.from_raw_findings(
+            pr_id=pr_id or str(pr_number),
+            raw_findings=raw_findings,
+            contract_hash=contract_hash,
+            reviewed_at=_utc_now(),
+        )
+
+        payload: Dict[str, Any] = {
             "gate": gate,
             "pr_number": pr_number,
+            "pr_id": pr_id or str(pr_number),
             "branch": branch,
             "status": status,
             "summary": summary,
-            "findings": findings or [],
+            "findings": raw_findings,
+            "advisory_findings": [f.to_dict() for f in receipt.advisory_findings],
+            "blocking_findings": [f.to_dict() for f in receipt.blocking_findings],
+            "advisory_count": receipt.advisory_count,
+            "blocking_count": receipt.blocking_count,
             "residual_risk": residual_risk,
-            "recorded_at": _utc_now(),
+            "contract_hash": contract_hash,
+            "recorded_at": receipt.reviewed_at,
         }
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         emit_governance_receipt(
@@ -207,11 +439,16 @@ class ReviewGateManager:
             status=status,
             terminal="T0",
             pr_number=pr_number,
+            pr_id=pr_id or str(pr_number),
             branch=branch,
             gate=gate,
             summary=summary,
-            findings=payload["findings"],
+            advisory_findings=payload["advisory_findings"],
+            blocking_findings=payload["blocking_findings"],
+            advisory_count=receipt.advisory_count,
+            blocking_count=receipt.blocking_count,
             residual_risk=residual_risk,
+            contract_hash=contract_hash,
         )
         return payload
 

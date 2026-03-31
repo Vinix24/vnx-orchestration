@@ -1,268 +1,265 @@
-# Feature: Headless Run Observability Burn-In
+# Feature: Review Contracts, Acceptance Idempotency, And Auto-Next Trials
 
 **Status**: Complete
-**Priority**: P1
-**Branch**: `feature/headless-run-observability-burnin`
-**Baseline**: FP-A through FP-D merged; adoption, packaging, and Pythonization feature merged on `main`
-**Runtime policy**: Use this feature as an operational proving ground for mixed execution, not as a broad autonomy expansion
-**Burn-in outcome**: Controlled rollout GO; small non-blocking follow-up items remain split out as separate work
-**Burn-in fallout included here**: worktree path resolution and canonical intelligence sync hardening needed to keep standalone worktree runtime local and intelligence flow canonical
-
-This feature is the recommended first burn-in feature after the adoption/productization work. It uses a small real feature to validate the newly hardened VNX runtime under realistic execution, while improving one of the most important unresolved areas: observability of headless runs.
+**Priority**: P0
+**Branch**: `feature/review-contract-gates-and-idempotency`
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
 
 Primary objective:
-Make headless execution inspectable, classifiable, and governable enough for real operator use.
+Turn the new roadmap/autopilot foundation into a deliverable-aware governance loop by fixing duplicate acceptance risk, generating deterministic review contracts per PR, and proving the next-feature workflow with controlled auto-next trials.
 
-Secondary objective:
-Use a small real feature to burn in starter mode, operator mode, mixed execution, receipts, provenance, recovery, and closure discipline together.
-
-Estimated effort: ~5-8 engineering days across PR-0 through PR-4.
-
-## Why This Is The Right Burn-In Feature
-
-- It is small enough to be safe
-- It touches real runtime behavior, not just docs
-- It exercises mixed execution without forcing a full routing redesign
-- It creates immediate operator value
-- It exposes whether headless execution is truly ready or only unit-tested
-
-## Design Principles
-
-- observability before more autonomy
-- operator clarity before more abstraction
-- structured run state before richer dashboards
-- minimal new control-plane surface, maximum signal
-- prove headless runtime behavior before scaling it
-
-## Governance Rules
-
-| # | Rule | Rationale |
-|---|------|-----------|
-| G-R1 | **Headless runs must remain receipt-producing and provenance-linked** | No blind execution |
-| G-R2 | **Operator must be able to inspect failed or hung runs without guesswork** | Recovery must be actionable |
-| G-R3 | **No feature closure without real burn-in evidence** | This feature exists to prove operation |
-| G-R4 | **No hidden retry or recovery behavior** | Headless control must stay explainable |
-| G-R5 | **This feature must not weaken interactive tmux flows** | Headless hardening cannot regress operator mode |
-| G-R6 | **No claimed test totals without real file and command verification** | Burn-in evidence must stay trustworthy |
-| G-R7 | **No merge-ready claim without push, PR, CI, and truthful metadata** | Closure discipline from earlier features remains mandatory |
-| G-R8 | **No pseudo-parallel dispatching onto the same terminal** | One terminal cannot provide true parallel execution for multiple active runs |
-
-## Architecture Rules
-
-| # | Rule | Description |
-|---|------|-------------|
-| A-R1 | **Every headless run gets a durable run identity** |
-| A-R2 | **Run state must capture heartbeat and last-output timestamps** |
-| A-R3 | **Logs must be persisted as artifacts, not just streamed to stdout** |
-| A-R4 | **Exit outcomes must be classified, not just pass/fail** |
-| A-R5 | **Process control must be group-aware where relevant** |
-| A-R6 | **The first version can be simple, but not opaque** |
-| A-R7 | **Interactive tmux flows must remain compatible with the new observability layer** |
-
-## Source Of Truth
-
-- headless run registry/state files or canonical runtime records
-- run log artifacts
-- receipts linked to runs
-- operator recovery commands and inspection views
-- burn-in certification report
-
-## Known Failure Surface
-
-1. Headless execution is currently more "possible" than fully operationally trusted
-2. Process still alive does not mean useful output is still happening
-3. Failing runs are harder to inspect than interactive terminal runs
-4. Hung/no-output situations need better detection
-5. Recovery actions need more precise signals than PID existence alone
-
-## What MUST NOT Be Done
-
-1. Do NOT introduce a giant new runtime substrate in this feature
-2. Do NOT replace tmux or rewrite the whole execution model
-3. Do NOT add broad new autonomy policies here
-4. Do NOT add fake observability that cannot drive operator decisions
-5. Do NOT close the feature on unit tests alone
+## Open Follow-Up Findings
+- Duplicate acceptance / duplicate dispatch handling still lacks a hard idempotency guard in the dispatch lifecycle.
+- Review gates exist, but reviewer prompts are not yet driven by structured deliverables and acceptance criteria.
+- Closure verification is stronger, but reviewer evidence and deliverable contracts are not yet fused into one canonical gate contract.
+- Auto-next exists at the roadmap layer, but has not yet been proven against real follow-up feature execution using review contracts.
 
 ## Dependency Flow
-
 ```text
-PR-0 -> PR-1
-PR-0 -> PR-2
-PR-1, PR-2 -> PR-3
-PR-3 -> PR-4
+PR-0 (no dependencies)
+PR-1 (no dependencies)
+PR-1 -> PR-2
+PR-1 -> PR-3
+PR-1 -> PR-4
+PR-0, PR-2, PR-3, PR-4 -> PR-5
+PR-5 -> PR-6
 ```
+
+## PR-0: Dispatch Acceptance Idempotency Guard
+**Track**: C
+**Priority**: P0
+**Complexity**: High
+**Risk**: High
+**Skill**: @architect
+**Requires-Model**: opus
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 3-5 hours
+**Dependencies**: []
+
+### Description
+Add a canonical acceptance idempotency guard so duplicate acceptance events and already-terminal dispatches are rejected or treated as explicit no-ops instead of being silently reprocessed.
+
+### Scope
+- `scripts/lib/runtime_coordination.py`
+- `scripts/dispatcher_v8_minimal.sh`
+- `scripts/receipt_processor_v4.sh`
+- focused lifecycle tests around duplicate acceptance and terminal-state repeats
+
+### Success Criteria
+- duplicate acceptance for an already accepted/running/terminal dispatch is deterministically blocked or no-op classified
+- no new parallel lifecycle truth is introduced outside the canonical runtime coordination layer
+- existing dispatch lifecycle behavior remains backward-compatible for valid forward transitions
+
+### Quality Gate
+`gate_pr0_acceptance_idempotency`:
+- [ ] Duplicate acceptance for an already terminal dispatch is rejected or no-op classified with explicit evidence
+- [ ] Forward-only valid dispatch transitions still pass without regression
+- [ ] Existing dispatch lifecycle tests and new duplicate-acceptance tests pass
 
 ---
 
-## PR-0: Headless Run Contract And Failure Taxonomy
+## PR-1: Review Contract Schema And Materializer
 **Track**: C
-**Priority**: P1
+**Priority**: P0
 **Complexity**: Medium
 **Risk**: Medium
 **Skill**: @architect
 **Requires-Model**: opus
-**Estimated Time**: 0.5-1 day
+**Risk-Class**: medium
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 2-4 hours
 **Dependencies**: []
 
 ### Description
-Define what a headless run is in VNX terms, which state it must emit, and how failures are classified.
+Define the canonical review contract schema and build the materializer that derives it from FEATURE_PLAN, PR metadata, changed files, declared tests, quality gates, and deterministic verifier findings.
 
 ### Scope
-- define headless run identity contract
-- define required runtime fields
-- define exit/failure classes
-- define minimum operator inspection expectations
-- define burn-in proof criteria
+- review contract schema and serializer
+- mapping from PR queue + feature plan metadata into a review contract document
+- stable fields for deliverables, non-goals, changed files, test evidence, and closure stage
 
 ### Success Criteria
-- headless run state model is explicit
-- failure classes are concrete and usable
-- later implementation PRs share one contract
+- each PR can produce one structured review contract without handwritten prompt assembly
+- contract fields cover deliverables, non-goals, tests, risk class, merge policy, and review stack
+- contract generation is deterministic for the same inputs
 
 ### Quality Gate
-`gate_pr0_headless_contract`:
-- [ ] Headless run identity and lifecycle are defined clearly
-- [ ] Failure taxonomy is actionable for recovery
-- [ ] Minimum observability contract is explicit
-- [ ] Burn-in proof criteria are measurable
+`gate_pr1_review_contract_schema`:
+- [ ] Review contract schema covers deliverables, non-goals, tests, risk class, merge policy, and review stack
+- [ ] Contract generation is deterministic for identical inputs
+- [ ] Schema serialization and parsing tests pass
 
 ---
 
-## PR-1: Run Registry, Heartbeats, And Output Timestamps
+## PR-2: Gemini Review Prompt Renderer And Receipt Contract
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: Medium
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 1-2 days
-**Dependencies**: [PR-0]
+**Risk-Class**: medium
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 2-4 hours
+**Dependencies**: [PR-1]
 
 ### Description
-Add the core runtime data needed to observe headless runs while they are live.
+Render deliverable-aware Gemini review prompts from the canonical review contract and emit richer review-gate receipts that show exactly what was checked.
 
 ### Scope
-- add headless run registry/state representation
-- persist run id, dispatch id, target, mode, pid/pgid where relevant
-- capture `started_at`, `heartbeat_at`, and `last_output_at`
-- expose result status and result class fields
+- Gemini prompt template(s) driven by review contract fields
+- structured receipt payloads for advisory vs blocking findings
+- tests for prompt rendering completeness and missing-field handling
 
 ### Success Criteria
-- active headless runs become visible in structured state
-- liveness is better than simple process existence
-- recovery has better signals to work from
+- Gemini review prompts include deliverables, non-goals, declared tests, changed files, and deterministic findings
+- emitted receipts clearly distinguish advisory and blocking findings
+- missing contract fields fail explicitly instead of silently degrading the prompt
 
 ### Quality Gate
-`gate_pr1_headless_registry`:
-- [ ] Headless run identity is durable and inspectable
-- [ ] Heartbeat and last-output timestamps are persisted
-- [ ] Runtime state is sufficient for operator inspection
-- [ ] Tests cover active, idle, and completed states
+`gate_pr2_gemini_contract_review`:
+- [ ] Gemini prompts include deliverables, non-goals, changed files, and declared tests
+- [ ] Advisory vs blocking findings are emitted distinctly in review receipts
+- [ ] Missing review-contract fields fail explicitly
 
 ---
 
-## PR-2: Structured Logs, Artifacts, And Exit Classification
-**Track**: B
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Estimated Time**: 1-2 days
-**Dependencies**: [PR-0]
-
-### Description
-Persist useful output and classify results so failed headless runs stop looking like black boxes.
-
-### Scope
-- tee stdout/stderr to durable artifact files
-- add log pointers into run state and/or receipts
-- classify exit outcomes:
-  - success
-  - tool_failure
-  - infra_failure
-  - timeout
-  - no_output_hang
-  - interrupted
-
-### Success Criteria
-- operators can inspect a run after failure
-- exit reason is more informative than exit code alone
-- receipts and artifacts stay linked
-
-### Quality Gate
-`gate_pr2_logs_and_classification`:
-- [ ] Headless run logs are persisted as artifacts
-- [ ] Exit outcomes are classified consistently
-- [ ] Receipts or linked state expose log pointers
-- [ ] Tests cover multiple exit classes
-
----
-
-## PR-3: Operator Inspection, Recovery Hooks, And Smoke Paths
-**Track**: B
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: High
-**Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Estimated Time**: 1-2 days
-**Dependencies**: [PR-1, PR-2]
-
-### Description
-Turn the new observability data into something operators can actually use during recovery and diagnosis.
-
-### Scope
-- add inspection command or view for headless runs
-- add operator-facing summary for last output, status, and exit class
-- connect headless state to recovery flow where appropriate
-- add smoke scenarios for:
-  - success
-  - timeout
-  - no-output hang
-  - interrupted run
-
-### Success Criteria
-- operators can tell what happened without manual file spelunking
-- recovery has stronger diagnostics
-- the feature is useful during real burn-in, not just on paper
-
-### Quality Gate
-`gate_pr3_operator_inspection`:
-- [ ] Operator can inspect active and failed headless runs cleanly
-- [ ] Recovery paths use the new observability signals where relevant
-- [ ] Smoke scenarios cover success, timeout, hang, and interrupt cases
-- [ ] No regression is introduced to interactive operator mode
-
----
-
-## PR-4: Burn-In Certification And Residual Risk Report
+## PR-3: Codex Final Gate Prompt Renderer And Headless Enforcement
 **Track**: C
+**Priority**: P0
+**Complexity**: High
+**Risk**: High
+**Skill**: @architect
+**Requires-Model**: opus
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 3-5 hours
+**Dependencies**: [PR-1]
+
+### Description
+Use the review contract to drive Codex final-gate prompts and enforce that high-risk/runtime/governance PRs cannot bypass the Codex gate when the policy requires it.
+
+### Scope
+- deliverable-aware Codex final gate prompt renderer
+- required/optional Codex gate enforcement based on change scope and policy
+- structured residual-risk and rerun requirements in final-gate receipts
+
+### Success Criteria
+- high-risk/runtime/governance PRs are blocked without a valid Codex final gate result
+- Codex prompts include deliverables, non-goals, tests, changed files, deterministic findings, and closure stage
+- final-gate receipts capture pass/fail/blocked plus residual risk and rerun requirements
+
+### Quality Gate
+`gate_pr3_codex_final_gate_contract`:
+- [ ] Runtime or governance PRs cannot clear without a Codex final gate when policy requires it
+- [ ] Codex prompts include deliverables, non-goals, tests, changed files, and closure stage
+- [ ] Final-gate receipts include findings, residual risk, and rerun requirements
+
+---
+
+## PR-4: Claude GitHub Review Bridge And Evidence Linkage
+**Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: Medium
+**Skill**: @backend-developer
+**Requires-Model**: sonnet
+**Risk-Class**: medium
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 2-3 hours
+**Dependencies**: [PR-1]
+
+### Description
+Turn the optional Claude GitHub review path into a first-class evidence source by linking GitHub review invocation/results into the same contract and receipt model.
+
+### Scope
+- GitHub review request payload integration with review contracts
+- receipt linkage from optional Claude review requests/results
+- explicit `not_configured` / `configured_dry_run` / `requested` semantics
+
+### Success Criteria
+- Claude GitHub review requests are linked to the same review contract as Gemini/Codex
+- optional review states are explicit and auditable
+- T0 can see whether GitHub review contributed evidence or was intentionally absent
+
+### Quality Gate
+`gate_pr4_claude_review_linkage`:
+- [ ] Claude GitHub review request state is linked to the same review contract as Gemini and Codex
+- [ ] Optional review states are explicit and auditable
+- [ ] Review evidence linkage tests pass
+
+---
+
+## PR-5: Closure Verifier Contract Checks And Required Evidence Wiring
+**Track**: C
+**Priority**: P0
+**Complexity**: High
+**Risk**: High
 **Skill**: @quality-engineer
 **Requires-Model**: opus
-**Estimated Time**: 1 day
-**Dependencies**: [PR-3]
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 3-5 hours
+**Dependencies**: [PR-0, PR-2, PR-3, PR-4]
 
 ### Description
-Prove the feature in realistic use and document whether headless execution is operationally trustworthy enough for broader rollout.
+Make closure verification consume review contracts and required review-gate evidence so T0 cannot claim closure-ready without the contractually required reviewers and deterministic deliverable evidence.
 
 ### Scope
-- run the feature through real starter/operator workflows
-- validate receipts, provenance, and operator inspection paths
-- validate at least one real headless task flow
-- produce a certification report and residual risk summary
+- closure verifier checks for required review contract presence
+- gate-result validation against review stack and risk policy
+- explicit failures for missing evidence, missing required reviewer, or scope drift
 
 ### Success Criteria
-- burn-in evidence exists beyond unit tests
-- residual headless risks are explicit
-- next roadmap decision can be based on real evidence
+- closure verifier fails when required review contracts or required gate results are missing
+- deterministic and reviewer evidence are both visible in closure output
+- T0 cannot claim closure-ready with partial or mismatched review evidence
 
 ### Quality Gate
-`gate_pr4_burnin_certification`:
-- [ ] Burn-in report includes real operator-run evidence
-- [ ] At least one real headless task flow is validated end-to-end
-- [ ] Receipts and provenance remain correct during headless runs
-- [ ] Residual risks are explicit enough to guide the next cleanup or routing phase
+`gate_pr5_closure_contract_enforcement`:
+- [ ] Closure verifier fails when required review contracts or required gate results are missing
+- [ ] Closure output shows both deterministic and reviewer evidence
+- [ ] False-green closure claims are blocked in automated tests
+
+---
+
+## PR-6: Auto-Next Trial Harness And Controlled Certification
+**Track**: C
+**Priority**: P0
+**Complexity**: High
+**Risk**: High
+**Skill**: @quality-engineer
+**Requires-Model**: opus
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 3-4 hours
+**Dependencies**: [PR-5]
+
+### Description
+Prove the new loop with controlled trial sequences: one feature merges, required evidence clears, and the next feature loads only when drift/fix-up conditions are satisfied.
+
+### Scope
+- integration tests for feature A -> optional fix-up -> feature B advancement
+- certification report for controlled rollout of the multi-feature loop
+- explicit residual-risk summary for autonomous follow-up usage
+
+### Success Criteria
+- roadmap auto-next only advances after merged-to-main + green checks + closure verifier pass
+- blocking drift inserts a fix-up feature before continuing
+- certification evidence exists for at least one controlled multi-feature trial path
+
+### Quality Gate
+`gate_pr6_auto_next_trials`:
+- [ ] Auto-next advances only after merged-to-main, green checks, and closure verifier pass
+- [ ] Blocking drift inserts a fix-up feature before the next feature loads
+- [ ] Controlled multi-feature trial certification evidence exists with residual risk documented

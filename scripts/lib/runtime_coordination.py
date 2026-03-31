@@ -42,6 +42,14 @@ DISPATCH_STATES = frozenset({
     "dead_letter",
 })
 
+# Terminal dispatch states: no outgoing transitions permitted.
+TERMINAL_DISPATCH_STATES = frozenset({"completed", "expired", "dead_letter"})
+
+# States that indicate acceptance has already occurred (accepted or beyond).
+ACCEPTED_OR_BEYOND_STATES = frozenset({
+    "accepted", "running", "completed", "timed_out", "expired", "dead_letter",
+})
+
 LEASE_STATES = frozenset({
     "idle",
     "leased",
@@ -89,6 +97,33 @@ class InvalidTransitionError(ValueError):
     """Raised when a state transition is not permitted."""
 
 
+class DuplicateTransitionError(InvalidTransitionError):
+    """Raised when a transition is a no-op because the target state was already reached.
+
+    This is a subclass of InvalidTransitionError so existing catch blocks
+    continue to work, but callers that want idempotent behavior can catch
+    this specifically and treat it as a safe no-op.
+
+    Attributes:
+        dispatch_id: The dispatch that was already in the target state.
+        current_state: The state the dispatch is currently in.
+        requested_state: The state that was requested.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        dispatch_id: str = "",
+        current_state: str = "",
+        requested_state: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.dispatch_id = dispatch_id
+        self.current_state = current_state
+        self.requested_state = requested_state
+
+
 def validate_dispatch_state(state: str) -> None:
     if state not in DISPATCH_STATES:
         raise InvalidStateError(f"Unknown dispatch state: {state!r}. Valid: {sorted(DISPATCH_STATES)}")
@@ -108,6 +143,16 @@ def validate_dispatch_transition(from_state: str, to_state: str) -> None:
             f"Dispatch transition {from_state!r} -> {to_state!r} is not permitted. "
             f"Allowed from {from_state!r}: {sorted(allowed) or 'none (terminal state)'}"
         )
+
+
+def is_terminal_dispatch_state(state: str) -> bool:
+    """Return True if the dispatch state has no outgoing transitions."""
+    return state in TERMINAL_DISPATCH_STATES
+
+
+def is_accepted_or_beyond(state: str) -> bool:
+    """Return True if the dispatch has already been accepted or progressed past acceptance."""
+    return state in ACCEPTED_OR_BEYOND_STATES
 
 
 def validate_lease_transition(from_state: str, to_state: str) -> None:
@@ -388,6 +433,91 @@ def transition_dispatch(
         conn.execute(
             "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
         ).fetchone()
+    )
+
+
+def transition_dispatch_idempotent(
+    conn: sqlite3.Connection,
+    *,
+    dispatch_id: str,
+    to_state: str,
+    actor: str = "runtime",
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Idempotent dispatch transition: no-op if already at or beyond target state.
+
+    Unlike transition_dispatch, this function does NOT raise for duplicate
+    transitions. Instead it:
+      - Returns the current row unchanged if the dispatch is already in
+        to_state or has progressed past it.
+      - Appends a 'dispatch_noop' coordination event for audit visibility.
+      - Raises DuplicateTransitionError only for terminal states where
+        re-acceptance is explicitly rejected (completed, expired, dead_letter).
+
+    For valid forward transitions, behaves identically to transition_dispatch.
+
+    Returns the dispatch row as a dict (possibly unchanged for no-ops).
+    Raises KeyError if dispatch_id not found.
+    Raises DuplicateTransitionError if dispatch is in a terminal state.
+    Raises InvalidTransitionError for genuinely invalid transitions.
+    """
+    row = conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"Dispatch not found: {dispatch_id!r}")
+
+    from_state = row["state"]
+
+    # Already in the requested state — pure no-op
+    if from_state == to_state:
+        _append_event(
+            conn,
+            event_type="dispatch_noop",
+            entity_type="dispatch",
+            entity_id=dispatch_id,
+            from_state=from_state,
+            to_state=to_state,
+            actor=actor,
+            reason=reason or f"idempotent no-op: already in {to_state!r}",
+            metadata=metadata,
+        )
+        return dict(row)
+
+    # Terminal state — reject explicitly
+    if is_terminal_dispatch_state(from_state):
+        raise DuplicateTransitionError(
+            f"Dispatch {dispatch_id!r} is in terminal state {from_state!r}; "
+            f"cannot transition to {to_state!r}",
+            dispatch_id=dispatch_id,
+            current_state=from_state,
+            requested_state=to_state,
+        )
+
+    # Already past the requested state (e.g., requesting 'accepted' but already 'running')
+    if to_state == "accepted" and is_accepted_or_beyond(from_state):
+        _append_event(
+            conn,
+            event_type="dispatch_noop",
+            entity_type="dispatch",
+            entity_id=dispatch_id,
+            from_state=from_state,
+            to_state=to_state,
+            actor=actor,
+            reason=reason or f"idempotent no-op: already at {from_state!r} (past {to_state!r})",
+            metadata=metadata,
+        )
+        return dict(row)
+
+    # Valid forward transition — delegate to the strict version
+    return transition_dispatch(
+        conn,
+        dispatch_id=dispatch_id,
+        to_state=to_state,
+        actor=actor,
+        reason=reason,
+        metadata=metadata,
     )
 
 

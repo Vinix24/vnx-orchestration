@@ -45,16 +45,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from runtime_coordination import (
+    ACCEPTED_OR_BEYOND_STATES,
+    TERMINAL_DISPATCH_STATES,
+    DuplicateTransitionError,
+    InvalidStateError,
+    InvalidTransitionError,
     create_attempt,
     get_connection,
     get_dispatch,
     increment_attempt_count,
     init_schema,
+    is_accepted_or_beyond,
+    is_terminal_dispatch_state,
     register_dispatch,
     transition_dispatch,
+    transition_dispatch_idempotent,
     update_attempt,
-    InvalidTransitionError,
-    InvalidStateError,
 )
 
 try:
@@ -421,26 +427,91 @@ class DispatchBroker:
         attempt_id: str,
         *,
         actor: str = "broker",
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Record that delivery succeeded and the terminal ACKed receipt.
 
         Transitions: delivering -> accepted.
         Updates the attempt state to 'succeeded'.
+
+        Idempotent: if the dispatch is already in 'accepted' or has
+        progressed beyond it (running, completed, etc.), this returns a
+        no-op result instead of raising. Terminal states (completed,
+        expired, dead_letter) are explicitly rejected with a
+        DuplicateTransitionError.
 
         Args:
             dispatch_id: Dispatch that was delivered.
             attempt_id:  Attempt ID returned from claim().
             actor:       Actor label recorded in coordination events.
 
+        Returns:
+            Dict with 'transitioned' (bool) and 'noop' (bool) keys.
+            When noop=True, 'current_state' and 'reason' explain why.
+
         Raises:
             BrokerError: If the dispatch does not exist.
-            InvalidTransitionError: If the transition is not permitted.
+            DuplicateTransitionError: If the dispatch is in a terminal state.
         """
         with get_connection(self._state_dir) as conn:
             row = get_dispatch(conn, dispatch_id)
             if row is None:
                 raise BrokerError(f"deliver_success: dispatch not found: {dispatch_id!r}")
 
+            current_state = row["state"]
+
+            # Idempotent: already accepted or beyond — safe no-op
+            if is_accepted_or_beyond(current_state):
+                reason = (
+                    f"duplicate acceptance no-op: dispatch already in {current_state!r}"
+                    if current_state == "accepted"
+                    else f"acceptance no-op: dispatch already progressed to {current_state!r}"
+                )
+
+                # Terminal states get rejected, not silently swallowed
+                if is_terminal_dispatch_state(current_state):
+                    from runtime_coordination import _append_event, _now_utc
+                    _append_event(
+                        conn,
+                        event_type="dispatch_acceptance_rejected",
+                        entity_type="dispatch",
+                        entity_id=dispatch_id,
+                        from_state=current_state,
+                        to_state="accepted",
+                        actor=actor,
+                        reason=f"rejected: dispatch in terminal state {current_state!r}",
+                        metadata={"attempt_id": attempt_id},
+                    )
+                    conn.commit()
+                    raise DuplicateTransitionError(
+                        f"Dispatch {dispatch_id!r} is in terminal state {current_state!r}; "
+                        f"duplicate acceptance rejected",
+                        dispatch_id=dispatch_id,
+                        current_state=current_state,
+                        requested_state="accepted",
+                    )
+
+                # Non-terminal but already accepted/running — auditable no-op
+                from runtime_coordination import _append_event
+                _append_event(
+                    conn,
+                    event_type="dispatch_noop",
+                    entity_type="dispatch",
+                    entity_id=dispatch_id,
+                    from_state=current_state,
+                    to_state="accepted",
+                    actor=actor,
+                    reason=reason,
+                    metadata={"attempt_id": attempt_id},
+                )
+                conn.commit()
+                return {
+                    "transitioned": False,
+                    "noop": True,
+                    "current_state": current_state,
+                    "reason": reason,
+                }
+
+            # Normal forward transition: delivering -> accepted
             transition_dispatch(
                 conn,
                 dispatch_id=dispatch_id,
@@ -456,6 +527,7 @@ class DispatchBroker:
                 actor=actor,
             )
             conn.commit()
+            return {"transitioned": True, "noop": False}
 
     def deliver_failure(
         self,
