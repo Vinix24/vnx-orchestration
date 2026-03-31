@@ -1,204 +1,115 @@
-# Feature: Review Contracts, Acceptance Idempotency, And Auto-Next Trials
+# Feature: Double-Feature Trial Certification
 
-**Status**: Complete
+**Status**: Draft
 **Priority**: P0
-**Branch**: `feature/review-contract-gates-and-idempotency`
+**Branch**: `feature/double-feature-trial-certification`
 **Risk-Class**: high
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 
 Primary objective:
-Turn the new roadmap/autopilot foundation into a deliverable-aware governance loop by fixing duplicate acceptance risk, generating deterministic review contracts per PR, and proving the next-feature workflow with controlled auto-next trials.
+Prove that VNX can execute two small features in sequence with real governance, real branch transitions, real review-gate evidence, and correct worktree/session continuity.
 
-## Open Follow-Up Findings
-- Duplicate acceptance / duplicate dispatch handling still lacks a hard idempotency guard in the dispatch lifecycle.
-- Review gates exist, but reviewer prompts are not yet driven by structured deliverables and acceptance criteria.
-- Closure verification is stronger, but reviewer evidence and deliverable contracts are not yet fused into one canonical gate contract.
-- Auto-next exists at the roadmap layer, but has not yet been proven against real follow-up feature execution using review contracts.
+Trial target sequence:
+- Feature A: `Inline Stale Lease Reconciliation`
+- Feature B: `Conversation Resume And Latest-First Timeline`
+
+## Trial Invariants
+- Feature B must not begin before Feature A is merged and independently closure-verified.
+- Branch/worktree transition correctness is part of the trial, not an assumed external step.
+- No pseudo-parallelism: one terminal may not carry two active dispatches at the same time.
+- Headless review jobs must return structured receipts and normalized markdown reports, not only prose.
+- Gemini review and Codex final gate must be exercised on real PRs where policy requires them.
+- Interactive Claude control must use attach/jump/resume/recover semantics, not terminal injection assumptions.
 
 ## Dependency Flow
 ```text
 PR-0 (no dependencies)
 PR-1 (no dependencies)
-PR-1 -> PR-2
-PR-1 -> PR-3
-PR-1 -> PR-4
-PR-0, PR-2, PR-3, PR-4 -> PR-5
-PR-5 -> PR-6
+PR-0, PR-1 -> PR-2
+PR-2 -> PR-3
+PR-3 -> PR-4
+PR-4 -> PR-5
 ```
 
-## PR-0: Dispatch Acceptance Idempotency Guard
+## PR-0: Trial Contract, Evidence Model, And Invariants
 **Track**: C
 **Priority**: P0
-**Complexity**: High
+**Complexity**: Medium
 **Risk**: High
 **Skill**: @architect
 **Requires-Model**: opus
 **Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Estimated Time**: 3-5 hours
-**Dependencies**: []
-
-### Description
-Add a canonical acceptance idempotency guard so duplicate acceptance events and already-terminal dispatches are rejected or treated as explicit no-ops instead of being silently reprocessed.
-
-### Scope
-- `scripts/lib/runtime_coordination.py`
-- `scripts/dispatcher_v8_minimal.sh`
-- `scripts/receipt_processor_v4.sh`
-- focused lifecycle tests around duplicate acceptance and terminal-state repeats
-
-### Success Criteria
-- duplicate acceptance for an already accepted/running/terminal dispatch is deterministically blocked or no-op classified
-- no new parallel lifecycle truth is introduced outside the canonical runtime coordination layer
-- existing dispatch lifecycle behavior remains backward-compatible for valid forward transitions
-
-### Quality Gate
-`gate_pr0_acceptance_idempotency`:
-- [ ] Duplicate acceptance for an already terminal dispatch is rejected or no-op classified with explicit evidence
-- [ ] Forward-only valid dispatch transitions still pass without regression
-- [ ] Existing dispatch lifecycle tests and new duplicate-acceptance tests pass
-
----
-
-## PR-1: Review Contract Schema And Materializer
-**Track**: C
-**Priority**: P0
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @architect
-**Requires-Model**: opus
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Estimated Time**: 2-4 hours
-**Dependencies**: []
-
-### Description
-Define the canonical review contract schema and build the materializer that derives it from FEATURE_PLAN, PR metadata, changed files, declared tests, quality gates, and deterministic verifier findings.
-
-### Scope
-- review contract schema and serializer
-- mapping from PR queue + feature plan metadata into a review contract document
-- stable fields for deliverables, non-goals, changed files, test evidence, and closure stage
-
-### Success Criteria
-- each PR can produce one structured review contract without handwritten prompt assembly
-- contract fields cover deliverables, non-goals, tests, risk class, merge policy, and review stack
-- contract generation is deterministic for the same inputs
-
-### Quality Gate
-`gate_pr1_review_contract_schema`:
-- [ ] Review contract schema covers deliverables, non-goals, tests, risk class, merge policy, and review stack
-- [ ] Contract generation is deterministic for identical inputs
-- [ ] Schema serialization and parsing tests pass
-
----
-
-## PR-2: Gemini Review Prompt Renderer And Receipt Contract
-**Track**: B
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Estimated Time**: 2-4 hours
-**Dependencies**: [PR-1]
-
-### Description
-Render deliverable-aware Gemini review prompts from the canonical review contract and emit richer review-gate receipts that show exactly what was checked.
-
-### Scope
-- Gemini prompt template(s) driven by review contract fields
-- structured receipt payloads for advisory vs blocking findings
-- tests for prompt rendering completeness and missing-field handling
-
-### Success Criteria
-- Gemini review prompts include deliverables, non-goals, declared tests, changed files, and deterministic findings
-- emitted receipts clearly distinguish advisory and blocking findings
-- missing contract fields fail explicitly instead of silently degrading the prompt
-
-### Quality Gate
-`gate_pr2_gemini_contract_review`:
-- [ ] Gemini prompts include deliverables, non-goals, changed files, and declared tests
-- [ ] Advisory vs blocking findings are emitted distinctly in review receipts
-- [ ] Missing review-contract fields fail explicitly
-
----
-
-## PR-3: Codex Final Gate Prompt Renderer And Headless Enforcement
-**Track**: C
-**Priority**: P0
-**Complexity**: High
-**Risk**: High
-**Skill**: @architect
-**Requires-Model**: opus
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Estimated Time**: 3-5 hours
-**Dependencies**: [PR-1]
-
-### Description
-Use the review contract to drive Codex final-gate prompts and enforce that high-risk/runtime/governance PRs cannot bypass the Codex gate when the policy requires it.
-
-### Scope
-- deliverable-aware Codex final gate prompt renderer
-- required/optional Codex gate enforcement based on change scope and policy
-- structured residual-risk and rerun requirements in final-gate receipts
-
-### Success Criteria
-- high-risk/runtime/governance PRs are blocked without a valid Codex final gate result
-- Codex prompts include deliverables, non-goals, tests, changed files, deterministic findings, and closure stage
-- final-gate receipts capture pass/fail/blocked plus residual risk and rerun requirements
-
-### Quality Gate
-`gate_pr3_codex_final_gate_contract`:
-- [ ] Runtime or governance PRs cannot clear without a Codex final gate when policy requires it
-- [ ] Codex prompts include deliverables, non-goals, tests, changed files, and closure stage
-- [ ] Final-gate receipts include findings, residual risk, and rerun requirements
-
----
-
-## PR-4: Claude GitHub Review Bridge And Evidence Linkage
-**Track**: B
-**Priority**: P1
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Risk-Class**: medium
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 2-3 hours
-**Dependencies**: [PR-1]
+**Dependencies**: []
 
 ### Description
-Turn the optional Claude GitHub review path into a first-class evidence source by linking GitHub review invocation/results into the same contract and receipt model.
+Define the canonical trial contract for a real two-feature run so the test has hard pass/fail rules instead of vague “it seemed to work” interpretation.
 
 ### Scope
-- GitHub review request payload integration with review contracts
-- receipt linkage from optional Claude review requests/results
-- explicit `not_configured` / `configured_dry_run` / `requested` semantics
+- define trial flow and invariants
+- define required evidence for Feature A, transition, Feature B, and end-to-end certification
+- define required branch/worktree checks and review-gate evidence
+- lock non-goals so this does not become a new orchestration rewrite
 
 ### Success Criteria
-- Claude GitHub review requests are linked to the same review contract as Gemini/Codex
-- optional review states are explicit and auditable
-- T0 can see whether GitHub review contributed evidence or was intentionally absent
+- the trial contract explicitly defines what counts as success or failure
+- required evidence is enumerated per trial stage
+- branch transition correctness is part of the trial contract
+- headless review receipts are required where policy says so
 
 ### Quality Gate
-`gate_pr4_claude_review_linkage`:
-- [ ] Claude GitHub review request state is linked to the same review contract as Gemini and Codex
-- [ ] Optional review states are explicit and auditable
-- [ ] Review evidence linkage tests pass
+`gate_pr0_double_feature_trial_contract`:
+- [ ] Contract defines pass/fail rules for Feature A, transition, Feature B, and final certification
+- [ ] Contract defines branch/worktree transition correctness as explicit evidence, not assumption
+- [ ] Contract defines required Gemini and Codex gate evidence for applicable PRs
+- [ ] Contract blocks scope creep into a broad runtime redesign
 
 ---
 
-## PR-5: Closure Verifier Contract Checks And Required Evidence Wiring
+## PR-1: Headless Review Job Contract And Evidence Receipts
+**Track**: C
+**Priority**: P0
+**Complexity**: Medium
+**Risk**: High
+**Skill**: @architect
+**Requires-Model**: opus
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 2-3 hours
+**Dependencies**: []
+
+### Description
+Define the contract for the headless review jobs used during the trial so Gemini review and Codex final gate produce structured evidence T0 can reason about.
+
+### Scope
+- define required receipt schema for headless review jobs
+- define required normalized report path under `$VNX_DATA_DIR/unified_reports/`
+- define pass, fail, blocked, advisory, and residual-risk fields
+- define how review jobs bind to review contracts and PR ids
+- define how T0 should treat missing or contradictory review evidence
+
+### Success Criteria
+- headless review jobs have a structured receipt contract
+- headless review jobs have a deterministic normalized report contract
+- Gemini and Codex results are usable as closure evidence
+- missing or contradictory review evidence becomes explicit
+- the contract fits the current review-contract architecture
+
+### Quality Gate
+`gate_pr1_headless_review_contract`:
+- [ ] Headless review receipts define pass, fail, blocked, advisory findings, and residual risk explicitly
+- [ ] Headless review results define a required report path under `$VNX_DATA_DIR/unified_reports/`
+- [ ] Review receipts link deterministically to PR id and review contract id
+- [ ] Missing or contradictory review evidence is explicitly representable
+- [ ] Contract aligns with current review-contract and closure-verifier architecture
+
+---
+
+## PR-2: Feature A Trial Execution And Certification
 **Track**: C
 **Priority**: P0
 **Complexity**: High
@@ -209,57 +120,139 @@ Turn the optional Claude GitHub review path into a first-class evidence source b
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 3-5 hours
-**Dependencies**: [PR-0, PR-2, PR-3, PR-4]
+**Dependencies**: [PR-0, PR-1]
 
 ### Description
-Make closure verification consume review contracts and required review-gate evidence so T0 cannot claim closure-ready without the contractually required reviewers and deterministic deliverable evidence.
+Execute and certify Feature A (`Inline Stale Lease Reconciliation`) under the new trial contract, including required review-gate evidence and closure verification.
 
 ### Scope
-- closure verifier checks for required review contract presence
-- gate-result validation against review stack and risk policy
-- explicit failures for missing evidence, missing required reviewer, or scope drift
+- activate Feature A plan
+- verify dispatch flow, lease behavior, and resulting evidence
+- require Gemini review and Codex final gate on applicable PRs
+- capture closure evidence and merge-readiness verdict for Feature A
 
 ### Success Criteria
-- closure verifier fails when required review contracts or required gate results are missing
-- deterministic and reviewer evidence are both visible in closure output
-- T0 cannot claim closure-ready with partial or mismatched review evidence
+- Feature A completes with required tests, review receipts, and closure evidence
+- stale lease behavior is exercised as intended for the trial
+- closure verification is explicit and auditable
+- residual risks for Feature A are documented before transition
 
 ### Quality Gate
-`gate_pr5_closure_contract_enforcement`:
-- [ ] Closure verifier fails when required review contracts or required gate results are missing
-- [ ] Closure output shows both deterministic and reviewer evidence
-- [ ] False-green closure claims are blocked in automated tests
+`gate_pr2_feature_a_trial_certification`:
+- [ ] All Feature A required tests pass
+- [ ] Gemini review receipt exists and all blocking findings are closed where policy requires review
+- [ ] Codex final gate receipt exists and all required checks pass where policy requires final gate
+- [ ] Required headless review reports exist at the report paths referenced by the gate results
+- [ ] Feature A closure evidence and residual risk note are complete before transition
 
 ---
 
-## PR-6: Auto-Next Trial Harness And Controlled Certification
+## PR-3: Branch, Worktree, And Auto-Next Transition Validation
 **Track**: C
 **Priority**: P0
 **Complexity**: High
 **Risk**: High
-**Skill**: @quality-engineer
+**Skill**: @architect
 **Requires-Model**: opus
 **Risk-Class**: high
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 3-4 hours
-**Dependencies**: [PR-5]
+**Dependencies**: [PR-2]
 
 ### Description
-Prove the new loop with controlled trial sequences: one feature merges, required evidence clears, and the next feature loads only when drift/fix-up conditions are satisfied.
+Validate the transition between Feature A and Feature B so the next feature is loaded only after correct branch/worktree state, merge verification, and closure gates are satisfied.
 
 ### Scope
-- integration tests for feature A -> optional fix-up -> feature B advancement
-- certification report for controlled rollout of the multi-feature loop
-- explicit residual-risk summary for autonomous follow-up usage
+- verify Feature A merged-to-main state
+- verify next-feature materialization behavior
+- verify branch/worktree transition correctness
+- verify no stale queue, stale lease, or stale session state leaks into Feature B start
 
 ### Success Criteria
-- roadmap auto-next only advances after merged-to-main + green checks + closure verifier pass
-- blocking drift inserts a fix-up feature before continuing
-- certification evidence exists for at least one controlled multi-feature trial path
+- Feature B does not start on Feature A branch state
+- the transition has explicit evidence for merge, branch, worktree, and queue correctness
+- stale runtime state does not silently poison the next feature
+- transition failures are explicit and operator-readable
 
 ### Quality Gate
-`gate_pr6_auto_next_trials`:
-- [ ] Auto-next advances only after merged-to-main, green checks, and closure verifier pass
-- [ ] Blocking drift inserts a fix-up feature before the next feature loads
-- [ ] Controlled multi-feature trial certification evidence exists with residual risk documented
+`gate_pr3_transition_validation`:
+- [ ] Feature A merge to main is independently verified before Feature B starts
+- [ ] Branch/worktree transition correctness is proven with explicit evidence
+- [ ] Queue, lease, and session state are clean or explicitly reconciled before Feature B activation
+- [ ] Transition failures are explicit and operator-readable
+
+---
+
+## PR-4: Feature B Trial Execution And Certification
+**Track**: C
+**Priority**: P0
+**Complexity**: High
+**Risk**: High
+**Skill**: @quality-engineer
+**Requires-Model**: opus
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 3-5 hours
+**Dependencies**: [PR-3]
+
+### Description
+Execute and certify Feature B (`Conversation Resume And Latest-First Timeline`) under the same governance conditions after the validated transition.
+
+### Scope
+- activate Feature B plan after the validated transition
+- verify conversation resume, latest-first behavior, and worktree/session linkage
+- require Gemini review and Codex final gate on applicable PRs
+- capture closure evidence and residual risk for Feature B
+
+### Success Criteria
+- Feature B completes with required tests, review receipts, and closure evidence
+- session continuity and operator-facing retrieval value are demonstrated
+- the feature is verified under post-transition conditions, not a fresh synthetic start
+- residual risks for Feature B are explicit
+
+### Quality Gate
+`gate_pr4_feature_b_trial_certification`:
+- [ ] All Feature B required tests pass
+- [ ] Gemini review receipt exists and all blocking findings are closed where policy requires review
+- [ ] Codex final gate receipt exists and all required checks pass where policy requires final gate
+- [ ] Required headless review reports exist at the report paths referenced by the gate results
+- [ ] Feature B closure evidence and residual risk note are complete after the validated transition
+
+---
+
+## PR-5: End-To-End Double-Feature Certification And Rollout Verdict
+**Track**: C
+**Priority**: P0
+**Complexity**: Medium
+**Risk**: High
+**Skill**: @quality-engineer
+**Requires-Model**: opus
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Estimated Time**: 2-3 hours
+**Dependencies**: [PR-4]
+
+### Description
+Produce the end-to-end certification verdict for the first real double-feature trial and state clearly whether the system is ready for broader multi-feature use.
+
+### Scope
+- synthesize Feature A, transition, and Feature B evidence
+- summarize review-gate behavior and operator friction
+- classify remaining blockers vs warns vs deferred work
+- state rollout recommendation for broader multi-feature execution
+
+### Success Criteria
+- the system receives a clear go/no-go verdict for broader multi-feature use
+- operator friction and headless review behavior are explicitly assessed
+- remaining blockers are not hidden inside generic residual risk text
+- the certification is strong enough to guide the next roadmap step
+
+### Quality Gate
+`gate_pr5_end_to_end_double_feature_certification`:
+- [ ] Final certification gives a clear go or no-go verdict for broader multi-feature use
+- [ ] Final certification includes review-gate behavior, operator friction, and transition quality assessment
+- [ ] Remaining blockers are separated from warnings and deferred work explicitly
+- [ ] End-to-end certification evidence is complete and auditable
