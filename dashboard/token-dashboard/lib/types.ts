@@ -47,3 +47,40 @@ export const MODEL_COLORS: Record<string, string> = {
   'claude-sonnet': '#6B8AE6',
   'unknown': '#6B6B6B',
 };
+
+export type SortOrder = 'DESC' | 'ASC';
+
+export interface ConversationSession {
+  session_id: string;
+  project_path: string;
+  cwd: string;
+  last_message: string | null;
+  title: string;
+  message_count: number;
+  user_message_count: number;
+  total_tokens: number;
+  terminal: string | null;
+  worktree_root: string | null;
+  worktree_exists: boolean;
+}
+
+export interface RotationChain {
+  dispatch_id: string;
+  chain_depth: number;
+  latest_message: string | null;
+  session_ids: string[];
+}
+
+export interface WorktreeGroupInfo {
+  worktree_root: string;
+  worktree_exists: boolean;
+  session_ids: string[];
+}
+
+export interface ConversationsResponse {
+  sessions: ConversationSession[];
+  sort_order: SortOrder;
+  total: number;
+  worktree_groups?: WorktreeGroupInfo[];
+  rotation_chains?: RotationChain[];
+}
