@@ -22,11 +22,17 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+
+# Make scripts/lib importable for conversation_read_model
+_SCRIPTS_LIB = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
+if _SCRIPTS_LIB not in sys.path:
+    sys.path.insert(0, _SCRIPTS_LIB)
 
 
 class DualStackHTTPServer(ThreadingHTTPServer):
@@ -574,6 +580,105 @@ def _scan_dispatches() -> dict:
     return {"stages": stages, "total": total}
 
 
+# ---------- Conversations API ----------
+
+CLAUDE_INDEX_DB = Path.home() / ".claude" / "conversation-index.db"
+
+
+def _query_conversations(params: dict[str, list[str]]) -> dict:
+    """Query conversation sessions via the read model (PR-2)."""
+    from conversation_read_model import ConversationReadModel
+
+    db_path = str(CLAUDE_INDEX_DB)
+    if not CLAUDE_INDEX_DB.exists():
+        return {"sessions": [], "sort_order": "DESC", "total": 0}
+
+    sort_order = (params.get("sort") or ["DESC"])[0].upper()
+    if sort_order not in ("DESC", "ASC"):
+        sort_order = "DESC"
+
+    project_filter = (params.get("project") or [None])[0]
+    worktree_filter = (params.get("worktree") or [None])[0]
+    terminal_filter = (params.get("terminal") or [None])[0]
+    limit = int((params.get("limit") or ["50"])[0])
+    group_by_wt = (params.get("group") or [None])[0] == "worktree"
+
+    # Discover worktree roots from known project paths
+    worktree_roots: list[str] = []
+    project_root = str(PROJECT_ROOT)
+    worktree_roots.append(project_root)
+
+    # Add any sibling worktrees (same parent dir, same base name pattern)
+    parent = PROJECT_ROOT.parent
+    base = PROJECT_ROOT.name.split("-wt")[0] if "-wt" in PROJECT_ROOT.name else PROJECT_ROOT.name
+    for sibling in parent.iterdir():
+        if sibling.is_dir() and sibling.name.startswith(base):
+            worktree_roots.append(str(sibling))
+
+    model = ConversationReadModel(
+        claude_index_db=db_path,
+        worktree_roots=worktree_roots,
+        receipt_path=str(RECEIPTS_PATH),
+    )
+
+    sessions = model.list_sessions(
+        project_filter=project_filter,
+        worktree_filter=worktree_filter,
+        terminal_filter=terminal_filter,
+        sort_order=sort_order,
+        limit=limit,
+    )
+
+    session_dicts = [
+        {
+            "session_id": s.session_id,
+            "project_path": s.project_path,
+            "cwd": s.cwd,
+            "last_message": s.last_message,
+            "title": s.title,
+            "message_count": s.message_count,
+            "user_message_count": s.user_message_count,
+            "total_tokens": s.total_tokens,
+            "terminal": s.terminal,
+            "worktree_root": s.worktree_root,
+            "worktree_exists": s.worktree_exists,
+        }
+        for s in sessions
+    ]
+
+    result: dict = {
+        "sessions": session_dicts,
+        "sort_order": sort_order,
+        "total": len(session_dicts),
+    }
+
+    if group_by_wt:
+        groups = model.group_by_worktree(sessions)
+        result["worktree_groups"] = [
+            {
+                "worktree_root": g.worktree_root,
+                "worktree_exists": g.worktree_exists,
+                "session_ids": [s.session_id for s in g.sessions],
+            }
+            for g in groups
+        ]
+
+    # Include rotation chains
+    chains = model.discover_rotation_chains(sessions)
+    if chains:
+        result["rotation_chains"] = [
+            {
+                "dispatch_id": c.dispatch_id,
+                "chain_depth": c.chain_depth,
+                "latest_message": c.latest_message,
+                "session_ids": [s.session_id for s in c.sessions],
+            }
+            for c in chains
+        ]
+
+    return result
+
+
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
     payload = json.dumps(payload_obj).encode("utf-8")
     handler.send_response(status)
@@ -753,6 +858,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/token-stats/sessions":
             result = _query_token_sessions(params)
             _json_response(self, HTTPStatus.OK, {"data": result, "count": len(result)})
+            return
+
+        if path == "/api/conversations":
+            try:
+                result = _query_conversations(params)
+            except Exception as exc:
+                _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc), "sessions": []})
+                return
+            _json_response(self, HTTPStatus.OK, result)
             return
 
         if path == "/api/dispatches":

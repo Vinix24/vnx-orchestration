@@ -3,10 +3,11 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign } from 'lucide-react';
+import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare } from 'lucide-react';
 
 const NAV_ITEMS = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
+  { href: '/conversations', label: 'Conversations', icon: MessageSquare },
   { href: '/tokens', label: 'Token Analysis', icon: Coins },
   { href: '/terminals', label: 'Terminals', icon: Monitor },
   { href: '/models', label: 'Models', icon: Cpu },
