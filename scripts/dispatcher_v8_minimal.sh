@@ -519,16 +519,108 @@ rc_delivery_failure() {
     fi
 }
 
+# Emit a structured NDJSON audit entry for a lease cleanup outcome.
+# Usage: emit_lease_cleanup_audit <dispatch_id> <terminal_id> <event_type> <lease_released> [<error>]
+# event_type should be "lease_released_on_failure" or "lease_release_failed"
+emit_lease_cleanup_audit() {
+    local dispatch_id="$1"
+    local terminal_id="$2"
+    local event_type="$3"
+    local lease_released="$4"
+    local error_detail="${5:-}"
+    local audit_file="$STATE_DIR/lease_cleanup_audit.ndjson"
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$lease_released" \
+        "$error_detail" "$ts" "$audit_file" <<'PY'
+import json, sys, os
+event_type, dispatch_id, terminal_id, lease_released, error_detail, ts, audit_file = sys.argv[1:]
+event = {
+    "event_type": event_type,
+    "dispatch_id": dispatch_id,
+    "terminal_id": terminal_id,
+    "lease_released": lease_released == "true",
+    "timestamp": ts,
+}
+if error_detail:
+    event["error"] = error_detail
+os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
+with open(audit_file, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
+}
+
 # Release canonical lease (leased -> idle).
+# Emits structured audit on success and uses log_structured_failure on error.
 rc_release_lease() {
     local terminal_id="$1" generation="$2"
+    local dispatch_id="${3:-unknown}"
     _rc_enabled || return 0
     [[ -n "$generation" && "$generation" != "0" ]] || return 0
 
     if ! _rc_python release-lease \
         --terminal "$terminal_id" \
         --generation "$generation" > /dev/null; then
-        log "V8 RUNTIME_CORE: release-lease non-fatal failure terminal=$terminal_id"
+        log_structured_failure "lease_release_failed" \
+            "Canonical lease release failed after delivery" \
+            "terminal=$terminal_id dispatch=$dispatch_id generation=$generation"
+        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+            "lease_release_failed" "false" "release-lease python invocation failed"
+        return 1
+    fi
+    log "V8 RUNTIME_CORE: lease released terminal=$terminal_id dispatch=$dispatch_id"
+    emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+        "lease_released_on_failure" "true"
+}
+
+# Release canonical lease and record delivery failure atomically.
+# Preferred over separate rc_delivery_failure + rc_release_lease calls because
+# both operations are performed regardless of individual step failure, and the
+# combined result is captured in a single structured audit entry.
+# Usage: rc_release_on_failure <dispatch_id> <attempt_id> <terminal_id> <generation> [<reason>]
+rc_release_on_failure() {
+    local dispatch_id="$1" attempt_id="$2" terminal_id="$3" generation="$4"
+    local reason="${5:-delivery failed}"
+    _rc_enabled || return 0
+    [[ -n "$generation" && "$generation" != "0" ]] || return 0
+
+    local result
+    result=$(_rc_python release-on-failure \
+        --dispatch-id "$dispatch_id" \
+        --attempt-id "$attempt_id" \
+        --terminal "$terminal_id" \
+        --generation "$generation" \
+        --reason "$reason") || {
+        log_structured_failure "release_on_failure_cli_failed" \
+            "release-on-failure CLI invocation failed — emitting direct lease release" \
+            "dispatch=$dispatch_id terminal=$terminal_id"
+        # Fall back to direct release-lease so the lease is not stranded
+        rc_release_lease "$terminal_id" "$generation" "$dispatch_id"
+        return 1
+    }
+
+    local lease_released cleanup_complete lease_error
+    lease_released=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(str(d.get("lease_released","false")).lower())' \
+        2>/dev/null || echo "false")
+    cleanup_complete=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(str(d.get("cleanup_complete","false")).lower())' \
+        2>/dev/null || echo "false")
+    lease_error=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(d.get("lease_error","") or "")' \
+        2>/dev/null || echo "")
+
+    if [[ "$lease_released" == "true" ]]; then
+        log "V8 RUNTIME_CORE: lease released on delivery failure terminal=$terminal_id dispatch=$dispatch_id"
+        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+            "lease_released_on_failure" "true"
+    else
+        log_structured_failure "lease_release_failed" \
+            "Canonical lease not released after delivery failure" \
+            "dispatch=$dispatch_id terminal=$terminal_id error=${lease_error}"
+        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+            "lease_release_failed" "false" "$lease_error"
     fi
 }
 
@@ -1484,9 +1576,8 @@ ${complete_prompt}"
     fi
 
     if [ "$_delivery_failed" = true ]; then
-        # Record failure in broker (durably, never logs-only — G-R3, G-R5)
-        rc_delivery_failure "$dispatch_id" "$_rc_attempt_id" "tmux delivery failed"
-        rc_release_lease "$terminal_id" "$_rc_generation"
+        # Record failure and release canonical lease atomically (PR-1: always paired)
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux delivery failed"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
@@ -1498,8 +1589,8 @@ ${complete_prompt}"
     sleep 1
 
     if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
-        rc_delivery_failure "$dispatch_id" "$_rc_attempt_id" "tmux Enter failed"
-        rc_release_lease "$terminal_id" "$_rc_generation"
+        # Record failure and release canonical lease atomically (PR-1: always paired)
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux Enter failed"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
