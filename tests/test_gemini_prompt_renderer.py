@@ -479,6 +479,7 @@ class TestRecordResultAdvisoryBlockingIntegration:
         return rgm.ReviewGateManager()
 
     def test_record_result_emits_advisory_and_blocking_fields(self, manager):
+        report_path = str((manager.reports_dir / "manual-pr2-gemini.md").resolve())
         result = manager.record_result(
             gate="gemini_review",
             pr_number=2,
@@ -489,7 +490,9 @@ class TestRecordResultAdvisoryBlockingIntegration:
                 {"severity": "blocking", "category": "correctness", "message": "crash"},
                 {"severity": "advisory", "category": "style", "message": "nit"},
             ],
+            contract_hash="hash-pr2",
             pr_id="PR-2",
+            report_path=report_path,
         )
         assert "advisory_findings" in result
         assert "blocking_findings" in result
@@ -497,6 +500,7 @@ class TestRecordResultAdvisoryBlockingIntegration:
         assert result["advisory_count"] == 1
 
     def test_record_result_persists_with_advisory_blocking_fields(self, manager, tmp_path):
+        report_path = str((manager.reports_dir / "manual-pr3-gemini.md").resolve())
         manager.record_result(
             gate="gemini_review",
             pr_number=3,
@@ -504,7 +508,9 @@ class TestRecordResultAdvisoryBlockingIntegration:
             status="pass",
             summary="no blockers",
             findings=[{"severity": "advisory", "category": "style", "message": "nit"}],
+            contract_hash="hash-pr3",
             pr_id="PR-3",
+            report_path=report_path,
         )
         saved = json.loads(
             (manager.results_dir / "pr-3-gemini_review.json").read_text(encoding="utf-8")
@@ -531,6 +537,7 @@ class TestRecordResultAdvisoryBlockingIntegration:
         saved = json.loads(request_files[0].read_text(encoding="utf-8"))
         assert "prompt" in saved
         assert "PR-2" in saved["pr_id"]
+        assert saved["report_path"].startswith(str(manager.reports_dir.resolve()))
 
     def test_request_gemini_with_contract_blocked_when_gemini_unavailable(self, manager, monkeypatch):
         import review_gate_manager as rgm

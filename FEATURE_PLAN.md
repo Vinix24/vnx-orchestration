@@ -1,58 +1,56 @@
-# Feature: Deterministic Queue State Reconciliation
+# Feature: Fail-Closed Terminal Dispatch Guard
 
 **Status**: Planned
 **Priority**: P1
-**Branch**: `feature/deterministic-queue-state-reconciliation`
+**Branch**: `feature/fail-closed-terminal-dispatch-guard`
 **Risk-Class**: high
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 
 Primary objective:
-Make VNX queue state deterministic from canonical runtime evidence so T0 stops relying on stale projections during active autonomous execution.
+Close the busy-terminal exclusivity breach by making dispatch safety fail closed under lease ambiguity, runtime uncertainty, invalid skill metadata, and Claude-specific delivery edge cases.
 
 Execution context:
-- first feature in the unattended 4-feature hardening chain
-- no routine operator checkpoints
+- second feature in the unattended 4-feature hardening chain
 - T1 and T2 are Sonnet-pinned terminals
-- branch-local review evidence is mandatory
+- T3 is a Claude terminal with known clear-context / modal sensitivity
 
 Review gate policy:
 - Gemini headless review is required on every PR in this feature
-- Codex headless final gate is required on every PR in this feature because queue truth, promotion safety, and closure evidence are all chain-critical
+- Codex headless final gate is required on every PR in this feature because dispatch-core behavior is merge-critical
 
 ## Problem Statement
 
-The recent trial exposed a governance flaw:
-- dispatch/runtime truth and queue projection truth drift apart
-- T0 can see `In Progress: None` while a real dispatch is active
-- closure and promotion decisions then depend on manual archaeology instead of deterministic evidence
+The recent trial exposed a real runtime safety breach:
+- a new dispatch was sent toward `T3`
+- while `T3` was already busy or ambiguously busy
+- later failures also showed:
+  - invalid skills can reach pending delivery before being rejected
+  - implicit `/clear` can trigger a Claude feedback modal and swallow real dispatch payload
+  - smart-tap can reject a real manager block because of benign shell noise
 
-This is not only a UI issue. It is a source-of-truth failure in an autonomous chain.
+This is not only observability drift. It is unsafe dispatch behavior.
 
 ## Design Goal
 
-Queue truth must be derived and refreshed in this order:
+Move dispatch safety from:
+- best-effort exclusivity with permissive fallback
 
-1. `FEATURE_PLAN.md`
-   - valid PR ids and dependency graph
-2. dispatch filesystem truth
-   - `active`, `completed`, `pending`, `staging`, `rejected`
-3. receipts and review evidence
-   - supporting runtime evidence
-4. queue projection files
-   - cached views only, never primary truth
-5. progress projections
-   - advisory only
+to:
+- fail-closed exclusivity with explicit blocked, requeue, and recovery semantics
 
-The system must detect, surface, and reconcile drift before promotion and before PR completion.
+That means:
+- no second dispatch to a terminal that is busy, ambiguously busy, or runtime-uncertain
+- no silent continuation after lease-acquire or availability-check failure
+- no invalid skill metadata reaching pending delivery
+- no implicit clear-context on Claude terminals unless explicitly requested and readiness is re-verified
 
 ## Non-Goals
 
-- no full queue-engine rewrite
-- no speculative orchestration redesign
-- no replacement of receipt processing
-- no replacement of feature-plan driven dependencies
-- no hidden fallback to stale projections
+- no full routing-engine rewrite
+- no pseudo-parallelism on a single terminal
+- no replacement of the broader queue system
+- no speculative tmux delivery redesign beyond safety guards needed here
 
 ## Dependency Flow
 
@@ -63,7 +61,7 @@ PR-1 -> PR-2
 PR-2 -> PR-3
 ```
 
-## PR-0: Queue Truth Contract And Source Hierarchy
+## PR-0: Terminal Exclusivity And Fail-Closed Contract
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -77,41 +75,36 @@ PR-2 -> PR-3
 **Dependencies**: []
 
 ### Description
-Define the canonical source hierarchy for queue state so VNX stops trusting stale projections over runtime truth during active feature execution.
+Define the canonical dispatch-exclusivity contract so no second dispatch can be sent to a terminal that is already busy, ambiguously busy, or runtime-uncertain.
 
 ### Scope
-- define source priority for:
-  - `FEATURE_PLAN.md`
-  - dispatch filesystem state
-  - receipts
-  - queue projections
-  - progress projections
-- define what counts as authoritative for:
-  - completed
-  - active
-  - pending
-  - blocked
-- define when stale projection must be treated as mismatch instead of truth
-- lock non-goals so this does not become a full queue-engine rewrite
+- define terminal states relevant to dispatch safety
+- define fail-closed behavior for:
+  - canonical check failure
+  - lease ambiguity
+  - runtime-core unavailability
+  - active worker ownership
+- define retry, requeue, and escalation boundaries
+- lock non-goals so this does not become a terminal scheduler rewrite
 
 ### Success Criteria
-- queue truth hierarchy is explicit
-- projection drift is detectable and explainable
-- reconciliation rules are deterministic
-- T0 can distinguish source-of-truth state from cached projection
+- terminal exclusivity rules are explicit
+- ambiguous runtime state blocks rather than dispatches
+- safe retry and requeue boundaries are clear
+- T0 and dispatcher share the same safety expectations
 
 ### Quality Gate
-`gate_pr0_queue_truth_contract`:
-- [ ] Contract defines source-of-truth priority among feature plan, dispatch files, receipts, and queue projections
-- [ ] Contract defines deterministic rules for completed, active, pending, and blocked queue state
-- [ ] Contract explains how projection drift is detected and surfaced
-- [ ] Contract blocks silent reliance on stale queue projections during active execution
+`gate_pr0_terminal_exclusivity_contract`:
+- [ ] Contract defines when a terminal is dispatchable, blocked, or ambiguous
+- [ ] Contract requires fail-closed behavior on runtime or lease uncertainty
+- [ ] Contract blocks silent second dispatch to an already occupied terminal
+- [ ] Contract defines retry or requeue behavior for blocked dispatch attempts
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-1: Reconcile Queue State From Canonical Runtime Evidence
+## PR-1: Fail-Closed Canonical Availability, Skill Validation, And Lease Acquire
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -125,43 +118,40 @@ Define the canonical source hierarchy for queue state so VNX stops trusting stal
 **Dependencies**: [PR-0]
 
 ### Description
-Implement deterministic queue reconciliation so queue status is rebuilt from canonical runtime evidence instead of drifting projections.
+Harden the dispatcher so canonical availability checks and lease acquisition fail closed, and validate requested skill metadata before queue init, promote, and delivery.
 
 ### Scope
-- add reconciliation command/path for queue state
-- derive status from:
-  - active dispatches
-  - completed dispatches
-  - pending dispatches
-  - receipts
-  - feature-plan dependencies
-- persist reconciled queue state with explicit provenance
-- ensure `PR_QUEUE.md` is regenerated from reconciled truth
-- add tests for stale projection and mid-run recovery scenarios
+- remove fail-open behavior from canonical terminal checks
+- make canonical lease acquisition enforceable for dispatch progression
+- block dispatch when runtime availability cannot be proven
+- validate requested skill or role before queue init, promote, and delivery so an invalid skill never becomes a silently hanging pending dispatch
+- add tests for availability-check exceptions, lease-acquire failure, and invalid skill metadata
 
 ### Success Criteria
-- reconciled queue state matches runtime truth under test
-- mid-run projection drift can be repaired deterministically
-- queue status includes provenance of why a PR is active, completed, pending, or blocked
-- reconciliation is repeatable and idempotent
+- dispatcher no longer continues after canonical availability ambiguity
+- lease-acquire failure blocks dispatch deterministically
+- invalid skill metadata is rejected before delivery rather than discovered only by worker-side failure
+- runtime check errors are explicit and auditable
+- existing safe dispatch paths continue to work
 
 ### Quality Gate
-`gate_pr1_queue_reconciliation`:
-- [ ] All queue reconciliation tests pass
-- [ ] Reconciled queue state matches canonical dispatch and receipt state under test scenarios
-- [ ] Projection drift can be repaired deterministically without manual file edits
-- [ ] `PR_QUEUE.md` is regenerated from reconciled truth instead of stale cache
+`gate_pr1_fail_closed_dispatch_guard`:
+- [ ] All fail-closed dispatch guard tests pass
+- [ ] Canonical availability check failure blocks dispatch explicitly
+- [ ] Canonical lease acquisition failure blocks dispatch explicitly
+- [ ] Invalid skill or role metadata blocks before pending delivery or worker pickup
+- [ ] No dispatch continues after runtime uncertainty under test scenarios
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-2: Kickoff, T0, And Per-PR Closure Integration
+## PR-2: Requeue, Clear-Context Safety, Smart-Tap, And Operator Visibility
 **Track**: C
 **Priority**: P2
 **Complexity**: Medium
 **Risk**: High
-**Skill**: @quality-engineer
+**Skill**: @reviewer
 **Requires-Model**: opus
 **Risk-Class**: high
 **Merge-Policy**: human
@@ -170,38 +160,39 @@ Implement deterministic queue reconciliation so queue status is rebuilt from can
 **Dependencies**: [PR-1]
 
 ### Description
-Integrate deterministic reconciliation into kickoff, T0 orchestration, and per-PR closure checks so queue truth and gate evidence truth are refreshed before promotion and before PR completion.
+Improve blocked-dispatch handling so operator tooling and T0 can distinguish safe requeue from true ownership conflict, while preventing Claude `/clear` and smart-tap edge cases from swallowing valid dispatches.
 
 ### Scope
-- add reconcile-before-promote behavior to kickoff/T0 paths
-- surface explicit drift warnings at pause checkpoints
-- prevent stale queue views from being treated as truth during multi-feature runs
-- add a per-PR closure-verifier mode so mid-chain PR certification is not forced through whole-feature closure logic
-- detect contradictions between structured gate result payloads and normalized report content and fail explicitly when they disagree
-- add tests for kickoff, promotion, and per-PR closure using stale or contradictory state
+- add explicit blocked-dispatch audit reasons
+- surface requeueable vs non-requeueable blocked state
+- remove or constrain implicit `ClearContext: true` behavior so Claude terminals are not cleared by default
+- verify Claude terminal ready state after explicit clear-context requests before delivering the actual dispatch
+- harden smart-tap reject heuristics so benign tool noise such as `Shell cwd was reset` does not invalidate a real manager block
+- verify no silent duplicate delivery attempts occur
+- add tests for operator-readable blocked-dispatch evidence
 
 ### Success Criteria
-- T0 sees reconciled queue truth before promotion
-- kickoff fails or warns explicitly when queue state is stale
-- per-PR closure can be evaluated without pretending the whole feature is done
-- contradictory gate JSON vs report content is surfaced as explicit evidence failure rather than silent ambiguity
-- multi-feature progression no longer depends on manual queue archaeology
-- drift findings remain operator-readable
+- blocked dispatches have actionable reason text
+- requeue behavior is deterministic and visible
+- Claude delivery no longer loses the real dispatch behind feedback or modal state triggered by `/clear`
+- valid manager blocks are not dropped by over-aggressive smart-tap reject heuristics
+- operators can distinguish busy-terminal protection from broader runtime failure
+- duplicate delivery attempts are auditable
 
 ### Quality Gate
-`gate_pr2_kickoff_queue_integration`:
-- [ ] All kickoff and T0 queue-integration tests pass
-- [ ] Promotion path refreshes queue truth before acting on it
-- [ ] Stale queue projection is surfaced explicitly at kickoff or checkpoint time
-- [ ] Per-PR closure mode works without requiring whole-feature completion state
-- [ ] Contradictory gate result JSON and report content fail with explicit evidence mismatch
-- [ ] Multi-feature flow does not silently trust stale queue state under test
+`gate_pr2_blocked_dispatch_visibility`:
+- [ ] All blocked-dispatch visibility tests pass
+- [ ] Blocked dispatch reasons distinguish busy terminal from runtime failure
+- [ ] Requeueable vs non-requeueable blocked state is explicit
+- [ ] Claude clear-context behavior is explicit and does not silently swallow dispatch delivery
+- [ ] Smart-tap preserves valid manager blocks even when surrounding pane output contains benign shell noise
+- [ ] Audit trail preserves evidence of prevented duplicate dispatch
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-3: Certification With Gemini Review And Codex Final Gate
+## PR-3: Certification With Real Busy-Terminal Reproduction
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -215,57 +206,28 @@ Integrate deterministic reconciliation into kickoff, T0 orchestration, and per-P
 **Dependencies**: [PR-2]
 
 ### Description
-Certify that deterministic reconciliation prevents the queue drift seen during the double-feature trial and produces auditable queue truth during real autonomous execution.
+Certify that the busy-terminal exclusivity breach seen in the double-feature run is closed under real dispatch conditions.
 
 ### Scope
-- reproduce stale queue drift from the recent trial
-- prove reconciliation restores correct state before next promotion
-- capture operator evidence for source-of-truth vs projection
-- require Gemini review and Codex final gate on certification
+- reproduce a terminal-already-busy scenario
+- verify second dispatch is blocked before delivery
+- verify operator-readable audit evidence explains the block
+- verify invalid skill metadata is rejected pre-delivery
+- verify Claude-targeted dispatches do not rely on implicit clear-context delivery
 
 ### Success Criteria
-- trial-style queue drift no longer blocks or misleads progression
-- certification evidence shows reconciled queue truth before further dispatch
+- second dispatch to an occupied terminal no longer lands
+- certification evidence proves fail-closed behavior
 - Gemini review evidence exists and blocking findings are resolved
-- Codex final gate evidence exists for queue-core changes
+- Codex final gate evidence exists for runtime-core changes
 - no chain-created open items remain unresolved at feature closure
 
 ### Quality Gate
-`gate_pr3_queue_reconciliation_certification`:
-- [ ] All queue reconciliation certification tests pass
-- [ ] Reproduced queue drift is corrected before the next promotion in certification flow
-- [ ] Certification evidence shows source-of-truth state and reconciled projection side by side
+`gate_pr3_busy_terminal_certification`:
+- [ ] All busy-terminal certification tests pass
+- [ ] Reproduced second-dispatch attempt is blocked before delivery
+- [ ] Certification evidence includes explicit blocked reason and no worker-side duplicate execution
+- [ ] Invalid skill metadata cannot reach pending delivery in certification flow
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 - [ ] Feature closes with zero unresolved chain-created open items
-
-## Test Plan
-
-- unit tests
-  - derive active PR from dispatch directories
-  - derive completed PRs from dispatch directories and receipts
-  - derive waiting and blocked PRs from dependency graph
-  - ignore foreign or stale staging dispatches
-
-- integration tests
-  - active dispatch exists while projected state is stale -> reconcile fixes visible queue status
-  - `PR_QUEUE.md` projection matches reconciled status summary
-  - kickoff and promotion paths refresh queue truth before acting
-  - per-PR closure succeeds only when gate evidence is present and internally consistent
-
-- certification tests
-  - reproduce the double-feature trial drift condition
-  - verify reconciled truth before next promotion
-  - verify Gemini and Codex evidence surfaces are branch-local and non-contradictory
-
-- governance tests
-  - T0 instructions mention queue reconciliation on mismatch
-  - kickoff skill explicitly hands off to `@t0-orchestrator` after first safe promotion
-
-## Expected Outcome
-
-After this feature:
-- queue status becomes meaningfully more trustworthy
-- T0 does less manual inference
-- active dispatch truth and visible queue state stop drifting apart silently
-- the two-feature trial findings are folded back into a small, concrete hardening step
