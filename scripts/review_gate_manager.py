@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,8 +47,10 @@ class ReviewGateManager:
     def __init__(self) -> None:
         self.paths = ensure_env()
         self.state_dir = Path(self.paths["VNX_STATE_DIR"])
+        self.reports_dir = Path(self.paths["VNX_REPORTS_DIR"])
         self.requests_dir = self.state_dir / "review_gates" / "requests"
         self.results_dir = self.state_dir / "review_gates" / "results"
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,6 +74,53 @@ class ReviewGateManager:
 
     def _result_path(self, gate: str, pr_number: int) -> Path:
         return self.results_dir / f"pr-{pr_number}-{gate}.json"
+
+    def _contract_slug(self, pr_id: str) -> str:
+        return pr_id.lower().replace("-", "")
+
+    def _contract_request_path(self, gate: str, pr_id: str) -> Path:
+        return self.requests_dir / f"{self._contract_slug(pr_id)}-{gate}-contract.json"
+
+    def _contract_result_path(self, gate: str, pr_id: str) -> Path:
+        return self.results_dir / f"{self._contract_slug(pr_id)}-{gate}-contract.json"
+
+    def _report_timestamp_slug(self, value: str) -> str:
+        digits = re.sub(r"[^0-9]", "", value or "")
+        if len(digits) >= 14:
+            return f"{digits[:8]}-{digits[8:14]}"
+        return digits or "undated"
+
+    def _report_pr_slug(self, *, pr_number: Optional[int] = None, pr_id: str = "") -> str:
+        if pr_id:
+            return pr_id.lower().replace("_", "-")
+        if pr_number is None:
+            raise ValueError("pr_number or pr_id is required to build report path")
+        return f"pr-{pr_number}"
+
+    def _build_report_path(
+        self,
+        *,
+        gate: str,
+        requested_at: str,
+        pr_number: Optional[int] = None,
+        pr_id: str = "",
+    ) -> str:
+        ts = self._report_timestamp_slug(requested_at)
+        pr_slug = self._report_pr_slug(pr_number=pr_number, pr_id=pr_id)
+        filename = f"{ts}-HEADLESS-{gate}-{pr_slug}.md"
+        return str((self.reports_dir / filename).resolve())
+
+    def _load_request_payload(self, gate: str, pr_number: int) -> Dict[str, Any]:
+        path = self._request_path(gate, pr_number)
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _load_contract_request_payload(self, gate: str, pr_id: str) -> Dict[str, Any]:
+        path = self._contract_request_path(gate, pr_id)
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def _gemini_available(self) -> bool:
         return os.environ.get("VNX_GEMINI_REVIEW_ENABLED", "1") != "0" and shutil.which("gemini") is not None
@@ -133,6 +183,7 @@ class ReviewGateManager:
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
     ) -> Dict[str, Any]:
         available = self._gemini_available()
+        requested_at = _utc_now()
         payload = {
             "gate": "gemini_review",
             "status": "queued" if available else "blocked",
@@ -142,7 +193,12 @@ class ReviewGateManager:
             "review_mode": mode,
             "risk_class": risk_class,
             "changed_files": changed_files,
-            "requested_at": _utc_now(),
+            "requested_at": requested_at,
+            "report_path": self._build_report_path(
+                gate="gemini_review",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ),
         }
         if not available:
             payload["reason"] = "gemini_not_available"
@@ -165,6 +221,7 @@ class ReviewGateManager:
         """
         prompt = render_gemini_prompt(contract)
         available = self._gemini_available()
+        requested_at = _utc_now()
         payload: Dict[str, Any] = {
             "gate": "gemini_review",
             "status": "queued" if available else "blocked",
@@ -177,13 +234,17 @@ class ReviewGateManager:
             "changed_files": contract.changed_files,
             "contract_hash": contract.content_hash,
             "prompt": prompt,
-            "requested_at": _utc_now(),
+            "requested_at": requested_at,
+            "report_path": self._build_report_path(
+                gate="gemini_review",
+                requested_at=requested_at,
+                pr_id=contract.pr_id,
+            ),
         }
         if not available:
             payload["reason"] = "gemini_not_available"
 
-        pr_slug = contract.pr_id.lower().replace("-", "")
-        request_file = self.requests_dir / f"{pr_slug}-gemini_review-contract.json"
+        request_file = self._contract_request_path("gemini_review", contract.pr_id)
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         emit_governance_receipt(
@@ -266,9 +327,13 @@ class ReviewGateManager:
         payload["review_mode"] = mode
         payload["risk_class"] = contract.risk_class
         payload["changed_files"] = contract.changed_files
+        payload["report_path"] = self._build_report_path(
+            gate="claude_github_optional",
+            requested_at=requested_at,
+            pr_id=contract.pr_id,
+        )
 
-        pr_slug = contract.pr_id.lower().replace("-", "")
-        request_file = self.requests_dir / f"{pr_slug}-claude_github_optional-contract.json"
+        request_file = self._contract_request_path("claude_github_optional", contract.pr_id)
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         emit_governance_receipt(
@@ -311,6 +376,9 @@ class ReviewGateManager:
         the full evidence chain.
         """
         raw_findings = findings or []
+        request_payload = self._load_contract_request_payload("claude_github_optional", pr_id)
+        effective_contract_hash = contract_hash or str(request_payload.get("contract_hash", ""))
+        effective_report_path = report_path or str(request_payload.get("report_path", ""))
         result_payload: Dict[str, Any] = {
             "gate": "claude_github_optional",
             "pr_id": pr_id,
@@ -319,12 +387,17 @@ class ReviewGateManager:
             "status": status,
             "summary": summary,
             "findings": raw_findings,
-            "contract_hash": contract_hash,
+            "contract_hash": effective_contract_hash,
             "requested_at": "",
             "completed_at": completed_at or _utc_now(),
         }
         receipt = ClaudeGitHubReviewReceipt.from_result_payload(result_payload)
-        canonical_report_path = self._canonical_report_path(report_path)
+        canonical_report_path = self._canonical_report_path(effective_report_path)
+        if status in {"pass", "fail"}:
+            if not effective_contract_hash:
+                raise ValueError("contract_hash is required for pass/fail gate results")
+            if not canonical_report_path:
+                raise ValueError("report_path is required for pass/fail gate results")
 
         full_payload = receipt.to_dict()
         full_payload["findings"] = raw_findings
@@ -332,7 +405,7 @@ class ReviewGateManager:
         full_payload["required_reruns"] = list(required_reruns or [])
         full_payload["residual_risk"] = full_payload.get("residual_risk", "")
 
-        result_file = self.results_dir / f"{pr_id.lower().replace('-', '')}-claude_github_optional-contract.json"
+        result_file = self._contract_result_path("claude_github_optional", pr_id)
         result_file.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
 
         emit_governance_receipt(
@@ -358,6 +431,7 @@ class ReviewGateManager:
         required = mode == "final" or codex_final_gate_required(changed_files)
         available = self._codex_headless_available()
         model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "gpt-5.2-codex"
+        requested_at = _utc_now()
         payload = {
             "gate": "codex_gate",
             "status": "queued" if available else ("blocked" if required else "not_configured"),
@@ -369,7 +443,12 @@ class ReviewGateManager:
             "review_mode": mode,
             "risk_class": risk_class,
             "changed_files": changed_files,
-            "requested_at": _utc_now(),
+            "requested_at": requested_at,
+            "report_path": self._build_report_path(
+                gate="codex_gate",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ),
         }
         if not available:
             payload["reason"] = "codex_headless_not_available"
@@ -380,6 +459,7 @@ class ReviewGateManager:
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
     ) -> Dict[str, Any]:
         configured = self._claude_github_configured()
+        requested_at = _utc_now()
         payload = {
             "gate": "claude_github_optional",
             "status": "not_configured",
@@ -389,7 +469,12 @@ class ReviewGateManager:
             "review_mode": mode,
             "risk_class": risk_class,
             "changed_files": changed_files,
-            "requested_at": _utc_now(),
+            "requested_at": requested_at,
+            "report_path": self._build_report_path(
+                gate="claude_github_optional",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ),
         }
         if configured:
             payload["status"] = "queued"
@@ -441,10 +526,13 @@ class ReviewGateManager:
         verifier can validate the full evidence chain.
         """
         raw_findings = findings or []
+        request_payload = self._load_request_payload(gate, pr_number)
+        effective_contract_hash = contract_hash or str(request_payload.get("contract_hash", ""))
+        effective_report_path = report_path or str(request_payload.get("report_path", ""))
         receipt = GeminiReviewReceipt.from_raw_findings(
             pr_id=pr_id or str(pr_number),
             raw_findings=raw_findings,
-            contract_hash=contract_hash,
+            contract_hash=effective_contract_hash,
             reviewed_at=_utc_now(),
         )
 
@@ -461,12 +549,20 @@ class ReviewGateManager:
             "advisory_count": receipt.advisory_count,
             "blocking_count": receipt.blocking_count,
             "residual_risk": residual_risk or "",
-            "contract_hash": contract_hash,
-            "report_path": report_path,
+            "contract_hash": effective_contract_hash,
+            "report_path": effective_report_path,
             "required_reruns": list(required_reruns or []),
             "recorded_at": receipt.reviewed_at,
         }
         payload["report_path"] = self._canonical_report_path(payload["report_path"])
+        if status in {"pass", "fail"}:
+            if not payload["contract_hash"]:
+                raise ValueError("contract_hash is required for pass/fail gate results")
+            if not payload["report_path"]:
+                raise ValueError("report_path is required for pass/fail gate results")
+            report_file = Path(payload["report_path"])
+            if not report_file.exists():
+                raise ValueError(f"report_path file does not exist: {payload['report_path']}")
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         emit_governance_receipt(
             "review_gate_result",
@@ -482,7 +578,7 @@ class ReviewGateManager:
             advisory_count=receipt.advisory_count,
             blocking_count=receipt.blocking_count,
             residual_risk=payload["residual_risk"],
-            contract_hash=contract_hash,
+            contract_hash=payload["contract_hash"],
             report_path=payload["report_path"],
             required_reruns=payload["required_reruns"],
         )
@@ -525,6 +621,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result_parser.add_argument("--summary", required=True)
     result_parser.add_argument("--findings-file", default=None)
     result_parser.add_argument("--residual-risk", default=None)
+    result_parser.add_argument("--contract-hash", default="")
+    result_parser.add_argument("--pr-id", default="")
+    result_parser.add_argument("--report-path", default="")
     result_parser.add_argument("--json", action="store_true")
 
     status_parser = sub.add_parser("status")
@@ -558,6 +657,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             summary=args.summary,
             findings=findings,
             residual_risk=args.residual_risk,
+            contract_hash=args.contract_hash,
+            pr_id=args.pr_id,
+            report_path=args.report_path,
         )
         print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
         return 0
