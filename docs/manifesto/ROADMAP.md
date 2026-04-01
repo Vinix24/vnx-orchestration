@@ -154,9 +154,26 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ---
 
+## 11) Deterministic Headless Gate Runner And Evidence Enforcement
+**Status**: `Next`
+**Why**: Feature 1 and Feature 2 both proved that substantive review content is not enough if request, execution, report writing, and result recording can drift apart.
+
+**Goals**
+- Introduce one canonical runner path for Gemini/Codex gate execution.
+- Make deterministic command invocation and model selection testable.
+- Ensure normalized reports are written before pass/fail result recording.
+- Make missing headless report files a hard merge blocker, not a retrospective surprise.
+
+**Success Criteria**
+- Required gates cannot be marked complete without a real normalized report on disk.
+- T0 no longer improvises headless gate execution with ad hoc shell sequences.
+- Feature 1 / Feature 2 style under-certified merges are covered by permanent regression tests.
+
+---
+
 ## Exploring (Not Default / Lower Priority)
 
-## 11) YOLO Execution Mode
+## 12) YOLO Execution Mode
 **Status**: `Exploring`  
 **Why**: Useful to test autonomous completion boundaries, but conflicts with governance-first defaults.
 
@@ -170,7 +187,7 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ---
 
-## 12) Additional Model Integrations (e.g., Kimi)
+## 13) Additional Model Integrations (e.g., Kimi)
 **Status**: `Exploring`  
 **Why**: Further validate model-agnostic orchestration design.
 
@@ -181,7 +198,7 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ---
 
-## 13) Rust Core Prototype (Selective)
+## 14) Rust Core Prototype (Selective)
 **Status**: `Exploring`  
 **Why**: Evaluate memory-safe/runtime-efficient implementation for critical paths.
 
