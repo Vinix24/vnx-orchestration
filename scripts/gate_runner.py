@@ -136,10 +136,18 @@ class GateRunner:
         """
         cli_args = list(GATE_CLI_ARGS.get(gate, []))
 
-        # Model selection for Gemini — configurable via GEMINI_MODEL env var
+        # Model selection — configurable via env vars
         if gate == "gemini_review":
             model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
             cli_args = ["--model", model] + cli_args
+        elif gate == "codex_gate":
+            model = (
+                os.environ.get("VNX_CODEX_HEADLESS_MODEL")
+                or os.environ.get("VNX_CODEX_MODEL")
+                or request_payload.get("model")
+                or "gpt-5.4"
+            )
+            cli_args = cli_args + ["-c", f'model="{model}"']
 
         cmd = [binary] + cli_args
 

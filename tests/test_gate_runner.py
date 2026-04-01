@@ -727,17 +727,18 @@ class TestCodexGateExecution:
         assert result["reason"] in ("timeout", "stall")
         assert mock_killpg.called or mock_proc.kill.called
 
-    def test_codex_no_model_flag_injected(self, gate_env, monkeypatch):
-        """Codex gate should NOT get --model flag (only gemini does)."""
+    def test_codex_model_passed_via_config_flag(self, gate_env, monkeypatch):
+        """Codex gate passes model via -c flag (not --model like gemini)."""
         monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
         monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_MODEL", "gpt-5.4")
 
         runner = GateRunner(
             state_dir=gate_env["state_dir"],
             reports_dir=gate_env["reports_dir"],
         )
 
-        report_path = str(gate_env["reports_dir"] / "codex-nomodel-report.md")
+        report_path = str(gate_env["reports_dir"] / "codex-model-report.md")
         payload = _make_request_payload(
             gate="codex_gate",
             report_path=report_path,
@@ -774,7 +775,10 @@ class TestCodexGateExecution:
             )
 
         call_args = mock_popen.call_args[0][0]
-        assert "--model" not in call_args
+        assert "--model" not in call_args  # gemini-style --model should NOT be used
+        assert "-c" in call_args
+        c_idx = call_args.index("-c")
+        assert 'model="gpt-5.4"' in call_args[c_idx + 1]
 
 
 class TestGateTimeoutConfig:
