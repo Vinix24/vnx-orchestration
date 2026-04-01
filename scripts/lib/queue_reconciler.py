@@ -216,7 +216,7 @@ def scan_dispatch_dirs(dispatch_dir: Path) -> List[DispatchRecord]:
         sub = dispatch_dir / dir_name
         if not sub.is_dir():
             continue
-        for f in sub.iterdir():
+        for f in sorted(sub.iterdir()):
             if not f.is_file() or not f.suffix == ".md":
                 continue
             dispatch_id = f.stem  # filename without extension
@@ -275,8 +275,8 @@ class QueueReconciler:
     """Derives PR queue state from canonical runtime evidence.
 
     Args:
-        dispatch_dir:    Path to .vnx-data/dispatches/
-        receipts_file:   Path to .vnx-data/state/t0_receipts.ndjson
+        dispatch_dir:    Path to $VNX_DISPATCH_DIR
+        receipts_file:   Path to $VNX_STATE_DIR/t0_receipts.ndjson
         feature_plan:    Path to FEATURE_PLAN.md
         projection_file: Path to pr_queue_state.json (for drift detection)
     """
