@@ -279,8 +279,8 @@ class RuntimeCore:
     ) -> Dict[str, Any]:
         """Check terminal availability via canonical lease state.
 
-        Non-fatal: returns available=True with reason on DB error so
-        the dispatcher can fall through to legacy lock check.
+        Fail-closed: returns available=False on DB error or runtime uncertainty.
+        Ambiguous state blocks rather than dispatches per the fail-closed contract.
         """
         try:
             lease = self._lease_mgr.get(terminal_id)
@@ -301,11 +301,12 @@ class RuntimeCore:
                 "claimed_by": lease.dispatch_id,
             }
         except Exception as exc:
-            # Non-fatal: DB unavailable — fall through to available so legacy path decides
+            # Fail-closed: DB unavailable means runtime state is ambiguous.
+            # Block dispatch rather than fall through — ambiguity must not permit delivery.
             return {
-                "available": True,
+                "available": False,
                 "terminal_id": terminal_id,
-                "reason": f"check_error_fallback:{exc}",
+                "reason": f"check_error_fail_closed:{exc}",
             }
 
     def acquire_lease(
