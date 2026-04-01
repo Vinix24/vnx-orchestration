@@ -612,6 +612,171 @@ class TestRequestNormalization:
         assert record["gate"] == "codex_gate"
 
 
+class TestCodexGateExecution:
+    """Codex gate execution path with VNX_CODEX_HEADLESS_ENABLED=1."""
+
+    def test_codex_enabled_completes_with_review_output(self, gate_env, monkeypatch):
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+
+        report_path = str(gate_env["reports_dir"] / "codex-report.md")
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=report_path,
+            prompt="Review this diff for correctness",
+        )
+
+        review_output = b'{"type":"message","message":"Code looks correct. No issues found."}\n{"type":"message","message":"All tests pass."}\n{"type":"message","message":"LGTM"}\n'
+
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = 0
+        mock_proc.returncode = 0
+        mock_proc.pid = 77777
+
+        read_call_count = [0]
+        def mock_os_read(fd, size):
+            read_call_count[0] += 1
+            if fd == 10 and read_call_count[0] == 1:
+                return review_output
+            return b""
+
+        with patch("gate_runner.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=77777):
+            result = runner.run(
+                gate="codex_gate",
+                request_payload=payload,
+                pr_number=1,
+            )
+
+        assert result["status"] == "completed"
+        assert result["contract_hash"] != ""
+
+        # Verify codex exec --json was used (not --quiet)
+        call_args = mock_popen.call_args[0][0]
+        assert call_args[0] == "codex"
+        assert "exec" in call_args
+        assert "--json" in call_args
+
+        # Verify report was written
+        assert Path(report_path).exists()
+
+    def test_codex_enabled_uses_correct_timeout(self, gate_env, monkeypatch):
+        """Codex gate uses 600s timeout (not gemini's 300s)."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+        monkeypatch.setenv("VNX_CODEX_GATE_TIMEOUT", "5")
+        monkeypatch.setenv("VNX_CODEX_STALL_THRESHOLD", "2")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+
+        report_path = str(gate_env["reports_dir"] / "codex-timeout-report.md")
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=report_path,
+            prompt="Review this code",
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = None  # Never finishes
+        mock_proc.pid = 88888
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = MagicMock()
+
+        real_monotonic = time.monotonic
+        call_count = [0]
+        base = [real_monotonic()]
+
+        def fake_monotonic():
+            call_count[0] += 1
+            return base[0] + (call_count[0] * 3)  # 3s per call, exceeds 5s timeout
+
+        mock_killpg = MagicMock()
+
+        with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.time.monotonic", side_effect=fake_monotonic), \
+             patch("gate_runner.os.getpgid", return_value=88888), \
+             patch("gate_runner.os.killpg", mock_killpg):
+            result = runner.run(
+                gate="codex_gate",
+                request_payload=payload,
+                pr_number=1,
+            )
+
+        assert result["status"] == "failed"
+        assert result["reason"] in ("timeout", "stall")
+        assert mock_killpg.called or mock_proc.kill.called
+
+    def test_codex_no_model_flag_injected(self, gate_env, monkeypatch):
+        """Codex gate should NOT get --model flag (only gemini does)."""
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+        monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+
+        report_path = str(gate_env["reports_dir"] / "codex-nomodel-report.md")
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=report_path,
+            prompt="Review this code",
+        )
+
+        review_output = b'{"type":"message","message":"LGTM"}\nAll checks pass.\nNo issues.\n'
+
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = 0
+        mock_proc.returncode = 0
+        mock_proc.pid = 99999
+
+        read_call_count = [0]
+        def mock_os_read(fd, size):
+            read_call_count[0] += 1
+            if fd == 10 and read_call_count[0] == 1:
+                return review_output
+            return b""
+
+        with patch("gate_runner.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=99999):
+            runner.run(
+                gate="codex_gate",
+                request_payload=payload,
+                pr_number=1,
+            )
+
+        call_args = mock_popen.call_args[0][0]
+        assert "--model" not in call_args
+
+
 class TestGateTimeoutConfig:
     """Verify gate-specific timeout and stall threshold configuration."""
 

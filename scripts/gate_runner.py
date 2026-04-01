@@ -37,7 +37,7 @@ GATE_BINARIES: Dict[str, str] = {
 # Gate type → CLI args for review execution
 GATE_CLI_ARGS: Dict[str, List[str]] = {
     "gemini_review": ["--output-format", "json"],
-    "codex_gate": ["--quiet"],
+    "codex_gate": ["exec", "--json"],
     "claude_github_optional": [],
 }
 
