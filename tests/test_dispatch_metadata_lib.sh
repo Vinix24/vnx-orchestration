@@ -54,7 +54,7 @@ missing_file="$(mktemp)"
 assert_eq "P1" "$(vnx_dispatch_extract_priority "$missing_file")" "default priority"
 assert_eq "normal" "$(vnx_dispatch_extract_cognition "$missing_file")" "default cognition"
 assert_eq "none" "$(vnx_dispatch_extract_mode "$missing_file")" "default mode"
-assert_eq "true" "$(vnx_dispatch_extract_clear_context "$missing_file")" "default clear-context"
+assert_eq "false" "$(vnx_dispatch_extract_clear_context "$missing_file")" "default clear-context"
 assert_eq "$(basename "$missing_file")" "$(vnx_dispatch_extract_dispatch_id "$missing_file")" "dispatch-id fallback to filename"
 
 rm -f "$tmp_file" "$missing_file"

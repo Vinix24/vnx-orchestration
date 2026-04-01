@@ -99,6 +99,62 @@ PY
     echo "[$ts] $payload"
 }
 
+# Classify a block reason into category and requeueable flag.
+# Outputs: "<category> <requeueable>" where category is one of:
+#   busy      — terminal has a healthy active lease (defer)
+#   ambiguous — lease expired or state unreadable (requeue)
+#   invalid   — metadata invalid, skill bad, dependency error (reject)
+_classify_blocked_dispatch() {
+    local reason="$1"
+    case "$reason" in
+        active_claim:*|status_claimed:*)
+            echo "busy true" ;;
+        canonical_lease:lease_expired*|recent_*|canonical_check_error:*|terminal_state_unreadable)
+            echo "ambiguous true" ;;
+        canonical_lease:*)
+            echo "busy true" ;;
+        *)
+            echo "invalid false" ;;
+    esac
+}
+
+# Emit a structured NDJSON event when a dispatch is blocked.
+# Usage: emit_blocked_dispatch_audit <dispatch_id> <terminal_id> <block_reason> [<event_type>]
+# event_type defaults to "dispatch_blocked"; use "duplicate_delivery_prevented" for duplicates.
+emit_blocked_dispatch_audit() {
+    local dispatch_id="$1"
+    local terminal_id="$2"
+    local block_reason="$3"
+    local event_type="${4:-dispatch_blocked}"
+    local audit_file="$STATE_DIR/blocked_dispatch_audit.ndjson"
+
+    local classification
+    classification=$(_classify_blocked_dispatch "$block_reason")
+    local block_category="${classification%% *}"
+    local requeueable="${classification##* }"
+
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$block_reason" \
+        "$block_category" "$requeueable" "$ts" "$audit_file" <<'PY'
+import json, sys, os
+event_type, dispatch_id, terminal_id, block_reason, block_category, requeueable_str, ts, audit_file = sys.argv[1:]
+event = {
+    "event_type": event_type,
+    "dispatch_id": dispatch_id,
+    "terminal_id": terminal_id,
+    "block_reason": block_reason,
+    "block_category": block_category,
+    "requeueable": requeueable_str == "true",
+    "timestamp": ts,
+}
+os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
+with open(audit_file, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
+}
+
 tmux_send_best_effort() {
     local target_pane="$1"
     shift
@@ -241,11 +297,24 @@ PY
 
     if [ $rc -ne 0 ]; then
         log "V8 LOCK: check_failed terminal=$terminal_id dispatch=$dispatch_id rc=$rc"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "legacy_check_failed:rc=$rc" "dispatch_blocked"
         return 1
     fi
 
     if [[ "$check_output" == BLOCK:* ]]; then
-        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${check_output#BLOCK:}"
+        local _block_reason="${check_output#BLOCK:}"
+        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_block_reason}"
+        # Detect duplicate: active_claim held by same dispatch_id
+        if [[ "$_block_reason" == active_claim:* ]]; then
+            local _holder="${_block_reason#active_claim:}"
+            if [[ "$_holder" == "$dispatch_id" ]]; then
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "duplicate_delivery_prevented"
+            else
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
+            fi
+        else
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
+        fi
         return 1
     fi
 
@@ -695,6 +764,22 @@ configure_terminal_mode() {
             codex_cli|codex)   sleep 4 ;;
             *)                 sleep 3 ;;
         esac
+
+        # Verify terminal shows ready prompt after clear-context.
+        # Handle feedback modal ("Was this conversation helpful?") by pressing Enter.
+        local pane_content
+        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+        if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
+            log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
+            tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
+            sleep 2
+            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+        fi
+        # Confirm terminal is back to input-ready state (prompt visible, not rendering)
+        if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
+            log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
+            sleep 2
+        fi
     fi
 
     # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
@@ -1273,7 +1358,19 @@ $receipt_footer"
     local _rc_canonical_check
     _rc_canonical_check=$(rc_check_terminal "$terminal_id" "$dispatch_id")
     if [[ "$_rc_canonical_check" == BLOCK:* ]]; then
-        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_canonical_check#BLOCK:}"
+        local _rc_block_reason="${_rc_canonical_check#BLOCK:}"
+        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_block_reason}"
+        # Detect duplicate delivery: canonical lease held by same dispatch_id prefix
+        if [[ "$_rc_block_reason" == canonical_lease:leased:* ]]; then
+            local _current_holder="${_rc_block_reason#canonical_lease:leased:}"
+            if [[ "$_current_holder" == "$dispatch_id" ]]; then
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "duplicate_delivery_prevented"
+            else
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+            fi
+        else
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+        fi
         return 1
     fi
 
@@ -1292,6 +1389,7 @@ $receipt_footer"
     _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id") || _rc_acquire_rc=$?
     if [[ "$_rc_acquire_rc" -ne 0 || "$_rc_generation" == "FAIL" ]]; then
         log "V8 LOCK: canonical lease acquire failed — blocking dispatch terminal=$terminal_id dispatch=$dispatch_id"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "canonical_lease_acquire_failed" "dispatch_blocked"
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after lease acquire failure" "terminal=$terminal_id dispatch=$dispatch_id"
         fi
