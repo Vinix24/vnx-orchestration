@@ -1630,19 +1630,24 @@ ${complete_prompt}"
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
 
     local _delivery_failed=false
+    local _failed_substep=""  # Tracks which substep set _delivery_failed=true
 
     # Provider-aware dispatch: Codex CLI paste-buffer replaces typed input,
     # so prepend skill command to buffer content instead of typing separately.
     if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
         # Codex: single paste-buffer with skill + instruction combined
+        # Substep: load_buffer
         if ! tmux_retry 3 tmux_load_buffer_safe "${skill_command}${complete_prompt}"; then
             _delivery_failed=true
+            _failed_substep="load_buffer"
             log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
         fi
 
         if [ "$_delivery_failed" = false ]; then
+            # Substep: paste_buffer
             if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
                 _delivery_failed=true
+                _failed_substep="paste_buffer"
                 log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
             fi
         fi
@@ -1650,8 +1655,10 @@ ${complete_prompt}"
         # Claude Code / others: type skill via send-keys, then paste instruction
         # Step 1: Type skill command via send-keys (triggers skill activation)
         # Use -l (literal) for providers that use $ prefix to prevent tmux key interpretation
+        # Substep: send_skill
         if ! tmux_retry 3 tmux_send_best_effort "$target_pane" -l "$skill_command"; then
             _delivery_failed=true
+            _failed_substep="send_skill"
             log "V8 ERROR: Failed to send skill command to terminal $target_pane"
         fi
 
@@ -1660,23 +1667,34 @@ ${complete_prompt}"
             sleep 0.5
 
             # Step 2: Load instruction into buffer and paste after typed skill command
+            # Substep: load_buffer
             if ! tmux_retry 3 tmux_load_buffer_safe "$complete_prompt"; then
                 _delivery_failed=true
+                _failed_substep="load_buffer"
                 log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
             fi
         fi
 
         if [ "$_delivery_failed" = false ]; then
+            # Substep: paste_buffer
             if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
                 _delivery_failed=true
+                _failed_substep="paste_buffer"
                 log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
             fi
         fi
     fi
 
     if [ "$_delivery_failed" = true ]; then
+        # Annotate dispatch with the failing substep for operator observability.
+        # [DELIVERY_SUBSTEP_FAILED:] is requeueable — does not trigger permanent rejection.
+        log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
+            "substep=$_failed_substep dispatch=$dispatch_id terminal=$terminal_id"
+        printf '\n\n[DELIVERY_SUBSTEP_FAILED: substep=%s] tmux delivery failed at substep. Retry is automatic.\n' \
+            "$_failed_substep" >> "$dispatch_file"
+
         # Record failure and release canonical lease atomically (PR-1: always paired)
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux delivery failed"
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux delivery failed: substep=$_failed_substep"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
@@ -1687,7 +1705,14 @@ ${complete_prompt}"
     # Add delay before Enter to ensure content is fully pasted and rendered
     sleep 1
 
+    # Substep: enter
     if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
+        # Annotate dispatch with the failing substep for operator observability.
+        log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
+            "substep=enter dispatch=$dispatch_id terminal=$terminal_id"
+        printf '\n\n[DELIVERY_SUBSTEP_FAILED: substep=enter] tmux Enter failed at substep. Retry is automatic.\n' \
+            >> "$dispatch_file"
+
         # Record failure and release canonical lease atomically (PR-1: always paired)
         rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux Enter failed"
 
