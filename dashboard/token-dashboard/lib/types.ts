@@ -50,6 +50,126 @@ export const MODEL_COLORS: Record<string, string> = {
 
 export type SortOrder = 'DESC' | 'ASC';
 
+// ===== Operator Dashboard Types =====
+
+export type TerminalStatus =
+  | 'active'
+  | 'working'
+  | 'blocked'
+  | 'stale'
+  | 'exited'
+  | 'idle'
+  | 'unknown';
+
+export type HeartbeatClassification = 'fresh' | 'stale' | 'dead' | 'missing' | string;
+
+export type AttentionLevel = 'critical' | 'warning' | 'clear';
+
+export type ActionStatus = 'success' | 'failed' | 'already_active' | 'degraded';
+
+export interface ContextPressure {
+  remaining_pct: number;
+  warning: boolean;
+}
+
+export interface TerminalEntry {
+  terminal_id: string;
+  lease_state: string;
+  dispatch_id: string | null;
+  heartbeat_classification: HeartbeatClassification;
+  last_heartbeat_at: string | null;
+  worker_state: string | null;
+  last_output_at: string | null;
+  stall_count?: number;
+  blocked_reason?: string | null;
+  is_terminal?: boolean;
+  status: TerminalStatus;
+  context_pressure?: ContextPressure;
+}
+
+export interface ProjectEntry {
+  name: string;
+  path: string;
+  registered_at: string | null;
+  session_active: boolean;
+  active_feature: string | null;
+  open_blocker_count: number;
+  open_warn_count: number;
+  attention_level: AttentionLevel;
+}
+
+export interface OpenItem {
+  id: string;
+  severity: 'blocker' | 'blocking' | 'warn' | 'warning' | 'info';
+  status: string;
+  title: string;
+  description?: string;
+  source?: string;
+  created_at?: string;
+  age_seconds?: number | null;
+  _project_name?: string;
+}
+
+export interface OpenItemSummary {
+  blocker_count: number;
+  warn_count: number;
+  info_count: number;
+}
+
+export interface PRProgress {
+  id: string;
+  title: string | null;
+  status: string | null;
+  track: string | null;
+  gate: string | null;
+}
+
+export interface TrackStatus {
+  current_gate: string | null;
+  status: string | null;
+  active_dispatch_id: string | null;
+}
+
+export interface SessionData {
+  feature_name: string | null;
+  pr_progress: PRProgress[];
+  track_status: Record<string, TrackStatus>;
+  terminal_states: TerminalEntry[];
+  last_activity: string | null;
+  open_item_summary: OpenItemSummary;
+}
+
+export interface FreshnessEnvelope<T = unknown> {
+  view: string;
+  queried_at?: string;
+  source_freshness?: Record<string, string | null>;
+  staleness_seconds?: number;
+  degraded: boolean;
+  degraded_reasons?: string[];
+  data: T;
+}
+
+export interface ProjectsEnvelope extends FreshnessEnvelope<ProjectEntry[]> {}
+export interface SessionEnvelope extends FreshnessEnvelope<SessionData> {}
+export interface TerminalsEnvelope extends FreshnessEnvelope<TerminalEntry[]> {}
+export interface TerminalEnvelope extends FreshnessEnvelope<TerminalEntry> {}
+export interface OpenItemsEnvelope extends FreshnessEnvelope<{ items: OpenItem[]; summary: OpenItemSummary }> {}
+export interface AggregateOpenItemsEnvelope extends FreshnessEnvelope<{
+  items: OpenItem[];
+  per_project_subtotals: Record<string, { status: string; blocker_count: number; warn_count: number; info_count: number }>;
+  total_summary: OpenItemSummary;
+}> {}
+
+export interface ActionOutcome {
+  action: string;
+  project: string;
+  status: ActionStatus;
+  message: string;
+  details?: Record<string, unknown>;
+  error_code?: string;
+  timestamp: string;
+}
+
 export interface ConversationSession {
   session_id: string;
   project_path: string;
