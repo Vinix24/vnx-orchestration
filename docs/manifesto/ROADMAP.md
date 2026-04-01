@@ -84,6 +84,26 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ## Next (After Committed Scope)
 
+## Recommended Next Hardening Chain
+**Status**: `Next`
+**Why**: The first four-feature autonomous run proved substantive delivery, but repeated governance gaps showed that formal closure and dispatch integrity still need a focused hardening lane before the next broad autonomous rollout.
+
+**Recommended order**
+1. Deterministic Headless Gate Evidence Enforcement
+2. Terminal Input-Ready Mode Guard
+3. Queue And Runtime Projection Consistency Hardening
+4. Fine-Grained Delivery Rejection Logging
+5. Residual Governance Bugfix Sweep
+
+**Intent**
+- First remove the repeated false-green closure path around headless gates.
+- Then close the tmux input-mode corruption path for slash-prefixed dispatches.
+- Then reconcile operator-visible queue/projected state with active runtime truth.
+- Then make delivery failures diagnostically precise instead of generic rejects.
+- Finally sweep the remaining warn-level governance bugs into a clean baseline for the next multi-feature autonomous chain.
+
+---
+
 ## 5) Terminal Pool Expansion (4 -> N)
 **Status**: `Next`  
 **Why**: Higher throughput and specialization require dynamic terminal scaling.
