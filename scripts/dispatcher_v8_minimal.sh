@@ -13,6 +13,7 @@ source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
 source "$SCRIPT_DIR/lib/provider_routing.sh"
 source "$SCRIPT_DIR/lib/model_routing.sh"
+source "$SCRIPT_DIR/lib/input_mode_guard.sh"
 
 # Configuration
 PROJECT_ROOT="${PROJECT_ROOT}"
@@ -115,6 +116,10 @@ _classify_blocked_dispatch() {
             echo "ambiguous true" ;;
         canonical_lease:*)
             echo "busy true" ;;
+        blocked_input_mode|recovery_failed|pane_dead|probe_failed)
+            # Input-mode blocks: terminal is not busy but pane is non-interactive.
+            # Requeue after operator resolves copy/search mode.
+            echo "ambiguous true" ;;
         *)
             echo "invalid false" ;;
     esac
@@ -1572,6 +1577,24 @@ $receipt_footer"
 
         # Record delivery start (queued -> claimed -> delivering)
         _rc_attempt_id=$(rc_delivery_start "$dispatch_id" "$terminal_id")
+    fi
+
+    # --- Input-Mode Guard (IMR-1, IMR-2) — PR-1 ---
+    # Post-lease, pre-send-keys: probe pane_in_mode before any tmux key delivery.
+    # Blocks slash-prefixed dispatch into copy/search mode (silent corruption path).
+    # Recovery: programmatic cancel (attempt 1) + Escape (attempt 2).
+    # Fail-closed on recovery failure: release lease + claim, block dispatch.
+    # Headless providers are exempt (no tmux send-keys used).
+    if ! check_pane_input_ready "$target_pane" "$terminal_id" "$dispatch_id" "$provider"; then
+        log "V8 INPUT_MODE: delivery blocked — unrecoverable pane mode terminal=$terminal_id dispatch=$dispatch_id"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "blocked_input_mode" "dispatch_blocked"
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "input_mode_blocked"
+        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+            log_structured_failure "claim_release_failed" \
+                "Failed to release claim after input mode block" \
+                "terminal=$terminal_id dispatch=$dispatch_id"
+        fi
+        return 1
     fi
 
     # Resolve worktree path for this terminal (falls back to PROJECT_ROOT)
