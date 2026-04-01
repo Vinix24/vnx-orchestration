@@ -192,6 +192,29 @@ def cmd_release_lease(args: argparse.Namespace) -> None:
     _out(result, 0 if result.get("released") else 1)
 
 
+def cmd_release_on_failure(args: argparse.Namespace) -> None:
+    """Record delivery failure and release canonical lease atomically.
+
+    Returns a structured result with explicit success/failure markers for
+    both the delivery-failure record and the lease release. The caller
+    uses these markers to emit a structured audit entry.
+
+    Exit 0 even on partial failure so the caller can read the JSON and
+    emit its own audit — do not let exit-code semantics hide the detail.
+    """
+    core = _require_core()
+    result = core.release_on_delivery_failure(
+        dispatch_id=args.dispatch_id,
+        attempt_id=args.attempt_id or "",
+        terminal_id=args.terminal,
+        generation=args.generation,
+        reason=args.reason or "delivery failed",
+    )
+    # Exit 0 always: caller reads cleanup_complete/lease_released to decide
+    # whether to emit a cleanup-failure audit entry.
+    _out(result, 0)
+
+
 def cmd_compat_check(_args: argparse.Namespace) -> None:
     """Validate all runtime core components are functional."""
     state_dir, dispatch_dir = _get_dirs()
@@ -255,6 +278,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--terminal", required=True)
     p.add_argument("--generation", type=int, required=True)
 
+    # release-on-failure
+    p = sub.add_parser(
+        "release-on-failure",
+        help="Record delivery failure and release canonical lease atomically",
+    )
+    p.add_argument("--dispatch-id", required=True)
+    p.add_argument("--attempt-id", default="")
+    p.add_argument("--terminal", required=True)
+    p.add_argument("--generation", type=int, required=True)
+    p.add_argument("--reason", default="delivery failed")
+
     # compat-check
     sub.add_parser("compat-check", help="Check runtime core compatibility")
 
@@ -273,6 +307,7 @@ def main() -> None:
         "check-terminal": cmd_check_terminal,
         "acquire-lease": cmd_acquire_lease,
         "release-lease": cmd_release_lease,
+        "release-on-failure": cmd_release_on_failure,
         "compat-check": cmd_compat_check,
     }
     handlers[args.command](args)
