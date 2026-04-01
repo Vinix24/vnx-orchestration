@@ -33,7 +33,8 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
-from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema
+from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection
+from runtime_state_reconciler import ZOMBIE_LEASE, GHOST_DISPATCH, RuntimeStateReconciler
 from tmux_adapter import TmuxAdapter, load_adapter
 
 _RUNTIME_PRIMARY_FLAG = "VNX_RUNTIME_PRIMARY"
@@ -281,6 +282,12 @@ class RuntimeCore:
 
         Fail-closed: returns available=False on DB error or runtime uncertainty.
         Ambiguous state blocks rather than dispatches per the fail-closed contract.
+
+        PR-2: also runs mismatch detection via RuntimeStateReconciler so that
+        dispatch safety checks see the same reconciled truth as operator tooling.
+        Zombie leases (lease held by a dispatch that has already ended) are
+        reported explicitly with mismatch=zombie_lease rather than silently
+        blocking future dispatches indefinitely.
         """
         try:
             lease = self._lease_mgr.get(terminal_id)
@@ -294,6 +301,33 @@ class RuntimeCore:
                     "terminal_id": terminal_id,
                     "reason": f"lease_expired_not_cleaned:{lease.dispatch_id}",
                 }
+
+            # PR-2: Detect zombie lease — lease is held but the linked dispatch
+            # has already ended (failed, completed, expired, etc.).  Report the
+            # mismatch explicitly so operators can see the divergence and the
+            # dispatcher can take explicit corrective action rather than being
+            # blocked indefinitely by a lease that should have been released.
+            reconciler = RuntimeStateReconciler(self._lease_mgr.state_dir)
+            mismatches = reconciler.reconcile_for_terminal(terminal_id)
+            zombie = next(
+                (m for m in mismatches if m.mismatch_type == ZOMBIE_LEASE),
+                None,
+            )
+            if zombie:
+                return {
+                    "available": False,
+                    "terminal_id": terminal_id,
+                    "reason": (
+                        f"zombie_lease:{lease.dispatch_id}:"
+                        f"dispatch_state={zombie.dispatch_state}"
+                    ),
+                    "lease_state": lease.state,
+                    "dispatch_state": zombie.dispatch_state,
+                    "mismatch": ZOMBIE_LEASE,
+                    "mismatch_message": zombie.message,
+                    "claimed_by": lease.dispatch_id,
+                }
+
             return {
                 "available": False,
                 "terminal_id": terminal_id,
