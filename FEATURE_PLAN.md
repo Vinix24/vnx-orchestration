@@ -1,53 +1,53 @@
-# Feature: Autonomous Runtime State Machine And Stall Supervision
+# Feature: Coding Operator Dashboard And Session Control
 
-**Feature-ID**: Feature 12
+**Feature-ID**: Feature 13
 
 **Status**: Planned
 **Priority**: P1
-**Branch**: `feature/autonomous-runtime-state-machine-and-stall-supervision`
+**Branch**: `feature/coding-operator-dashboard-and-session-control`
 **Risk-Class**: high
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 
 Primary objective:
-Eliminate silent worker bad states and establish one explicit runtime truth model that T0, later dashboard work, and future runtime adapters can trust.
+Deliver the first coding operator dashboard that can start sessions per project, show which terminals are actually working, and expose open items per project and across projects from a read-model-backed control surface.
 
 Execution context:
-- first post-bridge product-level feature after B1-B3 and Feature 10-11
-- maps directly to Roadmap M1: Autonomous Runtime Reliability
-- should land before the first coding operator dashboard feature so the dashboard does not build on ambiguous runtime state
+- immediate follow-on feature after Feature 12 runtime reliability work
+- maps primarily to Roadmap M4: Coding Operator Dashboard
+- incorporates early M5a discipline by avoiding new direct tmux coupling and routing all operator visibility through stable read-model surfaces
 
 Review gate policy:
 - Gemini headless review is required on every PR in this feature
-- Codex headless final gate is required on every PR in this feature because runtime truth is merge-critical
+- Codex headless final gate is required on every PR in this feature because operator control surfaces must not regress governance truth
 - every PR in this feature must be opened as a GitHub PR before merge consideration
 - no downstream PR may be promoted until the upstream PR is merged from green GitHub CI on updated `main`
 
 ## Problem Statement
 
-The current system still allows bad runtime ambiguity:
-- workers can end in idle-like or unknown states after bad exits
-- no-output or stale sessions can persist too long before becoming explicit governance objects
-- T0 and operators can still infer runtime truth indirectly instead of reading a canonical state machine
-- future dashboard and runtime adapter work would deepen tmux-era ambiguity if this layer remains implicit
+The current operator experience is still fragmented:
+- session truth is spread across tmux, receipts, runtime artifacts, and ad hoc scripts
+- open items are not yet easy to inspect per project and in aggregate from one practical surface
+- starting or attaching to sessions still depends too much on manual terminal choreography
+- a dashboard built directly on scripts or raw files would become a cosmetic surface instead of an operator-grade control plane
 
 ## Design Goal
 
-Create a deterministic worker/session state model with heartbeat, stall classification, and open-item escalation so silent runtime failure becomes structurally impossible.
+Create a read-model-backed coding dashboard that makes live session state, project-level open items, aggregate open items, and safe session actions visible in one practical operator surface.
 
 ## Non-Goals
 
-- no dashboard UI in this feature
-- no broad transport rewrite
-- no business-domain manager/worker generalization yet
-- no attempt to solve all context-injection or learning-loop issues here
+- no broad Business OS rollout
+- no hosted multi-user control plane
+- no replacement of tmux as the active runtime adapter in this feature
+- no heavy intelligence or learning-loop overhaul beyond what the dashboard needs to render trustworthy operator state
 
 ## Delivery Discipline
 
 - each PR must have a GitHub PR with clear scope and linked feature name before merge
 - required GitHub Actions checks must be green before human merge
 - dependent PRs must branch from post-merge `main`, not from stale local branches
-- local receipts alone are not sufficient for progression if GitHub CI is red or missing
+- no dashboard PR may merge against ambiguous runtime semantics from Feature 12
 
 ## Dependency Flow
 
@@ -56,9 +56,10 @@ PR-0 (no dependencies)
 PR-0 -> PR-1
 PR-1 -> PR-2
 PR-2 -> PR-3
+PR-3 -> PR-4
 ```
 
-## PR-0: Runtime State Machine Contract And Operator Truth Rules
+## PR-0: Dashboard Read Model And Operator Surface Contract
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -69,41 +70,41 @@ PR-2 -> PR-3
 **Dependencies**: []
 
 ### Description
-Define the canonical worker/session lifecycle, heartbeat semantics, tie-break rules across queue/runtime/terminal surfaces, and the escalation policy for anomalous runtime states.
+Define the dashboard data contract, operator questions, safe actions, and read-model boundaries so the UI is forced to sit on canonical projected state rather than direct script calls or raw file parsing.
 
 ### Scope
-- define canonical runtime states such as `working`, `idle`, `stalled`, `exited`, `blocked`, `awaiting_input`, `resume_unsafe`
-- define heartbeat freshness vs stale thresholds
-- define no-output detection semantics for headless and interactive workers
-- define which surface wins under mismatch between runtime, queue, and terminal activity
-- define when anomalous runtime situations create open items automatically
+- define the first dashboard surfaces: projects, sessions, terminals, open items, aggregate open items
+- define mandatory operator questions each surface must answer
+- define safe first actions: session start, attach/open terminal, refresh/reconcile, inspect open items
+- define required read-model inputs and forbidden direct data paths
+- define empty, stale, and degraded-state handling
 
 ### Deliverables
-- runtime state machine contract document
-- operator truth and tie-break policy
-- anomaly classification matrix
-- GitHub PR with linked acceptance summary
+- dashboard read-model and operator-surface contract
+- safe-action policy for first release
+- degraded-state and empty-state policy
+- GitHub PR with contract summary
 
 ### Success Criteria
-- runtime states are explicit and finite
-- stale vs active vs broken states are no longer implicit heuristics
-- T0 has deterministic guidance for which state surface to trust
-- anomaly escalation is defined before implementation starts
+- dashboard scope is explicit and practical
+- UI-first drift is blocked before implementation starts
+- operator questions are known up front
+- safe action boundaries are explicit
 
 ### Quality Gate
-`gate_pr0_runtime_state_machine_contract`:
-- [ ] Contract defines canonical worker and session states with allowed transitions
-- [ ] Contract defines heartbeat freshness, stale thresholds, and no-output semantics
-- [ ] Contract defines deterministic tie-break rules across queue, runtime, and terminal surfaces
-- [ ] Contract defines automatic open-item creation for anomalous runtime states
-- [ ] GitHub PR exists with feature-linked summary and acceptance notes
+`gate_pr0_dashboard_contract`:
+- [ ] Contract defines first dashboard surfaces and operator questions
+- [ ] Contract defines required read-model inputs and forbids raw script-coupled rendering
+- [ ] Contract defines safe initial actions and degraded-state handling
+- [ ] Contract defines per-project and cross-project open-item visibility requirements
+- [ ] GitHub PR exists with contract summary and acceptance notes
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-1: Session State Machine And Heartbeat Persistence
+## PR-1: Runtime, Session, And Open-Item Read Model Projections
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -114,88 +115,134 @@ Define the canonical worker/session lifecycle, heartbeat semantics, tie-break ru
 **Dependencies**: [PR-0]
 
 ### Description
-Implement the canonical state machine and heartbeat persistence so workers cannot silently slip from active execution into ambiguous idle or unknown states.
+Implement the read-model projections that unify runtime state, project session truth, and open-item visibility into one backend surface the dashboard can trust.
 
 ### Scope
-- add canonical runtime state representation in the execution layer
-- persist heartbeat timestamps and last-output timestamps
-- implement deterministic state transitions on launch, active output, clean exit, bad exit, and manual interruption
-- expose canonical runtime state for T0 and downstream read-model consumers
-- add tests for state transitions and stale classification
+- project-level session projection
+- terminal/runtime projection using Feature 12 canonical state
+- per-project open-item projection
+- aggregate open-item projection across projects
+- tests for projection freshness, degraded state, and mismatch diagnostics
 
 ### Deliverables
-- runtime state model implementation
-- heartbeat persistence and last-output tracking
-- state transition tests
-- GitHub PR with evidence summary
+- dashboard read-model projection layer
+- projection tests
+- operator-readable mismatch diagnostics
+- GitHub PR with projection evidence summary
 
 ### Success Criteria
-- runtime state no longer depends on ad hoc terminal inference alone
-- last heartbeat and last output are durable and queryable
-- clean vs bad exits resolve to explicit states
-- tests cover the main transition paths
+- dashboard-facing state can be queried without scraping raw runtime files manually
+- project and aggregate open-item views are available from one stable surface
+- runtime and session truth remain explainable under degraded conditions
+- projection tests cover stale and mismatch scenarios
 
 ### Quality Gate
-`gate_pr1_state_machine_and_heartbeat`:
-- [ ] All runtime state machine and heartbeat tests pass
-- [ ] Launch, output, clean exit, bad exit, and interruption transitions are explicit under test
-- [ ] Heartbeat and last-output timestamps persist in canonical runtime state
-- [ ] T0-readable state surface exists without scraping terminal behavior ad hoc
-- [ ] GitHub PR exists with implementation and evidence summary
+`gate_pr1_dashboard_read_model`:
+- [ ] All dashboard read-model projection tests pass
+- [ ] Project session, terminal runtime, and open-item projections are queryable from one stable surface
+- [ ] Aggregate open-item projection across projects is available under test
+- [ ] Degraded or mismatched projection states produce operator-readable diagnostics
+- [ ] GitHub PR exists with projection evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-2: Stall Detection, Exit Classification, And Open-Item Escalation
+## PR-2: Session Start And Safe Operator Control Actions
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
-**Skill**: @monitoring-specialist
+**Skill**: @backend-developer
 **Requires-Model**: sonnet
 **Estimated Time**: 2-4 hours
 **Dependencies**: [PR-1]
 
 ### Description
-Add runtime supervision that detects no-output hangs, stale sessions, and bad exits, then emits durable evidence and governance objects instead of leaving T0 to discover failures manually.
+Implement the first safe operator control actions so sessions can be started per project and the operator can reach the correct terminal/session without unsafe direct orchestration shortcuts.
 
 ### Scope
-- implement no-output stall detection
-- classify exit paths into operator-meaningful runtime outcomes
-- create durable audit records for stall, stale, and bad-exit scenarios
-- auto-create open items for unresolved runtime anomalies
-- add tests for stall detection, bad exits, and escalation paths
+- per-project session start action
+- safe attach/open-terminal action for active sessions
+- explicit action outcomes and operator-visible error states
+- no action may bypass runtime/read-model truth
+- tests for session start, attach intent, and degraded-action behavior
 
 ### Deliverables
-- stall and stale supervision logic
-- exit classification mapping
-- runtime anomaly audit records
-- open-item escalation path for unresolved runtime failures
-- GitHub PR with failure-path evidence summary
+- session start and attach control handlers
+- operator-visible action outcome model
+- action tests for success and degraded paths
+- GitHub PR with control-surface evidence summary
 
 ### Success Criteria
-- silent stalls become explicit runtime events
-- bad exits no longer collapse into ambiguous idle states
-- unresolved runtime anomalies create open items automatically
-- runtime failures become visible inputs for later dashboard work
+- an operator can start a session per project from one clear surface
+- terminal access is guided by explicit session truth, not guesswork
+- action failures are visible and auditable
+- no action path silently bypasses governance or runtime truth
 
 ### Quality Gate
-`gate_pr2_runtime_supervision_and_escalation`:
-- [ ] All runtime supervision tests pass
-- [ ] No-output stall detection produces structured runtime outcomes under test
-- [ ] Bad exits classify into explicit operator-meaningful states under test
-- [ ] Unresolved runtime anomalies create durable open items automatically
-- [ ] Audit records exist for stall, stale, and bad-exit paths
-- [ ] GitHub PR exists with failure-path evidence summary
+`gate_pr2_dashboard_control_actions`:
+- [ ] All session-control action tests pass
+- [ ] Session start works per project from the dashboard-backed control surface
+- [ ] Attach/open-terminal action resolves against canonical session truth under test
+- [ ] Failed or degraded actions produce explicit operator-visible outcomes
+- [ ] No action path bypasses runtime/read-model truth under test
+- [ ] GitHub PR exists with control-surface evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-3: Unattended Runtime Reliability Certification
+## PR-3: Dashboard UI For Projects, Sessions, Terminals, And Open Items
+**Track**: A
+**Priority**: P1
+**Complexity**: Medium
+**Risk**: High
+**Skill**: @frontend-developer
+**Requires-Model**: sonnet
+**Estimated Time**: 3-5 hours
+**Dependencies**: [PR-2]
+
+### Description
+Build the first operator dashboard UI on top of the read model so the coding operator can see project sessions, terminal state, and open items without dropping into manual tmux and raw file inspection for routine decisions.
+
+### Scope
+- projects overview with session start entrypoint
+- active sessions and terminal status view
+- per-project open-item view
+- aggregate open-items view across projects
+- degraded-state, empty-state, and stale-state rendering
+- UI tests for main operator flows
+
+### Deliverables
+- dashboard UI for projects, sessions, terminals, and open items
+- operator flow tests
+- degraded-state rendering coverage
+- GitHub PR with screenshots and flow evidence
+
+### Success Criteria
+- the operator can see which terminals are actually working
+- per-project and aggregate open items are visible from one dashboard
+- starting a project session is practical from the UI
+- degraded state is explicit instead of silently misleading
+
+### Quality Gate
+`gate_pr3_dashboard_ui`:
+- [ ] All dashboard UI and operator-flow tests pass
+- [ ] Projects view shows session start entrypoints and active session visibility
+- [ ] Terminal state view distinguishes active, stale, blocked, and exited sessions under test
+- [ ] Per-project and aggregate open-item views render correctly under test
+- [ ] Degraded, stale, and empty states render explicitly and do not masquerade as healthy state
+- [ ] GitHub PR exists with screenshots and operator-flow evidence
+- [ ] Required GitHub Actions checks are green before merge
+- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
+- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+
+---
+
+## PR-4: Coding Operator Dashboard Certification
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -203,37 +250,40 @@ Add runtime supervision that detects no-output hangs, stale sessions, and bad ex
 **Skill**: @quality-engineer
 **Requires-Model**: opus
 **Estimated Time**: 3-5 hours
-**Dependencies**: [PR-2]
+**Dependencies**: [PR-3]
 
 ### Description
-Certify that the runtime layer now surfaces active, stale, stalled, blocked, and exited states deterministically enough for unattended coding runs and future dashboard work.
+Certify that the first coding operator dashboard is trustworthy enough for daily use, that it improves practical control over autonomous coding flows, and that it did not regress governance truth.
 
 ### Scope
-- run unattended scenarios that previously produced mystery-idle or silently stale behavior
-- verify runtime truth remains reconstructable from evidence
-- verify anomalous runtime situations produce open items and operator-readable diagnostics
+- verify per-project session start end to end
+- verify active terminal visibility against real runtime state
+- verify per-project and aggregate open-item visibility
+- verify degraded-state handling under stale or mismatched projections
 - verify each prior PR was merged from green GitHub CI before the next PR began
 - require Gemini review and Codex final gate on the certification PR
 
 ### Deliverables
-- unattended runtime certification report
-- scenario evidence for active, stalled, stale, blocked, and exited outcomes
+- dashboard certification report
+- operator runbook for first release
+- evidence for project session start, active terminal visibility, and open-item views
 - sequencing audit for GitHub PR progression and green-CI compliance
-- residual risk summary for follow-on Feature 13
 
 ### Success Criteria
-- the operator can tell when a worker is truly working vs stale vs stalled vs broken
-- prior silent-failure patterns are reproducible and closed under test
+- the dashboard is useful for real daily operation, not just demonstration
+- session start and terminal visibility work against trustworthy state
+- open-item visibility is materially better than the current fragmented operator experience
 - this feature closes with zero unresolved chain-created open items
-- downstream dashboard work can trust runtime state as a real substrate, not a cosmetic proxy
 
 ### Quality Gate
-`gate_pr3_runtime_reliability_certification`:
-- [ ] All unattended runtime certification tests pass
-- [ ] Active, stalled, stale, blocked, and exited outcomes are distinguishable under test and in evidence
-- [ ] Previously observed silent-runtime failure patterns are closed under test
+`gate_pr4_dashboard_certification`:
+- [ ] All dashboard certification tests pass
+- [ ] End-to-end evidence proves per-project session start works from the dashboard
+- [ ] Active terminal visibility matches canonical runtime truth under test
+- [ ] Per-project and aggregate open-item views are correct under test
+- [ ] Degraded-state handling stays explicit under stale or mismatched projection conditions
 - [ ] Each PR in this feature was merged only after green GitHub CI on the corresponding GitHub PR
-- [ ] Certification report records residual risks for follow-on dashboard work
+- [ ] Operator runbook exists for first-release daily use
 - [ ] Feature closes with zero unresolved chain-created open items
 - [ ] GitHub PR exists with certification evidence summary
 - [ ] Required GitHub Actions checks are green before merge
