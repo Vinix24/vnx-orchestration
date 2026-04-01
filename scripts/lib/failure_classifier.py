@@ -52,6 +52,42 @@ _NON_RETRYABLE = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Canonical failure code registry (DFL-LOG-4, Contract 160 Section 2)
+# Maps every delivery failure code to (failure_class, retryable, retry_decision, operator_summary)
+# ---------------------------------------------------------------------------
+
+FAILURE_CODE_REGISTRY: dict[str, tuple[str, bool, str, str]] = {
+    # Phase 0: Pre-delivery (no lease held)
+    "pre_executor_resolution": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "No terminal available for the target track. Retry when a terminal is free."),
+    "pre_mode_configuration": (HOOK_FEEDBACK_INTERRUPTION, True, "auto_retry", "Terminal mode configuration failed (clear/switch/modal). Terminal may need operator reset."),
+    "pre_skill_empty": (INVALID_SKILL, False, "manual_fix", "Dispatch role has no skill mapping. Fix the Role field in the dispatch."),
+    "pre_skill_registry": (INVALID_SKILL, False, "manual_fix", "Skill not found in the skills registry. Fix the Role or Skill field."),
+    "pre_instruction_empty": (INVALID_SKILL, False, "manual_fix", "Dispatch contains no instruction content. Rework the dispatch body."),
+    "pre_terminal_resolution": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Terminal ID resolution failed. Transient — retry on next cycle."),
+    "pre_canonical_lease_busy": (STALE_LEASE, True, "defer", "Terminal is occupied by another dispatch. Deferred until lease is released."),
+    "pre_canonical_lease_expired": (STALE_LEASE, True, "auto_retry", "Lease expired or recovering. Retry after reconciler runs."),
+    "pre_canonical_check_error": (STALE_LEASE, True, "auto_retry", "Lease check failed (transient I/O). Safe to retry."),
+    "pre_canonical_acquire_failed": (STALE_LEASE, True, "auto_retry", "Lease acquisition contention. Safe to retry."),
+    "pre_legacy_lock_busy": (STALE_LEASE, True, "defer", "Terminal lock held by prior dispatch. Deferred until lock clears."),
+    "pre_claim_failed": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Terminal claim acquisition failed. Transient — retry."),
+    "pre_duplicate_delivery": (STALE_LEASE, True, "defer", "Duplicate delivery prevented — prior attempt still holds lease."),
+    "pre_validation_empty_role": (INVALID_SKILL, False, "manual_fix", "Dispatch has no role. Set a valid Role field."),
+    "pre_validation_command_failed": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Intelligence validation command failed. Runtime dependency — retry when resolved."),
+    "pre_gather_command_failed": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Intelligence gathering command failed. Runtime dependency — retry when resolved."),
+    # Phase 1: Post-lease, pre-transport
+    "post_input_mode_blocked": (HOOK_FEEDBACK_INTERRUPTION, True, "auto_retry", "Terminal pane is in non-interactive mode (copy/search). Recovery failed — retry after operator resets pane."),
+    "post_process_exit": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Dispatcher process exited during delivery setup. Lease released by cleanup trap. Safe to retry."),
+    # Phase 2: Transport (tmux active)
+    "tx_send_skill": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Failed to type skill command into terminal. Transient tmux issue — retry."),
+    "tx_load_buffer": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Failed to load instruction into tmux buffer. Transient — retry."),
+    "tx_paste_buffer": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Failed to paste instruction into terminal. Transient — retry."),
+    "tx_send_enter": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Failed to submit dispatch with Enter. Transient — retry."),
+    "tx_load_buffer_codex": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Failed to load combined content into tmux buffer. Transient — retry."),
+    "tx_paste_buffer_codex": (TMUX_TRANSPORT_FAILURE, True, "auto_retry", "Failed to paste combined content into terminal. Transient — retry."),
+}
+
+
+# ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
@@ -170,6 +206,49 @@ def classify_failure(reason: str) -> FailureClassification:
         ),
         reason=reason,
     )
+
+
+def classify_failure_code(code: str) -> Optional[FailureClassification]:
+    """Classify a canonical failure code via direct lookup (DFL-LOG-4).
+
+    Returns None if the code is not in the registry (caller should fall back
+    to keyword-based classify_failure()).
+    """
+    entry = FAILURE_CODE_REGISTRY.get(code)
+    if entry is None:
+        return None
+    failure_class, retryable, retry_decision, operator_summary = entry
+    return FailureClassification(
+        failure_class=failure_class,
+        retryable=retryable,
+        operator_summary=operator_summary,
+        reason=code,
+    )
+
+
+def classify_failure_with_code(reason: str) -> FailureClassification:
+    """Classify a failure reason, trying direct code lookup first (DFL-LOG-4).
+
+    If the reason matches a delivery_failed:{code} pattern, extracts the code
+    and looks it up directly. Falls back to keyword-based classification.
+    """
+    if reason.startswith("delivery_failed:"):
+        code = reason[len("delivery_failed:"):]
+        result = classify_failure_code(code)
+        if result is not None:
+            return result
+    result = classify_failure_code(reason)
+    if result is not None:
+        return result
+    return classify_failure(reason)
+
+
+def get_retry_decision(code: str) -> str:
+    """Return the retry decision for a failure code: auto_retry, defer, or manual_fix."""
+    entry = FAILURE_CODE_REGISTRY.get(code)
+    if entry is None:
+        return "auto_retry"
+    return entry[2]
 
 
 def is_retryable(failure_class: str) -> bool:
