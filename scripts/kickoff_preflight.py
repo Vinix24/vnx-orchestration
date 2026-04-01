@@ -34,6 +34,13 @@ from queue_reconciler import (  # noqa: E402
     ReconcileResult,
 )
 
+# Routing preflight (PR-3: Kickoff, Preset, and Preflight Provider Readiness)
+sys.path.insert(0, str(_SCRIPTS_DIR))
+from routing_preflight import (  # noqa: E402
+    extract_requirements_from_feature_plan,
+    run_routing_preflight,
+)
+
 
 def run_preflight(
     *,
@@ -117,6 +124,38 @@ def run_preflight(
         from reconcile_queue_state import repair_projections
         repair_projections(result, state_dir, project_root)
 
+    # --- Routing preflight (PR-3) ---
+    # Check provider/model readiness from FEATURE_PLAN requirements
+    routing_reqs = extract_requirements_from_feature_plan(feature_plan, pr_id)
+    routing_report = run_routing_preflight(routing_reqs, check_pinned=True)
+
+    routing_blocking = [
+        {
+            "terminal": b.terminal_id,
+            "dimension": b.dimension,
+            "required": b.required_value,
+            "actual": b.actual_value,
+            "strength": b.strength,
+            "gap": b.gap,
+            "diagnostic": b.diagnostic,
+        }
+        for b in routing_report.blocking
+    ]
+    routing_warnings = [
+        {
+            "terminal": w.terminal_id,
+            "dimension": w.dimension,
+            "required": w.required_value,
+            "actual": w.actual_value,
+            "diagnostic": w.diagnostic,
+        }
+        for w in routing_report.warnings
+    ]
+
+    # Routing blocks override queue-truth safe status
+    if routing_blocking:
+        safe = False
+
     return {
         "safe_to_promote": safe,
         "error": None,
@@ -141,6 +180,21 @@ def run_preflight(
                 "message": w.message,
             }
             for w in blocking
+        ],
+        "routing_ready": routing_report.ready,
+        "routing_blocking": routing_blocking,
+        "routing_warnings": routing_warnings,
+        "routing_pinned": [
+            {
+                "terminal": p.terminal_id,
+                "provider_ok": p.provider_ok,
+                "model_ok": p.model_ok,
+                "expected_provider": p.expected_provider,
+                "actual_provider": p.actual_provider,
+                "expected_model": p.expected_model,
+                "actual_model": p.actual_model,
+            }
+            for p in routing_report.pinned
         ],
         "checked_at": datetime.now(tz=timezone.utc).isoformat(),
     }
@@ -204,13 +258,26 @@ def main() -> int:
                 ps = result["pr_status"]
                 print(f"  {ps['pr_id']}: {ps['state'].upper()} (via {ps['provenance'].get('source', '?')})")
         else:
-            print("[!] BLOCKING DRIFT — queue truth is stale", file=sys.stderr)
-            for w in result["blocking_drift"]:
-                print(f"  [BLOCKING] {w['message']}", file=sys.stderr)
+            print("[!] BLOCKING — cannot promote/dispatch", file=sys.stderr)
+            for w in result.get("blocking_drift", []):
+                print(f"  [QUEUE DRIFT] {w['message']}", file=sys.stderr)
             if result.get("drift_warnings"):
                 non_blocking = [w for w in result["drift_warnings"] if w["severity"] != "blocking"]
                 for w in non_blocking:
                     print(f"  [{w['severity'].upper()}] {w['message']}", file=sys.stderr)
+
+        # Routing preflight diagnostics
+        if result.get("routing_blocking"):
+            print("\n  [ROUTING] Required capability gaps:", file=sys.stderr)
+            for b in result["routing_blocking"]:
+                print(f"    [{b['gap'].upper()}] {b['diagnostic']}", file=sys.stderr)
+        elif result.get("routing_ready") is True:
+            print("  [ROUTING] All provider/model requirements satisfied")
+
+        if result.get("routing_warnings"):
+            print("  [ROUTING] Advisory warnings:", file=sys.stderr)
+            for w in result["routing_warnings"]:
+                print(f"    [WARN] {w['diagnostic']}", file=sys.stderr)
 
     if result.get("error"):
         return 2
