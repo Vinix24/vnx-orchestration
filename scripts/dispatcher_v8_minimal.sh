@@ -11,6 +11,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
+source "$SCRIPT_DIR/lib/provider_routing.sh"
 
 # Configuration
 PROJECT_ROOT="${PROJECT_ROOT}"
@@ -771,9 +772,14 @@ extract_requires_model() {
     vnx_dispatch_extract_requires_model "$1"
 }
 
-# Function to extract Requires-Provider field
+# Function to extract Requires-Provider field (provider id only, no strength suffix)
 extract_requires_provider() {
     vnx_dispatch_extract_requires_provider "$1"
+}
+
+# Function to extract Requires-Provider strength ("required" or "advisory")
+extract_requires_provider_strength() {
+    vnx_dispatch_extract_requires_provider_strength "$1"
 }
 
 # Function to configure terminal mode based on dispatch fields
@@ -793,11 +799,22 @@ configure_terminal_mode() {
     local force_normal=$(extract_force_normal_mode "$dispatch_file")
     local requires_provider
     requires_provider=$(extract_requires_provider "$dispatch_file")
+    local requires_provider_strength
+    requires_provider_strength=$(extract_requires_provider_strength "$dispatch_file")
 
-    # Provider mismatch warning
-    if [[ -n "$requires_provider" ]] && [[ "$requires_provider" != "$provider" ]]; then
-        log "V8 MODE_CONTROL: WARNING — Requires-Provider=$requires_provider but terminal=$terminal_id runs $provider"
+    # Provider routing enforcement (fail-closed for required, warn-through for advisory)
+    local routing_event
+    if ! routing_event=$(vnx_eval_provider_routing \
+            "$requires_provider" "$requires_provider_strength" "$provider" \
+            "$terminal_id" "$(basename "$dispatch_file")"); then
+        log "V8 PROVIDER_ROUTING: $routing_event"
+        log_structured_failure "provider_mismatch_blocked" \
+            "Dispatch blocked — required provider mismatch" \
+            "requested_provider=$requires_provider actual_provider=$provider terminal=$terminal_id"
+        return 1
     fi
+    # Always log the routing event (covers advisory mismatch audit trail and match confirmation)
+    log "V8 PROVIDER_ROUTING: $routing_event"
 
     # Log configuration for debugging
     log "V8 MODE_CONTROL: Config - terminal=$terminal_id provider=$provider mode=$mode clear=$clear_context model=$requires_model force=$force_normal"
