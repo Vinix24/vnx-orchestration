@@ -52,7 +52,7 @@ def test_request_reviews_queues_gemini_and_skips_unconfigured_optional(review_en
     )
 
     requested = {item["gate"]: item for item in result["requested"]}
-    assert requested["gemini_review"]["status"] == "queued"
+    assert requested["gemini_review"]["status"] == "requested"
     assert requested["gemini_review"]["report_path"].startswith(str((review_env / ".vnx-data" / "unified_reports").resolve()))
     assert requested["claude_github_optional"]["status"] == "not_configured"
     assert (manager.requests_dir / "pr-12-gemini_review.json").exists()
@@ -75,7 +75,7 @@ def test_codex_final_gate_blocks_when_required_but_not_available(review_env, mon
 
     gate = result["requested"][0]
     assert gate["gate"] == "codex_gate"
-    assert gate["status"] == "blocked"
+    assert gate["status"] == "not_executable"
     assert gate["required"] is True
 
 
