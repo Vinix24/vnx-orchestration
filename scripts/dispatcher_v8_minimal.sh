@@ -406,10 +406,13 @@ rc_register() {
     fi
 
     if ! _rc_python "${args[@]}" > /dev/null; then
-        log "V8 RUNTIME_CORE: register non-fatal failure dispatch=$dispatch_id"
-    else
-        log "V8 RUNTIME_CORE: registered dispatch=$dispatch_id terminal=$terminal_id"
+        # BOOT-7: fail-closed — registration failure blocks dispatch before lease acquire
+        log_structured_failure "registration_failed" \
+            "Dispatch registration failed — blocking delivery" \
+            "dispatch=$dispatch_id terminal=$terminal_id"
+        return 1
     fi
+    log "V8 RUNTIME_CORE: registered dispatch=$dispatch_id terminal=$terminal_id"
 }
 
 # Check terminal availability via canonical lease before legacy lock check.
@@ -1555,8 +1558,32 @@ $receipt_footer"
         return 1
     fi
 
+    # --- Runtime Core: register dispatch bundle BEFORE canonical lease acquire ---
+    # BOOT-6: registration must precede lease acquire to satisfy FK constraint:
+    #         terminal_leases.dispatch_id REFERENCES dispatches(dispatch_id)
+    # BOOT-7: rc_register() is fail-closed — blocks dispatch before any lease is acquired
+    local _rc_prompt_tmpfile=""
+    local _rc_attempt_id=""
+    if _rc_enabled; then
+        _rc_prompt_tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/rc_prompt_${dispatch_id}.txt"
+        mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
+        printf '%s' "$complete_prompt" > "$_rc_prompt_tmpfile"
+        if ! rc_register "$dispatch_id" "$terminal_id" "$track" "$skill_name" "$gate" "$_rc_prompt_tmpfile"; then
+            rm -f "$_rc_prompt_tmpfile"
+            log "V8 RUNTIME_CORE: registration blocked dispatch — releasing claim terminal=$terminal_id dispatch=$dispatch_id"
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" \
+                    "Failed to release claim after registration failure" \
+                    "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            return 1
+        fi
+        rm -f "$_rc_prompt_tmpfile"
+    fi
+
     # --- Runtime Core: acquire canonical lease alongside terminal_state_shadow ---
     # Fail-closed: if acquire returns FAIL or non-zero, release claim and block dispatch.
+    # BOOT-6: acquire happens AFTER registration — FK constraint on terminal_leases satisfied.
     local _rc_generation
     local _rc_acquire_rc=0
     _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id") || _rc_acquire_rc=$?
@@ -1569,18 +1596,8 @@ $receipt_footer"
         return 1
     fi
 
-    # --- Runtime Core: register dispatch bundle with broker ---
-    # Write prompt to temp file for broker bundle (cleaned up after register)
-    local _rc_prompt_tmpfile=""
-    local _rc_attempt_id=""
+    # Record delivery start (queued -> claimed -> delivering) — after lease acquired
     if _rc_enabled; then
-        _rc_prompt_tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/rc_prompt_${dispatch_id}.txt"
-        mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
-        printf '%s' "$complete_prompt" > "$_rc_prompt_tmpfile"
-        rc_register "$dispatch_id" "$terminal_id" "$track" "$skill_name" "$gate" "$_rc_prompt_tmpfile"
-        rm -f "$_rc_prompt_tmpfile"
-
-        # Record delivery start (queued -> claimed -> delivering)
         _rc_attempt_id=$(rc_delivery_start "$dispatch_id" "$terminal_id")
     fi
 
@@ -1986,6 +2003,21 @@ process_dispatches() {
         log "V8: Processed $count dispatches"
     fi
 }
+
+# BOOT-3: Fail-closed startup precondition check.
+# VNX_STATE_DIR and VNX_DATA_DIR must be set and point to existing directories.
+# This runs before the main dispatch loop, before any rc_* calls, and before
+# any file operations against $STATE_DIR in the dispatch path.
+if [[ -z "${VNX_STATE_DIR:-}" ]] || [[ ! -d "$VNX_STATE_DIR" ]]; then
+    echo "FATAL: VNX_STATE_DIR is unset or does not exist: '${VNX_STATE_DIR:-}'" >&2
+    echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
+    exit 1
+fi
+if [[ -z "${VNX_DATA_DIR:-}" ]] || [[ ! -d "$VNX_DATA_DIR" ]]; then
+    echo "FATAL: VNX_DATA_DIR is unset or does not exist: '${VNX_DATA_DIR:-}'" >&2
+    echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
+    exit 1
+fi
 
 # Main loop
 log "Dispatcher V8 MINIMAL ready. Monitoring $PENDING_DIR for dispatches..."

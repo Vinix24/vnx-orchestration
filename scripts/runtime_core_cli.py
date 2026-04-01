@@ -57,16 +57,32 @@ from runtime_core import RuntimeCore, load_runtime_core, runtime_primary_active
 # ---------------------------------------------------------------------------
 
 def _get_dirs() -> tuple[str, str]:
-    """Return (state_dir, dispatch_dir) from VNX environment."""
+    """Return (state_dir, dispatch_dir) from VNX environment.
+
+    BOOT-1: No /tmp fallback. Raises RuntimeError when required env vars are unset.
+    """
     vnx_data = os.environ.get("VNX_DATA_DIR", "")
-    state_dir = os.environ.get(
-        "VNX_STATE_DIR",
-        str(Path(vnx_data) / "state") if vnx_data else "/tmp/vnx-state",
-    )
-    dispatch_dir = os.environ.get(
-        "VNX_DISPATCH_DIR",
-        str(Path(vnx_data) / "dispatches") if vnx_data else "/tmp/vnx-dispatches",
-    )
+    state_dir = os.environ.get("VNX_STATE_DIR", "")
+    dispatch_dir = os.environ.get("VNX_DISPATCH_DIR", "")
+
+    if not state_dir:
+        if vnx_data:
+            state_dir = str(Path(vnx_data) / "state")
+        else:
+            raise RuntimeError(
+                "VNX_STATE_DIR is not set and VNX_DATA_DIR is not set. "
+                "Source bin/vnx or set VNX_DATA_DIR before running runtime_core_cli.py."
+            )
+
+    if not dispatch_dir:
+        if vnx_data:
+            dispatch_dir = str(Path(vnx_data) / "dispatches")
+        else:
+            raise RuntimeError(
+                "VNX_DISPATCH_DIR is not set and VNX_DATA_DIR is not set. "
+                "Source bin/vnx or set VNX_DATA_DIR before running runtime_core_cli.py."
+            )
+
     return state_dir, dispatch_dir
 
 
@@ -215,6 +231,30 @@ def cmd_release_on_failure(args: argparse.Namespace) -> None:
     _out(result, 0)
 
 
+def cmd_chain_closeout(args: argparse.Namespace) -> None:
+    """Release all terminal leases at chain boundary. BOOT-9 through BOOT-12.
+
+    BOOT-12: This is an explicit operator action — not called automatically.
+    Exit 0 when all leases are idle. Exit 1 when blocked by non-terminal
+    dispatches (use --force to proceed) or when an error occurs.
+    """
+    try:
+        state_dir, dispatch_dir = _get_dirs()
+    except RuntimeError as exc:
+        _out({"ok": False, "error": str(exc)}, 1)
+        return  # unreachable — _out exits
+    core = load_runtime_core(state_dir, dispatch_dir)
+    if core is None:
+        _out({"ok": False, "error": "VNX_RUNTIME_PRIMARY=0, runtime core disabled"}, 1)
+    result = core.chain_closeout(force=args.force)
+    blocked = result.get("blocked", False)
+    all_idle = result.get("all_idle", False)
+    if blocked:
+        print(result.get("message", "WARN: non-terminal dispatches exist — use --force to proceed"), file=sys.stderr)
+        _out(result, 1)
+    _out(result, 0 if all_idle else 1)
+
+
 def cmd_compat_check(_args: argparse.Namespace) -> None:
     """Validate all runtime core components are functional."""
     state_dir, dispatch_dir = _get_dirs()
@@ -292,6 +332,17 @@ def _build_parser() -> argparse.ArgumentParser:
     # compat-check
     sub.add_parser("compat-check", help="Check runtime core compatibility")
 
+    # chain-closeout
+    p = sub.add_parser(
+        "chain-closeout",
+        help="Release all terminal leases at chain boundary (BOOT-9 through BOOT-12)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Proceed even if non-terminal dispatches exist",
+    )
+
     return parser
 
 
@@ -309,6 +360,7 @@ def main() -> None:
         "release-lease": cmd_release_lease,
         "release-on-failure": cmd_release_on_failure,
         "compat-check": cmd_compat_check,
+        "chain-closeout": cmd_chain_closeout,
     }
     handlers[args.command](args)
 

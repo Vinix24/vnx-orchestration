@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
-from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection
+from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection, release_all_leases
 from failure_classifier import classify_failure, FailureClassification
 from runtime_state_reconciler import ZOMBIE_LEASE, GHOST_DISPATCH, RuntimeStateReconciler
 from tmux_adapter import TmuxAdapter, load_adapter
@@ -468,6 +468,38 @@ class RuntimeCore:
             "retryable": classification.retryable,
             "operator_summary": classification.operator_summary,
         }
+
+    # ------------------------------------------------------------------
+    # Chain-boundary lease cleanup (BOOT-9 through BOOT-12)
+    # ------------------------------------------------------------------
+
+    def chain_closeout(self, force: bool = False) -> Dict[str, Any]:
+        """Release all terminal leases at chain boundary.
+
+        BOOT-9: Releases all non-idle leases to idle state.
+        BOOT-10: Follows verify -> release -> audit -> confirm sequence.
+        BOOT-11: Increments generation to guard against stale delayed releases.
+        BOOT-12: This is an explicit operator action — not called automatically.
+
+        Args:
+            force: Proceed even when non-terminal dispatches exist.
+
+        Returns a dict with released, already_idle, all_idle, and optional error.
+        """
+        try:
+            with get_connection(self._lease_mgr.state_dir) as conn:
+                result = release_all_leases(conn, force=force)
+                conn.commit()
+            return result
+        except Exception as exc:
+            return {
+                "released": [],
+                "already_idle": [],
+                "non_terminal_dispatches": [],
+                "blocked": False,
+                "all_idle": False,
+                "error": str(exc),
+            }
 
     # ------------------------------------------------------------------
     # Compatibility check
