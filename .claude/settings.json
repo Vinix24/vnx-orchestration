@@ -10,10 +10,16 @@
     "additionalDirectories": [
       "terminals/T0",
       "terminals/T1",
-      "terminals/T2",
+      "terminals/T2", 
       "terminals/T3",
       "vnx-system",
       "./"
+    ],
+    "allow": [
+      "Read(**)",
+      "Grep(**)",
+      "Glob(**)",
+      "Bash"
     ],
     "ask": [
       "Write(**)",
@@ -28,52 +34,7 @@
       "Bash(dd:*)",
       "Bash(mkfs:*)"
     ],
-    "allow": [
-      "Read(**)",
-      "Grep(**)",
-      "Glob(**)",
-      "Bash",
-      "Bash(ls *)",
-      "Bash(ls)",
-      "Bash(find *)",
-      "Bash(cat *)",
-      "Bash(echo *)",
-      "Bash(pwd)",
-      "Bash(pwd *)",
-      "Bash(which *)",
-      "Bash(whoami)",
-      "Bash(head *)",
-      "Bash(tail *)",
-      "Bash(wc *)",
-      "Bash(sort *)",
-      "Bash(grep *)",
-      "Bash(awk *)",
-      "Bash(sed *)",
-      "Bash(jq *)",
-      "Bash(python3 *)",
-      "Bash(python *)",
-      "Bash(node *)",
-      "Bash(git status*)",
-      "Bash(git log*)",
-      "Bash(git diff*)",
-      "Bash(git branch*)",
-      "Bash(git show*)",
-      "Bash(git remote*)",
-      "Bash(tmux *)",
-      "Bash(ps *)",
-      "Bash(pgrep *)",
-      "Bash(date)",
-      "Bash(date *)",
-      "Bash(uname *)"
-    ],
-    "deny": [
-      "Bash(rm -rf *)",
-      "Bash(sudo *)",
-      "Bash(chmod *)",
-      "Bash(chown *)",
-      "Bash(mkfs *)",
-      "Bash(dd *)"
-    ]
+    "deny": []
   },
   "hooks": {
     "SessionStart": [
@@ -82,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/vnx_rotation_recovery.sh --fallback /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/sessionstart.sh; else bash /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/sessionstart.sh; fi",
+            "command": "if [[ \"$PWD\" == */T0 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/sessionstart_t0_minimal.sh; elif [[ \"$PWD\" == */T1 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/vnx_rotation_recovery.sh; elif [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/vnx_rotation_recovery.sh --fallback /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/sessionstart_worker.sh; elif [[ \"$PWD\" == */T-MANAGER ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/hooks/sessionstart_tmanager_minimal.sh; else echo '{}' ; fi",
             "timeout": 3000
           }
         ]
@@ -115,8 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/hooks/vnx_context_monitor.sh; else echo '{\"decision\":\"allow\"}'; fi",
-            "timeout": 3000
+            "command": "if [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/vnx-system/hooks/vnx_context_monitor.sh; else echo '{}'; fi"
           }
         ]
       },
@@ -132,36 +92,35 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "NEVER_MATCH_THIS_PATTERN_DISABLED",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/posttool_to_t0.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "DISABLED_FOR_MANUAL_INIT",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/venv_python.sh $CLAUDE_PROJECT_DIR/.claude/hooks/worker_prompt_summary.py",
+            "timeout": 1000
+          }
+        ]
+      },
+      {
         "matcher": "Write",
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/vincentvandeth/Development/vnx-system-wt-upgrade/hooks/vnx_handover_detector.sh",
+            "command": "/Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/vnx-system/hooks/vnx_handover_detector.sh",
             "timeout": 3000
           }
         ]
       }
     ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/Users/vincentvandeth/Development/vnx-system-wt-upgrade/hooks/vnx_context_monitor.sh",
-            "timeout": 3000
-          }
-        ]
-      }
-    ]
-  },
-  "_vnx_meta": {
-    "version": "2.0",
-    "managed_keys": [
-      "hooks",
-      "env.VNX_*",
-      "permissions.allow(vnx_baseline)",
-      "permissions.deny(vnx_baseline)"
-    ],
-    "description": "VNX-owned settings keys. Merged by 'vnx regen-settings --merge'."
+    "Stop": []
   }
 }

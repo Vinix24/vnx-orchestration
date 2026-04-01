@@ -1,183 +1,241 @@
-# Feature: Verified Provider And Model Routing Enforcement
+# Feature: Autonomous Runtime State Machine And Stall Supervision
 
-## PR-0: Routing Contract And Capability Boundaries
+**Feature-ID**: Feature 12
+
+**Status**: Planned
+**Priority**: P1
+**Branch**: `feature/autonomous-runtime-state-machine-and-stall-supervision`
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+
+Primary objective:
+Eliminate silent worker bad states and establish one explicit runtime truth model that T0, later dashboard work, and future runtime adapters can trust.
+
+Execution context:
+- first post-bridge product-level feature after B1-B3 and Feature 10-11
+- maps directly to Roadmap M1: Autonomous Runtime Reliability
+- should land before the first coding operator dashboard feature so the dashboard does not build on ambiguous runtime state
+
+Review gate policy:
+- Gemini headless review is required on every PR in this feature
+- Codex headless final gate is required on every PR in this feature because runtime truth is merge-critical
+- every PR in this feature must be opened as a GitHub PR before merge consideration
+- no downstream PR may be promoted until the upstream PR is merged from green GitHub CI on updated `main`
+
+## Problem Statement
+
+The current system still allows bad runtime ambiguity:
+- workers can end in idle-like or unknown states after bad exits
+- no-output or stale sessions can persist too long before becoming explicit governance objects
+- T0 and operators can still infer runtime truth indirectly instead of reading a canonical state machine
+- future dashboard and runtime adapter work would deepen tmux-era ambiguity if this layer remains implicit
+
+## Design Goal
+
+Create a deterministic worker/session state model with heartbeat, stall classification, and open-item escalation so silent runtime failure becomes structurally impossible.
+
+## Non-Goals
+
+- no dashboard UI in this feature
+- no broad transport rewrite
+- no business-domain manager/worker generalization yet
+- no attempt to solve all context-injection or learning-loop issues here
+
+## Delivery Discipline
+
+- each PR must have a GitHub PR with clear scope and linked feature name before merge
+- required GitHub Actions checks must be green before human merge
+- dependent PRs must branch from post-merge `main`, not from stale local branches
+- local receipts alone are not sufficient for progression if GitHub CI is red or missing
+
+## Dependency Flow
+
+```text
+PR-0 (no dependencies)
+PR-0 -> PR-1
+PR-1 -> PR-2
+PR-2 -> PR-3
+```
+
+## PR-0: Runtime State Machine Contract And Operator Truth Rules
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @architect
+**Requires-Model**: opus
 **Estimated Time**: 2-3 hours
 **Dependencies**: []
 
 ### Description
-Define the canonical routing contract for provider and model requirements so dispatch metadata stops behaving as best-effort advice and becomes auditable execution intent.
+Define the canonical worker/session lifecycle, heartbeat semantics, tie-break rules across queue/runtime/terminal surfaces, and the escalation policy for anomalous runtime states.
 
 ### Scope
-- Define the difference between:
-  - provider selection
-  - model selection
-  - capability selection
-  - execution mode
-- Define which requirements are hard blockers vs operator warnings
-- Define how interactive terminals, headless gates, and future provider-agnostic sessions should report actual runtime identity
-- Define how pinned-terminal assumptions are represented when runtime model switching is unavailable or unverified
-- Lock non-goals so this does not become a full terminal abstraction rewrite
+- define canonical runtime states such as `working`, `idle`, `stalled`, `exited`, `blocked`, `awaiting_input`, `resume_unsafe`
+- define heartbeat freshness vs stale thresholds
+- define no-output detection semantics for headless and interactive workers
+- define which surface wins under mismatch between runtime, queue, and terminal activity
+- define when anomalous runtime situations create open items automatically
+
+### Deliverables
+- runtime state machine contract document
+- operator truth and tie-break policy
+- anomaly classification matrix
+- GitHub PR with linked acceptance summary
 
 ### Success Criteria
-- Routing rules are explicit rather than implicit
-- Provider mismatch behavior is deterministic
-- Model mismatch behavior is deterministic
-- Pinned-terminal operation remains auditable while runtime switching is unreliable
-- The contract supports future actor-identity work without being tied forever to T1/T2/T3
+- runtime states are explicit and finite
+- stale vs active vs broken states are no longer implicit heuristics
+- T0 has deterministic guidance for which state surface to trust
+- anomaly escalation is defined before implementation starts
 
 ### Quality Gate
-`gate_pr0_routing_contract`:
-- [ ] Contract defines hard vs advisory routing requirements for provider, model, capability, and execution mode
-- [ ] Contract defines how actual runtime identity is recorded after dispatch
-- [ ] Contract blocks silent provider mismatch for required provider-routed work
-- [ ] Contract defines how pinned terminals satisfy model requirements when switching is unavailable
-- [ ] Contract preserves a migration path toward provider-agnostic actor routing
+`gate_pr0_runtime_state_machine_contract`:
+- [ ] Contract defines canonical worker and session states with allowed transitions
+- [ ] Contract defines heartbeat freshness, stale thresholds, and no-output semantics
+- [ ] Contract defines deterministic tie-break rules across queue, runtime, and terminal surfaces
+- [ ] Contract defines automatic open-item creation for anomalous runtime states
+- [ ] GitHub PR exists with feature-linked summary and acceptance notes
+- [ ] Required GitHub Actions checks are green before merge
+- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
+- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-1: Fail-Closed Provider Enforcement At Dispatch Time
+## PR-1: Session State Machine And Heartbeat Persistence
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @backend-developer
-**Estimated Time**: 2-3 hours
+**Requires-Model**: sonnet
+**Estimated Time**: 2-4 hours
 **Dependencies**: [PR-0]
 
 ### Description
-Make required provider routing fail closed so dispatches do not silently land on a terminal that cannot satisfy the requested provider.
+Implement the canonical state machine and heartbeat persistence so workers cannot silently slip from active execution into ambiguous idle or unknown states.
 
 ### Scope
-- Promote `Requires-Provider` from warning-only to enforceable routing rule where policy marks it as required
-- Block dispatch when terminal provider does not match required provider
-- Preserve explicit advisory mode for cases where provider preference is informational only
-- Add tests for required vs optional provider routing
+- add canonical runtime state representation in the execution layer
+- persist heartbeat timestamps and last-output timestamps
+- implement deterministic state transitions on launch, active output, clean exit, bad exit, and manual interruption
+- expose canonical runtime state for T0 and downstream read-model consumers
+- add tests for state transitions and stale classification
+
+### Deliverables
+- runtime state model implementation
+- heartbeat persistence and last-output tracking
+- state transition tests
+- GitHub PR with evidence summary
 
 ### Success Criteria
-- Required provider mismatches no longer dispatch silently
-- Optional provider preferences remain visible without overblocking
-- Dispatcher reports explicit reasons for provider-route rejection
-- Existing terminal start configuration remains compatible
+- runtime state no longer depends on ad hoc terminal inference alone
+- last heartbeat and last output are durable and queryable
+- clean vs bad exits resolve to explicit states
+- tests cover the main transition paths
 
 ### Quality Gate
-`gate_pr1_provider_enforcement`:
-- [ ] All provider-routing enforcement tests pass
-- [ ] Required provider mismatch blocks dispatch with explicit reason
-- [ ] Optional provider preference remains advisory and auditable
-- [ ] Provider routing logic does not silently downgrade required work to the wrong terminal
+`gate_pr1_state_machine_and_heartbeat`:
+- [ ] All runtime state machine and heartbeat tests pass
+- [ ] Launch, output, clean exit, bad exit, and interruption transitions are explicit under test
+- [ ] Heartbeat and last-output timestamps persist in canonical runtime state
+- [ ] T0-readable state surface exists without scraping terminal behavior ad hoc
+- [ ] GitHub PR exists with implementation and evidence summary
+- [ ] Required GitHub Actions checks are green before merge
+- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
+- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-2: Verified Model Switching And Post-Switch Runtime Validation
+## PR-2: Stall Detection, Exit Classification, And Open-Item Escalation
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
-**Skill**: @backend-developer
-**Estimated Time**: 2-3 hours
-**Dependencies**: [PR-0, PR-1]
+**Skill**: @monitoring-specialist
+**Requires-Model**: sonnet
+**Estimated Time**: 2-4 hours
+**Dependencies**: [PR-1]
 
 ### Description
-Turn model routing from best-effort command injection into a verified state transition so dispatches can prove which model actually handled the work.
+Add runtime supervision that detects no-output hangs, stale sessions, and bad exits, then emits durable evidence and governance objects instead of leaving T0 to discover failures manually.
 
 ### Scope
-- Add explicit model-switch result states:
-  - switched
-  - already_active
-  - unsupported
-  - failed
-  - unverified
-- Verify post-switch runtime state where provider supports it
-- Block required model-routed dispatches when the switch cannot be verified
-- Preserve explicit unsupported behavior for providers that do not support runtime model switching
+- implement no-output stall detection
+- classify exit paths into operator-meaningful runtime outcomes
+- create durable audit records for stall, stale, and bad-exit scenarios
+- auto-create open items for unresolved runtime anomalies
+- add tests for stall detection, bad exits, and escalation paths
+
+### Deliverables
+- stall and stale supervision logic
+- exit classification mapping
+- runtime anomaly audit records
+- open-item escalation path for unresolved runtime failures
+- GitHub PR with failure-path evidence summary
 
 ### Success Criteria
-- Required model changes are not assumed successful without verification
-- Dispatch receipts can show the requested and actual runtime model
-- Unsupported runtime switching is explicit rather than silently ignored
-- Model-routing failures do not continue to delivery as if nothing happened
+- silent stalls become explicit runtime events
+- bad exits no longer collapse into ambiguous idle states
+- unresolved runtime anomalies create open items automatically
+- runtime failures become visible inputs for later dashboard work
 
 ### Quality Gate
-`gate_pr2_verified_model_switching`:
-- [ ] All model-routing verification tests pass
-- [ ] Required model-routed dispatches fail when post-switch state cannot be verified
-- [ ] Requested and actual runtime model are recorded in dispatch evidence
-- [ ] Unsupported runtime switching paths are explicit and do not masquerade as success
+`gate_pr2_runtime_supervision_and_escalation`:
+- [ ] All runtime supervision tests pass
+- [ ] No-output stall detection produces structured runtime outcomes under test
+- [ ] Bad exits classify into explicit operator-meaningful states under test
+- [ ] Unresolved runtime anomalies create durable open items automatically
+- [ ] Audit records exist for stall, stale, and bad-exit paths
+- [ ] GitHub PR exists with failure-path evidence summary
+- [ ] Required GitHub Actions checks are green before merge
+- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
+- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-3: Kickoff, Preset, And Preflight Provider Readiness
-**Track**: C
-**Priority**: P2
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @quality-engineer
-**Estimated Time**: 2-3 hours
-**Dependencies**: [PR-1, PR-2]
-
-### Description
-Move provider and model readiness checks earlier into kickoff and runtime preflight so T0 does not discover missing routing capabilities only after work is already underway.
-
-### Scope
-- Add preflight validation for required provider and model capabilities from feature/review metadata
-- Surface missing provider capability at kickoff or promotion time
-- Verify startup presets and env profiles can express required routing capabilities
-- Verify pinned terminal assumptions for the current chain:
-  - T1 = Sonnet
-  - T2 = Sonnet
-  - T0 and T3 = stronger review/orchestration model
-- Add operator-readable diagnostics for why a requested provider/model is unavailable
-
-### Success Criteria
-- Required provider/model capability gaps are caught before real execution
-- T0 receives deterministic readiness feedback instead of post-failure guesswork
-- Presets and env profiles can intentionally provision routing requirements
-- Pinned-terminal assumptions can be checked before the chain starts
-- Autonomous chain features can declare provider expectations in a machine-usable way
-
-### Quality Gate
-`gate_pr3_routing_preflight_readiness`:
-- [ ] All preflight readiness tests pass
-- [ ] Kickoff or promotion blocks when required provider or model capability is unavailable
-- [ ] Startup preset and env diagnostics explain missing routing capability clearly
-- [ ] Pinned terminal assumptions are checked explicitly before the chain starts
-- [ ] T0 can distinguish unsupported, unavailable, and misconfigured routing states
-
----
-
-## PR-4: Certification With Real Mixed-Provider And Mixed-Model Dispatches
+## PR-3: Unattended Runtime Reliability Certification
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @quality-engineer
-**Estimated Time**: 2-3 hours
-**Dependencies**: [PR-2, PR-3]
+**Requires-Model**: opus
+**Estimated Time**: 3-5 hours
+**Dependencies**: [PR-2]
 
 ### Description
-Certify routing enforcement using realistic mixed-provider and mixed-model dispatches so the next autonomous feature sequence can trust provider/model requirements.
+Certify that the runtime layer now surfaces active, stale, stalled, blocked, and exited states deterministically enough for unattended coding runs and future dashboard work.
 
 ### Scope
-- Run at least one mixed-provider scenario and one mixed-model scenario
-- Prove required provider mismatch blocks before delivery
-- Prove verified model switching records requested vs actual runtime identity
-- Require Gemini review and Codex final gate on certification and routing-core PRs
+- run unattended scenarios that previously produced mystery-idle or silently stale behavior
+- verify runtime truth remains reconstructable from evidence
+- verify anomalous runtime situations produce open items and operator-readable diagnostics
+- verify each prior PR was merged from green GitHub CI before the next PR began
+- require Gemini review and Codex final gate on the certification PR
+
+### Deliverables
+- unattended runtime certification report
+- scenario evidence for active, stalled, stale, blocked, and exited outcomes
+- sequencing audit for GitHub PR progression and green-CI compliance
+- residual risk summary for follow-on Feature 13
 
 ### Success Criteria
-- Required provider and model routing works deterministically under real dispatch flow
-- No dispatch silently stays on the old model when a required verified switch is requested
-- Gemini review evidence exists and blocking findings are resolved
-- Codex final gate evidence exists and passes for routing-core changes
+- the operator can tell when a worker is truly working vs stale vs stalled vs broken
+- prior silent-failure patterns are reproducible and closed under test
+- this feature closes with zero unresolved chain-created open items
+- downstream dashboard work can trust runtime state as a real substrate, not a cosmetic proxy
 
 ### Quality Gate
-`gate_pr4_routing_certification`:
-- [ ] All routing certification tests pass for mixed-provider and mixed-model scenarios
-- [ ] Required provider mismatch blocks before delivery and produces explicit evidence
-- [ ] Requested and actual runtime model are both present in certification evidence
-- [ ] Gemini review receipt exists and all blocking findings are closed
-- [ ] Codex final gate receipt exists and all required checks pass
+`gate_pr3_runtime_reliability_certification`:
+- [ ] All unattended runtime certification tests pass
+- [ ] Active, stalled, stale, blocked, and exited outcomes are distinguishable under test and in evidence
+- [ ] Previously observed silent-runtime failure patterns are closed under test
+- [ ] Each PR in this feature was merged only after green GitHub CI on the corresponding GitHub PR
+- [ ] Certification report records residual risks for follow-on dashboard work
+- [ ] Feature closes with zero unresolved chain-created open items
+- [ ] GitHub PR exists with certification evidence summary
+- [ ] Required GitHub Actions checks are green before merge
+- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
+- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
