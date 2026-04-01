@@ -860,6 +860,123 @@ def _jump_terminal(terminal_id: str) -> dict:
     }
 
 
+# ---------- Operator Dashboard API ----------
+
+def _operator_get_projects() -> dict:
+    """GET /api/operator/projects — cross-project overview via ProjectsView."""
+    try:
+        from dashboard_read_model import ProjectsView
+        view = ProjectsView()
+        envelope = view.list_projects()
+        return envelope.to_dict()
+    except Exception as exc:
+        return {"view": "ProjectsView", "degraded": True, "degraded_reasons": [str(exc)], "data": []}
+
+
+def _operator_get_session(params: dict) -> dict:
+    """GET /api/operator/session — per-project session state via SessionView."""
+    project_path = (params.get("project_path") or [None])[0]
+    if not project_path:
+        state_dir = CANONICAL_STATE_DIR
+    else:
+        state_dir = Path(project_path) / ".vnx-data" / "state"
+    try:
+        from dashboard_read_model import SessionView
+        view = SessionView(state_dir)
+        envelope = view.get_session()
+        return envelope.to_dict()
+    except Exception as exc:
+        return {"view": "SessionView", "degraded": True, "degraded_reasons": [str(exc)], "data": {}}
+
+
+def _operator_get_terminals() -> dict:
+    """GET /api/operator/terminals — all terminal health via TerminalView."""
+    try:
+        from dashboard_read_model import TerminalView
+        view = TerminalView(CANONICAL_STATE_DIR)
+        envelope = view.get_all_terminals()
+        return envelope.to_dict()
+    except Exception as exc:
+        return {"view": "TerminalView", "degraded": True, "degraded_reasons": [str(exc)], "data": []}
+
+
+def _operator_get_terminal(terminal_id: str) -> dict:
+    """GET /api/operator/terminal/<id> — single terminal health."""
+    try:
+        from dashboard_read_model import TerminalView
+        view = TerminalView(CANONICAL_STATE_DIR)
+        envelope = view.get_terminal(terminal_id)
+        return envelope.to_dict()
+    except Exception as exc:
+        return {"view": "TerminalView", "degraded": True, "degraded_reasons": [str(exc)], "data": {"terminal_id": terminal_id}}
+
+
+def _operator_get_open_items(params: dict) -> dict:
+    """GET /api/operator/open-items — per-project open items."""
+    project_path = (params.get("project_path") or [None])[0]
+    severity = (params.get("severity") or [None])[0]
+    include_resolved = (params.get("include_resolved") or ["false"])[0].lower() == "true"
+
+    if not project_path:
+        state_dir = CANONICAL_STATE_DIR
+    else:
+        state_dir = Path(project_path) / ".vnx-data" / "state"
+    try:
+        from dashboard_read_model import OpenItemsView
+        view = OpenItemsView(state_dir)
+        envelope = view.get_items(severity=severity, include_resolved=include_resolved)
+        return envelope.to_dict()
+    except Exception as exc:
+        return {"view": "OpenItemsView", "degraded": True, "degraded_reasons": [str(exc)], "data": {"items": [], "summary": {}}}
+
+
+def _operator_get_open_items_aggregate(params: dict) -> dict:
+    """GET /api/operator/open-items/aggregate — cross-project open items."""
+    project_filter = (params.get("project") or [None])[0]
+    try:
+        from dashboard_read_model import AggregateOpenItemsView
+        view = AggregateOpenItemsView()
+        envelope = view.get_aggregate(project_filter=project_filter)
+        return envelope.to_dict()
+    except Exception as exc:
+        return {"view": "AggregateOpenItemsView", "degraded": True, "degraded_reasons": [str(exc)], "data": {"items": [], "per_project_subtotals": {}, "total_summary": {}}}
+
+
+def _operator_post_action(action: str, body: dict) -> tuple[dict, int]:
+    """Dispatch operator control actions. Returns (response_dict, http_status_int)."""
+    try:
+        from dashboard_actions import (
+            start_session, stop_session, attach_terminal,
+            refresh_projections, run_reconciliation, inspect_open_item,
+        )
+    except ImportError as exc:
+        return {"action": action, "status": "failed", "message": f"dashboard_actions unavailable: {exc}"}, 503
+
+    project_path = body.get("project_path", "")
+    dry_run = bool(body.get("dry_run", False))
+
+    if action == "session/start":
+        outcome = start_session(project_path, dry_run=dry_run)
+    elif action == "session/stop":
+        outcome = stop_session(project_path, dry_run=dry_run)
+    elif action == "terminal/attach":
+        terminal_id = body.get("terminal_id", "")
+        outcome = attach_terminal(project_path, terminal_id, dry_run=dry_run)
+    elif action == "projections/refresh":
+        outcome = refresh_projections(project_path, dry_run=dry_run)
+    elif action == "reconcile":
+        outcome = run_reconciliation(project_path, dry_run=dry_run)
+    elif action == "open-item/inspect":
+        item_id = body.get("item_id", "")
+        outcome = inspect_open_item(project_path, item_id)
+    else:
+        return {"action": action, "status": "failed", "message": f"Unknown action: {action}"}, 400
+
+    result = outcome.to_dict()
+    status_code = 200 if outcome.status in ("success", "already_active", "degraded") else 422
+    return result, status_code
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
@@ -918,6 +1035,32 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, result)
             return
 
+        # Operator Dashboard API
+        if path == "/api/operator/projects":
+            _json_response(self, HTTPStatus.OK, _operator_get_projects())
+            return
+
+        if path == "/api/operator/session":
+            _json_response(self, HTTPStatus.OK, _operator_get_session(params))
+            return
+
+        if path == "/api/operator/terminals":
+            _json_response(self, HTTPStatus.OK, _operator_get_terminals())
+            return
+
+        if path.startswith("/api/operator/terminal/"):
+            tid = path[len("/api/operator/terminal/"):]
+            _json_response(self, HTTPStatus.OK, _operator_get_terminal(tid))
+            return
+
+        if path == "/api/operator/open-items/aggregate":
+            _json_response(self, HTTPStatus.OK, _operator_get_open_items_aggregate(params))
+            return
+
+        if path == "/api/operator/open-items":
+            _json_response(self, HTTPStatus.OK, _operator_get_open_items(params))
+            return
+
         # Fall through to static file serving
         super().do_GET()
 
@@ -969,6 +1112,27 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             status = HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT
             _json_response(self, status, result)
+            return
+
+        # Operator control actions
+        _OPERATOR_ACTIONS = {
+            "/api/operator/session/start": "session/start",
+            "/api/operator/session/stop": "session/stop",
+            "/api/operator/terminal/attach": "terminal/attach",
+            "/api/operator/projections/refresh": "projections/refresh",
+            "/api/operator/reconcile": "reconcile",
+            "/api/operator/open-item/inspect": "open-item/inspect",
+        }
+        if parsed_path in _OPERATOR_ACTIONS:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body_bytes = self.rfile.read(length) if length else b"{}"
+            try:
+                body_data = json.loads(body_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            result, status_int = _operator_post_action(_OPERATOR_ACTIONS[parsed_path], body_data)
+            _json_response(self, HTTPStatus(status_int), result)
             return
 
         if parsed_path not in ("/api/restart-process", "/api/unlock-terminal"):
