@@ -353,6 +353,62 @@ class RuntimeCore:
         except Exception as exc:
             return {"released": False, "terminal_id": terminal_id, "error": str(exc)}
 
+    def release_on_delivery_failure(
+        self,
+        dispatch_id: str,
+        attempt_id: str,
+        terminal_id: str,
+        generation: int,
+        reason: str = "delivery failed",
+    ) -> Dict[str, Any]:
+        """Record delivery failure and release canonical lease in one auditable call.
+
+        Guarantees the canonical lease is always released when delivery fails,
+        even when the delivery-failure bookkeeping step itself partially fails.
+        Returns explicit success/failure markers for both operations so the
+        caller can emit a structured audit entry rather than relying on logs.
+
+        Contract (PR-1):
+          - failure_recorded=False does NOT prevent lease release.
+          - lease_released=False is explicit, never silently ignored.
+          - cleanup_complete is True only when both succeed.
+        """
+        failure_recorded = False
+        lease_released = False
+        failure_error: Optional[str] = None
+        lease_error: Optional[str] = None
+
+        # Step 1: Record delivery failure durably (broker state machine).
+        # A failure here must NOT prevent the lease from being released.
+        if attempt_id:
+            try:
+                self._broker.deliver_failure(dispatch_id, attempt_id, reason, actor="dispatcher")
+                failure_recorded = True
+            except Exception as exc:
+                failure_error = str(exc)
+
+        # Step 2: Release canonical lease — always attempted regardless of step 1.
+        try:
+            self._lease_mgr.release(
+                terminal_id,
+                generation,
+                actor="dispatcher",
+                reason=f"delivery_failure:{reason}",
+            )
+            lease_released = True
+        except Exception as exc:
+            lease_error = str(exc)
+
+        return {
+            "dispatch_id": dispatch_id,
+            "terminal_id": terminal_id,
+            "failure_recorded": failure_recorded,
+            "lease_released": lease_released,
+            "cleanup_complete": failure_recorded and lease_released,
+            "failure_error": failure_error,
+            "lease_error": lease_error,
+        }
+
     # ------------------------------------------------------------------
     # Compatibility check
     # ------------------------------------------------------------------
