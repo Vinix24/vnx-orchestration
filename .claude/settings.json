@@ -72,6 +72,15 @@
         ]
       },
       {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [[ \"$PWD\" == */T1 ]] || [[ \"$PWD\" == */T2 ]] || [[ \"$PWD\" == */T3 ]]; then /Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/vnx-system/hooks/vnx_context_monitor.sh; else echo '{}'; fi"
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {
@@ -112,16 +121,6 @@
         ]
       }
     ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/Users/vincentvandeth/Development/vnx-system-wt-upgrade/.claude/vnx-system/hooks/vnx_context_monitor.sh",
-            "timeout": 3000
-          }
-        ]
-      }
-    ]
+    "Stop": []
   }
 }
