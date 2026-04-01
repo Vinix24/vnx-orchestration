@@ -1,233 +1,188 @@
-# Feature: Fail-Closed Terminal Dispatch Guard
+# Feature: Failed Delivery Lease Cleanup And Runtime State Reconciliation
 
-**Status**: Planned
-**Priority**: P1
-**Branch**: `feature/fail-closed-terminal-dispatch-guard`
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-
-Primary objective:
-Close the busy-terminal exclusivity breach by making dispatch safety fail closed under lease ambiguity, runtime uncertainty, invalid skill metadata, and Claude-specific delivery edge cases.
-
-Execution context:
-- second feature in the unattended 4-feature hardening chain
-- T1 and T2 are Sonnet-pinned terminals
-- T3 is a Claude terminal with known clear-context / modal sensitivity
-
-Review gate policy:
-- Gemini headless review is required on every PR in this feature
-- Codex headless final gate is required on every PR in this feature because dispatch-core behavior is merge-critical
-
-## Problem Statement
-
-The recent trial exposed a real runtime safety breach:
-- a new dispatch was sent toward `T3`
-- while `T3` was already busy or ambiguously busy
-- later failures also showed:
-  - invalid skills can reach pending delivery before being rejected
-  - implicit `/clear` can trigger a Claude feedback modal and swallow real dispatch payload
-  - smart-tap can reject a real manager block because of benign shell noise
-
-This is not only observability drift. It is unsafe dispatch behavior.
-
-## Design Goal
-
-Move dispatch safety from:
-- best-effort exclusivity with permissive fallback
-
-to:
-- fail-closed exclusivity with explicit blocked, requeue, and recovery semantics
-
-That means:
-- no second dispatch to a terminal that is busy, ambiguously busy, or runtime-uncertain
-- no silent continuation after lease-acquire or availability-check failure
-- no invalid skill metadata reaching pending delivery
-- no implicit clear-context on Claude terminals unless explicitly requested and readiness is re-verified
-
-## Non-Goals
-
-- no full routing-engine rewrite
-- no pseudo-parallelism on a single terminal
-- no replacement of the broader queue system
-- no speculative tmux delivery redesign beyond safety guards needed here
-
-## Dependency Flow
-
-```text
-PR-0 (no dependencies)
-PR-0 -> PR-1
-PR-1 -> PR-2
-PR-2 -> PR-3
-```
-
-## PR-0: Terminal Exclusivity And Fail-Closed Contract
+## PR-0: Delivery Failure And Lease Ownership Contract
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @architect
-**Requires-Model**: opus
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 2-3 hours
 **Dependencies**: []
 
 ### Description
-Define the canonical dispatch-exclusivity contract so no second dispatch can be sent to a terminal that is already busy, ambiguously busy, or runtime-uncertain.
+Define the canonical contract for what must happen when a dispatch fails during terminal delivery so leases, claims, and runtime state do not silently strand a terminal in blocked state.
 
 ### Scope
-- define terminal states relevant to dispatch safety
-- define fail-closed behavior for:
-  - canonical check failure
-  - lease ambiguity
-  - runtime-core unavailability
-  - active worker ownership
-- define retry, requeue, and escalation boundaries
-- lock non-goals so this does not become a terminal scheduler rewrite
+- Define required cleanup behavior for:
+  - tmux delivery failure
+  - worker-side reject during execution handoff
+  - Claude feedback or hook loop after context reset
+  - stale pending-to-rejected transitions
+- Define when canonical lease must be released
+- Define how failed delivery differs from accepted execution
+- Lock non-goals so this does not become a full broker/runtime rewrite
 
 ### Success Criteria
-- terminal exclusivity rules are explicit
-- ambiguous runtime state blocks rather than dispatches
-- safe retry and requeue boundaries are clear
-- T0 and dispatcher share the same safety expectations
+- Lease ownership rules are explicit for every delivery-failure path
+- Failed delivery cannot leave a terminal silently blocked
+- Cleanup obligations for dispatcher and runtime-core are deterministic
+- The contract explains how runtime truth should reconcile after failure
 
 ### Quality Gate
-`gate_pr0_terminal_exclusivity_contract`:
-- [ ] Contract defines when a terminal is dispatchable, blocked, or ambiguous
-- [ ] Contract requires fail-closed behavior on runtime or lease uncertainty
-- [ ] Contract blocks silent second dispatch to an already occupied terminal
-- [ ] Contract defines retry or requeue behavior for blocked dispatch attempts
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr0_failed_delivery_lease_contract`:
+- [ ] Contract defines required lease and claim cleanup for every failed-delivery path
+- [ ] Contract distinguishes failed delivery from accepted execution and worker failure
+- [ ] Contract blocks silent terminal stranding after dispatch rejection or delivery failure
+- [ ] Contract defines required audit evidence for cleanup and reconciliation
 
 ---
 
-## PR-1: Fail-Closed Canonical Availability, Skill Validation, And Lease Acquire
+## PR-1: Release Canonical Lease On Delivery Failure
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @backend-developer
-**Requires-Model**: sonnet
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 2-3 hours
 **Dependencies**: [PR-0]
 
 ### Description
-Harden the dispatcher so canonical availability checks and lease acquisition fail closed, and validate requested skill metadata before queue init, promote, and delivery.
+Harden dispatcher failure handling so a dispatch that fails before real worker acceptance always releases the canonical lease and terminal claim.
 
 ### Scope
-- remove fail-open behavior from canonical terminal checks
-- make canonical lease acquisition enforceable for dispatch progression
-- block dispatch when runtime availability cannot be proven
-- validate requested skill or role before queue init, promote, and delivery so an invalid skill never becomes a silently hanging pending dispatch
-- add tests for availability-check exceptions, lease-acquire failure, and invalid skill metadata
+- Ensure every failed-delivery path releases canonical lease
+- Ensure claim release and lease release stay paired
+- Add tests for:
+  - tmux transport failure
+  - rejected execution handoff
+  - Claude feedback or prompt-loop interruption after explicit clear-context
+  - repeated retry followed by failure
+- Emit explicit audit markers for release success or cleanup failure
 
 ### Success Criteria
-- dispatcher no longer continues after canonical availability ambiguity
-- lease-acquire failure blocks dispatch deterministically
-- invalid skill metadata is rejected before delivery rather than discovered only by worker-side failure
-- runtime check errors are explicit and auditable
-- existing safe dispatch paths continue to work
+- Failed delivery no longer strands a terminal lease
+- Cleanup behavior is deterministic and auditable
+- Retried delivery failures do not accumulate stale ownership
+- Delivery-failure cleanup works even when subsequent bookkeeping partially fails
 
 ### Quality Gate
-`gate_pr1_fail_closed_dispatch_guard`:
-- [ ] All fail-closed dispatch guard tests pass
-- [ ] Canonical availability check failure blocks dispatch explicitly
-- [ ] Canonical lease acquisition failure blocks dispatch explicitly
-- [ ] Invalid skill or role metadata blocks before pending delivery or worker pickup
-- [ ] No dispatch continues after runtime uncertainty under test scenarios
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr1_release_lease_on_failure`:
+- [ ] All failed-delivery lease cleanup tests pass
+- [ ] Canonical lease is released for every failed-delivery path before dispatch exits
+- [ ] Terminal claim and canonical lease cleanup remain paired under test
+- [ ] Cleanup failures are explicit in audit output rather than silent
 
 ---
 
-## PR-2: Requeue, Clear-Context Safety, Smart-Tap, And Operator Visibility
+## PR-2: Runtime Truth Reconciliation Between LeaseManager And Runtime Core
+**Track**: B
+**Priority**: P1
+**Complexity**: Medium
+**Risk**: High
+**Skill**: @backend-developer
+**Estimated Time**: 2-3 hours
+**Dependencies**: [PR-0, PR-1]
+
+### Description
+Eliminate or explicitly reconcile divergent terminal state projections so LeaseManager and runtime_core_cli do not disagree about whether a terminal is idle, leased, or blocked.
+
+### Scope
+- Identify canonical source of truth for terminal ownership state
+- Reconcile LeaseManager projection with runtime core broker state
+- Reconcile PR queue/projected in-progress state with active dispatch/runtime truth so a live execution cannot appear as `In Progress: None`
+- Add explicit mismatch detection and operator-readable diagnostics
+- Add tests for divergent generation or state snapshots
+- Add tests where:
+  - active dispatch exists but queue/projected in-progress state is empty
+  - terminal is visibly executing while queue projection still reports idle
+  - reconciliation restores consistent operator-visible truth without duplicate dispatch
+
+### Success Criteria
+- Operators no longer see one subsystem report idle while another reports blocked
+- Operators no longer see queue/projected state claim nothing is in progress while an active dispatch is already executing
+- Runtime truth is derived from one canonical source or a deterministic reconciliation path
+- Divergent state becomes explicit and repairable
+- Dispatch safety checks use the same effective truth seen by operator tooling
+
+### Quality Gate
+`gate_pr2_runtime_state_reconciliation`:
+- [ ] All runtime-state reconciliation tests pass
+- [ ] LeaseManager and runtime-core state no longer diverge silently under test scenarios
+- [ ] Queue/projected in-progress state reconciles correctly against active dispatch/runtime truth
+- [ ] Divergent generation or state snapshots produce explicit diagnostics
+- [ ] Dispatch safety checks consume reconciled runtime truth rather than conflicting projections
+
+---
+
+## PR-3: Dispatch Failure Classification And Operator Visibility
 **Track**: C
 **Priority**: P2
 **Complexity**: Medium
-**Risk**: High
+**Risk**: Medium
 **Skill**: @reviewer
-**Requires-Model**: opus
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 2-3 hours
-**Dependencies**: [PR-1]
+**Dependencies**: [PR-1, PR-2]
 
 ### Description
-Improve blocked-dispatch handling so operator tooling and T0 can distinguish safe requeue from true ownership conflict, while preventing Claude `/clear` and smart-tap edge cases from swallowing valid dispatches.
+Improve failure classification and operator surfaces so delivery failures explain whether the issue was invalid skill, stale lease, blocked runtime state, or worker-side handoff failure.
 
 ### Scope
-- add explicit blocked-dispatch audit reasons
-- surface requeueable vs non-requeueable blocked state
-- remove or constrain implicit `ClearContext: true` behavior so Claude terminals are not cleared by default
-- verify Claude terminal ready state after explicit clear-context requests before delivering the actual dispatch
-- harden smart-tap reject heuristics so benign tool noise such as `Shell cwd was reset` does not invalidate a real manager block
-- verify no silent duplicate delivery attempts occur
-- add tests for operator-readable blocked-dispatch evidence
+- Add explicit failure reasons for:
+  - invalid skill
+  - stale lease
+  - runtime state divergence
+  - worker-side execution handoff failure
+  - hook or feedback-loop interruption after terminal reset
+- Surface cleanup outcome in operator-readable state
+- Verify rejected dispatches preserve actionable reason text
+- Add tests for diagnostic visibility
 
 ### Success Criteria
-- blocked dispatches have actionable reason text
-- requeue behavior is deterministic and visible
-- Claude delivery no longer loses the real dispatch behind feedback or modal state triggered by `/clear`
-- valid manager blocks are not dropped by over-aggressive smart-tap reject heuristics
-- operators can distinguish busy-terminal protection from broader runtime failure
-- duplicate delivery attempts are auditable
+- Operators can distinguish configuration failure from runtime ownership failure
+- Rejected dispatches retain actionable root-cause evidence
+- Cleanup outcome is visible rather than inferred
+- T0 can decide whether to retry, reroute, or escalate from explicit signals
 
 ### Quality Gate
-`gate_pr2_blocked_dispatch_visibility`:
-- [ ] All blocked-dispatch visibility tests pass
-- [ ] Blocked dispatch reasons distinguish busy terminal from runtime failure
-- [ ] Requeueable vs non-requeueable blocked state is explicit
-- [ ] Claude clear-context behavior is explicit and does not silently swallow dispatch delivery
-- [ ] Smart-tap preserves valid manager blocks even when surrounding pane output contains benign shell noise
-- [ ] Audit trail preserves evidence of prevented duplicate dispatch
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr3_failure_classification_visibility`:
+- [ ] Failure classification tests pass for invalid skill, stale lease, runtime divergence, worker-side handoff failure, and hook/feedback-loop interruption
+- [ ] Rejected dispatches preserve actionable root-cause markers
+- [ ] Cleanup outcome is visible in operator-readable state or audit artifacts
+- [ ] T0 can distinguish retryable from non-retryable delivery failures deterministically
 
 ---
 
-## PR-3: Certification With Real Busy-Terminal Reproduction
+## PR-4: Certification With Real Failed-Delivery Reproduction
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @quality-engineer
-**Requires-Model**: opus
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
 **Estimated Time**: 2-3 hours
-**Dependencies**: [PR-2]
+**Dependencies**: [PR-2, PR-3]
 
 ### Description
-Certify that the busy-terminal exclusivity breach seen in the double-feature run is closed under real dispatch conditions.
+Certify the fix by reproducing a failed delivery and proving the terminal does not remain blocked, the runtime state stays consistent, and the next valid dispatch can proceed without manual lease surgery.
 
 ### Scope
-- reproduce a terminal-already-busy scenario
-- verify second dispatch is blocked before delivery
-- verify operator-readable audit evidence explains the block
-- verify invalid skill metadata is rejected pre-delivery
-- verify Claude-targeted dispatches do not rely on implicit clear-context delivery
+- Reproduce at least one real failed-delivery path
+- Verify lease cleanup and claim cleanup occur automatically
+- Verify runtime truth remains consistent across operator tools
+- Verify active dispatch state, queue/projected in-progress state, and terminal activity remain mutually consistent after failure and after recovery
+- Require Gemini review and Codex final gate on certification and runtime-core PRs
 
 ### Success Criteria
-- second dispatch to an occupied terminal no longer lands
-- certification evidence proves fail-closed behavior
-- Gemini review evidence exists and blocking findings are resolved
-- Codex final gate evidence exists for runtime-core changes
-- no chain-created open items remain unresolved at feature closure
+- A failed dispatch no longer strands the target terminal
+- The next valid dispatch can proceed without manual lease recovery
+- Operator-visible state stays consistent after failure
+- Operator-visible state does not regress to `In Progress: None` while a recovered or continuing dispatch is still active
+- Gemini review and Codex final gate evidence exist for runtime-core changes
 
 ### Quality Gate
-`gate_pr3_busy_terminal_certification`:
-- [ ] All busy-terminal certification tests pass
-- [ ] Reproduced second-dispatch attempt is blocked before delivery
-- [ ] Certification evidence includes explicit blocked reason and no worker-side duplicate execution
-- [ ] Invalid skill metadata cannot reach pending delivery in certification flow
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
-- [ ] Feature closes with zero unresolved chain-created open items
+`gate_pr4_failed_delivery_certification`:
+- [ ] All failed-delivery certification tests pass
+- [ ] Reproduced failed delivery does not leave the target terminal blocked
+- [ ] Lease cleanup and runtime-state reconciliation are both visible in certification evidence
+- [ ] Certification proves queue/projected in-progress state matches active dispatch and terminal activity before and after recovery
+- [ ] Gemini review receipt exists and all blocking findings are closed
+- [ ] Codex final gate receipt exists and all required checks pass
