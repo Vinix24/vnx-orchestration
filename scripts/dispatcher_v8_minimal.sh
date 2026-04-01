@@ -114,9 +114,14 @@ _classify_blocked_dispatch() {
             echo "busy true" ;;
         canonical_lease:lease_expired*|recent_*|canonical_check_error:*|terminal_state_unreadable)
             echo "ambiguous true" ;;
+        canonical_check_parse_error|canonical_lease_acquire_failed)
+            # RC-2: canonical_check_parse_error is a transient JSON parse failure
+            # (not a metadata defect) — must be ambiguous, not invalid (contract 140 §2.3).
+            # canonical_lease_acquire_failed is contention, also transient.
+            echo "ambiguous true" ;;
         canonical_lease:*)
             echo "busy true" ;;
-        blocked_input_mode|recovery_failed|pane_dead|probe_failed)
+        blocked_input_mode|recovery_failed|pane_dead|probe_failed|input_mode_blocked)
             # Input-mode blocks: terminal is not busy but pane is non-interactive.
             # Requeue after operator resolves copy/search mode.
             echo "ambiguous true" ;;
@@ -1788,6 +1793,19 @@ process_dispatches() {
             continue
         fi
 
+        # RC-4: Catch empty or 'none' role before any terminal operations.
+        # An empty/none role bypasses the validation guard below and reaches
+        # dispatch_with_skill_activation() where map_role_to_skill("") returns
+        # empty, triggering [SKILL_INVALID] deep in delivery after terminal
+        # operations may have started. Block here at pre-validation instead.
+        if [ -z "$agent_role" ] || [ "$agent_role" = "none" ] || [ "$agent_role" = "None" ]; then
+            log "V8 ERROR: Empty or 'none' role — dispatch blocked at pre-validation: $(basename "$dispatch")"
+            if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+                printf '\n\n[SKILL_INVALID] Role is empty or '"'"'none'"'"'. Set a valid Role and remove this marker to retry.\n' >> "$dispatch"
+            fi
+            continue
+        fi
+
         # Validate skill against skills.yaml registry before any terminal operations.
         # An invalid skill must never advance to delivery — block here before canonial
         # check or lease acquire so no terminal state is touched for an invalid dispatch.
@@ -1913,14 +1931,24 @@ process_dispatches() {
         if ! dispatch_with_skill_activation "$dispatch" "$track" "$agent_role" "$intel_result" "$dispatch_id"; then
             if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
                 log "V8 WARNING: Dispatch blocked due to invalid skill (waiting for edit): $(basename "$dispatch")"
+                continue  # Stay in pending — waiting for operator to fix role
+            fi
+            if grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
+                log "V8 WARNING: Dispatch blocked due to dependency error (waiting for resolution): $(basename "$dispatch")"
+                continue  # Stay in pending — waiting for dependency to recover
+            fi
+            # RC-3: Only move to rejected when an explicit [REJECTED:] marker was written
+            # by the failure path that determined the failure is permanent. No-marker
+            # return-1 means requeueable transient failure — do NOT reject (contract 140 §3.2).
+            if grep -q "\[REJECTED:" "$dispatch"; then
+                log "V8 ERROR: Dispatch permanently rejected: $(basename "$dispatch")"
+                if [ -f "$dispatch" ]; then
+                    mv "$dispatch" "$REJECTED_DIR/"
+                fi
                 continue
             fi
-            log "V8 ERROR: Dispatch failed for $(basename "$dispatch")"
-            if [ -f "$dispatch" ]; then
-                echo -e "\n\n[REJECTED: Dispatch failed during execution]\n" >> "$dispatch"
-                mv "$dispatch" "$REJECTED_DIR/"
-            fi
-            continue
+            log "V8 INFO: Dispatch failed with requeueable condition — deferring to pending: $(basename "$dispatch")"
+            continue  # Stay in pending — requeueable transient failure, retry on next loop
         fi
 
         ((count++))
