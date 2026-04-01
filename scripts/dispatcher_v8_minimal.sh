@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
 source "$SCRIPT_DIR/lib/provider_routing.sh"
+source "$SCRIPT_DIR/lib/model_routing.sh"
 
 # Configuration
 PROJECT_ROOT="${PROJECT_ROOT}"
@@ -772,6 +773,11 @@ extract_requires_model() {
     vnx_dispatch_extract_requires_model "$1"
 }
 
+# Function to extract Requires-Model strength ("required" or "advisory")
+extract_requires_model_strength() {
+    vnx_dispatch_extract_requires_model_strength "$1"
+}
+
 # Function to extract Requires-Provider field (provider id only, no strength suffix)
 extract_requires_provider() {
     vnx_dispatch_extract_requires_provider "$1"
@@ -796,6 +802,8 @@ configure_terminal_mode() {
     local mode=$(extract_mode "$dispatch_file")
     local clear_context=$(extract_clear_context "$dispatch_file")
     local requires_model=$(extract_requires_model "$dispatch_file")
+    local requires_model_strength
+    requires_model_strength=$(extract_requires_model_strength "$dispatch_file")
     local force_normal=$(extract_force_normal_mode "$dispatch_file")
     local requires_provider
     requires_provider=$(extract_requires_provider "$dispatch_file")
@@ -817,7 +825,7 @@ configure_terminal_mode() {
     log "V8 PROVIDER_ROUTING: $routing_event"
 
     # Log configuration for debugging
-    log "V8 MODE_CONTROL: Config - terminal=$terminal_id provider=$provider mode=$mode clear=$clear_context model=$requires_model force=$force_normal"
+    log "V8 MODE_CONTROL: Config - terminal=$terminal_id provider=$provider mode=$mode clear=$clear_context model=$requires_model model_strength=$requires_model_strength force=$force_normal"
 
     # Step 1: Force normal mode if requested (to handle persistence issue)
     if [[ "$force_normal" == "true" && "$provider" == "claude_code" ]]; then
@@ -891,35 +899,81 @@ configure_terminal_mode() {
         fi
     fi
 
-    # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
-    if [[ "$requires_model" == "opus" ]]; then
-        requires_model="default"
+    # Step 3: Verified model switch (replaces best-effort fire-and-forget)
+    # Implements contract: docs/core/100_VERIFIED_PROVIDER_MODEL_ROUTING_CONTRACT.md §5
+    local model_pre_event
+    if ! model_pre_event=$(vnx_eval_model_routing \
+            "$requires_model" "$requires_model_strength" "$provider" \
+            "$terminal_id" "$(basename "$dispatch_file")"); then
+        log "V8 MODEL_ROUTING: $model_pre_event"
+        log_structured_failure "model_routing_blocked" \
+            "Dispatch blocked — required model routing pre-check failed" \
+            "requested_model=$requires_model provider=$provider terminal=$terminal_id"
+        return 1
     fi
-    # Step 3: Switch model if specified (only for providers that support /model)
-    # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
-    if [[ "$requires_model" == "opus" ]]; then
-        requires_model="default"
-    fi
-    if [[ -n "$requires_model" ]] && [[ "$requires_model" != "" ]]; then
-        if [[ "$provider" == "claude_code" || "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-            log "V8 MODE_CONTROL: Switching to model: $requires_model (provider=$provider)"
-            # Pre-clear input line (C-u only — C-c would kill the CLI process)
-            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-            sleep 0.3
-            if ! tmux_send_best_effort "$target_pane" -l "/model $requires_model"; then
-                log_structured_failure "model_switch_failed" "Failed to send model switch command" "pane=$target_pane model=$requires_model"
-                return 1
-            fi
+    log "V8 MODEL_ROUTING: $model_pre_event"
+
+    # Determine pre-check result
+    local model_pre_result
+    model_pre_result=$(echo "$model_pre_event" | \
+        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "")
+
+    if [[ "$model_pre_result" == "needs_switch" ]]; then
+        # Normalize: "opus" → "default" to select Opus 4.6 1M context (not 200K)
+        local model_cmd="$requires_model"
+        if [[ "$model_cmd" == "opus" ]]; then
+            model_cmd="default"
+        fi
+
+        log "V8 MODEL_ROUTING: Switching to model: $model_cmd (raw=$requires_model provider=$provider)"
+        # Pre-clear input line (C-u only — C-c would kill the CLI process)
+        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+        sleep 0.3
+
+        local switch_send_ok=true
+        if ! tmux_send_best_effort "$target_pane" -l "/model $model_cmd"; then
+            switch_send_ok=false
+        fi
+
+        if [[ "$switch_send_ok" == "true" ]]; then
             sleep 1  # Allow CLI to render command before submitting
             if ! tmux_send_best_effort "$target_pane" Enter; then
-                log_structured_failure "model_switch_submit_failed" "Failed to submit model switch command" "pane=$target_pane model=$requires_model"
+                switch_send_ok=false
+            fi
+        fi
+
+        if [[ "$switch_send_ok" == "false" ]]; then
+            local fail_event
+            if ! fail_event=$(vnx_emit_model_switch_result \
+                    "$requires_model" "failed" "" "$requires_model_strength" \
+                    "$terminal_id" "$(basename "$dispatch_file")"); then
+                log "V8 MODEL_ROUTING: $fail_event"
+                log_structured_failure "model_switch_blocked" \
+                    "Dispatch blocked — required model switch command could not be sent" \
+                    "requested_model=$requires_model terminal=$terminal_id"
                 return 1
             fi
-            sleep 4  # Critical delay for model switch to complete
-        elif [[ "$provider" == "gemini_cli" || "$provider" == "gemini" ]]; then
-            log "V8 MODE_CONTROL: Gemini does not support runtime model switching — Requires-Model=$requires_model ignored"
+            log "V8 MODEL_ROUTING: $fail_event"
         else
-            log "V8 MODE_CONTROL: Unknown provider '$provider' — Requires-Model=$requires_model ignored"
+            sleep 4  # Critical delay for model switch to complete
+
+            # Post-switch verification: capture pane and parse confirmation
+            local pane_content
+            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+            local switch_result
+            switch_result=$(vnx_verify_model_switch_output "$pane_content" "$model_cmd")
+
+            local result_event
+            if ! result_event=$(vnx_emit_model_switch_result \
+                    "$requires_model" "$switch_result" "" "$requires_model_strength" \
+                    "$terminal_id" "$(basename "$dispatch_file")"); then
+                log "V8 MODEL_ROUTING: $result_event"
+                log_structured_failure "model_switch_blocked" \
+                    "Dispatch blocked — required model switch could not be verified" \
+                    "requested_model=$requires_model switch_result=$switch_result terminal=$terminal_id"
+                return 1
+            fi
+            log "V8 MODEL_ROUTING: $result_event"
         fi
     fi
 
