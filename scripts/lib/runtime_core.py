@@ -33,7 +33,9 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
-from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema
+from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection
+from failure_classifier import classify_failure, FailureClassification
+from runtime_state_reconciler import ZOMBIE_LEASE, GHOST_DISPATCH, RuntimeStateReconciler
 from tmux_adapter import TmuxAdapter, load_adapter
 
 _RUNTIME_PRIMARY_FLAG = "VNX_RUNTIME_PRIMARY"
@@ -262,11 +264,25 @@ class RuntimeCore:
         Transitions: delivering -> failed_delivery.
         Failures are never logs-only after this call.
         """
+        classification = classify_failure(reason)
         try:
             self._broker.deliver_failure(dispatch_id, attempt_id, reason, actor="dispatcher")
-            return {"recorded": True, "dispatch_id": dispatch_id}
+            return {
+                "recorded": True,
+                "dispatch_id": dispatch_id,
+                "failure_class": classification.failure_class,
+                "retryable": classification.retryable,
+                "operator_summary": classification.operator_summary,
+            }
         except Exception as exc:
-            return {"recorded": False, "dispatch_id": dispatch_id, "error": str(exc)}
+            return {
+                "recorded": False,
+                "dispatch_id": dispatch_id,
+                "error": str(exc),
+                "failure_class": classification.failure_class,
+                "retryable": classification.retryable,
+                "operator_summary": classification.operator_summary,
+            }
 
     # ------------------------------------------------------------------
     # Terminal lease management (lease_manager)
@@ -281,6 +297,12 @@ class RuntimeCore:
 
         Fail-closed: returns available=False on DB error or runtime uncertainty.
         Ambiguous state blocks rather than dispatches per the fail-closed contract.
+
+        PR-2: also runs mismatch detection via RuntimeStateReconciler so that
+        dispatch safety checks see the same reconciled truth as operator tooling.
+        Zombie leases (lease held by a dispatch that has already ended) are
+        reported explicitly with mismatch=zombie_lease rather than silently
+        blocking future dispatches indefinitely.
         """
         try:
             lease = self._lease_mgr.get(terminal_id)
@@ -294,6 +316,39 @@ class RuntimeCore:
                     "terminal_id": terminal_id,
                     "reason": f"lease_expired_not_cleaned:{lease.dispatch_id}",
                 }
+
+            # PR-2: Detect zombie lease — lease is held but the linked dispatch
+            # has already ended (failed, completed, expired, etc.).  Report the
+            # mismatch explicitly so operators can see the divergence and the
+            # dispatcher can take explicit corrective action rather than being
+            # blocked indefinitely by a lease that should have been released.
+            reconciler = RuntimeStateReconciler(self._lease_mgr.state_dir)
+            mismatches = reconciler.reconcile_for_terminal(terminal_id)
+            zombie = next(
+                (m for m in mismatches if m.mismatch_type == ZOMBIE_LEASE),
+                None,
+            )
+            if zombie:
+                classification = classify_failure(
+                    f"runtime_state_divergence:zombie_lease:{zombie.dispatch_state}"
+                )
+                return {
+                    "available": False,
+                    "terminal_id": terminal_id,
+                    "reason": (
+                        f"zombie_lease:{lease.dispatch_id}:"
+                        f"dispatch_state={zombie.dispatch_state}"
+                    ),
+                    "lease_state": lease.state,
+                    "dispatch_state": zombie.dispatch_state,
+                    "mismatch": ZOMBIE_LEASE,
+                    "mismatch_message": zombie.message,
+                    "claimed_by": lease.dispatch_id,
+                    "failure_class": classification.failure_class,
+                    "retryable": classification.retryable,
+                    "operator_summary": classification.operator_summary,
+                }
+
             return {
                 "available": False,
                 "terminal_id": terminal_id,
@@ -352,6 +407,67 @@ class RuntimeCore:
             return {"released": True, "terminal_id": terminal_id}
         except Exception as exc:
             return {"released": False, "terminal_id": terminal_id, "error": str(exc)}
+
+    def release_on_delivery_failure(
+        self,
+        dispatch_id: str,
+        attempt_id: str,
+        terminal_id: str,
+        generation: int,
+        reason: str = "delivery failed",
+    ) -> Dict[str, Any]:
+        """Record delivery failure and release canonical lease in one auditable call.
+
+        Guarantees the canonical lease is always released when delivery fails,
+        even when the delivery-failure bookkeeping step itself partially fails.
+        Returns explicit success/failure markers for both operations so the
+        caller can emit a structured audit entry rather than relying on logs.
+
+        Contract (PR-1):
+          - failure_recorded=False does NOT prevent lease release.
+          - lease_released=False is explicit, never silently ignored.
+          - cleanup_complete is True only when both succeed.
+        """
+        failure_recorded = False
+        lease_released = False
+        failure_error: Optional[str] = None
+        lease_error: Optional[str] = None
+
+        # Step 1: Record delivery failure durably (broker state machine).
+        # A failure here must NOT prevent the lease from being released.
+        if attempt_id:
+            try:
+                self._broker.deliver_failure(dispatch_id, attempt_id, reason, actor="dispatcher")
+                failure_recorded = True
+            except Exception as exc:
+                failure_error = str(exc)
+
+        # Step 2: Release canonical lease — always attempted regardless of step 1.
+        try:
+            self._lease_mgr.release(
+                terminal_id,
+                generation,
+                actor="dispatcher",
+                reason=f"delivery_failure:{reason}",
+            )
+            lease_released = True
+        except Exception as exc:
+            lease_error = str(exc)
+
+        classification = classify_failure(reason)
+
+        return {
+            "dispatch_id": dispatch_id,
+            "terminal_id": terminal_id,
+            "failure_recorded": failure_recorded,
+            "lease_released": lease_released,
+            "cleanup_complete": failure_recorded and lease_released,
+            "failure_error": failure_error,
+            "lease_error": lease_error,
+            "failure_class": classification.failure_class,
+            "retryable": classification.retryable,
+            "operator_summary": classification.operator_summary,
+        }
 
     # ------------------------------------------------------------------
     # Compatibility check
