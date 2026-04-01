@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
 from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection
+from failure_classifier import classify_failure, FailureClassification
 from runtime_state_reconciler import ZOMBIE_LEASE, GHOST_DISPATCH, RuntimeStateReconciler
 from tmux_adapter import TmuxAdapter, load_adapter
 
@@ -263,11 +264,25 @@ class RuntimeCore:
         Transitions: delivering -> failed_delivery.
         Failures are never logs-only after this call.
         """
+        classification = classify_failure(reason)
         try:
             self._broker.deliver_failure(dispatch_id, attempt_id, reason, actor="dispatcher")
-            return {"recorded": True, "dispatch_id": dispatch_id}
+            return {
+                "recorded": True,
+                "dispatch_id": dispatch_id,
+                "failure_class": classification.failure_class,
+                "retryable": classification.retryable,
+                "operator_summary": classification.operator_summary,
+            }
         except Exception as exc:
-            return {"recorded": False, "dispatch_id": dispatch_id, "error": str(exc)}
+            return {
+                "recorded": False,
+                "dispatch_id": dispatch_id,
+                "error": str(exc),
+                "failure_class": classification.failure_class,
+                "retryable": classification.retryable,
+                "operator_summary": classification.operator_summary,
+            }
 
     # ------------------------------------------------------------------
     # Terminal lease management (lease_manager)
@@ -314,6 +329,9 @@ class RuntimeCore:
                 None,
             )
             if zombie:
+                classification = classify_failure(
+                    f"runtime_state_divergence:zombie_lease:{zombie.dispatch_state}"
+                )
                 return {
                     "available": False,
                     "terminal_id": terminal_id,
@@ -326,6 +344,9 @@ class RuntimeCore:
                     "mismatch": ZOMBIE_LEASE,
                     "mismatch_message": zombie.message,
                     "claimed_by": lease.dispatch_id,
+                    "failure_class": classification.failure_class,
+                    "retryable": classification.retryable,
+                    "operator_summary": classification.operator_summary,
                 }
 
             return {
@@ -433,6 +454,8 @@ class RuntimeCore:
         except Exception as exc:
             lease_error = str(exc)
 
+        classification = classify_failure(reason)
+
         return {
             "dispatch_id": dispatch_id,
             "terminal_id": terminal_id,
@@ -441,6 +464,9 @@ class RuntimeCore:
             "cleanup_complete": failure_recorded and lease_released,
             "failure_error": failure_error,
             "lease_error": lease_error,
+            "failure_class": classification.failure_class,
+            "retryable": classification.retryable,
+            "operator_summary": classification.operator_summary,
         }
 
     # ------------------------------------------------------------------
