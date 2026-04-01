@@ -1,6 +1,6 @@
-# Feature: Failed Delivery Lease Cleanup And Runtime State Reconciliation
+# Feature: Verified Provider And Model Routing Enforcement
 
-## PR-0: Delivery Failure And Lease Ownership Contract
+## PR-0: Routing Contract And Capability Boundaries
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -10,34 +10,37 @@
 **Dependencies**: []
 
 ### Description
-Define the canonical contract for what must happen when a dispatch fails during terminal delivery so leases, claims, and runtime state do not silently strand a terminal in blocked state.
+Define the canonical routing contract for provider and model requirements so dispatch metadata stops behaving as best-effort advice and becomes auditable execution intent.
 
 ### Scope
-- Define required cleanup behavior for:
-  - tmux delivery failure
-  - worker-side reject during execution handoff
-  - Claude feedback or hook loop after context reset
-  - stale pending-to-rejected transitions
-- Define when canonical lease must be released
-- Define how failed delivery differs from accepted execution
-- Lock non-goals so this does not become a full broker/runtime rewrite
+- Define the difference between:
+  - provider selection
+  - model selection
+  - capability selection
+  - execution mode
+- Define which requirements are hard blockers vs operator warnings
+- Define how interactive terminals, headless gates, and future provider-agnostic sessions should report actual runtime identity
+- Define how pinned-terminal assumptions are represented when runtime model switching is unavailable or unverified
+- Lock non-goals so this does not become a full terminal abstraction rewrite
 
 ### Success Criteria
-- Lease ownership rules are explicit for every delivery-failure path
-- Failed delivery cannot leave a terminal silently blocked
-- Cleanup obligations for dispatcher and runtime-core are deterministic
-- The contract explains how runtime truth should reconcile after failure
+- Routing rules are explicit rather than implicit
+- Provider mismatch behavior is deterministic
+- Model mismatch behavior is deterministic
+- Pinned-terminal operation remains auditable while runtime switching is unreliable
+- The contract supports future actor-identity work without being tied forever to T1/T2/T3
 
 ### Quality Gate
-`gate_pr0_failed_delivery_lease_contract`:
-- [ ] Contract defines required lease and claim cleanup for every failed-delivery path
-- [ ] Contract distinguishes failed delivery from accepted execution and worker failure
-- [ ] Contract blocks silent terminal stranding after dispatch rejection or delivery failure
-- [ ] Contract defines required audit evidence for cleanup and reconciliation
+`gate_pr0_routing_contract`:
+- [ ] Contract defines hard vs advisory routing requirements for provider, model, capability, and execution mode
+- [ ] Contract defines how actual runtime identity is recorded after dispatch
+- [ ] Contract blocks silent provider mismatch for required provider-routed work
+- [ ] Contract defines how pinned terminals satisfy model requirements when switching is unavailable
+- [ ] Contract preserves a migration path toward provider-agnostic actor routing
 
 ---
 
-## PR-1: Release Canonical Lease On Delivery Failure
+## PR-1: Fail-Closed Provider Enforcement At Dispatch Time
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -47,34 +50,30 @@ Define the canonical contract for what must happen when a dispatch fails during 
 **Dependencies**: [PR-0]
 
 ### Description
-Harden dispatcher failure handling so a dispatch that fails before real worker acceptance always releases the canonical lease and terminal claim.
+Make required provider routing fail closed so dispatches do not silently land on a terminal that cannot satisfy the requested provider.
 
 ### Scope
-- Ensure every failed-delivery path releases canonical lease
-- Ensure claim release and lease release stay paired
-- Add tests for:
-  - tmux transport failure
-  - rejected execution handoff
-  - Claude feedback or prompt-loop interruption after explicit clear-context
-  - repeated retry followed by failure
-- Emit explicit audit markers for release success or cleanup failure
+- Promote `Requires-Provider` from warning-only to enforceable routing rule where policy marks it as required
+- Block dispatch when terminal provider does not match required provider
+- Preserve explicit advisory mode for cases where provider preference is informational only
+- Add tests for required vs optional provider routing
 
 ### Success Criteria
-- Failed delivery no longer strands a terminal lease
-- Cleanup behavior is deterministic and auditable
-- Retried delivery failures do not accumulate stale ownership
-- Delivery-failure cleanup works even when subsequent bookkeeping partially fails
+- Required provider mismatches no longer dispatch silently
+- Optional provider preferences remain visible without overblocking
+- Dispatcher reports explicit reasons for provider-route rejection
+- Existing terminal start configuration remains compatible
 
 ### Quality Gate
-`gate_pr1_release_lease_on_failure`:
-- [ ] All failed-delivery lease cleanup tests pass
-- [ ] Canonical lease is released for every failed-delivery path before dispatch exits
-- [ ] Terminal claim and canonical lease cleanup remain paired under test
-- [ ] Cleanup failures are explicit in audit output rather than silent
+`gate_pr1_provider_enforcement`:
+- [ ] All provider-routing enforcement tests pass
+- [ ] Required provider mismatch blocks dispatch with explicit reason
+- [ ] Optional provider preference remains advisory and auditable
+- [ ] Provider routing logic does not silently downgrade required work to the wrong terminal
 
 ---
 
-## PR-2: Runtime Truth Reconciliation Between LeaseManager And Runtime Core
+## PR-2: Verified Model Switching And Post-Switch Runtime Validation
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -84,75 +83,74 @@ Harden dispatcher failure handling so a dispatch that fails before real worker a
 **Dependencies**: [PR-0, PR-1]
 
 ### Description
-Eliminate or explicitly reconcile divergent terminal state projections so LeaseManager and runtime_core_cli do not disagree about whether a terminal is idle, leased, or blocked.
+Turn model routing from best-effort command injection into a verified state transition so dispatches can prove which model actually handled the work.
 
 ### Scope
-- Identify canonical source of truth for terminal ownership state
-- Reconcile LeaseManager projection with runtime core broker state
-- Reconcile PR queue/projected in-progress state with active dispatch/runtime truth so a live execution cannot appear as `In Progress: None`
-- Add explicit mismatch detection and operator-readable diagnostics
-- Add tests for divergent generation or state snapshots
-- Add tests where:
-  - active dispatch exists but queue/projected in-progress state is empty
-  - terminal is visibly executing while queue projection still reports idle
-  - reconciliation restores consistent operator-visible truth without duplicate dispatch
+- Add explicit model-switch result states:
+  - switched
+  - already_active
+  - unsupported
+  - failed
+  - unverified
+- Verify post-switch runtime state where provider supports it
+- Block required model-routed dispatches when the switch cannot be verified
+- Preserve explicit unsupported behavior for providers that do not support runtime model switching
 
 ### Success Criteria
-- Operators no longer see one subsystem report idle while another reports blocked
-- Operators no longer see queue/projected state claim nothing is in progress while an active dispatch is already executing
-- Runtime truth is derived from one canonical source or a deterministic reconciliation path
-- Divergent state becomes explicit and repairable
-- Dispatch safety checks use the same effective truth seen by operator tooling
+- Required model changes are not assumed successful without verification
+- Dispatch receipts can show the requested and actual runtime model
+- Unsupported runtime switching is explicit rather than silently ignored
+- Model-routing failures do not continue to delivery as if nothing happened
 
 ### Quality Gate
-`gate_pr2_runtime_state_reconciliation`:
-- [ ] All runtime-state reconciliation tests pass
-- [ ] LeaseManager and runtime-core state no longer diverge silently under test scenarios
-- [ ] Queue/projected in-progress state reconciles correctly against active dispatch/runtime truth
-- [ ] Divergent generation or state snapshots produce explicit diagnostics
-- [ ] Dispatch safety checks consume reconciled runtime truth rather than conflicting projections
+`gate_pr2_verified_model_switching`:
+- [ ] All model-routing verification tests pass
+- [ ] Required model-routed dispatches fail when post-switch state cannot be verified
+- [ ] Requested and actual runtime model are recorded in dispatch evidence
+- [ ] Unsupported runtime switching paths are explicit and do not masquerade as success
 
 ---
 
-## PR-3: Dispatch Failure Classification And Operator Visibility
+## PR-3: Kickoff, Preset, And Preflight Provider Readiness
 **Track**: C
 **Priority**: P2
 **Complexity**: Medium
 **Risk**: Medium
-**Skill**: @reviewer
+**Skill**: @quality-engineer
 **Estimated Time**: 2-3 hours
 **Dependencies**: [PR-1, PR-2]
 
 ### Description
-Improve failure classification and operator surfaces so delivery failures explain whether the issue was invalid skill, stale lease, blocked runtime state, or worker-side handoff failure.
+Move provider and model readiness checks earlier into kickoff and runtime preflight so T0 does not discover missing routing capabilities only after work is already underway.
 
 ### Scope
-- Add explicit failure reasons for:
-  - invalid skill
-  - stale lease
-  - runtime state divergence
-  - worker-side execution handoff failure
-  - hook or feedback-loop interruption after terminal reset
-- Surface cleanup outcome in operator-readable state
-- Verify rejected dispatches preserve actionable reason text
-- Add tests for diagnostic visibility
+- Add preflight validation for required provider and model capabilities from feature/review metadata
+- Surface missing provider capability at kickoff or promotion time
+- Verify startup presets and env profiles can express required routing capabilities
+- Verify pinned terminal assumptions for the current chain:
+  - T1 = Sonnet
+  - T2 = Sonnet
+  - T0 and T3 = stronger review/orchestration model
+- Add operator-readable diagnostics for why a requested provider/model is unavailable
 
 ### Success Criteria
-- Operators can distinguish configuration failure from runtime ownership failure
-- Rejected dispatches retain actionable root-cause evidence
-- Cleanup outcome is visible rather than inferred
-- T0 can decide whether to retry, reroute, or escalate from explicit signals
+- Required provider/model capability gaps are caught before real execution
+- T0 receives deterministic readiness feedback instead of post-failure guesswork
+- Presets and env profiles can intentionally provision routing requirements
+- Pinned-terminal assumptions can be checked before the chain starts
+- Autonomous chain features can declare provider expectations in a machine-usable way
 
 ### Quality Gate
-`gate_pr3_failure_classification_visibility`:
-- [ ] Failure classification tests pass for invalid skill, stale lease, runtime divergence, worker-side handoff failure, and hook/feedback-loop interruption
-- [ ] Rejected dispatches preserve actionable root-cause markers
-- [ ] Cleanup outcome is visible in operator-readable state or audit artifacts
-- [ ] T0 can distinguish retryable from non-retryable delivery failures deterministically
+`gate_pr3_routing_preflight_readiness`:
+- [ ] All preflight readiness tests pass
+- [ ] Kickoff or promotion blocks when required provider or model capability is unavailable
+- [ ] Startup preset and env diagnostics explain missing routing capability clearly
+- [ ] Pinned terminal assumptions are checked explicitly before the chain starts
+- [ ] T0 can distinguish unsupported, unavailable, and misconfigured routing states
 
 ---
 
-## PR-4: Certification With Real Failed-Delivery Reproduction
+## PR-4: Certification With Real Mixed-Provider And Mixed-Model Dispatches
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -162,27 +160,24 @@ Improve failure classification and operator surfaces so delivery failures explai
 **Dependencies**: [PR-2, PR-3]
 
 ### Description
-Certify the fix by reproducing a failed delivery and proving the terminal does not remain blocked, the runtime state stays consistent, and the next valid dispatch can proceed without manual lease surgery.
+Certify routing enforcement using realistic mixed-provider and mixed-model dispatches so the next autonomous feature sequence can trust provider/model requirements.
 
 ### Scope
-- Reproduce at least one real failed-delivery path
-- Verify lease cleanup and claim cleanup occur automatically
-- Verify runtime truth remains consistent across operator tools
-- Verify active dispatch state, queue/projected in-progress state, and terminal activity remain mutually consistent after failure and after recovery
-- Require Gemini review and Codex final gate on certification and runtime-core PRs
+- Run at least one mixed-provider scenario and one mixed-model scenario
+- Prove required provider mismatch blocks before delivery
+- Prove verified model switching records requested vs actual runtime identity
+- Require Gemini review and Codex final gate on certification and routing-core PRs
 
 ### Success Criteria
-- A failed dispatch no longer strands the target terminal
-- The next valid dispatch can proceed without manual lease recovery
-- Operator-visible state stays consistent after failure
-- Operator-visible state does not regress to `In Progress: None` while a recovered or continuing dispatch is still active
-- Gemini review and Codex final gate evidence exist for runtime-core changes
+- Required provider and model routing works deterministically under real dispatch flow
+- No dispatch silently stays on the old model when a required verified switch is requested
+- Gemini review evidence exists and blocking findings are resolved
+- Codex final gate evidence exists and passes for routing-core changes
 
 ### Quality Gate
-`gate_pr4_failed_delivery_certification`:
-- [ ] All failed-delivery certification tests pass
-- [ ] Reproduced failed delivery does not leave the target terminal blocked
-- [ ] Lease cleanup and runtime-state reconciliation are both visible in certification evidence
-- [ ] Certification proves queue/projected in-progress state matches active dispatch and terminal activity before and after recovery
+`gate_pr4_routing_certification`:
+- [ ] All routing certification tests pass for mixed-provider and mixed-model scenarios
+- [ ] Required provider mismatch blocks before delivery and produces explicit evidence
+- [ ] Requested and actual runtime model are both present in certification evidence
 - [ ] Gemini review receipt exists and all blocking findings are closed
 - [ ] Codex final gate receipt exists and all required checks pass
