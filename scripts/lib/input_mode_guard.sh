@@ -6,10 +6,18 @@
 # Implements IMR-1 (dispatcher MUST NOT send-keys to pane_in_mode=1) and
 # IMR-2 (fail-closed when recovery cannot prove input-readiness).
 #
+# Rate-limiting (PR-0 retry-loop-ux-protection):
+#   Per-terminal cooldown prevents repeated copy-mode cancellation during retry storms.
+#   Default cooldown: 30s (VNX_INPUT_MODE_COOLDOWN override).
+#   During cooldown: probe pane_in_mode but skip recovery (cancel/escape).
+#   If blocked during cooldown: defer dispatch (requeueable), preserve scrollback.
+#   First attempt after cooldown expires: full recovery as normal.
+#
 # Audit reasons emitted:
 #   recovered_before_dispatch   — pane was blocked; recovery restored normal mode
 #   blocked_input_mode          — delivery blocked; recovery exhausted (or probe failed)
 #   recovery_failed             — both recovery attempts failed
+#   recovery_cooldown_deferred  — blocked during cooldown; dispatch deferred (scrollback preserved)
 
 # Emit a structured NDJSON event to the VNX coordination audit log.
 # Usage: _emit_input_mode_event <event_type> <terminal_id> <pane_target>
@@ -69,6 +77,48 @@ _input_mode_probe() {
         return 1
     fi
     printf '%s' "$result"
+}
+
+# ---------------------------------------------------------------------------
+# Rate-limiting: per-terminal recovery cooldown
+# ---------------------------------------------------------------------------
+
+# Default cooldown period in seconds (override with VNX_INPUT_MODE_COOLDOWN)
+_INPUT_MODE_COOLDOWN="${VNX_INPUT_MODE_COOLDOWN:-30}"
+
+# Return the cooldown file path for a terminal.
+_cooldown_file() {
+    local terminal_id="$1"
+    local cooldown_dir="${STATE_DIR:-${VNX_STATE_DIR:-/tmp}}/input_mode_cooldown"
+    mkdir -p "$cooldown_dir" 2>/dev/null
+    printf '%s/%s' "$cooldown_dir" "$terminal_id"
+}
+
+# Check if recovery is within cooldown window for a terminal.
+# Returns 0 if in cooldown (should skip recovery), 1 if cooldown expired.
+_recovery_in_cooldown() {
+    local terminal_id="$1"
+    local cf
+    cf="$(_cooldown_file "$terminal_id")"
+    if [ ! -f "$cf" ]; then
+        return 1
+    fi
+    local last_recovery now elapsed
+    last_recovery=$(cat "$cf" 2>/dev/null) || return 1
+    now=$(date +%s)
+    elapsed=$((now - last_recovery))
+    if [ "$elapsed" -lt "$_INPUT_MODE_COOLDOWN" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Record that a recovery attempt was made for a terminal (starts cooldown).
+_record_recovery_timestamp() {
+    local terminal_id="$1"
+    local cf
+    cf="$(_cooldown_file "$terminal_id")"
+    date +%s > "$cf"
 }
 
 # Probe pane input mode, attempt recovery if blocked, fail closed if recovery fails.
@@ -152,9 +202,27 @@ check_pane_input_ready() {
         return 0
     fi
 
-    # Input-blocked — begin bounded recovery (contract Section 5)
+    # Input-blocked — check cooldown before attempting recovery
     local mode_before="${pane_mode:-copy-mode}"
+
+    # Rate-limiting: if within cooldown window, defer dispatch without recovery
+    # to preserve operator scrollback during retry storms.
+    if _recovery_in_cooldown "$terminal_id"; then
+        log "V8 INPUT_MODE: recovery_cooldown mode=$mode_before terminal=$terminal_id dispatch=$dispatch_id — deferring (scrollback preserved)"
+        _emit_input_mode_event "input_mode_recovery_cooldown" "$terminal_id" "$target_pane" \
+            "$pane_in_mode" "${pane_dead:-0}" "$mode_before" "$dispatch_id" \
+            "reason=recovery_cooldown_deferred cooldown=${_INPUT_MODE_COOLDOWN}s"
+        _emit_input_mode_event "input_mode_delivery_blocked" "$terminal_id" "$target_pane" \
+            "$pane_in_mode" "${pane_dead:-0}" "$mode_before" "$dispatch_id" \
+            "reason=recovery_cooldown_deferred"
+        return 1
+    fi
+
+    # Begin bounded recovery (contract Section 5)
     log "V8 INPUT_MODE: input_blocked mode=$mode_before terminal=$terminal_id dispatch=$dispatch_id — attempting recovery"
+
+    # Record recovery timestamp to start cooldown window
+    _record_recovery_timestamp "$terminal_id"
 
     # --- Recovery attempt 1: programmatic cancel (preferred, Section 5.2) ---
     _emit_input_mode_event "input_mode_recovery_started" "$terminal_id" "$target_pane" \
