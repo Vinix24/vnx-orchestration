@@ -84,6 +84,26 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ## Next (After Committed Scope)
 
+## Recommended Next Hardening Chain
+**Status**: `Next`
+**Why**: The first four-feature autonomous run proved substantive delivery, but repeated governance gaps showed that formal closure and dispatch integrity still need a focused hardening lane before the next broad autonomous rollout.
+
+**Recommended order**
+1. Deterministic Headless Gate Evidence Enforcement
+2. Terminal Input-Ready Mode Guard
+3. Queue And Runtime Projection Consistency Hardening
+4. Fine-Grained Delivery Rejection Logging
+5. Residual Governance Bugfix Sweep
+
+**Intent**
+- First remove the repeated false-green closure path around headless gates.
+- Then close the tmux input-mode corruption path for slash-prefixed dispatches.
+- Then reconcile operator-visible queue/projected state with active runtime truth.
+- Then make delivery failures diagnostically precise instead of generic rejects.
+- Finally sweep the remaining warn-level governance bugs into a clean baseline for the next multi-feature autonomous chain.
+
+---
+
 ## 5) Terminal Pool Expansion (4 -> N)
 **Status**: `Next`  
 **Why**: Higher throughput and specialization require dynamic terminal scaling.
@@ -137,11 +157,26 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 - Remove leftover legacy wrappers and dead paths where safe.
 - Keep CLI behavior stable while improving maintainability.
 
+## 10) Terminal Input-Ready Mode Guard
+**Status**: `Next`
+**Why**: Mouse-enabled tmux environments can leave a pane in copy/search mode, and slash-prefixed dispatches can then be swallowed by tmux itself.
+
+**Goals**
+- Detect `pane_in_mode` before dispatch.
+- Recover safely when a pane can be returned to normal input mode.
+- Fail closed when input readiness cannot be proven.
+- Add certification that reproduces the real `search down` dispatch-corruption path.
+
+**Success Criteria**
+- Slash-prefixed dispatches are never sent blindly into a non-normal tmux mode.
+- Recovery vs blocked delivery is explicit and auditable.
+- The `search down` failure mode has a permanent regression test.
+
 ---
 
 ## Exploring (Not Default / Lower Priority)
 
-## 10) YOLO Execution Mode
+## 11) YOLO Execution Mode
 **Status**: `Exploring`  
 **Why**: Useful to test autonomous completion boundaries, but conflicts with governance-first defaults.
 
@@ -155,7 +190,7 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ---
 
-## 11) Additional Model Integrations (e.g., Kimi)
+## 12) Additional Model Integrations (e.g., Kimi)
 **Status**: `Exploring`  
 **Why**: Further validate model-agnostic orchestration design.
 
@@ -166,7 +201,7 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 
 ---
 
-## 12) Rust Core Prototype (Selective)
+## 13) Rust Core Prototype (Selective)
 **Status**: `Exploring`  
 **Why**: Evaluate memory-safe/runtime-efficient implementation for critical paths.
 

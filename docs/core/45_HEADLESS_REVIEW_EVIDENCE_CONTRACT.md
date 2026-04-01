@@ -24,6 +24,7 @@ The minimum acceptable outcome is:
 2. a durable operator-readable report
 3. a structured gate result receipt
 4. deterministic linkage between request, report, receipt, and closure decision
+5. an explicit execution lifecycle state that distinguishes `requested` from `running` and from `completed`
 
 If any of these are missing, closure must remain blocked.
 
@@ -53,6 +54,9 @@ Each headless review job MUST be bound to all of the following:
 ## 3. Required Output Surfaces
 
 Every headless review job MUST produce all three output surfaces below.
+
+`queued` or `requested` state alone is never completion evidence.
+It only proves that T0 asked for the gate.
 
 ### 3.1 Request Record
 
@@ -94,6 +98,20 @@ The structured result lives under:
 
 It is the machine-readable closure input that T0 and the closure verifier use.
 
+### 3.4 Execution State Semantics
+
+Headless review orchestration MUST distinguish these states:
+
+- `queued` or `requested`
+  - request exists, but execution has not yet been proven to start
+- `running`
+  - the gate is actively executing
+- `pass`, `fail`, `blocked`, `not_configured`
+  - terminal states that can be reasoned about during closure
+
+T0 MUST NOT treat `queued` or `requested` as evidence that the gate is already running.
+T0 MUST NOT treat `queued` plus ad hoc shell output as valid closure evidence unless the structured result and normalized report are also present.
+
 ## 4. Required Gate Result Fields
 
 Every `review_gate_result` relevant to closure MUST include:
@@ -123,6 +141,11 @@ So:
 - `claude_github_optional` may be `not_configured` or `configured_dry_run`
 - but it may not simply have no state at all
 
+Required gates are stricter:
+- a required gate may be `queued` temporarily
+- but it is still incomplete until a terminal result state and normalized report exist
+- `queued` must never be interpreted as a passing or near-passing state
+
 ## 5. T0 Enforcement Rules
 
 T0 MUST enforce all of the following before completing a PR or declaring closure-ready state:
@@ -134,6 +157,9 @@ T0 MUST enforce all of the following before completing a PR or declaring closure
 5. The normalized markdown report must exist at `report_path`.
 6. All blocking findings must be resolved or explicitly re-reviewed before closure.
 7. Missing, contradictory, or ambiguous review evidence blocks closure.
+8. A required gate that remains only `queued` or `requested` blocks closure.
+9. A gate result with empty `contract_hash` blocks closure.
+10. A gate result with empty `report_path` blocks closure.
 
 ### Closure Blocking Examples
 
@@ -143,6 +169,10 @@ Closure MUST fail if any of the following is true:
 - request/result `contract_hash` does not match the review contract
 - gate says `pass` but unresolved blocking findings remain
 - optional gate has no explicit state
+- required gate remains `queued` with no proof of completion
+- gate result exists but `contract_hash` is empty
+- gate result exists but `report_path` is empty
+- gate execution was run ad hoc in a shell but never recorded into request/result/report surfaces
 
 ## 6. Relationship To Unified Reports
 
@@ -161,10 +191,29 @@ Any feature plan that depends on headless review evidence MUST explicitly define
 - which gates are policy-required versus optional
 - the expected `report_path` convention
 - how T0 should behave on missing or contradictory evidence
+- whether T0 must actively start execution after request creation
+- that `queued` is only request state, not completion evidence
 
 If a feature plan omits this, T0 must treat the plan as under-specified and refuse closure claims based on incomplete review evidence.
 
-## 8. Operator Reading Order
+## 8. Required T0 Execution Pattern
+
+For any required headless review gate, T0 must follow this order:
+
+1. create the request record
+2. actively start the gate execution
+3. wait for execution to finish or fail explicitly
+4. write the normalized markdown report
+5. record the structured result
+6. verify request, result, report, and contract linkage before closure
+
+If the repo has no automatic runner, T0 must not passively wait on `queued`.
+T0 must either:
+- actively start the gate
+- dispatch a worker to execute the gate
+- or explicitly block progression because no execution path exists
+
+## 9. Operator Reading Order
 
 When validating a headless review outcome, read in this order:
 

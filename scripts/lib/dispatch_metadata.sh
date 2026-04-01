@@ -103,7 +103,7 @@ vnx_dispatch_extract_clear_context() {
     local file="$1"
     local clear
     clear=$(sed -n 's/^ClearContext:[[:space:]]*//Ip' "$file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-    echo "${clear:-true}"
+    echo "${clear:-false}"
 }
 
 vnx_dispatch_extract_force_normal_mode() {
@@ -115,9 +115,28 @@ vnx_dispatch_extract_force_normal_mode() {
 
 vnx_dispatch_extract_requires_model() {
     local file="$1"
+    local raw
+    raw=$(sed -n 's/^Requires-Model:[[:space:]]*//Ip' "$file" 2>/dev/null \
+          | sed 's/#.*//' | xargs 2>/dev/null || true)
     local model
-    model=$(sed -n 's/^Requires-Model:[[:space:]]*//Ip' "$file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    model=$(echo "$raw" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
     echo "${model:-}"
+}
+
+# Returns "required" when Requires-Model carries the hard-blocker suffix,
+# "advisory" otherwise (including when the field is absent).
+vnx_dispatch_extract_requires_model_strength() {
+    local file="$1"
+    local raw
+    raw=$(sed -n 's/^Requires-Model:[[:space:]]*//Ip' "$file" 2>/dev/null \
+          | sed 's/#.*//' | xargs 2>/dev/null || true)
+    local lower
+    lower=$(echo "$raw" | tr '[:upper:]' '[:lower:]')
+    if [[ "$(echo "$lower" | awk '{print $2}')" == "required" ]]; then
+        echo "required"
+    else
+        echo "advisory"
+    fi
 }
 
 vnx_dispatch_extract_risk_class() {
@@ -150,10 +169,30 @@ vnx_dispatch_extract_requires_mcp() {
 
 vnx_dispatch_extract_requires_provider() {
     local file="$1"
+    local raw
+    raw=$(sed -n 's/^Requires-Provider:[[:space:]]*//Ip' "$file" 2>/dev/null \
+          | sed 's/#.*//' | xargs 2>/dev/null || true)
+    # Extract first token only — strips optional 'required' strength suffix
     local provider
-    provider=$(sed -n 's/^Requires-Provider:[[:space:]]*//Ip' "$file" 2>/dev/null \
-               | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    provider=$(echo "$raw" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
     echo "${provider:-}"
+}
+
+# Returns "required" when Requires-Provider carries the hard-blocker suffix,
+# "advisory" otherwise (including when the field is absent).
+vnx_dispatch_extract_requires_provider_strength() {
+    local file="$1"
+    local raw
+    raw=$(sed -n 's/^Requires-Provider:[[:space:]]*//Ip' "$file" 2>/dev/null \
+          | sed 's/#.*//' | xargs 2>/dev/null || true)
+    local lower
+    lower=$(echo "$raw" | tr '[:upper:]' '[:lower:]')
+    # Word-boundary check: second token must be exactly 'required'
+    if [[ "$(echo "$lower" | awk '{print $2}')" == "required" ]]; then
+        echo "required"
+    else
+        echo "advisory"
+    fi
 }
 
 vnx_dispatch_extract_working_directory() {

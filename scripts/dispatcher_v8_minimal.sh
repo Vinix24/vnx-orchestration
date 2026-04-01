@@ -11,6 +11,9 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
+source "$SCRIPT_DIR/lib/provider_routing.sh"
+source "$SCRIPT_DIR/lib/model_routing.sh"
+source "$SCRIPT_DIR/lib/input_mode_guard.sh"
 
 # Configuration
 PROJECT_ROOT="${PROJECT_ROOT}"
@@ -97,6 +100,66 @@ PY
 )"
 
     echo "[$ts] $payload"
+}
+
+# Classify a block reason into category and requeueable flag.
+# Outputs: "<category> <requeueable>" where category is one of:
+#   busy      — terminal has a healthy active lease (defer)
+#   ambiguous — lease expired or state unreadable (requeue)
+#   invalid   — metadata invalid, skill bad, dependency error (reject)
+_classify_blocked_dispatch() {
+    local reason="$1"
+    case "$reason" in
+        active_claim:*|status_claimed:*)
+            echo "busy true" ;;
+        canonical_lease:lease_expired*|recent_*|canonical_check_error:*|terminal_state_unreadable)
+            echo "ambiguous true" ;;
+        canonical_lease:*)
+            echo "busy true" ;;
+        blocked_input_mode|recovery_failed|pane_dead|probe_failed)
+            # Input-mode blocks: terminal is not busy but pane is non-interactive.
+            # Requeue after operator resolves copy/search mode.
+            echo "ambiguous true" ;;
+        *)
+            echo "invalid false" ;;
+    esac
+}
+
+# Emit a structured NDJSON event when a dispatch is blocked.
+# Usage: emit_blocked_dispatch_audit <dispatch_id> <terminal_id> <block_reason> [<event_type>]
+# event_type defaults to "dispatch_blocked"; use "duplicate_delivery_prevented" for duplicates.
+emit_blocked_dispatch_audit() {
+    local dispatch_id="$1"
+    local terminal_id="$2"
+    local block_reason="$3"
+    local event_type="${4:-dispatch_blocked}"
+    local audit_file="$STATE_DIR/blocked_dispatch_audit.ndjson"
+
+    local classification
+    classification=$(_classify_blocked_dispatch "$block_reason")
+    local block_category="${classification%% *}"
+    local requeueable="${classification##* }"
+
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$block_reason" \
+        "$block_category" "$requeueable" "$ts" "$audit_file" <<'PY'
+import json, sys, os
+event_type, dispatch_id, terminal_id, block_reason, block_category, requeueable_str, ts, audit_file = sys.argv[1:]
+event = {
+    "event_type": event_type,
+    "dispatch_id": dispatch_id,
+    "terminal_id": terminal_id,
+    "block_reason": block_reason,
+    "block_category": block_category,
+    "requeueable": requeueable_str == "true",
+    "timestamp": ts,
+}
+os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
+with open(audit_file, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
 }
 
 tmux_send_best_effort() {
@@ -241,11 +304,24 @@ PY
 
     if [ $rc -ne 0 ]; then
         log "V8 LOCK: check_failed terminal=$terminal_id dispatch=$dispatch_id rc=$rc"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "legacy_check_failed:rc=$rc" "dispatch_blocked"
         return 1
     fi
 
     if [[ "$check_output" == BLOCK:* ]]; then
-        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${check_output#BLOCK:}"
+        local _block_reason="${check_output#BLOCK:}"
+        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_block_reason}"
+        # Detect duplicate: active_claim held by same dispatch_id
+        if [[ "$_block_reason" == active_claim:* ]]; then
+            local _holder="${_block_reason#active_claim:}"
+            if [[ "$_holder" == "$dispatch_id" ]]; then
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "duplicate_delivery_prevented"
+            else
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
+            fi
+        else
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
+        fi
         return 1
     fi
 
@@ -333,22 +409,25 @@ rc_register() {
 
 # Check terminal availability via canonical lease before legacy lock check.
 # Outputs BLOCK:<reason> or ALLOW if canonical lease says terminal is busy.
+# Fail-closed: Python failure or parse error outputs BLOCK, not ALLOW.
 rc_check_terminal() {
     local terminal_id="$1" dispatch_id="$2"
     _rc_enabled || { echo "ALLOW"; return 0; }
 
     local result
     result=$(_rc_python check-terminal --terminal "$terminal_id" --dispatch-id "$dispatch_id") || {
-        echo "ALLOW"
+        log "V8 RUNTIME_CORE: check-terminal python failed terminal=$terminal_id dispatch=$dispatch_id — fail closed"
+        echo "BLOCK:canonical_check_error:python_failed"
         return 0
     }
 
+    # Fail-closed: JSON parse failure defaults to blocked (not available)
     local available
-    available=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("yes" if d.get("available") else "no")' 2>/dev/null || echo "yes")
+    available=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("yes" if d.get("available") else "no")' 2>/dev/null || echo "no")
 
     if [[ "$available" == "no" ]]; then
         local reason
-        reason=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("reason","canonical_lease_conflict"))' 2>/dev/null || echo "canonical_lease_conflict")
+        reason=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("reason","canonical_lease_conflict"))' 2>/dev/null || echo "canonical_check_parse_error")
         echo "BLOCK:canonical_lease:$reason"
     else
         echo "ALLOW"
@@ -357,6 +436,7 @@ rc_check_terminal() {
 
 # Acquire canonical lease alongside terminal_state_shadow write.
 # Returns the lease generation (integer) on stdout for later release.
+# Fail-closed: on failure, outputs FAIL and returns 1. Caller must block dispatch.
 rc_acquire_lease() {
     local terminal_id="$1" dispatch_id="$2"
     local lease_seconds="${VNX_DISPATCH_LEASE_SECONDS:-600}"
@@ -367,13 +447,19 @@ rc_acquire_lease() {
         --terminal "$terminal_id" \
         --dispatch-id "$dispatch_id" \
         --lease-seconds "$lease_seconds") || {
-        log "V8 RUNTIME_CORE: acquire-lease non-fatal failure terminal=$terminal_id dispatch=$dispatch_id"
-        echo "0"
-        return 0
+        log "V8 RUNTIME_CORE: acquire-lease failed terminal=$terminal_id dispatch=$dispatch_id — fail closed"
+        echo "FAIL"
+        return 1
     }
 
+    # Fail-closed: JSON parse failure means we cannot confirm lease was acquired
     local generation
-    generation=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("generation",0))' 2>/dev/null || echo "0")
+    generation=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); g=d.get("generation"); print(g if g is not None else "FAIL")' 2>/dev/null || echo "FAIL")
+    if [[ "$generation" == "FAIL" ]]; then
+        log "V8 RUNTIME_CORE: acquire-lease result parse failed terminal=$terminal_id — fail closed"
+        echo "FAIL"
+        return 1
+    fi
     log "V8 RUNTIME_CORE: lease acquired terminal=$terminal_id generation=$generation"
     echo "$generation"
 }
@@ -440,16 +526,108 @@ rc_delivery_failure() {
     fi
 }
 
+# Emit a structured NDJSON audit entry for a lease cleanup outcome.
+# Usage: emit_lease_cleanup_audit <dispatch_id> <terminal_id> <event_type> <lease_released> [<error>]
+# event_type should be "lease_released_on_failure" or "lease_release_failed"
+emit_lease_cleanup_audit() {
+    local dispatch_id="$1"
+    local terminal_id="$2"
+    local event_type="$3"
+    local lease_released="$4"
+    local error_detail="${5:-}"
+    local audit_file="$STATE_DIR/lease_cleanup_audit.ndjson"
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$lease_released" \
+        "$error_detail" "$ts" "$audit_file" <<'PY'
+import json, sys, os
+event_type, dispatch_id, terminal_id, lease_released, error_detail, ts, audit_file = sys.argv[1:]
+event = {
+    "event_type": event_type,
+    "dispatch_id": dispatch_id,
+    "terminal_id": terminal_id,
+    "lease_released": lease_released == "true",
+    "timestamp": ts,
+}
+if error_detail:
+    event["error"] = error_detail
+os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
+with open(audit_file, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
+}
+
 # Release canonical lease (leased -> idle).
+# Emits structured audit on success and uses log_structured_failure on error.
 rc_release_lease() {
     local terminal_id="$1" generation="$2"
+    local dispatch_id="${3:-unknown}"
     _rc_enabled || return 0
     [[ -n "$generation" && "$generation" != "0" ]] || return 0
 
     if ! _rc_python release-lease \
         --terminal "$terminal_id" \
         --generation "$generation" > /dev/null; then
-        log "V8 RUNTIME_CORE: release-lease non-fatal failure terminal=$terminal_id"
+        log_structured_failure "lease_release_failed" \
+            "Canonical lease release failed after delivery" \
+            "terminal=$terminal_id dispatch=$dispatch_id generation=$generation"
+        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+            "lease_release_failed" "false" "release-lease python invocation failed"
+        return 1
+    fi
+    log "V8 RUNTIME_CORE: lease released terminal=$terminal_id dispatch=$dispatch_id"
+    emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+        "lease_released_on_failure" "true"
+}
+
+# Release canonical lease and record delivery failure atomically.
+# Preferred over separate rc_delivery_failure + rc_release_lease calls because
+# both operations are performed regardless of individual step failure, and the
+# combined result is captured in a single structured audit entry.
+# Usage: rc_release_on_failure <dispatch_id> <attempt_id> <terminal_id> <generation> [<reason>]
+rc_release_on_failure() {
+    local dispatch_id="$1" attempt_id="$2" terminal_id="$3" generation="$4"
+    local reason="${5:-delivery failed}"
+    _rc_enabled || return 0
+    [[ -n "$generation" && "$generation" != "0" ]] || return 0
+
+    local result
+    result=$(_rc_python release-on-failure \
+        --dispatch-id "$dispatch_id" \
+        --attempt-id "$attempt_id" \
+        --terminal "$terminal_id" \
+        --generation "$generation" \
+        --reason "$reason") || {
+        log_structured_failure "release_on_failure_cli_failed" \
+            "release-on-failure CLI invocation failed — emitting direct lease release" \
+            "dispatch=$dispatch_id terminal=$terminal_id"
+        # Fall back to direct release-lease so the lease is not stranded
+        rc_release_lease "$terminal_id" "$generation" "$dispatch_id"
+        return 1
+    }
+
+    local lease_released cleanup_complete lease_error
+    lease_released=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(str(d.get("lease_released","false")).lower())' \
+        2>/dev/null || echo "false")
+    cleanup_complete=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(str(d.get("cleanup_complete","false")).lower())' \
+        2>/dev/null || echo "false")
+    lease_error=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(d.get("lease_error","") or "")' \
+        2>/dev/null || echo "")
+
+    if [[ "$lease_released" == "true" ]]; then
+        log "V8 RUNTIME_CORE: lease released on delivery failure terminal=$terminal_id dispatch=$dispatch_id"
+        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+            "lease_released_on_failure" "true"
+    else
+        log_structured_failure "lease_release_failed" \
+            "Canonical lease not released after delivery failure" \
+            "dispatch=$dispatch_id terminal=$terminal_id error=${lease_error}"
+        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+            "lease_release_failed" "false" "$lease_error"
     fi
 }
 
@@ -600,9 +778,19 @@ extract_requires_model() {
     vnx_dispatch_extract_requires_model "$1"
 }
 
-# Function to extract Requires-Provider field
+# Function to extract Requires-Model strength ("required" or "advisory")
+extract_requires_model_strength() {
+    vnx_dispatch_extract_requires_model_strength "$1"
+}
+
+# Function to extract Requires-Provider field (provider id only, no strength suffix)
 extract_requires_provider() {
     vnx_dispatch_extract_requires_provider "$1"
+}
+
+# Function to extract Requires-Provider strength ("required" or "advisory")
+extract_requires_provider_strength() {
+    vnx_dispatch_extract_requires_provider_strength "$1"
 }
 
 # Function to configure terminal mode based on dispatch fields
@@ -619,17 +807,30 @@ configure_terminal_mode() {
     local mode=$(extract_mode "$dispatch_file")
     local clear_context=$(extract_clear_context "$dispatch_file")
     local requires_model=$(extract_requires_model "$dispatch_file")
+    local requires_model_strength
+    requires_model_strength=$(extract_requires_model_strength "$dispatch_file")
     local force_normal=$(extract_force_normal_mode "$dispatch_file")
     local requires_provider
     requires_provider=$(extract_requires_provider "$dispatch_file")
+    local requires_provider_strength
+    requires_provider_strength=$(extract_requires_provider_strength "$dispatch_file")
 
-    # Provider mismatch warning
-    if [[ -n "$requires_provider" ]] && [[ "$requires_provider" != "$provider" ]]; then
-        log "V8 MODE_CONTROL: WARNING — Requires-Provider=$requires_provider but terminal=$terminal_id runs $provider"
+    # Provider routing enforcement (fail-closed for required, warn-through for advisory)
+    local routing_event
+    if ! routing_event=$(vnx_eval_provider_routing \
+            "$requires_provider" "$requires_provider_strength" "$provider" \
+            "$terminal_id" "$(basename "$dispatch_file")"); then
+        log "V8 PROVIDER_ROUTING: $routing_event"
+        log_structured_failure "provider_mismatch_blocked" \
+            "Dispatch blocked — required provider mismatch" \
+            "requested_provider=$requires_provider actual_provider=$provider terminal=$terminal_id"
+        return 1
     fi
+    # Always log the routing event (covers advisory mismatch audit trail and match confirmation)
+    log "V8 PROVIDER_ROUTING: $routing_event"
 
     # Log configuration for debugging
-    log "V8 MODE_CONTROL: Config - terminal=$terminal_id provider=$provider mode=$mode clear=$clear_context model=$requires_model force=$force_normal"
+    log "V8 MODE_CONTROL: Config - terminal=$terminal_id provider=$provider mode=$mode clear=$clear_context model=$requires_model model_strength=$requires_model_strength force=$force_normal"
 
     # Step 1: Force normal mode if requested (to handle persistence issue)
     if [[ "$force_normal" == "true" && "$provider" == "claude_code" ]]; then
@@ -685,37 +886,99 @@ configure_terminal_mode() {
             codex_cli|codex)   sleep 4 ;;
             *)                 sleep 3 ;;
         esac
+
+        # Verify terminal shows ready prompt after clear-context.
+        # Handle feedback modal ("Was this conversation helpful?") by pressing Enter.
+        local pane_content
+        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+        if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
+            log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
+            tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
+            sleep 2
+            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+        fi
+        # Confirm terminal is back to input-ready state (prompt visible, not rendering)
+        if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
+            log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
+            sleep 2
+        fi
     fi
 
-    # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
-    if [[ "$requires_model" == "opus" ]]; then
-        requires_model="default"
+    # Step 3: Verified model switch (replaces best-effort fire-and-forget)
+    # Implements contract: docs/core/100_VERIFIED_PROVIDER_MODEL_ROUTING_CONTRACT.md §5
+    local model_pre_event
+    if ! model_pre_event=$(vnx_eval_model_routing \
+            "$requires_model" "$requires_model_strength" "$provider" \
+            "$terminal_id" "$(basename "$dispatch_file")"); then
+        log "V8 MODEL_ROUTING: $model_pre_event"
+        log_structured_failure "model_routing_blocked" \
+            "Dispatch blocked — required model routing pre-check failed" \
+            "requested_model=$requires_model provider=$provider terminal=$terminal_id"
+        return 1
     fi
-    # Step 3: Switch model if specified (only for providers that support /model)
-    # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
-    if [[ "$requires_model" == "opus" ]]; then
-        requires_model="default"
-    fi
-    if [[ -n "$requires_model" ]] && [[ "$requires_model" != "" ]]; then
-        if [[ "$provider" == "claude_code" || "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-            log "V8 MODE_CONTROL: Switching to model: $requires_model (provider=$provider)"
-            # Pre-clear input line (C-u only — C-c would kill the CLI process)
-            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-            sleep 0.3
-            if ! tmux_send_best_effort "$target_pane" -l "/model $requires_model"; then
-                log_structured_failure "model_switch_failed" "Failed to send model switch command" "pane=$target_pane model=$requires_model"
-                return 1
-            fi
+    log "V8 MODEL_ROUTING: $model_pre_event"
+
+    # Determine pre-check result
+    local model_pre_result
+    model_pre_result=$(echo "$model_pre_event" | \
+        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "")
+
+    if [[ "$model_pre_result" == "needs_switch" ]]; then
+        # Normalize: "opus" → "default" to select Opus 4.6 1M context (not 200K)
+        local model_cmd="$requires_model"
+        if [[ "$model_cmd" == "opus" ]]; then
+            model_cmd="default"
+        fi
+
+        log "V8 MODEL_ROUTING: Switching to model: $model_cmd (raw=$requires_model provider=$provider)"
+        # Pre-clear input line (C-u only — C-c would kill the CLI process)
+        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+        sleep 0.3
+
+        local switch_send_ok=true
+        if ! tmux_send_best_effort "$target_pane" -l "/model $model_cmd"; then
+            switch_send_ok=false
+        fi
+
+        if [[ "$switch_send_ok" == "true" ]]; then
             sleep 1  # Allow CLI to render command before submitting
             if ! tmux_send_best_effort "$target_pane" Enter; then
-                log_structured_failure "model_switch_submit_failed" "Failed to submit model switch command" "pane=$target_pane model=$requires_model"
+                switch_send_ok=false
+            fi
+        fi
+
+        if [[ "$switch_send_ok" == "false" ]]; then
+            local fail_event
+            if ! fail_event=$(vnx_emit_model_switch_result \
+                    "$requires_model" "failed" "" "$requires_model_strength" \
+                    "$terminal_id" "$(basename "$dispatch_file")"); then
+                log "V8 MODEL_ROUTING: $fail_event"
+                log_structured_failure "model_switch_blocked" \
+                    "Dispatch blocked — required model switch command could not be sent" \
+                    "requested_model=$requires_model terminal=$terminal_id"
                 return 1
             fi
-            sleep 4  # Critical delay for model switch to complete
-        elif [[ "$provider" == "gemini_cli" || "$provider" == "gemini" ]]; then
-            log "V8 MODE_CONTROL: Gemini does not support runtime model switching — Requires-Model=$requires_model ignored"
+            log "V8 MODEL_ROUTING: $fail_event"
         else
-            log "V8 MODE_CONTROL: Unknown provider '$provider' — Requires-Model=$requires_model ignored"
+            sleep 4  # Critical delay for model switch to complete
+
+            # Post-switch verification: capture pane and parse confirmation
+            local pane_content
+            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+            local switch_result
+            switch_result=$(vnx_verify_model_switch_output "$pane_content" "$model_cmd")
+
+            local result_event
+            if ! result_event=$(vnx_emit_model_switch_result \
+                    "$requires_model" "$switch_result" "" "$requires_model_strength" \
+                    "$terminal_id" "$(basename "$dispatch_file")"); then
+                log "V8 MODEL_ROUTING: $result_event"
+                log_structured_failure "model_switch_blocked" \
+                    "Dispatch blocked — required model switch could not be verified" \
+                    "requested_model=$requires_model switch_result=$switch_result terminal=$terminal_id"
+                return 1
+            fi
+            log "V8 MODEL_ROUTING: $result_event"
         fi
     fi
 
@@ -1263,7 +1526,19 @@ $receipt_footer"
     local _rc_canonical_check
     _rc_canonical_check=$(rc_check_terminal "$terminal_id" "$dispatch_id")
     if [[ "$_rc_canonical_check" == BLOCK:* ]]; then
-        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_canonical_check#BLOCK:}"
+        local _rc_block_reason="${_rc_canonical_check#BLOCK:}"
+        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_block_reason}"
+        # Detect duplicate delivery: canonical lease held by same dispatch_id prefix
+        if [[ "$_rc_block_reason" == canonical_lease:leased:* ]]; then
+            local _current_holder="${_rc_block_reason#canonical_lease:leased:}"
+            if [[ "$_current_holder" == "$dispatch_id" ]]; then
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "duplicate_delivery_prevented"
+            else
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+            fi
+        else
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+        fi
         return 1
     fi
 
@@ -1276,8 +1551,18 @@ $receipt_footer"
     fi
 
     # --- Runtime Core: acquire canonical lease alongside terminal_state_shadow ---
+    # Fail-closed: if acquire returns FAIL or non-zero, release claim and block dispatch.
     local _rc_generation
-    _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id")
+    local _rc_acquire_rc=0
+    _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id") || _rc_acquire_rc=$?
+    if [[ "$_rc_acquire_rc" -ne 0 || "$_rc_generation" == "FAIL" ]]; then
+        log "V8 LOCK: canonical lease acquire failed — blocking dispatch terminal=$terminal_id dispatch=$dispatch_id"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "canonical_lease_acquire_failed" "dispatch_blocked"
+        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+            log_structured_failure "claim_release_failed" "Failed to release claim after lease acquire failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        fi
+        return 1
+    fi
 
     # --- Runtime Core: register dispatch bundle with broker ---
     # Write prompt to temp file for broker bundle (cleaned up after register)
@@ -1292,6 +1577,24 @@ $receipt_footer"
 
         # Record delivery start (queued -> claimed -> delivering)
         _rc_attempt_id=$(rc_delivery_start "$dispatch_id" "$terminal_id")
+    fi
+
+    # --- Input-Mode Guard (IMR-1, IMR-2) — PR-1 ---
+    # Post-lease, pre-send-keys: probe pane_in_mode before any tmux key delivery.
+    # Blocks slash-prefixed dispatch into copy/search mode (silent corruption path).
+    # Recovery: programmatic cancel (attempt 1) + Escape (attempt 2).
+    # Fail-closed on recovery failure: release lease + claim, block dispatch.
+    # Headless providers are exempt (no tmux send-keys used).
+    if ! check_pane_input_ready "$target_pane" "$terminal_id" "$dispatch_id" "$provider"; then
+        log "V8 INPUT_MODE: delivery blocked — unrecoverable pane mode terminal=$terminal_id dispatch=$dispatch_id"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "blocked_input_mode" "dispatch_blocked"
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "input_mode_blocked"
+        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+            log_structured_failure "claim_release_failed" \
+                "Failed to release claim after input mode block" \
+                "terminal=$terminal_id dispatch=$dispatch_id"
+        fi
+        return 1
     fi
 
     # Resolve worktree path for this terminal (falls back to PROJECT_ROOT)
@@ -1367,9 +1670,8 @@ ${complete_prompt}"
     fi
 
     if [ "$_delivery_failed" = true ]; then
-        # Record failure in broker (durably, never logs-only — G-R3, G-R5)
-        rc_delivery_failure "$dispatch_id" "$_rc_attempt_id" "tmux delivery failed"
-        rc_release_lease "$terminal_id" "$_rc_generation"
+        # Record failure and release canonical lease atomically (PR-1: always paired)
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux delivery failed"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
@@ -1381,8 +1683,8 @@ ${complete_prompt}"
     sleep 1
 
     if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
-        rc_delivery_failure "$dispatch_id" "$_rc_attempt_id" "tmux Enter failed"
-        rc_release_lease "$terminal_id" "$_rc_generation"
+        # Record failure and release canonical lease atomically (PR-1: always paired)
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux Enter failed"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
@@ -1484,6 +1786,22 @@ process_dispatches() {
         if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
             log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
             continue
+        fi
+
+        # Validate skill against skills.yaml registry before any terminal operations.
+        # An invalid skill must never advance to delivery — block here before canonial
+        # check or lease acquire so no terminal state is touched for an invalid dispatch.
+        if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
+            local _mapped_skill_pre
+            _mapped_skill_pre="$(map_role_to_skill "$agent_role" 2>/dev/null || echo "$agent_role")"
+            if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$_mapped_skill_pre" >/dev/null 2>&1; then
+                log "V8 ERROR: Skill '@${_mapped_skill_pre}' failed registry validation — blocking dispatch before terminal operations"
+                if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+                    printf '\n\n[SKILL_INVALID] Skill '"'"'@%s'"'"' not found in registry. Update Role and remove this marker to retry.\n' "$_mapped_skill_pre" >> "$dispatch"
+                fi
+                continue
+            fi
+            log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
         fi
 
         # V7.4 INTELLIGENCE: Validate agent if specified
