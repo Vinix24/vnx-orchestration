@@ -17,9 +17,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
-from governance_receipts import emit_governance_receipt
+from governance_receipts import emit_governance_receipt, utc_now_iso
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
+from headless_adapter import gate_timeout, gate_stall_threshold
 from gemini_prompt_renderer import (
     GeminiReviewReceipt,
     MissingContractFieldError,
@@ -186,7 +187,7 @@ class ReviewGateManager:
         requested_at = _utc_now()
         payload = {
             "gate": "gemini_review",
-            "status": "queued" if available else "blocked",
+            "status": "requested" if available else "not_executable",
             "provider": "gemini_cli",
             "branch": branch,
             "pr_number": pr_number,
@@ -201,7 +202,19 @@ class ReviewGateManager:
             ),
         }
         if not available:
-            payload["reason"] = "gemini_not_available"
+            reason, detail = self._classify_unavailable("gemini_review", "gemini")
+            payload["reason"] = reason
+            payload["reason_detail"] = detail
+            payload["resolved_at"] = requested_at
+            self._write_not_executable_result(
+                gate="gemini_review", pr_number=pr_number, pr_id="",
+                reason=reason, reason_detail=detail,
+            )
+            self._write_skip_rationale(
+                gate="gemini_review", pr_id=str(pr_number),
+                reason=reason, reason_detail=detail,
+                binary_name="gemini",
+            )
         self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
@@ -224,7 +237,7 @@ class ReviewGateManager:
         requested_at = _utc_now()
         payload: Dict[str, Any] = {
             "gate": "gemini_review",
-            "status": "queued" if available else "blocked",
+            "status": "requested" if available else "not_executable",
             "provider": "gemini_cli",
             "branch": contract.branch,
             "pr_id": contract.pr_id,
@@ -242,7 +255,20 @@ class ReviewGateManager:
             ),
         }
         if not available:
-            payload["reason"] = "gemini_not_available"
+            reason, detail = self._classify_unavailable("gemini_review", "gemini")
+            payload["reason"] = reason
+            payload["reason_detail"] = detail
+            payload["resolved_at"] = requested_at
+            self._write_not_executable_result(
+                gate="gemini_review", pr_number=None, pr_id=contract.pr_id,
+                reason=reason, reason_detail=detail,
+                contract_hash=contract.content_hash,
+            )
+            self._write_skip_rationale(
+                gate="gemini_review", pr_id=contract.pr_id,
+                reason=reason, reason_detail=detail,
+                binary_name="gemini",
+            )
 
         request_file = self._contract_request_path("gemini_review", contract.pr_id)
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -434,7 +460,7 @@ class ReviewGateManager:
         requested_at = _utc_now()
         payload = {
             "gate": "codex_gate",
-            "status": "queued" if available else ("blocked" if required else "not_configured"),
+            "status": "requested" if available else "not_executable",
             "provider": "codex_headless",
             "model": model,
             "required": required,
@@ -451,7 +477,19 @@ class ReviewGateManager:
             ),
         }
         if not available:
-            payload["reason"] = "codex_headless_not_available"
+            reason, detail = self._classify_unavailable("codex_gate", "codex")
+            payload["reason"] = reason
+            payload["reason_detail"] = detail
+            payload["resolved_at"] = requested_at
+            self._write_not_executable_result(
+                gate="codex_gate", pr_number=pr_number, pr_id="",
+                reason=reason, reason_detail=detail,
+            )
+            self._write_skip_rationale(
+                gate="codex_gate", pr_id=str(pr_number),
+                reason=reason, reason_detail=detail,
+                binary_name="codex",
+            )
         self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
@@ -584,6 +622,184 @@ class ReviewGateManager:
         )
         return payload
 
+    # ------------------------------------------------------------------
+    # Gate execution helpers (GATE-1 through GATE-12)
+    # ------------------------------------------------------------------
+
+    def _classify_unavailable(self, gate: str, binary_name: str) -> tuple:
+        """Return (reason_code, reason_detail) for an unavailable gate provider (GATE-4)."""
+        env_flags = {
+            "gemini_review": ("VNX_GEMINI_REVIEW_ENABLED", "1"),
+            "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "0"),
+            "claude_github_optional": ("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0"),
+        }
+        env_var, default = env_flags.get(gate, ("", "0"))
+        disabled = env_var and os.environ.get(env_var, default) == "0"
+        binary_found = shutil.which(binary_name) is not None
+
+        if disabled and not binary_found:
+            return ("provider_disabled", f"{binary_name} binary not found in PATH and {env_var}=0")
+        if disabled:
+            return ("provider_disabled", f"{env_var} is set to 0")
+        if not binary_found:
+            return ("provider_not_installed", f"{binary_name} binary not found in PATH")
+        return ("provider_not_configured", f"{gate} provider is not configured")
+
+    def _write_not_executable_result(
+        self,
+        *,
+        gate: str,
+        pr_number: Optional[int],
+        pr_id: str,
+        reason: str,
+        reason_detail: str,
+        contract_hash: str = "",
+    ) -> Dict[str, Any]:
+        """Write a not_executable result record (GATE-4)."""
+        now = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": gate,
+            "pr_id": pr_id or (str(pr_number) if pr_number else ""),
+            "pr_number": pr_number,
+            "status": "not_executable",
+            "reason": reason,
+            "reason_detail": reason_detail,
+            "summary": f"{gate} not executable: {reason_detail}",
+            "contract_hash": contract_hash,
+            "report_path": "",
+            "blocking_findings": [],
+            "advisory_findings": [],
+            "required_reruns": [],
+            "residual_risk": "Gate evidence not available. Compensating evidence required.",
+            "recorded_at": now,
+        }
+        if pr_id:
+            result_file = self._contract_result_path(gate, pr_id)
+        elif pr_number is not None:
+            result_file = self._result_path(gate, pr_number)
+        else:
+            return payload
+        result_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    def _write_skip_rationale(
+        self,
+        *,
+        gate: str,
+        pr_id: str,
+        reason: str,
+        reason_detail: str,
+        binary_name: str,
+    ) -> None:
+        """Append a skip-rationale record to the NDJSON audit trail (GATE-9)."""
+        env_flags = {
+            "gemini_review": "VNX_GEMINI_REVIEW_ENABLED",
+            "codex_gate": "VNX_CODEX_HEADLESS_ENABLED",
+            "claude_github_optional": "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
+        }
+        env_var = env_flags.get(gate, "")
+        record = {
+            "event_type": "gate_skip_rationale",
+            "gate": gate,
+            "pr_id": pr_id,
+            "reason": reason,
+            "reason_detail": reason_detail,
+            "provider_check": {
+                "binary_name": binary_name,
+                "binary_found": shutil.which(binary_name) is not None,
+                "env_flag": env_var,
+                "env_value": os.environ.get(env_var, ""),
+            },
+            "compensating_action": "Manual review or operator override required.",
+            "timestamp": _utc_now(),
+        }
+        audit_path = self.state_dir / "gate_execution_audit.ndjson"
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    def _write_failure_result(
+        self,
+        *,
+        gate: str,
+        pr_number: Optional[int],
+        pr_id: str,
+        reason: str,
+        reason_detail: str,
+        duration_seconds: float,
+        partial_output_lines: int,
+        runner_pid: int,
+        contract_hash: str = "",
+    ) -> Dict[str, Any]:
+        """Write a failed result record for timeout/stall (GATE-6/7)."""
+        now = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": gate,
+            "pr_id": pr_id or (str(pr_number) if pr_number else ""),
+            "pr_number": pr_number,
+            "status": "failed",
+            "reason": reason,
+            "reason_detail": reason_detail,
+            "duration_seconds": duration_seconds,
+            "partial_output_lines": partial_output_lines,
+            "runner_pid": runner_pid,
+            "killed_at": now,
+            "summary": f"Gate execution {reason}: {reason_detail}",
+            "contract_hash": contract_hash,
+            "report_path": "",
+            "blocking_findings": [],
+            "advisory_findings": [],
+            "required_reruns": [gate],
+            "residual_risk": f"Gate {reason}. Re-run required.",
+            "recorded_at": now,
+        }
+        if pr_id:
+            result_file = self._contract_result_path(gate, pr_id)
+        elif pr_number is not None:
+            result_file = self._result_path(gate, pr_number)
+        else:
+            return payload
+        result_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    def execute_gate(
+        self,
+        *,
+        gate: str,
+        pr_number: Optional[int] = None,
+        pr_id: str = "",
+    ) -> Dict[str, Any]:
+        """Execute a gate: transition requested→executing→completed|failed (GATE-1).
+
+        Loads the request record, starts the gate subprocess with bounded timeout
+        and stall detection, then writes result records atomically (GATE-11/12).
+        """
+        from gate_runner import GateRunner
+
+        if pr_id:
+            request_payload = self._load_contract_request_payload(gate, pr_id)
+        elif pr_number is not None:
+            request_payload = self._load_request_payload(gate, pr_number)
+        else:
+            raise ValueError("pr_number or pr_id is required")
+
+        if not request_payload:
+            raise ValueError(f"No request record found for gate={gate}")
+
+        status = request_payload.get("status", "")
+        if status in ("not_executable", "completed", "failed"):
+            return request_payload
+
+        runner = GateRunner(
+            state_dir=self.state_dir,
+            reports_dir=self.reports_dir,
+        )
+        return runner.run(
+            gate=gate,
+            request_payload=request_payload,
+            pr_number=pr_number,
+            pr_id=pr_id,
+        )
+
     def status(self, pr_number: int) -> Dict[str, Any]:
         results = []
         for path in sorted(self.results_dir.glob(f"pr-{pr_number}-*.json")):
@@ -626,6 +842,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result_parser.add_argument("--report-path", default="")
     result_parser.add_argument("--json", action="store_true")
 
+    execute_parser = sub.add_parser("execute")
+    execute_parser.add_argument("--gate", required=True)
+    execute_parser.add_argument("--pr", type=int, default=None)
+    execute_parser.add_argument("--pr-id", default="")
+    execute_parser.add_argument("--json", action="store_true")
+
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--pr", type=int, required=True)
     status_parser.add_argument("--json", action="store_true")
@@ -662,6 +884,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             report_path=args.report_path,
         )
         print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "execute":
+        result = manager.execute_gate(
+            gate=args.gate,
+            pr_number=args.pr,
+            pr_id=args.pr_id,
+        )
+        print(json.dumps(result, indent=2))
         return 0
 
     if args.command == "status":

@@ -69,6 +69,60 @@ HEADLESS_CLI_DEFAULTS = {
 
 DEFAULT_TIMEOUT = 600  # 10 minutes
 
+# ---------------------------------------------------------------------------
+# Gate-specific timeout and stall thresholds (GATE-6, GATE-7)
+# ---------------------------------------------------------------------------
+
+GATE_TIMEOUT_DEFAULTS: Dict[str, int] = {
+    "gemini_review": 300,
+    "codex_gate": 600,
+    "claude_github_optional": 300,
+}
+
+GATE_TIMEOUT_ENV: Dict[str, str] = {
+    "gemini_review": "VNX_GEMINI_GATE_TIMEOUT",
+    "codex_gate": "VNX_CODEX_GATE_TIMEOUT",
+    "claude_github_optional": "VNX_CLAUDE_GITHUB_GATE_TIMEOUT",
+}
+
+GATE_STALL_DEFAULTS: Dict[str, int] = {
+    "gemini_review": 60,
+    "codex_gate": 120,
+    "claude_github_optional": 60,
+}
+
+GATE_STALL_ENV: Dict[str, str] = {
+    "gemini_review": "VNX_GEMINI_STALL_THRESHOLD",
+    "codex_gate": "VNX_CODEX_STALL_THRESHOLD",
+    "claude_github_optional": "VNX_CLAUDE_GITHUB_STALL_THRESHOLD",
+}
+
+
+def gate_timeout(gate_type: str) -> int:
+    """Return execution timeout in seconds for a specific gate type (GATE-6)."""
+    env_var = GATE_TIMEOUT_ENV.get(gate_type)
+    if env_var:
+        raw = os.environ.get(env_var)
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return GATE_TIMEOUT_DEFAULTS.get(gate_type, DEFAULT_TIMEOUT)
+
+
+def gate_stall_threshold(gate_type: str) -> int:
+    """Return stall detection threshold in seconds for a specific gate type (GATE-7)."""
+    env_var = GATE_STALL_ENV.get(gate_type)
+    if env_var:
+        raw = os.environ.get(env_var)
+        if raw is not None:
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+    return GATE_STALL_DEFAULTS.get(gate_type, 60)
+
 
 # ---------------------------------------------------------------------------
 # Feature flag helpers
