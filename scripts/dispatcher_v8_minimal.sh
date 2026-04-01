@@ -74,27 +74,54 @@ log() {
 }
 
 # Structured failure event logging for shell/Python boundary diagnostics.
+# Enhanced per DFL-LOG-1 (Contract 160): emits failure_code, failure_class,
+# retryable, operator_summary, dispatch_id, terminal_id, provider, and phase.
+#
+# Usage: log_structured_failure <code> <message> <details> [<failure_code> <dispatch_id> <terminal_id> <provider>]
 log_structured_failure() {
     local code="$1"
     local message="$2"
     local details="${3:-}"
+    local failure_code="${4:-}"
+    local dispatch_id="${5:-}"
+    local terminal_id="${6:-}"
+    local provider="${7:-}"
     local ts
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
 
     local payload
-    payload="$(python3 - "$code" "$message" "$details" <<'PY'
-import json
-import sys
-
-code, message, details = sys.argv[1], sys.argv[2], sys.argv[3]
+    payload="$(python3 - "$code" "$message" "$details" "$failure_code" "$dispatch_id" "$terminal_id" "$provider" <<'PY'
+import json, sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(".")), "scripts", "lib"))
+code, message, details, failure_code, dispatch_id, terminal_id, provider = sys.argv[1:8]
 event = {
-    "event": "failure",
+    "event": "delivery_failure",
     "component": "dispatcher_v8_minimal.sh",
     "code": code,
     "message": message,
 }
 if details:
     event["details"] = details
+if failure_code:
+    event["failure_code"] = failure_code
+    phase = failure_code.split("_")[0] if "_" in failure_code else ""
+    event["phase"] = phase
+    try:
+        sys.path.insert(0, os.path.join(os.environ.get("VNX_HOME", "."), "scripts", "lib"))
+        from failure_classifier import FAILURE_CODE_REGISTRY
+        entry = FAILURE_CODE_REGISTRY.get(failure_code)
+        if entry:
+            event["failure_class"] = entry[0]
+            event["retryable"] = entry[1]
+            event["operator_summary"] = entry[3]
+    except Exception:
+        pass
+if dispatch_id:
+    event["dispatch_id"] = dispatch_id
+if terminal_id:
+    event["terminal_id"] = terminal_id
+if provider:
+    event["provider"] = provider
 print(json.dumps(event, separators=(",", ":")))
 PY
 )"
@@ -125,19 +152,30 @@ _classify_blocked_dispatch() {
             # Input-mode blocks: terminal is not busy but pane is non-interactive.
             # Requeue after operator resolves copy/search mode.
             echo "ambiguous true" ;;
+        # DFL-LOG per-code classification (Contract 160 Section 4.4)
+        delivery_failed:tx_*|delivery_failed:post_*)
+            echo "ambiguous true" ;;
+        delivery_failed:pre_skill_*|delivery_failed:pre_instruction_*|delivery_failed:pre_validation_empty_role)
+            echo "invalid false" ;;
+        delivery_failed:pre_canonical_lease_busy|delivery_failed:pre_legacy_lock_busy|delivery_failed:pre_duplicate_delivery)
+            echo "busy true" ;;
+        delivery_failed:pre_*)
+            echo "ambiguous true" ;;
         *)
             echo "invalid false" ;;
     esac
 }
 
 # Emit a structured NDJSON event when a dispatch is blocked.
-# Usage: emit_blocked_dispatch_audit <dispatch_id> <terminal_id> <block_reason> [<event_type>]
+# Usage: emit_blocked_dispatch_audit <dispatch_id> <terminal_id> <block_reason> [<event_type>] [<failure_code>]
 # event_type defaults to "dispatch_blocked"; use "duplicate_delivery_prevented" for duplicates.
+# DFL-LOG-2: failure_code and failure_class fields are included when failure_code is provided.
 emit_blocked_dispatch_audit() {
     local dispatch_id="$1"
     local terminal_id="$2"
     local block_reason="$3"
     local event_type="${4:-dispatch_blocked}"
+    local failure_code="${5:-}"
     local audit_file="$STATE_DIR/blocked_dispatch_audit.ndjson"
 
     local classification
@@ -149,9 +187,9 @@ emit_blocked_dispatch_audit() {
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     python3 - "$event_type" "$dispatch_id" "$terminal_id" "$block_reason" \
-        "$block_category" "$requeueable" "$ts" "$audit_file" <<'PY'
+        "$block_category" "$requeueable" "$ts" "$audit_file" "$failure_code" <<'PY'
 import json, sys, os
-event_type, dispatch_id, terminal_id, block_reason, block_category, requeueable_str, ts, audit_file = sys.argv[1:]
+event_type, dispatch_id, terminal_id, block_reason, block_category, requeueable_str, ts, audit_file, failure_code = sys.argv[1:]
 event = {
     "event_type": event_type,
     "dispatch_id": dispatch_id,
@@ -161,6 +199,16 @@ event = {
     "requeueable": requeueable_str == "true",
     "timestamp": ts,
 }
+if failure_code:
+    event["failure_code"] = failure_code
+    try:
+        sys.path.insert(0, os.path.join(os.environ.get("VNX_HOME", "."), "scripts", "lib"))
+        from failure_classifier import FAILURE_CODE_REGISTRY
+        entry = FAILURE_CODE_REGISTRY.get(failure_code)
+        if entry:
+            event["failure_class"] = entry[0]
+    except Exception:
+        pass
 os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
 with open(audit_file, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(event, separators=(",", ":")) + "\n")
@@ -1609,8 +1657,8 @@ $receipt_footer"
     # Headless providers are exempt (no tmux send-keys used).
     if ! check_pane_input_ready "$target_pane" "$terminal_id" "$dispatch_id" "$provider"; then
         log "V8 INPUT_MODE: delivery blocked — unrecoverable pane mode terminal=$terminal_id dispatch=$dispatch_id"
-        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "blocked_input_mode" "dispatch_blocked"
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "input_mode_blocked"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "blocked_input_mode" "dispatch_blocked" "post_input_mode_blocked"
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "delivery_failed:post_input_mode_blocked"
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" \
                 "Failed to release claim after input mode block" \
@@ -1703,15 +1751,25 @@ ${complete_prompt}"
     fi
 
     if [ "$_delivery_failed" = true ]; then
-        # Annotate dispatch with the failing substep for operator observability.
+        # Map substep to canonical failure code (DFL-LOG-3, Contract 160 Section 3.4)
+        local _failure_code="tx_${_failed_substep}"
+        if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
+            case "$_failed_substep" in
+                load_buffer) _failure_code="tx_load_buffer_codex" ;;
+                paste_buffer) _failure_code="tx_paste_buffer_codex" ;;
+            esac
+        fi
+
+        # Annotate dispatch with canonical failure code for operator observability.
         # [DELIVERY_SUBSTEP_FAILED:] is requeueable — does not trigger permanent rejection.
         log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
-            "substep=$_failed_substep dispatch=$dispatch_id terminal=$terminal_id"
-        printf '\n\n[DELIVERY_SUBSTEP_FAILED: substep=%s] tmux delivery failed at substep. Retry is automatic.\n' \
-            "$_failed_substep" >> "$dispatch_file"
+            "substep=$_failed_substep dispatch=$dispatch_id terminal=$terminal_id" \
+            "$_failure_code" "$dispatch_id" "$terminal_id" "$provider"
+        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=%s] tmux delivery failed at substep. Retry is automatic.\n' \
+            "$_failure_code" >> "$dispatch_file"
 
         # Record failure and release canonical lease atomically (PR-1: always paired)
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux delivery failed: substep=$_failed_substep"
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "delivery_failed:$_failure_code"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
@@ -1724,14 +1782,15 @@ ${complete_prompt}"
 
     # Substep: enter
     if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
-        # Annotate dispatch with the failing substep for operator observability.
+        # Annotate dispatch with canonical failure code for operator observability.
         log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
-            "substep=enter dispatch=$dispatch_id terminal=$terminal_id"
-        printf '\n\n[DELIVERY_SUBSTEP_FAILED: substep=enter] tmux Enter failed at substep. Retry is automatic.\n' \
+            "substep=enter dispatch=$dispatch_id terminal=$terminal_id" \
+            "tx_send_enter" "$dispatch_id" "$terminal_id" "$provider"
+        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=tx_send_enter] tmux Enter failed at substep. Retry is automatic.\n' \
             >> "$dispatch_file"
 
         # Record failure and release canonical lease atomically (PR-1: always paired)
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "tmux Enter failed"
+        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "delivery_failed:tx_send_enter"
 
         if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
             log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
