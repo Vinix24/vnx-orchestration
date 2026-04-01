@@ -361,8 +361,8 @@ class ProjectionReconciler:
     projection surfaces that directly affect operator dispatch decisions.
 
     Args:
-        dispatch_dir:    Path to dispatch root (.vnx-data/dispatches/).
-        state_dir:       Path to VNX state directory (.vnx-data/state/).
+        dispatch_dir:    Path to dispatch root ($VNX_DISPATCH_DIR).
+        state_dir:       Path to VNX state directory ($VNX_STATE_DIR).
         consistency_dir: Path for mismatch event log (default: state_dir/consistency_checks/).
     """
 
