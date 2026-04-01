@@ -216,7 +216,7 @@ def scan_dispatch_dirs(dispatch_dir: Path) -> List[DispatchRecord]:
         sub = dispatch_dir / dir_name
         if not sub.is_dir():
             continue
-        for f in sub.iterdir():
+        for f in sorted(sub.iterdir()):
             if not f.is_file() or not f.suffix == ".md":
                 continue
             dispatch_id = f.stem  # filename without extension
