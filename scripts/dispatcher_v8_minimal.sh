@@ -99,6 +99,62 @@ PY
     echo "[$ts] $payload"
 }
 
+# Classify a block reason into category and requeueable flag.
+# Outputs: "<category> <requeueable>" where category is one of:
+#   busy      — terminal has a healthy active lease (defer)
+#   ambiguous — lease expired or state unreadable (requeue)
+#   invalid   — metadata invalid, skill bad, dependency error (reject)
+_classify_blocked_dispatch() {
+    local reason="$1"
+    case "$reason" in
+        active_claim:*|status_claimed:*)
+            echo "busy true" ;;
+        canonical_lease:lease_expired*|recent_*|canonical_check_error:*|terminal_state_unreadable)
+            echo "ambiguous true" ;;
+        canonical_lease:*)
+            echo "busy true" ;;
+        *)
+            echo "invalid false" ;;
+    esac
+}
+
+# Emit a structured NDJSON event when a dispatch is blocked.
+# Usage: emit_blocked_dispatch_audit <dispatch_id> <terminal_id> <block_reason> [<event_type>]
+# event_type defaults to "dispatch_blocked"; use "duplicate_delivery_prevented" for duplicates.
+emit_blocked_dispatch_audit() {
+    local dispatch_id="$1"
+    local terminal_id="$2"
+    local block_reason="$3"
+    local event_type="${4:-dispatch_blocked}"
+    local audit_file="$STATE_DIR/blocked_dispatch_audit.ndjson"
+
+    local classification
+    classification=$(_classify_blocked_dispatch "$block_reason")
+    local block_category="${classification%% *}"
+    local requeueable="${classification##* }"
+
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$block_reason" \
+        "$block_category" "$requeueable" "$ts" "$audit_file" <<'PY'
+import json, sys, os
+event_type, dispatch_id, terminal_id, block_reason, block_category, requeueable_str, ts, audit_file = sys.argv[1:]
+event = {
+    "event_type": event_type,
+    "dispatch_id": dispatch_id,
+    "terminal_id": terminal_id,
+    "block_reason": block_reason,
+    "block_category": block_category,
+    "requeueable": requeueable_str == "true",
+    "timestamp": ts,
+}
+os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
+with open(audit_file, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+PY
+}
+
 tmux_send_best_effort() {
     local target_pane="$1"
     shift
@@ -241,11 +297,24 @@ PY
 
     if [ $rc -ne 0 ]; then
         log "V8 LOCK: check_failed terminal=$terminal_id dispatch=$dispatch_id rc=$rc"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "legacy_check_failed:rc=$rc" "dispatch_blocked"
         return 1
     fi
 
     if [[ "$check_output" == BLOCK:* ]]; then
-        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${check_output#BLOCK:}"
+        local _block_reason="${check_output#BLOCK:}"
+        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_block_reason}"
+        # Detect duplicate: active_claim held by same dispatch_id
+        if [[ "$_block_reason" == active_claim:* ]]; then
+            local _holder="${_block_reason#active_claim:}"
+            if [[ "$_holder" == "$dispatch_id" ]]; then
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "duplicate_delivery_prevented"
+            else
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
+            fi
+        else
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
+        fi
         return 1
     fi
 
@@ -333,22 +402,25 @@ rc_register() {
 
 # Check terminal availability via canonical lease before legacy lock check.
 # Outputs BLOCK:<reason> or ALLOW if canonical lease says terminal is busy.
+# Fail-closed: Python failure or parse error outputs BLOCK, not ALLOW.
 rc_check_terminal() {
     local terminal_id="$1" dispatch_id="$2"
     _rc_enabled || { echo "ALLOW"; return 0; }
 
     local result
     result=$(_rc_python check-terminal --terminal "$terminal_id" --dispatch-id "$dispatch_id") || {
-        echo "ALLOW"
+        log "V8 RUNTIME_CORE: check-terminal python failed terminal=$terminal_id dispatch=$dispatch_id — fail closed"
+        echo "BLOCK:canonical_check_error:python_failed"
         return 0
     }
 
+    # Fail-closed: JSON parse failure defaults to blocked (not available)
     local available
-    available=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("yes" if d.get("available") else "no")' 2>/dev/null || echo "yes")
+    available=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("yes" if d.get("available") else "no")' 2>/dev/null || echo "no")
 
     if [[ "$available" == "no" ]]; then
         local reason
-        reason=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("reason","canonical_lease_conflict"))' 2>/dev/null || echo "canonical_lease_conflict")
+        reason=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("reason","canonical_lease_conflict"))' 2>/dev/null || echo "canonical_check_parse_error")
         echo "BLOCK:canonical_lease:$reason"
     else
         echo "ALLOW"
@@ -357,6 +429,7 @@ rc_check_terminal() {
 
 # Acquire canonical lease alongside terminal_state_shadow write.
 # Returns the lease generation (integer) on stdout for later release.
+# Fail-closed: on failure, outputs FAIL and returns 1. Caller must block dispatch.
 rc_acquire_lease() {
     local terminal_id="$1" dispatch_id="$2"
     local lease_seconds="${VNX_DISPATCH_LEASE_SECONDS:-600}"
@@ -367,13 +440,19 @@ rc_acquire_lease() {
         --terminal "$terminal_id" \
         --dispatch-id "$dispatch_id" \
         --lease-seconds "$lease_seconds") || {
-        log "V8 RUNTIME_CORE: acquire-lease non-fatal failure terminal=$terminal_id dispatch=$dispatch_id"
-        echo "0"
-        return 0
+        log "V8 RUNTIME_CORE: acquire-lease failed terminal=$terminal_id dispatch=$dispatch_id — fail closed"
+        echo "FAIL"
+        return 1
     }
 
+    # Fail-closed: JSON parse failure means we cannot confirm lease was acquired
     local generation
-    generation=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("generation",0))' 2>/dev/null || echo "0")
+    generation=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); g=d.get("generation"); print(g if g is not None else "FAIL")' 2>/dev/null || echo "FAIL")
+    if [[ "$generation" == "FAIL" ]]; then
+        log "V8 RUNTIME_CORE: acquire-lease result parse failed terminal=$terminal_id — fail closed"
+        echo "FAIL"
+        return 1
+    fi
     log "V8 RUNTIME_CORE: lease acquired terminal=$terminal_id generation=$generation"
     echo "$generation"
 }
@@ -685,6 +764,22 @@ configure_terminal_mode() {
             codex_cli|codex)   sleep 4 ;;
             *)                 sleep 3 ;;
         esac
+
+        # Verify terminal shows ready prompt after clear-context.
+        # Handle feedback modal ("Was this conversation helpful?") by pressing Enter.
+        local pane_content
+        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+        if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
+            log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
+            tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
+            sleep 2
+            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+        fi
+        # Confirm terminal is back to input-ready state (prompt visible, not rendering)
+        if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
+            log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
+            sleep 2
+        fi
     fi
 
     # Normalize: "opus" → "default" to ensure Opus 4.6 1M context (not 200K)
@@ -1263,7 +1358,19 @@ $receipt_footer"
     local _rc_canonical_check
     _rc_canonical_check=$(rc_check_terminal "$terminal_id" "$dispatch_id")
     if [[ "$_rc_canonical_check" == BLOCK:* ]]; then
-        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_canonical_check#BLOCK:}"
+        local _rc_block_reason="${_rc_canonical_check#BLOCK:}"
+        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_block_reason}"
+        # Detect duplicate delivery: canonical lease held by same dispatch_id prefix
+        if [[ "$_rc_block_reason" == canonical_lease:leased:* ]]; then
+            local _current_holder="${_rc_block_reason#canonical_lease:leased:}"
+            if [[ "$_current_holder" == "$dispatch_id" ]]; then
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "duplicate_delivery_prevented"
+            else
+                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+            fi
+        else
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+        fi
         return 1
     fi
 
@@ -1276,8 +1383,18 @@ $receipt_footer"
     fi
 
     # --- Runtime Core: acquire canonical lease alongside terminal_state_shadow ---
+    # Fail-closed: if acquire returns FAIL or non-zero, release claim and block dispatch.
     local _rc_generation
-    _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id")
+    local _rc_acquire_rc=0
+    _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id") || _rc_acquire_rc=$?
+    if [[ "$_rc_acquire_rc" -ne 0 || "$_rc_generation" == "FAIL" ]]; then
+        log "V8 LOCK: canonical lease acquire failed — blocking dispatch terminal=$terminal_id dispatch=$dispatch_id"
+        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "canonical_lease_acquire_failed" "dispatch_blocked"
+        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+            log_structured_failure "claim_release_failed" "Failed to release claim after lease acquire failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        fi
+        return 1
+    fi
 
     # --- Runtime Core: register dispatch bundle with broker ---
     # Write prompt to temp file for broker bundle (cleaned up after register)
@@ -1484,6 +1601,22 @@ process_dispatches() {
         if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
             log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
             continue
+        fi
+
+        # Validate skill against skills.yaml registry before any terminal operations.
+        # An invalid skill must never advance to delivery — block here before canonial
+        # check or lease acquire so no terminal state is touched for an invalid dispatch.
+        if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
+            local _mapped_skill_pre
+            _mapped_skill_pre="$(map_role_to_skill "$agent_role" 2>/dev/null || echo "$agent_role")"
+            if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$_mapped_skill_pre" >/dev/null 2>&1; then
+                log "V8 ERROR: Skill '@${_mapped_skill_pre}' failed registry validation — blocking dispatch before terminal operations"
+                if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+                    printf '\n\n[SKILL_INVALID] Skill '"'"'@%s'"'"' not found in registry. Update Role and remove this marker to retry.\n' "$_mapped_skill_pre" >> "$dispatch"
+                fi
+                continue
+            fi
+            log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
         fi
 
         # V7.4 INTELLIGENCE: Validate agent if specified

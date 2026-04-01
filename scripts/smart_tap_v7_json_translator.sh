@@ -345,8 +345,10 @@ validate_block() {
                 return 1
             fi
 
-            # Reject blocks that contain shell prompt output (T0 discussing dispatches)
-            if echo "$block" | grep -qE '(Cogitated for|^❯ |^> ja |Shell cwd was reset)'; then
+            # Reject blocks that contain shell prompt output (T0 discussing dispatches).
+            # Note: "Shell cwd was reset" is benign tool noise emitted during agent runs;
+            # it must NOT be tested against full block content to avoid false positives.
+            if echo "$block" | grep -qE '(Cogitated for|^❯ |^> ja )'; then
                 log "Rejected block - contains T0 conversation output, not a dispatch"
                 return 1
             fi
