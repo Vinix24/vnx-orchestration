@@ -36,7 +36,7 @@ GATE_BINARIES: Dict[str, str] = {
 
 # Gate type → CLI args for review execution
 GATE_CLI_ARGS: Dict[str, List[str]] = {
-    "gemini_review": [],
+    "gemini_review": ["--output-format", "json"],
     "codex_gate": ["--quiet"],
     "claude_github_optional": [],
 }
@@ -83,6 +83,10 @@ class GateRunner:
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
 
+        # Ensure prompt is in request_payload for contract_hash fallback
+        if prompt and "prompt" not in request_payload:
+            request_payload["prompt"] = prompt
+
         # GATE-3: Mark as executing with started_at and runner_pid
         pid = os.getpid()
         started_at = utc_now_iso()
@@ -124,13 +128,24 @@ class GateRunner:
         stall_threshold: int,
         request_payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Spawn subprocess and monitor for timeout/stall (GATE-6/7/8)."""
-        cli_args = GATE_CLI_ARGS.get(gate, [])
+        """Spawn subprocess and monitor for timeout/stall (GATE-6/7/8).
+
+        Uses binary-mode I/O with os.read() for non-blocking reads that
+        cannot be held up by TextIOWrapper buffering. Runs the subprocess
+        in its own session so process-group kill reaches child processes.
+        """
+        cli_args = list(GATE_CLI_ARGS.get(gate, []))
+
+        # Model selection for Gemini — configurable via GEMINI_MODEL env var
+        if gate == "gemini_review":
+            model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            cli_args = ["--model", model] + cli_args
+
         cmd = [binary] + cli_args
 
         start = time.monotonic()
-        stdout_parts: List[str] = []
-        stderr_parts: List[str] = []
+        stdout_parts: List[bytes] = []
+        stderr_parts: List[bytes] = []
         last_output_time = start
         output_line_count = 0
 
@@ -140,7 +155,7 @@ class GateRunner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
+                start_new_session=True,
             )
         except OSError as exc:
             return {
@@ -156,19 +171,30 @@ class GateRunner:
 
         try:
             if prompt and proc.stdin:
-                proc.stdin.write(prompt)
+                proc.stdin.write(prompt.encode("utf-8"))
                 proc.stdin.close()
+
+            stdout_fd = proc.stdout.fileno() if proc.stdout else -1
+            stderr_fd = proc.stderr.fileno() if proc.stderr else -1
+            fd_map = {}
+            if stdout_fd >= 0:
+                fd_map[stdout_fd] = "stdout"
+            if stderr_fd >= 0:
+                fd_map[stderr_fd] = "stderr"
+            raw_fds = list(fd_map.keys())
 
             while True:
                 elapsed = time.monotonic() - start
                 if elapsed >= timeout:
                     self._kill_process(proc)
+                    stdout = b"".join(stdout_parts).decode("utf-8", errors="replace")
+                    stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
                     return {
                         "status": "failed",
                         "reason": "timeout",
                         "reason_detail": f"Subprocess exceeded {timeout}s timeout",
-                        "stdout": "".join(stdout_parts),
-                        "stderr": "".join(stderr_parts),
+                        "stdout": stdout,
+                        "stderr": stderr,
                         "duration_seconds": elapsed,
                         "partial_output_lines": output_line_count,
                         "runner_pid": proc.pid,
@@ -177,12 +203,14 @@ class GateRunner:
                 stall_elapsed = time.monotonic() - last_output_time
                 if stall_elapsed >= stall_threshold:
                     self._kill_process(proc)
+                    stdout = b"".join(stdout_parts).decode("utf-8", errors="replace")
+                    stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
                     return {
                         "status": "failed",
                         "reason": "stall",
                         "reason_detail": f"No output for {stall_threshold}s (stall threshold exceeded)",
-                        "stdout": "".join(stdout_parts),
-                        "stderr": "".join(stderr_parts),
+                        "stdout": stdout,
+                        "stderr": stderr,
                         "duration_seconds": elapsed,
                         "partial_output_lines": output_line_count,
                         "runner_pid": proc.pid,
@@ -198,41 +226,49 @@ class GateRunner:
 
                 readable = []
                 try:
-                    fds = [f for f in [proc.stdout, proc.stderr] if f is not None]
-                    readable, _, _ = select.select(fds, [], [], poll_timeout)
+                    readable, _, _ = select.select(raw_fds, [], [], poll_timeout)
                 except (ValueError, OSError):
                     pass
 
-                for fd in readable:
-                    chunk = fd.read(4096) if fd else ""
+                for fd_num in readable:
+                    try:
+                        chunk = os.read(fd_num, 4096)
+                    except OSError:
+                        chunk = b""
                     if chunk:
                         last_output_time = time.monotonic()
-                        if fd == proc.stdout:
+                        if fd_map.get(fd_num) == "stdout":
                             stdout_parts.append(chunk)
-                            output_line_count += chunk.count("\n")
+                            output_line_count += chunk.count(b"\n")
                         else:
                             stderr_parts.append(chunk)
 
                 if proc.poll() is not None:
-                    for fd in [proc.stdout, proc.stderr]:
-                        if fd:
-                            remaining = fd.read()
-                            if remaining:
-                                if fd == proc.stdout:
+                    for fd_num in raw_fds:
+                        try:
+                            while True:
+                                remaining = os.read(fd_num, 4096)
+                                if not remaining:
+                                    break
+                                if fd_map.get(fd_num) == "stdout":
                                     stdout_parts.append(remaining)
-                                    output_line_count += remaining.count("\n")
+                                    output_line_count += remaining.count(b"\n")
                                 else:
                                     stderr_parts.append(remaining)
+                        except OSError:
+                            pass
                     break
 
         except Exception as exc:
             self._kill_process(proc)
+            stdout = b"".join(stdout_parts).decode("utf-8", errors="replace")
+            stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
             return {
                 "status": "failed",
                 "reason": "subprocess_error",
                 "reason_detail": str(exc),
-                "stdout": "".join(stdout_parts),
-                "stderr": "".join(stderr_parts),
+                "stdout": stdout,
+                "stderr": stderr,
                 "duration_seconds": time.monotonic() - start,
                 "partial_output_lines": output_line_count,
                 "runner_pid": proc.pid,
@@ -240,14 +276,16 @@ class GateRunner:
 
         duration = time.monotonic() - start
         exit_code = proc.returncode
+        stdout = b"".join(stdout_parts).decode("utf-8", errors="replace")
+        stderr = b"".join(stderr_parts).decode("utf-8", errors="replace")
 
         if exit_code != 0:
             return {
                 "status": "failed",
                 "reason": "exit_nonzero",
                 "reason_detail": f"Subprocess exited with code {exit_code}",
-                "stdout": "".join(stdout_parts),
-                "stderr": "".join(stderr_parts),
+                "stdout": stdout,
+                "stderr": stderr,
                 "duration_seconds": duration,
                 "partial_output_lines": output_line_count,
                 "runner_pid": proc.pid,
@@ -255,8 +293,8 @@ class GateRunner:
 
         return {
             "status": "completed",
-            "stdout": "".join(stdout_parts),
-            "stderr": "".join(stderr_parts),
+            "stdout": stdout,
+            "stderr": stderr,
             "duration_seconds": duration,
             "partial_output_lines": output_line_count,
             "runner_pid": proc.pid,
@@ -265,7 +303,33 @@ class GateRunner:
 
     @staticmethod
     def _kill_process(proc: subprocess.Popen) -> None:
-        """Kill subprocess and all children."""
+        """Kill subprocess and its entire process group.
+
+        Uses SIGTERM on the process group first, then SIGKILL if the
+        process does not exit within 3 seconds. Falls back to direct
+        proc.kill() if process-group operations fail.
+        """
+        pgid = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except OSError:
+            pass
+
+        if pgid is not None and pgid != os.getpgrp():
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=3)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+
         try:
             proc.kill()
         except OSError:
@@ -301,6 +365,16 @@ class GateRunner:
                 request_payload["prompt"].encode("utf-8")
             ).hexdigest()[:16]
 
+        if not contract_hash:
+            fallback_input = json.dumps({
+                "gate": gate,
+                "branch": request_payload.get("branch", ""),
+                "changed_files": sorted(request_payload.get("changed_files", [])),
+            }, sort_keys=True)
+            contract_hash = hashlib.sha256(
+                fallback_input.encode("utf-8")
+            ).hexdigest()[:16]
+
         # Step 1: Write normalized report
         if not report_path:
             return self._record_failure_simple(
@@ -329,6 +403,17 @@ class GateRunner:
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
                 reason="artifact_materialization_failed",
                 reason_detail="Report file is empty or missing after write",
+                request_payload=request_payload,
+            )
+
+        # Step 2b: Validate report contains substantive content (OI-273)
+        stripped = stdout.strip()
+        content_lines = [ln for ln in stripped.splitlines() if ln.strip()] if stripped else []
+        if len(content_lines) < 3 and stripped != "(no output)":
+            return self._record_failure_simple(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                reason="empty_review_content",
+                reason_detail=f"Gate output has only {len(content_lines)} substantive line(s); expected review content",
                 request_payload=request_payload,
             )
 
