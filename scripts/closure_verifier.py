@@ -401,6 +401,207 @@ def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) ->
     return CheckResult("stale_staging", "PASS", "no stale staging dispatches")
 
 
+def verify_pr_closure(
+    *,
+    pr_id: str,
+    project_root: Path,
+    feature_plan: Path,
+    dispatch_dir: Path,
+    receipts_file: Path,
+    state_dir: Path,
+    review_contract: Optional[ReviewContract] = None,
+    gate_results_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Verify closure for a single PR without requiring whole-feature completion.
+
+    This runs queue reconciliation to derive the PR's current state,
+    validates gate evidence for that PR, and detects contradictions
+    between structured gate results and normalized reports.
+
+    Does NOT check feature-level status, PR_QUEUE completeness, or
+    GitHub PR state — those are whole-feature concerns.
+    """
+    from queue_reconciler import QueueReconciler
+
+    checks: List[CheckResult] = []
+    paths = ensure_env()
+
+    # 1. Reconcile queue to get fresh PR state
+    projection_file = state_dir / "pr_queue_state.json"
+    reconciler = QueueReconciler(
+        dispatch_dir=dispatch_dir,
+        receipts_file=receipts_file,
+        feature_plan=feature_plan,
+        projection_file=projection_file if projection_file.is_file() else None,
+    )
+    result = reconciler.reconcile()
+
+    pr_reconciled = next((p for p in result.prs if p.pr_id == pr_id), None)
+    if pr_reconciled is None:
+        checks.append(CheckResult(
+            "pr_exists_in_plan", "FAIL",
+            f"{pr_id} not found in FEATURE_PLAN.md",
+        ))
+        return {
+            "verdict": "fail",
+            "mode": "per_pr",
+            "pr_id": pr_id,
+            "checks": [c.__dict__ for c in checks],
+            "reconciled_state": None,
+            "review_evidence": None,
+        }
+
+    # 2. PR must be completed per reconciliation
+    if pr_reconciled.state == "completed":
+        receipt_note = ""
+        if not pr_reconciled.provenance.get("receipt_confirmed"):
+            receipt_note = " (unconfirmed — no terminal receipt)"
+        checks.append(CheckResult(
+            "pr_completed", "PASS",
+            f"{pr_id} is completed via {pr_reconciled.provenance.get('source', '?')}{receipt_note}",
+        ))
+    else:
+        checks.append(CheckResult(
+            "pr_completed", "FAIL",
+            f"{pr_id} state is {pr_reconciled.state}, not completed",
+        ))
+
+    # 3. Check for blocking drift affecting this PR
+    pr_drift = [w for w in result.drift_warnings if w.pr_id == pr_id and w.severity == "blocking"]
+    if pr_drift:
+        checks.append(CheckResult(
+            "queue_drift", "FAIL",
+            f"{pr_id} has blocking queue drift: {pr_drift[0].message}",
+        ))
+    else:
+        checks.append(CheckResult(
+            "queue_drift", "PASS",
+            f"no blocking drift for {pr_id}",
+        ))
+
+    # 4. Review contract and gate evidence
+    review_evidence_summary: Optional[Dict[str, Any]] = None
+    if review_contract is not None:
+        effective_results_dir = gate_results_dir
+        if effective_results_dir is None:
+            effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
+        checks.extend(_validate_review_evidence(review_contract, effective_results_dir))
+
+        # 5. Gate result vs report contradiction detection
+        checks.extend(_detect_gate_report_contradictions(review_contract, effective_results_dir))
+
+        review_evidence_summary = {
+            "contract_pr_id": review_contract.pr_id,
+            "contract_hash": review_contract.content_hash,
+            "review_stack": review_contract.review_stack,
+            "risk_class": review_contract.risk_class,
+            "deterministic_finding_count": len(review_contract.deterministic_findings),
+            "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
+        }
+    else:
+        checks.append(CheckResult(
+            "review_contract", "FAIL",
+            "no review contract provided — per-PR closure requires contract-backed evidence",
+        ))
+
+    verdict = "pass" if all(c.status == "PASS" for c in checks) else "fail"
+    return {
+        "verdict": verdict,
+        "mode": "per_pr",
+        "pr_id": pr_id,
+        "reconciled_state": {
+            "pr_id": pr_reconciled.pr_id,
+            "state": pr_reconciled.state,
+            "provenance": pr_reconciled.provenance,
+        },
+        "checks": [c.__dict__ for c in checks],
+        "review_evidence": review_evidence_summary,
+    }
+
+
+def _detect_gate_report_contradictions(
+    contract: ReviewContract,
+    results_dir: Path,
+) -> List[CheckResult]:
+    """Detect contradictions between structured gate result JSON and normalized report content.
+
+    A contradiction exists when:
+    - Gate result JSON says pass but report contains blocking findings
+    - Gate result JSON says fail but report claims all clear
+    - Gate result blocking_count disagrees with actual blocking findings in report
+    """
+    checks: List[CheckResult] = []
+
+    for gate in contract.review_stack:
+        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        if result is None:
+            continue
+
+        report_path_str = result.get("report_path", "")
+        if not report_path_str:
+            continue
+
+        report_path = Path(report_path_str)
+        if not report_path.exists():
+            continue
+
+        try:
+            report_content = report_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        gate_status = result.get("status") or result.get("verdict") or "unknown"
+        gate_blocking = result.get("blocking_count", 0)
+
+        # Count blocking-severity indicators in report
+        report_blocking_indicators = _count_report_blocking_indicators(report_content)
+
+        # Contradiction 1: gate says pass but report has blocking indicators
+        if gate_status == "pass" and report_blocking_indicators > 0:
+            checks.append(CheckResult(
+                f"contradiction_{gate}",
+                "FAIL",
+                f"{gate}: gate result says pass but report contains "
+                f"{report_blocking_indicators} blocking indicator(s) — evidence mismatch",
+            ))
+        # Contradiction 2: gate says fail/blocking but report has none
+        elif gate_status == "fail" and gate_blocking > 0 and report_blocking_indicators == 0:
+            checks.append(CheckResult(
+                f"contradiction_{gate}",
+                "FAIL",
+                f"{gate}: gate result says fail with {gate_blocking} blocking finding(s) "
+                f"but report contains no blocking indicators — evidence mismatch",
+            ))
+        else:
+            checks.append(CheckResult(
+                f"contradiction_{gate}",
+                "PASS",
+                f"{gate}: gate result and report content are consistent",
+            ))
+
+    return checks
+
+
+def _count_report_blocking_indicators(content: str) -> int:
+    """Count blocking-severity indicators in a normalized report.
+
+    Looks for patterns that indicate blocking findings in headless review reports.
+    """
+    import re
+    count = 0
+    # Standard blocking patterns in normalized reports
+    blocking_patterns = [
+        r"\[BLOCKING\]",
+        r"\*\*Severity\*\*:\s*blocking",
+        r"severity:\s*blocking",
+        r"BLOCK(?:ER|ING)\s*:",
+        r"Status:\s*FAIL",
+    ]
+    for pattern in blocking_patterns:
+        count += len(re.findall(pattern, content, re.IGNORECASE))
+    return count
+
+
 def verify_closure(
     *,
     project_root: Path,
@@ -559,14 +760,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--claim-file", default=None)
     parser.add_argument("--review-contract", default=None, help="Path to review contract JSON")
     parser.add_argument("--gate-results-dir", default=None, help="Directory containing gate result JSONs")
+    parser.add_argument("--pr-id", default=None, help="Per-PR closure mode: verify a single PR without requiring whole-feature completion")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--emit-receipt", action="store_true")
     args = parser.parse_args(argv)
 
     paths = ensure_env()
     project_root = Path(paths["PROJECT_ROOT"]).resolve()
-    branch = args.branch or _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
-    claim_file = Path(args.claim_file) if args.claim_file else _default_claim_file(paths)
 
     contract: Optional[ReviewContract] = None
     if args.review_contract:
@@ -578,33 +778,55 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.gate_results_dir:
         gate_results_dir = Path(args.gate_results_dir)
 
-    result = verify_closure(
-        project_root=project_root,
-        feature_plan=(project_root / args.feature_plan if not Path(args.feature_plan).is_absolute() else Path(args.feature_plan)),
-        pr_queue=(project_root / args.pr_queue if not Path(args.pr_queue).is_absolute() else Path(args.pr_queue)),
-        branch=branch,
-        mode=args.mode,
-        claim_file=claim_file if claim_file.exists() else None,
-        review_contract=contract,
-        gate_results_dir=gate_results_dir,
-    )
-
-    if args.emit_receipt:
-        emit_governance_receipt(
-            "closure_verification_result",
-            status="success" if result["verdict"] == "pass" else "blocked",
-            branch=branch,
-            verification_mode=args.mode,
-            feature_title=result.get("feature_title"),
-            verifier="closure_verifier.py",
-            checks=result["checks"],
-            review_evidence=result.get("review_evidence"),
+    # Per-PR closure mode
+    if args.pr_id:
+        feature_plan_path = (
+            project_root / args.feature_plan
+            if not Path(args.feature_plan).is_absolute()
+            else Path(args.feature_plan)
         )
+        result = verify_pr_closure(
+            pr_id=args.pr_id,
+            project_root=project_root,
+            feature_plan=feature_plan_path,
+            dispatch_dir=Path(paths["VNX_DISPATCH_DIR"]),
+            receipts_file=Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson",
+            state_dir=Path(paths["VNX_STATE_DIR"]),
+            review_contract=contract,
+            gate_results_dir=gate_results_dir,
+        )
+    else:
+        branch = args.branch or _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
+        claim_file = Path(args.claim_file) if args.claim_file else _default_claim_file(paths)
+
+        result = verify_closure(
+            project_root=project_root,
+            feature_plan=(project_root / args.feature_plan if not Path(args.feature_plan).is_absolute() else Path(args.feature_plan)),
+            pr_queue=(project_root / args.pr_queue if not Path(args.pr_queue).is_absolute() else Path(args.pr_queue)),
+            branch=branch,
+            mode=args.mode,
+            claim_file=claim_file if claim_file.exists() else None,
+            review_contract=contract,
+            gate_results_dir=gate_results_dir,
+        )
+
+        if args.emit_receipt:
+            emit_governance_receipt(
+                "closure_verification_result",
+                status="success" if result["verdict"] == "pass" else "blocked",
+                branch=branch,
+                verification_mode=args.mode,
+                feature_title=result.get("feature_title"),
+                verifier="closure_verifier.py",
+                checks=result["checks"],
+                review_evidence=result.get("review_evidence"),
+            )
 
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"Closure verifier: {result['verdict'].upper()}")
+        mode_label = f"Per-PR ({args.pr_id})" if args.pr_id else "Closure"
+        print(f"{mode_label} verifier: {result['verdict'].upper()}")
         for check in result["checks"]:
             print(f"- [{check['status']}] {check['name']}: {check['detail']}")
 
