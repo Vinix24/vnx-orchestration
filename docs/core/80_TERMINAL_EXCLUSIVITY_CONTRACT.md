@@ -238,8 +238,9 @@ process_dispatches() loop:
        - This is the legacy check, kept as an early-exit optimization.
        → On block: log defer, skip. NEXT dispatch.
 
-    4. GATHER INTELLIGENCE (non-blocking on failure since PR-1)
-       - Failures block dispatch to prevent silent intelligence loss.
+    4. GATHER INTELLIGENCE
+       - Command execution failure (rc != 0): blocks dispatch — marks [DEPENDENCY_ERROR], defers to pending.
+       - Result parse failure: does NOT block — falls back to empty intelligence (non-fatal quality degradation).
 
     5. ENTER dispatch_with_skill_activation():
 

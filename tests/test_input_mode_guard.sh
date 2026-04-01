@@ -93,6 +93,7 @@ mock_fail_once() {
 
 reset_mocks() {
     rm -f "$MOCK_QUEUE" "$MOCK_FAIL_FLAG" "$MOCK_CALL_LOG" "$AUDIT_FILE"
+    rm -rf "$STATE_DIR/input_mode_cooldown"
     touch "$MOCK_QUEUE" "$MOCK_CALL_LOG"
 }
 
@@ -368,6 +369,164 @@ rc=0; check_pane_input_ready "test:0.7" "T1" "d-011" || rc=$?
 assert_pass $rc "T11: copy-mode-vi recovered via programmatic cancel"
 assert_file_contains "$AUDIT_FILE" '"mode_before":"copy-mode-vi"' \
     "T11: mode_before=copy-mode-vi recorded correctly"
+
+# ===========================================================================
+# Test 12: Rate-limiting — first attempt gets full recovery (cooldown not active)
+# Scenario: fresh terminal, no prior recovery → full recovery sequence runs
+# ===========================================================================
+reset_mocks
+queue_responses "1:0:copy-mode" "0:0:"
+rc=0; check_pane_input_ready "test:0.8" "T2" "d-012" || rc=$?
+assert_pass $rc "T12: first attempt gets full recovery (no cooldown)"
+
+assert_file_contains "$AUDIT_FILE" "input_mode_recovery_started" \
+    "T12: recovery_started event emitted on first attempt"
+assert_file_contains "$AUDIT_FILE" "input_mode_recovery_succeeded" \
+    "T12: recovery_succeeded on first attempt"
+assert_file_not_contains "$AUDIT_FILE" "recovery_cooldown" \
+    "T12: no cooldown event on first attempt"
+
+# Verify cooldown file was created
+assert_eq "true" "$([ -f "$STATE_DIR/input_mode_cooldown/T2" ] && echo true || echo false)" \
+    "T12: cooldown file created after recovery"
+
+# ===========================================================================
+# Test 13: Rate-limiting — second attempt within cooldown skips recovery
+# Scenario: same terminal, within 30s → probe only, no cancel/escape
+# ===========================================================================
+# Do NOT reset_mocks — we need the cooldown from T12 to persist
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "1:0:copy-mode"
+rc=0; check_pane_input_ready "test:0.8" "T2" "d-013" || rc=$?
+assert_fail $rc "T13: second attempt within cooldown returns blocked (requeueable)"
+
+assert_file_contains "$AUDIT_FILE" "input_mode_recovery_cooldown" \
+    "T13: recovery_cooldown event emitted"
+assert_file_contains "$AUDIT_FILE" "recovery_cooldown_deferred" \
+    "T13: reason=recovery_cooldown_deferred in event"
+
+# No recovery commands should have been sent
+assert_file_not_contains "$MOCK_CALL_LOG" "^copy-mode$" \
+    "T13: tmux copy-mode NOT called during cooldown (scrollback preserved)"
+assert_file_not_contains "$MOCK_CALL_LOG" "^send-keys$" \
+    "T13: tmux send-keys NOT called during cooldown (scrollback preserved)"
+
+# ===========================================================================
+# Test 14: Rate-limiting — different terminal not affected by cooldown
+# Scenario: T2 in cooldown but T1 has no cooldown → T1 gets full recovery
+# ===========================================================================
+# T2 cooldown still active from T12/T13 — do NOT reset
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "1:0:copy-mode" "0:0:"
+rc=0; check_pane_input_ready "test:0.9" "T1" "d-014" || rc=$?
+assert_pass $rc "T14: different terminal (T1) gets full recovery despite T2 cooldown"
+
+assert_file_contains "$AUDIT_FILE" "input_mode_recovery_started" \
+    "T14: recovery_started for T1 (not in cooldown)"
+assert_file_not_contains "$AUDIT_FILE" "recovery_cooldown" \
+    "T14: no cooldown event for T1"
+
+# ===========================================================================
+# Test 15: Rate-limiting — cooldown expiry restores full recovery
+# Scenario: set cooldown to 1s, wait for expiry → full recovery again
+# ===========================================================================
+reset_mocks
+_INPUT_MODE_COOLDOWN=1  # Override to 1s for test speed
+
+# First attempt — triggers recovery and starts cooldown
+queue_responses "1:0:copy-mode" "0:0:"
+rc=0; check_pane_input_ready "test:1.0" "T3" "d-015a" || rc=$?
+assert_pass $rc "T15a: first attempt recovers (starts 1s cooldown)"
+
+# Second attempt immediately — should be deferred
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "1:0:copy-mode"
+rc=0; check_pane_input_ready "test:1.0" "T3" "d-015b" || rc=$?
+assert_fail $rc "T15b: immediate retry deferred by cooldown"
+assert_file_contains "$AUDIT_FILE" "recovery_cooldown" \
+    "T15b: cooldown event emitted"
+
+# Wait for cooldown to expire (real sleep, not mocked)
+builtin command sleep 1.5 2>/dev/null || /bin/sleep 1.5 2>/dev/null || sleep 1.5
+
+# Third attempt after cooldown — should get full recovery
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "1:0:copy-mode" "0:0:"
+rc=0; check_pane_input_ready "test:1.0" "T3" "d-015c" || rc=$?
+assert_pass $rc "T15c: after cooldown expiry, full recovery restored"
+assert_file_contains "$AUDIT_FILE" "input_mode_recovery_started" \
+    "T15c: recovery_started after cooldown expired"
+assert_file_not_contains "$AUDIT_FILE" "recovery_cooldown" \
+    "T15c: no cooldown event after expiry"
+
+# Restore default cooldown
+_INPUT_MODE_COOLDOWN=30
+
+# ===========================================================================
+# Test 16: Rate-limiting — copy-mode during cooldown preserves scrollback
+# Scenario: pane in copy-mode, cooldown active → no cancel sent, dispatch deferred
+# ===========================================================================
+reset_mocks
+# Start cooldown by doing a first recovery
+queue_responses "1:0:copy-mode" "0:0:"
+check_pane_input_ready "test:1.1" "T2" "d-016a" || true
+
+# Now simulate retry with operator scrolling (copy-mode)
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "1:0:copy-mode"
+rc=0; check_pane_input_ready "test:1.1" "T2" "d-016b" || rc=$?
+assert_fail $rc "T16: copy-mode during cooldown → dispatch deferred"
+
+# Critical: scrollback must be preserved — no copy-mode -q or Escape sent
+assert_file_not_contains "$MOCK_CALL_LOG" "^copy-mode$" \
+    "T16: copy-mode -q NOT called (operator scrollback preserved)"
+assert_file_not_contains "$MOCK_CALL_LOG" "^send-keys$" \
+    "T16: send-keys Escape NOT called (operator scrollback preserved)"
+assert_file_contains "$AUDIT_FILE" "recovery_cooldown_deferred" \
+    "T16: deferred reason recorded in audit"
+
+# ===========================================================================
+# Test 17: Rate-limiting — normal mode pane during cooldown proceeds immediately
+# Scenario: cooldown active but pane is input-ready → no recovery needed, dispatch ok
+# ===========================================================================
+# T2 cooldown still active from T16
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "0:0:"
+rc=0; check_pane_input_ready "test:1.1" "T2" "d-017" || rc=$?
+assert_pass $rc "T17: normal mode pane during cooldown → dispatch proceeds"
+assert_file_not_contains "$AUDIT_FILE" "recovery_cooldown" \
+    "T17: no cooldown event when pane is already input-ready"
+
+# ===========================================================================
+# Test 18: Rate-limiting — env override of cooldown period
+# Scenario: VNX_INPUT_MODE_COOLDOWN=0 disables cooldown
+# ===========================================================================
+reset_mocks
+_INPUT_MODE_COOLDOWN=0  # Disable cooldown
+
+# First attempt — full recovery, starts 0s cooldown (effectively no cooldown)
+queue_responses "1:0:copy-mode" "0:0:"
+check_pane_input_ready "test:1.2" "T2" "d-018a" || true
+
+# Second attempt immediately — should still get full recovery (0s cooldown = always expired)
+rm -f "$MOCK_CALL_LOG" "$AUDIT_FILE"
+touch "$MOCK_CALL_LOG"
+queue_responses "1:0:copy-mode" "0:0:"
+rc=0; check_pane_input_ready "test:1.2" "T2" "d-018b" || rc=$?
+assert_pass $rc "T18: VNX_INPUT_MODE_COOLDOWN=0 disables rate-limiting"
+assert_file_contains "$AUDIT_FILE" "input_mode_recovery_started" \
+    "T18: full recovery even on second attempt with cooldown=0"
+assert_file_not_contains "$AUDIT_FILE" "recovery_cooldown" \
+    "T18: no cooldown event with cooldown=0"
+
+# Restore default
+_INPUT_MODE_COOLDOWN=30
 
 # --- Cleanup ---
 rm -rf "$TMP_ROOT"
