@@ -1032,3 +1032,133 @@ def project_terminal_state(conn: sqlite3.Connection) -> Dict[str, Any]:
         terminals[tid] = record
 
     return {"schema_version": 1, "terminals": terminals}
+
+
+def release_all_leases(
+    conn: sqlite3.Connection,
+    *,
+    actor: str = "chain_closeout",
+    reason: str = "chain_boundary_cleanup",
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Release all non-idle terminal leases to idle state at chain boundary.
+
+    BOOT-9: Releases ALL terminal leases regardless of current state.
+    BOOT-10: Follows verify -> release -> audit -> confirm sequence.
+    BOOT-11: Increments generation to guard against stale delayed releases from
+             the old chain (a delayed release-on-failure using the old generation
+             will be rejected by the generation guard in release_lease).
+
+    Args:
+        conn: Open database connection. Caller must commit.
+        actor: Actor recorded in audit events (default: 'chain_closeout').
+        reason: Reason recorded in audit events.
+        force: If True, proceed even when non-terminal dispatches exist.
+
+    Returns dict with keys:
+        released: list of terminal_ids that were released.
+        already_idle: list of terminal_ids already idle.
+        non_terminal_dispatches: list of {dispatch_id, state} for non-terminal dispatches.
+        blocked: True if blocked by non-terminal dispatches (force=False).
+        all_idle: True if all leases are now idle.
+        error: Present when post-release verification fails.
+    """
+    # BOOT-10 Step 1: VERIFY — check for non-terminal dispatches.
+    non_terminal_rows = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches WHERE state NOT IN (?, ?, ?)",
+        ("completed", "expired", "dead_letter"),
+    ).fetchall()
+    non_terminal = [dict(r) for r in non_terminal_rows]
+
+    if non_terminal and not force:
+        return {
+            "released": [],
+            "already_idle": [],
+            "non_terminal_dispatches": non_terminal,
+            "blocked": True,
+            "all_idle": False,
+            "message": (
+                f"WARN: {len(non_terminal)} non-terminal dispatch(es) exist. "
+                "Use --force to proceed with lease cleanup."
+            ),
+        }
+
+    now = _now_utc()
+    released = []
+    already_idle = []
+
+    lease_rows = conn.execute("SELECT * FROM terminal_leases").fetchall()
+
+    for row in lease_rows:
+        terminal_id = row["terminal_id"]
+        old_state = row["state"]
+        old_generation = row["generation"]
+
+        if old_state == "idle":
+            already_idle.append(terminal_id)
+            continue
+
+        # BOOT-10 Step 2: RELEASE — set directly to idle with generation increment.
+        # BOOT-11: new_generation = generation + 1 invalidates any in-flight
+        #          release-on-failure calls from the old chain.
+        new_generation = old_generation + 1
+        conn.execute(
+            """
+            UPDATE terminal_leases
+            SET state = 'idle',
+                dispatch_id = NULL,
+                leased_at = NULL,
+                expires_at = NULL,
+                last_heartbeat_at = NULL,
+                released_at = ?,
+                generation = ?
+            WHERE terminal_id = ?
+            """,
+            (now, new_generation, terminal_id),
+        )
+
+        # BOOT-10 Step 3: AUDIT — emit coordination events for each released lease.
+        _append_event(
+            conn,
+            event_type="lease_released",
+            entity_type="lease",
+            entity_id=terminal_id,
+            from_state=old_state,
+            to_state="idle",
+            actor=actor,
+            reason=reason,
+            metadata={
+                "generation": old_generation,
+                "new_generation": new_generation,
+                "dispatch_id": row["dispatch_id"],
+            },
+        )
+        released.append(terminal_id)
+
+    # BOOT-10 Step 4: VERIFY confirmation — abort if any non-idle lease remains.
+    remaining_rows = conn.execute(
+        "SELECT terminal_id, state FROM terminal_leases WHERE state != 'idle'"
+    ).fetchall()
+
+    if remaining_rows:
+        remaining = [dict(r) for r in remaining_rows]
+        return {
+            "released": released,
+            "already_idle": already_idle,
+            "non_terminal_dispatches": non_terminal,
+            "blocked": False,
+            "all_idle": False,
+            "error": (
+                f"Verification failed: {len(remaining)} non-idle lease(s) remain "
+                "after closeout cleanup"
+            ),
+            "remaining": remaining,
+        }
+
+    return {
+        "released": released,
+        "already_idle": already_idle,
+        "non_terminal_dispatches": non_terminal,
+        "blocked": False,
+        "all_idle": True,
+    }
