@@ -194,6 +194,12 @@ def _find_gate_result(
     """
 
     def _accept(data: Dict[str, Any]) -> bool:
+        # PR-scoped AND matching: if data carries pr_id it must match the queried pr_id.
+        # This prevents a result from a different PR satisfying a closure check even when
+        # the filename-based lookup finds a contract for the correct PR name.
+        data_pr_id = data.get("pr_id")
+        if data_pr_id and data_pr_id != pr_id:
+            return False
         if branch and data.get("branch") and data["branch"] != branch:
             return False
         return True
@@ -361,8 +367,15 @@ def _validate_review_evidence(
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir)
-        gate_status = result.get("status") or result.get("verdict") if result else None
-        if result and gate_status in ("pass", "fail"):
+        # Check both status and verdict fields independently to avoid the OR-priority escape:
+        # if status="requested" (truthy) but verdict="pass", the old OR logic would yield
+        # gate_status="requested" and skip report_path enforcement for a terminal verdict.
+        _terminal = ("pass", "fail")
+        _has_terminal = result is not None and (
+            (result.get("status") or "").lower() in _terminal
+            or (result.get("verdict") or "").lower() in _terminal
+        )
+        if _has_terminal:
             report_path = result.get("report_path", "")
             if not report_path:
                 checks.append(CheckResult(
@@ -431,6 +444,8 @@ def verify_pr_closure(
     state_dir: Path,
     review_contract: Optional[ReviewContract] = None,
     gate_results_dir: Optional[Path] = None,
+    branch: Optional[str] = None,
+    require_github_pr: bool = False,
 ) -> Dict[str, Any]:
     """Verify closure for a single PR without requiring whole-feature completion.
 
@@ -438,8 +453,10 @@ def verify_pr_closure(
     validates gate evidence for that PR, and detects contradictions
     between structured gate results and normalized reports.
 
-    Does NOT check feature-level status, PR_QUEUE completeness, or
-    GitHub PR state — those are whole-feature concerns.
+    When ``branch`` is provided and ``require_github_pr`` is True, also verifies
+    that a real GitHub PR exists for the branch and that required CI checks are
+    green (pre-merge mode).  Local-only closure cannot pass merge readiness when
+    GitHub PR / CI linkage is required.
     """
     from queue_reconciler import QueueReconciler
 
@@ -524,11 +541,36 @@ def verify_pr_closure(
             "no review contract provided — per-PR closure requires contract-backed evidence",
         ))
 
+    # 5. GitHub PR and CI checks (when branch is provided and explicitly required)
+    # Local-only closure cannot pass merge readiness without a real GitHub PR + green checks.
+    github_pr: Optional[Dict[str, Any]] = None
+    if branch and require_github_pr:
+        github_pr = _find_branch_pr(branch)
+        checks.append(CheckResult(
+            "github_pr_exists",
+            "PASS" if github_pr else "FAIL",
+            f"GitHub PR {'found' if github_pr else 'missing'} for branch {branch}",
+        ))
+        if github_pr:
+            rollup = github_pr.get("statusCheckRollup") or []
+            all_green = bool(rollup) and all(
+                item.get("status") == "COMPLETED" and item.get("conclusion") == "SUCCESS"
+                for item in rollup
+                if item.get("__typename") == "CheckRun"
+            )
+            checks.append(CheckResult(
+                "github_checks",
+                "PASS" if all_green else "FAIL",
+                "all required GitHub checks green" if all_green
+                else "GitHub checks incomplete or failing — merge readiness blocked",
+            ))
+
     verdict = "pass" if all(c.status == "PASS" for c in checks) else "fail"
     return {
         "verdict": verdict,
         "mode": "per_pr",
         "pr_id": pr_id,
+        "branch": branch,
         "reconciled_state": {
             "pr_id": pr_reconciled.pr_id,
             "state": pr_reconciled.state,
@@ -536,6 +578,7 @@ def verify_pr_closure(
         },
         "checks": [c.__dict__ for c in checks],
         "review_evidence": review_evidence_summary,
+        "github_pr": github_pr,
     }
 
 
