@@ -53,6 +53,7 @@ def test_request_reviews_queues_gemini_and_skips_unconfigured_optional(review_en
 
     requested = {item["gate"]: item for item in result["requested"]}
     assert requested["gemini_review"]["status"] == "queued"
+    assert requested["gemini_review"]["report_path"].startswith(str((review_env / ".vnx-data" / "unified_reports").resolve()))
     assert requested["claude_github_optional"]["status"] == "not_configured"
     assert (manager.requests_dir / "pr-12-gemini_review.json").exists()
 
@@ -81,6 +82,7 @@ def test_codex_final_gate_blocks_when_required_but_not_available(review_env, mon
 def test_record_result_persists_structured_review_output(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
     manager = rgm.ReviewGateManager()
+    report_path = str((review_env / ".vnx-data" / "unified_reports" / "manual-gemini-report.md").resolve())
 
     payload = manager.record_result(
         gate="gemini_review",
@@ -90,6 +92,8 @@ def test_record_result_persists_structured_review_output(review_env, monkeypatch
         summary="No blocking findings",
         findings=[{"severity": "info", "title": "Minor wording"}],
         residual_risk="low",
+        contract_hash="hash-123",
+        report_path=report_path,
     )
 
     result_path = manager.results_dir / "pr-8-gemini_review.json"
@@ -98,6 +102,8 @@ def test_record_result_persists_structured_review_output(review_env, monkeypatch
     assert saved["status"] == "pass"
     assert saved["findings"][0]["title"] == "Minor wording"
     assert payload["residual_risk"] == "low"
+    assert saved["contract_hash"] == "hash-123"
+    assert saved["report_path"] == report_path
 
 
 def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatch):
@@ -111,6 +117,7 @@ def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatc
         branch="feature/docs",
         status="pass",
         summary="No blocking findings",
+        contract_hash="hash-456",
         report_path=report_rel,
     )
 
@@ -118,3 +125,60 @@ def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatc
     saved = json.loads((manager.results_dir / "pr-9-codex_gate.json").read_text(encoding="utf-8"))
     assert payload["report_path"] == expected
     assert saved["report_path"] == expected
+
+
+def test_record_result_uses_request_report_path_when_report_path_omitted(review_env, monkeypatch):
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake" if tool == "gemini" else None)
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+
+    manager = rgm.ReviewGateManager()
+    requested = manager.request_reviews(
+        pr_number=17,
+        branch="feature/runtime",
+        review_stack=["gemini_review"],
+        risk_class="high",
+        changed_files=["scripts/runtime.py"],
+        mode="per_pr",
+    )["requested"][0]
+
+    payload = manager.record_result(
+        gate="gemini_review",
+        pr_number=17,
+        branch="feature/runtime",
+        status="pass",
+        summary="No blocking findings",
+        contract_hash="hash-789",
+    )
+
+    assert payload["report_path"] == requested["report_path"]
+
+
+def test_record_result_rejects_pass_without_contract_hash(review_env, monkeypatch):
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+    manager = rgm.ReviewGateManager()
+
+    with pytest.raises(ValueError, match="contract_hash is required"):
+        manager.record_result(
+            gate="gemini_review",
+            pr_number=21,
+            branch="feature/docs",
+            status="pass",
+            summary="No blocking findings",
+            report_path=str((review_env / ".vnx-data" / "unified_reports" / "gate.md").resolve()),
+        )
+
+
+def test_record_result_rejects_pass_without_report_path_or_request(review_env, monkeypatch):
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+    manager = rgm.ReviewGateManager()
+
+    with pytest.raises(ValueError, match="report_path is required"):
+        manager.record_result(
+            gate="codex_gate",
+            pr_number=22,
+            branch="feature/runtime",
+            status="pass",
+            summary="No blocking findings",
+            contract_hash="hash-999",
+        )

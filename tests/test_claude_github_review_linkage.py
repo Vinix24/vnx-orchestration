@@ -386,6 +386,7 @@ class TestRecordClaudeGitHubResult:
             summary="LGTM — Claude GitHub review complete",
             findings=[],
             contract_hash=sample_contract.content_hash,
+            report_path=str((review_env / ".vnx-data/unified_reports/claude-contract-pr4.md").resolve()),
         )
 
         assert receipt.state == STATE_COMPLETED
@@ -408,6 +409,7 @@ class TestRecordClaudeGitHubResult:
                 {"severity": "info", "category": "coverage", "message": "Add test"},
             ],
             contract_hash="abc123",
+            report_path=str((review_env / ".vnx-data/unified_reports/claude-blocking-pr4.md").resolve()),
         )
 
         assert receipt.blocking_count == 1
@@ -424,6 +426,7 @@ class TestRecordClaudeGitHubResult:
             status="pass",
             summary="Clean",
             contract_hash="hash999",
+            report_path=str((review_env / ".vnx-data/unified_reports/claude-pr4.md").resolve()),
         )
 
         result_file = manager.results_dir / "pr4-claude_github_optional-contract.json"
@@ -465,6 +468,7 @@ class TestRecordClaudeGitHubResult:
             status="pass",
             summary="LGTM",
             contract_hash="linked_hash_777",
+            report_path=str((review_env / ".vnx-data/unified_reports/claude-pr4-receipt.md").resolve()),
         )
 
         assert len(receipts) == 1
