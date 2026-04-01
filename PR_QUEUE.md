@@ -1,8 +1,8 @@
 # PR Queue - Feature: Deterministic Queue State Reconciliation
 
 ## Progress Overview
-Total: 4 PRs | Complete: 2 | Active: 0 | Queued: 2 | Blocked: 0
-Progress: █████░░░░░ 50%
+Total: 4 PRs | Complete: 4 | Active: 0 | Queued: 0 | Blocked: 0
+Progress: ██████████ 100%
 
 ## Governance Metadata
 Risk-Class: high
@@ -14,10 +14,8 @@ Review-Stack: gemini_review,codex_gate,claude_github_optional
 ### ✅ Completed PRs
 - PR-0: Queue Truth Contract And Source Hierarchy
 - PR-1: Reconcile Queue State From Canonical Runtime Evidence
-
-### ⏳ Queued PRs
-- PR-2: Kickoff, T0, And Per-PR Closure Integration (dependencies: PR-1) [risk=high, merge=human, review=gemini_review,codex_gate,claude_github_optional]
-- PR-3: Certification With Gemini Review And Codex Final Gate (dependencies: PR-2) [risk=high, merge=human, review=gemini_review,codex_gate,claude_github_optional]
+- PR-2: Kickoff, T0, And Per-PR Closure Integration
+- PR-3: Certification With Gemini Review And Codex Final Gate
 
 ## Dependency Flow
 ```
