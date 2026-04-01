@@ -148,9 +148,10 @@ _classify_blocked_dispatch() {
             echo "ambiguous true" ;;
         canonical_lease:*)
             echo "busy true" ;;
-        blocked_input_mode|recovery_failed|pane_dead|probe_failed|input_mode_blocked)
+        blocked_input_mode|recovery_failed|pane_dead|probe_failed|input_mode_blocked|recovery_cooldown_deferred)
             # Input-mode blocks: terminal is not busy but pane is non-interactive.
             # Requeue after operator resolves copy/search mode.
+            # RES-A4: recovery_cooldown_deferred — pane blocked during cooldown, requeueable.
             echo "ambiguous true" ;;
         # DFL-LOG per-code classification (Contract 160 Section 4.4)
         delivery_failed:tx_*|delivery_failed:post_*)
@@ -563,7 +564,11 @@ rc_delivery_success() {
         if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
             log "V8 RUNTIME_CORE: delivery-success rejected dispatch=$dispatch_id (terminal state)"
         else
-            log "V8 RUNTIME_CORE: delivery-success non-fatal failure dispatch=$dispatch_id"
+            # RES-D2: Log structured failure when delivery_success recording fails.
+            # Broker will show 'delivering' instead of 'accepted' for this dispatch.
+            log_structured_failure "delivery_success_record_failed" \
+                "delivery-success recording failed — broker state may show delivering instead of accepted" \
+                "dispatch=$dispatch_id attempt=$attempt_id"
         fi
     fi
 }
@@ -1362,9 +1367,25 @@ dispatch_with_skill_activation() {
 
     log "V8 DISPATCH: Routing to terminal $target_pane (Track: $track, Role: $agent_role)"
 
+    # RES-B1 (OI-024): Best-effort pre-lease pane mode check before mode configuration.
+    # If pane is in copy/search mode, skip mode config (which uses send-keys) to avoid
+    # corrupting operator scrollback. No lease is held at this point — safe to return 1.
+    local _pre_probe
+    if _pre_probe=$(_input_mode_probe "$target_pane" 2>/dev/null); then
+        local _pre_in_mode
+        IFS=: read -r _pre_in_mode _ _ <<< "$_pre_probe"
+        if [[ "$_pre_in_mode" == "1" ]]; then
+            log "V8 INPUT_MODE: pre-lease probe blocked — pane in non-interactive mode, skipping mode config pane=$target_pane dispatch=$(basename "$dispatch_file")"
+            return 1
+        fi
+    fi
+
     # Configure terminal mode (clear, model switch, mode activation)
+    # RES-B2: Use pre_mode_configuration canonical failure code on failure.
     if ! configure_terminal_mode "$target_pane" "$dispatch_file"; then
-        log_structured_failure "mode_configuration_failed" "Terminal mode configuration failed" "pane=$target_pane dispatch=$(basename "$dispatch_file")"
+        log_structured_failure "mode_configuration_failed" "Terminal mode configuration failed" \
+            "pane=$target_pane dispatch=$(basename "$dispatch_file")" \
+            "pre_mode_configuration" "$(basename "$dispatch_file")" "" ""
         return 1
     fi
 
@@ -1431,9 +1452,12 @@ dispatch_with_skill_activation() {
     fi
 
     # Generate receipt footer
+    # RES-D3: Receipt footer generation failure is intentionally non-fatal.
+    # The dispatch is still valid and the receipt can be processed without it.
+    # The footer adds metadata for T0 convenience but is not a required artifact.
     local receipt_footer
     if ! receipt_footer=$(generate_receipt_footer "$dispatch_file" "$track" "$phase" "$gate" "$task_id" "$cmd_id" "$dispatch_id"); then
-        log "V8 WARNING: Failed to generate receipt footer, continuing without"
+        log "V8 WARNING: Failed to generate receipt footer, continuing without (intentionally non-fatal per RES-D3)"
         receipt_footer=""
     fi
 
@@ -1647,6 +1671,14 @@ $receipt_footer"
     # Record delivery start (queued -> claimed -> delivering) — after lease acquired
     if _rc_enabled; then
         _rc_attempt_id=$(rc_delivery_start "$dispatch_id" "$terminal_id")
+        # RES-D1: Log when delivery_start returns empty attempt_id (DFL-2).
+        # Downstream rc_delivery_failure guards on non-empty attempt_id, so an
+        # empty value means the failure won't be recorded in the broker.
+        if [[ -z "$_rc_attempt_id" ]]; then
+            log_structured_failure "delivery_start_no_attempt" \
+                "delivery_start returned empty attempt_id — broker failure record will be lost" \
+                "dispatch=$dispatch_id terminal=$terminal_id"
+        fi
     fi
 
     # --- Input-Mode Guard (IMR-1, IMR-2) — PR-1 ---
@@ -1908,24 +1940,27 @@ process_dispatches() {
         fi
 
         # Validate skill against skills.yaml registry before any terminal operations.
-        # An invalid skill must never advance to delivery — block here before canonial
+        # An invalid skill must never advance to delivery — block here before canonical
         # check or lease acquire so no terminal state is touched for an invalid dispatch.
-        if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
-            local _mapped_skill_pre
-            _mapped_skill_pre="$(map_role_to_skill "$agent_role" 2>/dev/null || echo "$agent_role")"
-            if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$_mapped_skill_pre" >/dev/null 2>&1; then
-                log "V8 ERROR: Skill '@${_mapped_skill_pre}' failed registry validation — blocking dispatch before terminal operations"
-                if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-                    printf '\n\n[SKILL_INVALID] Skill '"'"'@%s'"'"' not found in registry. Update Role and remove this marker to retry.\n' "$_mapped_skill_pre" >> "$dispatch"
-                fi
-                continue
+        # Note: empty/none role already caught by RC-4 guard above, so agent_role is
+        # always non-empty and non-"none" at this point.
+        local _mapped_skill_pre
+        _mapped_skill_pre="$(map_role_to_skill "$agent_role" 2>/dev/null || echo "$agent_role")"
+        if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$_mapped_skill_pre" >/dev/null 2>&1; then
+            log "V8 ERROR: Skill '@${_mapped_skill_pre}' failed registry validation — blocking dispatch before terminal operations"
+            if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+                printf '\n\n[SKILL_INVALID] Skill '"'"'@%s'"'"' not found in registry. Update Role and remove this marker to retry.\n' "$_mapped_skill_pre" >> "$dispatch"
             fi
-            log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
+            continue
         fi
+        log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
 
         # V7.4 INTELLIGENCE: Validate agent if specified
+        # RES-A3 (Contract 140 RC-6): Command failure (non-zero exit) blocks dispatch
+        # with [DEPENDENCY_ERROR]. JSON parse failure is non-fatal — dispatch proceeds
+        # without intelligence data, not blocked.
         if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
-            # Validate agent using intelligence gatherer
+            # Validate agent using intelligence gatherer — command failure blocks dispatch
             local validation_rc=0
             set +e
             validation_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" validate "$agent_role" 2>&1)
@@ -2002,6 +2037,8 @@ process_dispatches() {
             local task_description=$(extract_instruction_content "$dispatch")
 
             # Gather intelligence (convert track letter to terminal ID)
+            # RES-A3: Command failure (rc!=0) blocks dispatch. JSON parse failure
+            # downstream is non-fatal — dispatch proceeds without intelligence data.
             local terminal
             terminal=$(track_to_terminal "$track")
             local intel_rc=0
