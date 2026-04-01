@@ -99,27 +99,40 @@ class TestGateTransitionsToExecuting:
         req_file = gate_env["requests_dir"] / "pr-1-gemini_review.json"
         req_file.write_text(json.dumps(payload), encoding="utf-8")
 
-        # Mock subprocess to return immediately with success
+        # Mock subprocess with binary-mode fd integers
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
-        mock_proc.stdout.read.return_value = "Review complete: no issues"
-        mock_proc.stderr.read.return_value = ""
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = 0
         mock_proc.returncode = 0
         mock_proc.pid = 99999
 
-        # select.select returns stdout as readable, then empty on next call
+        review_output = b'{"summary": "LGTM", "findings": []}\nReview complete: no issues found.\nAll deliverables verified.\n'
+
+        # select returns stdout fd as readable on first call, then proc exits
         call_count = [0]
         def mock_select(rlist, wlist, xlist, timeout=None):
             call_count[0] += 1
             if call_count[0] == 1:
-                return ([mock_proc.stdout], [], [])
+                return ([10], [], [])
             return ([], [], [])
 
+        read_call_count = [0]
+        def mock_os_read(fd, size):
+            read_call_count[0] += 1
+            if fd == 10 and read_call_count[0] == 1:
+                return review_output
+            if fd == 10:
+                return b""
+            return b""
+
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
-             patch("gate_runner.select.select", side_effect=mock_select):
+             patch("gate_runner.select.select", side_effect=mock_select), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=99999):
             result = runner.run(
                 gate="gemini_review",
                 request_payload=payload,
@@ -150,14 +163,19 @@ class TestGateTransitionsToExecuting:
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
-        mock_proc.stdout.read.return_value = "OK"
-        mock_proc.stderr.read.return_value = ""
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = 0
         mock_proc.returncode = 0
         mock_proc.pid = 42
 
+        def mock_os_read(fd, size):
+            return b""
+
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
-             patch("gate_runner.select.select", return_value=([], [], [])):
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=42):
             runner.run(gate="gemini_review", request_payload=payload, pr_number=1)
 
         saved = json.loads(req_file.read_text(encoding="utf-8"))
@@ -243,6 +261,8 @@ class TestTimeoutKill:
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = None  # Never finishes
         mock_proc.pid = 12345
         mock_proc.kill = MagicMock()
@@ -258,9 +278,13 @@ class TestTimeoutKill:
             # Jump time forward to exceed timeout
             return base_time[0] + (call_count[0] * 0.5)
 
+        mock_killpg = MagicMock()
+
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
-             patch("gate_runner.time.monotonic", side_effect=fake_monotonic):
+             patch("gate_runner.time.monotonic", side_effect=fake_monotonic), \
+             patch("gate_runner.os.getpgid", return_value=12345), \
+             patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
                 gate="gemini_review",
                 request_payload=payload,
@@ -270,7 +294,7 @@ class TestTimeoutKill:
         assert result["status"] == "failed"
         assert result["reason"] in ("timeout", "stall")
         assert result["required_reruns"] == ["gemini_review"]
-        mock_proc.kill.assert_called()
+        assert mock_killpg.called or mock_proc.kill.called
 
 
 class TestStallDetection:
@@ -293,6 +317,8 @@ class TestStallDetection:
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = None
         mock_proc.pid = 54321
         mock_proc.kill = MagicMock()
@@ -307,9 +333,13 @@ class TestStallDetection:
             # Stall threshold is 2s, advance by 1s each call
             return base[0] + call_count[0]
 
+        mock_killpg = MagicMock()
+
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
              patch("gate_runner.select.select", return_value=([], [], [])), \
-             patch("gate_runner.time.monotonic", side_effect=fake_monotonic):
+             patch("gate_runner.time.monotonic", side_effect=fake_monotonic), \
+             patch("gate_runner.os.getpgid", return_value=54321), \
+             patch("gate_runner.os.killpg", mock_killpg):
             result = runner.run(
                 gate="gemini_review",
                 request_payload=payload,
@@ -319,7 +349,7 @@ class TestStallDetection:
         assert result["status"] == "failed"
         assert result["reason"] == "stall"
         assert "stall threshold" in result["reason_detail"]
-        mock_proc.kill.assert_called()
+        assert mock_killpg.called or mock_proc.kill.called
 
 
 class TestSkipRationaleAudit:
@@ -380,18 +410,29 @@ class TestArtifactAtomicity:
         bad_report_path = "/nonexistent/path/report.md"
         payload = _make_request_payload(report_path=bad_report_path)
 
+        review_output = b'{"summary": "LGTM", "findings": []}\nReview complete.\nAll clear.\n'
+
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
-        mock_proc.stdout.read.return_value = "Output"
-        mock_proc.stderr.read.return_value = ""
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = 0
         mock_proc.returncode = 0
         mock_proc.pid = 11111
 
+        read_call_count = [0]
+        def mock_os_read(fd, size):
+            read_call_count[0] += 1
+            if fd == 10 and read_call_count[0] == 1:
+                return review_output
+            return b""
+
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
-             patch("gate_runner.select.select", return_value=([], [], [])):
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=11111):
             result = runner.run(
                 gate="gemini_review",
                 request_payload=payload,
@@ -411,18 +452,29 @@ class TestArtifactAtomicity:
 
         payload = _make_request_payload(report_path="")
 
+        review_output = b'{"summary": "LGTM", "findings": []}\nReview complete.\nAll clear.\n'
+
         mock_proc = MagicMock()
         mock_proc.stdin = MagicMock()
         mock_proc.stdout = MagicMock()
         mock_proc.stderr = MagicMock()
-        mock_proc.stdout.read.return_value = "Output"
-        mock_proc.stderr.read.return_value = ""
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
         mock_proc.poll.return_value = 0
         mock_proc.returncode = 0
         mock_proc.pid = 22222
 
+        read_call_count = [0]
+        def mock_os_read(fd, size):
+            read_call_count[0] += 1
+            if fd == 10 and read_call_count[0] == 1:
+                return review_output
+            return b""
+
         with patch("gate_runner.subprocess.Popen", return_value=mock_proc), \
-             patch("gate_runner.select.select", return_value=([], [], [])):
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=22222):
             result = runner.run(
                 gate="gemini_review",
                 request_payload=payload,
