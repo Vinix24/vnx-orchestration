@@ -180,22 +180,41 @@ def _validate_test_claims(claims: Dict[str, Any], project_root: Path) -> List[Ch
     return results
 
 
-def _find_gate_result(gate: str, pr_id: str, results_dir: Path) -> Optional[Dict[str, Any]]:
-    """Search for a gate result file matching the PR and gate name."""
+def _find_gate_result(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+    branch: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Search for a gate result file matching the PR and gate name.
+
+    If ``branch`` is provided, results from a different branch are rejected.
+    If a result carries a ``report_path``, that file must exist on disk or the
+    result is treated as stale and skipped.
+    """
+
+    def _accept(data: Dict[str, Any]) -> bool:
+        if branch and data.get("branch") and data["branch"] != branch:
+            return False
+        return True
+
     pr_slug = pr_id.lower().replace("-", "")
     # Contract-based results: {pr_slug}-{gate}-contract.json
     contract_path = results_dir / f"{pr_slug}-{gate}-contract.json"
     if contract_path.exists():
         try:
-            return json.loads(_read_text(contract_path))
+            data = json.loads(_read_text(contract_path))
+            if _accept(data):
+                return data
         except (json.JSONDecodeError, OSError):
             pass
-    # Legacy pattern: pr-{number}-{gate}.json — scan for matching gate
+    # Legacy pattern: pr-{number}-{gate}.json — require both pr_id AND gate to match
     for path in results_dir.glob(f"*-{gate}*.json"):
         try:
             data = json.loads(_read_text(path))
-            if data.get("pr_id") == pr_id or data.get("gate") == gate:
-                return data
+            if data.get("pr_id") == pr_id and data.get("gate") == gate:
+                if _accept(data):
+                    return data
         except (json.JSONDecodeError, OSError):
             continue
     return None
@@ -342,7 +361,8 @@ def _validate_review_evidence(
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir)
-        if result and result.get("status") in ("pass", "fail"):
+        gate_status = result.get("status") or result.get("verdict") if result else None
+        if result and gate_status in ("pass", "fail"):
             report_path = result.get("report_path", "")
             if not report_path:
                 checks.append(CheckResult(

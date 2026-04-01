@@ -560,6 +560,9 @@ class ReviewGateManager:
                 raise ValueError("contract_hash is required for pass/fail gate results")
             if not payload["report_path"]:
                 raise ValueError("report_path is required for pass/fail gate results")
+            report_file = Path(payload["report_path"])
+            if not report_file.exists():
+                raise ValueError(f"report_path file does not exist: {payload['report_path']}")
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         emit_governance_receipt(
             "review_gate_result",
