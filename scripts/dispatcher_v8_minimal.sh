@@ -114,9 +114,14 @@ _classify_blocked_dispatch() {
             echo "busy true" ;;
         canonical_lease:lease_expired*|recent_*|canonical_check_error:*|terminal_state_unreadable)
             echo "ambiguous true" ;;
+        canonical_check_parse_error|canonical_lease_acquire_failed)
+            # RC-2: canonical_check_parse_error is a transient JSON parse failure
+            # (not a metadata defect) — must be ambiguous, not invalid (contract 140 §2.3).
+            # canonical_lease_acquire_failed is contention, also transient.
+            echo "ambiguous true" ;;
         canonical_lease:*)
             echo "busy true" ;;
-        blocked_input_mode|recovery_failed|pane_dead|probe_failed)
+        blocked_input_mode|recovery_failed|pane_dead|probe_failed|input_mode_blocked)
             # Input-mode blocks: terminal is not busy but pane is non-interactive.
             # Requeue after operator resolves copy/search mode.
             echo "ambiguous true" ;;
