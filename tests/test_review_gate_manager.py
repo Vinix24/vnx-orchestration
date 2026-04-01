@@ -82,7 +82,10 @@ def test_codex_final_gate_blocks_when_required_but_not_available(review_env, mon
 def test_record_result_persists_structured_review_output(review_env, monkeypatch):
     monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
     manager = rgm.ReviewGateManager()
-    report_path = str((review_env / ".vnx-data" / "unified_reports" / "manual-gemini-report.md").resolve())
+    report_file = review_env / ".vnx-data" / "unified_reports" / "manual-gemini-report.md"
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text("# Gemini report\n", encoding="utf-8")
+    report_path = str(report_file.resolve())
 
     payload = manager.record_result(
         gate="gemini_review",
@@ -111,6 +114,9 @@ def test_record_result_canonicalizes_relative_report_path(review_env, monkeypatc
     manager = rgm.ReviewGateManager()
 
     report_rel = ".vnx-data/unified_reports/review.md"
+    report_file = review_env / ".vnx-data" / "unified_reports" / "review.md"
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text("# Review report\n", encoding="utf-8")
     payload = manager.record_result(
         gate="codex_gate",
         pr_number=9,
@@ -141,6 +147,10 @@ def test_record_result_uses_request_report_path_when_report_path_omitted(review_
         changed_files=["scripts/runtime.py"],
         mode="per_pr",
     )["requested"][0]
+
+    # Create the report file that the request reserved
+    Path(requested["report_path"]).parent.mkdir(parents=True, exist_ok=True)
+    Path(requested["report_path"]).write_text("# Gemini headless report\n", encoding="utf-8")
 
     payload = manager.record_result(
         gate="gemini_review",
