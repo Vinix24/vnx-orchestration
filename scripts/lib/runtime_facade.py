@@ -155,7 +155,7 @@ class RuntimeFacade:
         """Aggregate health across terminals. Returns Result with dict."""
         if not self.has_capability(CAPABILITY_SESSION_HEALTH):
             return result_error("unsupported", "SESSION_HEALTH not supported")
-        ids = list(terminal_ids or CANONICAL_TERMINALS)
+        ids = list(CANONICAL_TERMINALS if terminal_ids is None else terminal_ids)
         result = self._adapter.session_health(ids)
         summary = {
             "session_exists": result.session_exists,
