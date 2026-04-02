@@ -27,6 +27,8 @@ DEFAULT_ERROR_EXIT_CODE_MAP: Dict[str, int] = {
     "pr_not_found": EXIT_IO,
     "operation_failed": EXIT_DEPENDENCY,
     "unexpected_error": EXIT_INTERNAL,
+    "invalid_handover": EXIT_VALIDATION,
+    "invalid_resume": EXIT_VALIDATION,
 }
 
 

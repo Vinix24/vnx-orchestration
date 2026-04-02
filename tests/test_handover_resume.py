@@ -29,6 +29,7 @@ from handover_resume import (
     validate_handover,
     validate_resume,
 )
+from result_contract import EXIT_VALIDATION, result_exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -459,3 +460,139 @@ class TestResumeResidualSurvival:
         result = build_resume(**kwargs)
         assert result.ok is True
         assert "bounded context" in result.data["dispatch_context"]["task_specification"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Malformed payload safety (OI-501)
+# ---------------------------------------------------------------------------
+
+class TestMalformedPayloadSafety:
+
+    def test_handover_non_dict_returns_result(self) -> None:
+        result = validate_handover("not a dict")
+        assert result.ok is False
+        assert result.error_code == "invalid_handover"
+
+    def test_handover_none_returns_result(self) -> None:
+        result = validate_handover(None)
+        assert result.ok is False
+
+    def test_handover_list_returns_result(self) -> None:
+        result = validate_handover([1, 2, 3])
+        assert result.ok is False
+
+    def test_handover_files_modified_not_list(self) -> None:
+        result = validate_handover({
+            "dispatch_id": "20260402-120000-t", "pr_id": "PR-1",
+            "track": "B", "gate": "g", "status": "success",
+            "completion_summary": {"what_was_done": "X", "files_modified": "not-a-list"},
+            "evidence": {"verification_method": "none"},
+            "next_action": {"recommended_action": "advance", "reason": "R"},
+            "residual_state": {},
+            "context_for_next": {"critical_context": "C"},
+        })
+        assert result.ok is True  # safe — _safe_get_list returns []
+
+    def test_handover_residual_state_not_dict(self) -> None:
+        result = validate_handover({
+            "dispatch_id": "20260402-120000-t", "pr_id": "PR-1",
+            "track": "B", "gate": "g", "status": "success",
+            "completion_summary": {"what_was_done": "X"},
+            "evidence": {"verification_method": "none"},
+            "next_action": {"recommended_action": "advance", "reason": "R"},
+            "residual_state": "not-a-dict",
+            "context_for_next": {"critical_context": "C"},
+        })
+        assert result.ok is True  # safe — _safe_get_dict returns {}
+
+    def test_resume_non_dict_returns_result(self) -> None:
+        result = validate_resume("not a dict")
+        assert result.ok is False
+        assert result.error_code == "invalid_resume"
+
+    def test_resume_none_returns_result(self) -> None:
+        result = validate_resume(None)
+        assert result.ok is False
+
+    def test_resume_prior_progress_not_dict(self) -> None:
+        result = validate_resume({
+            "resume_type": "rotation",
+            "original_dispatch_id": "20260402-120000-t",
+            "prior_progress": "not-a-dict",
+            "context_snapshot": {},
+            "dispatch_context": {"task_specification": "Do X"},
+        })
+        assert result.ok is False
+        assert "work_remaining" in result.error_msg  # missing because prior is not a dict
+
+
+# ---------------------------------------------------------------------------
+# 8. RS-5 transcript detection (OI-502)
+# ---------------------------------------------------------------------------
+
+class TestRS5TranscriptDetection:
+
+    def test_user_prefix_in_work_completed_rejected(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["work_completed"] = "Previous session:\nUser: Please fix the bug\nAssistant: Sure"
+        result = build_resume(**kwargs)
+        assert result.ok is False
+        assert "RS-5" in result.error_msg
+        assert "work_completed" in result.error_msg
+
+    def test_assistant_prefix_in_task_spec_rejected(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["task_specification"] = "Assistant: I will implement the feature now"
+        result = build_resume(**kwargs)
+        assert result.ok is False
+        assert "RS-5" in result.error_msg
+        assert "task_specification" in result.error_msg
+
+    def test_human_prefix_rejected(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["work_completed"] = "Human: Do the thing\nClaude: OK"
+        result = build_resume(**kwargs)
+        assert result.ok is False
+        assert "RS-5" in result.error_msg
+
+    def test_claude_prefix_in_last_known_state_rejected(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["resume_type"] = "interruption"
+        kwargs["last_known_state"] = "Claude: I was working on the file when interrupted"
+        result = build_resume(**kwargs)
+        assert result.ok is False
+        assert "RS-5" in result.error_msg
+
+    def test_normal_text_with_colon_accepted(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["work_completed"] = "Implemented user authentication: login and logout endpoints"
+        result = build_resume(**kwargs)
+        assert result.ok is True
+
+    def test_work_remaining_transcript_rejected(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["work_remaining"] = "User: finish the tests\nAssistant: will do"
+        result = build_resume(**kwargs)
+        assert result.ok is False
+        assert "RS-5" in result.error_msg
+
+
+# ---------------------------------------------------------------------------
+# 9. Exit code mapping (OI-503)
+# ---------------------------------------------------------------------------
+
+class TestExitCodeMapping:
+
+    def test_invalid_handover_maps_to_exit_validation(self) -> None:
+        kwargs = _valid_handover_kwargs()
+        kwargs["status"] = "invalid"
+        result = build_handover(**kwargs)
+        assert result.ok is False
+        assert result_exit_code(result) == EXIT_VALIDATION
+
+    def test_invalid_resume_maps_to_exit_validation(self) -> None:
+        kwargs = _valid_resume_kwargs()
+        kwargs["resume_type"] = "invalid"
+        result = build_resume(**kwargs)
+        assert result.ok is False
+        assert result_exit_code(result) == EXIT_VALIDATION
