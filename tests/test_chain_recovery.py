@@ -516,13 +516,88 @@ class TestDeferredItemsPersistence:
         snapshot_feature_boundary(
             state_dir, feature_id="PR-0", feature_name="F0",
             status="completed", prs_merged=["PR-0"],
-            deferred_items=[{"id": "D-001", "severity": "warn", "title": "A"}],
+            deferred_items=[{"id": "D-001", "severity": "warn", "title": "A", "reason": "out of scope"}],
         )
         snapshot_feature_boundary(
             state_dir, feature_id="PR-1", feature_name="F1",
             status="completed", prs_merged=["PR-1"],
-            deferred_items=[{"id": "D-002", "severity": "info", "title": "B"}],
+            deferred_items=[{"id": "D-002", "severity": "info", "title": "B", "reason": "low priority"}],
         )
         ledger = json.loads((state_dir / "chain_carry_forward.json").read_text())
         ids = {d["id"] for d in ledger["deferred_items"]}
         assert ids == {"D-001", "D-002"}
+
+    def test_blocker_deferral_raises_error(self, state_dir: Path) -> None:
+        """Contract O-3: blocker-severity items cannot be deferred."""
+        with pytest.raises(ValueError, match="Cannot defer blocker"):
+            snapshot_feature_boundary(
+                state_dir, feature_id="PR-0", feature_name="F0",
+                status="completed", prs_merged=["PR-0"],
+                deferred_items=[{"id": "D-999", "severity": "blocker", "title": "Critical", "reason": "skip"}],
+            )
+
+    def test_deferred_without_reason_raises_error(self, state_dir: Path) -> None:
+        """Contract O-3: deferred items require a reason."""
+        with pytest.raises(ValueError, match="missing required 'reason'"):
+            snapshot_feature_boundary(
+                state_dir, feature_id="PR-0", feature_name="F0",
+                status="completed", prs_merged=["PR-0"],
+                deferred_items=[{"id": "D-100", "severity": "warn", "title": "No reason"}],
+            )
+
+    def test_deferred_items_count_in_feature_summary(self, state_dir: Path) -> None:
+        """Feature summary must reflect deferred_items_count."""
+        deferred = [
+            {"id": "D-001", "severity": "warn", "title": "A", "reason": "later"},
+            {"id": "D-002", "severity": "info", "title": "B", "reason": "low pri"},
+        ]
+        snapshot_feature_boundary(
+            state_dir, feature_id="PR-0", feature_name="F0",
+            status="completed", prs_merged=["PR-0"], deferred_items=deferred,
+        )
+        ledger = json.loads((state_dir / "chain_carry_forward.json").read_text())
+        assert ledger["feature_summaries"][0]["deferred_items_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: Codex round 2 — blocker findings in carry-forward block advancement
+# ---------------------------------------------------------------------------
+
+class TestBlockerFindingsBlockAdvancement:
+    def test_blocker_finding_blocks_advancement(self, state_dir: Path) -> None:
+        """Carry-forward with blocker finding + certified gates → can_advance must be False."""
+        from chain_state_projection import compute_advancement_truth
+        # Write carry-forward with a blocker finding
+        cf = {
+            "chain_id": "test",
+            "findings": [{"id": "F-001", "severity": "blocker", "resolution_status": "open"}],
+            "open_items": [], "deferred_items": [], "residual_risks": [], "feature_summaries": [],
+        }
+        (state_dir / "chain_carry_forward.json").write_text(json.dumps(cf))
+        # Write passing gate results
+        (state_dir / "review_gates" / "results").mkdir(parents=True, exist_ok=True)
+        for gate in ("gemini_review", "codex_gate"):
+            (state_dir / "review_gates" / "results" / f"pr-1-{gate}.json").write_text(json.dumps({
+                "gate": gate, "status": "approve", "contract_hash": "abc", "blocking_count": 0
+            }))
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(pr_queue, [], state_dir, "PR-1")
+        assert result["can_advance"] is False
+        assert any("blocker finding" in b for b in result["blockers"])
+
+    def test_resolved_blocker_finding_does_not_block(self, state_dir: Path) -> None:
+        from chain_state_projection import compute_advancement_truth
+        cf = {
+            "chain_id": "test",
+            "findings": [{"id": "F-001", "severity": "blocker", "resolution_status": "resolved"}],
+            "open_items": [], "deferred_items": [], "residual_risks": [], "feature_summaries": [],
+        }
+        (state_dir / "chain_carry_forward.json").write_text(json.dumps(cf))
+        (state_dir / "review_gates" / "results").mkdir(parents=True, exist_ok=True)
+        for gate in ("gemini_review", "codex_gate"):
+            (state_dir / "review_gates" / "results" / f"pr-1-{gate}.json").write_text(json.dumps({
+                "gate": gate, "status": "approve", "contract_hash": "abc", "blocking_count": 0
+            }))
+        pr_queue = {"prs": [{"id": "PR-1", "status": "completed", "dependencies": []}]}
+        result = compute_advancement_truth(pr_queue, [], state_dir, "PR-1")
+        assert result["can_advance"] is True
