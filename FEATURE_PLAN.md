@@ -1,58 +1,59 @@
-# Feature: Multi-Feature Autonomy Hardening And Chain Recovery
+# Feature: Context Injection And Handover Quality
 
-**Feature-ID**: Feature 14
+**Feature-ID**: Feature 15
 **Status**: Planned
 **Priority**: P1
-**Branch**: `feature/multi-feature-autonomy-hardening-and-chain-recovery`
+**Branch**: `feature/context-injection-and-handover-quality`
 **Risk-Class**: high
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 
 Primary objective:
-Make unattended multi-feature execution reliable enough that T0 can chain several features in sequence with deterministic resume, requeue, transition, and carry-forward behavior.
+Improve context injection, handover quality, and resume fidelity so autonomous coding runs receive the right amount of context, waste fewer tokens, and require fewer T0 redispatches.
 
 Execution context:
-- direct follow-on after Feature 12 and Feature 13
-- maps primarily to Roadmap M2: Multi-Feature Autonomy Hardening
-- assumes runtime truth and first operator visibility already exist and now need to be exploited for longer unattended chains
+- intended follow-on after Feature 14 chain hardening
+- maps primarily to Roadmap M3: Intelligence And Context Injection Upgrade
+- assumes runtime truth, operator visibility, and chain carry-forward are already available and can now feed better context selection
 
 Execution preconditions:
-- both Gemini and Codex headless gates must be proven end-to-end on current `main` before this feature starts
+- Feature 14 chain hardening baseline must be merged first
+- both Gemini and Codex headless gates must remain operational on current `main` throughout this feature
 - no provider-disabled or `not_executable` steady-state is acceptable for this feature family
-- Feature 12 and Feature 13 must already be merged and reflected in the active baseline used for chain advancement
+- interface-only Runtime Adapter work may overlap only if T0 explicitly documents that no M3 deliverable is forced to rework around it
 
 Review gate policy:
 - Gemini headless review is required on every PR in this feature
-- Codex headless final gate is required on every PR in this feature because chain reliability is merge-critical
+- Codex headless final gate is required on every PR in this feature because prompt quality and resume reliability directly affect autonomous chain success
 - no PR in this feature may proceed under provider-disabled waiver language for Gemini or Codex
 - every PR in this feature must be opened as a GitHub PR before merge consideration
 - no downstream PR may be promoted until the upstream PR is merged from green GitHub CI on updated `main`
 
 ## Problem Statement
 
-Even with stronger runtime truth and dashboard visibility, unattended multi-feature execution can still break at chain boundaries:
-- resume and requeue decisions can drift across features
-- branch/worktree transitions can silently degrade if a new feature starts from the wrong baseline
-- carry-forward findings can be lost or re-discovered instead of being promoted into the next feature
-- chain recovery after a mid-run interruption can become ad hoc rather than governed
+Autonomous coding still loses efficiency and coherence when context is too broad, too stale, or too weakly structured:
+- workers can receive more history than they need and still miss the critical detail
+- resumes and handovers can force T0 to redispatch because the next actor did not receive enough bounded context
+- repeated failures and useful outcomes are not yet transformed into reusable context signals cleanly enough
+- longer chains will remain noisy if context selection stays implicit and unmeasured
 
 ## Design Goal
 
-Create a governed chain-execution model in which multi-feature runs can pause, resume, requeue, and advance deterministically while preserving worktree discipline, open-item continuity, and feature-by-feature evidence.
+Create a bounded, measurable context-injection and handover system that improves worker relevance, reduces prompt waste, and raises first-pass resume acceptance in autonomous coding flows.
 
 ## Non-Goals
 
-- no broad business-domain manager/worker rollout
-- no full runtime transport rewrite
-- no major dashboard redesign beyond the state already provided by Feature 13
-- no attempt to solve general long-term memory or broad learning-loop intelligence in this feature
+- no broad local-LLM housekeeping layer in this feature
+- no semantic-search platform rewrite
+- no cross-domain business preference system rollout
+- no runtime transport rearchitecture here
 
 ## Delivery Discipline
 
 - each PR must have a GitHub PR with clear scope and linked feature name before merge
 - required GitHub Actions checks must be green before human merge
 - dependent PRs must branch from post-merge `main`, not from stale local branches
-- no chain hardening PR may merge against ambiguous runtime semantics or unverified dashboard truth from Features 12 and 13
+- context-improvement claims must be backed by measurable evidence, not intuition
 - final certification must update the internal planning progress docs in `docs/internal/plans/`
 
 ## Dependency Flow
@@ -65,7 +66,7 @@ PR-2 -> PR-3
 PR-3 -> PR-4
 ```
 
-## PR-0: Multi-Feature Chain Contract And Recovery Policy
+## PR-0: Context Injection And Handover Contract
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -76,34 +77,34 @@ PR-3 -> PR-4
 **Dependencies**: []
 
 ### Description
-Define the canonical chain lifecycle for multi-feature execution: advancement conditions, resume and requeue policy, branch/worktree transition rules, and carry-forward evidence requirements.
+Define the bounded-context contract, handover structure, and measurable acceptance targets for context injection and resume quality.
 
 ### Scope
-- define the chain state model from feature start through feature advancement and chain close
-- define resume-safe vs resume-unsafe conditions between features
-- define when a failed feature attempt is requeued vs blocked vs escalated
-- define branch/worktree advancement rules from merged `main`
-- define carry-forward rules for findings, open items, and residual risks
+- define the canonical context bundle structure for autonomous coding dispatches
+- define what belongs in mandatory context vs optional supporting context
+- define handover and resume payload structure
+- define measurable success criteria for context waste and resume acceptance
+- define stale-context rejection rules
 
 ### Deliverables
-- multi-feature chain execution contract
-- chain recovery and requeue policy
-- branch/worktree advancement rules
+- context injection contract
+- handover and resume payload contract
+- measurement contract for context waste and resume acceptance
 - GitHub PR with contract summary and acceptance notes
 
 ### Success Criteria
-- chain progression semantics are explicit and finite
-- resume and requeue decisions are governed instead of ad hoc
-- branch/worktree transition discipline is locked before implementation
-- carry-forward behavior is explicit and auditable
+- context selection rules are explicit and bounded
+- handover structure is standardized before implementation starts
+- measurement targets are locked before optimization begins
+- stale-context reuse becomes an explicit defect class
 
 ### Quality Gate
-`gate_pr0_chain_contract_and_recovery_policy`:
-- [ ] Contract defines chain states, advancement rules, and stop conditions
-- [ ] Contract defines resume-safe and resume-unsafe conditions between features
-- [ ] Contract defines deterministic requeue vs block vs escalation behavior
-- [ ] Contract defines branch/worktree transition rules from merged `main`
-- [ ] Contract defines carry-forward rules for findings, open items, and residual risk
+`gate_pr0_context_and_handover_contract`:
+- [ ] Contract defines bounded context bundle structure for autonomous coding dispatches
+- [ ] Contract defines mandatory vs optional context components
+- [ ] Contract defines standardized handover and resume payload structure
+- [ ] Contract defines measurable acceptance targets for context waste and resume quality
+- [ ] Contract defines stale-context rejection rules
 - [ ] GitHub PR exists with feature-linked summary and acceptance notes
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
@@ -111,7 +112,7 @@ Define the canonical chain lifecycle for multi-feature execution: advancement co
 
 ---
 
-## PR-1: Chain State Projection And Feature Advancement Truth
+## PR-1: Context Selection And Budget Enforcement
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
@@ -122,130 +123,128 @@ Define the canonical chain lifecycle for multi-feature execution: advancement co
 **Dependencies**: [PR-0]
 
 ### Description
-Implement a canonical chain-state projection so T0 and operators can see which feature is active, what the next feature is, and whether the chain is truly safe to advance.
+Implement deterministic context selection and budget enforcement so autonomous dispatches include the right evidence, history, and carry-forward signals without bloating prompts.
 
 ### Scope
-- add chain state projection for current feature, next feature, blocked feature, and recovery-needed states
-- derive advancement truth from merged feature state plus certification status
-- expose carry-forward findings and unresolved chain items in the chain state surface
-- add tests for advancement, blocked, and recovery-needed states
+- implement bounded context assembly against explicit budget targets
+- include high-value carry-forward evidence while excluding stale or irrelevant history
+- enforce mandatory context components and rejection of stale-context inputs
+- add tests for budget enforcement and stale-context rejection
 
 ### Deliverables
-- chain state projection layer
-- feature advancement truth logic
-- chain-state tests
-- GitHub PR with state evidence summary
+- bounded context assembly implementation
+- context budget enforcement
+- stale-context rejection checks
+- GitHub PR with context-selection evidence summary
 
 ### Success Criteria
-- chain progression truth is queryable from one stable surface
-- feature advancement does not rely on implicit operator memory
-- unresolved chain items are visible before the next feature starts
-- tests cover blocked and recovery-needed paths
+- context injection stays within explicit budget boundaries
+- stale or irrelevant context is blocked from entering validated dispatch paths
+- high-value carry-forward evidence remains present under test
+- context selection becomes deterministic enough to review and certify
 
 ### Quality Gate
-`gate_pr1_chain_state_projection`:
-- [ ] All chain-state projection tests pass
-- [ ] Current feature, next feature, blocked, and recovery-needed states are distinguishable under test
-- [ ] Advancement truth requires merged certification state and does not rely on ad hoc operator memory
-- [ ] Carry-forward findings and unresolved chain items are visible in the chain state surface
-- [ ] GitHub PR exists with implementation and evidence summary
+`gate_pr1_context_selection_and_budget_enforcement`:
+- [ ] All context selection and budget tests pass
+- [ ] Validated dispatch path enforces explicit context budget boundaries under test
+- [ ] Stale-context inputs are rejected under test
+- [ ] Carry-forward evidence remains included when required under test
+- [ ] GitHub PR exists with context-selection evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-2: Resume, Requeue, And Branch/Worktree Transition Enforcement
+## PR-2: Handover And Resume Payload Quality Enforcement
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 3-5 hours
+**Estimated Time**: 2-4 hours
 **Dependencies**: [PR-1]
 
 ### Description
-Implement chain-safe resume, requeue, and feature-transition enforcement so interrupted or failed chains recover deterministically instead of degenerating into duplicated or stale execution.
+Implement standardized handover and resume payload generation so downstream workers or T0 reviews receive enough structured context to continue without immediate redispatch.
 
 ### Scope
-- enforce resume-safe vs resume-unsafe decisions using canonical chain state
-- enforce deterministic requeue policy for recoverable feature interruptions
-- block chain advancement when next-feature branch/worktree is not derived from merged `main`
-- preserve carry-forward feature context needed for the next feature dispatch
-- add tests for interrupted chains, stale branch starts, and recovery requeue paths
+- implement standardized handover payload generation
+- implement resume payload generation for interrupted or resumed work
+- enforce required fields for status, next action, evidence, residual risks, and open items
+- add tests for handover completeness and resume fidelity
 
 ### Deliverables
-- chain resume and requeue enforcement
-- branch/worktree transition guard
-- carry-forward context handoff for next feature creation
-- GitHub PR with recovery-path evidence summary
+- handover payload generation
+- resume payload generation
+- completeness and fidelity tests
+- GitHub PR with handover-quality evidence summary
 
 ### Success Criteria
-- interrupted chains can resume or requeue deterministically
-- next-feature branch creation cannot silently drift from the merged baseline
-- recoverable interruptions do not force full manual re-orchestration
-- chain carry-forward remains intact across transitions
+- handovers are structured enough for downstream actors to continue coherently
+- resumes contain enough actionable context to avoid avoidable redispatches
+- required residual risks and open items survive into handovers under test
+- handover quality becomes deterministic rather than stylistic
 
 ### Quality Gate
-`gate_pr2_chain_resume_requeue_and_transition_enforcement`:
-- [ ] All chain recovery and transition tests pass
-- [ ] Resume-safe and resume-unsafe paths are enforced from canonical chain state under test
-- [ ] Recoverable interruptions requeue deterministically instead of collapsing into manual ad hoc recovery
-- [ ] Next-feature branch/worktree transition is blocked when not derived from merged `main`
-- [ ] Carry-forward feature context persists into the next feature under test
-- [ ] GitHub PR exists with recovery-path evidence summary
+`gate_pr2_handover_and_resume_quality`:
+- [ ] All handover and resume quality tests pass
+- [ ] Standardized handover payload includes required status, next-action, evidence, residual-risk, and open-item fields under test
+- [ ] Resume payload contains enough context to continue without immediate redispatch in validated scenarios under test
+- [ ] Required residual risks and open items survive into handover and resume payloads under test
+- [ ] GitHub PR exists with handover-quality evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-3: Chain-Level Findings Carry-Forward And Residual Governance
-**Track**: C
+## PR-3: Outcome Signals And Reusable Context Inputs
+**Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
-**Skill**: @quality-engineer
-**Requires-Model**: opus
+**Skill**: @data-analyst
+**Requires-Model**: sonnet
 **Estimated Time**: 2-4 hours
 **Dependencies**: [PR-2]
 
 ### Description
-Certify that chain-level findings, residual risks, and new open items survive across feature boundaries and remain visible until properly closed or deliberately carried forward.
+Promote repeated outcomes, prior failures, and useful chain evidence into reusable context inputs so future dispatches and resumes draw from validated signals instead of undifferentiated history.
 
 ### Scope
-- verify carry-forward of findings from one feature into the next feature’s planning and closeout context
-- verify unresolved chain-created open items remain visible and cumulative
-- verify chain stop conditions remain explicit when blocking findings persist
-- produce a chain-level residual governance model for final certification
+- identify and surface reusable outcome signals from receipts, open items, and recent chain history
+- distinguish reusable signals from stale narrative history
+- expose reusable context inputs to the bounded context assembler
+- add tests for reusable-signal inclusion and stale-history exclusion
 
 ### Deliverables
-- chain carry-forward certification evidence
-- cumulative open-item and residual-risk verification
-- residual governance summary for multi-feature runs
-- GitHub PR with chain-governance evidence summary
+- reusable outcome-signal extraction
+- reusable context input surface
+- signal-selection tests
+- GitHub PR with reusable-signal evidence summary
 
 ### Success Criteria
-- chain findings do not disappear between features
-- unresolved chain-created items remain visible until closed or explicitly deferred
-- chain stop conditions remain operator-readable and auditable
-- final certification can explain what was carried forward and why
+- useful repeated outcomes can be reused without dragging full old transcripts into the prompt
+- stale narrative history is excluded where reusable structured signals exist
+- context assembly quality improves through stronger inputs, not broader prompts
+- learning-loop groundwork is improved without introducing heavy ML scope
 
 ### Quality Gate
-`gate_pr3_chain_findings_carry_forward`:
-- [ ] All chain carry-forward certification tests pass
-- [ ] Findings persist across feature boundaries under test
-- [ ] Unresolved chain-created open items remain cumulative and visible under test
-- [ ] Blocking findings keep the chain in an explicit stop state under test
-- [ ] GitHub PR exists with chain-governance evidence summary
+`gate_pr3_reusable_context_inputs`:
+- [ ] All reusable-signal tests pass
+- [ ] Reusable outcome signals are available to the context assembler under test
+- [ ] Stale narrative history is excluded when reusable structured signals exist under test
+- [ ] Context assembly uses stronger reusable inputs without uncontrolled prompt growth under test
+- [ ] GitHub PR exists with reusable-signal evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-4: Multi-Feature Autonomous Chain Certification
+## PR-4: Context And Resume Quality Certification
 **Track**: C
 **Priority**: P1
 **Complexity**: High
@@ -256,41 +255,58 @@ Certify that chain-level findings, residual risks, and new open items survive ac
 **Dependencies**: [PR-3]
 
 ### Description
-Run and certify a governed unattended multi-feature chain using the new recovery, advancement, and carry-forward rules, proving that several features can execute in sequence without T0 babysitting every boundary.
+Certify that bounded context injection and structured handovers materially improve autonomous coding flow quality, reduce prompt waste, and lower immediate redispatch rates.
 
 ### Scope
-- execute a chained multi-feature run using the new chain-state and recovery rules
-- verify advancement only occurs after merged green-CI feature completion
-- verify interruption and recovery behavior under at least one recoverable disruption
+- measure bounded context waste on the validated dispatch path
+- measure resume and handover acceptance on sampled autonomous coding scenarios
+- verify stale-context rejection and reusable-signal inclusion in certification scenarios
 - update `docs/internal/plans/CHANGELOG.md` with feature-closeout summary and next-step recommendation
-- update `docs/internal/plans/PROJECT_STATUS.md` with the new chain-capable baseline and remaining next-order steps
+- update `docs/internal/plans/PROJECT_STATUS.md` with the improved context-quality baseline and remaining next-order steps
 - require Gemini review and Codex final gate on the certification PR
 
 ### Deliverables
-- chain certification report
-- evidence for advancement, interruption, recovery, and carry-forward behavior
-- sequencing audit for GitHub PR progression and green-CI compliance
+- context and resume certification report
+- measured evidence for context budget efficiency and resume acceptance
+- stale-context and reusable-signal certification evidence
 - updated internal planning changelog
 - updated internal planning project status
 
 ### Success Criteria
-- a multi-feature chain can advance with materially less operator babysitting
-- recoverable chain interruption no longer destroys chain continuity
-- carry-forward findings remain visible and cumulative across the certified run
-- both Gemini and Codex gates execute successfully on the certified chain PRs
+- bounded context waste remains under the accepted threshold on the validated path
+- resumes and handovers are accepted without immediate redispatch in the targeted share of sampled review cases
+- context quality is measurably better, not just qualitatively preferred
+- both Gemini and Codex gates execute successfully on the certification PR
 - this feature closes with zero unresolved chain-created open items
 
 ### Quality Gate
-`gate_pr4_multi_feature_chain_certification`:
-- [ ] All multi-feature chain certification tests pass
-- [ ] Certified chain evidence shows advancement only after merged green-CI feature completion
-- [ ] Recoverable chain interruption and recovery behavior are proven under test
-- [ ] Carry-forward findings remain visible across the certified run
+`gate_pr4_context_and_resume_certification`:
+- [ ] All context and resume certification tests pass
+- [ ] Bounded context waste remains under 20 percent of total dispatch prompt budget on the validated path under test
+- [ ] Resumes and handovers are accepted without immediate redispatch in at least 80 percent of sampled review cases
+- [ ] Stale-context rejection and reusable-signal inclusion are proven in certification scenarios
 - [ ] Gemini and Codex both execute to terminal success on the certification path with request, result, and report artifacts present
 - [ ] `docs/internal/plans/CHANGELOG.md` is updated with feature-closeout progress and next recommended order
-- [ ] `docs/internal/plans/PROJECT_STATUS.md` is updated with the new chain-capable baseline
+- [ ] `docs/internal/plans/PROJECT_STATUS.md` is updated with the new context-quality baseline
 - [ ] Feature closes with zero unresolved chain-created open items
 - [ ] GitHub PR exists with certification evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+
+### Post-Merge Continuation
+If this certification PR merges cleanly and no feature-level blockers remain, T0 must
+auto-continue into the next feature in the chain rather than waiting for a new human
+kickoff prompt.
+
+Required continuation sequence:
+1. Close Feature 15 in the queue and confirm no unresolved blocker open items remain.
+2. Perform chain-boundary runtime cleanup / stale-lease reconciliation.
+3. Materialize Feature 16 into root `FEATURE_PLAN.md`.
+4. Reinitialize `PR_QUEUE.md` from the new plan.
+5. Run kickoff preflight for `PR-0`.
+6. Promote exactly one kickoff dispatch for Feature 16.
+7. Continue normal orchestration from the new queue state.
+
+Next feature to start automatically:
+- Feature 16: Runtime Adapter Formalization And Headless Transport Abstraction

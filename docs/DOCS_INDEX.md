@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-03-29
+**Last Updated**: 2026-04-02
 
 ---
 
@@ -29,6 +29,7 @@
 - Headless run contract: `HEADLESS_RUN_CONTRACT.md`
 - Multi-feature chain contract: `MULTI_FEATURE_CHAIN_CONTRACT.md`
 - Chain residual governance: `CHAIN_RESIDUAL_GOVERNANCE.md`
+- Context injection and handover: `CONTEXT_INJECTION_CONTRACT.md`
 
 ### Technical Deep Dives
 - Intelligence system (v4.0 — code + doc ingestion + governance): `core/technical/INTELLIGENCE_SYSTEM.md`
