@@ -2,11 +2,8 @@
 """VNX tmux Adapter — RuntimeAdapter implementation for tmux-based terminals.
 
 Decouples dispatch identity from tmux mechanics. Primary path sends
-`load-dispatch <dispatch_id>` via send-keys. Legacy fallback uses
-paste-buffer. All operations recorded as coordination events.
-
+`load-dispatch <dispatch_id>` via send-keys. Legacy fallback uses paste-buffer.
 Feature flags: VNX_TMUX_ADAPTER_ENABLED, VNX_ADAPTER_PRIMARY.
-Pane resolution via panes.json (adapter state only, A-R3).
 """
 
 from __future__ import annotations
