@@ -272,7 +272,7 @@ def build_carry_forward_summary(
     ]
     live_unresolved = [
         item for item in open_items
-        if str(item.get("status", "")).lower() not in {"done", "closed", "resolved"}
+        if str(item.get("status", "")).lower() not in {"done", "closed", "resolved", "wontfix"}
     ]
     live_blockers = [i for i in live_unresolved if str(i.get("severity", "")).lower() == "blocker"]
 
@@ -294,7 +294,7 @@ def _build_unresolved_chain_items(
     open_items: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Return all carry-forward and live open items that are not yet resolved."""
-    resolved = {"done", "closed", "resolved"}
+    resolved = {"done", "closed", "resolved", "wontfix"}
     unresolved: List[Dict[str, Any]] = []
     for item in carry_forward.get("open_items") or []:
         if str(item.get("status", "")).lower() not in resolved:

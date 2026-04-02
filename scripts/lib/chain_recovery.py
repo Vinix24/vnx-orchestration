@@ -287,7 +287,7 @@ def check_branch_baseline(
 
     try:
         actual_merge_base = run([
-            "git", "-C", repo_root, "merge-base", feature_branch, "HEAD"
+            "git", "-C", repo_root, "merge-base", feature_branch, "main"
         ])
     except RuntimeError as exc:
         return BaselineCheckResult(
@@ -299,7 +299,6 @@ def check_branch_baseline(
         )
 
     if not expected_main_sha:
-        # No expected SHA recorded — accept any merge-base (bootstrap case)
         return BaselineCheckResult(
             is_valid=True,
             feature_branch=feature_branch,
@@ -308,7 +307,8 @@ def check_branch_baseline(
             reason="no expected SHA recorded — baseline accepted",
         )
 
-    # Normalize: compare full or prefix-matched SHAs
+    # S-2: merge-base must be equal to OR a descendant of the expected SHA.
+    # Check equality first (prefix match), then check --is-ancestor.
     expected_norm = expected_main_sha.strip().lower()
     actual_norm = actual_merge_base.strip().lower()
     min_len = min(len(expected_norm), len(actual_norm), 40)
@@ -321,6 +321,19 @@ def check_branch_baseline(
             actual_merge_base=actual_merge_base,
             reason="branch baseline matches expected main SHA",
         )
+
+    # Check if expected SHA is an ancestor of actual merge-base (descendant case)
+    try:
+        run(["git", "-C", repo_root, "merge-base", "--is-ancestor", expected_main_sha, actual_merge_base])
+        return BaselineCheckResult(
+            is_valid=True,
+            feature_branch=feature_branch,
+            expected_main_sha=expected_main_sha,
+            actual_merge_base=actual_merge_base,
+            reason="merge-base is a descendant of expected main SHA — baseline valid",
+        )
+    except RuntimeError:
+        pass
 
     return BaselineCheckResult(
         is_valid=False,
@@ -426,6 +439,7 @@ def snapshot_feature_boundary(
     gate_results: Optional[Dict[str, str]] = None,
     findings: Optional[List[Dict[str, Any]]] = None,
     open_items: Optional[List[Dict[str, Any]]] = None,
+    deferred_items: Optional[List[Dict[str, Any]]] = None,
     residual_risks: Optional[List[Dict[str, Any]]] = None,
     requeue_count: int = 0,
 ) -> Dict[str, Any]:
@@ -438,6 +452,7 @@ def snapshot_feature_boundary(
     now = _now_iso()
     safe_findings = findings or []
     safe_items = open_items or []
+    safe_deferred = deferred_items or []
     safe_risks = residual_risks or []
 
     for f in safe_findings:
@@ -447,6 +462,12 @@ def snapshot_feature_boundary(
         ledger["findings"].append(entry)
 
     _accumulate_open_items(ledger, safe_items, feature_id, now)
+
+    for item in safe_deferred:
+        entry = dict(item)
+        entry.setdefault("origin_feature", feature_id)
+        entry.setdefault("deferred_at", now)
+        ledger["deferred_items"].append(entry)
 
     for risk in safe_risks:
         entry = dict(risk)
@@ -476,7 +497,7 @@ def build_next_feature_context(
 
     unresolved_items = [
         i for i in ledger.get("open_items") or []
-        if str(i.get("status", "")).lower() not in {"done", "closed", "resolved"}
+        if str(i.get("status", "")).lower() not in {"done", "closed", "resolved", "wontfix"}
     ]
     blocker_items = [i for i in unresolved_items if str(i.get("severity", "")).lower() == "blocker"]
     warn_items = [i for i in unresolved_items if str(i.get("severity", "")).lower() == "warn"]
