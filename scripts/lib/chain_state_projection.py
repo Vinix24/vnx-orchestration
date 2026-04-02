@@ -11,7 +11,7 @@ This module provides the single queryable surface for:
     AND gate certification — not implicit operator memory)
   - Carry-forward findings and unresolved chain items
 
-State files (relative to $VNX_DATA_DIR/state/ unless overridden):
+State files (all located under $VNX_STATE_DIR, typically $VNX_DATA_DIR/vnx-state):
   chain_state.json            current chain state record
   chain_carry_forward.json    cumulative carry-forward ledger
   chain_audit.jsonl           append-only state transition audit trail
