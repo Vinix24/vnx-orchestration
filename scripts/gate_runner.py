@@ -82,6 +82,8 @@ class GateRunner:
         prompt = request_payload.get("prompt", "")
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
+        elif not prompt and gate == "codex_gate":
+            prompt = self._build_codex_prompt(request_payload)
 
         # Ensure prompt is in request_payload for contract_hash fallback
         if prompt and "prompt" not in request_payload:
@@ -178,8 +180,9 @@ class GateRunner:
             }
 
         try:
-            if prompt and proc.stdin:
-                proc.stdin.write(prompt.encode("utf-8"))
+            if proc.stdin:
+                if prompt:
+                    proc.stdin.write(prompt.encode("utf-8"))
                 proc.stdin.close()
 
             stdout_fd = proc.stdout.fileno() if proc.stdout else -1
@@ -688,6 +691,19 @@ class GateRunner:
         branch = request_payload.get("branch", "")
         risk = request_payload.get("risk_class", "medium")
         return f"Review the following changes on branch {branch} (risk: {risk}):\nFiles: {', '.join(files)}\n"
+
+    @staticmethod
+    def _build_codex_prompt(request_payload: Dict[str, Any]) -> str:
+        """Build a review prompt for codex gate when no prompt is present."""
+        files = request_payload.get("changed_files", [])
+        branch = request_payload.get("branch", "")
+        risk = request_payload.get("risk_class", "medium")
+        pr = request_payload.get("pr_number", "")
+        return (
+            f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
+            f"Changed files: {', '.join(files)}\n"
+            f"Read each file and provide a structured code review with findings.\n"
+        )
 
     @staticmethod
     def verify_artifact_consistency(
