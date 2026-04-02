@@ -273,3 +273,50 @@ class TestDirectCouplingFreeze:
             if "subprocess" in line and "tmux" in line and not line.lstrip().startswith("#")
         ]
         assert len(tmux_calls) >= 1, "TmuxAdapter must contain tmux subprocess calls"
+
+
+# ---------------------------------------------------------------------------
+# 8. tmux-missing guard (OI-569)
+# ---------------------------------------------------------------------------
+
+class TestTmuxMissingGuard:
+    """All non-delivery methods return error results when tmux is absent."""
+
+    def test_stop_without_tmux(self, adapter: TmuxAdapter) -> None:
+        with patch("tmux_adapter._tmux_available", return_value=False):
+            result = adapter.stop("T0")
+            assert result.success is True
+            assert result.was_running is False
+            assert result.error == "tmux not available"
+
+    def test_attach_without_tmux(self, adapter: TmuxAdapter) -> None:
+        with patch("tmux_adapter._tmux_available", return_value=False):
+            result = adapter.attach("T0")
+            assert result.success is False
+            assert result.error == "tmux not available"
+
+    def test_observe_without_tmux(self, adapter: TmuxAdapter) -> None:
+        with patch("tmux_adapter._tmux_available", return_value=False):
+            result = adapter.observe("T0")
+            assert result.exists is False
+            assert result.error == "tmux not available"
+
+    def test_inspect_without_tmux(self, adapter: TmuxAdapter) -> None:
+        with patch("tmux_adapter._tmux_available", return_value=False):
+            result = adapter.inspect("T0")
+            assert result.exists is False
+            assert result.error == "tmux not available"
+
+    def test_health_without_tmux(self, adapter: TmuxAdapter) -> None:
+        with patch("tmux_adapter._tmux_available", return_value=False):
+            result = adapter.health("T0")
+            assert result.healthy is False
+            assert result.error == "tmux not available"
+
+    def test_session_health_without_tmux(self, adapter: TmuxAdapter) -> None:
+        with patch("tmux_adapter._tmux_available", return_value=False):
+            result = adapter.session_health(["T0", "T1"])
+            assert result.session_exists is False
+            assert len(result.degraded_terminals) == 2
+            for tid in ("T0", "T1"):
+                assert result.terminals[tid].error == "tmux not available"
