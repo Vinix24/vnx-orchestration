@@ -25,7 +25,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 from context_assembler import (
     BUDGET_HARD_LIMIT_RATIO,
     BUDGET_TARGET_RATIO,
+    CHAIN_POSITION_TOKEN_LIMIT,
     INTELLIGENCE_CHAR_LIMIT,
+    INTELLIGENCE_CLASS_PRIORITY,
+    OPEN_ITEMS_TOKEN_LIMIT,
+    PRIOR_PR_TOKEN_LIMIT,
+    REUSABLE_SIGNALS_TOKEN_LIMIT,
     TRIM_ORDER,
     ContextAssembler,
     ContextBundle,
@@ -181,17 +186,18 @@ class TestBudgetEnforcement:
     def test_large_overhead_triggers_trimming(self) -> None:
         asm = _make_assembler()
         _add_mandatory(asm)
-        # Add massive P5, P6, P7 to blow budget
+        # Add components at their limits to blow aggregate budget
+        # Each component stays under its individual limit but combined they exceed 25%
         asm.add_prior_pr_evidence(
-            [{"severity": "warn", "description": _bloat_content(3000)}],
+            [{"severity": "warn", "description": _bloat_content(3500)}],
             source_updated_at=NOW,
         )
         asm.add_open_items_digest(
-            [{"severity": "warn", "title": _bloat_content(2000), "status": "open"}],
+            [{"severity": "warn", "title": _bloat_content(1800), "status": "open"}],
             source_updated_at=NOW,
         )
         asm.add_reusable_signals(
-            [{"type": "outcome", "content": _bloat_content(2000)}],
+            [{"type": "outcome", "content": _bloat_content(1800)}],
             source_updated_at=NOW,
         )
         result = asm.assemble()
@@ -201,29 +207,17 @@ class TestBudgetEnforcement:
         assert bundle.overhead_ratio <= BUDGET_HARD_LIMIT_RATIO
 
     def test_budget_hard_limit_rejects_when_untrimable(self) -> None:
-        """If P3 alone exceeds 25%, assembly fails even after trimming all optional."""
+        """If P3 alone exceeds its component limit, add_chain_position rejects it."""
         asm = _make_assembler()
-        # Small mandatory content
-        asm.add_dispatch_identity(
-            dispatch_id="20260402-120000-t", pr_id="PR-1",
-            track="B", gate="g", feature_name="F",
-        )
-        asm.add_task_specification(
-            skill_command="/t", task_description="D.",
-            deliverables=["D"], success_criteria=["C"],
-            quality_gate_checklist=[],
-        )
-        # Massive P3 that will dominate budget
-        asm.add_chain_position(
+        result = asm.add_chain_position(
             current_feature_index=0, total_features=2,
             carry_forward_summary={"blocker_count": 0, "warn_count": 0, "deferred_count": 0, "residual_risk_count": 0},
             blocking_items=[{"severity": "blocker", "title": _bloat_content(5000)}],
             dependency_status=_bloat_content(5000),
             source_updated_at=NOW,
         )
-        result = asm.assemble()
         assert result.ok is False
-        assert result.error_code == "budget_exceeded"
+        assert result.error_code == "component_too_large"
 
     def test_overhead_excludes_p0_p1_p2(self) -> None:
         """P0, P1, P2 do not count toward overhead."""
@@ -423,9 +417,9 @@ class TestCarryForwardInclusion:
             blocking_items=[], dependency_status="ok",
             source_updated_at=NOW,
         )
-        # Add bloated optional components to trigger trimming
+        # Add optional components near their limits to trigger trimming
         asm.add_reusable_signals(
-            [{"type": "outcome", "content": _bloat_content(3000)}],
+            [{"type": "outcome", "content": _bloat_content(1800)}],
             source_updated_at=NOW,
         )
         result = asm.assemble()
@@ -458,13 +452,13 @@ class TestTrimmingOrder:
             deliverables=["D"], success_criteria=["C"],
             quality_gate_checklist=[],
         )
-        # Add moderate P6 and large P7 to blow budget
+        # Add moderate P6 and large P7 (within component limits) to blow aggregate budget
         asm.add_open_items_digest(
             [{"severity": "warn", "title": _bloat_content(400), "status": "open"}],
             source_updated_at=NOW,
         )
         asm.add_reusable_signals(
-            [{"type": "outcome", "content": _bloat_content(2000)}],
+            [{"type": "outcome", "content": _bloat_content(1800)}],
             source_updated_at=NOW,
         )
         result = asm.assemble()
@@ -525,17 +519,22 @@ class TestFreshnessMetadata:
 
 class TestComponentLimits:
 
-    def test_intelligence_payload_truncated_at_2000_chars(self) -> None:
+    def test_intelligence_overflow_drops_lowest_priority_items(self) -> None:
+        """When payload exceeds 2000 chars, drop recent_comparable first per FPC."""
         asm = _make_assembler()
-        long_content = _bloat_content(3000)
-        asm.add_intelligence_payload(
-            [{"type": "pattern", "content": long_content}],
-            source_updated_at=NOW,
-        )
-        # The component should have been truncated
+        items = [
+            {"type": "proven_pattern", "content": "Short proven pattern"},
+            {"type": "failure_prevention", "content": "Short failure prevention"},
+            {"type": "recent_comparable", "content": _bloat_content(2500)},
+        ]
+        asm.add_intelligence_payload(items, source_updated_at=NOW)
         intel_comp = [c for c in asm._components if c.name == "intelligence_payload"]
         assert len(intel_comp) == 1
         assert len(intel_comp[0].content) <= INTELLIGENCE_CHAR_LIMIT
+        # recent_comparable should have been dropped
+        assert "recent_comparable" not in intel_comp[0].content
+        assert "proven_pattern" in intel_comp[0].content
+        assert "failure_prevention" in intel_comp[0].content
 
     def test_intelligence_bounded_to_3_items(self) -> None:
         asm = _make_assembler()
@@ -598,3 +597,157 @@ class TestTokenEstimation:
         """Unknown components are always fresh."""
         result = check_freshness("unknown_thing", NOW - timedelta(days=100), NOW)
         assert result.is_fresh is True
+
+
+# ---------------------------------------------------------------------------
+# 9. Per-component hard limits (OI-492)
+# ---------------------------------------------------------------------------
+
+class TestPerComponentHardLimits:
+
+    def test_chain_position_rejects_oversized(self) -> None:
+        asm = _make_assembler()
+        result = asm.add_chain_position(
+            current_feature_index=0, total_features=2,
+            carry_forward_summary={"blocker_count": 0, "warn_count": 0, "deferred_count": 0, "residual_risk_count": 0},
+            blocking_items=[{"severity": "blocker", "title": _bloat_content(4000)}],
+            dependency_status="ok",
+            source_updated_at=NOW,
+        )
+        assert result.ok is False
+        assert result.error_code == "component_too_large"
+
+    def test_prior_pr_evidence_rejects_oversized(self) -> None:
+        asm = _make_assembler()
+        result = asm.add_prior_pr_evidence(
+            [{"severity": "warn", "description": _bloat_content(5000)}],
+            source_updated_at=NOW,
+        )
+        assert result.ok is False
+        assert result.error_code == "component_too_large"
+
+    def test_open_items_digest_rejects_oversized(self) -> None:
+        asm = _make_assembler()
+        result = asm.add_open_items_digest(
+            [{"severity": "warn", "title": _bloat_content(3000), "status": "open"}],
+            source_updated_at=NOW,
+        )
+        assert result.ok is False
+        assert result.error_code == "component_too_large"
+
+    def test_reusable_signals_rejects_oversized(self) -> None:
+        asm = _make_assembler()
+        result = asm.add_reusable_signals(
+            [{"type": "outcome", "content": _bloat_content(3000)}],
+            source_updated_at=NOW,
+        )
+        assert result.ok is False
+        assert result.error_code == "component_too_large"
+
+    def test_components_within_limits_accepted(self) -> None:
+        asm = _make_assembler()
+        r1 = asm.add_chain_position(
+            current_feature_index=0, total_features=2,
+            carry_forward_summary={"blocker_count": 0, "warn_count": 0, "deferred_count": 0, "residual_risk_count": 0},
+            blocking_items=[], dependency_status="ok",
+            source_updated_at=NOW,
+        )
+        r2 = asm.add_prior_pr_evidence(
+            [{"severity": "warn", "description": "Small finding"}],
+            source_updated_at=NOW,
+        )
+        assert r1.ok is True
+        assert r2.ok is True
+
+
+# ---------------------------------------------------------------------------
+# 10. P4 item-level dropping per FPC priority (OI-493)
+# ---------------------------------------------------------------------------
+
+class TestIntelligenceItemDropping:
+
+    def test_drops_recent_comparable_before_failure_prevention(self) -> None:
+        asm = _make_assembler()
+        items = [
+            {"type": "proven_pattern", "content": "A" * 800},
+            {"type": "failure_prevention", "content": "B" * 800},
+            {"type": "recent_comparable", "content": "C" * 800},
+        ]
+        asm.add_intelligence_payload(items, source_updated_at=NOW)
+        intel_comp = [c for c in asm._components if c.name == "intelligence_payload"]
+        content = intel_comp[0].content
+        assert len(content) <= INTELLIGENCE_CHAR_LIMIT
+        # recent_comparable dropped first (lowest priority)
+        assert "recent_comparable" not in content
+        assert "proven_pattern" in content
+
+    def test_drops_both_lower_priority_if_needed(self) -> None:
+        asm = _make_assembler()
+        items = [
+            {"type": "proven_pattern", "content": "A" * 1800},
+            {"type": "failure_prevention", "content": "B" * 800},
+            {"type": "recent_comparable", "content": "C" * 800},
+        ]
+        asm.add_intelligence_payload(items, source_updated_at=NOW)
+        intel_comp = [c for c in asm._components if c.name == "intelligence_payload"]
+        content = intel_comp[0].content
+        assert len(content) <= INTELLIGENCE_CHAR_LIMIT
+        assert "proven_pattern" in content
+        assert "recent_comparable" not in content
+        assert "failure_prevention" not in content
+
+    def test_class_priority_order_correct(self) -> None:
+        assert INTELLIGENCE_CLASS_PRIORITY == (
+            "proven_pattern", "failure_prevention", "recent_comparable"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 11. Duplicate component replacement (OI-494)
+# ---------------------------------------------------------------------------
+
+class TestDuplicateComponentReplacement:
+
+    def test_duplicate_p4_replaces_not_appends(self) -> None:
+        asm = _make_assembler()
+        asm.add_intelligence_payload(
+            [{"type": "proven_pattern", "content": "First version"}],
+            source_updated_at=NOW,
+        )
+        asm.add_intelligence_payload(
+            [{"type": "proven_pattern", "content": "Second version"}],
+            source_updated_at=NOW,
+        )
+        intel_comps = [c for c in asm._components if c.name == "intelligence_payload"]
+        assert len(intel_comps) == 1
+        assert "Second version" in intel_comps[0].content
+        assert "First version" not in intel_comps[0].content
+
+    def test_duplicate_p0_replaces(self) -> None:
+        asm = _make_assembler()
+        asm.add_dispatch_identity(
+            dispatch_id="20260402-120000-first", pr_id="PR-1",
+            track="B", gate="g1", feature_name="First",
+        )
+        asm.add_dispatch_identity(
+            dispatch_id="20260402-120000-second", pr_id="PR-2",
+            track="A", gate="g2", feature_name="Second",
+        )
+        p0_comps = [c for c in asm._components if c.name == "dispatch_identity"]
+        assert len(p0_comps) == 1
+        assert "Second" in p0_comps[0].content
+
+    def test_duplicate_p6_replaces(self) -> None:
+        asm = _make_assembler()
+        asm.add_open_items_digest(
+            [{"severity": "warn", "title": "Old item", "status": "open"}],
+            source_updated_at=NOW,
+        )
+        asm.add_open_items_digest(
+            [{"severity": "blocker", "title": "New item", "status": "open"}],
+            source_updated_at=NOW,
+        )
+        oi_comps = [c for c in asm._components if c.name == "open_items_digest"]
+        assert len(oi_comps) == 1
+        assert "New item" in oi_comps[0].content
+        assert "Old item" not in oi_comps[0].content
