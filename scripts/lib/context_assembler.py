@@ -50,6 +50,9 @@ VALID_ACTIONS = frozenset({"advance", "review", "fix", "block", "escalate"})
 VALID_SEVERITIES = frozenset({"blocker", "warn", "info"})
 VALID_CHANGE_TYPES = frozenset({"created", "modified", "deleted"})
 
+# Intelligence item class priority (highest first); overflow drops lowest first
+INTELLIGENCE_CLASS_PRIORITY = ("proven_pattern", "failure_prevention", "recent_comparable")
+
 # Max age in seconds per component (0 = must re-derive at assembly)
 STALENESS_MAX_AGE: Dict[str, int] = {
     "chain_position": 0,
@@ -166,6 +169,14 @@ class ContextAssembler:
         self._stale_rejections: List[str] = []
         self._freshness_records: Dict[str, Dict[str, Any]] = {}
 
+    def _set_component(self, component: ContextComponent) -> None:
+        """Replace existing component of same name, or append if new."""
+        for i, c in enumerate(self._components):
+            if c.name == component.name:
+                self._components[i] = component
+                return
+        self._components.append(component)
+
     def add_dispatch_identity(
         self, dispatch_id: str, pr_id: str, track: str,
         gate: str, feature_name: str,
@@ -187,7 +198,7 @@ class ContextAssembler:
             f"PR: {pr_id} | Track: {track} | Gate: {gate}\n"
             f"Feature: {feature_name}"
         )
-        self._components.append(ContextComponent(priority=0, name="dispatch_identity", content=content))
+        self._set_component(ContextComponent(priority=0, name="dispatch_identity", content=content))
         return result_ok()
 
     def add_task_specification(
@@ -214,7 +225,7 @@ class ContextAssembler:
         if quality_gate_checklist:
             parts.append("\nQuality Gate:\n" + "\n".join(f"- [ ] {g}" for g in quality_gate_checklist))
 
-        self._components.append(ContextComponent(priority=1, name="task_specification", content="\n".join(parts)))
+        self._set_component(ContextComponent(priority=1, name="task_specification", content="\n".join(parts)))
         return result_ok()
 
     def add_code_context(self, file_contents: Dict[str, str]) -> Result:
@@ -224,7 +235,7 @@ class ContextAssembler:
         parts = []
         for path, content in file_contents.items():
             parts.append(f"--- {path} ---\n{content}")
-        self._components.append(ContextComponent(priority=2, name="code_context", content="\n\n".join(parts)))
+        self._set_component(ContextComponent(priority=2, name="code_context", content="\n\n".join(parts)))
         return result_ok()
 
     def add_chain_position(
@@ -261,8 +272,15 @@ class ContextAssembler:
             for item in blocking_items:
                 parts.append(f"  - [{item.get('severity', '?')}] {item.get('title', 'untitled')}")
 
-        self._components.append(ContextComponent(
-            priority=3, name="chain_position", content="\n".join(parts), freshness=freshness,
+        content = "\n".join(parts)
+        if estimate_tokens(content) > CHAIN_POSITION_TOKEN_LIMIT:
+            return result_error(
+                "component_too_large",
+                f"Chain position ({estimate_tokens(content)} tokens) exceeds "
+                f"hard limit ({CHAIN_POSITION_TOKEN_LIMIT} tokens)",
+            )
+        self._set_component(ContextComponent(
+            priority=3, name="chain_position", content=content, freshness=freshness,
         ))
         return result_ok()
 
@@ -284,14 +302,24 @@ class ContextAssembler:
         }
 
         bounded_items = items[:3]
-        content = "\n".join(
-            f"[{it.get('type', 'pattern')}] {it.get('content', '')}"
-            for it in bounded_items
-        )
-        if len(content) > INTELLIGENCE_CHAR_LIMIT:
-            content = content[:INTELLIGENCE_CHAR_LIMIT]
+        # Sort by FPC class priority (highest first) for overflow dropping
+        class_rank = {cls: i for i, cls in enumerate(INTELLIGENCE_CLASS_PRIORITY)}
+        bounded_items.sort(key=lambda it: class_rank.get(it.get("type", "proven_pattern"), 0))
 
-        self._components.append(ContextComponent(
+        # Drop lowest-priority items first when payload exceeds char limit
+        while bounded_items:
+            content = "\n".join(
+                f"[{it.get('type', 'pattern')}] {it.get('content', '')}"
+                for it in bounded_items
+            )
+            if len(content) <= INTELLIGENCE_CHAR_LIMIT:
+                break
+            bounded_items.pop()  # drop lowest-priority (last) item
+
+        if not bounded_items:
+            content = ""
+
+        self._set_component(ContextComponent(
             priority=4, name="intelligence_payload", content=content, freshness=freshness,
         ))
         return result_ok()
@@ -318,7 +346,13 @@ class ContextAssembler:
             parts.append(f"  - [{f.get('severity', 'info')}] {f.get('description', '')}")
         content = "\n".join(parts)
 
-        self._components.append(ContextComponent(
+        if estimate_tokens(content) > PRIOR_PR_TOKEN_LIMIT:
+            return result_error(
+                "component_too_large",
+                f"Prior PR evidence ({estimate_tokens(content)} tokens) exceeds "
+                f"hard limit ({PRIOR_PR_TOKEN_LIMIT} tokens)",
+            )
+        self._set_component(ContextComponent(
             priority=5, name="prior_pr_evidence", content=content, freshness=freshness,
         ))
         return result_ok()
@@ -349,7 +383,13 @@ class ContextAssembler:
             parts.append(f"  - [{item.get('severity')}] {item.get('title', '')} ({item.get('status', 'open')})")
         content = "\n".join(parts)
 
-        self._components.append(ContextComponent(
+        if estimate_tokens(content) > OPEN_ITEMS_TOKEN_LIMIT:
+            return result_error(
+                "component_too_large",
+                f"Open items digest ({estimate_tokens(content)} tokens) exceeds "
+                f"hard limit ({OPEN_ITEMS_TOKEN_LIMIT} tokens)",
+            )
+        self._set_component(ContextComponent(
             priority=6, name="open_items_digest", content=content, freshness=freshness,
         ))
         return result_ok()
@@ -376,7 +416,13 @@ class ContextAssembler:
             parts.append(f"  - [{sig.get('type', 'outcome')}] {sig.get('content', '')}")
         content = "\n".join(parts)
 
-        self._components.append(ContextComponent(
+        if estimate_tokens(content) > REUSABLE_SIGNALS_TOKEN_LIMIT:
+            return result_error(
+                "component_too_large",
+                f"Reusable signals ({estimate_tokens(content)} tokens) exceeds "
+                f"hard limit ({REUSABLE_SIGNALS_TOKEN_LIMIT} tokens)",
+            )
+        self._set_component(ContextComponent(
             priority=7, name="reusable_signals", content=content, freshness=freshness,
         ))
         return result_ok()
