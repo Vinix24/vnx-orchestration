@@ -565,6 +565,28 @@ class TestReusableSignalCertification:
 # 6. End-to-end dispatch lifecycle
 # ---------------------------------------------------------------------------
 
+def _build_lifecycle_handover() -> Any:
+    """Build the handover payload for the lifecycle test (Phase 2)."""
+    return build_handover(
+        dispatch_id="20260402-130000-lifecycle",
+        pr_id="PR-2", track="B", gate="gate_test", status="success",
+        what_was_done="Implemented handover and resume payload generation with validation.",
+        key_decisions=["Used result_contract pattern", "Added RS-5 transcript detection"],
+        files_modified=[
+            {"path": "scripts/lib/handover_resume.py", "change_type": "created", "description": "Handover+resume module"},
+        ],
+        tests_run="42", tests_passed="42", tests_failed="0",
+        commands_executed=["pytest tests/test_handover_resume.py -v"],
+        verification_method="local_tests",
+        recommended_action="advance",
+        action_reason="All 42 tests pass, handover validation complete.",
+        blocking_conditions=[],
+        critical_context="Handover module complete. Resume payload supports 3 types. RS-5 enforced.",
+        gotchas=["Transcript detection uses multiline regex"],
+        relevant_file_paths=["scripts/lib/handover_resume.py", "tests/test_handover_resume.py"],
+    )
+
+
 class TestEndToEndLifecycleCertification:
     """Full dispatch -> context -> execution -> handover -> resume cycle."""
 
@@ -599,35 +621,11 @@ class TestEndToEndLifecycleCertification:
 
         bundle_result = asm.assemble()
         assert bundle_result.ok
-        bundle = bundle_result.data
-        assert bundle.budget_status == "within_target"
-        assert bundle.overhead_ratio < BUDGET_TARGET_RATIO
+        assert bundle_result.data.budget_status == "within_target"
+        assert bundle_result.data.overhead_ratio < BUDGET_TARGET_RATIO
 
         # Phase 2: Worker produces handover
-        handover_result = build_handover(
-            dispatch_id="20260402-130000-lifecycle",
-            pr_id="PR-2",
-            track="B",
-            gate="gate_test",
-            status="success",
-            what_was_done="Implemented handover and resume payload generation with validation.",
-            key_decisions=["Used result_contract pattern", "Added RS-5 transcript detection"],
-            files_modified=[
-                {"path": "scripts/lib/handover_resume.py", "change_type": "created", "description": "Handover+resume module"},
-            ],
-            tests_run="42",
-            tests_passed="42",
-            tests_failed="0",
-            commands_executed=["pytest tests/test_handover_resume.py -v"],
-            verification_method="local_tests",
-            recommended_action="advance",
-            action_reason="All 42 tests pass, handover validation complete.",
-            blocking_conditions=[],
-            critical_context="Handover module complete. Resume payload supports 3 types. RS-5 enforced.",
-            gotchas=["Transcript detection uses multiline regex"],
-            relevant_file_paths=["scripts/lib/handover_resume.py", "tests/test_handover_resume.py"],
-        )
-        assert handover_result.ok
+        assert _build_lifecycle_handover().ok
 
         # Phase 3: Context rotation triggers resume
         resume_result = build_resume(
@@ -642,9 +640,8 @@ class TestEndToEndLifecycleCertification:
             carry_forward_summary="Feature 2 of 5, 1 warn carry-forward, 0 blockers.",
         )
         assert resume_result.ok
-        resume = resume_result.data
-        assert resume["resume_type"] == "rotation"
-        assert resume["dispatch_context"]["task_specification"] != ""
+        assert resume_result.data["resume_type"] == "rotation"
+        assert resume_result.data["dispatch_context"]["task_specification"] != ""
 
     def test_zero_unresolved_blockers_at_feature_end(self) -> None:
         """Feature 15 closes with zero unresolved chain-created open items."""
