@@ -86,8 +86,8 @@ GATE_TIMEOUT_ENV: Dict[str, str] = {
 }
 
 GATE_STALL_DEFAULTS: Dict[str, int] = {
-    "gemini_review": 60,
-    "codex_gate": 120,
+    "gemini_review": 180,
+    "codex_gate": 300,
     "claude_github_optional": 60,
 }
 
