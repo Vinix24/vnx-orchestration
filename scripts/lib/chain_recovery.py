@@ -382,7 +382,11 @@ def _accumulate_open_items(
         else:
             for i, existing in enumerate(ledger["open_items"]):
                 if existing.get("id") == item_copy.get("id"):
-                    ledger["open_items"][i] = {**existing, **item_copy}
+                    merged = {**existing, **item_copy}
+                    # Preserve original origin_feature — provenance must not drift
+                    if "origin_feature" in existing:
+                        merged["origin_feature"] = existing["origin_feature"]
+                    ledger["open_items"][i] = merged
                     break
 
 
