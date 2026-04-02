@@ -263,6 +263,31 @@ class BaselineCheckResult:
     reason: str
 
 
+def _baseline_result(
+    valid: bool, branch: str, expected: str, actual: str, reason: str
+) -> BaselineCheckResult:
+    return BaselineCheckResult(
+        is_valid=valid, feature_branch=branch,
+        expected_main_sha=expected, actual_merge_base=actual, reason=reason,
+    )
+
+
+def _sha_prefix_matches(expected: str, actual: str) -> bool:
+    """Compare SHA strings by shortest common prefix (up to 40 chars)."""
+    e, a = expected.strip().lower(), actual.strip().lower()
+    n = min(len(e), len(a), 40)
+    return n > 0 and a[:n] == e[:n]
+
+
+def _is_ancestor(run: GitRunner, repo_root: str, ancestor: str, descendant: str) -> bool:
+    """Return True if ancestor is an ancestor of descendant."""
+    try:
+        run(["git", "-C", repo_root, "merge-base", "--is-ancestor", ancestor, descendant])
+        return True
+    except RuntimeError:
+        return False
+
+
 def check_branch_baseline(
     feature_branch: str,
     expected_main_sha: str,
@@ -274,76 +299,28 @@ def check_branch_baseline(
     Implements contract rules S-1 through S-3: blocks advancement when a
     feature branch's merge-base with main is older than the last recorded
     merge SHA.
-
-    Args:
-        feature_branch: branch name or SHA to check (e.g. "feature/my-feature")
-        expected_main_sha: the SHA that main should contain as ancestor
-        repo_root: path to git repository root
-        git_runner: optional override for git subprocess (for testing)
-
-    Returns BaselineCheckResult with is_valid=True when branch is current.
     """
     run = git_runner or _default_git_runner
 
     try:
-        actual_merge_base = run([
-            "git", "-C", repo_root, "merge-base", feature_branch, "main"
-        ])
+        actual = run(["git", "-C", repo_root, "merge-base", feature_branch, "main"])
     except RuntimeError as exc:
-        return BaselineCheckResult(
-            is_valid=False,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base="",
-            reason=f"git merge-base failed: {exc}",
-        )
+        return _baseline_result(False, feature_branch, expected_main_sha, "", f"git merge-base failed: {exc}")
 
     if not expected_main_sha:
-        return BaselineCheckResult(
-            is_valid=True,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base=actual_merge_base,
-            reason="no expected SHA recorded — baseline accepted",
-        )
+        return _baseline_result(True, feature_branch, expected_main_sha, actual, "no expected SHA recorded — baseline accepted")
 
-    # S-2: merge-base must be equal to OR a descendant of the expected SHA.
-    # Check equality first (prefix match), then check --is-ancestor.
-    expected_norm = expected_main_sha.strip().lower()
-    actual_norm = actual_merge_base.strip().lower()
-    min_len = min(len(expected_norm), len(actual_norm), 40)
+    if _sha_prefix_matches(expected_main_sha, actual):
+        return _baseline_result(True, feature_branch, expected_main_sha, actual, "branch baseline matches expected main SHA")
 
-    if actual_norm[:min_len] == expected_norm[:min_len]:
-        return BaselineCheckResult(
-            is_valid=True,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base=actual_merge_base,
-            reason="branch baseline matches expected main SHA",
-        )
+    if _is_ancestor(run, repo_root, expected_main_sha, actual):
+        return _baseline_result(True, feature_branch, expected_main_sha, actual,
+                                "merge-base is a descendant of expected main SHA — baseline valid")
 
-    # Check if expected SHA is an ancestor of actual merge-base (descendant case)
-    try:
-        run(["git", "-C", repo_root, "merge-base", "--is-ancestor", expected_main_sha, actual_merge_base])
-        return BaselineCheckResult(
-            is_valid=True,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base=actual_merge_base,
-            reason="merge-base is a descendant of expected main SHA — baseline valid",
-        )
-    except RuntimeError:
-        pass
-
-    return BaselineCheckResult(
-        is_valid=False,
-        feature_branch=feature_branch,
-        expected_main_sha=expected_main_sha,
-        actual_merge_base=actual_merge_base,
-        reason=(
-            f"stale branch: merge-base {actual_merge_base[:12]} does not match "
-            f"expected {expected_main_sha[:12]} — recreate worktree from current main"
-        ),
+    return _baseline_result(
+        False, feature_branch, expected_main_sha, actual,
+        f"stale branch: merge-base {actual[:12]} does not match "
+        f"expected {expected_main_sha[:12]} — recreate worktree from current main",
     )
 
 
