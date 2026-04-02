@@ -1,52 +1,59 @@
 # VNX Project Status
 
 **Status**: Active  
-**Last Updated**: 2026-04-01  
+**Last Updated**: 2026-04-02  
 **Owner**: VNX Maintainer  
-**Purpose**: Commit-backed status after the completed 5-feature autonomous hardening chain.
+**Purpose**: Commit-backed status after Feature 12 and Feature 13 completion.
 
 ---
 
 ## Current Summary
 
-The latest hardening chain is complete and merged through `557864d`.
+Feature 12 and Feature 13 are complete and merged (PRs #64–#72, 2026-04-01).
 
-This baseline now includes:
+This baseline now includes all prior hardening (Features 5–11) plus:
 
-1. **Terminal input readiness protection**
-   - slash-prefixed dispatches are no longer sent blindly into tmux copy/search mode
-2. **Queue/runtime projection consistency**
-   - queue truth drift is detected and repairable from canonical runtime evidence
-3. **Gate evidence accuracy**
-   - gate lookup is PR-scoped and `report_path` enforcement is deterministic
-4. **Dispatch requeue and classification accuracy**
-   - retryable dispatch failures are deferred instead of being permanently rejected
-5. **Delivery substep observability**
-   - delivery rejection evidence identifies the failing substep instead of collapsing into a generic reject
+6. **Runtime state machine and stall supervision** (Feature 12)
+   - 9-state canonical worker lifecycle with deterministic transitions
+   - heartbeat and output tracked as independent liveness signals
+   - stall detection with automatic open-item escalation (9 anomaly types)
+   - deterministic truth hierarchy: Runtime DB > Queue Projection > Terminal Activity
+7. **Coding operator dashboard and session control** (Feature 13)
+   - 5 operator surfaces through governed read-model layer
+   - 6 safe operator actions with structured outcome model
+   - cross-project open-item aggregation with attention model
+   - degraded state is explicitly visible (never silent)
+8. **Headless review gate hardening** (post-Feature 13)
+   - both Gemini and Codex gates default-enabled
+   - atomic request-and-execute flow prevents silent non-execution
 
-The system is now best described as:
+The system is now:
 
-- governance-first
-- mixed interactive + headless capable
-- feature-worktree based
-- receipt-led and closure-verifier enforced
-- materially hardened for tmux/runtime/queue failure modes discovered during autonomous trials
+- governance-first with explicit runtime truth
+- operator-visible through dashboard read-model
+- receipt-led with 245+ tests across runtime and dashboard layers
+- headless-review capable with both providers enabled by default
 
 ---
 
 ## Representative Recent Chain Merges
 
-- `e4cdf3c` — Feature 5: Terminal Input-Ready Mode Guard
-- `942bd53` — Feature 6: Queue and Runtime Projection Consistency Hardening
-- `1df2964` — Feature 7: Gate Evidence Accuracy and PR-Scoped Lookup
-- `da60f53` — Feature 8: Dispatch Requeue and Classification Accuracy
-- `557864d` — Feature 9: Delivery Substep Observability
+- PR #64 — Feature 12 PR-0: Runtime State Machine Contract
+- PR #65 — Feature 12 PR-1: Worker State Machine and Heartbeat Persistence
+- PR #66 — Feature 12 PR-2: Stall Detection, Exit Classification, Escalation
+- PR #67 — Feature 12 PR-3: Unattended Runtime Reliability Certification
+- PR #68 — Feature 13 PR-0: Dashboard Read-Model Contract
+- PR #69 — Feature 13 PR-1: Read-Model Projection Layer
+- PR #70 — Feature 13 PR-2: Safe Operator Control Actions
+- PR #71 — Feature 13 PR-3: Operator Dashboard UI
+- PR #72 — Feature 13 PR-4: Dashboard Certification
 
 Governance note:
 
-- Features 1-2 in this lane were still local-only merges
-- Features 3-5 in this lane were merged through real GitHub PRs with CI visibility
-- compensating-evidence use for unstable headless gate execution is now explicit, not implicit
+- all 9 PRs merged through GitHub PRs with CI visibility
+- Feature 12/13 were interactively reviewed by T0 with code spot-checks
+- headless gates (Gemini/Codex) were not executed during the chain due to infrastructure timing gap and orchestration flow gap
+- post-chain correction: both providers now enabled by default with atomic request-and-execute enforcement
 
 ---
 
@@ -62,24 +69,29 @@ Governance note:
 
 ## Carried-Forward Open Items
 
-These items remain known and non-blocking, but are not resolved in code yet:
-
+Pre-existing:
 - `OI-022` — `rc_register` remains non-fatal while `acquire_lease` depends on its FK side effect
-- `OI-024` — `configure_terminal_mode` probe placement remains a known deviation
-- `OI-048` — headless Gemini/Codex gate execution reliability remains weak
-- `OI-078` — `Profile C` CI path configuration remains pre-existing and needs cleanup
+- `OI-078` — `Profile C` CI path configuration remains pre-existing
+
+From Feature 12/13 (all warn, no blockers):
+- `OI-373` — `dashboard_actions.py:start_session` 106 lines — highest priority refactor candidate
+- `OI-374` — `serve_dashboard.py` 1215 lines — needs route decomposition (pre-existing file)
+- `OI-371` — `dashboard_read_model.py:get_aggregate` 84 lines over threshold
+- `OI-314` — `worker_state_manager.py:transition` 3 lines over threshold
+- `OI-370` — `runtime_supervisor.py:_check_terminal` 3 lines over threshold
+
+Resolved by post-chain correction:
+- `OI-048` — headless Gemini/Codex gate execution reliability — **materially improved**: both providers now default-enabled, atomic execution flow enforced
 
 ---
 
-## Recommended Next Bridge Lane
+## Recommended Next Features
 
-The next short bridge lane should focus on:
+1. Feature 14: multi-feature autonomy hardening
+2. Feature 15: intelligence, context injection, and handover quality
+3. Feature 16: runtime adapter formalization and early headless transport abstraction
 
-1. residual governance bugfix sweep
-2. headless review reliability hardening
-3. operator UX improvements such as latest-first conversation resume
-
-These should close the remaining governance friction before broader major-feature work.
+Prerequisite: live smoke test proving both Gemini and Codex gates execute end-to-end.
 
 ---
 
