@@ -112,27 +112,17 @@ def _load_carry_forward(state_dir: Path) -> Dict[str, Any]:
 
 
 def _load_gate_results(state_dir: Path, pr_id: str) -> Dict[str, Any]:
-    """Return gate certification results keyed by gate name for a given PR.
-
-    Result file naming convention: pr-<N>-<gate>.json where N is numeric part of PR id.
-    Returns dict: gate_name -> {status, contract_hash, report_path, recorded_at}
-    """
+    """Return gate certification results keyed by gate name for a given PR."""
     results_dir = state_dir / "review_gates" / "results"
     if not results_dir.is_dir():
         return {}
-
-    # Extract numeric suffix from PR id (e.g. "PR-1" -> "1", "PR-0" -> "0")
-    pr_num = pr_id.lstrip("PR-").lstrip("pr-").strip("-").lower()
-    # Handle both "PR-1" and "PR-01" style ids
     try:
         pr_num = str(int(pr_id.split("-")[-1]))
     except (ValueError, IndexError):
         pr_num = pr_id.lower().replace("pr-", "").replace("pr", "")
-
     gate_results: Dict[str, Any] = {}
     for gate in REQUIRED_GATES:
-        candidate = results_dir / f"pr-{pr_num}-{gate}.json"
-        data = _safe_load_json(candidate)
+        data = _safe_load_json(results_dir / f"pr-{pr_num}-{gate}.json")
         if data is not None:
             gate_results[gate] = {
                 "status": data.get("status", "unknown"),
@@ -164,19 +154,13 @@ def _completed_pr_ids(pr_queue: Dict[str, Any]) -> List[str]:
 
 
 def _find_current_feature(pr_queue: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return the first non-completed, non-blocked PR in dependency order.
-
-    Returns the PR dict or None if all are completed or none available.
-    """
+    """Return the first non-completed PR whose dependencies are all satisfied."""
     prs = _pr_sequence_from_queue(pr_queue)
     completed_ids = set(_completed_pr_ids(pr_queue))
-
     for pr in prs:
-        status = pr.get("status", "queued")
-        if status == "completed":
+        if pr.get("status") == "completed":
             continue
-        deps = pr.get("dependencies") or []
-        if all(dep in completed_ids for dep in deps):
+        if all(dep in completed_ids for dep in (pr.get("dependencies") or [])):
             return pr
     return None
 
@@ -185,24 +169,41 @@ def _find_next_feature(pr_queue: Dict[str, Any], current_pr_id: Optional[str]) -
     """Return the PR that comes after current_pr_id in dependency order."""
     if current_pr_id is None:
         return None
-
     prs = _pr_sequence_from_queue(pr_queue)
     completed_ids = set(_completed_pr_ids(pr_queue)) | {current_pr_id}
-
     for pr in prs:
-        if pr.get("id") == current_pr_id:
+        if pr.get("id") == current_pr_id or pr.get("status") == "completed":
             continue
-        if pr.get("status") == "completed":
-            continue
-        deps = pr.get("dependencies") or []
-        if all(dep in completed_ids for dep in deps):
+        if all(dep in completed_ids for dep in (pr.get("dependencies") or [])):
             return pr
     return None
 
 
 # ---------------------------------------------------------------------------
-# Advancement truth computation
+# Advancement truth helpers
 # ---------------------------------------------------------------------------
+
+def _compute_gate_certification(
+    state_dir: Path, feature_id: str, blockers: List[str]
+) -> Dict[str, str]:
+    """Populate blockers for any uncertified gates; return certification_status dict."""
+    gate_results = _load_gate_results(state_dir, feature_id)
+    certification_status: Dict[str, str] = {}
+    for gate in REQUIRED_GATES:
+        result = gate_results.get(gate)
+        if result is None:
+            certification_status[gate] = "missing"
+            blockers.append(f"{gate} not certified for {feature_id}: no result record")
+        elif not _is_gate_certified(result):
+            certification_status[gate] = f"not_certified:{result.get('status', 'unknown')}"
+            blockers.append(
+                f"{gate} not certified for {feature_id}: "
+                f"status={result.get('status')}, blocking={result.get('blocking_count')}"
+            )
+        else:
+            certification_status[gate] = "certified"
+    return certification_status
+
 
 def compute_advancement_truth(
     pr_queue: Dict[str, Any],
@@ -216,31 +217,19 @@ def compute_advancement_truth(
     1. Current feature PR has status 'completed' in pr_queue_state.json
     2. No open items with severity 'blocker' and status 'open'
     3. All required gate providers have terminal success with non-empty contract_hash
-       for the current PR
-
-    Returns:
-        can_advance (bool)
-        blockers (list[str]): human-readable blocking reasons
-        certification_status (dict): per-gate status for current feature
     """
+    if current_feature_id is None:
+        return {"can_advance": False, "blockers": ["no active feature identified"], "certification_status": {}}
+
     blockers: List[str] = []
 
-    if current_feature_id is None:
-        return {
-            "can_advance": False,
-            "blockers": ["no active feature identified"],
-            "certification_status": {},
-        }
-
-    # Check 1: PR completion in pr_queue_state.json
+    # Check 1: PR completion
     prs = _pr_sequence_from_queue(pr_queue)
     pr_record = next((p for p in prs if p.get("id") == current_feature_id), None)
     if pr_record is None:
         blockers.append(f"{current_feature_id} not found in PR queue")
     elif pr_record.get("status") != "completed":
-        blockers.append(
-            f"{current_feature_id} not yet merged (status={pr_record.get('status', 'unknown')})"
-        )
+        blockers.append(f"{current_feature_id} not yet merged (status={pr_record.get('status', 'unknown')})")
 
     # Check 2: No blocker open items
     blocker_open = [
@@ -252,76 +241,50 @@ def compute_advancement_truth(
         ids = ", ".join(item.get("id", "?") for item in blocker_open)
         blockers.append(f"{len(blocker_open)} open blocker item(s) unresolved: {ids}")
 
-    # Check 3: Gate certification — requires merged state AND gate evidence
-    gate_results = _load_gate_results(state_dir, current_feature_id)
-    certification_status: Dict[str, Any] = {}
+    # Check 3: Gate certification
+    certification_status = _compute_gate_certification(state_dir, current_feature_id, blockers)
 
-    for gate in REQUIRED_GATES:
-        result = gate_results.get(gate)
-        if result is None:
-            certification_status[gate] = "missing"
-            blockers.append(f"{gate} not certified for {current_feature_id}: no result record")
-        elif not _is_gate_certified(result):
-            certification_status[gate] = f"not_certified:{result.get('status','unknown')}"
-            blockers.append(
-                f"{gate} not certified for {current_feature_id}: "
-                f"status={result.get('status')}, blocking={result.get('blocking_count')}"
-            )
-        else:
-            certification_status[gate] = "certified"
-
-    return {
-        "can_advance": len(blockers) == 0,
-        "blockers": blockers,
-        "certification_status": certification_status,
-    }
+    return {"can_advance": len(blockers) == 0, "blockers": blockers, "certification_status": certification_status}
 
 
 # ---------------------------------------------------------------------------
 # Carry-forward summary
 # ---------------------------------------------------------------------------
 
+def _summarize_findings(findings: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+    """Return (total, open_count, blocker_count) for a findings list."""
+    open_findings = [f for f in findings if str(f.get("resolution_status", "")).lower() != "resolved"]
+    blocker_findings = [f for f in open_findings if str(f.get("severity", "")).lower() == "blocker"]
+    return len(findings), len(open_findings), len(blocker_findings)
+
+
 def build_carry_forward_summary(
     carry_forward: Dict[str, Any],
     open_items: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Summarize the carry-forward ledger and live open items for the projection surface."""
-    findings = carry_forward.get("findings") or []
-    open_findings = [f for f in findings if str(f.get("resolution_status", "")).lower() != "resolved"]
-    blocker_findings = [
-        f for f in open_findings
-        if str(f.get("severity", "")).lower() == "blocker"
-    ]
+    total_f, open_f, blocker_f = _summarize_findings(carry_forward.get("findings") or [])
 
-    # Unresolved chain items from carry-forward ledger
     cf_open_items = carry_forward.get("open_items") or []
-    cf_blocker_items = [
+    cf_blockers = [
         i for i in cf_open_items
-        if str(i.get("severity", "")).lower() == "blocker"
-        and str(i.get("status", "")).lower() == "open"
+        if str(i.get("severity", "")).lower() == "blocker" and str(i.get("status", "")).lower() == "open"
     ]
-
-    # Live open items (from open_items.json, any severity, not done)
     live_unresolved = [
         item for item in open_items
         if str(item.get("status", "")).lower() not in {"done", "closed", "resolved"}
     ]
-    live_blockers = [
-        item for item in live_unresolved
-        if str(item.get("severity", "")).lower() == "blocker"
-    ]
-
-    residual_risks = carry_forward.get("residual_risks") or []
+    live_blockers = [i for i in live_unresolved if str(i.get("severity", "")).lower() == "blocker"]
 
     return {
-        "total_findings": len(findings),
-        "open_findings": len(open_findings),
-        "blocker_findings": len(blocker_findings),
+        "total_findings": total_f,
+        "open_findings": open_f,
+        "blocker_findings": blocker_f,
         "carry_forward_open_items": len(cf_open_items),
-        "carry_forward_blocker_items": len(cf_blocker_items),
+        "carry_forward_blocker_items": len(cf_blockers),
         "live_unresolved_items": len(live_unresolved),
         "live_blocker_items": len(live_blockers),
-        "residual_risks": len(residual_risks),
+        "residual_risks": len(carry_forward.get("residual_risks") or []),
         "feature_summaries_count": len(carry_forward.get("feature_summaries") or []),
     }
 
@@ -331,12 +294,10 @@ def _build_unresolved_chain_items(
     open_items: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Return all carry-forward and live open items that are not yet resolved."""
+    resolved = {"done", "closed", "resolved"}
     unresolved: List[Dict[str, Any]] = []
-
-    # Carry-forward open items not yet closed
     for item in carry_forward.get("open_items") or []:
-        status = str(item.get("status", "")).lower()
-        if status not in {"done", "closed", "resolved"}:
+        if str(item.get("status", "")).lower() not in resolved:
             unresolved.append({
                 "source": "carry_forward",
                 "id": item.get("id"),
@@ -345,11 +306,8 @@ def _build_unresolved_chain_items(
                 "title": item.get("title"),
                 "origin_feature": item.get("origin_feature"),
             })
-
-    # Live open items from open_items.json
     for item in open_items:
-        status = str(item.get("status", "")).lower()
-        if status not in {"done", "closed", "resolved"}:
+        if str(item.get("status", "")).lower() not in resolved:
             unresolved.append({
                 "source": "open_items.json",
                 "id": item.get("id"),
@@ -358,7 +316,6 @@ def _build_unresolved_chain_items(
                 "title": item.get("title"),
                 "origin_feature": item.get("pr_id"),
             })
-
     return unresolved
 
 
@@ -374,28 +331,91 @@ def _load_requeue_history(chain_state: Optional[Dict[str, Any]]) -> Dict[str, An
 
 
 def _requeue_count_for(chain_state: Optional[Dict[str, Any]], feature_id: str) -> int:
-    history = _load_requeue_history(chain_state)
-    entry = history.get(feature_id) or {}
+    entry = _load_requeue_history(chain_state).get(feature_id) or {}
     return int(entry.get("total_attempts", 0))
+
+
+# ---------------------------------------------------------------------------
+# Projection sub-builders
+# ---------------------------------------------------------------------------
+
+def _resolve_chain_identity(
+    chain_state: Optional[Dict[str, Any]], pr_queue: Dict[str, Any]
+) -> Tuple[str, str, Optional[str], List[str]]:
+    """Return (current_state, chain_id, current_feature_id, feature_sequence)."""
+    if chain_state is not None:
+        return (
+            str(chain_state.get("current_state", "INITIALIZED")),
+            str(chain_state.get("chain_id", "")),
+            chain_state.get("current_feature_id"),
+            chain_state.get("feature_sequence") or [],
+        )
+    current_feature = _find_current_feature(pr_queue)
+    return (
+        "NOT_INITIALIZED",
+        "",
+        current_feature.get("id") if current_feature else None,
+        [pr.get("id") for pr in _pr_sequence_from_queue(pr_queue)],
+    )
+
+
+def _infer_not_initialized_state(
+    prs: List[Dict[str, Any]], cf_summary: Dict[str, Any], current_feature_id: Optional[str]
+) -> str:
+    """Derive chain state from queue when chain_state.json is absent."""
+    if prs and all(pr.get("status") == "completed" for pr in prs):
+        return "CHAIN_COMPLETE"
+    if cf_summary["live_blocker_items"] > 0:
+        return "ADVANCEMENT_BLOCKED"
+    if current_feature_id is not None:
+        return "FEATURE_ACTIVE"
+    return "NOT_INITIALIZED"
+
+
+def _build_active_feature_info(
+    current_pr_record: Optional[Dict[str, Any]],
+    prs: List[Dict[str, Any]],
+    chain_state: Optional[Dict[str, Any]],
+    current_feature_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Build active feature dict from PR record, or None if no active PR."""
+    if current_pr_record is None:
+        return None
+    completed_ids = {p["id"] for p in prs if p.get("status") == "completed"}
+    return {
+        "id": current_pr_record.get("id"),
+        "title": current_pr_record.get("title"),
+        "status": current_pr_record.get("status"),
+        "track": current_pr_record.get("track"),
+        "gate": current_pr_record.get("gate"),
+        "requeue_count": _requeue_count_for(chain_state, current_feature_id or ""),
+        "prs_completed_before": [
+            p.get("id") for p in prs
+            if p.get("id") in completed_ids and p.get("id") != current_feature_id
+        ],
+    }
+
+
+def _build_next_feature_info(next_pr_record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Build next feature dict from PR record, or None."""
+    if next_pr_record is None:
+        return None
+    return {
+        "id": next_pr_record.get("id"),
+        "title": next_pr_record.get("title"),
+        "dependencies": next_pr_record.get("dependencies") or [],
+    }
 
 
 # ---------------------------------------------------------------------------
 # Main projection builder
 # ---------------------------------------------------------------------------
 
-def build_chain_projection(
-    state_dir: str | Path,
-) -> Dict[str, Any]:
+def build_chain_projection(state_dir: str | Path) -> Dict[str, Any]:
     """Build the full chain state projection.
 
-    This is the single stable surface for querying chain progression truth.
-    Works with or without an initialized chain_state.json by deriving state
-    from pr_queue_state.json.
-
-    Returns a dict with:
-      chain_id, chain_state, active_feature, next_feature,
-      advancement_truth, carry_forward_summary, unresolved_chain_items,
-      requeue_history, generated_at
+    Single stable surface for querying chain progression truth.
+    Works without chain_state.json by deriving state from pr_queue_state.json.
     """
     state_root = Path(state_dir)
     chain_state = _load_chain_state(state_root)
@@ -403,93 +423,36 @@ def build_chain_projection(
     open_items = _load_open_items(state_root)
     carry_forward = _load_carry_forward(state_root)
 
-    # Derive current chain state
-    if chain_state is not None:
-        current_state = str(chain_state.get("current_state", "INITIALIZED"))
-        chain_id = str(chain_state.get("chain_id", ""))
-        current_feature_id = chain_state.get("current_feature_id")
-        feature_sequence = chain_state.get("feature_sequence") or []
-    else:
-        # Bootstrap: infer state from pr_queue_state.json
-        current_state = "NOT_INITIALIZED"
-        chain_id = ""
-        current_feature = _find_current_feature(pr_queue)
-        current_feature_id = current_feature.get("id") if current_feature else None
-        feature_sequence = [pr.get("id") for pr in _pr_sequence_from_queue(pr_queue)]
-
-    # Resolve current feature record from PR queue
-    prs = _pr_sequence_from_queue(pr_queue)
-    current_pr_record = next(
-        (p for p in prs if p.get("id") == current_feature_id), None
-    ) if current_feature_id else None
-
-    # Find next feature in sequence
-    next_pr_record = _find_next_feature(pr_queue, current_feature_id)
-
-    # Compute advancement truth
-    advancement = compute_advancement_truth(
-        pr_queue=pr_queue,
-        open_items=open_items,
-        state_dir=state_root,
-        current_feature_id=current_feature_id,
+    current_state, chain_id, current_feature_id, feature_sequence = _resolve_chain_identity(
+        chain_state, pr_queue
     )
 
-    # Carry-forward and unresolved items
+    prs = _pr_sequence_from_queue(pr_queue)
+    current_pr_record = next((p for p in prs if p.get("id") == current_feature_id), None) if current_feature_id else None
+    next_pr_record = _find_next_feature(pr_queue, current_feature_id)
+
+    advancement = compute_advancement_truth(
+        pr_queue=pr_queue, open_items=open_items, state_dir=state_root, current_feature_id=current_feature_id
+    )
     cf_summary = build_carry_forward_summary(carry_forward, open_items)
     unresolved = _build_unresolved_chain_items(carry_forward, open_items)
 
-    # Requeue history
-    requeue_history = _load_requeue_history(chain_state)
-
-    # Determine projected state when chain_state.json absent
     if current_state == "NOT_INITIALIZED":
-        all_completed = all(pr.get("status") == "completed" for pr in prs) if prs else False
-        if all_completed and prs:
-            current_state = "CHAIN_COMPLETE"
-        elif cf_summary["live_blocker_items"] > 0:
-            current_state = "ADVANCEMENT_BLOCKED"
-        elif current_feature_id is not None:
-            current_state = "FEATURE_ACTIVE"
-
-    # Build active feature info
-    active_feature: Optional[Dict[str, Any]] = None
-    if current_pr_record is not None:
-        completed_ids = set(_completed_pr_ids(pr_queue))
-        active_feature = {
-            "id": current_pr_record.get("id"),
-            "title": current_pr_record.get("title"),
-            "status": current_pr_record.get("status"),
-            "track": current_pr_record.get("track"),
-            "gate": current_pr_record.get("gate"),
-            "requeue_count": _requeue_count_for(chain_state, current_feature_id or ""),
-            "prs_completed_before": [
-                p.get("id") for p in prs
-                if p.get("id") in completed_ids and p.get("id") != current_feature_id
-            ],
-        }
-
-    # Build next feature info
-    next_feature: Optional[Dict[str, Any]] = None
-    if next_pr_record is not None:
-        next_feature = {
-            "id": next_pr_record.get("id"),
-            "title": next_pr_record.get("title"),
-            "dependencies": next_pr_record.get("dependencies") or [],
-        }
+        current_state = _infer_not_initialized_state(prs, cf_summary, current_feature_id)
 
     return {
         "chain_id": chain_id,
         "chain_state": current_state,
         "is_blocked": current_state in BLOCKED_STATES,
         "is_recovery_needed": current_state in RECOVERY_NEEDED_STATES,
-        "active_feature": active_feature,
-        "next_feature": next_feature,
+        "active_feature": _build_active_feature_info(current_pr_record, prs, chain_state, current_feature_id),
+        "next_feature": _build_next_feature_info(next_pr_record),
         "feature_sequence": feature_sequence,
         "completed_features": _completed_pr_ids(pr_queue),
         "advancement_truth": advancement,
         "carry_forward_summary": cf_summary,
         "unresolved_chain_items": unresolved,
-        "requeue_history": requeue_history,
+        "requeue_history": _load_requeue_history(chain_state),
         "generated_at": _now_iso(),
     }
 
@@ -523,11 +486,30 @@ def init_chain_state(
         "completed_features": [],
         "updated_at": now,
     }
-    path = state_root / "chain_state.json"
-    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    (state_root / "chain_state.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     _append_audit(state_root, chain_id=chain_id, from_state=None, to_state="INITIALIZED",
                   feature_id=None, actor=initiated_by, reason="chain initialized")
     return record
+
+
+def _update_requeue_history(
+    chain_state: Dict[str, Any], to_state: str, from_state: str, feature_id: Optional[str]
+) -> None:
+    """Increment requeue counter when transitioning back to FEATURE_ACTIVE from recovery."""
+    if to_state == "FEATURE_ACTIVE" and feature_id and from_state in {"RECOVERY_PENDING", "FEATURE_FAILED"}:
+        history = chain_state.setdefault("requeue_history", {})
+        entry = history.setdefault(feature_id, {"total_attempts": 0, "failure_classes": {}})
+        entry["total_attempts"] = int(entry.get("total_attempts", 0)) + 1
+
+
+def _update_completed_features(
+    chain_state: Dict[str, Any], to_state: str, feature_id: Optional[str]
+) -> None:
+    """Append feature_id to completed_features when advancing or completing chain."""
+    if to_state in {"FEATURE_ADVANCING", "CHAIN_COMPLETE"} and feature_id:
+        completed = chain_state.setdefault("completed_features", [])
+        if feature_id not in completed:
+            completed.append(feature_id)
 
 
 def record_state_transition(
@@ -550,40 +532,18 @@ def record_state_transition(
     state_root = Path(state_dir)
     chain_state = _load_chain_state(state_root) or {}
     from_state = chain_state.get("current_state", "NOT_INITIALIZED")
-    chain_id = chain_state.get("chain_id", "")
-    now = _now_iso()
 
     chain_state["current_state"] = to_state
-    chain_state["updated_at"] = now
+    chain_state["updated_at"] = _now_iso()
     if feature_id is not None:
         chain_state["current_feature_id"] = feature_id
 
-    # Track requeue history
-    if to_state == "FEATURE_ACTIVE" and feature_id and from_state in {"RECOVERY_PENDING", "FEATURE_FAILED"}:
-        history = chain_state.setdefault("requeue_history", {})
-        entry = history.setdefault(feature_id, {"total_attempts": 0, "failure_classes": {}})
-        entry["total_attempts"] = int(entry.get("total_attempts", 0)) + 1
+    _update_requeue_history(chain_state, to_state, from_state, feature_id)
+    _update_completed_features(chain_state, to_state, feature_id)
 
-    # Mark feature complete
-    if to_state in {"FEATURE_ADVANCING", "CHAIN_COMPLETE"} and feature_id:
-        completed = chain_state.setdefault("completed_features", [])
-        if feature_id not in completed:
-            completed.append(feature_id)
-
-    path = state_root / "chain_state.json"
-    path.write_text(json.dumps(chain_state, indent=2), encoding="utf-8")
-
-    _append_audit(
-        state_root,
-        chain_id=chain_id,
-        from_state=from_state,
-        to_state=to_state,
-        feature_id=feature_id,
-        actor=actor,
-        reason=reason,
-        evidence=evidence,
-    )
-
+    (state_root / "chain_state.json").write_text(json.dumps(chain_state, indent=2), encoding="utf-8")
+    _append_audit(state_root, chain_id=chain_state.get("chain_id", ""), from_state=from_state,
+                  to_state=to_state, feature_id=feature_id, actor=actor, reason=reason, evidence=evidence)
     return chain_state
 
 
@@ -620,16 +580,12 @@ def _append_audit(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Chain state projection for VNX multi-feature chains")
-    parser.add_argument(
-        "--state-dir",
-        default=os.environ.get("VNX_STATE_DIR", ""),
-        help="Path to state directory (defaults to VNX_STATE_DIR)",
-    )
+    parser.add_argument("--state-dir", default=os.environ.get("VNX_STATE_DIR", ""),
+                        help="Path to state directory (defaults to VNX_STATE_DIR)")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    sub.add_parser("projection", help="Full chain state projection (current, next, advancement, carry-forward)")
-    sub.add_parser("advancement-truth", help="Advancement truth only: can the chain advance now?")
-    sub.add_parser("carry-forward", help="Carry-forward summary and unresolved chain items")
+    sub.add_parser("projection", help="Full chain state projection")
+    sub.add_parser("advancement-truth", help="Advancement truth only")
+    sub.add_parser("carry-forward", help="Carry-forward summary and unresolved items")
     sub.add_parser("chain-state", help="Current chain state name and blocked/recovery flags")
 
     init_p = sub.add_parser("init", help="Initialize chain state")
@@ -644,7 +600,6 @@ def _build_parser() -> argparse.ArgumentParser:
     trans_p.add_argument("--feature-id")
     trans_p.add_argument("--actor", default="T0")
     trans_p.add_argument("--reason", default="")
-
     return parser
 
 
@@ -658,47 +613,31 @@ def main() -> int:
     state_root = Path(state_dir)
 
     if args.command == "init":
-        record = init_chain_state(
-            state_root,
-            chain_id=args.chain_id,
-            feature_plan=args.feature_plan,
-            feature_sequence=args.feature_sequence,
-            chain_origin_sha=args.origin_sha,
-            initiated_by=args.initiated_by,
-        )
+        record = init_chain_state(state_root, chain_id=args.chain_id, feature_plan=args.feature_plan,
+                                   feature_sequence=args.feature_sequence, chain_origin_sha=args.origin_sha,
+                                   initiated_by=args.initiated_by)
         print(json.dumps(record, separators=(",", ":")))
-
     elif args.command == "transition":
-        record = record_state_transition(
-            state_root,
-            to_state=args.to_state,
-            feature_id=args.feature_id,
-            actor=args.actor,
-            reason=args.reason,
-        )
+        record = record_state_transition(state_root, to_state=args.to_state, feature_id=args.feature_id,
+                                          actor=args.actor, reason=args.reason)
         print(json.dumps(record, separators=(",", ":")))
-
     else:
         projection = build_chain_projection(state_root)
-
         if args.command == "projection":
             print(json.dumps(projection, separators=(",", ":")))
         elif args.command == "advancement-truth":
             print(json.dumps(projection["advancement_truth"], separators=(",", ":")))
         elif args.command == "carry-forward":
-            print(json.dumps({
-                "summary": projection["carry_forward_summary"],
-                "unresolved_chain_items": projection["unresolved_chain_items"],
-            }, separators=(",", ":")))
+            print(json.dumps({"summary": projection["carry_forward_summary"],
+                              "unresolved_chain_items": projection["unresolved_chain_items"]},
+                             separators=(",", ":")))
         elif args.command == "chain-state":
-            print(json.dumps({
-                "chain_state": projection["chain_state"],
-                "is_blocked": projection["is_blocked"],
-                "is_recovery_needed": projection["is_recovery_needed"],
-                "active_feature": (projection.get("active_feature") or {}).get("id"),
-                "next_feature": (projection.get("next_feature") or {}).get("id"),
-            }, separators=(",", ":")))
-
+            print(json.dumps({"chain_state": projection["chain_state"],
+                              "is_blocked": projection["is_blocked"],
+                              "is_recovery_needed": projection["is_recovery_needed"],
+                              "active_feature": (projection.get("active_feature") or {}).get("id"),
+                              "next_feature": (projection.get("next_feature") or {}).get("id")},
+                             separators=(",", ":")))
     return 0
 
 
