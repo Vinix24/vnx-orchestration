@@ -1,59 +1,60 @@
-# Feature: Context Injection And Handover Quality
+# Feature: Runtime Adapter Formalization And Headless Transport Abstraction
 
-**Feature-ID**: Feature 15
+**Feature-ID**: Feature 16
 **Status**: Planned
 **Priority**: P1
-**Branch**: `feature/context-injection-and-handover-quality`
+**Branch**: `feature/runtime-adapter-formalization-and-headless-transport-abstraction`
 **Risk-Class**: high
 **Merge-Policy**: human
 **Review-Stack**: gemini_review,codex_gate,claude_github_optional
 
 Primary objective:
-Improve context injection, handover quality, and resume fidelity so autonomous coding runs receive the right amount of context, waste fewer tokens, and require fewer T0 redispatches.
+Make runtime execution and observation flow through an explicit adapter boundary so tmux remains supported but is no longer the hidden architecture for worker/session control.
 
 Execution context:
-- intended follow-on after Feature 14 chain hardening
-- maps primarily to Roadmap M3: Intelligence And Context Injection Upgrade
-- assumes runtime truth, operator visibility, and chain carry-forward are already available and can now feed better context selection
+- intended follow-on after Feature 14 and Feature 15
+- maps primarily to Roadmap M5a: Runtime Adapter Interface And `TmuxAdapter` Formalization
+- assumes Feature 12 runtime truth and Feature 13 dashboard visibility already exist
+- assumes chain and context quality work are strong enough that transport abstraction can land without masking runtime ambiguity
 
 Execution preconditions:
-- Feature 14 chain hardening baseline must be merged first
-- both Gemini and Codex headless gates must remain operational on current `main` throughout this feature
+- both Gemini and Codex headless gates must be proven end-to-end on current `main` before this feature starts
 - no provider-disabled or `not_executable` steady-state is acceptable for this feature family
-- interface-only Runtime Adapter work may overlap only if T0 explicitly documents that no M3 deliverable is forced to rework around it
+- Feature 14 and Feature 15 must already be merged, except for narrowly scoped interface-only overlap explicitly documented by T0
 
 Review gate policy:
 - Gemini headless review is required on every PR in this feature
-- Codex headless final gate is required on every PR in this feature because prompt quality and resume reliability directly affect autonomous chain success
+- Codex headless final gate is required on every PR in this feature because runtime-boundary mistakes can silently damage future autonomy
 - no PR in this feature may proceed under provider-disabled waiver language for Gemini or Codex
 - every PR in this feature must be opened as a GitHub PR before merge consideration
 - no downstream PR may be promoted until the upstream PR is merged from green GitHub CI on updated `main`
 
 ## Problem Statement
 
-Autonomous coding still loses efficiency and coherence when context is too broad, too stale, or too weakly structured:
-- workers can receive more history than they need and still miss the critical detail
-- resumes and handovers can force T0 to redispatch because the next actor did not receive enough bounded context
-- repeated failures and useful outcomes are not yet transformed into reusable context signals cleanly enough
-- longer chains will remain noisy if context selection stays implicit and unmeasured
+VNX runtime behavior is now more observable and governable, but execution still leans too heavily on implicit tmux assumptions:
+- launch, attach, stop, inspect, and health semantics are still too coupled to tmux-specific behavior
+- new runtime improvements risk deepening transport coupling if they continue to talk directly in tmux terms
+- headless execution exists, but not yet behind a clear session/runtime boundary that can coexist with tmux safely
+- future worker/session evolution will stay fragile until runtime capabilities are modeled explicitly instead of being inferred from terminal mechanics
 
 ## Design Goal
 
-Create a bounded, measurable context-injection and handover system that improves worker relevance, reduces prompt waste, and raises first-pass resume acceptance in autonomous coding flows.
+Introduce an explicit runtime adapter boundary with a production `TmuxAdapter` and a constrained early headless transport abstraction, so future worker/session work can evolve without a transport rewrite or hidden tmux dependency.
 
 ## Non-Goals
 
-- no broad local-LLM housekeeping layer in this feature
-- no semantic-search platform rewrite
-- no cross-domain business preference system rollout
-- no runtime transport rearchitecture here
+- no full tmux removal
+- no complete transport rewrite
+- no remote-control channel architecture
+- no broad Business OS rollout
+- no forced production cutover to a richer headless runtime in this feature
 
 ## Delivery Discipline
 
 - each PR must have a GitHub PR with clear scope and linked feature name before merge
 - required GitHub Actions checks must be green before human merge
 - dependent PRs must branch from post-merge `main`, not from stale local branches
-- context-improvement claims must be backed by measurable evidence, not intuition
+- new runtime work must land through adapter-backed interfaces, not fresh direct tmux coupling
 - final certification must update the internal planning progress docs in `docs/internal/plans/`
 
 ## Dependency Flow
@@ -66,7 +67,7 @@ PR-2 -> PR-3
 PR-3 -> PR-4
 ```
 
-## PR-0: Context Injection And Handover Contract
+## PR-0: Runtime Adapter Contract And Capability Matrix
 **Track**: C
 **Priority**: P1
 **Complexity**: Medium
@@ -77,34 +78,33 @@ PR-3 -> PR-4
 **Dependencies**: []
 
 ### Description
-Define the bounded-context contract, handover structure, and measurable acceptance targets for context injection and resume quality.
+Define the canonical runtime adapter interface, capability model, adapter responsibilities, and state mapping rules before code extraction starts.
 
 ### Scope
-- define the canonical context bundle structure for autonomous coding dispatches
-- define what belongs in mandatory context vs optional supporting context
-- define handover and resume payload structure
-- define measurable success criteria for context waste and resume acceptance
-- define stale-context rejection rules
+- define `RuntimeAdapter` interface for spawn, stop, attach, observe, inspect, and health/status queries
+- define adapter capability matrix and explicit unsupported-operation semantics
+- define mapping rules between adapter state and canonical runtime truth
+- define compatibility requirements for `TmuxAdapter`
+- define boundary rules for future headless/local-session adapters
 
 ### Deliverables
-- context injection contract
-- handover and resume payload contract
-- measurement contract for context waste and resume acceptance
+- runtime adapter contract
+- adapter capability matrix
+- canonical state-mapping rules
 - GitHub PR with contract summary and acceptance notes
 
 ### Success Criteria
-- context selection rules are explicit and bounded
-- handover structure is standardized before implementation starts
-- measurement targets are locked before optimization begins
-- stale-context reuse becomes an explicit defect class
+- runtime/session responsibilities are explicit before implementation
+- adapter capability gaps are surfaced as governed states rather than hidden behavior
+- tmux compatibility is preserved without making tmux the architecture
+- future headless adapter work has a locked contract to build against
 
 ### Quality Gate
-`gate_pr0_context_and_handover_contract`:
-- [ ] Contract defines bounded context bundle structure for autonomous coding dispatches
-- [ ] Contract defines mandatory vs optional context components
-- [ ] Contract defines standardized handover and resume payload structure
-- [ ] Contract defines measurable acceptance targets for context waste and resume quality
-- [ ] Contract defines stale-context rejection rules
+`gate_pr0_runtime_adapter_contract`:
+- [ ] Contract defines `RuntimeAdapter` responsibilities for spawn, stop, attach, observe, inspect, and health/status
+- [ ] Contract defines adapter capability matrix and unsupported-operation semantics
+- [ ] Contract defines mapping between adapter-visible state and canonical runtime truth
+- [ ] Contract defines `TmuxAdapter` compatibility requirements and future headless-adapter boundary rules
 - [ ] GitHub PR exists with feature-linked summary and acceptance notes
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
@@ -112,139 +112,139 @@ Define the bounded-context contract, handover structure, and measurable acceptan
 
 ---
 
-## PR-1: Context Selection And Budget Enforcement
+## PR-1: TmuxAdapter Extraction And Direct-Coupling Freeze
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 2-4 hours
+**Estimated Time**: 3-5 hours
 **Dependencies**: [PR-0]
 
 ### Description
-Implement deterministic context selection and budget enforcement so autonomous dispatches include the right evidence, history, and carry-forward signals without bloating prompts.
+Extract current tmux runtime behavior behind an explicit `TmuxAdapter` and freeze new direct tmux coupling in the validated path.
 
 ### Scope
-- implement bounded context assembly against explicit budget targets
-- include high-value carry-forward evidence while excluding stale or irrelevant history
-- enforce mandatory context components and rejection of stale-context inputs
-- add tests for budget enforcement and stale-context rejection
+- implement `TmuxAdapter` against the new runtime adapter contract
+- route validated launch/attach/stop/inspect calls through `TmuxAdapter`
+- add guardrails/tests that block new direct tmux wiring in the protected path
+- preserve existing operator-visible behavior while shifting the boundary
 
 ### Deliverables
-- bounded context assembly implementation
-- context budget enforcement
-- stale-context rejection checks
-- GitHub PR with context-selection evidence summary
+- `TmuxAdapter` implementation
+- direct-coupling freeze guard
+- adapter-backed runtime tests
+- GitHub PR with adapter extraction evidence summary
 
 ### Success Criteria
-- context injection stays within explicit budget boundaries
-- stale or irrelevant context is blocked from entering validated dispatch paths
-- high-value carry-forward evidence remains present under test
-- context selection becomes deterministic enough to review and certify
+- validated runtime actions no longer need to call tmux primitives directly outside the adapter
+- `TmuxAdapter` preserves existing behavior for current operator and worker flows
+- new direct tmux coupling is blocked in the protected path
+- adapter extraction does not regress runtime truth visibility
 
 ### Quality Gate
-`gate_pr1_context_selection_and_budget_enforcement`:
-- [ ] All context selection and budget tests pass
-- [ ] Validated dispatch path enforces explicit context budget boundaries under test
-- [ ] Stale-context inputs are rejected under test
-- [ ] Carry-forward evidence remains included when required under test
-- [ ] GitHub PR exists with context-selection evidence summary
+`gate_pr1_tmux_adapter_extraction`:
+- [ ] All adapter extraction and compatibility tests pass
+- [ ] Validated launch/attach/stop/inspect flows use `TmuxAdapter` under test
+- [ ] New direct tmux coupling is blocked or flagged in the protected path under test
+- [ ] Existing operator-visible behavior remains compatible under test
+- [ ] GitHub PR exists with adapter extraction evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-2: Handover And Resume Payload Quality Enforcement
+## PR-2: Runtime Launch And Observation Facade
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 2-4 hours
+**Estimated Time**: 3-5 hours
 **Dependencies**: [PR-1]
 
 ### Description
-Implement standardized handover and resume payload generation so downstream workers or T0 reviews receive enough structured context to continue without immediate redispatch.
+Introduce an adapter-backed runtime facade so orchestration and dashboard surfaces ask for runtime behavior through one explicit boundary.
 
 ### Scope
-- implement standardized handover payload generation
-- implement resume payload generation for interrupted or resumed work
-- enforce required fields for status, next action, evidence, residual risks, and open items
-- add tests for handover completeness and resume fidelity
+- add runtime facade/service that uses `RuntimeAdapter` rather than transport-specific helpers
+- route dashboard/operator actions through the facade where applicable
+- route validated runtime observation/read-model paths through the facade
+- add tests for launch, observation, and failure propagation
 
 ### Deliverables
-- handover payload generation
-- resume payload generation
-- completeness and fidelity tests
-- GitHub PR with handover-quality evidence summary
+- runtime facade/service
+- adapter-backed operator/runtime integration
+- facade behavior tests
+- GitHub PR with facade evidence summary
 
 ### Success Criteria
-- handovers are structured enough for downstream actors to continue coherently
-- resumes contain enough actionable context to avoid avoidable redispatches
-- required residual risks and open items survive into handovers under test
-- handover quality becomes deterministic rather than stylistic
+- orchestration and dashboard code consume one runtime boundary instead of transport-specific helpers
+- transport-specific failures surface as explicit runtime outcomes
+- runtime facade preserves current truth/read-model compatibility
+- future adapter work has a stable integration seam
 
 ### Quality Gate
-`gate_pr2_handover_and_resume_quality`:
-- [ ] All handover and resume quality tests pass
-- [ ] Standardized handover payload includes required status, next-action, evidence, residual-risk, and open-item fields under test
-- [ ] Resume payload contains enough context to continue without immediate redispatch in validated scenarios under test
-- [ ] Required residual risks and open items survive into handover and resume payloads under test
-- [ ] GitHub PR exists with handover-quality evidence summary
+`gate_pr2_runtime_facade`:
+- [ ] All runtime facade tests pass
+- [ ] Validated orchestration and dashboard paths use the runtime facade under test
+- [ ] Transport-specific failures surface as explicit runtime outcomes under test
+- [ ] Runtime facade preserves current runtime truth and read-model compatibility under test
+- [ ] GitHub PR exists with facade evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-3: Outcome Signals And Reusable Context Inputs
+## PR-3: Early Headless Transport Abstraction And Capability Gating
 **Track**: B
 **Priority**: P1
 **Complexity**: Medium
 **Risk**: High
-**Skill**: @data-analyst
+**Skill**: @architect
 **Requires-Model**: sonnet
-**Estimated Time**: 2-4 hours
+**Estimated Time**: 3-5 hours
 **Dependencies**: [PR-2]
 
 ### Description
-Promote repeated outcomes, prior failures, and useful chain evidence into reusable context inputs so future dispatches and resumes draw from validated signals instead of undifferentiated history.
+Add a constrained early headless transport abstraction so future non-tmux worker/session execution can be reasoned about without forcing a production cutover.
 
 ### Scope
-- identify and surface reusable outcome signals from receipts, open items, and recent chain history
-- distinguish reusable signals from stale narrative history
-- expose reusable context inputs to the bounded context assembler
-- add tests for reusable-signal inclusion and stale-history exclusion
+- define and implement a minimal headless/local-session adapter skeleton behind the runtime adapter contract
+- add capability gating so unsupported operations remain explicit
+- keep tmux as the active production adapter while validating headless capability semantics
+- add tests for adapter registration, capability gating, and safe fallback behavior
 
 ### Deliverables
-- reusable outcome-signal extraction
-- reusable context input surface
-- signal-selection tests
-- GitHub PR with reusable-signal evidence summary
+- early headless/local-session adapter skeleton
+- adapter capability-gating logic
+- safe fallback behavior tests
+- GitHub PR with headless-adapter evidence summary
 
 ### Success Criteria
-- useful repeated outcomes can be reused without dragging full old transcripts into the prompt
-- stale narrative history is excluded where reusable structured signals exist
-- context assembly quality improves through stronger inputs, not broader prompts
-- learning-loop groundwork is improved without introducing heavy ML scope
+- VNX can represent a non-tmux runtime path without pretending it is production-ready
+- unsupported headless operations fail explicitly and governably
+- tmux remains the default active adapter for current production flows
+- future richer headless runtime work no longer needs to invent its boundary from scratch
 
 ### Quality Gate
-`gate_pr3_reusable_context_inputs`:
-- [ ] All reusable-signal tests pass
-- [ ] Reusable outcome signals are available to the context assembler under test
-- [ ] Stale narrative history is excluded when reusable structured signals exist under test
-- [ ] Context assembly uses stronger reusable inputs without uncontrolled prompt growth under test
-- [ ] GitHub PR exists with reusable-signal evidence summary
+`gate_pr3_headless_transport_abstraction`:
+- [ ] All headless-adapter and capability-gating tests pass
+- [ ] Early headless adapter is registered behind the runtime adapter contract under test
+- [ ] Unsupported headless operations fail explicitly under test
+- [ ] Tmux remains the default active adapter for current production flows under test
+- [ ] GitHub PR exists with headless-adapter evidence summary
 - [ ] Required GitHub Actions checks are green before merge
 - [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
 - [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
 
 ---
 
-## PR-4: Context And Resume Quality Certification
+## PR-4: Runtime Adapter Certification And Transition Guardrails
 **Track**: C
 **Priority**: P1
 **Complexity**: High
@@ -255,39 +255,38 @@ Promote repeated outcomes, prior failures, and useful chain evidence into reusab
 **Dependencies**: [PR-3]
 
 ### Description
-Certify that bounded context injection and structured handovers materially improve autonomous coding flow quality, reduce prompt waste, and lower immediate redispatch rates.
+Certify that runtime behavior now flows through stable adapter boundaries, tmux remains safely supported, and the early headless abstraction is explicit rather than accidental.
 
 ### Scope
-- measure bounded context waste on the validated dispatch path
-- measure resume and handover acceptance on sampled autonomous coding scenarios
-- verify stale-context rejection and reusable-signal inclusion in certification scenarios
+- certify adapter-backed parity for validated launch/attach/stop/inspect paths
+- certify canonical runtime truth remains aligned with adapter-backed state reporting
+- verify no new protected-path direct tmux coupling was introduced during the feature
 - update `docs/internal/plans/CHANGELOG.md` with feature-closeout summary and next-step recommendation
-- update `docs/internal/plans/PROJECT_STATUS.md` with the improved context-quality baseline and remaining next-order steps
+- update `docs/internal/plans/PROJECT_STATUS.md` with the new runtime-adapter baseline and remaining next-order steps
 - require Gemini review and Codex final gate on the certification PR
 
 ### Deliverables
-- context and resume certification report
-- measured evidence for context budget efficiency and resume acceptance
-- stale-context and reusable-signal certification evidence
+- runtime adapter certification report
+- parity and guardrail evidence
 - updated internal planning changelog
 - updated internal planning project status
 
 ### Success Criteria
-- bounded context waste remains under the accepted threshold on the validated path
-- resumes and handovers are accepted without immediate redispatch in the targeted share of sampled review cases
-- context quality is measurably better, not just qualitatively preferred
+- validated runtime behavior is adapter-backed rather than transport-hard-coded
+- tmux remains safely supported as one adapter
+- early headless transport abstraction is explicit and bounded
 - both Gemini and Codex gates execute successfully on the certification PR
 - this feature closes with zero unresolved chain-created open items
 
 ### Quality Gate
-`gate_pr4_context_and_resume_certification`:
-- [ ] All context and resume certification tests pass
-- [ ] Bounded context waste remains under 20 percent of total dispatch prompt budget on the validated path under test
-- [ ] Resumes and handovers are accepted without immediate redispatch in at least 80 percent of sampled review cases
-- [ ] Stale-context rejection and reusable-signal inclusion are proven in certification scenarios
+`gate_pr4_runtime_adapter_certification`:
+- [ ] All runtime adapter certification tests pass
+- [ ] Adapter-backed parity is proven for validated launch, attach, stop, and inspect flows under test
+- [ ] Canonical runtime truth remains aligned with adapter-backed state reporting under test
+- [ ] No new protected-path direct tmux coupling is introduced under test
 - [ ] Gemini and Codex both execute to terminal success on the certification path with request, result, and report artifacts present
 - [ ] `docs/internal/plans/CHANGELOG.md` is updated with feature-closeout progress and next recommended order
-- [ ] `docs/internal/plans/PROJECT_STATUS.md` is updated with the new context-quality baseline
+- [ ] `docs/internal/plans/PROJECT_STATUS.md` is updated with the new runtime-adapter baseline
 - [ ] Feature closes with zero unresolved chain-created open items
 - [ ] GitHub PR exists with certification evidence summary
 - [ ] Required GitHub Actions checks are green before merge
@@ -300,13 +299,13 @@ auto-continue into the next feature in the chain rather than waiting for a new h
 kickoff prompt.
 
 Required continuation sequence:
-1. Close Feature 15 in the queue and confirm no unresolved blocker open items remain.
+1. Close Feature 16 in the queue and confirm no unresolved blocker open items remain.
 2. Perform chain-boundary runtime cleanup / stale-lease reconciliation.
-3. Materialize Feature 16 into root `FEATURE_PLAN.md`.
+3. Materialize Feature 17 into root `FEATURE_PLAN.md`.
 4. Reinitialize `PR_QUEUE.md` from the new plan.
 5. Run kickoff preflight for `PR-0`.
-6. Promote exactly one kickoff dispatch for Feature 16.
+6. Promote exactly one kickoff dispatch for Feature 17.
 7. Continue normal orchestration from the new queue state.
 
 Next feature to start automatically:
-- Feature 16: Runtime Adapter Formalization And Headless Transport Abstraction
+- Feature 17: Rich Headless Runtime Sessions And Structured Observability
