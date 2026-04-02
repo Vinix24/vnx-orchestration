@@ -353,6 +353,8 @@ class TmuxAdapter:
 
     def stop(self, terminal_id: str) -> StopResult:
         """Terminate tmux pane. Idempotent — stopping absent pane succeeds."""
+        if not _tmux_available():
+            return StopResult(success=True, was_running=False, error="tmux not available")
         try:
             target = self.resolve_target(terminal_id)
         except PaneNotFoundError:
@@ -362,6 +364,8 @@ class TmuxAdapter:
 
     def attach(self, terminal_id: str) -> AttachResult:
         """Switch operator focus to terminal's pane."""
+        if not _tmux_available():
+            return AttachResult(success=False, error="tmux not available")
         try:
             target = self.resolve_target(terminal_id)
         except PaneNotFoundError:
@@ -373,6 +377,8 @@ class TmuxAdapter:
 
     def observe(self, terminal_id: str) -> ObservationResult:
         """Read-only state probe without side effects."""
+        if not _tmux_available():
+            return ObservationResult(exists=False, error="tmux not available")
         try:
             target = self.resolve_target(terminal_id)
         except PaneNotFoundError:
@@ -388,6 +394,8 @@ class TmuxAdapter:
 
     def inspect(self, terminal_id: str) -> InspectionResult:
         """Deep diagnostic inspection of terminal pane."""
+        if not _tmux_available():
+            return InspectionResult(exists=False, error="tmux not available")
         try:
             target = self.resolve_target(terminal_id)
         except PaneNotFoundError:
@@ -403,6 +411,8 @@ class TmuxAdapter:
 
     def health(self, terminal_id: str) -> HealthResult:
         """Fast health check (< 2s)."""
+        if not _tmux_available():
+            return HealthResult(healthy=False, surface_exists=False, error="tmux not available")
         try:
             target = self.resolve_target(terminal_id)
         except PaneNotFoundError:
