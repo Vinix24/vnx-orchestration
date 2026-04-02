@@ -384,7 +384,8 @@ def _build_feature_summary(
     feature_id: str, feature_name: str, status: str, prs_merged: List[str],
     merge_shas: List[str], gate_results: Dict[str, str],
     findings: List[Dict[str, Any]], open_items: List[Dict[str, Any]],
-    residual_risks: List[Dict[str, Any]], requeue_count: int, now: str,
+    deferred_items: List[Dict[str, Any]], residual_risks: List[Dict[str, Any]],
+    requeue_count: int, now: str,
 ) -> Dict[str, Any]:
     """Build a feature summary record (contract Section 6.5)."""
     return {
@@ -400,9 +401,33 @@ def _build_feature_summary(
         "open_items_created": len([i for i in open_items if i.get("status") != "done"]),
         "open_items_resolved": len([i for i in open_items if i.get("status") == "done"]),
         "open_items_deferred": len([i for i in open_items if i.get("status") == "deferred"]),
+        "deferred_items_count": len(deferred_items),
         "residual_risks": len(residual_risks),
         "requeue_count": requeue_count,
     }
+
+
+def _validate_deferred_items(
+    items: List[Dict[str, Any]], feature_id: str
+) -> List[Dict[str, Any]]:
+    """Validate deferred items per contract O-3: only warn/info severity, reason required."""
+    validated: List[Dict[str, Any]] = []
+    for item in items:
+        severity = str(item.get("severity", "")).lower()
+        if severity == "blocker":
+            raise ValueError(
+                f"Cannot defer blocker item {item.get('id', '?')} — contract O-3 "
+                f"requires blocker items to block advancement, not be deferred"
+            )
+        if not item.get("reason"):
+            raise ValueError(
+                f"Deferred item {item.get('id', '?')} missing required 'reason' field — "
+                f"contract O-3 requires a deferral reason"
+            )
+        entry = dict(item)
+        entry.setdefault("origin_feature", feature_id)
+        validated.append(entry)
+    return validated
 
 
 def snapshot_feature_boundary(
@@ -440,9 +465,8 @@ def snapshot_feature_boundary(
 
     _accumulate_open_items(ledger, safe_items, feature_id, now)
 
-    for item in safe_deferred:
-        entry = dict(item)
-        entry.setdefault("origin_feature", feature_id)
+    validated_deferred = _validate_deferred_items(safe_deferred, feature_id)
+    for entry in validated_deferred:
         entry.setdefault("deferred_at", now)
         ledger["deferred_items"].append(entry)
 
@@ -454,7 +478,8 @@ def snapshot_feature_boundary(
 
     ledger["feature_summaries"].append(_build_feature_summary(
         feature_id, feature_name, status, prs_merged, merge_shas or [],
-        gate_results or {}, safe_findings, safe_items, safe_risks, requeue_count, now,
+        gate_results or {}, safe_findings, safe_items, validated_deferred,
+        safe_risks, requeue_count, now,
     ))
 
     _write_carry_forward(state_root, ledger)
