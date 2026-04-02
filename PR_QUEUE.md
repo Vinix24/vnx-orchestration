@@ -1,4 +1,4 @@
-# PR Queue - Feature: Multi-Feature Autonomy Hardening And Chain Recovery
+# PR Queue - Feature: Context Injection And Handover Quality
 
 ## Progress Overview
 Total: 5 PRs | Complete: 5 | Active: 0 | Queued: 0 | Blocked: 0
@@ -12,11 +12,11 @@ Review-Stack: gemini_review,codex_gate,claude_github_optional
 ## Status
 
 ### ✅ Completed PRs
-- PR-0: Multi-Feature Chain Contract And Recovery Policy
-- PR-1: Chain State Projection And Feature Advancement Truth
-- PR-2: Resume, Requeue, And Branch/Worktree Transition Enforcement
-- PR-3: Chain-Level Findings Carry-Forward And Residual Governance
-- PR-4: Multi-Feature Autonomous Chain Certification
+- PR-0: Context Injection And Handover Contract
+- PR-1: Context Selection And Budget Enforcement
+- PR-2: Handover And Resume Payload Quality Enforcement
+- PR-3: Outcome Signals And Reusable Context Inputs
+- PR-4: Context And Resume Quality Certification
 
 ## Dependency Flow
 ```
