@@ -26,6 +26,8 @@
 - Receipt format (NDJSON): `core/11_RECEIPT_FORMAT.md`
 - Permission settings: `core/12_PERMISSION_SETTINGS.md`
 - Error contract standard: `orchestration/ERROR_CONTRACT_STANDARD.md`
+- Headless run contract: `HEADLESS_RUN_CONTRACT.md`
+- Multi-feature chain contract: `MULTI_FEATURE_CHAIN_CONTRACT.md`
 
 ### Technical Deep Dives
 - Intelligence system (v4.0 — code + doc ingestion + governance): `core/technical/INTELLIGENCE_SYSTEM.md`
