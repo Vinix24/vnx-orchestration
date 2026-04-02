@@ -1,7 +1,7 @@
 # Runtime Adapter Contract
 
 **Feature**: Feature 16 — Runtime Adapter Formalization And Headless Transport Abstraction
-**PR**: PR-0
+**Contract-ID**: runtime-adapter-v1
 **Status**: Canonical
 **Last Updated**: 2026-04-02
 
@@ -85,7 +85,7 @@ Send a dispatch payload to the terminal's execution surface.
 |--------|--------|
 | **Input** | `terminal_id` (str), `dispatch_id` (str), `payload` (DeliveryPayload): skill command and/or dispatch reference. |
 | **Output** | `DeliveryResult`: success (bool), delivery_method (str), error (optional str). |
-| **Precondition** | Terminal must have an active execution surface. Adapter should validate lease soft-check but must NOT enforce lease state — that is the dispatcher's responsibility. |
+| **Precondition** | Terminal must have an active execution surface. The adapter must NOT read or validate lease state (see Section 6.1). The caller (dispatcher) may pass an optional `lease_hint` (dict with `dispatch_id`, `generation`) for the adapter to include in coordination events, but the adapter must not query `runtime_coordination.db` or any lease source to verify it. |
 | **Failure** | Transport failure returns `success=False` with error detail. Must NOT throw for transport-level failures (caller decides retry policy). |
 | **Side effects** | Must record `adapter_deliver_start`, `adapter_deliver_success` or `adapter_deliver_failure` coordination events. |
 
@@ -134,15 +134,15 @@ Fast health check for a single terminal.
 | **Behavior** | Lightweight subset of `observe`. Must complete within 2 seconds. Suitable for supervisor polling loops. |
 | **Failure** | Returns `healthy=False` with detail for any degraded state. |
 
-#### 3.2.8 `session_health() -> SessionHealthResult`
+#### 3.2.8 `session_health(terminal_ids) -> SessionHealthResult`
 
-Aggregate health check for the entire adapter session.
+Aggregate health check across specified terminals.
 
 | Aspect | Detail |
 |--------|--------|
-| **Input** | None. |
+| **Input** | `terminal_ids` (list of str): canonical IDs to check. The caller (facade/dispatcher) provides this list from canonical state; the adapter does not query `runtime_coordination.db` to discover terminals. |
 | **Output** | `SessionHealthResult`: session_exists (bool), terminals (dict of terminal_id -> HealthResult), degraded_terminals (list of str), error (optional str). |
-| **Behavior** | Returns health for all known terminals. Must complete within 5 seconds. |
+| **Behavior** | Checks health for each terminal in `terminal_ids` that this adapter instance manages. Terminals not managed by this adapter are returned with `healthy=False, surface_exists=False`. Must complete within 5 seconds. |
 
 #### 3.2.9 `reheal(terminal_id) -> RehealResult`
 
@@ -206,8 +206,10 @@ adapter type.
 | `HEALTH` | Fast health check | Yes |
 | `SESSION_HEALTH` | Aggregate session health | Yes |
 | `REHEAL` | Transport-level drift recovery | No |
-| `CAPTURE_OUTPUT` | Read terminal output content | No |
-| `INTERACTIVE_INPUT` | Send arbitrary keystrokes | No |
+
+> **Reserved capabilities** (no interface operations defined yet — will be introduced in a future PR when operations are specified):
+> `CAPTURE_OUTPUT` (read terminal output content), `INTERACTIVE_INPUT` (send arbitrary keystrokes).
+> These must NOT appear in any adapter's `capabilities()` set until their operations exist.
 
 ### 5.3 Adapter Capability Matrix
 
@@ -222,8 +224,6 @@ adapter type.
 | `HEALTH` | Yes | Yes | Yes |
 | `SESSION_HEALTH` | Yes | Yes | Yes |
 | `REHEAL` | Yes | No | No |
-| `CAPTURE_OUTPUT` | Yes | Partial | No |
-| `INTERACTIVE_INPUT` | Yes | No | No |
 
 ### 5.4 Unsupported Operation Semantics
 
@@ -439,5 +439,5 @@ Every `RuntimeAdapter` implementation must pass these conformance tests:
 |----------|-----------|
 | Should the adapter own process cleanup? | No. Process cleanup (`pkill`) stays in supervisor/stop scripts. Adapter owns transport surface lifecycle only. |
 | Should observe record events? | No, unless anomaly detected. Read-only operations should not create audit noise. |
-| Should the adapter validate leases? | Soft pre-check only (warn if lease looks stale). Hard enforcement stays in dispatcher/LeaseManager. |
+| Should the adapter validate leases? | No. The adapter must not read lease state (Section 6.1). The dispatcher passes an optional `lease_hint` for event metadata only. Lease enforcement is exclusively the dispatcher/LeaseManager's responsibility. |
 | Should dynamic tmux windows (ops, recovery) go through the adapter? | No. Dynamic windows are operator UX, not dispatch transport. They remain tmux-specific. |
