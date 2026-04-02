@@ -407,68 +407,87 @@ class TestBranchBaselineEnhanced:
 # 6. Full 5-feature chain lifecycle (end-to-end)
 # ---------------------------------------------------------------------------
 
+def _complete_feature(sd: Path, pr_idx: int, name: str, **snapshot_kwargs: Any) -> None:
+    """Activate a feature, snapshot its boundary as completed, and advance."""
+    pr_id = f"PR-{pr_idx}"
+    record_state_transition(sd, to_state="FEATURE_ACTIVE", feature_id=pr_id)
+    snapshot_feature_boundary(
+        sd, feature_id=pr_id, feature_name=name,
+        status="completed", prs_merged=[pr_id], merge_shas=[f"sha{pr_idx}"],
+        gate_results={"gemini_review": "passed", "codex_gate": "passed"},
+        **snapshot_kwargs,
+    )
+    record_state_transition(sd, to_state="FEATURE_ADVANCING", feature_id=pr_id)
+
+
+def _recover_and_complete_feature(sd: Path, pr_idx: int, name: str, **snapshot_kwargs: Any) -> None:
+    """Simulate transient failure, verify requeue, then complete the feature."""
+    pr_id = f"PR-{pr_idx}"
+    record_state_transition(sd, to_state="FEATURE_ACTIVE", feature_id=pr_id)
+    record_state_transition(sd, to_state="FEATURE_FAILED", feature_id=pr_id, reason="provider timeout")
+    record_state_transition(sd, to_state="RECOVERY_PENDING", feature_id=pr_id)
+    decision = evaluate_recovery(pr_id, "provider timeout", {})
+    assert decision.action == RECOVERY_ACTION_REQUEUE
+    record_state_transition(sd, to_state="FEATURE_ACTIVE", feature_id=pr_id, reason="requeue after timeout")
+    snapshot_feature_boundary(
+        sd, feature_id=pr_id, feature_name=name,
+        status="completed", prs_merged=[pr_id], merge_shas=[f"sha{pr_idx}"],
+        gate_results={"gemini_review": "passed", "codex_gate": "passed"},
+        **snapshot_kwargs,
+    )
+    record_state_transition(sd, to_state="FEATURE_ADVANCING", feature_id=pr_id)
+
+
+def _assert_lifecycle_complete(sd: Path) -> None:
+    """Assert chain completion, carry-forward integrity, and audit trail."""
+    projection = build_chain_projection(sd)
+    assert projection["chain_state"] == "CHAIN_COMPLETE"
+    assert projection["is_blocked"] is False
+    assert len(projection["completed_features"]) == 5
+
+    ledger = json.loads((sd / "chain_carry_forward.json").read_text())
+    assert len(ledger["feature_summaries"]) == 5
+    assert any(f["id"] == "F-L-0" for f in ledger["findings"])
+
+    oi = next(i for i in ledger["open_items"] if i["id"] == "OI-L-1")
+    assert oi["status"] == "done"
+    assert oi["origin_feature"] == "PR-1"
+
+    assert len(ledger["residual_risks"]) == 1
+    assert ledger["residual_risks"][0]["accepting_feature"] == "PR-2"
+
+    audit = [json.loads(l) for l in (sd / "chain_audit.jsonl").read_text().strip().splitlines()]
+    states = [r["to_state"] for r in audit]
+    assert states[0] == "INITIALIZED"
+    assert states[-1] == "CHAIN_COMPLETE"
+    assert "FEATURE_FAILED" in states
+    assert "RECOVERY_PENDING" in states
+    recovery_idx = states.index("RECOVERY_PENDING")
+    assert states[recovery_idx + 1] == "FEATURE_ACTIVE"
+
+
 class TestFullChainLifecycle:
     """End-to-end: 5 features through init, active, advancing, with one recovery."""
 
     def test_five_feature_lifecycle_with_recovery(self, state_dir: Path) -> None:
         _init_five_feature_chain(state_dir)
 
-        # PR-0: complete successfully
-        record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-0")
-        snapshot_feature_boundary(
-            state_dir, feature_id="PR-0", feature_name="Contract",
-            status="completed", prs_merged=["PR-0"], merge_shas=["sha0"],
-            gate_results={"gemini_review": "passed", "codex_gate": "passed"},
-            findings=[{"id": "F-L-0", "severity": "info", "resolution_status": "open"}],
-        )
-        record_state_transition(state_dir, to_state="FEATURE_ADVANCING", feature_id="PR-0")
+        _complete_feature(state_dir, 0, "Contract",
+            findings=[{"id": "F-L-0", "severity": "info", "resolution_status": "open"}])
+        _complete_feature(state_dir, 1, "Projection",
+            open_items=[{"id": "OI-L-1", "severity": "warn", "status": "open", "title": "Perf"}])
+        _recover_and_complete_feature(state_dir, 2, "Recovery",
+            residual_risks=[{"risk": "timeout sensitivity", "acceptance_rationale": "monitor"}])
+        _complete_feature(state_dir, 3, "Carry-Forward",
+            open_items=[{"id": "OI-L-1", "severity": "warn", "status": "done", "title": "Perf"}])
 
-        # PR-1: complete successfully
-        record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-1")
-        snapshot_feature_boundary(
-            state_dir, feature_id="PR-1", feature_name="Projection",
-            status="completed", prs_merged=["PR-1"], merge_shas=["sha1"],
-            gate_results={"gemini_review": "passed", "codex_gate": "passed"},
-            open_items=[{"id": "OI-L-1", "severity": "warn", "status": "open", "title": "Perf"}],
-        )
-        record_state_transition(state_dir, to_state="FEATURE_ADVANCING", feature_id="PR-1")
-
-        # PR-2: fails once (transient), then recovers
-        record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-2")
-        record_state_transition(state_dir, to_state="FEATURE_FAILED", feature_id="PR-2",
-                                  reason="provider timeout")
-        record_state_transition(state_dir, to_state="RECOVERY_PENDING", feature_id="PR-2")
-
-        decision = evaluate_recovery("PR-2", "provider timeout", {})
-        assert decision.action == RECOVERY_ACTION_REQUEUE
-
-        record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-2",
-                                  reason="requeue after timeout")
-        snapshot_feature_boundary(
-            state_dir, feature_id="PR-2", feature_name="Recovery",
-            status="completed", prs_merged=["PR-2"], merge_shas=["sha2"],
-            gate_results={"gemini_review": "passed", "codex_gate": "passed"},
-            residual_risks=[{"risk": "timeout sensitivity", "acceptance_rationale": "monitor"}],
-        )
-        record_state_transition(state_dir, to_state="FEATURE_ADVANCING", feature_id="PR-2")
-
-        # PR-3: complete, resolves the warn item from PR-1
-        record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-3")
-        snapshot_feature_boundary(
-            state_dir, feature_id="PR-3", feature_name="Carry-Forward",
-            status="completed", prs_merged=["PR-3"], merge_shas=["sha3"],
-            gate_results={"gemini_review": "passed", "codex_gate": "passed"},
-            open_items=[{"id": "OI-L-1", "severity": "warn", "status": "done", "title": "Perf"}],
-        )
-        record_state_transition(state_dir, to_state="FEATURE_ADVANCING", feature_id="PR-3")
-
-        # PR-4: final certification — update PR queue to reflect merge
         _write_pr_queue(state_dir, [
-            {"id": "PR-0", "status": "completed", "dependencies": [], "title": "Contract", "track": "C", "gate": "g0"},
-            {"id": "PR-1", "status": "completed", "dependencies": ["PR-0"], "title": "Projection", "track": "B", "gate": "g1"},
-            {"id": "PR-2", "status": "completed", "dependencies": ["PR-1"], "title": "Recovery", "track": "B", "gate": "g2"},
-            {"id": "PR-3", "status": "completed", "dependencies": ["PR-2"], "title": "Carry-Forward", "track": "C", "gate": "g3"},
-            {"id": "PR-4", "status": "completed", "dependencies": ["PR-3"], "title": "Certification", "track": "C", "gate": "g4"},
+            {"id": f"PR-{i}", "status": "completed", "dependencies": [f"PR-{i-1}"] if i else [],
+             "title": t, "track": tr, "gate": f"g{i}"}
+            for i, (t, tr) in enumerate([
+                ("Contract", "C"), ("Projection", "B"), ("Recovery", "B"),
+                ("Carry-Forward", "C"), ("Certification", "C"),
+            ])
         ])
         record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-4")
         snapshot_feature_boundary(
@@ -478,38 +497,7 @@ class TestFullChainLifecycle:
         )
         record_state_transition(state_dir, to_state="CHAIN_COMPLETE", feature_id="PR-4")
 
-        # Final assertions
-        projection = build_chain_projection(state_dir)
-        assert projection["chain_state"] == "CHAIN_COMPLETE"
-        assert projection["is_blocked"] is False
-        assert len(projection["completed_features"]) == 5
-
-        # Carry-forward ledger has all 5 feature summaries
-        ledger = json.loads((state_dir / "chain_carry_forward.json").read_text())
-        assert len(ledger["feature_summaries"]) == 5
-
-        # Finding from PR-0 still present
-        assert any(f["id"] == "F-L-0" for f in ledger["findings"])
-
-        # OI-L-1 resolved
-        oi = next(i for i in ledger["open_items"] if i["id"] == "OI-L-1")
-        assert oi["status"] == "done"
-        assert oi["origin_feature"] == "PR-1"  # provenance preserved
-
-        # Residual risk from PR-2
-        assert len(ledger["residual_risks"]) == 1
-        assert ledger["residual_risks"][0]["accepting_feature"] == "PR-2"
-
-        # Audit trail complete
-        audit = [json.loads(l) for l in (state_dir / "chain_audit.jsonl").read_text().strip().splitlines()]
-        states = [r["to_state"] for r in audit]
-        assert states[0] == "INITIALIZED"
-        assert states[-1] == "CHAIN_COMPLETE"
-        assert "FEATURE_FAILED" in states
-        assert "RECOVERY_PENDING" in states
-        # Recovery cycle: FEATURE_ACTIVE appears after RECOVERY_PENDING
-        recovery_idx = states.index("RECOVERY_PENDING")
-        assert states[recovery_idx + 1] == "FEATURE_ACTIVE"
+        _assert_lifecycle_complete(state_dir)
 
     def test_chain_closes_with_zero_unresolved_blockers(self, state_dir: Path) -> None:
         """Feature 14 success criterion: zero unresolved chain-created open items."""
