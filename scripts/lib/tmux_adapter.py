@@ -95,12 +95,129 @@ class DeliveryResult:
     tmux_returncode: Optional[int] = None
 
 
+@dataclass
+class SpawnResult:
+    """Result of spawning an execution surface."""
+    success: bool
+    transport_ref: str = ""
+    error: Optional[str] = None
+
+
+@dataclass
+class StopResult:
+    """Result of stopping an execution surface."""
+    success: bool
+    was_running: bool = False
+    error: Optional[str] = None
+
+
+@dataclass
+class AttachResult:
+    """Result of switching operator focus."""
+    success: bool
+    error: Optional[str] = None
+
+
+@dataclass
+class ObservationResult:
+    """Read-only state probe result."""
+    exists: bool
+    responsive: bool = False
+    transport_state: Dict[str, Any] = field(default_factory=dict)
+    last_output_fragment: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class InspectionResult:
+    """Deep diagnostic inspection result."""
+    exists: bool
+    transport_ref: str = ""
+    transport_details: Dict[str, Any] = field(default_factory=dict)
+    pane_content: Optional[str] = None
+    environment: Optional[Dict[str, str]] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class HealthResult:
+    """Fast health check result."""
+    healthy: bool
+    surface_exists: bool = False
+    process_alive: bool = False
+    details: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+
+
+@dataclass
+class SessionHealthResult:
+    """Aggregate health check result."""
+    session_exists: bool
+    terminals: Dict[str, HealthResult] = field(default_factory=dict)
+    degraded_terminals: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+@dataclass
+class RehealResult:
+    """Transport drift recovery result."""
+    rehealed: bool
+    old_ref: Optional[str] = None
+    new_ref: Optional[str] = None
+    strategy: str = ""
+    error: Optional[str] = None
+
+
+# Capability constants
+CAPABILITY_SPAWN = "SPAWN"
+CAPABILITY_STOP = "STOP"
+CAPABILITY_DELIVER = "DELIVER"
+CAPABILITY_ATTACH = "ATTACH"
+CAPABILITY_OBSERVE = "OBSERVE"
+CAPABILITY_INSPECT = "INSPECT"
+CAPABILITY_HEALTH = "HEALTH"
+CAPABILITY_SESSION_HEALTH = "SESSION_HEALTH"
+CAPABILITY_REHEAL = "REHEAL"
+
+TMUX_CAPABILITIES = frozenset({
+    CAPABILITY_SPAWN, CAPABILITY_STOP, CAPABILITY_DELIVER, CAPABILITY_ATTACH,
+    CAPABILITY_OBSERVE, CAPABILITY_INSPECT, CAPABILITY_HEALTH,
+    CAPABILITY_SESSION_HEALTH, CAPABILITY_REHEAL,
+})
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 
-class AdapterError(Exception):
+class RuntimeAdapterError(Exception):
+    """Base error for all runtime adapter failures."""
+    def __init__(self, message: str, adapter_type: str = "tmux", operation: str = ""):
+        self.adapter_type = adapter_type
+        self.operation = operation
+        super().__init__(message)
+
+
+class AdapterError(RuntimeAdapterError):
     """Base error for tmux adapter failures."""
+
+
+class AdapterConfigError(RuntimeAdapterError):
+    """Invalid configuration at init."""
+
+
+class AdapterTransportError(RuntimeAdapterError):
+    """Transport-level failure (tmux command failed)."""
+    def __init__(self, message: str, transport_detail: str = "", **kwargs: Any):
+        self.transport_detail = transport_detail
+        super().__init__(message, **kwargs)
+
+
+class UnsupportedCapability(RuntimeAdapterError):
+    """Raised when an operation is invoked on an adapter that does not support it."""
+    def __init__(self, operation: str, adapter_type: str = "tmux", reason: str = ""):
+        self.reason = reason or f"{adapter_type} adapter does not support {operation}"
+        super().__init__(self.reason, adapter_type=adapter_type, operation=operation)
 
 
 class AdapterDisabledError(AdapterError):
@@ -315,6 +432,145 @@ class TmuxAdapter:
                 f"Terminal {terminal_id!r} is leased to dispatch "
                 f"{lease.get('dispatch_id')!r}, not {dispatch_id!r}."
             )
+
+    # ------------------------------------------------------------------
+    # RuntimeAdapter interface methods
+    # ------------------------------------------------------------------
+
+    def adapter_type(self) -> str:
+        return "tmux"
+
+    def capabilities(self) -> frozenset:
+        """Return supported capabilities for TmuxAdapter."""
+        if not adapter_enabled():
+            return frozenset()
+        return TMUX_CAPABILITIES
+
+    def spawn(self, terminal_id: str, config: Dict[str, Any]) -> SpawnResult:
+        """Create tmux pane for terminal. Idempotent."""
+        try:
+            target = self.resolve_target(terminal_id)
+            return SpawnResult(success=True, transport_ref=target.pane_id)
+        except PaneNotFoundError:
+            pass
+        session = config.get("session_name", "")
+        work_dir = config.get("work_dir", "")
+        if not session:
+            return SpawnResult(success=False, error="session_name required in config")
+        cmd = ["tmux", "split-window", "-t", session, "-c", work_dir or "."]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                return SpawnResult(success=False, error=result.stderr.strip())
+            return SpawnResult(success=True, transport_ref=result.stdout.strip())
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            return SpawnResult(success=False, error=str(e))
+
+    def stop(self, terminal_id: str) -> StopResult:
+        """Terminate tmux pane. Idempotent — stopping absent pane succeeds."""
+        try:
+            target = self.resolve_target(terminal_id)
+        except PaneNotFoundError:
+            return StopResult(success=True, was_running=False)
+        result = _run_tmux("kill-pane", "-t", target.pane_id)
+        return StopResult(success=True, was_running=result.returncode == 0)
+
+    def attach(self, terminal_id: str) -> AttachResult:
+        """Switch operator focus to terminal's pane."""
+        try:
+            target = self.resolve_target(terminal_id)
+        except PaneNotFoundError:
+            return AttachResult(success=False, error=f"Terminal {terminal_id} not found")
+        result = _run_tmux("select-pane", "-t", target.pane_id)
+        if result.returncode != 0:
+            return AttachResult(success=False, error=result.stderr.strip())
+        return AttachResult(success=True)
+
+    def observe(self, terminal_id: str) -> ObservationResult:
+        """Read-only state probe without side effects."""
+        try:
+            target = self.resolve_target(terminal_id)
+        except PaneNotFoundError:
+            return ObservationResult(exists=False)
+        result = _run_tmux("display-message", "-t", target.pane_id, "-p", "#{pane_pid}")
+        if result.returncode != 0:
+            return ObservationResult(exists=False)
+        pid = result.stdout.strip()
+        return ObservationResult(
+            exists=True, responsive=True,
+            transport_state={"surface_exists": True, "process_alive": bool(pid), "pane_id": target.pane_id},
+        )
+
+    def inspect(self, terminal_id: str) -> InspectionResult:
+        """Deep diagnostic inspection of terminal pane."""
+        try:
+            target = self.resolve_target(terminal_id)
+        except PaneNotFoundError:
+            return InspectionResult(exists=False)
+        content_result = _run_tmux("capture-pane", "-t", target.pane_id, "-p")
+        pane_content = content_result.stdout if content_result.returncode == 0 else None
+        pid_result = _run_tmux("display-message", "-t", target.pane_id, "-p", "#{pane_pid}")
+        return InspectionResult(
+            exists=True, transport_ref=target.pane_id,
+            transport_details={"pane_id": target.pane_id, "pid": pid_result.stdout.strip()},
+            pane_content=pane_content,
+        )
+
+    def health(self, terminal_id: str) -> HealthResult:
+        """Fast health check (< 2s)."""
+        try:
+            target = self.resolve_target(terminal_id)
+        except PaneNotFoundError:
+            return HealthResult(healthy=False, surface_exists=False)
+        result = _run_tmux("display-message", "-t", target.pane_id, "-p", "#{pane_pid}")
+        exists = result.returncode == 0
+        pid = result.stdout.strip() if exists else ""
+        alive = exists and bool(pid)
+        return HealthResult(
+            healthy=exists and alive, surface_exists=exists, process_alive=alive,
+            details={"pane_id": target.pane_id, "pid": pid},
+        )
+
+    def session_health(self, terminal_ids: List[str]) -> SessionHealthResult:
+        """Aggregate health check (< 5s)."""
+        terminals: Dict[str, HealthResult] = {}
+        degraded: List[str] = []
+        for tid in terminal_ids:
+            h = self.health(tid)
+            terminals[tid] = h
+            if not h.healthy:
+                degraded.append(tid)
+        session_exists = any(h.surface_exists for h in terminals.values())
+        return SessionHealthResult(
+            session_exists=session_exists, terminals=terminals,
+            degraded_terminals=degraded,
+        )
+
+    def reheal(self, terminal_id: str) -> RehealResult:
+        """Re-establish pane mapping after drift using work_dir anchor."""
+        try:
+            target = self.resolve_target(terminal_id)
+            old_ref = target.pane_id
+        except PaneNotFoundError:
+            old_ref = None
+        panes = _read_panes_json(self._panes_path)
+        entry = panes.get(terminal_id) or panes.get(terminal_id.upper()) or {}
+        work_dir = entry.get("work_dir", "") if isinstance(entry, dict) else ""
+        if not work_dir:
+            return RehealResult(rehealed=False, old_ref=old_ref, strategy="work_dir",
+                                error="No work_dir in panes.json for reheal")
+        ok = remap_pane(terminal_id, "", self._panes_path, state_dir=self._state_dir)
+        if ok:
+            try:
+                new_target = self.resolve_target(terminal_id)
+                return RehealResult(rehealed=True, old_ref=old_ref, new_ref=new_target.pane_id, strategy="work_dir")
+            except PaneNotFoundError:
+                pass
+        return RehealResult(rehealed=False, old_ref=old_ref, strategy="work_dir", error="Reheal failed")
+
+    def shutdown(self, graceful: bool = True) -> None:
+        """Clean up resources. No-op for TmuxAdapter (tmux session persists)."""
+        pass
 
     def deliver(
         self,
