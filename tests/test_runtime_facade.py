@@ -141,6 +141,13 @@ class TestFacadeHealth:
             assert result.ok is True
             assert result.data["total"] == 1
 
+    def test_session_health_empty_list_returns_zero(self, facade: RuntimeFacade) -> None:
+        result = facade.session_health([])
+        assert result.ok is True
+        assert result.data["total"] == 0
+        assert result.data["healthy"] == 0
+        assert result.data["terminals"] == {}
+
 
 # ---------------------------------------------------------------------------
 # 4. Deliver through facade
