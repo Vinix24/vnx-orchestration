@@ -127,7 +127,7 @@ class ReviewGateManager:
         return os.environ.get("VNX_GEMINI_REVIEW_ENABLED", "1") != "0" and shutil.which("gemini") is not None
 
     def _codex_headless_available(self) -> bool:
-        return os.environ.get("VNX_CODEX_HEADLESS_ENABLED", "0") == "1" and shutil.which("codex") is not None
+        return os.environ.get("VNX_CODEX_HEADLESS_ENABLED", "1") != "0" and shutil.which("codex") is not None
 
     def _claude_github_configured(self) -> bool:
         return os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0") == "1" and shutil.which("gh") is not None
@@ -630,7 +630,7 @@ class ReviewGateManager:
         """Return (reason_code, reason_detail) for an unavailable gate provider (GATE-4)."""
         env_flags = {
             "gemini_review": ("VNX_GEMINI_REVIEW_ENABLED", "1"),
-            "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "0"),
+            "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "1"),
             "claude_github_optional": ("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0"),
         }
         env_var, default = env_flags.get(gate, ("", "0"))
@@ -800,6 +800,84 @@ class ReviewGateManager:
             pr_id=pr_id,
         )
 
+    def request_and_execute(
+        self,
+        *,
+        pr_number: int,
+        branch: str,
+        review_stack: Optional[Iterable[str]] = None,
+        risk_class: str,
+        changed_files: Iterable[str],
+        mode: str,
+    ) -> Dict[str, Any]:
+        """Request and immediately execute all gates atomically.
+
+        Ensures gates cannot be requested without execution — a single call
+        does both so that T0 enforcement never leaves a gate in ``requested``
+        state without a subsequent execution attempt.
+
+        Sets ``VNX_CODEX_HEADLESS_ENABLED=1`` in the process environment before
+        checking availability so codex is never silently disabled during
+        enforcement.
+
+        Returns a dict with ``pr_number``, ``branch``, and ``gates`` list where
+        each gate entry contains its final status after request + execution.
+        Exits with code 1 (via the CLI layer) if any required gate ends in
+        ``not_executable`` or ``not_configured``.
+        """
+        # Ensure codex is never silently disabled during enforcement
+        os.environ["VNX_CODEX_HEADLESS_ENABLED"] = "1"
+
+        request_result = self.request_reviews(
+            pr_number=pr_number,
+            branch=branch,
+            review_stack=review_stack,
+            risk_class=risk_class,
+            changed_files=changed_files,
+            mode=mode,
+        )
+
+        gates: List[Dict[str, Any]] = []
+        has_required_failure = False
+
+        for req in request_result.get("requested", []):
+            gate_name = req.get("gate", "")
+            req_status = req.get("status", "")
+
+            if req_status == "requested":
+                exec_result = self.execute_gate(
+                    gate=gate_name,
+                    pr_number=pr_number,
+                )
+                gates.append({
+                    "gate": gate_name,
+                    "request_status": req_status,
+                    "execution_status": exec_result.get("status", "unknown"),
+                    "report_path": exec_result.get("report_path", ""),
+                    "contract_hash": exec_result.get("contract_hash", ""),
+                    "detail": exec_result,
+                })
+            else:
+                gates.append({
+                    "gate": gate_name,
+                    "request_status": req_status,
+                    "execution_status": req_status,
+                    "reason": req.get("reason", ""),
+                    "reason_detail": req.get("reason_detail", ""),
+                    "detail": req,
+                })
+                if req_status in ("not_executable", "not_configured"):
+                    required = req.get("required", True)
+                    if gate_name != "claude_github_optional" and required:
+                        has_required_failure = True
+
+        return {
+            "pr_number": pr_number,
+            "branch": branch,
+            "gates": gates,
+            "has_required_failure": has_required_failure,
+        }
+
     def status(self, pr_number: int) -> Dict[str, Any]:
         results = []
         for path in sorted(self.results_dir.glob(f"pr-{pr_number}-*.json")):
@@ -848,6 +926,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     execute_parser.add_argument("--pr-id", default="")
     execute_parser.add_argument("--json", action="store_true")
 
+    rexec_parser = sub.add_parser("request-and-execute")
+    rexec_parser.add_argument("--pr", type=int, required=True)
+    rexec_parser.add_argument("--branch", required=True)
+    rexec_parser.add_argument("--review-stack", default=",".join(DEFAULT_REVIEW_STACK))
+    rexec_parser.add_argument("--risk-class", default="medium")
+    rexec_parser.add_argument("--changed-files", default="")
+    rexec_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
+    rexec_parser.add_argument("--json", action="store_true")
+
     status_parser = sub.add_parser("status")
     status_parser.add_argument("--pr", type=int, required=True)
     status_parser.add_argument("--json", action="store_true")
@@ -884,6 +971,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             report_path=args.report_path,
         )
         print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
+        return 0
+
+    if args.command == "request-and-execute":
+        result = manager.request_and_execute(
+            pr_number=args.pr,
+            branch=args.branch,
+            review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
+            risk_class=args.risk_class,
+            changed_files=_parse_changed_files(args.changed_files),
+            mode=args.mode,
+        )
+        print(json.dumps(result, indent=2))
+        if result.get("has_required_failure"):
+            failed_gates = [
+                g["gate"] for g in result.get("gates", [])
+                if g.get("execution_status") in ("not_executable", "not_configured")
+                and g.get("gate") != "claude_github_optional"
+            ]
+            print(
+                f"ERROR: required gates not executable: {', '.join(failed_gates)}",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     if args.command == "execute":
