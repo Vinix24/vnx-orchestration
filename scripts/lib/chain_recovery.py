@@ -263,6 +263,31 @@ class BaselineCheckResult:
     reason: str
 
 
+def _baseline_result(
+    valid: bool, branch: str, expected: str, actual: str, reason: str
+) -> BaselineCheckResult:
+    return BaselineCheckResult(
+        is_valid=valid, feature_branch=branch,
+        expected_main_sha=expected, actual_merge_base=actual, reason=reason,
+    )
+
+
+def _sha_prefix_matches(expected: str, actual: str) -> bool:
+    """Compare SHA strings by shortest common prefix (up to 40 chars)."""
+    e, a = expected.strip().lower(), actual.strip().lower()
+    n = min(len(e), len(a), 40)
+    return n > 0 and a[:n] == e[:n]
+
+
+def _is_ancestor(run: GitRunner, repo_root: str, ancestor: str, descendant: str) -> bool:
+    """Return True if ancestor is an ancestor of descendant."""
+    try:
+        run(["git", "-C", repo_root, "merge-base", "--is-ancestor", ancestor, descendant])
+        return True
+    except RuntimeError:
+        return False
+
+
 def check_branch_baseline(
     feature_branch: str,
     expected_main_sha: str,
@@ -274,63 +299,28 @@ def check_branch_baseline(
     Implements contract rules S-1 through S-3: blocks advancement when a
     feature branch's merge-base with main is older than the last recorded
     merge SHA.
-
-    Args:
-        feature_branch: branch name or SHA to check (e.g. "feature/my-feature")
-        expected_main_sha: the SHA that main should contain as ancestor
-        repo_root: path to git repository root
-        git_runner: optional override for git subprocess (for testing)
-
-    Returns BaselineCheckResult with is_valid=True when branch is current.
     """
     run = git_runner or _default_git_runner
 
     try:
-        actual_merge_base = run([
-            "git", "-C", repo_root, "merge-base", feature_branch, "HEAD"
-        ])
+        actual = run(["git", "-C", repo_root, "merge-base", feature_branch, "main"])
     except RuntimeError as exc:
-        return BaselineCheckResult(
-            is_valid=False,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base="",
-            reason=f"git merge-base failed: {exc}",
-        )
+        return _baseline_result(False, feature_branch, expected_main_sha, "", f"git merge-base failed: {exc}")
 
     if not expected_main_sha:
-        # No expected SHA recorded — accept any merge-base (bootstrap case)
-        return BaselineCheckResult(
-            is_valid=True,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base=actual_merge_base,
-            reason="no expected SHA recorded — baseline accepted",
-        )
+        return _baseline_result(True, feature_branch, expected_main_sha, actual, "no expected SHA recorded — baseline accepted")
 
-    # Normalize: compare full or prefix-matched SHAs
-    expected_norm = expected_main_sha.strip().lower()
-    actual_norm = actual_merge_base.strip().lower()
-    min_len = min(len(expected_norm), len(actual_norm), 40)
+    if _sha_prefix_matches(expected_main_sha, actual):
+        return _baseline_result(True, feature_branch, expected_main_sha, actual, "branch baseline matches expected main SHA")
 
-    if actual_norm[:min_len] == expected_norm[:min_len]:
-        return BaselineCheckResult(
-            is_valid=True,
-            feature_branch=feature_branch,
-            expected_main_sha=expected_main_sha,
-            actual_merge_base=actual_merge_base,
-            reason="branch baseline matches expected main SHA",
-        )
+    if _is_ancestor(run, repo_root, expected_main_sha, actual):
+        return _baseline_result(True, feature_branch, expected_main_sha, actual,
+                                "merge-base is a descendant of expected main SHA — baseline valid")
 
-    return BaselineCheckResult(
-        is_valid=False,
-        feature_branch=feature_branch,
-        expected_main_sha=expected_main_sha,
-        actual_merge_base=actual_merge_base,
-        reason=(
-            f"stale branch: merge-base {actual_merge_base[:12]} does not match "
-            f"expected {expected_main_sha[:12]} — recreate worktree from current main"
-        ),
+    return _baseline_result(
+        False, feature_branch, expected_main_sha, actual,
+        f"stale branch: merge-base {actual[:12]} does not match "
+        f"expected {expected_main_sha[:12]} — recreate worktree from current main",
     )
 
 
@@ -382,7 +372,11 @@ def _accumulate_open_items(
         else:
             for i, existing in enumerate(ledger["open_items"]):
                 if existing.get("id") == item_copy.get("id"):
-                    ledger["open_items"][i] = {**existing, **item_copy}
+                    merged = {**existing, **item_copy}
+                    # Preserve original origin_feature — provenance must not drift
+                    if "origin_feature" in existing:
+                        merged["origin_feature"] = existing["origin_feature"]
+                    ledger["open_items"][i] = merged
                     break
 
 
@@ -390,7 +384,8 @@ def _build_feature_summary(
     feature_id: str, feature_name: str, status: str, prs_merged: List[str],
     merge_shas: List[str], gate_results: Dict[str, str],
     findings: List[Dict[str, Any]], open_items: List[Dict[str, Any]],
-    residual_risks: List[Dict[str, Any]], requeue_count: int, now: str,
+    deferred_items: List[Dict[str, Any]], residual_risks: List[Dict[str, Any]],
+    requeue_count: int, now: str,
 ) -> Dict[str, Any]:
     """Build a feature summary record (contract Section 6.5)."""
     return {
@@ -406,9 +401,33 @@ def _build_feature_summary(
         "open_items_created": len([i for i in open_items if i.get("status") != "done"]),
         "open_items_resolved": len([i for i in open_items if i.get("status") == "done"]),
         "open_items_deferred": len([i for i in open_items if i.get("status") == "deferred"]),
+        "deferred_items_count": len(deferred_items),
         "residual_risks": len(residual_risks),
         "requeue_count": requeue_count,
     }
+
+
+def _validate_deferred_items(
+    items: List[Dict[str, Any]], feature_id: str
+) -> List[Dict[str, Any]]:
+    """Validate deferred items per contract O-3: only warn/info severity, reason required."""
+    validated: List[Dict[str, Any]] = []
+    for item in items:
+        severity = str(item.get("severity", "")).lower()
+        if severity == "blocker":
+            raise ValueError(
+                f"Cannot defer blocker item {item.get('id', '?')} — contract O-3 "
+                f"requires blocker items to block advancement, not be deferred"
+            )
+        if not item.get("reason"):
+            raise ValueError(
+                f"Deferred item {item.get('id', '?')} missing required 'reason' field — "
+                f"contract O-3 requires a deferral reason"
+            )
+        entry = dict(item)
+        entry.setdefault("origin_feature", feature_id)
+        validated.append(entry)
+    return validated
 
 
 def snapshot_feature_boundary(
@@ -422,6 +441,7 @@ def snapshot_feature_boundary(
     gate_results: Optional[Dict[str, str]] = None,
     findings: Optional[List[Dict[str, Any]]] = None,
     open_items: Optional[List[Dict[str, Any]]] = None,
+    deferred_items: Optional[List[Dict[str, Any]]] = None,
     residual_risks: Optional[List[Dict[str, Any]]] = None,
     requeue_count: int = 0,
 ) -> Dict[str, Any]:
@@ -434,6 +454,7 @@ def snapshot_feature_boundary(
     now = _now_iso()
     safe_findings = findings or []
     safe_items = open_items or []
+    safe_deferred = deferred_items or []
     safe_risks = residual_risks or []
 
     for f in safe_findings:
@@ -444,6 +465,11 @@ def snapshot_feature_boundary(
 
     _accumulate_open_items(ledger, safe_items, feature_id, now)
 
+    validated_deferred = _validate_deferred_items(safe_deferred, feature_id)
+    for entry in validated_deferred:
+        entry.setdefault("deferred_at", now)
+        ledger["deferred_items"].append(entry)
+
     for risk in safe_risks:
         entry = dict(risk)
         entry.setdefault("accepting_feature", feature_id)
@@ -452,7 +478,8 @@ def snapshot_feature_boundary(
 
     ledger["feature_summaries"].append(_build_feature_summary(
         feature_id, feature_name, status, prs_merged, merge_shas or [],
-        gate_results or {}, safe_findings, safe_items, safe_risks, requeue_count, now,
+        gate_results or {}, safe_findings, safe_items, validated_deferred,
+        safe_risks, requeue_count, now,
     ))
 
     _write_carry_forward(state_root, ledger)
@@ -472,7 +499,7 @@ def build_next_feature_context(
 
     unresolved_items = [
         i for i in ledger.get("open_items") or []
-        if str(i.get("status", "")).lower() not in {"done", "closed", "resolved"}
+        if str(i.get("status", "")).lower() not in {"done", "closed", "resolved", "wontfix"}
     ]
     blocker_items = [i for i in unresolved_items if str(i.get("severity", "")).lower() == "blocker"]
     warn_items = [i for i in unresolved_items if str(i.get("severity", "")).lower() == "warn"]

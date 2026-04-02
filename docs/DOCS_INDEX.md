@@ -28,6 +28,7 @@
 - Error contract standard: `orchestration/ERROR_CONTRACT_STANDARD.md`
 - Headless run contract: `HEADLESS_RUN_CONTRACT.md`
 - Multi-feature chain contract: `MULTI_FEATURE_CHAIN_CONTRACT.md`
+- Chain residual governance: `CHAIN_RESIDUAL_GOVERNANCE.md`
 
 ### Technical Deep Dives
 - Intelligence system (v4.0 — code + doc ingestion + governance): `core/technical/INTELLIGENCE_SYSTEM.md`

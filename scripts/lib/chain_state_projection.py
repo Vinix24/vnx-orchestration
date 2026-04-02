@@ -241,6 +241,16 @@ def compute_advancement_truth(
         ids = ", ".join(item.get("id", "?") for item in blocker_open)
         blockers.append(f"{len(blocker_open)} open blocker item(s) unresolved: {ids}")
 
+    # Check 2b: No unresolved blocker findings in carry-forward ledger (F-2)
+    cf = _load_carry_forward(state_dir)
+    blocker_findings = [
+        f for f in cf.get("findings") or []
+        if str(f.get("severity", "")).lower() == "blocker"
+        and str(f.get("resolution_status", "")).lower() != "resolved"
+    ]
+    if blocker_findings:
+        blockers.append(f"{len(blocker_findings)} unresolved blocker finding(s) in carry-forward")
+
     # Check 3: Gate certification
     certification_status = _compute_gate_certification(state_dir, current_feature_id, blockers)
 
@@ -272,7 +282,7 @@ def build_carry_forward_summary(
     ]
     live_unresolved = [
         item for item in open_items
-        if str(item.get("status", "")).lower() not in {"done", "closed", "resolved"}
+        if str(item.get("status", "")).lower() not in {"done", "closed", "resolved", "wontfix"}
     ]
     live_blockers = [i for i in live_unresolved if str(i.get("severity", "")).lower() == "blocker"]
 
@@ -294,7 +304,7 @@ def _build_unresolved_chain_items(
     open_items: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Return all carry-forward and live open items that are not yet resolved."""
-    resolved = {"done", "closed", "resolved"}
+    resolved = {"done", "closed", "resolved", "wontfix"}
     unresolved: List[Dict[str, Any]] = []
     for item in carry_forward.get("open_items") or []:
         if str(item.get("status", "")).lower() not in resolved:
