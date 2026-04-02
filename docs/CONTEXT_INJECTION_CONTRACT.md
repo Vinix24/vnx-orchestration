@@ -39,7 +39,7 @@ Every dispatch context bundle is composed of these component classes, in priorit
 
 - **CTX-1**: P0 and P1 components are always present. A dispatch without identity or task specification is invalid.
 - **CTX-2**: P2 components are present when the dispatch references specific files. File references use `@file` syntax resolved at assembly time.
-- **CTX-3**: P3 components are present when the dispatch is part of a multi-feature chain (chain_state.json exists). They are derived from the carry-forward ledger and chain projection.
+- **CTX-3**: P3 components are present when the dispatch is part of a multi-feature chain. Presence is determined by querying `chain_state_projection.build_chain_projection()`, which derives chain state from the dispatch filesystem and carry-forward ledger. The chain projection output is the canonical source — not any single JSON file.
 - **CTX-4**: P4 components follow the existing FP-C Intelligence Contract (max 3 items, max 2000 chars total, confidence thresholds enforced).
 - **CTX-5**: Optional components (P5-P7) are included only when the total context bundle fits within the dispatch prompt budget. When budget is exceeded, components are trimmed in reverse priority order (P7 first).
 - **CTX-6**: No component may contain raw conversation history or full prior session transcripts. All components must be structured summaries or curated references.
@@ -48,14 +48,18 @@ Every dispatch context bundle is composed of these component classes, in priorit
 
 | Budget Class | Target | Hard Limit |
 |-------------|--------|------------|
-| Total context bundle (excluding task spec) | < 20% of model context window | 25% |
-| Intelligence payload | < 2000 chars | 2000 chars (FP-C contract) |
-| Chain position summary | < 500 tokens | 750 tokens |
-| Prior PR evidence | < 800 tokens | 1000 tokens |
-| Open items digest | < 300 tokens | 500 tokens |
-| Reusable signals | < 300 tokens | 500 tokens |
+| Context overhead (P3 + P4 + P5 + P6 + P7 combined) | < 20% of total dispatch prompt | 25% |
+| Intelligence payload (P4) | < 2000 chars | 2000 chars (FP-C contract) |
+| Chain position summary (P3) | < 500 tokens | 750 tokens |
+| Prior PR evidence (P5) | < 800 tokens | 1000 tokens |
+| Open items digest (P6) | < 300 tokens | 500 tokens |
+| Reusable signals (P7) | < 300 tokens | 500 tokens |
 
-**Budget enforcement**: The context assembler MUST measure the total token count of the context bundle (excluding the task specification) and reject assembly when the hard limit is exceeded. Budget overflow is a defect, not a warning.
+**Budget model**: The overhead metric measures P3 through P7 combined (all supplementary context beyond identity, task spec, and code references). P0 (dispatch identity), P1 (task specification), and P2 (mandatory code context) are excluded from the overhead metric because they are structurally required and not subject to optimization — they are the work itself.
+
+P3 (chain position) is included in the overhead metric even when mandatory-when-chained, because chain position is supplementary context that can be optimized for size. Its mandatory status means it must be present, not that it is exempt from budget.
+
+**Budget enforcement**: The context assembler MUST measure the total token count of P3-P7 components and calculate the ratio against the full dispatch prompt token count. Assembly must be rejected when the hard limit (25%) is exceeded. Budget overflow is a defect, not a warning.
 
 ---
 
@@ -84,10 +88,12 @@ These components are mandatory when the dispatch is part of a multi-feature chai
 
 | Component | Source | Validation Rule |
 |-----------|--------|----------------|
-| `chain_position` | chain_state.json | Current feature index and total count |
-| `carry_forward_summary` | chain_carry_forward.json | Blocker count, warn count, deferred count, residual risk count |
+| `chain_position` | `chain_state_projection.build_chain_projection()` | Current feature index and total count |
+| `carry_forward_summary` | `chain_state_projection.build_carry_forward_summary()` | Blocker count, warn count, deferred count, residual risk count |
 | `blocking_items` | open_items.json | List of blocker-severity open items (empty list if none) |
-| `dependency_status` | pr_queue_state.json | Status of dependencies (all must be "completed") |
+| `dependency_status` | Dispatch filesystem (`.vnx-data/dispatches/`) with `pr_queue_state.json` as read-optimized fallback (staleness < 60s required; see Note below) |
+
+**Dependency source note**: Per the Queue Truth Contract (`docs/core/70_QUEUE_TRUTH_CONTRACT.md`), `pr_queue_state.json` is a cached projection view and must not be the sole basis for dispatch decisions. The canonical dependency status is derived from the dispatch filesystem (completed dispatch records). `pr_queue_state.json` may be used as a read-optimized view when its `updated_at` timestamp is within 60 seconds of the current time. When stale, the context assembler must fall back to the dispatch filesystem.
 
 ### 2.3 Optional Components
 
@@ -260,9 +266,9 @@ A resume is accepted (no immediate redispatch needed) when:
 **Definition**: Context waste is the proportion of the total dispatch prompt budget consumed by context that does not contribute to the worker's task execution.
 
 **Measurement Method**:
-1. Calculate total token count of context bundle components (P3-P7, excluding P0-P2 which are always necessary)
-2. Calculate total token count of the full dispatch prompt
-3. Context overhead ratio = optional context tokens / total prompt tokens
+1. Calculate total token count of supplementary context components (P3 + P4 + P5 + P6 + P7)
+2. Calculate total token count of the full dispatch prompt (P0 through P7 inclusive)
+3. Context overhead ratio = supplementary context tokens (P3-P7) / total prompt tokens
 
 **Target**: Context overhead ratio < 20% of total dispatch prompt budget on the validated path.
 
