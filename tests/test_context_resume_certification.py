@@ -142,34 +142,39 @@ class TestContextBudgetCertification:
         assert bundle.budget_status == "within_target"
 
     def test_oversized_p7_gets_trimmed(self) -> None:
-        """When P7 is large, it gets trimmed first (reverse priority)."""
-        asm = _minimal_assembler()
-        # Add large P7 signal content
-        large_signals = [{"type": "outcome", "content": "x" * 400} for _ in range(5)]
-        asm.add_reusable_signals(large_signals, source_updated_at=NOW)
+        """When P7 pushes aggregate overhead past 25%, it gets trimmed."""
+        # Use small P0+P1 so overhead components dominate
+        asm = ContextAssembler(main_sha="abc", assembly_time=NOW)
+        asm.add_dispatch_identity("20260402-120000-x", "PR-0", "C", "g", "F")
+        asm.add_task_specification("@a", "Do X.", ["d"], ["c"], [])
+        # P7 within its own 500-token limit but large relative to tiny P0+P1
+        p7_result = asm.add_reusable_signals(
+            [{"type": "outcome", "content": "x" * 1800}],
+            source_updated_at=NOW,
+        )
+        assert p7_result.ok, "P7 must be accepted to test trimming"
         result = asm.assemble()
         assert result.ok
         bundle = result.data
-        # Either within budget or trimmed
+        assert "reusable_signals" in bundle.trimmed_components
         assert bundle.overhead_ratio <= BUDGET_HARD_LIMIT_RATIO
 
     def test_budget_hard_limit_rejects_assembly(self) -> None:
-        """If P3-P7 exceed 25% even after trimming, assembly fails."""
+        """Aggregate P3+P5 exceeds 25% even after trimming optional P5."""
         asm = ContextAssembler(main_sha="abc", assembly_time=NOW)
-        # Tiny P0+P1 (very small task spec)
         asm.add_dispatch_identity("20260402-120000-x", "PR-0", "C", "g", "F")
         asm.add_task_specification("@a", "Do X.", ["d"], ["c"], [])
-        # Massive P3 that can't be trimmed (mandatory-when-chained)
-        huge_blocking = [{"severity": "blocker", "title": f"Item {i}" * 20} for i in range(50)]
-        result = asm.add_chain_position(
+        # P3 within its 750-token limit but large relative to tiny P0+P1
+        r3 = asm.add_chain_position(
             current_feature_index=0, total_features=1,
-            carry_forward_summary={"blocker_count": 50, "warn_count": 0, "deferred_count": 0, "residual_risk_count": 0},
-            blocking_items=huge_blocking, dependency_status="pending",
+            carry_forward_summary={"blocker_count": 0, "warn_count": 0, "deferred_count": 0, "residual_risk_count": 0},
+            blocking_items=[], dependency_status="x" * 2800,
             source_updated_at=NOW,
         )
-        # Chain position itself may reject if over per-component limit
-        if not result.ok:
-            assert "exceeds" in result.error_msg
+        assert r3.ok, "P3 must be accepted individually"
+        result = asm.assemble()
+        assert not result.ok
+        assert result.error_code == "budget_exceeded"
 
     def test_overhead_ratio_calculation_correct(self) -> None:
         """Verify P3-P7 tokens / total tokens math."""
@@ -643,12 +648,22 @@ class TestEndToEndLifecycleCertification:
         assert resume_result.data["resume_type"] == "rotation"
         assert resume_result.data["dispatch_context"]["task_specification"] != ""
 
-    def test_zero_unresolved_blockers_at_feature_end(self) -> None:
-        """Feature 15 closes with zero unresolved chain-created open items."""
-        # Simulate: all items resolved across the feature
+    def test_resolved_items_produce_no_signals(self) -> None:
+        """All resolved items produce zero open-item signals."""
         items = [
             {"severity": "warn", "status": "done", "title": "Budget calc off by 2%"},
             {"severity": "info", "status": "done", "title": "Doc typo fixed"},
         ]
         open_signals = extract_from_open_items(items)
-        assert len(open_signals) == 0  # all resolved, no signals
+        assert len(open_signals) == 0
+
+    def test_unresolved_blocker_detected_as_signal(self) -> None:
+        """Unresolved blocker-severity items are surfaced as signals."""
+        items = [
+            {"id": "OI-1", "severity": "blocker", "status": "open", "title": "Critical security gap in auth module"},
+            {"severity": "warn", "status": "done", "title": "Already resolved warning item"},
+        ]
+        open_signals = extract_from_open_items(items)
+        assert len(open_signals) == 1
+        assert open_signals[0]["type"] == "open_item_signal"
+        assert "blocker" in open_signals[0]["content"]
