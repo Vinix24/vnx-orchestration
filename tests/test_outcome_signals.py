@@ -359,3 +359,64 @@ class TestMultiSourceCollection:
         assert "failure_outcome" in types
         assert "open_item_signal" in types
         assert "residual_risk_signal" in types
+
+
+# ---------------------------------------------------------------------------
+# 10. Timezone-naive timestamps (OI-507)
+# ---------------------------------------------------------------------------
+
+class TestTimezoneNaiveTimestamps:
+
+    def test_naive_timestamp_treated_as_utc(self) -> None:
+        naive_ts = "2026-04-01T10:00:00"
+        lines = [_receipt("task_complete", "failed", ts=naive_ts,
+                          failure_reason="Failure with naive timestamp value")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+
+    def test_aware_utc_timestamp_still_works(self) -> None:
+        aware_ts = "2026-04-01T10:00:00+00:00"
+        lines = [_receipt("task_complete", "failed", ts=aware_ts,
+                          failure_reason="Failure with aware timestamp value")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+
+    def test_z_suffix_timestamp_works(self) -> None:
+        z_ts = "2026-04-01T10:00:00Z"
+        lines = [_receipt("task_complete", "failed", ts=z_ts,
+                          failure_reason="Failure with Z suffix timestamp")]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+
+
+# ---------------------------------------------------------------------------
+# 11. Null field safety (OI-508)
+# ---------------------------------------------------------------------------
+
+class TestNullFieldSafety:
+
+    def test_null_failure_reason_no_crash(self) -> None:
+        lines = [json.dumps({
+            "event_type": "task_complete", "status": "failed",
+            "timestamp": RECENT, "failure_reason": None,
+        })]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 0  # empty after null -> ""
+
+    def test_null_summary_no_crash(self) -> None:
+        lines = [json.dumps({
+            "event_type": "task_complete", "status": "success",
+            "timestamp": RECENT, "summary": None,
+        })]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 0
+
+    def test_null_reason_fallback_to_reason_field(self) -> None:
+        lines = [json.dumps({
+            "event_type": "task_complete", "status": "failed",
+            "timestamp": RECENT, "failure_reason": None,
+            "reason": "Fallback reason field with enough content",
+        })]
+        signals = extract_from_receipts(lines, cutoff=NOW)
+        assert len(signals) == 1
+        assert "Fallback" in signals[0]["content"]

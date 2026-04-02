@@ -95,6 +95,8 @@ def extract_from_receipts(
         timestamp_str = event.get("timestamp", "")
         try:
             ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             continue
 
@@ -110,12 +112,12 @@ def extract_from_receipts(
         status = event.get("status", "")
 
         if event_type == "task_complete" and status == "failed":
-            reason = _truncate(event.get("failure_reason", event.get("reason", "")))
+            reason = _truncate(str(event.get("failure_reason") or event.get("reason") or ""))
             if reason and len(reason) >= MIN_CONTENT_LENGTH:
                 signals.append({"type": "failure_outcome", "content": reason})
 
         elif event_type == "task_complete" and status == "success":
-            summary = _truncate(event.get("summary", ""))
+            summary = _truncate(str(event.get("summary") or ""))
             if summary and len(summary) >= MIN_CONTENT_LENGTH:
                 signals.append({"type": "success_pattern", "content": summary})
 
