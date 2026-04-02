@@ -236,10 +236,16 @@ class TestResumeSafety:
 # ---------------------------------------------------------------------------
 
 class TestBranchBaselineGuard:
-    def _make_runner(self, merge_base_sha: str):
-        """Return a fake git runner that returns a fixed merge-base SHA."""
+    def _make_runner(self, merge_base_sha: str, ancestor_valid: bool = False):
+        """Return a fake git runner for merge-base and --is-ancestor checks."""
         def runner(args: list[str]) -> str:
+            if "--is-ancestor" in args:
+                if ancestor_valid:
+                    return ""
+                raise RuntimeError("not ancestor")
             if "merge-base" in args:
+                # Verify we check against main, not HEAD
+                assert "main" in args, f"branch guard must compare against 'main', got: {args}"
                 return merge_base_sha
             raise RuntimeError(f"unexpected git command: {args}")
         return runner
@@ -425,3 +431,98 @@ class TestNextFeatureContext:
                                    status="completed", prs_merged=["PR-0"], residual_risks=risks)
         ctx = build_next_feature_context(state_dir)
         assert ctx["residual_risk_count"] == 2
+
+    def test_wontfix_items_excluded_from_unresolved(self, state_dir: Path) -> None:
+        """wontfix is a terminal status — must not count as unresolved."""
+        items = [
+            {"id": "OI-001", "severity": "warn", "status": "wontfix", "title": "Accepted"},
+            {"id": "OI-002", "severity": "warn", "status": "open", "title": "Still open"},
+        ]
+        snapshot_feature_boundary(state_dir, feature_id="PR-0", feature_name="F0",
+                                   status="completed", prs_merged=["PR-0"], open_items=items)
+        ctx = build_next_feature_context(state_dir)
+        assert ctx["unresolved_item_count"] == 1  # only OI-002
+
+
+# ---------------------------------------------------------------------------
+# Tests: Codex review fixes — branch guard main ref and descendant
+# ---------------------------------------------------------------------------
+
+class TestBranchBaselineMainRef:
+    def test_merge_base_checks_against_main_not_head(self) -> None:
+        """Contract S-2: branch guard must compare against main, not HEAD."""
+        calls: list[list[str]] = []
+        def tracking_runner(args: list[str]) -> str:
+            calls.append(args)
+            if "--is-ancestor" in args:
+                raise RuntimeError("not ancestor")
+            if "merge-base" in args:
+                return "abc123"
+            raise RuntimeError(f"unexpected: {args}")
+        check_branch_baseline("feature/x", "abc123", git_runner=tracking_runner)
+        merge_base_call = [c for c in calls if "merge-base" in c and "--is-ancestor" not in c]
+        assert len(merge_base_call) == 1
+        assert "main" in merge_base_call[0]
+        assert "HEAD" not in merge_base_call[0]
+
+    def test_descendant_of_expected_sha_is_valid(self) -> None:
+        """S-2: merge-base equal to OR descendant of expected SHA must be accepted."""
+        expected = "aaaa000000000000000000000000000000000000"
+        newer = "bbbb111111111111111111111111111111111111"
+        def runner(args: list[str]) -> str:
+            if "--is-ancestor" in args:
+                return ""  # success = is ancestor
+            if "merge-base" in args:
+                return newer
+            raise RuntimeError(f"unexpected: {args}")
+        result = check_branch_baseline("feature/x", expected, git_runner=runner)
+        assert result.is_valid is True
+        assert "descendant" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Tests: Codex review fixes — wontfix terminal status
+# ---------------------------------------------------------------------------
+
+class TestWontfixTerminalStatus:
+    def test_wontfix_open_item_not_counted_as_unresolved(self, state_dir: Path) -> None:
+        items = [{"id": "OI-001", "severity": "blocker", "status": "wontfix", "title": "Dismissed"}]
+        snapshot_feature_boundary(state_dir, feature_id="PR-0", feature_name="F0",
+                                   status="completed", prs_merged=["PR-0"], open_items=items)
+        ctx = build_next_feature_context(state_dir)
+        assert ctx["unresolved_item_count"] == 0
+        assert ctx["blocker_item_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Codex review fixes — deferred items persistence
+# ---------------------------------------------------------------------------
+
+class TestDeferredItemsPersistence:
+    def test_deferred_items_written_to_carry_forward(self, state_dir: Path) -> None:
+        deferred = [
+            {"id": "D-001", "severity": "warn", "title": "Deferred cleanup", "reason": "out of scope"},
+        ]
+        snapshot_feature_boundary(
+            state_dir, feature_id="PR-0", feature_name="F0",
+            status="completed", prs_merged=["PR-0"], deferred_items=deferred,
+        )
+        ledger = json.loads((state_dir / "chain_carry_forward.json").read_text())
+        assert len(ledger["deferred_items"]) == 1
+        assert ledger["deferred_items"][0]["id"] == "D-001"
+        assert ledger["deferred_items"][0]["origin_feature"] == "PR-0"
+
+    def test_deferred_items_accumulate_across_features(self, state_dir: Path) -> None:
+        snapshot_feature_boundary(
+            state_dir, feature_id="PR-0", feature_name="F0",
+            status="completed", prs_merged=["PR-0"],
+            deferred_items=[{"id": "D-001", "severity": "warn", "title": "A"}],
+        )
+        snapshot_feature_boundary(
+            state_dir, feature_id="PR-1", feature_name="F1",
+            status="completed", prs_merged=["PR-1"],
+            deferred_items=[{"id": "D-002", "severity": "info", "title": "B"}],
+        )
+        ledger = json.loads((state_dir / "chain_carry_forward.json").read_text())
+        ids = {d["id"] for d in ledger["deferred_items"]}
+        assert ids == {"D-001", "D-002"}
