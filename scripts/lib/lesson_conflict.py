@@ -288,6 +288,59 @@ def detect_conflicts(store: PreferenceStore) -> List[ConflictPair]:
 
 
 # ---------------------------------------------------------------------------
+# Resolution helpers (CL-3)
+# ---------------------------------------------------------------------------
+
+def _apply_accept(
+    store: PreferenceStore,
+    conflict: ConflictPair,
+    accepted_entry_id: Optional[str],
+    ts: str,
+) -> str:
+    """Validate ACCEPT inputs, retire the non-accepted entry, return retired ID."""
+    if not accepted_entry_id:
+        raise InvalidResolutionError("ACCEPT resolution requires accepted_entry_id.")
+    if not conflict.involves(accepted_entry_id):
+        raise InvalidResolutionError(
+            f"accepted_entry_id {accepted_entry_id!r} is not part of the "
+            f"conflict pair ({conflict.entry_id_a!r}, {conflict.entry_id_b!r})."
+        )
+    other_id = conflict.other(accepted_entry_id)
+    entry = store.get(other_id)
+    if entry is None:
+        raise InvalidResolutionError(
+            f"Entry {other_id!r} not found in store — cannot retire it."
+        )
+    if not entry.retired:
+        store.retire(other_id, retired_at=ts)
+    return other_id
+
+
+def _apply_retire(
+    store: PreferenceStore,
+    conflict: ConflictPair,
+    retired_entry_id: Optional[str],
+    ts: str,
+) -> str:
+    """Validate RETIRE inputs, retire the named entry, return retired ID."""
+    if not retired_entry_id:
+        raise InvalidResolutionError("RETIRE resolution requires retired_entry_id.")
+    if not conflict.involves(retired_entry_id):
+        raise InvalidResolutionError(
+            f"retired_entry_id {retired_entry_id!r} is not part of the "
+            f"conflict pair ({conflict.entry_id_a!r}, {conflict.entry_id_b!r})."
+        )
+    entry = store.get(retired_entry_id)
+    if entry is None:
+        raise InvalidResolutionError(
+            f"Entry {retired_entry_id!r} not found in store — cannot retire it."
+        )
+    if not entry.retired:
+        store.retire(retired_entry_id, retired_at=ts)
+    return retired_entry_id
+
+
+# ---------------------------------------------------------------------------
 # Resolution workflow (CL-3, CL-4)
 # ---------------------------------------------------------------------------
 
@@ -305,30 +358,15 @@ def resolve_conflict(
     """Apply a resolution action to a ConflictPair and record it in the log.
 
     CL-3 semantics by kind:
-      - ACCEPT: accepted_entry_id is required; the other entry in the pair is
-                retired in the store. accepted_entry_id remains active.
-      - RETIRE: retired_entry_id is required; that entry is retired in the store.
+      - ACCEPT: accepted_entry_id required; other entry in the pair is retired.
+      - RETIRE: retired_entry_id required; that entry is retired.
       - DEFER:  neither accepted nor retired; conflict is logged as deferred.
 
     CL-4: rationale and resolved_by must be non-empty.
 
-    Args:
-        log:               The ResolutionLog to append the record to.
-        store:             The PreferenceStore to apply retirements to.
-        conflict:          The ConflictPair being resolved.
-        kind:              The ResolutionKind action.
-        rationale:         Explicit reason for the decision. Must be non-empty.
-        resolved_by:       Operator or agent identity. Must be non-empty.
-        accepted_entry_id: Required for ACCEPT. Must be a member of the conflict pair.
-        retired_entry_id:  Required for RETIRE. Must be a member of the conflict pair.
-        resolved_at:       Optional explicit timestamp. Defaults to current UTC.
-
-    Returns:
-        The newly created and logged ConflictResolution.
-
     Raises:
-        ValueError:           If rationale or resolved_by is empty.
-        InvalidResolutionError: If required IDs are missing/wrong or entries not found.
+        ValueError:             If rationale or resolved_by is empty.
+        InvalidResolutionError: If required IDs are missing/wrong or not found.
     """
     if not rationale or not rationale.strip():
         raise ValueError("rationale must be non-empty.")
@@ -339,45 +377,9 @@ def resolve_conflict(
     effective_retired: Optional[str] = None
 
     if kind == ResolutionKind.ACCEPT:
-        if not accepted_entry_id:
-            raise InvalidResolutionError(
-                "ACCEPT resolution requires accepted_entry_id."
-            )
-        if not conflict.involves(accepted_entry_id):
-            raise InvalidResolutionError(
-                f"accepted_entry_id {accepted_entry_id!r} is not part of the "
-                f"conflict pair ({conflict.entry_id_a!r}, {conflict.entry_id_b!r})."
-            )
-        # Retire the other entry in the pair
-        other_id = conflict.other(accepted_entry_id)
-        entry = store.get(other_id)
-        if entry is None:
-            raise InvalidResolutionError(
-                f"Entry {other_id!r} not found in store — cannot retire it."
-            )
-        if not entry.retired:
-            store.retire(other_id, retired_at=ts)
-        effective_retired = other_id
-
+        effective_retired = _apply_accept(store, conflict, accepted_entry_id, ts)
     elif kind == ResolutionKind.RETIRE:
-        if not retired_entry_id:
-            raise InvalidResolutionError(
-                "RETIRE resolution requires retired_entry_id."
-            )
-        if not conflict.involves(retired_entry_id):
-            raise InvalidResolutionError(
-                f"retired_entry_id {retired_entry_id!r} is not part of the "
-                f"conflict pair ({conflict.entry_id_a!r}, {conflict.entry_id_b!r})."
-            )
-        entry = store.get(retired_entry_id)
-        if entry is None:
-            raise InvalidResolutionError(
-                f"Entry {retired_entry_id!r} not found in store — cannot retire it."
-            )
-        if not entry.retired:
-            store.retire(retired_entry_id, retired_at=ts)
-        effective_retired = retired_entry_id
-
+        effective_retired = _apply_retire(store, conflict, retired_entry_id, ts)
     # DEFER: no entries retired; conflict is explicitly deferred
 
     resolution = ConflictResolution(
