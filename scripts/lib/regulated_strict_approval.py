@@ -372,6 +372,12 @@ class DispatchApprovalState:
 
     def add_pre_approval(self, record: ApprovalRecord) -> None:
         """Record a pre-execution approval for this dispatch."""
+        if record.dispatch_id != self.dispatch_id:
+            raise ApprovalError(
+                f"Approval dispatch_id {record.dispatch_id!r} does not match "
+                f"state dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted (RA-4)."
+            )
         if record.approval_type != ApprovalType.PRE_EXECUTION:
             raise ApprovalError(
                 f"Expected PRE_EXECUTION approval, got {record.approval_type.value!r}. "
@@ -383,8 +389,14 @@ class DispatchApprovalState:
         """Record a post-review closure.
 
         Raises:
-            ApprovalError: If dispatch is not in PENDING_REVIEW state.
+            ApprovalError: If dispatch is not in PENDING_REVIEW state or dispatch_id mismatches.
         """
+        if record.dispatch_id != self.dispatch_id:
+            raise ApprovalError(
+                f"Closure dispatch_id {record.dispatch_id!r} does not match "
+                f"state dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted (RA-4)."
+            )
         if self.state != ApprovalState.PENDING_REVIEW:
             raise ApprovalError(
                 f"Cannot apply closure in state {self.state.value!r}. "
