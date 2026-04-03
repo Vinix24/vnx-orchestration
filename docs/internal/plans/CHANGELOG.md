@@ -29,6 +29,19 @@ Artifacts:
 - `scripts/lib/lesson_conflict.py` — conflict detection and resolution (406 lines)
 - `tests/test_preferences_lessons_certification.py` — 20 certification tests
 
+### Feature 24 completed: Per-Project Open Items And Gate Toggle
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- open items and gate toggle contract with project switcher UX, gate toggle API, safe-action A7
+- gate config endpoints: GET /api/operator/gate/config, POST /api/operator/gate/toggle with YAML persistence
+- open items page with project dropdown and severity filter chips
+- gate toggle switches on project cards
+- 10 certification tests + 40 component tests = 50 Feature 24 tests
+
+---
+
 ### Feature 23 completed: Dashboard Data Pipeline Fix And Kanban Board
 
 Merged: PRs on `main` branch, 2026-04-03
