@@ -113,10 +113,11 @@ export function useAggregateOpenItems(project?: string) {
   );
 }
 
-export function useKanban() {
+export function useKanban(project?: string) {
+  const key = project ? ['operator-kanban', project] : 'operator-kanban';
   return useSWR<KanbanEnvelope>(
-    'operator-kanban',
-    () => fetchKanban(),
+    key,
+    () => fetchKanban(project),
     { refreshInterval: 15000, revalidateOnFocus: true, dedupingInterval: 8000 }
   );
 }
