@@ -456,7 +456,7 @@ class ReviewGateManager:
     ) -> Dict[str, Any]:
         required = mode == "final" or codex_final_gate_required(changed_files)
         available = self._codex_headless_available()
-        model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "gpt-5.4"
+        model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "gpt-5.2-codex"
         requested_at = _utc_now()
         payload = {
             "gate": "codex_gate",

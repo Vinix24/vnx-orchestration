@@ -48,6 +48,20 @@ Artifacts:
 6. ~~Feature 17: rich headless runtime sessions and structured observability~~ — **COMPLETE**
 7. Feature 18: learning-loop signal enrichment and governance feedback hardening
 8. Feature 19: coding substrate generalization and Agent OS lift-in
+9. Feature 20: business-light governance pilot and folder-scoped orchestration
+10. Feature 21: regulated-strict governance profile and audit bundle
+11. Feature 22: preferences and lessons surface generalization
+
+### Chain pilot gate exception
+
+- Features 18–22 chain pilot runs with Gemini headless gates disabled due to rate limits; Codex gates remain required.
+
+### Feature plans added for secured five-feature chain
+
+- [FEATURE_PLAN_BUSINESS_LIGHT_GOVERNANCE_PILOT_AND_FOLDER_SCOPED_ORCHESTRATION.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_BUSINESS_LIGHT_GOVERNANCE_PILOT_AND_FOLDER_SCOPED_ORCHESTRATION.md)
+- [FEATURE_PLAN_REGULATED_STRICT_GOVERNANCE_PROFILE_AND_AUDIT_BUNDLE.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_REGULATED_STRICT_GOVERNANCE_PROFILE_AND_AUDIT_BUNDLE.md)
+- [FEATURE_PLAN_PREFERENCES_AND_LESSONS_SURFACE_GENERALIZATION.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_PREFERENCES_AND_LESSONS_SURFACE_GENERALIZATION.md)
+- [CHAIN_PILOT_FEATURES_18_22.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/CHAIN_PILOT_FEATURES_18_22.md)
 
 ---
 

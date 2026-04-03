@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import select
 import signal
@@ -147,7 +148,7 @@ class GateRunner:
                 os.environ.get("VNX_CODEX_HEADLESS_MODEL")
                 or os.environ.get("VNX_CODEX_MODEL")
                 or request_payload.get("model")
-                or "gpt-5.4"
+                or "gpt-5.2-codex"
             )
             cli_args = cli_args + ["-c", f'model="{model}"']
 
@@ -430,6 +431,20 @@ class GateRunner:
 
         # Step 3-4: Write result record
         now = utc_now_iso()
+        findings: List[Dict[str, Any]] = []
+        residual_risk = ""
+        if gate == "codex_gate":
+            parsed = self._parse_codex_findings(stdout)
+            findings = parsed["findings"]
+            residual_risk = parsed.get("residual_risk", "") or ""
+        blocking_findings: List[Dict[str, Any]] = []
+        advisory_findings: List[Dict[str, Any]] = []
+        for finding in findings:
+            severity = str(finding.get("severity", "")).lower()
+            if severity in {"error", "blocking", "critical", "high"}:
+                blocking_findings.append(finding)
+            else:
+                advisory_findings.append(finding)
         result_payload: Dict[str, Any] = {
             "gate": gate,
             "pr_id": pr_id or (str(pr_number) if pr_number else ""),
@@ -438,10 +453,11 @@ class GateRunner:
             "summary": f"{gate} execution completed successfully",
             "contract_hash": contract_hash,
             "report_path": str(report_file),
-            "blocking_findings": [],
-            "advisory_findings": [],
+            "findings": findings,
+            "blocking_findings": blocking_findings,
+            "advisory_findings": advisory_findings,
             "required_reruns": [],
-            "residual_risk": "",
+            "residual_risk": residual_risk,
             "duration_seconds": duration_seconds,
             "recorded_at": now,
         }
@@ -702,8 +718,157 @@ class GateRunner:
         return (
             f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
             f"Changed files: {', '.join(files)}\n"
-            f"Read each file and provide a structured code review with findings.\n"
+            "Read each file and provide a structured code review with findings.\n\n"
+            "Respond with a structured JSON verdict only:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "pass|fail|blocked",\n'
+            '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
+            '  "residual_risk": "description of remaining risks or null",\n'
+            '  "rerun_required": false,\n'
+            '  "rerun_reason": null\n'
+            "}\n"
+            "```\n"
         )
+
+    def _parse_codex_findings(self, stdout: str) -> Dict[str, Any]:
+        """Extract findings from Codex headless NDJSON output."""
+        text = self._extract_codex_text(stdout)
+        verdict = self._extract_codex_verdict(text)
+        findings = []
+        residual_risk = ""
+        if verdict:
+            findings = verdict.get("findings") or []
+            residual_risk = verdict.get("residual_risk") or ""
+        if not findings:
+            findings = self._extract_findings_from_text(text)
+        normalized = self._normalize_findings(findings)
+        return {
+            "findings": normalized,
+            "residual_risk": residual_risk,
+            "verdict": verdict or {},
+            "raw_text": text,
+        }
+
+    @staticmethod
+    def _extract_codex_text(stdout: str) -> str:
+        """Extract agent_message text from codex NDJSON output."""
+        texts: List[str] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                item = payload.get("item") if isinstance(payload.get("item"), dict) else None
+                if item and item.get("type") in {"agent_message", "assistant_message", "output_text"}:
+                    text = item.get("text") or ""
+                    if text:
+                        texts.append(text)
+                elif payload.get("type") in {"agent_message", "assistant_message", "output_text"}:
+                    text = payload.get("text") or ""
+                    if text:
+                        texts.append(text)
+        if texts:
+            return "\n".join(texts).strip()
+        # Fallback to raw stdout when not JSON/NDJSON.
+        return stdout.strip()
+
+    @staticmethod
+    def _extract_codex_verdict(text: str) -> Dict[str, Any]:
+        """Try to parse a JSON verdict from codex output text."""
+        if not text:
+            return {}
+        # Prefer fenced JSON blocks.
+        fenced = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        if fenced:
+            try:
+                return json.loads(fenced.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Try to parse any JSON object that contains a verdict/findings.
+        decoder = json.JSONDecoder()
+        for idx, ch in enumerate(text):
+            if ch != "{":
+                continue
+            try:
+                obj, _ = decoder.raw_decode(text[idx:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and ("verdict" in obj or "findings" in obj):
+                return obj
+        return {}
+
+    @staticmethod
+    def _extract_findings_from_text(text: str) -> List[Dict[str, Any]]:
+        """Heuristic fallback when codex does not emit JSON verdicts."""
+        findings: List[Dict[str, Any]] = []
+        if not text:
+            return findings
+        lines = text.splitlines()
+        in_section = False
+        header_pattern = re.compile(
+            r"^(?:\*\*|__)?\s*(findings|issues found|critical issues|major issues|minor issues)\s*(?:\*\*|__)?$",
+            re.IGNORECASE,
+        )
+        new_section_pattern = re.compile(
+            r"^(?:\*\*|__)?\s*(open questions|summary|notes|recommendations|conclusion)\s*(?:\*\*|__)?$",
+            re.IGNORECASE,
+        )
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            header_match = re.match(
+                r"^#{1,4}\s*(findings|issues found|critical issues|major issues|minor issues)\b",
+                stripped,
+                re.IGNORECASE,
+            )
+            if header_match or header_pattern.match(stripped):
+                in_section = True
+                continue
+            if in_section:
+                if stripped.startswith("#") or new_section_pattern.match(stripped):
+                    # New section; stop if we already collected findings.
+                    if findings:
+                        break
+                    continue
+            item_match = re.match(r"^[-*]\s*(.+)$", stripped) or re.match(r"^\d+\.\s*(.+)$", stripped)
+            if not item_match:
+                continue
+            item = item_match.group(1).strip()
+            severity = "warning"
+            msg = item
+            sev_match = re.match(r"^(critical|high|medium|low|warning|warn|error|info)\s*[:\-]\s*(.+)$", item, re.IGNORECASE)
+            if sev_match:
+                sev = sev_match.group(1).lower()
+                msg = sev_match.group(2).strip()
+                severity = sev
+            bracket_match = re.match(r"^\[(critical|high|medium|low|warning|warn|error|info)\]\s*(.+)$", item, re.IGNORECASE)
+            if bracket_match:
+                sev = bracket_match.group(1).lower()
+                msg = bracket_match.group(2).strip()
+                severity = sev
+            findings.append({"severity": severity, "message": msg})
+        return findings
+
+    @staticmethod
+    def _normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for f in findings or []:
+            if isinstance(f, str):
+                normalized.append({"severity": "warning", "message": f})
+                continue
+            if not isinstance(f, dict):
+                normalized.append({"severity": "warning", "message": str(f)})
+                continue
+            severity = str(f.get("severity", "warning")).lower()
+            message = f.get("message") or f.get("title") or f.get("details") or ""
+            normalized.append({"severity": severity, "message": str(message)})
+        return normalized
 
     @staticmethod
     def verify_artifact_consistency(

@@ -96,6 +96,7 @@ PY
 show_enhanced_notification_async() {
     local message="$1"
     local count="${2:-1}"
+    local queue_count
 
     # 1. Terminal bell for audio notification (multiple beeps)
     echo -e "\a\a\a"  # Triple beep for attention
@@ -129,6 +130,12 @@ show_enhanced_notification_async() {
     fi
 
     # 5. AUTO-OPEN POPUP (RESTORED FUNCTIONALITY)
+    # Guard: only open popup if queue still has items (avoid empty-popup races).
+    queue_count=$(count_files "$QUEUE_DIR")
+    if [ "$queue_count" -eq 0 ]; then
+        echo "Queue empty at popup time, skipping popup launch"
+        return
+    fi
     # Check if popup is already running to avoid duplicates
     if ! is_popup_running; then
         echo "Opening queue popup via tmux..."
@@ -206,8 +213,15 @@ while true; do
         echo -e "${GREEN}✓ $NEW_FILES new dispatch(es) detected!${NC}"
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         
-        # Show enhanced non-intrusive notification instead of auto-launching popup
-        show_enhanced_notification_async "$NEW_FILES new dispatch(es) detected" "$NEW_FILES"
+        # Debounce: ensure queue still has items before opening popup
+        sleep 1
+        CURRENT_COUNT=$(count_files "$QUEUE_DIR")
+        if [ "$CURRENT_COUNT" -gt 0 ]; then
+            # Show enhanced non-intrusive notification instead of auto-launching popup
+            show_enhanced_notification_async "$NEW_FILES new dispatch(es) detected" "$NEW_FILES"
+        else
+            echo "Queue emptied during debounce; skipping popup"
+        fi
         
         LAST_COUNT=$CURRENT_COUNT
     elif [ "$CURRENT_COUNT" -lt "$LAST_COUNT" ]; then

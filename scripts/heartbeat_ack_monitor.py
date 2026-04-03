@@ -285,6 +285,8 @@ class HeartbeatACKMonitor:
 
                 if last_update_str != 'never':
                     last_update = datetime.fromisoformat(last_update_str.replace('Z', '+00:00'))
+                    if last_update.tzinfo is None:
+                        last_update = last_update.replace(tzinfo=timezone.utc)
 
                     # Ensure after_time is timezone-aware for comparison
                     if after_time.tzinfo is None:
@@ -428,6 +430,10 @@ class HeartbeatACKMonitor:
                         timestamp_str = entry.get('timestamp')
                         if timestamp_str:
                             timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            if timestamp.tzinfo is None:
+                                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                            if after_time.tzinfo is None:
+                                after_time = after_time.replace(tzinfo=timezone.utc)
 
                             if timestamp > after_time:
                                 delay = (timestamp - after_time).total_seconds()

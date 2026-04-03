@@ -103,7 +103,7 @@ vnx_dispatch_extract_clear_context() {
     local file="$1"
     local clear
     clear=$(sed -n 's/^ClearContext:[[:space:]]*//Ip' "$file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-    echo "${clear:-false}"
+    echo "${clear:-true}"
 }
 
 vnx_dispatch_extract_force_normal_mode() {

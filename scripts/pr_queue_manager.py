@@ -662,6 +662,8 @@ Review-Stack: {review_stack or 'none'}
                 'complexity': 'Medium',  # default
                 'cognition': 'normal',  # default
                 'requires_model': None,  # default
+                'requires_provider': None,  # default
+                'clear_context': True,  # default
                 'risk_class': 'medium',
                 'merge_policy': 'human',
                 'review_stack': [],
@@ -708,6 +710,30 @@ Review-Stack: {review_stack or 'none'}
                 model_match = re.match(r'\*\*Requires-Model\*\*:\s*(.+)', line, re.IGNORECASE)
                 if model_match:
                     details['requires_model'] = model_match.group(1).strip()
+
+                # Requires-Provider (optional)
+                provider_match = re.match(r'\*\*Requires-Provider\*\*:\s*(.+)', line, re.IGNORECASE)
+                if provider_match:
+                    details['requires_provider'] = provider_match.group(1).strip()
+
+                # ClearContext (optional)
+                clear_match = re.match(r'\*\*ClearContext\*\*:\s*(.+)', line, re.IGNORECASE)
+                if clear_match:
+                    details['clear_context'] = clear_match.group(1).strip().lower() == 'true'
+
+            # Fallback: scan entire PR section for metadata if not found early
+            if details.get('requires_model') is None:
+                model_match = re.search(r'(?:\*\*Requires-Model\*\*|Requires-Model):\s*(.+)', pr_section, re.IGNORECASE)
+                if model_match:
+                    details['requires_model'] = model_match.group(1).strip()
+            if details.get('requires_provider') is None:
+                provider_match = re.search(r'(?:\*\*Requires-Provider\*\*|Requires-Provider):\s*(.+)', pr_section, re.IGNORECASE)
+                if provider_match:
+                    details['requires_provider'] = provider_match.group(1).strip()
+            if details.get('clear_context') is True:
+                clear_match = re.search(r'(?:\*\*ClearContext\*\*|ClearContext):\s*(.+)', pr_section, re.IGNORECASE)
+                if clear_match:
+                    details['clear_context'] = clear_match.group(1).strip().lower() == 'true'
 
                 risk_class_match = re.match(r'\*\*Risk-Class\*\*:\s*(.+)', line, re.IGNORECASE)
                 if risk_class_match:
@@ -915,6 +941,10 @@ Review-Stack: {review_stack or 'none'}
         priority = (pr_details.get('priority') if pr_details else None) or pr.get('priority', 'P1')
         cognition = (pr_details.get('cognition') if pr_details else None) or 'normal'
         requires_model = (pr_details.get('requires_model') if pr_details else None) or None
+        requires_provider = (pr_details.get('requires_provider') if pr_details else None) or None
+        clear_context = (pr_details.get('clear_context') if pr_details else None)
+        if clear_context is None:
+            clear_context = True
         risk_class = (pr_details.get('risk_class') if pr_details else None) or pr.get('risk_class', 'medium')
         merge_policy = (pr_details.get('merge_policy') if pr_details else None) or pr.get('merge_policy', 'human')
         review_stack = (pr_details.get('review_stack') if pr_details else None) or pr.get('review_stack', [])
@@ -968,6 +998,9 @@ Review-Stack: {','.join(review_stack) if review_stack else 'none'}"""
         # SPRINT 2: Add Requires-Model if specified
         if requires_model:
             manager_block += f"\nRequires-Model: {requires_model}"
+        if requires_provider:
+            manager_block += f"\nRequires-Provider: {requires_provider}"
+        manager_block += f"\nClearContext: {'true' if clear_context else 'false'}"
 
         manager_block += f"""
 Dispatch-ID: {dispatch_id}

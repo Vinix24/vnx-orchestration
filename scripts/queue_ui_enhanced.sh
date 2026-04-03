@@ -152,10 +152,15 @@ if [ $QUEUE_COUNT -gt 0 ]; then
 fi
 
 if [ $QUEUE_COUNT -eq 0 ]; then
-    echo -e "${YELLOW}No dispatches in queue${NC}"
-    echo ""
-    echo -e "${BLUE}Press any key to exit...${NC}"
-    IFS= read -r -n 1 2>/dev/null || true
+    pending_count=0
+    pending_count=$(find "$PENDING_DIR" -name "*.md" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$pending_count" -gt 0 ]; then
+        echo -e "${YELLOW}No dispatches awaiting approval (queue empty).${NC}"
+        echo -e "${BLUE}${pending_count} dispatch(es) already pending.${NC}"
+    else
+        echo -e "${YELLOW}No dispatches in queue${NC}"
+    fi
+    sleep 1
     exit 0
 fi
 
