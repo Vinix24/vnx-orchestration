@@ -45,6 +45,8 @@ Usage:
 
 from __future__ import annotations
 
+import copy
+import types
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -137,6 +139,15 @@ class EvidenceEntry:
     evidence_type: EvidenceType
     timestamp:     str
     payload:       Dict[str, Any]
+
+    def __post_init__(self) -> None:
+        # AB-1: freeze payload so external references cannot mutate stored evidence.
+        # Deep-copy first to sever any nested mutable references, then wrap in
+        # MappingProxyType to make the stored dict read-only.
+        object.__setattr__(
+            self, "payload",
+            types.MappingProxyType(copy.deepcopy(dict(self.payload))),
+        )
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable dict representation of this entry."""
@@ -303,16 +314,18 @@ class AuditBundleBuilder:
     def add_gate_result(self, gate_result: Dict[str, Any]) -> "AuditBundleBuilder":
         """Add a gate result dict as evidence.
 
-        Required fields: gate_id, outcome, timestamp.
+        Required fields: gate_id, outcome, timestamp, dispatch_id.
+        dispatch_id must match the builder's dispatch_id.
 
         Args:
-            gate_result: Dict containing at minimum gate_id, outcome, timestamp.
+            gate_result: Dict containing gate_id, outcome, timestamp, dispatch_id.
 
         Returns:
             self, for chaining.
 
         Raises:
             InvalidEvidenceError: If required fields are missing.
+            ValueError: If dispatch_id does not match builder dispatch_id.
         """
         _require_fields(gate_result, ("gate_id", "outcome", "timestamp", "dispatch_id"), "gate_result")
         if gate_result["dispatch_id"] != self.dispatch_id:
@@ -363,11 +376,11 @@ class AuditBundleBuilder:
     def add_runtime_event(self, event: Dict[str, Any]) -> "AuditBundleBuilder":
         """Add a runtime event dict as evidence.
 
-        Required fields: event_type, timestamp. Arbitrary additional keys
-        are preserved in the payload.
+        Required fields: event_type, timestamp, dispatch_id. Arbitrary additional
+        keys are preserved in the payload. dispatch_id must match the builder's.
 
         Args:
-            event: Dict containing at minimum event_type and timestamp,
+            event: Dict containing event_type, timestamp, dispatch_id,
                    plus any additional runtime-specific fields.
 
         Returns:
@@ -375,6 +388,7 @@ class AuditBundleBuilder:
 
         Raises:
             InvalidEvidenceError: If required fields are missing.
+            ValueError: If dispatch_id does not match builder dispatch_id.
         """
         _require_fields(event, ("event_type", "timestamp", "dispatch_id"), "runtime_event")
         if event["dispatch_id"] != self.dispatch_id:
