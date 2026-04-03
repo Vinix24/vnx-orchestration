@@ -51,7 +51,7 @@ Business-light dispatches are **not** reviewed by quality gates by default. Inst
 1. **Default**: Dispatches complete when the manager (T0 equivalent) accepts the worker output. No gate blocks closure.
 2. **Exception trigger**: A dispatch is flagged for review when:
    - Worker output contains error markers or failure signals
-   - The dispatch touches a folder marked as `review_required` in the scope config
+   - The dispatch touches a path listed in `review_required_paths` in the scope config
    - An operator manually requests review
    - A recurrence signal (from governance feedback loop) flags the pattern
 3. **Exception review**: When triggered, the dispatch is held and routed to a gate (Codex or operator) before closure.
@@ -64,7 +64,7 @@ Business-light dispatches are **not** reviewed by quality gates by default. Inst
 | **BL-C2** | Closure must still emit a receipt to the receipt pipeline |
 | **BL-C3** | Closed dispatches must record `closure_authority: "manager"` or `closure_authority: "operator"` in the receipt |
 | **BL-C4** | If an exception is triggered post-closure, the dispatch must be reopenable by the operator |
-| **BL-C5** | Autonomous closure is disabled during the pilot phase (see Section 6) |
+| **BL-C5** | During the pilot phase, manager closure is enabled but all closures must be logged with `pilot_audit: true` in the receipt for post-hoc review (see Section 6) |
 
 ### 2.4 Open Item Handling
 
@@ -207,7 +207,7 @@ The business-light profile launches as a **constrained pilot**, not a production
 |------------|-------|-----------|
 | Max concurrent business scopes | 2 | Limit blast radius |
 | Max active business workers | 2 | Prevent resource contention with coding |
-| Autonomous closure | Disabled during pilot (BL-C5) | Prove review-by-exception first |
+| Autonomous closure | Enabled with pilot audit logging (BL-C5) | Prove manager closure works; post-hoc review via `pilot_audit` receipts |
 | Max dispatch age | 1 hour | Prevent long-running unmonitored work |
 | Gate requirement | Optional but logged | Measure gate value before enforcing |
 | Terminal pool | Separate from coding | Prevent cross-domain resource conflicts |
@@ -256,7 +256,7 @@ vnx domain disable business
 1. Business-light profile validates against substrate
 2. Business-light profile is experimental maturity (not production-ready)
 3. `policy_mutation_blocked` is True
-4. `closure_requires_human` is False (but disabled during pilot via BL-C5)
+4. `closure_requires_human` is False (manager closure enabled; pilot phase adds `pilot_audit` logging per BL-C5)
 
 ### 7.2 Isolation Tests
 
@@ -278,7 +278,7 @@ vnx domain disable business
 
 1. Max concurrent scopes enforced
 2. Max active workers enforced
-3. Autonomous closure disabled during pilot
+3. Manager closure receipts include `pilot_audit: true` during pilot
 4. Max dispatch age enforced
 5. `VNX_BUSINESS_LIGHT_ENABLED=0` stops all business dispatches
 
