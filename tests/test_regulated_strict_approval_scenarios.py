@@ -319,3 +319,76 @@ class TestDispatchIdGuard:
         foreign_approval = _make_pre_approval(dispatch_id="d-foreign")
         with pytest.raises(ApprovalError, match="d-expected"):
             state.add_pre_approval(foreign_approval)
+
+
+# ---------------------------------------------------------------------------
+# RA-4 integrity guards: transition, retroactive approval, overwrite, re-approval
+# ---------------------------------------------------------------------------
+
+class TestRA4IntegrityGuards:
+
+    # Guard 1: transition to APPROVED requires pre_approval
+    def test_transition_to_approved_requires_pre_approval(self) -> None:
+        """Cannot transition to APPROVED state without at least one pre-execution approval."""
+        state = DispatchApprovalState(dispatch_id="d-001")
+        with pytest.raises(ApprovalError, match="pre-execution approval"):
+            state.transition_to(ApprovalState.APPROVED)
+
+    def test_transition_to_approved_succeeds_with_pre_approval(self) -> None:
+        state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
+        state.transition_to(ApprovalState.APPROVED)
+        assert state.state == ApprovalState.APPROVED
+
+    # Guard 2: retroactive approval blocked
+    def test_add_pre_approval_rejected_after_approved(self) -> None:
+        """Cannot add pre-execution approval once dispatch has moved past PENDING_APPROVAL."""
+        state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
+        state.transition_to(ApprovalState.APPROVED)
+        with pytest.raises(ApprovalError, match="retroactive"):
+            state.add_pre_approval(_make_pre_approval())
+
+    def test_add_pre_approval_rejected_in_executing(self) -> None:
+        state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
+        state.transition_to(ApprovalState.APPROVED)
+        state.transition_to(ApprovalState.EXECUTING)
+        with pytest.raises(ApprovalError, match="retroactive"):
+            state.add_pre_approval(_make_pre_approval())
+
+    # Guard 3: closure overwrite blocked
+    def test_apply_closure_rejects_overwrite(self) -> None:
+        """A second closure record must not overwrite the first."""
+        state = _state_at_pending_review()
+        state.apply_closure(_make_closure())
+        with pytest.raises(ApprovalError, match="already has a closure"):
+            state.apply_closure(_make_closure())
+
+    # Guard 4: re-approval required after REVIEW_FAILED
+    def test_review_failed_clears_pre_approvals(self) -> None:
+        """After REVIEW_FAILED loops to PENDING_APPROVAL, pre_approvals are cleared."""
+        state = _state_at_pending_review()
+        assert state.has_pre_execution_approval()
+        state.transition_to(ApprovalState.REVIEW_FAILED)
+        state.transition_to(ApprovalState.PENDING_APPROVAL)
+        assert not state.has_pre_execution_approval()
+        assert len(state.pre_approvals) == 0
+
+    def test_review_failed_clears_closure_record(self) -> None:
+        """After REVIEW_FAILED, any partial closure record is also cleared."""
+        state = _state_at_pending_review()
+        state.apply_closure(_make_closure())
+        state.transition_to(ApprovalState.REVIEW_FAILED)
+        state.transition_to(ApprovalState.PENDING_APPROVAL)
+        assert not state.has_closure_record()
+        assert state.closure_record is None
+
+    def test_review_failed_requires_fresh_approval_before_approved(self) -> None:
+        """After reset, APPROVED transition requires a new pre-execution approval."""
+        state = _state_at_pending_review()
+        state.transition_to(ApprovalState.REVIEW_FAILED)
+        state.transition_to(ApprovalState.PENDING_APPROVAL)
+        # Pre-approvals were cleared — cannot transition to APPROVED without re-approval
+        with pytest.raises(ApprovalError, match="pre-execution approval"):
+            state.transition_to(ApprovalState.APPROVED)

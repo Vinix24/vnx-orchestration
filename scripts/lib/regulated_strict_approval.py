@@ -360,6 +360,7 @@ class DispatchApprovalState:
 
         Raises:
             InvalidStateTransitionError: If the transition is not valid.
+            ApprovalError: If transitioning to APPROVED without a pre-execution approval (RA-4).
         """
         allowed = VALID_TRANSITIONS.get(self.state, frozenset())
         if new_state not in allowed:
@@ -368,10 +369,28 @@ class DispatchApprovalState:
                 f"Allowed transitions from {self.state.value!r}: "
                 f"{sorted(s.value for s in allowed) or 'none (terminal state)'}."
             )
+        if new_state == ApprovalState.APPROVED and not self.pre_approvals:
+            raise ApprovalError(
+                f"Cannot transition dispatch {self.dispatch_id!r} to 'approved' without "
+                "a pre-execution approval record (RA-4)."
+            )
+        if (self.state == ApprovalState.REVIEW_FAILED
+                and new_state == ApprovalState.PENDING_APPROVAL):
+            self.pre_approvals = []
+            self.closure_record = None
         self.state = new_state
 
     def add_pre_approval(self, record: ApprovalRecord) -> None:
-        """Record a pre-execution approval for this dispatch."""
+        """Record a pre-execution approval for this dispatch.
+
+        Raises:
+            ApprovalError: If dispatch is not in PENDING_APPROVAL state (retroactive approval blocked).
+        """
+        if self.state != ApprovalState.PENDING_APPROVAL:
+            raise ApprovalError(
+                f"Cannot add pre-execution approval in state {self.state.value!r}. "
+                "Approvals must be recorded before execution begins (retroactive approval blocked)."
+            )
         if record.dispatch_id != self.dispatch_id:
             raise ApprovalError(
                 f"Approval dispatch_id {record.dispatch_id!r} does not match "
@@ -396,6 +415,11 @@ class DispatchApprovalState:
                 f"Closure dispatch_id {record.dispatch_id!r} does not match "
                 f"state dispatch_id {self.dispatch_id!r}. "
                 "Cross-dispatch evidence is not permitted (RA-4)."
+            )
+        if self.closure_record is not None:
+            raise ApprovalError(
+                f"Dispatch {self.dispatch_id!r} already has a closure record. "
+                "Closure records are immutable and cannot be overwritten."
             )
         if self.state != ApprovalState.PENDING_REVIEW:
             raise ApprovalError(
