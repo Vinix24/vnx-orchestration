@@ -11,7 +11,9 @@ Certifies that:
 
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 import re
 import sys
 from pathlib import Path
@@ -53,6 +55,22 @@ from tmux_adapter import (
 )
 
 LIB_DIR = Path(__file__).parent.parent / "scripts" / "lib"
+
+
+def _get_imported_names(filepath: Path) -> Set[str]:
+    """Parse a Python file's AST and return all imported names."""
+    tree = ast.parse(filepath.read_text(encoding="utf-8"))
+    names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module)
+            for alias in node.names:
+                names.add(alias.name)
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -163,52 +181,35 @@ class TestCanonicalTruthAlignment:
     """Certify adapter does not write canonical state."""
 
     def test_adapter_does_not_import_lease_write_functions(self) -> None:
-        """TmuxAdapter must not import lease mutation functions."""
+        """TmuxAdapter must not import lease mutation functions (AST-checked)."""
         import tmux_adapter as mod
-        source = Path(mod.__file__).read_text(encoding="utf-8")
-        lease_mutators = ["acquire_lease", "release_lease", "renew_lease", "expire_lease"]
-        for fn in lease_mutators:
-            # Check it's not imported at module level (allow if in comments)
-            imports = [
-                line for line in source.splitlines()
-                if f"import" in line and fn in line and not line.strip().startswith("#")
-            ]
-            # get_lease is allowed (read-only), mutators are not
-            assert not imports, f"tmux_adapter.py imports lease mutator: {fn}"
+        imported = _get_imported_names(Path(mod.__file__))
+        lease_mutators = {"acquire_lease", "release_lease", "renew_lease", "expire_lease"}
+        found = imported & lease_mutators
+        assert found == set(), f"tmux_adapter.py imports lease mutators: {found}"
 
     def test_adapter_does_not_import_dispatch_transition(self) -> None:
-        """TmuxAdapter must not import dispatch state transition functions."""
+        """TmuxAdapter must not import dispatch state transition (AST-checked)."""
         import tmux_adapter as mod
-        source = Path(mod.__file__).read_text(encoding="utf-8")
-        dispatch_mutators = ["transition_dispatch"]
-        for fn in dispatch_mutators:
-            imports = [
-                line for line in source.splitlines()
-                if "import" in line and fn in line and not line.strip().startswith("#")
-            ]
-            assert not imports, f"tmux_adapter.py imports dispatch mutator: {fn}"
+        imported = _get_imported_names(Path(mod.__file__))
+        assert "transition_dispatch" not in imported, \
+            "tmux_adapter.py imports transition_dispatch"
 
     def test_headless_adapter_does_not_import_coordination_db(self) -> None:
-        """HeadlessAdapter must not import runtime_coordination."""
+        """HeadlessAdapter must not import runtime_coordination (AST-checked)."""
         import headless_transport_adapter as mod
-        source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "runtime_coordination" not in source, \
+        imported = _get_imported_names(Path(mod.__file__))
+        assert "runtime_coordination" not in imported, \
             "headless_transport_adapter.py imports runtime_coordination"
 
     def test_facade_does_not_mutate_canonical_state(self) -> None:
-        """RuntimeFacade must not import lease or dispatch mutators."""
+        """RuntimeFacade must not import lease or dispatch mutators (AST-checked)."""
         import runtime_facade as mod
-        source = Path(mod.__file__).read_text(encoding="utf-8")
-        forbidden = [
-            "acquire_lease", "release_lease", "transition_dispatch",
-            "expire_lease", "recover_lease",
-        ]
-        for fn in forbidden:
-            imports = [
-                line for line in source.splitlines()
-                if "import" in line and fn in line and not line.strip().startswith("#")
-            ]
-            assert not imports, f"runtime_facade.py imports mutator: {fn}"
+        imported = _get_imported_names(Path(mod.__file__))
+        forbidden = {"acquire_lease", "release_lease", "transition_dispatch",
+                      "expire_lease", "recover_lease"}
+        found = imported & forbidden
+        assert found == set(), f"runtime_facade.py imports mutators: {found}"
 
 
 # ===================================================================
@@ -360,17 +361,22 @@ class TestContractAlignment:
             "session_health() must accept terminal_ids parameter"
 
     def test_deliver_has_no_lease_validation(self) -> None:
-        """deliver() must not validate lease state per OI-559 fix."""
-        import tmux_adapter as mod
-        source = Path(mod.__file__).read_text(encoding="utf-8")
-        # Find the deliver method and check it doesn't call validate_lease
-        # internally (the old validate_lease is for legacy path only)
-        # The key invariant: deliver() signature should not require lease state
-        import inspect
-        sig = inspect.signature(TmuxAdapter.deliver)
-        params = list(sig.parameters.keys())
-        # Should not have a required 'lease' parameter
-        assert "lease" not in params or sig.parameters["lease"].default is not inspect.Parameter.empty
+        """deliver() body must not call validate_lease or query lease state."""
+        source = inspect.getsource(TmuxAdapter.deliver)
+        forbidden = ["validate_lease", "check_lease", "get_lease", "lease_state"]
+        violations = [fn for fn in forbidden if fn in source]
+        assert violations == [], (
+            f"deliver() body references lease functions: {violations}"
+        )
+        # Also check private delivery helpers
+        for helper_name in ("_deliver_primary", "_deliver_legacy", "_handle_pane_not_found"):
+            helper = getattr(TmuxAdapter, helper_name, None)
+            if helper:
+                helper_src = inspect.getsource(helper)
+                helper_violations = [fn for fn in forbidden if fn in helper_src]
+                assert helper_violations == [], (
+                    f"{helper_name} references lease functions: {helper_violations}"
+                )
 
 
 # ===================================================================
