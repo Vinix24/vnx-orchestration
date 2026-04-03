@@ -266,6 +266,43 @@ export interface GovernanceDigestSourceFreshness {
   governance_digest: string | null;
 }
 
+export interface DigestRecurrenceRecord {
+  defect_family: string;
+  count: number;
+  representative_content: string;
+  severity: string;
+  signal_types: string[];
+  impacted_features: string[];
+  impacted_prs: string[];
+  impacted_sessions: string[];
+  evidence_pointers: string[];
+  providers: string[];
+}
+
+export interface DigestRecommendation {
+  category: string;
+  content: string;
+  advisory_only: boolean;
+  evidence_basis: string[];
+  severity: string;
+  recurrence_count: number;
+  defect_family: string;
+}
+
+export interface GovernanceDigestData {
+  runner_version?: string;
+  generated_at?: string;
+  total_signals_processed?: number;
+  recurring_pattern_count?: number;
+  single_occurrence_count?: number;
+  recurring_patterns?: DigestRecurrenceRecord[];
+  recommendations?: DigestRecommendation[];
+  source_records?: {
+    gate_results?: number;
+    queue_anomalies?: number;
+  };
+}
+
 export interface GovernanceDigestEnvelope {
   view: string;
   queried_at: string;
@@ -273,5 +310,5 @@ export interface GovernanceDigestEnvelope {
   staleness_seconds: number | null;
   degraded: boolean;
   degraded_reasons: string[];
-  data: Record<string, unknown>;
+  data: GovernanceDigestData;
 }
