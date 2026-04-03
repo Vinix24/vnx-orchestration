@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12 through 21 are complete. Feature 21 merged on `main` branch, 2026-04-03.
+Features 12 through 22 are complete. Feature 22 merged on `main` branch, 2026-04-03. Five-feature chain pilot (Features 18-22) complete.
 
 The internal baseline is now:
 
@@ -23,9 +23,11 @@ The internal baseline is now:
 - coding-first substrate generalized into reusable Agent OS layer with capability profiles, domain readiness surfaces, and planning scaffolding guardrails (Feature 19)
 - business-light governance pilot: folder-scoped orchestration, review-by-exception, profile selector with coding_strict authority protection (Feature 20)
 - regulated-strict governance: explicit approval workflow, audit bundles with completeness gating, strict closure semantics (Feature 21)
-- all ten features certified with 1990+ tests, zero blocker open items
+- preferences/lessons surface: scoped store with profile isolation, injection at P6, conflict detection with audit trail (Feature 22)
+- all eleven features certified with 2225+ tests, zero blocker open items
+- five-feature chain pilot (Features 18-22) complete
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: preferences and lessons surface generalization (Feature 22) completing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
+- next emphasis: chain pilot post-mortem and next roadmap phase planning
 
 ---
 

@@ -9,6 +9,32 @@
 
 ## 2026-04-03
 
+### Feature 22 completed: Preferences And Lessons Surface Generalization
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- preferences/lessons contract defining entity model (preferences + lessons), scoping (profile/domain), cross-profile isolation (PL-1..PL-5), authority boundaries (PA-1..PA-5), and 90-day retirement
+- preference store with immutable PreferenceEntry, ScopeKey-based query, profile validation, scope contamination guard
+- preference injector with profile-scoped dispatch injection, bounded context, InjectionContext frozen dataclass
+- preference surface with ProfileSurface snapshot, active/retired counting, format_surface_line operator view
+- lesson conflict detection and resolution with ConflictPair, ResolutionKind (ACCEPT/DEFER/RETIRE), append-only ResolutionLog audit trail
+- 20 certification tests + 215 component tests = 235 Feature 22 tests
+
+Artifacts:
+- `docs/PREFERENCES_LESSONS_CONTRACT.md` — preferences/lessons contract (v1)
+- `scripts/lib/preference_store.py` — scoped preference/lesson store (359 lines)
+- `scripts/lib/preference_injector.py` — profile-scoped injection (216 lines)
+- `scripts/lib/preference_surface.py` — operator dashboard surface (196 lines)
+- `scripts/lib/lesson_conflict.py` — conflict detection and resolution (406 lines)
+- `tests/test_preferences_lessons_certification.py` — 20 certification tests
+
+### Chain pilot Features 18-22 complete
+
+This closes the five-feature chain pilot (Features 18-22). All features certified with 2225+ tests. See `CHAIN_PILOT_18_22_REPORT.md` for full pilot analysis.
+
+---
+
 ### Feature 21 completed: Regulated-Strict Governance Profile And Audit Bundle
 
 Merged: PRs on `main` branch, 2026-04-03
