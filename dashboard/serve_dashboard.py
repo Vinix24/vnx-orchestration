@@ -1136,6 +1136,55 @@ def _operator_post_gate_toggle(body: dict, config_path: Path | None = None) -> t
         }, 500
 
 
+# ---------- Governance Digest API ----------
+
+_DIGEST_STALE_THRESHOLD = 600  # seconds — digest older than 10 min is degraded
+
+
+def _operator_get_governance_digest(digest_path: Path | None = None) -> dict:
+    """GET /api/operator/governance-digest — governance digest with freshness envelope."""
+    now = datetime.now(timezone.utc)
+    path = digest_path or (CANONICAL_STATE_DIR / "governance_digest.json")
+
+    # Compute source freshness
+    mtime_iso: str | None = None
+    staleness: float | None = None
+    try:
+        mt = path.stat().st_mtime
+        mtime_iso = datetime.fromtimestamp(mt, tz=timezone.utc).isoformat()
+        ts = datetime.fromisoformat(mtime_iso)
+        staleness = (now - ts).total_seconds()
+    except (OSError, ValueError):
+        pass
+
+    # Load digest data
+    data = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    # Compute degraded state
+    degraded_reasons: list[str] = []
+    if data is None:
+        degraded_reasons.append("governance_digest.json not found or unreadable")
+    elif staleness is not None and staleness > _DIGEST_STALE_THRESHOLD:
+        degraded_reasons.append(
+            f"governance_digest.json stale ({staleness:.0f}s old, threshold {_DIGEST_STALE_THRESHOLD}s)"
+        )
+
+    return {
+        "view": "GovernanceDigestView",
+        "queried_at": now.isoformat(),
+        "source_freshness": {"governance_digest": mtime_iso},
+        "staleness_seconds": round(staleness, 1) if staleness is not None else None,
+        "degraded": bool(degraded_reasons),
+        "degraded_reasons": degraded_reasons,
+        "data": data or {},
+    }
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
@@ -1230,6 +1279,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/gate/config":
             _json_response(self, HTTPStatus.OK, _operator_get_gate_config(params))
+            return
+
+        if path == "/api/operator/governance-digest":
+            _json_response(self, HTTPStatus.OK, _operator_get_governance_digest())
             return
 
         # Return JSON 404 for unrecognised /api/* paths so callers get
