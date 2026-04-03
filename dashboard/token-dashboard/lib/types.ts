@@ -204,3 +204,30 @@ export interface ConversationsResponse {
   worktree_groups?: WorktreeGroupInfo[];
   rotation_chains?: RotationChain[];
 }
+
+// ===== Kanban Board Types =====
+
+export interface KanbanCard {
+  id: string;
+  pr_id: string;
+  track: string;
+  terminal: string;
+  role: string;
+  gate: string;
+  priority: string;
+  status: string;
+  stage: string;
+  duration_secs: number;
+  duration_label: string;
+  has_receipt: boolean;
+  receipt_status: string | null;
+}
+
+export type KanbanStageName = 'staging' | 'pending' | 'active' | 'review' | 'done';
+
+export interface KanbanEnvelope {
+  stages: Partial<Record<KanbanStageName, KanbanCard[]>>;
+  total: number;
+  degraded?: boolean;
+  degraded_reasons?: string[];
+}

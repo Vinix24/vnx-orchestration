@@ -5,6 +5,7 @@ import type {
   TerminalEnvelope,
   OpenItemsEnvelope,
   AggregateOpenItemsEnvelope,
+  KanbanEnvelope,
   ActionOutcome,
 } from './types';
 
@@ -88,4 +89,8 @@ export function actionRunReconciliation(projectPath: string, dryRun = false): Pr
 
 export function actionInspectOpenItem(projectPath: string, itemId: string): Promise<ActionOutcome> {
   return post(`${BASE}/open-item/inspect`, { project_path: projectPath, item_id: itemId });
+}
+
+export function fetchKanban(): Promise<KanbanEnvelope> {
+  return get(`${BASE}/kanban`);
 }
