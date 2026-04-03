@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 // Mock next/navigation used indirectly (Link, usePathname in sidebar)
@@ -17,16 +17,18 @@ jest.mock('next/navigation', () => ({
   usePathname: () => '/operator/kanban',
 }));
 
-// Mock SWR hook — we test the page in isolation
+// Mock SWR hooks — we test the page in isolation
 jest.mock('@/lib/hooks', () => ({
   useKanban: jest.fn(),
+  useProjects: jest.fn(),
 }));
 
-import { useKanban } from '@/lib/hooks';
+import { useKanban, useProjects } from '@/lib/hooks';
 import KanbanPage from '@/app/operator/kanban/page';
-import type { KanbanEnvelope } from '@/lib/types';
+import type { KanbanEnvelope, ProjectsEnvelope } from '@/lib/types';
 
 const mockUseKanban = useKanban as jest.MockedFunction<typeof useKanban>;
+const mockUseProjects = useProjects as jest.MockedFunction<typeof useProjects>;
 
 // ---- Fixtures ----
 
@@ -87,9 +89,37 @@ function makeEnvelope(overrides: Partial<KanbanEnvelope> = {}): KanbanEnvelope {
   };
 }
 
+function makeProjectsEnvelope(names: string[] = []): ProjectsEnvelope {
+  return {
+    view: 'projects',
+    degraded: false,
+    data: names.map(name => ({
+      name,
+      path: `/projects/${name}`,
+      registered_at: null,
+      session_active: false,
+      active_feature: null,
+      open_blocker_count: 0,
+      open_warn_count: 0,
+      attention_level: 'clear' as const,
+    })),
+  };
+}
+
 // ---- Helpers ----
 
-function renderWithData(envelope: KanbanEnvelope) {
+function setupProjects(names: string[] = []) {
+  mockUseProjects.mockReturnValue({
+    data: makeProjectsEnvelope(names),
+    isLoading: false,
+    error: undefined,
+    mutate: jest.fn(),
+    isValidating: false,
+  } as ReturnType<typeof useProjects>);
+}
+
+function renderWithData(envelope: KanbanEnvelope, projectNames: string[] = []) {
+  setupProjects(projectNames);
   mockUseKanban.mockReturnValue({
     data: envelope,
     isLoading: false,
@@ -101,6 +131,7 @@ function renderWithData(envelope: KanbanEnvelope) {
 }
 
 function renderLoading() {
+  setupProjects();
   mockUseKanban.mockReturnValue({
     data: undefined,
     isLoading: true,
@@ -112,6 +143,7 @@ function renderLoading() {
 }
 
 function renderError() {
+  setupProjects();
   mockUseKanban.mockReturnValue({
     data: undefined,
     isLoading: false,
@@ -315,5 +347,55 @@ describe('KanbanPage — SWR hook usage', () => {
   test('useKanban hook is called on mount', () => {
     renderWithData(makeEnvelope());
     expect(mockUseKanban).toHaveBeenCalled();
+  });
+});
+
+describe('KanbanPage — project filter', () => {
+  test('project filter is not shown when no projects', () => {
+    renderWithData(makeEnvelope(), []);
+    expect(screen.queryByTestId('project-filter')).not.toBeInTheDocument();
+  });
+
+  test('project filter renders when projects are available', () => {
+    renderWithData(makeEnvelope(), ['alpha', 'beta']);
+    expect(screen.getByTestId('project-filter')).toBeInTheDocument();
+  });
+
+  test('project filter shows all project names', () => {
+    renderWithData(makeEnvelope(), ['alpha', 'beta']);
+    expect(screen.getByTestId('project-filter-alpha')).toBeInTheDocument();
+    expect(screen.getByTestId('project-filter-beta')).toBeInTheDocument();
+  });
+
+  test('project filter shows "All projects" button', () => {
+    renderWithData(makeEnvelope(), ['alpha']);
+    expect(screen.getByText('All projects')).toBeInTheDocument();
+  });
+
+  test('useKanban is called with undefined project on initial render', () => {
+    renderWithData(makeEnvelope(), ['alpha']);
+    expect(mockUseKanban).toHaveBeenCalledWith(undefined);
+  });
+
+  test('clicking a project chip calls useKanban with that project', () => {
+    renderWithData(makeEnvelope(), ['alpha']);
+
+    const chip = screen.getByTestId('project-filter-alpha');
+    fireEvent.click(chip);
+
+    // useKanban should have been called with 'alpha' on re-render
+    expect(mockUseKanban).toHaveBeenCalledWith('alpha');
+  });
+
+  test('clicking the active project chip again resets to all projects', () => {
+    renderWithData(makeEnvelope(), ['alpha']);
+
+    const chip = screen.getByTestId('project-filter-alpha');
+    fireEvent.click(chip); // select alpha — now filter is 'alpha'
+    fireEvent.click(chip); // deselect alpha — now filter is undefined
+
+    // Should have been called with both 'alpha' and then undefined
+    expect(mockUseKanban).toHaveBeenCalledWith('alpha');
+    expect(mockUseKanban).toHaveBeenCalledWith(undefined);
   });
 });
