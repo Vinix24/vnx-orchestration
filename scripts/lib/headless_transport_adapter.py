@@ -17,10 +17,8 @@ Capabilities:
 
 from __future__ import annotations
 
-import os
-import signal
+import shlex
 import subprocess
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from tmux_adapter import (
@@ -53,12 +51,15 @@ HEADLESS_CAPABILITIES = frozenset({
 class HeadlessAdapter:
     """RuntimeAdapter for headless CLI subprocess sessions.
 
-    Each terminal maps to a subprocess PID tracked in-memory.
+    Each terminal maps to a managed subprocess tracked in-memory.
     No tmux dependency. No interactive terminal surface.
+
+    Security note: command input must be trusted/internal-only.
+    This adapter is not exposed to untrusted user input.
     """
 
     def __init__(self) -> None:
-        self._processes: Dict[str, int] = {}  # terminal_id -> pid
+        self._procs: Dict[str, subprocess.Popen] = {}  # terminal_id -> Popen
 
     def adapter_type(self) -> str:
         return "headless"
@@ -68,47 +69,49 @@ class HeadlessAdapter:
 
     def spawn(self, terminal_id: str, config: Dict[str, Any]) -> SpawnResult:
         """Spawn a subprocess for terminal_id. Idempotent."""
-        if terminal_id in self._processes:
-            pid = self._processes[terminal_id]
-            if self._pid_alive(pid):
-                return SpawnResult(success=True, transport_ref=str(pid))
+        existing = self._procs.get(terminal_id)
+        if existing is not None and existing.poll() is None:
+            return SpawnResult(success=True, transport_ref=str(existing.pid))
         command = config.get("command", "")
         work_dir = config.get("work_dir", ".")
         if not command:
             return SpawnResult(success=False, error="command required in config")
+        args = shlex.split(command) if isinstance(command, str) else list(command)
         try:
             proc = subprocess.Popen(
-                command, shell=True, cwd=work_dir,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                args, cwd=work_dir,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            self._processes[terminal_id] = proc.pid
+            self._procs[terminal_id] = proc
             return SpawnResult(success=True, transport_ref=str(proc.pid))
         except OSError as e:
             return SpawnResult(success=False, error=str(e))
 
     def stop(self, terminal_id: str) -> StopResult:
-        """Stop subprocess. Idempotent."""
-        pid = self._processes.pop(terminal_id, None)
-        if pid is None:
+        """Stop subprocess with SIGTERM -> wait(5s) -> SIGKILL. Idempotent."""
+        proc = self._procs.pop(terminal_id, None)
+        if proc is None:
             return StopResult(success=True, was_running=False)
-        if not self._pid_alive(pid):
+        if proc.poll() is not None:
             return StopResult(success=True, was_running=False)
+        proc.terminate()
         try:
-            os.kill(pid, signal.SIGTERM)
-            return StopResult(success=True, was_running=True)
-        except OSError:
-            return StopResult(success=True, was_running=False)
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+        return StopResult(success=True, was_running=True)
 
     def deliver(self, terminal_id: str, dispatch_id: str,
                 attempt_id: Optional[str] = None, **kwargs: Any) -> DeliveryResult:
         """Deliver dispatch reference. For headless, this is a no-op marker."""
-        pid = self._processes.get(terminal_id)
-        if pid is None or not self._pid_alive(pid):
+        proc = self._procs.get(terminal_id)
+        if proc is None or proc.poll() is not None:
             return DeliveryResult(success=False, terminal_id=terminal_id,
                 dispatch_id=dispatch_id, pane_id=None, path_used="headless",
                 failure_reason="No active process for terminal")
         return DeliveryResult(success=True, terminal_id=terminal_id,
-            dispatch_id=dispatch_id, pane_id=str(pid), path_used="headless")
+            dispatch_id=dispatch_id, pane_id=str(proc.pid), path_used="headless")
 
     def attach(self, terminal_id: str) -> AttachResult:
         """Headless sessions have no interactive surface."""
@@ -117,34 +120,34 @@ class HeadlessAdapter:
 
     def observe(self, terminal_id: str) -> ObservationResult:
         """Check process liveness."""
-        pid = self._processes.get(terminal_id)
-        if pid is None:
+        proc = self._procs.get(terminal_id)
+        if proc is None:
             return ObservationResult(exists=False)
-        alive = self._pid_alive(pid)
+        alive = proc.poll() is None
         return ObservationResult(
             exists=alive, responsive=alive,
-            transport_state={"surface_exists": alive, "process_alive": alive, "pid": pid},
+            transport_state={"surface_exists": alive, "process_alive": alive, "pid": proc.pid},
         )
 
     def inspect(self, terminal_id: str) -> InspectionResult:
         """Partial: process info only, no terminal content."""
-        pid = self._processes.get(terminal_id)
-        if pid is None:
+        proc = self._procs.get(terminal_id)
+        if proc is None:
             return InspectionResult(exists=False)
-        alive = self._pid_alive(pid)
+        alive = proc.poll() is None
         return InspectionResult(
-            exists=alive, transport_ref=str(pid),
-            transport_details={"pid": pid, "alive": alive},
+            exists=alive, transport_ref=str(proc.pid),
+            transport_details={"pid": proc.pid, "alive": alive},
         )
 
     def health(self, terminal_id: str) -> HealthResult:
         """Process liveness check."""
-        pid = self._processes.get(terminal_id)
-        if pid is None:
+        proc = self._procs.get(terminal_id)
+        if proc is None:
             return HealthResult(healthy=False, surface_exists=False)
-        alive = self._pid_alive(pid)
+        alive = proc.poll() is None
         return HealthResult(healthy=alive, surface_exists=alive,
-            process_alive=alive, details={"pid": pid})
+            process_alive=alive, details={"pid": proc.pid})
 
     def session_health(self, terminal_ids: List[str]) -> SessionHealthResult:
         """Aggregate health across terminals."""
@@ -166,14 +169,5 @@ class HeadlessAdapter:
 
     def shutdown(self, graceful: bool = True) -> None:
         """Stop all tracked processes."""
-        for tid in list(self._processes):
+        for tid in list(self._procs):
             self.stop(tid)
-
-    @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        """Check if a process is alive."""
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
