@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Tests for regulated_strict approval workflow and evidence capture (Feature 21, PR-1).
 
-Covers all approval enforcement requirements from the contract
-(docs/REGULATED_STRICT_GOVERNANCE_CONTRACT.md) Section 8.1 and 8.3:
+Core unit tests for types, state machine, and policy enforcement.
+Scenario and contract-level behavioral tests are in
+test_regulated_strict_approval_scenarios.py.
 
+Covers:
   1.  ApprovalState       — all states defined, state machine transitions
   2.  ApprovalType        — enum values
   3.  ClosureType         — enum values
@@ -14,17 +16,8 @@ Covers all approval enforcement requirements from the contract
   8.  State machine transitions — valid and invalid paths
   9.  RegulatedStrictApprovalPolicy — record_approval, record_closure, can_close,
                                       assert_can_close, transition_dispatch
-  10. RA-1 enforcement    — empty rationale rejected everywhere
-  11. RA-2 enforcement    — automated approvals rejected everywhere
-  12. RA-3 enforcement    — records are immutable
-  13. RA-4 enforcement    — both pre-execution approval and closure required for close
-  14. Terminal states     — CLOSED and REJECTED cannot be transitioned further
-  15. REVIEW_FAILED loop  — review failure loops back to PENDING_APPROVAL
-  16. Isolation           — no imports from coding_strict or business_light paths
-  17. Dispatch cannot close without approval (contract Section 8.1 item 1)
-  18. Gate-pass does not auto-close (contract Section 8.3 item 2)
-  19. Timeout leads to PENDING_APPROVAL, not CLOSED (contract Section 8.3 item 3)
-  20. Auto-close rejected (contract Section 8.3 item 1)
+  10. Terminal states     — CLOSED and REJECTED cannot be transitioned further
+  11. Policy factory
 """
 
 from __future__ import annotations
@@ -639,208 +632,7 @@ class TestCanClose:
 
 
 # ---------------------------------------------------------------------------
-# 11. RA-4 enforcement: both pre and post approval required
-# ---------------------------------------------------------------------------
-
-class TestRA4Enforcement:
-
-    def setup_method(self) -> None:
-        self.policy = _make_policy()
-
-    def test_dispatch_requires_pre_execution_approval_before_closure(self) -> None:
-        """Contract Section 8.1 item 1: dispatch requires pre-execution approval."""
-        state = DispatchApprovalState(dispatch_id="d-001")
-        state.state = ApprovalState.PENDING_REVIEW
-        state.closure_record = _make_closure()
-        # No pre-approval — cannot close
-        assert not self.policy.can_close(state)
-
-    def test_dispatch_requires_closure_record(self) -> None:
-        """Contract Section 8.1 item 5: explicit closure approval required."""
-        state = _state_at_pending_review()
-        # Has pre-approval and is in correct state, but no closure record
-        assert not self.policy.can_close(state)
-
-    def test_both_approvals_required_for_close(self) -> None:
-        """RA-4: both pre and post approval records must exist."""
-        state = _state_at_pending_review()
-        state.apply_closure(_make_closure())
-        assert self.policy.can_close(state)
-
-    def test_only_pre_approval_insufficient_for_close(self) -> None:
-        state = _state_at_pending_review()
-        # Pre-approval present but no closure
-        assert not self.policy.can_close(state)
-
-    def test_only_closure_record_insufficient_for_close(self) -> None:
-        state = DispatchApprovalState(dispatch_id="d-001")
-        state.state = ApprovalState.PENDING_REVIEW
-        state.apply_closure(_make_closure())
-        # Closure present but no pre-approval
-        assert not self.policy.can_close(state)
-
-
-# ---------------------------------------------------------------------------
-# 12. Gate-pass does not auto-close (contract Section 8.3 item 2)
-# ---------------------------------------------------------------------------
-
-class TestGatePassDoesNotAutoClose:
-
-    def test_gate_pass_alone_does_not_close(self) -> None:
-        """Simulate passing a gate without explicit approval — should not close."""
-        policy = _make_policy()
-        state = _state_at_pending_review()
-        # No closure record recorded despite "gate passing"
-        assert not policy.can_close(state)
-
-    def test_receipt_arrival_does_not_close(self) -> None:
-        """Simulates receipt arriving — dispatch stays in PENDING_REVIEW, not CLOSED."""
-        state = DispatchApprovalState(dispatch_id="d-001")
-        state.add_pre_approval(_make_pre_approval())
-        state.transition_to(ApprovalState.APPROVED)
-        state.transition_to(ApprovalState.EXECUTING)
-        state.transition_to(ApprovalState.PENDING_REVIEW)
-        # Receipt arrived but no explicit closure — still in PENDING_REVIEW
-        assert state.state == ApprovalState.PENDING_REVIEW
-        assert not _make_policy().can_close(state)
-
-
-# ---------------------------------------------------------------------------
-# 13. Timeout leads to PENDING_APPROVAL, not CLOSED (contract Section 8.3 item 3)
-# ---------------------------------------------------------------------------
-
-class TestTimeoutSemantics:
-
-    def test_timeout_transitions_to_review_failed_then_pending_approval(self) -> None:
-        """Simulate a timeout: dispatch fails review and loops back to PENDING_APPROVAL."""
-        state = _state_at_pending_review()
-        state.transition_to(ApprovalState.REVIEW_FAILED)
-        state.transition_to(ApprovalState.PENDING_APPROVAL)
-        assert state.state == ApprovalState.PENDING_APPROVAL
-
-    def test_timeout_does_not_auto_close(self) -> None:
-        """Timeout cannot directly transition to CLOSED."""
-        state = _state_at_pending_review()
-        state.transition_to(ApprovalState.REVIEW_FAILED)
-        with pytest.raises(InvalidStateTransitionError):
-            state.transition_to(ApprovalState.CLOSED)
-
-
-# ---------------------------------------------------------------------------
-# 14. Automated approvals rejected (contract Section 8.1 item 3)
-# ---------------------------------------------------------------------------
-
-class TestAutomatedApprovalsRejected:
-
-    def test_runtime_cannot_approve(self) -> None:
-        policy = _make_policy()
-        with pytest.raises(AutomatedApprovalError):
-            policy.record_approval(
-                dispatch_id="d-001",
-                approved_by="runtime",
-                rationale="auto",
-            )
-
-    def test_router_cannot_approve(self) -> None:
-        policy = _make_policy()
-        with pytest.raises(AutomatedApprovalError):
-            policy.record_approval(
-                dispatch_id="d-001",
-                approved_by="router",
-                rationale="auto",
-            )
-
-    def test_system_cannot_approve(self) -> None:
-        policy = _make_policy()
-        with pytest.raises(AutomatedApprovalError):
-            policy.record_approval(
-                dispatch_id="d-001",
-                approved_by="system",
-                rationale="auto",
-            )
-
-    def test_runtime_cannot_close(self) -> None:
-        policy = _make_policy()
-        with pytest.raises(AutomatedApprovalError):
-            policy.record_closure(
-                dispatch_id="d-001",
-                closed_by="runtime",
-                rationale="auto-closed",
-            )
-
-
-# ---------------------------------------------------------------------------
-# 15. Approval metadata is retained and queryable
-# ---------------------------------------------------------------------------
-
-class TestApprovalMetadataRetention:
-
-    def test_approval_id_is_stable(self) -> None:
-        rec = _make_pre_approval()
-        assert rec.approval_id == rec.approval_id  # identical on re-access
-
-    def test_approval_metadata_all_fields_accessible(self) -> None:
-        rec = _make_pre_approval(dispatch_id="d-meta", approved_by="T0",
-                                  rationale="Verified by T0")
-        assert rec.dispatch_id == "d-meta"
-        assert rec.approved_by == "T0"
-        assert rec.rationale == "Verified by T0"
-        assert rec.approval_type == ApprovalType.PRE_EXECUTION
-
-    def test_multiple_approvals_all_retained(self) -> None:
-        state = DispatchApprovalState(dispatch_id="d-001")
-        rec1 = _make_pre_approval(approved_by="operator")
-        rec2 = _make_pre_approval(approved_by="T0")
-        state.add_pre_approval(rec1)
-        state.add_pre_approval(rec2)
-        assert len(state.pre_approvals) == 2
-        assert state.pre_approvals[0].approved_by == "operator"
-        assert state.pre_approvals[1].approved_by == "T0"
-
-    def test_closure_metadata_retained(self) -> None:
-        state = _state_at_pending_review()
-        policy = _make_policy()
-        closure = policy.record_closure(
-            dispatch_id="d-001",
-            closed_by="operator",
-            rationale="All checks passed",
-            closure_type=ClosureType.APPROVED,
-            residual_risks=["minor gap"],
-        )
-        state.apply_closure(closure)
-        assert state.closure_record is not None
-        assert state.closure_record.rationale == "All checks passed"
-        assert state.closure_record.closure_type == ClosureType.APPROVED
-        assert "minor gap" in state.closure_record.residual_risks
-
-
-# ---------------------------------------------------------------------------
-# 16. Isolation — regulated_strict does not import from coding_strict paths
-# ---------------------------------------------------------------------------
-
-class TestIsolation:
-
-    def test_no_business_light_imports(self) -> None:
-        """regulated_strict_approval must not depend on business_light_policy."""
-        import regulated_strict_approval
-        source = Path(regulated_strict_approval.__file__).read_text()
-        assert "business_light_policy" not in source
-        assert "from business_light_policy" not in source
-
-    def test_no_governance_profile_selector_imports(self) -> None:
-        """regulated_strict_approval must not depend on governance_profile_selector."""
-        import regulated_strict_approval
-        source = Path(regulated_strict_approval.__file__).read_text()
-        assert "governance_profile_selector" not in source
-
-    def test_module_can_be_imported_standalone(self) -> None:
-        """Module should import without side effects."""
-        import regulated_strict_approval  # noqa: F401 — import itself is the test
-        assert True
-
-
-# ---------------------------------------------------------------------------
-# 17. policy factory
+# 11. policy factory
 # ---------------------------------------------------------------------------
 
 class TestPolicyFactory:
