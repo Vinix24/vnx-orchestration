@@ -10,6 +10,7 @@ import type {
   GateConfigResponse,
   GateToggleRequest,
   GateToggleResponse,
+  GovernanceDigestEnvelope,
 } from './types';
 
 const BASE = '/api/operator';
@@ -104,4 +105,8 @@ export function fetchGateConfig(project?: string): Promise<GateConfigResponse> {
 
 export function postGateToggle(req: GateToggleRequest): Promise<GateToggleResponse> {
   return post(`${BASE}/gate/toggle`, req as unknown as Record<string, unknown>);
+}
+
+export function fetchGovernanceDigest(): Promise<GovernanceDigestEnvelope> {
+  return get(`${BASE}/governance-digest`);
 }

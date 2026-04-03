@@ -8,12 +8,13 @@ import {
   fetchAggregateOpenItems,
   fetchKanban,
   fetchGateConfig,
+  fetchGovernanceDigest,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
-  GateConfigResponse,
+  GateConfigResponse, GovernanceDigestEnvelope,
 } from './types';
 
 export function useTokenStats(
@@ -130,5 +131,13 @@ export function useGateConfig(project?: string) {
     key,
     () => fetchGateConfig(project),
     { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useGovernanceDigest() {
+  return useSWR<GovernanceDigestEnvelope>(
+    'operator-governance-digest',
+    fetchGovernanceDigest,
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 15000 }
   );
 }
