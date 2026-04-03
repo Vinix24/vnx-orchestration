@@ -1,41 +1,107 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { RefreshCw, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useAggregateOpenItems, useProjects } from '@/lib/hooks';
 import DegradedBanner from '@/components/operator/degraded-banner';
 import FreshnessBadge from '@/components/operator/freshness-badge';
 import OpenItemsList from '@/components/operator/open-items-list';
+import type { OpenItem } from '@/lib/types';
 
-function LoadingSpinner() {
+// Normalized severity groups: blocker|blocking → 'blocker', warn|warning → 'warn', info → 'info'
+type SeverityFilter = 'blocker' | 'warn' | 'info';
+
+function normalizeSeverity(sev: string): SeverityFilter {
+  if (sev === 'blocker' || sev === 'blocking') return 'blocker';
+  if (sev === 'warn' || sev === 'warning') return 'warn';
+  return 'info';
+}
+
+function LoadingSkeleton() {
   return (
-    <div className="flex items-center justify-center py-16">
-      <div
-        className="animate-spin w-8 h-8 border-2 rounded-full"
-        style={{
-          borderColor: 'var(--color-card-border)',
-          borderTopColor: 'var(--color-accent)',
-        }}
-      />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {[0, 1, 2].map(i => (
+        <div
+          key={i}
+          aria-hidden="true"
+          style={{
+            height: 64,
+            borderRadius: 10,
+            background:
+              'linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.07) 50%, rgba(255,255,255,0.04) 75%)',
+            backgroundSize: '200% 100%',
+            animation: 'shimmer 1.6s infinite',
+            border: '1px solid rgba(255,255,255,0.06)',
+          }}
+        />
+      ))}
     </div>
   );
 }
 
+const SEVERITY_CHIP_CONFIG: Record<SeverityFilter, { label: string; activeColor: string; activeBg: string; activeBorder: string }> = {
+  blocker: {
+    label: 'Blockers',
+    activeColor: 'var(--color-error)',
+    activeBg: 'rgba(255, 107, 107, 0.12)',
+    activeBorder: 'rgba(255, 107, 107, 0.4)',
+  },
+  warn: {
+    label: 'Warnings',
+    activeColor: 'var(--color-warning)',
+    activeBg: 'rgba(250, 204, 21, 0.12)',
+    activeBorder: 'rgba(250, 204, 21, 0.4)',
+  },
+  info: {
+    label: 'Info',
+    activeColor: 'var(--color-muted)',
+    activeBg: 'rgba(255,255,255,0.08)',
+    activeBorder: 'rgba(255,255,255,0.2)',
+  },
+};
+
 export default function OpenItemsPage() {
-  const [projectFilter, setProjectFilter] = useState<string | undefined>(undefined);
-  const { data: aggregateEnv, isLoading, mutate } = useAggregateOpenItems(projectFilter);
+  const [projectFilter, setProjectFilter] = useState<string>('');
+  const [severityFilter, setSeverityFilter] = useState<SeverityFilter | null>(null);
+
+  const { data: aggregateEnv, isLoading, mutate } = useAggregateOpenItems(
+    projectFilter || undefined
+  );
   const { data: projectsEnv } = useProjects();
 
   const projects = projectsEnv?.data ?? [];
   const data = aggregateEnv?.data;
-  const items = data?.items ?? [];
+  const allItems: OpenItem[] = data?.items ?? [];
   const summary = data?.total_summary ?? { blocker_count: 0, warn_count: 0, info_count: 0 };
   const perProject = data?.per_project_subtotals ?? {};
   const degradedReasons = aggregateEnv?.degraded
     ? (aggregateEnv.degraded_reasons ?? ['Aggregate open items view degraded'])
     : [];
 
+  // Per-severity counts from the currently fetched (already project-filtered) items
+  const severityCounts = useMemo(() => {
+    const counts: Record<SeverityFilter, number> = { blocker: 0, warn: 0, info: 0 };
+    for (const item of allItems) {
+      counts[normalizeSeverity(item.severity)]++;
+    }
+    return counts;
+  }, [allItems]);
+
+  // Apply client-side severity filter
+  const items: OpenItem[] = useMemo(() => {
+    if (!severityFilter) return allItems;
+    return allItems.filter(item => normalizeSeverity(item.severity) === severityFilter);
+  }, [allItems, severityFilter]);
+
   const totalOpen = summary.blocker_count + summary.warn_count + summary.info_count;
+
+  const emptyLabel = (() => {
+    if (severityFilter && allItems.length > 0 && items.length === 0) {
+      return `No ${SEVERITY_CHIP_CONFIG[severityFilter].label.toLowerCase()} for${projectFilter ? ` ${projectFilter}` : ' any project'}`;
+    }
+    if (projectFilter) return `No open items for ${projectFilter}`;
+    return 'No open items across any registered project.';
+  })();
 
   return (
     <div>
@@ -150,66 +216,126 @@ export default function OpenItemsPage() {
         </div>
       )}
 
-      {/* Project filter chips */}
-      {projects.length > 0 && (
-        <div className="flex items-center gap-2" style={{ marginBottom: 20, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Filter:</span>
-          <button
-            onClick={() => setProjectFilter(undefined)}
-            style={{
-              padding: '4px 12px',
-              borderRadius: 20,
-              fontSize: 11,
-              fontWeight: projectFilter === undefined ? 600 : 400,
-              background: projectFilter === undefined ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.04)',
-              border: `1px solid ${projectFilter === undefined ? 'rgba(249, 115, 22, 0.4)' : 'rgba(255,255,255,0.08)'}`,
-              color: projectFilter === undefined ? 'var(--color-accent)' : 'var(--color-muted)',
-              cursor: 'pointer',
-            }}
+      {/* Filter row: project dropdown + severity chips */}
+      <div
+        data-testid="filter-row"
+        className="flex items-center gap-4"
+        style={{ marginBottom: 20, flexWrap: 'wrap' }}
+      >
+        {/* Project dropdown */}
+        {projects.length > 0 && (
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor="project-select"
+              style={{ fontSize: 12, color: 'var(--color-muted)', whiteSpace: 'nowrap' }}
+            >
+              Project:
+            </label>
+            <select
+              id="project-select"
+              data-testid="project-dropdown"
+              value={projectFilter}
+              onChange={e => {
+                setProjectFilter(e.target.value);
+                setSeverityFilter(null);
+              }}
+              style={{
+                padding: '5px 10px',
+                borderRadius: 8,
+                fontSize: 12,
+                background: 'rgba(10, 20, 48, 0.9)',
+                border: projectFilter
+                  ? '1px solid rgba(107, 138, 230, 0.4)'
+                  : '1px solid rgba(255,255,255,0.12)',
+                color: projectFilter ? '#6B8AE6' : 'var(--color-foreground)',
+                cursor: 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="">All projects</option>
+              {projects.map(p => (
+                <option key={p.name} value={p.name}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Severity filter chips */}
+        {!isLoading && (
+          <div
+            data-testid="severity-filter"
+            className="flex items-center gap-2"
+            style={{ flexWrap: 'wrap' }}
           >
-            All projects
-          </button>
-          {projects.map(p => {
-            const sub = perProject[p.name];
-            const hasBlockers = (sub?.blocker_count ?? 0) > 0;
-            const hasWarns = (sub?.warn_count ?? 0) > 0;
-            const dotColor = hasBlockers
-              ? 'var(--color-error)'
-              : hasWarns
-              ? 'var(--color-warning)'
-              : 'var(--color-success)';
-            return (
+            <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Severity:</span>
+            {(Object.entries(SEVERITY_CHIP_CONFIG) as [SeverityFilter, typeof SEVERITY_CHIP_CONFIG[SeverityFilter]][]).map(
+              ([sev, cfg]) => {
+                const count = severityCounts[sev];
+                const isActive = severityFilter === sev;
+                return (
+                  <button
+                    key={sev}
+                    data-testid={`severity-chip-${sev}`}
+                    onClick={() => setSeverityFilter(isActive ? null : sev)}
+                    aria-pressed={isActive}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      padding: '4px 10px',
+                      borderRadius: 20,
+                      fontSize: 11,
+                      fontWeight: isActive ? 700 : 400,
+                      background: isActive ? cfg.activeBg : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${isActive ? cfg.activeBorder : 'rgba(255,255,255,0.08)'}`,
+                      color: isActive ? cfg.activeColor : 'var(--color-muted)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {cfg.label}
+                    <span
+                      data-testid={`severity-count-${sev}`}
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        minWidth: 14,
+                        textAlign: 'center',
+                        padding: '0 3px',
+                        borderRadius: 6,
+                        background: isActive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.06)',
+                        color: isActive ? cfg.activeColor : 'rgba(244,244,249,0.5)',
+                      }}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              }
+            )}
+            {severityFilter && (
               <button
-                key={p.name}
-                onClick={() => setProjectFilter(projectFilter === p.name ? undefined : p.name)}
+                data-testid="severity-clear"
+                onClick={() => setSeverityFilter(null)}
                 style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  padding: '4px 12px',
-                  borderRadius: 20,
                   fontSize: 11,
-                  fontWeight: projectFilter === p.name ? 600 : 400,
-                  background: projectFilter === p.name ? 'rgba(107, 138, 230, 0.15)' : 'rgba(255,255,255,0.04)',
-                  border: `1px solid ${projectFilter === p.name ? 'rgba(107, 138, 230, 0.4)' : 'rgba(255,255,255,0.08)'}`,
-                  color: projectFilter === p.name ? '#6B8AE6' : 'var(--color-muted)',
+                  color: 'var(--color-muted)',
+                  background: 'none',
+                  border: 'none',
                   cursor: 'pointer',
+                  padding: '4px 6px',
+                  borderRadius: 6,
+                  textDecoration: 'underline',
+                  textDecorationColor: 'rgba(244,244,249,0.3)',
                 }}
               >
-                <div
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    backgroundColor: dotColor,
-                  }}
-                />
-                {p.name}
+                Clear
               </button>
-            );
-          })}
-        </div>
-      )}
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Degraded banner */}
       <DegradedBanner reasons={degradedReasons} view="AggregateOpenItemsView" />
@@ -263,17 +389,15 @@ export default function OpenItemsPage() {
 
       {/* Items list */}
       {isLoading ? (
-        <LoadingSpinner />
+        <div className="glass-card" style={{ padding: '24px' }}>
+          <LoadingSkeleton />
+        </div>
       ) : (
         <div className="glass-card" style={{ padding: '24px' }}>
           <OpenItemsList
             items={items}
             summary={summary}
-            emptyLabel={
-              projectFilter
-                ? `No open items for ${projectFilter}`
-                : 'No open items across any registered project.'
-            }
+            emptyLabel={emptyLabel}
           />
         </div>
       )}
