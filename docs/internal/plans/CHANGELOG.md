@@ -9,6 +9,26 @@
 
 ## 2026-04-03
 
+### Feature 21 completed: Regulated-Strict Governance Profile And Audit Bundle
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- regulated-strict governance contract with explicit approval workflow (7-state machine), approval records with RA-1..RA-4 invariants, audit bundle with 5 evidence types and completeness gating
+- approval workflow: DispatchApprovalState tracking pre-execution and post-review approvals, EmptyRationaleError, AutomatedApprovalError enforcement
+- audit bundle builder: immutable AuditBundle and EvidenceEntry with AB-1..AB-5 invariants, dispatch_id cross-dispatch isolation guards, MappingProxyType payload protection
+- regulated-strict dashboard: RegulatedStrictStatus frozen snapshot, profile-locked invariant, format_status_line operator surface
+- 21 certification tests + 255 component tests = 276 Feature 21 tests
+
+Artifacts:
+- `docs/REGULATED_STRICT_GOVERNANCE_CONTRACT.md` — regulated-strict contract (v1)
+- `scripts/lib/regulated_strict_approval.py` — approval workflow (612 lines)
+- `scripts/lib/audit_bundle.py` — audit bundle builder (479 lines)
+- `scripts/lib/regulated_strict_dashboard.py` — dashboard surface (227 lines)
+- `tests/test_regulated_strict_certification.py` — 21 certification tests
+
+---
+
 ### Feature 20 completed: Business-Light Governance Pilot And Folder-Scoped Orchestration
 
 Merged: PRs on `main` branch, 2026-04-03
