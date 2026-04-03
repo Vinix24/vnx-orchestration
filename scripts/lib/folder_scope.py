@@ -43,7 +43,7 @@ from __future__ import annotations
 import os.path
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import FrozenSet, List
+from typing import FrozenSet, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +106,18 @@ class FolderScope:
     root: str
     scope_type: ScopeType
     subfolder: str = ""
+
+    def __post_init__(self) -> None:
+        if self.subfolder and os.path.isabs(self.subfolder):
+            raise ValueError(
+                f"FolderScope.subfolder must be relative, "
+                f"got absolute path: {self.subfolder!r}"
+            )
+        if self.subfolder and not _is_under(self.resolved_path, self.root):
+            raise ValueError(
+                f"FolderScope.subfolder {self.subfolder!r} escapes root {self.root!r}. "
+                f"Resolved path {self.resolved_path!r} is outside root boundary."
+            )
 
     @property
     def resolved_path(self) -> str:
@@ -180,7 +192,7 @@ def business_folder_scope(root: str, subfolder: str = "") -> FolderScope:
 # Scope resolution
 # ---------------------------------------------------------------------------
 
-def resolve_scope(path: str, coding_roots: List[str] = []) -> FolderScope:
+def resolve_scope(path: str, coding_roots: Optional[List[str]] = None) -> FolderScope:
     """Resolve the scope type for a given path.
 
     A path is classified CODING_WORKTREE if it equals or descends from any
@@ -193,6 +205,8 @@ def resolve_scope(path: str, coding_roots: List[str] = []) -> FolderScope:
     Returns:
         FolderScope with the resolved scope type and subfolder filled in.
     """
+    if coding_roots is None:
+        coding_roots = []
     for coding_root in coding_roots:
         if _is_under(path, coding_root):
             norm_root = _normalize(coding_root)
@@ -212,7 +226,7 @@ def resolve_scope(path: str, coding_roots: List[str] = []) -> FolderScope:
 
 def assemble_context(
     scope: FolderScope,
-    sources: List[str] = [],
+    sources: Optional[List[str]] = None,
 ) -> FolderContext:
     """Assemble a bounded FolderContext from a scope and source paths.
 
@@ -230,6 +244,8 @@ def assemble_context(
     Raises:
         IsolationViolation: If any source is outside the scope boundary.
     """
+    if sources is None:
+        sources = []
     for src in sources:
         if not scope.contains_path(src):
             raise IsolationViolation(

@@ -393,3 +393,71 @@ class TestCodingWorktreeIsolation:
         with pytest.raises(IsolationViolation) as exc_info:
             ctx.assert_path_allowed("/dev/vnx-wt/main.py")
         assert "business_folder" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# 9. Subfolder validation and mutable default safety
+# ---------------------------------------------------------------------------
+
+class TestSubfolderValidation:
+
+    def test_absolute_subfolder_raises(self) -> None:
+        with pytest.raises(ValueError, match="absolute"):
+            business_folder_scope("/work", subfolder="/dev/vnx-wt")
+
+    def test_absolute_subfolder_in_coding_scope_raises(self) -> None:
+        with pytest.raises(ValueError, match="absolute"):
+            coding_worktree_scope("/dev/vnx-wt", subfolder="/etc/passwd")
+
+    def test_dotdot_traversal_raises(self) -> None:
+        with pytest.raises(ValueError, match="escapes root"):
+            FolderScope(root="/work/crm", scope_type=ScopeType.BUSINESS_FOLDER,
+                        subfolder="../..")
+
+    def test_single_dotdot_traversal_raises(self) -> None:
+        with pytest.raises(ValueError, match="escapes root"):
+            FolderScope(root="/work/crm", scope_type=ScopeType.BUSINESS_FOLDER,
+                        subfolder="..")
+
+    def test_nested_traversal_escaping_root_raises(self) -> None:
+        with pytest.raises(ValueError, match="escapes root"):
+            FolderScope(root="/work/crm", scope_type=ScopeType.BUSINESS_FOLDER,
+                        subfolder="sub/../../..")
+
+    def test_traversal_that_stays_within_root_is_ok(self) -> None:
+        """'sub/..' resolves to root — still within boundary, should not raise."""
+        s = FolderScope(root="/work/crm", scope_type=ScopeType.BUSINESS_FOLDER,
+                        subfolder="sub/..")
+        assert s.is_business_scope()
+
+    def test_normal_subfolder_no_error(self) -> None:
+        s = business_folder_scope("/work", subfolder="crm")
+        assert s.resolved_path == "/work/crm"
+
+    def test_nested_subfolder_no_error(self) -> None:
+        s = business_folder_scope("/work", subfolder="crm/invoices/2026")
+        assert "crm/invoices/2026" in s.resolved_path
+
+    def test_empty_subfolder_no_error(self) -> None:
+        s = business_folder_scope("/work/crm", subfolder="")
+        assert s.resolved_path == "/work/crm"
+
+    def test_resolve_scope_none_coding_roots_behaves_as_empty(self) -> None:
+        s = resolve_scope("/work/crm", coding_roots=None)
+        assert s.scope_type == ScopeType.BUSINESS_FOLDER
+
+    def test_assemble_context_none_sources_behaves_as_empty(self) -> None:
+        scope = business_folder_scope("/work/crm")
+        ctx = assemble_context(scope, sources=None)
+        assert ctx.context_sources == frozenset()
+
+    def test_absolute_subfolder_error_message_includes_path(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            business_folder_scope("/work", subfolder="/dev/vnx-wt")
+        assert "/dev/vnx-wt" in str(exc_info.value)
+
+    def test_traversal_error_message_includes_subfolder(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            FolderScope(root="/work/crm", scope_type=ScopeType.BUSINESS_FOLDER,
+                        subfolder="../../etc")
+        assert "../../etc" in str(exc_info.value)
