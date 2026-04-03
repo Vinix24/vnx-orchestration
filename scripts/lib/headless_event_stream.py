@@ -133,9 +133,10 @@ class HeadlessEventStream:
 
     def record_artifact(self, name: str, path: str) -> HeadlessEvent:
         """Record an artifact and emit artifact_materialized event."""
-        self._artifacts[name] = path
-        return self.emit("artifact_materialized",
+        event = self.emit("artifact_materialized",
             details={"artifact_name": name}, artifact_path=path)
+        self._artifacts[name] = path
+        return event
 
     def timeline(self) -> List[Dict[str, Any]]:
         """Return the full timeline as a list of dicts."""
@@ -153,11 +154,21 @@ class HeadlessEventStream:
         if self._events[0].event_type != "session_created":
             violations.append(f"First event must be session_created, got {self._events[0].event_type}")
         seen_terminal = False
+        max_phase = -1
         for i, event in enumerate(self._events):
             if seen_terminal:
                 violations.append(f"Event {event.event_type} at position {i} after terminal event")
             if event.event_type in TERMINAL_EVENT_TYPES:
                 seen_terminal = True
+            if event.event_type in CANONICAL_ORDER:
+                phase = CANONICAL_ORDER.index(event.event_type)
+                if phase < max_phase:
+                    violations.append(
+                        f"Event {event.event_type} at position {i} violates canonical order "
+                        f"(after {CANONICAL_ORDER[max_phase]})"
+                    )
+                else:
+                    max_phase = phase
         return violations
 
     def validate_correlation(self) -> List[str]:
@@ -168,4 +179,6 @@ class HeadlessEventStream:
                 violations.append(f"Event {i} session_id mismatch")
             if event.correlation.attempt_number != self._correlation.attempt_number:
                 violations.append(f"Event {i} attempt_number mismatch")
+            if event.correlation.dispatch_id != self._correlation.dispatch_id:
+                violations.append(f"Event {i} dispatch_id mismatch")
         return violations

@@ -281,3 +281,59 @@ class TestFullLifecycle:
         events = [json.loads(l) for l in ndjson.split("\n")]
         assert events[-1]["event_type"] == "session_failed"
         assert events[-1]["dispatch_id"] == "d-fail"
+
+
+# ---------------------------------------------------------------------------
+# 8. Codex fixes (OI-625, OI-626, OI-627)
+# ---------------------------------------------------------------------------
+
+class TestCodexFixes:
+
+    def test_record_artifact_on_terminated_stream_no_mutation(self) -> None:
+        """OI-625: record_artifact must not mutate _artifacts if emit fails."""
+        stream = HeadlessEventStream("T1")
+        stream.emit("session_created")
+        stream.emit("session_completed")
+        with pytest.raises(ValueError, match="terminated"):
+            stream.record_artifact("late_artifact", "/tmp/late.txt")
+        assert "late_artifact" not in stream.artifacts
+
+    def test_misordered_events_detected(self) -> None:
+        """OI-626: validate_order catches non-terminal events out of order."""
+        stream = HeadlessEventStream("T1")
+        stream.emit("session_created")
+        stream.emit("subprocess_launched")
+        stream.emit("heartbeat")
+        # Manually insert a subprocess_launched after heartbeat (bypass emit)
+        from headless_event_stream import HeadlessEvent, _now_iso
+        stream._events.append(HeadlessEvent(
+            event_type="subprocess_launched", timestamp=_now_iso(),
+            correlation=stream.correlation,
+        ))
+        violations = stream.validate_order()
+        assert any("canonical order" in v for v in violations)
+
+    def test_canonical_order_allows_repeated_heartbeats(self) -> None:
+        """Heartbeats can repeat without violating order."""
+        stream = HeadlessEventStream("T1")
+        stream.emit("session_created")
+        stream.emit("subprocess_launched")
+        stream.emit("heartbeat")
+        stream.emit("heartbeat")
+        stream.emit("heartbeat")
+        stream.emit("session_completed")
+        assert stream.validate_order() == []
+
+    def test_dispatch_id_mismatch_detected(self) -> None:
+        """OI-627: validate_correlation catches dispatch_id mismatch."""
+        stream = HeadlessEventStream("T1", dispatch_id="d-1")
+        stream.emit("session_created")
+        # Manually inject event with wrong dispatch_id
+        from headless_event_stream import HeadlessEvent, CorrelationKeys, _now_iso
+        bad_event = HeadlessEvent(
+            event_type="heartbeat", timestamp=_now_iso(),
+            correlation=CorrelationKeys(session_id="T1", attempt_number=1, dispatch_id="d-wrong"),
+        )
+        stream._events.append(bad_event)
+        violations = stream.validate_correlation()
+        assert any("dispatch_id" in v for v in violations)
