@@ -19,6 +19,7 @@ Terminal: <T1|T2|T3>
 Priority: <P0|P1|P2>
 Cognition: <normal|deep>
 Requires-Model: <opus|sonnet>
+ClearContext: <true|false>
 Risk-Class: <low|medium|high>
 Merge-Policy: <human|conditional_auto>
 Review-Stack: <gemini_review,codex_gate,claude_github_optional>
@@ -120,6 +121,7 @@ Every Manager Block MUST have:
 - `Terminal`: T1, T2, or T3
 - `Priority`: P0 (critical), P1 (high), P2 (normal)
 - `Cognition`: normal or deep
+- `ClearContext`: true or false (default: true)
 - `Dispatch-ID`: Unique ID with format YYYYMMDD-HHMMSS-descriptor-track
 - `Parent-Dispatch`: Parent dispatch ID or "none"
 - `PR-ID`: PR-X format (e.g., PR-4) or "none" for non-PR work
@@ -133,7 +135,6 @@ Every Manager Block MUST have:
 - `Merge-Policy`: human or conditional_auto
 - `Review-Stack`: comma-separated reviewer gates
 - `Mode`: planning, thinking, normal (terminal mode)
-- `ClearContext`: true/false (default: true)
 - `ForceNormalMode`: true/false (reset mode first)
 
 ## Common Patterns
@@ -168,6 +169,7 @@ Terminal: T1
 Priority: P1
 Cognition: normal
 Requires-Model: sonnet
+ClearContext: true
 Risk-Class: medium
 Merge-Policy: human
 Review-Stack: gemini_review,codex_gate,claude_github_optional
