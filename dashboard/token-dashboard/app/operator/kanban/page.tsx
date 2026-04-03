@@ -1,7 +1,8 @@
 'use client';
 
+import { useState } from 'react';
 import { RefreshCw } from 'lucide-react';
-import { useKanban } from '@/lib/hooks';
+import { useKanban, useProjects } from '@/lib/hooks';
 import DegradedBanner from '@/components/operator/degraded-banner';
 import type { KanbanCard, KanbanStageName } from '@/lib/types';
 
@@ -274,7 +275,10 @@ function KanbanColumn({
 
 // ---- Page ----
 export default function KanbanPage() {
-  const { data, isLoading, error, mutate } = useKanban();
+  const [projectFilter, setProjectFilter] = useState<string | undefined>(undefined);
+  const { data, isLoading, error, mutate } = useKanban(projectFilter);
+  const { data: projectsEnv } = useProjects();
+  const projects = projectsEnv?.data ?? [];
 
   const stages = data?.stages ?? {};
   const degradedReasons = data?.degraded
@@ -336,6 +340,51 @@ export default function KanbanPage() {
 
       {/* Degraded / error banner */}
       <DegradedBanner reasons={degradedReasons} view="KanbanView" />
+
+      {/* Project filter */}
+      {projects.length > 0 && (
+        <div
+          data-testid="project-filter"
+          className="flex items-center gap-2"
+          style={{ marginBottom: 20, flexWrap: 'wrap' }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Project:</span>
+          <button
+            onClick={() => setProjectFilter(undefined)}
+            style={{
+              padding: '4px 12px',
+              borderRadius: 20,
+              fontSize: 11,
+              fontWeight: projectFilter === undefined ? 600 : 400,
+              background: projectFilter === undefined ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.04)',
+              border: `1px solid ${projectFilter === undefined ? 'rgba(249, 115, 22, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+              color: projectFilter === undefined ? 'var(--color-accent)' : 'var(--color-muted)',
+              cursor: 'pointer',
+            }}
+          >
+            All projects
+          </button>
+          {projects.map(p => (
+            <button
+              key={p.name}
+              data-testid={`project-filter-${p.name}`}
+              onClick={() => setProjectFilter(projectFilter === p.name ? undefined : p.name)}
+              style={{
+                padding: '4px 12px',
+                borderRadius: 20,
+                fontSize: 11,
+                fontWeight: projectFilter === p.name ? 600 : 400,
+                background: projectFilter === p.name ? 'rgba(107, 138, 230, 0.15)' : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${projectFilter === p.name ? 'rgba(107, 138, 230, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                color: projectFilter === p.name ? '#6B8AE6' : 'var(--color-muted)',
+                cursor: 'pointer',
+              }}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* 5-column grid */}
       <div

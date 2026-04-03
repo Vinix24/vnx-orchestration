@@ -91,6 +91,6 @@ export function actionInspectOpenItem(projectPath: string, itemId: string): Prom
   return post(`${BASE}/open-item/inspect`, { project_path: projectPath, item_id: itemId });
 }
 
-export function fetchKanban(): Promise<KanbanEnvelope> {
-  return get(`${BASE}/kanban`);
+export function fetchKanban(project?: string): Promise<KanbanEnvelope> {
+  return get(`${BASE}/kanban`, project ? { project } : undefined);
 }
