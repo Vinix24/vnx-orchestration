@@ -1,6 +1,6 @@
 # VNX Documentation Index
 
-**Last Updated**: 2026-04-02
+**Last Updated**: 2026-04-03
 
 ---
 
@@ -30,6 +30,8 @@
 - Multi-feature chain contract: `MULTI_FEATURE_CHAIN_CONTRACT.md`
 - Chain residual governance: `CHAIN_RESIDUAL_GOVERNANCE.md`
 - Context injection and handover: `CONTEXT_INJECTION_CONTRACT.md`
+- Runtime adapter contract: `RUNTIME_ADAPTER_CONTRACT.md`
+- Headless session contract: `HEADLESS_SESSION_CONTRACT.md`
 
 ### Technical Deep Dives
 - Intelligence system (v4.0 — code + doc ingestion + governance): `core/technical/INTELLIGENCE_SYSTEM.md`
