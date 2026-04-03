@@ -252,6 +252,12 @@ class AuditBundleBuilder:
             raise InvalidEvidenceError(
                 f"add_approval() expects an ApprovalRecord, got {type(record).__name__!r}."
             )
+        if record.dispatch_id != self.dispatch_id:
+            raise ValueError(
+                f"Approval dispatch_id {record.dispatch_id!r} does not match "
+                f"builder dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted."
+            )
         entry = EvidenceEntry(
             entry_id=_new_entry_id(),
             evidence_type=EvidenceType.APPROVAL_RECORD,
@@ -279,6 +285,12 @@ class AuditBundleBuilder:
             raise InvalidEvidenceError(
                 f"add_closure() expects a ClosureRecord, got {type(record).__name__!r}."
             )
+        if record.dispatch_id != self.dispatch_id:
+            raise ValueError(
+                f"Closure dispatch_id {record.dispatch_id!r} does not match "
+                f"builder dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted."
+            )
         entry = EvidenceEntry(
             entry_id=_new_entry_id(),
             evidence_type=EvidenceType.CLOSURE_RECORD,
@@ -302,7 +314,13 @@ class AuditBundleBuilder:
         Raises:
             InvalidEvidenceError: If required fields are missing.
         """
-        _require_fields(gate_result, ("gate_id", "outcome", "timestamp"), "gate_result")
+        _require_fields(gate_result, ("gate_id", "outcome", "timestamp", "dispatch_id"), "gate_result")
+        if gate_result["dispatch_id"] != self.dispatch_id:
+            raise ValueError(
+                f"Gate result dispatch_id {gate_result['dispatch_id']!r} does not match "
+                f"builder dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted."
+            )
         entry = EvidenceEntry(
             entry_id=_new_entry_id(),
             evidence_type=EvidenceType.GATE_RESULT,
@@ -327,6 +345,12 @@ class AuditBundleBuilder:
             InvalidEvidenceError: If required fields are missing.
         """
         _require_fields(receipt, ("receipt_id", "dispatch_id", "timestamp"), "receipt")
+        if receipt["dispatch_id"] != self.dispatch_id:
+            raise ValueError(
+                f"Receipt dispatch_id {receipt['dispatch_id']!r} does not match "
+                f"builder dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted."
+            )
         entry = EvidenceEntry(
             entry_id=_new_entry_id(),
             evidence_type=EvidenceType.RECEIPT,
@@ -352,7 +376,13 @@ class AuditBundleBuilder:
         Raises:
             InvalidEvidenceError: If required fields are missing.
         """
-        _require_fields(event, ("event_type", "timestamp"), "runtime_event")
+        _require_fields(event, ("event_type", "timestamp", "dispatch_id"), "runtime_event")
+        if event["dispatch_id"] != self.dispatch_id:
+            raise ValueError(
+                f"Runtime event dispatch_id {event['dispatch_id']!r} does not match "
+                f"builder dispatch_id {self.dispatch_id!r}. "
+                "Cross-dispatch evidence is not permitted."
+            )
         entry = EvidenceEntry(
             entry_id=_new_entry_id(),
             evidence_type=EvidenceType.RUNTIME_EVENT,
