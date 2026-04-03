@@ -215,3 +215,208 @@ class TestApiCatchAll:
             with patch.object(sd, "DISPATCHES_DIR", Path(tmpdir) / "dispatches"):
                 result = sd._operator_get_kanban()
         assert isinstance(result, dict)
+
+
+# ---------------------------------------------------------------------------
+# /api/operator/gate/config (GET)
+# ---------------------------------------------------------------------------
+
+class TestGateConfigGet:
+
+    def test_returns_dict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result = sd._operator_get_gate_config({}, config_path=cfg)
+        assert isinstance(result, dict)
+
+    def test_contains_required_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result = sd._operator_get_gate_config({}, config_path=cfg)
+        for key in ("project", "gates", "queried_at", "config_path"):
+            assert key in result, f"missing key: {key!r}"
+
+    def test_gates_is_dict_when_no_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result = sd._operator_get_gate_config({}, config_path=cfg)
+        assert isinstance(result["gates"], dict)
+
+    def test_project_none_when_not_specified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result = sd._operator_get_gate_config({}, config_path=cfg)
+        assert result["project"] is None
+
+    def test_project_param_reflected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result = sd._operator_get_gate_config({"project": ["alpha"]}, config_path=cfg)
+        assert result["project"] == "alpha"
+
+    def test_returns_per_project_gates_after_toggle(self) -> None:
+        """Gates toggled for a project appear in the GET response for that project."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": False},
+                config_path=cfg,
+            )
+            result = sd._operator_get_gate_config({"project": ["alpha"]}, config_path=cfg)
+        assert result["gates"]["gemini_review"]["enabled"] is False
+
+    def test_queried_at_is_iso_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result = sd._operator_get_gate_config({}, config_path=cfg)
+        datetime.fromisoformat(result["queried_at"].replace("Z", "+00:00"))
+
+    def test_all_projects_returned_when_no_project_param(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                config_path=cfg,
+            )
+            sd._operator_post_gate_toggle(
+                {"project": "beta", "gate": "codex_gate", "enabled": False},
+                config_path=cfg,
+            )
+            result = sd._operator_get_gate_config({}, config_path=cfg)
+        gates = result["gates"]
+        assert "alpha" in gates
+        assert "beta" in gates
+
+
+# ---------------------------------------------------------------------------
+# /api/operator/gate/toggle (POST)
+# ---------------------------------------------------------------------------
+
+class TestGateTogglePost:
+
+    def test_success_returns_200(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result, status = sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                config_path=cfg,
+            )
+        assert status == 200
+
+    def test_success_returns_success_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result, _ = sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                config_path=cfg,
+            )
+        assert result["status"] == "success"
+
+    def test_persists_enabled_true(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            sd._operator_post_gate_toggle(
+                {"project": "myproject", "gate": "codex_gate", "enabled": True},
+                config_path=cfg,
+            )
+            data = sd._read_gate_config(cfg)
+        assert data["gates"]["myproject"]["codex_gate"]["enabled"] is True
+
+    def test_persists_enabled_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            sd._operator_post_gate_toggle(
+                {"project": "myproject", "gate": "codex_gate", "enabled": False},
+                config_path=cfg,
+            )
+            data = sd._read_gate_config(cfg)
+        assert data["gates"]["myproject"]["codex_gate"]["enabled"] is False
+
+    def test_toggle_updates_existing_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            sd._operator_post_gate_toggle(
+                {"project": "p", "gate": "g", "enabled": True}, config_path=cfg
+            )
+            sd._operator_post_gate_toggle(
+                {"project": "p", "gate": "g", "enabled": False}, config_path=cfg
+            )
+            data = sd._read_gate_config(cfg)
+        assert data["gates"]["p"]["g"]["enabled"] is False
+
+    def test_missing_project_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            _, status = sd._operator_post_gate_toggle(
+                {"gate": "gemini_review", "enabled": True}, config_path=cfg
+            )
+        assert status == 400
+
+    def test_missing_gate_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            _, status = sd._operator_post_gate_toggle(
+                {"project": "alpha", "enabled": True}, config_path=cfg
+            )
+        assert status == 400
+
+    def test_non_bool_enabled_returns_400(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            _, status = sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": "yes"},
+                config_path=cfg,
+            )
+        assert status == 400
+
+    def test_response_contains_action_field(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result, _ = sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                config_path=cfg,
+            )
+        assert result["action"] == "gate/toggle"
+
+    def test_response_echoes_project_and_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result, _ = sd._operator_post_gate_toggle(
+                {"project": "myproj", "gate": "codex_gate", "enabled": False},
+                config_path=cfg,
+            )
+        assert result["project"] == "myproj"
+        assert result["gate"] == "codex_gate"
+        assert result["enabled"] is False
+
+    def test_response_has_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            result, _ = sd._operator_post_gate_toggle(
+                {"project": "p", "gate": "g", "enabled": True}, config_path=cfg
+            )
+        datetime.fromisoformat(result["timestamp"].replace("Z", "+00:00"))
+
+    def test_creates_config_file_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            assert not cfg.exists()
+            sd._operator_post_gate_toggle(
+                {"project": "p", "gate": "g", "enabled": True}, config_path=cfg
+            )
+            assert cfg.exists()
+
+    def test_multiple_projects_coexist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "governance_gates.yaml"
+            sd._operator_post_gate_toggle(
+                {"project": "alpha", "gate": "gemini_review", "enabled": True},
+                config_path=cfg,
+            )
+            sd._operator_post_gate_toggle(
+                {"project": "beta", "gate": "codex_gate", "enabled": False},
+                config_path=cfg,
+            )
+            data = sd._read_gate_config(cfg)
+        assert data["gates"]["alpha"]["gemini_review"]["enabled"] is True
+        assert data["gates"]["beta"]["codex_gate"]["enabled"] is False

@@ -7,6 +7,9 @@ import type {
   AggregateOpenItemsEnvelope,
   KanbanEnvelope,
   ActionOutcome,
+  GateConfigResponse,
+  GateToggleRequest,
+  GateToggleResponse,
 } from './types';
 
 const BASE = '/api/operator';
@@ -93,4 +96,12 @@ export function actionInspectOpenItem(projectPath: string, itemId: string): Prom
 
 export function fetchKanban(project?: string): Promise<KanbanEnvelope> {
   return get(`${BASE}/kanban`, project ? { project } : undefined);
+}
+
+export function fetchGateConfig(project?: string): Promise<GateConfigResponse> {
+  return get(`${BASE}/gate/config`, project ? { project } : undefined);
+}
+
+export function postGateToggle(req: GateToggleRequest): Promise<GateToggleResponse> {
+  return post(`${BASE}/gate/toggle`, req as unknown as Record<string, unknown>);
 }
