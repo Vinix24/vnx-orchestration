@@ -9,6 +9,29 @@
 
 ## 2026-04-03
 
+### Feature 19 completed: Coding Substrate Generalization And Agent OS Lift-In
+
+Merged: PRs on `feature/orchestration-substrate-extraction` branch, 2026-04-03
+
+Material changes:
+- Agent OS lift-in contract defining 3-layer model (Transport, Substrate, Domain), 4 boundary invariants (B-1..B-4), 5 governance invariants (G-1..G-5), and 6 anti-goals
+- orchestration substrate with domain-agnostic StateTransitionSpec, WorkerHandle, ManagerProtocol, and CodingManagerAdapter compatibility bridge
+- capability profile model with 20 capability constants, MaturityLevel enum, DomainReadinessSurface, and honest readiness projections
+- domain plan scaffolding template with onboarding section, capability profile declaration, and substrate boundary acknowledgments
+- domain plan validator with 8 rules (V-1..V-8) blocking premature rollout, missing onboarding, and policy mutation
+- import boundary verified: all substrate modules use stdlib-only imports (zero domain-specific imports)
+- 22 certification tests + 130 component tests = 152 Feature 19 tests
+
+Artifacts:
+- `docs/AGENT_OS_LIFT_IN_CONTRACT.md` — Agent OS lift-in contract (v1)
+- `scripts/lib/orchestration_substrate.py` — domain-agnostic orchestration substrate
+- `scripts/lib/capability_profiles.py` — capability profiles and readiness surfaces
+- `scripts/lib/domain_plan_validator.py` — plan scaffolding validator (8 rules)
+- `templates/DOMAIN_FEATURE_PLAN_TEMPLATE.md` — domain plan template with guardrails
+- `tests/test_agent_os_certification.py` — 22 certification tests
+
+---
+
 ### Feature 18 completed: Learning-Loop Signal Enrichment And Governance Feedback Hardening
 
 Merged: PRs on `main` branch, 2026-04-03
