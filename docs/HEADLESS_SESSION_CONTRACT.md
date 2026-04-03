@@ -53,7 +53,7 @@ Session (1) --contains--> (1..N) Attempt --contains--> (1) Run
 
 **Key invariants**:
 
-- **S-1**: A session is created exactly once per (terminal_id, dispatch_id) pair. If the same dispatch is retried on the same terminal after recovery, a new session is created.
+- **S-1**: A session is scoped to one delivery cycle of a (terminal_id, dispatch_id) pair. Each delivery cycle gets exactly one session. If the dispatch is retried after recovery, a new delivery cycle begins and a new session (with a new `session_id`) is created — the previous session remains CLOSED. The effective identity key is `(terminal_id, dispatch_id, attempt_generation)` where `attempt_generation` is the monotonic attempt counter from the dispatch system.
 - **S-2**: A session always has at least one attempt. An attempt always has exactly one run.
 - **S-3**: Session state is derived from its attempts — it does not have independent state transitions. When the last attempt reaches a terminal state, the session closes.
 - **S-4**: `session_id` appears in all structured events, evidence artifacts, and correlation metadata produced during the session.
@@ -142,7 +142,7 @@ Every structured event has this envelope:
 | Event Type | When | Payload |
 |------------|------|---------|
 | `run.started` | Subprocess spawned | `{ "pid": N, "pgid": N, "command": "...", "timeout_seconds": N }` |
-| `run.progress` | Periodic progress signal | `{ "elapsed_seconds": F, "output_bytes": N, "last_output_age_seconds": F, "heartbeat_ok": bool }` |
+| `run.progress` | Periodic progress signal | `{ "elapsed_seconds": F, "output_bytes": N, "last_output_age_seconds": F, "heartbeat_ok": bool, "confidence": "high\|medium\|low\|none" }` |
 | `run.output_fragment` | Meaningful output detected | `{ "fragment": "<last 200 chars>", "stream": "stdout\|stderr", "cumulative_bytes": N }` |
 | `run.timeout` | Subprocess exceeded timeout | `{ "timeout_seconds": N, "elapsed_seconds": F, "output_bytes_at_timeout": N }` |
 | `run.completed` | Subprocess exited | `{ "exit_code": N, "duration_seconds": F, "failure_class": "...", "classification_reason": "..." }` |
@@ -198,7 +198,7 @@ A session is **evidence-complete** when all applicable evidence classes are pres
 
 | Evidence Class | Required? | Completeness Check |
 |----------------|-----------|-------------------|
-| Raw Output | Yes (always) | `log_artifact_path` exists and is non-empty |
+| Raw Output | Yes (always) | `artifacts/log_artifact.txt` (the combined log artifact at `log_artifact_path`) exists and is non-empty. The separate `raw_output/stdout.log` and `raw_output/stderr.log` are supplementary capture files; the completeness check uses the combined artifact only. |
 | Structured Event Stream | Yes (always) | `events.ndjson` exists, has `session.created` and `session.closed` events |
 | Report Artifact | Conditional | Required for review-gate sessions. Must exist at `report_path` in unified_reports/. |
 | Runtime Correlation | Yes (always) | `evidence.correlation_linked` event exists with all applicable links populated |
