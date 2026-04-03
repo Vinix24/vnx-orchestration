@@ -189,6 +189,31 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _build_closure_record(
+    dispatch_id: str,
+    closed_by: str,
+    rationale: str,
+    closure_type: "ClosureType",
+    bundle_id: str,
+    bundle_complete: bool,
+    open_items_resolved: bool,
+    residual_risks: Optional[List[str]],
+) -> "ClosureRecord":
+    """Construct an immutable ClosureRecord from validated parameters."""
+    return ClosureRecord(
+        closure_id=f"close-{uuid.uuid4()}",
+        dispatch_id=dispatch_id,
+        closed_by=closed_by,
+        closed_at=_now_utc_iso(),
+        closure_type=closure_type,
+        rationale=rationale,
+        bundle_id=bundle_id,
+        bundle_complete=bundle_complete,
+        open_items_resolved=open_items_resolved,
+        residual_risks=tuple(residual_risks) if residual_risks else (),
+    )
+
+
 @dataclass(frozen=True)
 class ApprovalRecord:
     """Immutable approval record per contract Section 2.3.
@@ -460,34 +485,13 @@ class RegulatedStrictApprovalPolicy:
     ) -> ClosureRecord:
         """Create and return an immutable ClosureRecord.
 
-        Args:
-            dispatch_id:         The dispatch being closed.
-            closed_by:           Must be "operator" or "T0".
-            rationale:           Non-empty explanation.
-            closure_type:        APPROVED, REJECTED, or EXCEPTION.
-            bundle_id:           Audit bundle reference.
-            bundle_complete:     Whether the bundle is complete.
-            open_items_resolved: Whether all open items are resolved.
-            residual_risks:      List of documented residual risks.
-
-        Returns:
-            Immutable ClosureRecord with generated closure_id and timestamp.
-
         Raises:
             EmptyRationaleError:    If rationale is empty.
             AutomatedApprovalError: If closed_by is not operator or T0.
         """
-        return ClosureRecord(
-            closure_id=f"close-{uuid.uuid4()}",
-            dispatch_id=dispatch_id,
-            closed_by=closed_by,
-            closed_at=_now_utc_iso(),
-            closure_type=closure_type,
-            rationale=rationale,
-            bundle_id=bundle_id,
-            bundle_complete=bundle_complete,
-            open_items_resolved=open_items_resolved,
-            residual_risks=tuple(residual_risks) if residual_risks else (),
+        return _build_closure_record(
+            dispatch_id, closed_by, rationale, closure_type,
+            bundle_id, bundle_complete, open_items_resolved, residual_risks,
         )
 
     def can_close(self, state: DispatchApprovalState) -> bool:
