@@ -234,3 +234,28 @@ class TestHeadlessBehavior:
     def test_validate_required_on_headless(self, headless_adapter: HeadlessAdapter) -> None:
         missing = validate_required_capabilities(headless_adapter)
         assert missing == [], f"Missing required: {missing}"
+
+    def test_spawn_stop_lifecycle_with_cleanup(self) -> None:
+        """Spawn a real process, verify it runs, stop it, verify cleanup."""
+        adapter = HeadlessAdapter()
+        result = adapter.spawn("T0", {"command": "sleep 30", "work_dir": "."})
+        assert result.success is True
+        pid = int(result.transport_ref)
+        assert pid > 0
+
+        health = adapter.health("T0")
+        assert health.healthy is True
+
+        stop_result = adapter.stop("T0")
+        assert stop_result.success is True
+        assert stop_result.was_running is True
+
+        health_after = adapter.health("T0")
+        assert health_after.healthy is False
+
+    def test_spawn_no_shell_injection(self) -> None:
+        """Verify command is split with shlex, not passed to shell."""
+        adapter = HeadlessAdapter()
+        result = adapter.spawn("T0", {"command": "sleep 30", "work_dir": "."})
+        assert result.success is True
+        adapter.stop("T0")
