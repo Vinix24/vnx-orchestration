@@ -420,3 +420,133 @@ class TestGateTogglePost:
             data = sd._read_gate_config(cfg)
         assert data["gates"]["alpha"]["gemini_review"]["enabled"] is True
         assert data["gates"]["beta"]["codex_gate"]["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# /api/operator/governance-digest
+# ---------------------------------------------------------------------------
+
+class TestGovernanceDigestEndpoint:
+
+    def test_returns_freshness_envelope_keys(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        for key in ("view", "queried_at", "source_freshness", "staleness_seconds",
+                    "degraded", "degraded_reasons", "data"):
+            assert key in result, f"missing key: {key!r}"
+
+    def test_view_value(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        assert result["view"] == "GovernanceDigestView"
+
+    def test_degraded_true_when_file_missing(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        assert result["degraded"] is True
+        assert len(result["degraded_reasons"]) >= 1
+
+    def test_degraded_false_when_file_fresh(self, tmp_path):
+        digest_file = tmp_path / "governance_digest.json"
+        digest_file.write_text(json.dumps({
+            "runner_version": "1.0",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_signals_processed": 0,
+            "recurring_patterns": [],
+            "recommendations": [],
+            "source_records": {"gate_results": 0, "queue_anomalies": 0},
+        }), encoding="utf-8")
+        result = sd._operator_get_governance_digest(digest_path=digest_file)
+        assert result["degraded"] is False
+        assert result["degraded_reasons"] == []
+
+    def test_data_contains_digest_when_present(self, tmp_path):
+        digest_file = tmp_path / "governance_digest.json"
+        payload = {"runner_version": "1.0", "total_signals_processed": 5}
+        digest_file.write_text(json.dumps(payload), encoding="utf-8")
+        result = sd._operator_get_governance_digest(digest_path=digest_file)
+        assert result["data"]["total_signals_processed"] == 5
+
+    def test_data_is_empty_dict_when_file_missing(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        assert result["data"] == {}
+
+    def test_staleness_none_when_file_missing(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        assert result["staleness_seconds"] is None
+
+    def test_staleness_is_numeric_when_file_present(self, tmp_path):
+        digest_file = tmp_path / "governance_digest.json"
+        digest_file.write_text("{}", encoding="utf-8")
+        result = sd._operator_get_governance_digest(digest_path=digest_file)
+        assert isinstance(result["staleness_seconds"], (int, float))
+
+    def test_queried_at_is_iso_timestamp(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        datetime.fromisoformat(result["queried_at"].replace("Z", "+00:00"))
+
+    def test_source_freshness_contains_governance_digest_key(self, tmp_path):
+        result = sd._operator_get_governance_digest(digest_path=tmp_path / "governance_digest.json")
+        assert "governance_digest" in result["source_freshness"]
+
+
+# ---------------------------------------------------------------------------
+# SignalStore
+# ---------------------------------------------------------------------------
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
+from signal_store import SignalStore
+
+
+class TestSignalStore:
+
+    def test_append_creates_file(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        store.append({"event": "test"})
+        assert (tmp_path / "signals.ndjson").exists()
+
+    def test_append_persists_signal(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        store.append({"event": "gate_pass", "gate_id": "g1"})
+        records = store.read_all()
+        assert len(records) == 1
+        assert records[0]["gate_id"] == "g1"
+
+    def test_append_many_persists_all(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        store.append_many([{"i": 1}, {"i": 2}, {"i": 3}])
+        assert store.count() == 3
+
+    def test_multiple_appends_accumulate(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        store.append({"n": 1})
+        store.append({"n": 2})
+        assert store.count() == 2
+
+    def test_read_all_empty_when_no_file(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        assert store.read_all() == []
+
+    def test_count_returns_zero_when_no_file(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        assert store.count() == 0
+
+    def test_append_many_no_op_on_empty_list(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        store.append_many([])
+        assert not (tmp_path / "signals.ndjson").exists()
+
+    def test_creates_parent_directories(self, tmp_path):
+        store = SignalStore(path=tmp_path / "deep" / "path" / "signals.ndjson")
+        store.append({"x": 1})
+        assert (tmp_path / "deep" / "path" / "signals.ndjson").exists()
+
+    def test_from_env_uses_base_dir(self, tmp_path):
+        store = SignalStore.from_env(base_dir=tmp_path)
+        assert store.path == tmp_path / "feedback" / "signals.ndjson"
+
+    def test_ndjson_one_json_object_per_line(self, tmp_path):
+        store = SignalStore(path=tmp_path / "signals.ndjson")
+        store.append_many([{"a": 1}, {"b": 2}])
+        lines = [l for l in (tmp_path / "signals.ndjson").read_text().splitlines() if l.strip()]
+        assert len(lines) == 2
+        for line in lines:
+            json.loads(line)  # each line must be valid JSON
