@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12, 13, 14, 15, and 16 are complete. Feature 16 merged on `feature/multi-feature-autonomy-hardening` branch (continued), 2026-04-03.
+Features 12, 13, 14, 15, 16, and 17 are complete. Feature 17 merged on `feature/rich-headless-runtime-sessions-and-structured-observability` branch, 2026-04-03.
 
 The internal baseline is now:
 
@@ -18,9 +18,10 @@ The internal baseline is now:
 - multi-feature chain execution is governed with deterministic advancement, recovery, and carry-forward (Feature 14)
 - context injection is bounded and measurable, handovers are structured and validated (Feature 15)
 - runtime adapter boundary is explicit: TmuxAdapter formalized, HeadlessAdapter skeleton operational, RuntimeFacade routes all calls (Feature 16)
-- all five features certified with 950+ tests, zero blocker open items
+- headless runtime sessions are first-class: LocalSessionAdapter with lifecycle, structured event stream, and provider-aware observability (Feature 17)
+- all six features certified with 1080+ tests, zero blocker open items
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: rich headless runtime sessions and structured observability
+- next emphasis: learning-loop signal enrichment and governance feedback hardening
 
 ---
 
@@ -85,6 +86,16 @@ The confirmed autonomous coding hardening baseline now includes:
 - 3 pre-existing direct tmux violations cataloged (dashboard_actions.py, terminal_snapshot.py, terminal_state_reconciler.py) — not introduced by Feature 16
 - 29 certification tests, 125 adapter tests, 242 supporting runtime tests (396 total)
 
+**Feature 17 — Rich Headless Runtime Sessions And Structured Observability**:
+- Headless session contract with session/attempt/run identity model and S-1..S-5 invariants
+- LocalSessionAdapter: explicit lifecycle (CREATED->RUNNING->COMPLETED|FAILED|TIMED_OUT) with attempt tracking
+- HeadlessEventStream: 7 structured event types, NDJSON serialization, canonical order validation, artifact correlation
+- Provider-aware observability: 4 providers with capability flags (tool_call_visibility, structured_progress_events, output_only_fallback, can_attach)
+- ObservabilityQuality projections: RICH (claude_code), STRUCTURED (gemini), OUTPUT_ONLY (codex_cli, unknown)
+- Progress confidence derived from provider capabilities: high/medium/low
+- Unknown providers degrade to output-only explicitly
+- 36 certification tests, 95 component tests (131 total Feature 17)
+
 The system is now:
 - governance-first with explicit runtime truth
 - receipt-led with operator dashboard visibility
@@ -93,6 +104,7 @@ The system is now:
 - chain-capable: multi-feature execution governed with deterministic recovery and cumulative carry-forward
 - context-bounded: dispatch prompts have measurable overhead, structured handovers, and validated resumes
 - adapter-bounded: runtime behavior flows through explicit adapter boundary with capability gating and coupling freeze
+- session-aware: headless execution modeled as governed sessions with structured observability and provider-honest visibility
 
 ---
 
@@ -182,11 +194,11 @@ Features 12, 13, 14, 15, and 16 are complete. Default order from this point:
 3. ~~Feature 14: multi-feature autonomy hardening~~ — **COMPLETE**
 4. ~~Feature 15: context injection and handover quality~~ — **COMPLETE**
 5. ~~Feature 16: runtime adapter formalization and headless transport abstraction~~ — **COMPLETE**
-6. Feature 17: rich headless runtime sessions and structured observability
+6. ~~Feature 17: rich headless runtime sessions and structured observability~~ — **COMPLETE**
 7. Feature 18: learning-loop signal enrichment and governance feedback hardening
 8. Feature 19: coding substrate generalization and Agent OS lift-in
 
-Prerequisite for Feature 17: Feature 16 merged with green CI and both review gates passing.
+Prerequisite for Feature 18: Feature 17 merged with green CI and both review gates passing.
 
 Order rule:
 
