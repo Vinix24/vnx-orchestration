@@ -431,7 +431,8 @@ class TestEvidenceEntry:
     def test_entry_has_payload(self) -> None:
         bundle = _complete_builder().build()
         for entry in bundle.evidence:
-            assert isinstance(entry.payload, dict)
+            # payload is a MappingProxyType (read-only mapping) after AB-1 freeze
+            assert hasattr(entry.payload, "__getitem__") and hasattr(entry.payload, "keys")
 
     def test_entry_id_format_is_entry_uuid(self) -> None:
         bundle = _complete_builder().build()
@@ -733,3 +734,39 @@ class TestIntegrationLifecycle:
         assert payload["approval_id"] == approval.approval_id
         assert payload["dispatch_id"] == dispatch_id
         assert payload["approved_by"] == "operator"
+
+
+# ---------------------------------------------------------------------------
+# AB-1 payload immutability: mutation via payload reference is blocked
+# ---------------------------------------------------------------------------
+
+class TestPayloadImmutability:
+
+    def test_payload_is_read_only_after_entry_creation(self) -> None:
+        """Payload stored in EvidenceEntry is a MappingProxyType — write raises TypeError."""
+        import types as _types
+        builder = audit_bundle_builder("d-001")
+        builder.add_approval(_make_approval())
+        builder.add_closure(_make_closure())
+        builder.add_gate_result(_make_gate_result())
+        bundle = builder.build()
+        gate_entry = next(
+            e for e in bundle.evidence if e.evidence_type == EvidenceType.GATE_RESULT
+        )
+        assert isinstance(gate_entry.payload, _types.MappingProxyType)
+        with pytest.raises(TypeError):
+            gate_entry.payload["outcome"] = "MUTATED"  # type: ignore[index]
+
+    def test_original_dict_mutation_does_not_affect_stored_payload(self) -> None:
+        """Mutating the source dict after adding to builder does not affect the entry."""
+        source = _make_gate_result()
+        builder = audit_bundle_builder("d-001")
+        builder.add_approval(_make_approval())
+        builder.add_closure(_make_closure())
+        builder.add_gate_result(source)
+        source["outcome"] = "MUTATED"  # mutate after add
+        bundle = builder.build()
+        gate_entry = next(
+            e for e in bundle.evidence if e.evidence_type == EvidenceType.GATE_RESULT
+        )
+        assert gate_entry.payload["outcome"] == "pass"
