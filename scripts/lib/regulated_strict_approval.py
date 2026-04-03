@@ -374,6 +374,17 @@ class DispatchApprovalState:
                 f"Cannot transition dispatch {self.dispatch_id!r} to 'approved' without "
                 "a pre-execution approval record (RA-4)."
             )
+        if new_state == ApprovalState.CLOSED:
+            if not self.pre_approvals:
+                raise ApprovalError(
+                    f"Cannot close dispatch {self.dispatch_id!r}: "
+                    "no pre-execution approval record (RA-4)."
+                )
+            if self.closure_record is None:
+                raise ApprovalError(
+                    f"Cannot close dispatch {self.dispatch_id!r}: "
+                    "no closure record set (RA-4)."
+                )
         if (self.state == ApprovalState.REVIEW_FAILED
                 and new_state == ApprovalState.PENDING_APPROVAL):
             self.pre_approvals = []

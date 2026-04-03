@@ -501,6 +501,7 @@ class TestStateMachineTransitions:
 
     def test_pending_review_to_closed(self) -> None:
         state = _state_at_pending_review()
+        state.apply_closure(_make_closure())
         state.transition_to(ApprovalState.CLOSED)
         assert state.state == ApprovalState.CLOSED
 
@@ -547,6 +548,7 @@ class TestTerminalStates:
 
     def test_closed_is_terminal(self) -> None:
         state = _state_at_pending_review()
+        state.apply_closure(_make_closure())
         state.transition_to(ApprovalState.CLOSED)
         with pytest.raises(InvalidStateTransitionError):
             state.transition_to(ApprovalState.PENDING_APPROVAL)
@@ -559,6 +561,7 @@ class TestTerminalStates:
 
     def test_closed_cannot_reopen(self) -> None:
         state = _state_at_pending_review()
+        state.apply_closure(_make_closure())
         state.transition_to(ApprovalState.CLOSED)
         with pytest.raises(InvalidStateTransitionError):
             state.transition_to(ApprovalState.APPROVED)

@@ -392,3 +392,28 @@ class TestRA4IntegrityGuards:
         # Pre-approvals were cleared — cannot transition to APPROVED without re-approval
         with pytest.raises(ApprovalError, match="pre-execution approval"):
             state.transition_to(ApprovalState.APPROVED)
+
+    # Guard: CLOSED requires both pre_approval and closure_record
+    def test_transition_to_closed_without_pre_approval_raises(self) -> None:
+        """Cannot transition directly to CLOSED without a pre-execution approval (RA-4)."""
+        state = DispatchApprovalState(dispatch_id="d-001")
+        # Manually force to PENDING_REVIEW to isolate the CLOSED guard
+        state.state = ApprovalState.PENDING_REVIEW
+        state.closure_record = _make_closure()
+        # No pre_approvals — must raise
+        with pytest.raises(ApprovalError, match="pre-execution approval"):
+            state.transition_to(ApprovalState.CLOSED)
+
+    def test_transition_to_closed_without_closure_record_raises(self) -> None:
+        """Cannot transition to CLOSED without a closure record (RA-4)."""
+        state = _state_at_pending_review()
+        # Has pre_approval but no closure record
+        with pytest.raises(ApprovalError, match="closure record"):
+            state.transition_to(ApprovalState.CLOSED)
+
+    def test_transition_to_closed_with_both_present_succeeds(self) -> None:
+        """With pre_approval and closure_record, transition to CLOSED succeeds."""
+        state = _state_at_pending_review()
+        state.apply_closure(_make_closure())
+        state.transition_to(ApprovalState.CLOSED)
+        assert state.state == ApprovalState.CLOSED
