@@ -9,6 +9,48 @@
 
 ## 2026-04-03
 
+### Feature 17 completed: Rich Headless Runtime Sessions And Structured Observability
+
+Merged: PRs on `feature/rich-headless-runtime-sessions-and-structured-observability` branch, 2026-04-03
+
+Material changes:
+- canonical headless session contract extending HEADLESS_RUN_CONTRACT with session/attempt/run identity model, structured event schema, evidence classes, and provider-capability matrix
+- LocalSessionAdapter with explicit lifecycle states (CREATED->RUNNING->COMPLETED|FAILED|TIMED_OUT) and monotonic attempt tracking
+- HeadlessEventStream with 7 structured event types, NDJSON serialization, canonical order validation, and artifact correlation
+- provider-aware observability layer: 4 providers (claude_code, gemini, codex_cli, output_only) with capability flags and quality projections (RICH, STRUCTURED, OUTPUT_ONLY)
+- progress confidence derived from provider capabilities (high/medium/low)
+- unknown provider fallback to output-only with explicit degradation
+- RuntimeAdapter protocol conformance for LocalSessionAdapter (7 capabilities, ATTACH/REHEAL unsupported)
+- 36 certification tests + 95 component tests = 131 Feature 17 tests
+
+Codex findings resolved:
+- OI-619: S-1 identity clarified with (terminal_id, dispatch_id, attempt_generation) key
+- OI-620: confidence field added to run.progress schema
+- OI-621: Evidence completeness aligned with artifacts/log_artifact.txt
+
+Artifacts:
+- `docs/HEADLESS_SESSION_CONTRACT.md` — headless session contract (v1)
+- `scripts/lib/local_session_adapter.py` — LocalSessionAdapter (288 lines)
+- `scripts/lib/headless_event_stream.py` — structured event stream (184 lines)
+- `scripts/lib/provider_observability.py` — provider capabilities (141 lines)
+- `tests/test_rich_headless_certification.py` — 36 certification tests
+- `tests/test_local_session_adapter.py` — 28 lifecycle tests
+- `tests/test_headless_event_stream.py` — 28 event stream tests
+- `tests/test_provider_observability.py` — 34 provider tests
+
+### Recommended next execution order
+
+1. ~~Feature 12: runtime state machine and stall supervision~~ — **COMPLETE**
+2. ~~Feature 13: coding operator dashboard and session control~~ — **COMPLETE**
+3. ~~Feature 14: multi-feature autonomy hardening~~ — **COMPLETE**
+4. ~~Feature 15: context injection and handover quality~~ — **COMPLETE**
+5. ~~Feature 16: runtime adapter formalization and headless transport abstraction~~ — **COMPLETE**
+6. ~~Feature 17: rich headless runtime sessions and structured observability~~ — **COMPLETE**
+7. Feature 18: learning-loop signal enrichment and governance feedback hardening
+8. Feature 19: coding substrate generalization and Agent OS lift-in
+
+---
+
 ### Feature 16 completed: Runtime Adapter Formalization And Headless Transport Abstraction
 
 Merged: PRs on `feature/multi-feature-autonomy-hardening` branch (continued), 2026-04-03
