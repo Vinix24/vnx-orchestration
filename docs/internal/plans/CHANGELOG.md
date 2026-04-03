@@ -9,6 +9,29 @@
 
 ## 2026-04-03
 
+### Feature 18 completed: Learning-Loop Signal Enrichment And Governance Feedback Hardening
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- governance feedback loop contract defining 7 signal classes, recurrence thresholds, authority boundary, and local-model helper role
+- enriched governance signal extraction from 4 source categories (session events, gate results, queue anomalies, open-item transitions) with full correlation context
+- defect family normalization via MD5 key derivation for deterministic recurrence matching
+- recurrence detection with 2-occurrence threshold, 5-occurrence high-frequency escalation
+- retrospective digest surface with evidence-linked recurrence patterns and guarded recommendations
+- 4 recommendation categories (review_required, runtime_fix, policy_change, prompt_tuning) with enforced advisory_only invariant
+- optional local-model retrospective analysis hook with non-authoritative constraint, confidence annotation, and fallback behavior
+- 31 certification tests + 217 component tests = 248 Feature 18 tests
+
+Artifacts:
+- `docs/GOVERNANCE_FEEDBACK_CONTRACT.md` — governance feedback loop contract (v1)
+- `scripts/lib/governance_signal_extractor.py` — signal enrichment (476 lines)
+- `scripts/lib/retrospective_digest.py` — recurrence detection and digests (391 lines)
+- `scripts/lib/retrospective_model_hook.py` — local-model hook (257 lines)
+- `tests/test_learning_loop_certification.py` — 31 certification tests
+
+---
+
 ### Feature 17 completed: Rich Headless Runtime Sessions And Structured Observability
 
 Merged: PRs on `feature/rich-headless-runtime-sessions-and-structured-observability` branch, 2026-04-03
