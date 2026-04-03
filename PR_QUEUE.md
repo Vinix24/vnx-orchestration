@@ -1,4 +1,4 @@
-# PR Queue - Feature: Context Injection And Handover Quality
+# PR Queue - Feature: Runtime Adapter Formalization And Headless Transport Abstraction
 
 ## Progress Overview
 Total: 5 PRs | Complete: 5 | Active: 0 | Queued: 0 | Blocked: 0
@@ -12,11 +12,11 @@ Review-Stack: gemini_review,codex_gate,claude_github_optional
 ## Status
 
 ### ✅ Completed PRs
-- PR-0: Context Injection And Handover Contract
-- PR-1: Context Selection And Budget Enforcement
-- PR-2: Handover And Resume Payload Quality Enforcement
-- PR-3: Outcome Signals And Reusable Context Inputs
-- PR-4: Context And Resume Quality Certification
+- PR-0: Runtime Adapter Contract And Capability Matrix
+- PR-1: TmuxAdapter Extraction And Direct-Coupling Freeze
+- PR-2: Runtime Launch And Observation Facade
+- PR-3: Early Headless Transport Abstraction And Capability Gating
+- PR-4: Runtime Adapter Certification And Transition Guardrails
 
 ## Dependency Flow
 ```
