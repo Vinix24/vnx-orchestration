@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from regulated_strict_approval import (
+    ApprovalError,
     ApprovalState,
     ApprovalType,
     AutomatedApprovalError,
@@ -278,3 +279,43 @@ class TestIsolation:
         """Module should import without side effects."""
         import regulated_strict_approval  # noqa: F401 — import itself is the test
         assert True
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-ID guard: cross-dispatch evidence rejected (RA-4 integrity)
+# ---------------------------------------------------------------------------
+
+class TestDispatchIdGuard:
+
+    def test_add_pre_approval_rejects_wrong_dispatch_id(self) -> None:
+        """Approval for a different dispatch must not satisfy RA-4 for this dispatch."""
+        state = DispatchApprovalState(dispatch_id="d-target")
+        foreign_approval = _make_pre_approval(dispatch_id="d-other")
+        with pytest.raises(ApprovalError, match="d-other"):
+            state.add_pre_approval(foreign_approval)
+
+    def test_add_pre_approval_accepts_matching_dispatch_id(self) -> None:
+        state = DispatchApprovalState(dispatch_id="d-target")
+        approval = _make_pre_approval(dispatch_id="d-target")
+        state.add_pre_approval(approval)
+        assert state.has_pre_execution_approval()
+
+    def test_apply_closure_rejects_wrong_dispatch_id(self) -> None:
+        """Closure for a different dispatch must not close this dispatch."""
+        state = _state_at_pending_review(dispatch_id="d-target")
+        foreign_closure = _make_closure(dispatch_id="d-other")
+        with pytest.raises(ApprovalError, match="d-other"):
+            state.apply_closure(foreign_closure)
+
+    def test_apply_closure_accepts_matching_dispatch_id(self) -> None:
+        state = _state_at_pending_review(dispatch_id="d-target")
+        closure = _make_closure(dispatch_id="d-target")
+        state.apply_closure(closure)
+        assert state.has_closure_record()
+
+    def test_mismatch_error_includes_both_ids(self) -> None:
+        """Error message should name both the foreign and expected dispatch_id."""
+        state = DispatchApprovalState(dispatch_id="d-expected")
+        foreign_approval = _make_pre_approval(dispatch_id="d-foreign")
+        with pytest.raises(ApprovalError, match="d-expected"):
+            state.add_pre_approval(foreign_approval)
