@@ -68,6 +68,186 @@ def _rollback_mode_enabled() -> bool:
     return bool(rollback)
 
 
+class GovernanceDigestRunner:
+    """Periodic governance digest builder.
+
+    Reads governance signals from the runtime state directory, calls the F18
+    extractors and digest builder, and writes the result to
+    ``state_dir/governance_digest.json`` every ``interval`` seconds.
+
+    Interval defaults to 300 s (5 min) and is configurable via the
+    ``VNX_DIGEST_INTERVAL`` environment variable.
+    """
+
+    OUTPUT_FILENAME = "governance_digest.json"
+    RUNNER_VERSION = "1.0"
+
+    def __init__(self, state_dir: Path, interval: int = 300) -> None:
+        self.state_dir = Path(state_dir)
+        self.interval = max(1, interval)
+        self.digest_path = self.state_dir / self.OUTPUT_FILENAME
+        self.last_run: Optional[datetime] = None
+
+    @classmethod
+    def from_env(cls, state_dir: Path) -> "GovernanceDigestRunner":
+        """Construct runner reading interval from VNX_DIGEST_INTERVAL (default 300)."""
+        try:
+            interval = int(os.environ.get("VNX_DIGEST_INTERVAL", "300"))
+        except (ValueError, TypeError):
+            interval = 300
+        return cls(state_dir, interval)
+
+    # ── Scheduling ──────────────────────────────────────────────────────────
+
+    def should_run(self) -> bool:
+        """Return True if the interval has elapsed since the last run."""
+        if self.last_run is None:
+            return True
+        elapsed = (datetime.now() - self.last_run).total_seconds()
+        return elapsed >= self.interval
+
+    # ── Signal loading ───────────────────────────────────────────────────────
+
+    def _load_gate_results(self) -> List[Dict]:
+        """Extract gate result records from t0_receipts.ndjson."""
+        results: List[Dict] = []
+        receipts_path = self.state_dir / "t0_receipts.ndjson"
+        if not receipts_path.exists():
+            return results
+
+        gate_event_map = {
+            "task_complete": "pass",
+            "task_success": "pass",
+            "gate_pass": "pass",
+            "task_failed": "fail",
+            "gate_fail": "fail",
+            "gate_failure": "fail",
+        }
+
+        try:
+            with open(receipts_path, encoding="utf-8") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        receipt = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    gate = receipt.get("gate") or receipt.get("gate_id", "")
+                    event_type = receipt.get("event_type", "")
+                    if not gate or event_type not in gate_event_map:
+                        continue
+
+                    results.append({
+                        "gate_id": gate,
+                        "status": gate_event_map[event_type],
+                        "feature_id": receipt.get("feature_id", ""),
+                        "pr_id": receipt.get("pr", receipt.get("pr_id", "")),
+                        "dispatch_id": receipt.get("dispatch_id", ""),
+                        "reason": receipt.get("error", receipt.get("reason", "")),
+                    })
+        except Exception as exc:
+            logger.warning("GovernanceDigestRunner: could not read receipts: %s", exc)
+
+        return results
+
+    def _load_queue_anomalies(self) -> List[Dict]:
+        """Extract queue anomaly records from t0_receipts.ndjson."""
+        anomalies: List[Dict] = []
+        receipts_path = self.state_dir / "t0_receipts.ndjson"
+        if not receipts_path.exists():
+            return anomalies
+
+        anomaly_types = frozenset({
+            "delivery_failure", "reconcile_error", "ack_timeout",
+            "dead_letter", "queue_stall",
+        })
+
+        try:
+            with open(receipts_path, encoding="utf-8") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        receipt = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if receipt.get("event_type") in anomaly_types:
+                        anomalies.append(receipt)
+        except Exception as exc:
+            logger.warning("GovernanceDigestRunner: could not read anomalies: %s", exc)
+
+        return anomalies
+
+    # ── Core execution ───────────────────────────────────────────────────────
+
+    def run_once(self) -> bool:
+        """Execute one digest cycle.
+
+        1. Load signals from state files.
+        2. Call collect_governance_signals() (F18 extractor).
+        3. Call build_digest() (F18 digest builder).
+        4. Write output to state_dir/governance_digest.json.
+
+        Returns True on success, False on failure.
+        """
+        try:
+            from governance_signal_extractor import collect_governance_signals
+            from retrospective_digest import build_digest
+        except ImportError as exc:
+            logger.error("GovernanceDigestRunner: cannot import F18 modules: %s", exc)
+            return False
+
+        try:
+            gate_results = self._load_gate_results()
+            queue_anomalies = self._load_queue_anomalies()
+
+            signals = collect_governance_signals(
+                gate_results=gate_results or None,
+                queue_anomalies=queue_anomalies or None,
+            )
+
+            digest = build_digest(signals)
+
+            output: Dict = {
+                "runner_version": self.RUNNER_VERSION,
+                "state_dir": str(self.state_dir),
+                "interval_seconds": self.interval,
+                "source_records": {
+                    "gate_results": len(gate_results),
+                    "queue_anomalies": len(queue_anomalies),
+                },
+                **digest.to_dict(),
+            }
+
+            self._write_json_atomic(output)
+            self.last_run = datetime.now()
+            logger.info(
+                "GovernanceDigestRunner: digest written (%d signals, %d recurring patterns)",
+                len(signals),
+                len(digest.recurring_patterns),
+            )
+            return True
+
+        except Exception as exc:
+            logger.error("GovernanceDigestRunner.run_once failed: %s", exc)
+            return False
+
+    def _write_json_atomic(self, payload: Dict) -> None:
+        """Write payload to digest_path via a temporary file (atomic replace)."""
+        import tempfile
+        self.digest_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=self.digest_path.parent, delete=False, suffix=".tmp"
+        ) as tmp:
+            json.dump(payload, tmp, indent=2)
+            tmp_path = tmp.name
+        os.replace(tmp_path, self.digest_path)
+
+
 class IntelligenceDaemon:
     """Continuous intelligence extraction daemon with health monitoring"""
 
@@ -119,6 +299,9 @@ class IntelligenceDaemon:
             'uptime_seconds': 0,
             'last_health_update': None
         }
+
+        # Governance digest runner (5-min cadence by default)
+        self.digest_runner = GovernanceDigestRunner.from_env(self.state_dir)
 
         # Register signal handlers for graceful shutdown
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -888,6 +1071,10 @@ class IntelligenceDaemon:
                 # Daily hygiene at 18:00
                 if self.should_run_daily_hygiene():
                     self.daily_hygiene()
+
+                # Governance digest (every VNX_DIGEST_INTERVAL seconds, default 5 min)
+                if self.digest_runner.should_run():
+                    self.digest_runner.run_once()
 
                 # Health reporting (every minute)
                 self.write_intelligence_health()  # Write to dedicated file (PR #8 Fix)
