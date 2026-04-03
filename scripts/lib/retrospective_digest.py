@@ -167,174 +167,176 @@ class RetroDigest:
 # Recurrence detection
 # ---------------------------------------------------------------------------
 
+def _corr_attr(member: Any, attr: str) -> str:
+    """Safely read a correlation attribute from a signal."""
+    return getattr(getattr(member, "correlation", None), attr, "") or ""
+
+
+def _build_record(family_key: str, members: List[Any]) -> RecurrenceRecord:
+    """Assemble a RecurrenceRecord from a bucket of same-family signals."""
+    sessions = _sorted_unique(_corr_attr(m, "session_id") for m in members)
+    dispatches = _sorted_unique(_corr_attr(m, "dispatch_id") for m in members)
+    return RecurrenceRecord(
+        defect_family=family_key,
+        count=len(members),
+        representative_content=getattr(members[0], "content", ""),
+        severity=_worst_severity([getattr(m, "severity", "info") for m in members]),
+        signal_types=list(_sorted_unique(getattr(m, "signal_type", "") for m in members)),
+        impacted_features=list(_sorted_unique(_corr_attr(m, "feature_id") for m in members)),
+        impacted_prs=list(_sorted_unique(_corr_attr(m, "pr_id") for m in members)),
+        impacted_sessions=list(sessions),
+        evidence_pointers=list(_sorted_unique(list(dispatches) + list(sessions))),
+        providers=list(_sorted_unique(_corr_attr(m, "provider_id") for m in members)),
+    )
+
+
 def detect_recurrences(signals: List[Any]) -> List[RecurrenceRecord]:
-    """Group signals by defect_family and build recurrence records.
+    """Group signals by defect_family and return records for recurring patterns.
 
     Accepts GovernanceSignal instances (duck-typed for testability).
     Returns records only for families with count >= RECURRENCE_THRESHOLD.
     """
     buckets: Dict[str, List[Any]] = {}
-
     for sig in signals:
         family = getattr(sig, "defect_family", None)
-        if not family:
-            continue
-        buckets.setdefault(family, []).append(sig)
+        if family:
+            buckets.setdefault(family, []).append(sig)
 
-    records: List[RecurrenceRecord] = []
-    for family_key, members in buckets.items():
-        if len(members) < RECURRENCE_THRESHOLD:
-            continue
-
-        # Collect correlation data from all members
-        features = _sorted_unique(
-            getattr(getattr(m, "correlation", None), "feature_id", "") for m in members)
-        prs = _sorted_unique(
-            getattr(getattr(m, "correlation", None), "pr_id", "") for m in members)
-        sessions = _sorted_unique(
-            getattr(getattr(m, "correlation", None), "session_id", "") for m in members)
-        dispatches = _sorted_unique(
-            getattr(getattr(m, "correlation", None), "dispatch_id", "") for m in members)
-        providers = _sorted_unique(
-            getattr(getattr(m, "correlation", None), "provider_id", "") for m in members)
-        signal_types = _sorted_unique(
-            getattr(m, "signal_type", "") for m in members)
-
-        # Evidence pointers: dispatch_ids + session_ids (non-empty, deduped)
-        pointers = _sorted_unique(list(dispatches) + list(sessions))
-
-        # Representative content from first member
-        rep_content = getattr(members[0], "content", "")
-        severity = _worst_severity([getattr(m, "severity", "info") for m in members])
-
-        records.append(RecurrenceRecord(
-            defect_family=family_key,
-            count=len(members),
-            representative_content=rep_content,
-            severity=severity,
-            signal_types=list(signal_types),
-            impacted_features=list(features),
-            impacted_prs=list(prs),
-            impacted_sessions=list(sessions),
-            evidence_pointers=list(pointers),
-            providers=list(providers),
-        ))
-
-    # Sort by count descending, then severity
+    records = [
+        _build_record(k, v) for k, v in buckets.items()
+        if len(v) >= RECURRENCE_THRESHOLD
+    ]
     _sev_order = {"blocker": 2, "warn": 1, "info": 0}
     records.sort(key=lambda r: (-r.count, -_sev_order.get(r.severity, 0)))
     return records
 
 
 # ---------------------------------------------------------------------------
-# Recommendation generation
+# Recommendation helpers (one per category)
+# ---------------------------------------------------------------------------
+
+def _recommend_prompt_tuning(record: RecurrenceRecord, evidence: List[str]) -> Recommendation:
+    features = ", ".join(record.impacted_features) or "unknown"
+    return Recommendation(
+        category="prompt_tuning",
+        content=(
+            f"Session failure pattern '{record.representative_content}' occurred "
+            f"{record.count} times. High frequency suggests a systemic prompt or "
+            f"instruction issue. Review dispatch templates for features: {features}."
+        ),
+        evidence_basis=evidence,
+        severity="blocker" if record.severity == "blocker" else "warn",
+        recurrence_count=record.count,
+        defect_family=record.defect_family,
+    )
+
+
+def _recommend_gate_review(record: RecurrenceRecord, evidence: List[str]) -> Recommendation:
+    prs = ", ".join(record.impacted_prs) or "unknown"
+    return Recommendation(
+        category="review_required",
+        content=(
+            f"Gate failure recurred {record.count} time(s) across PRs: {prs}. "
+            f"Gate is not stabilizing. Investigate root cause before next dispatch."
+        ),
+        evidence_basis=evidence,
+        severity=record.severity,
+        recurrence_count=record.count,
+        defect_family=record.defect_family,
+    )
+
+
+def _recommend_policy_change(record: RecurrenceRecord, evidence: List[str]) -> Recommendation:
+    scope = ", ".join(record.impacted_features) or "system-wide"
+    return Recommendation(
+        category="policy_change",
+        content=(
+            f"Queue anomaly '{record.representative_content}' recurred {record.count} time(s). "
+            f"Consider reviewing delivery retry policy or terminal assignment for: {scope}."
+        ),
+        evidence_basis=evidence,
+        severity=record.severity,
+        recurrence_count=record.count,
+        defect_family=record.defect_family,
+    )
+
+
+def _recommend_runtime_fix(record: RecurrenceRecord, evidence: List[str]) -> Recommendation:
+    return Recommendation(
+        category="runtime_fix",
+        content=(
+            f"Session failure repeated {record.count} time(s) exclusively on provider "
+            f"'{record.providers[0]}'. Pattern suggests a provider-specific runtime "
+            f"issue. Check provider health and capability flags."
+        ),
+        evidence_basis=evidence,
+        severity=record.severity,
+        recurrence_count=record.count,
+        defect_family=record.defect_family,
+    )
+
+
+def _recommend_session_review(record: RecurrenceRecord, evidence: List[str]) -> Recommendation:
+    features = ", ".join(record.impacted_features) or "unknown"
+    return Recommendation(
+        category="review_required",
+        content=(
+            f"Session failure recurred {record.count} time(s) across features: {features}. "
+            f"Review session lifecycle and retry configuration."
+        ),
+        evidence_basis=evidence,
+        severity=record.severity,
+        recurrence_count=record.count,
+        defect_family=record.defect_family,
+    )
+
+
+def _recommend_blocker_item_review(record: RecurrenceRecord, evidence: List[str]) -> Recommendation:
+    prs = ", ".join(record.impacted_prs) or "unknown"
+    return Recommendation(
+        category="review_required",
+        content=(
+            f"Blocker open item transitioned {record.count} time(s) without resolution "
+            f"across PRs: {prs}. Item may be cycling. Manual T0 review required."
+        ),
+        evidence_basis=evidence,
+        severity="blocker",
+        recurrence_count=record.count,
+        defect_family=record.defect_family,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recommendation generation (orchestrator)
 # ---------------------------------------------------------------------------
 
 def generate_recommendations(records: List[RecurrenceRecord]) -> List[Recommendation]:
     """Generate guarded advisory recommendations from recurrence records.
 
-    Each recommendation is advisory_only=True and includes evidence_basis
-    so T0 can verify the pattern before deciding whether to act.
-
-    Heuristics (all advisory only):
-    - gate_failure recurring → review_required: gate is not stabilizing
-    - session_failure from single provider → runtime_fix: provider-specific issue
-    - queue_anomaly recurring → policy_change: queue policy needs adjustment
-    - session_timed_out recurring → policy_change: timeout budget may be too tight
-    - any family count >= HIGH_FREQUENCY_THRESHOLD → prompt_tuning: systemic frequency
-    - open_item_transition (blocker) recurring → review_required: blocker not resolved
+    Each recommendation is advisory_only=True. Delegates to per-category
+    helpers. Heuristics: gate_failure→review_required, queue_anomaly→policy_change,
+    single-provider session failure→runtime_fix, high-frequency→prompt_tuning,
+    cycling blocker→review_required.
     """
     recs: List[Recommendation] = []
-
     for record in records:
-        base_evidence = record.evidence_pointers[:5]  # cap evidence list
+        evidence = record.evidence_pointers[:5]
         stypes = set(record.signal_types)
-
+        rec = None
         if record.count >= HIGH_FREQUENCY_THRESHOLD and "session_failure" in stypes:
-            recs.append(Recommendation(
-                category="prompt_tuning",
-                content=(
-                    f"Session failure pattern '{record.representative_content}' "
-                    f"occurred {record.count} times. High frequency suggests a "
-                    f"systemic prompt or instruction issue. Review dispatch templates "
-                    f"for features: {', '.join(record.impacted_features) or 'unknown'}."
-                ),
-                evidence_basis=base_evidence,
-                severity="blocker" if record.severity == "blocker" else "warn",
-                recurrence_count=record.count,
-                defect_family=record.defect_family,
-            ))
+            rec = _recommend_prompt_tuning(record, evidence)
         elif "gate_failure" in stypes:
-            recs.append(Recommendation(
-                category="review_required",
-                content=(
-                    f"Gate failure recurred {record.count} time(s) across "
-                    f"PRs: {', '.join(record.impacted_prs) or 'unknown'}. "
-                    f"Gate is not stabilizing. Investigate root cause before "
-                    f"next dispatch to affected features."
-                ),
-                evidence_basis=base_evidence,
-                severity=record.severity,
-                recurrence_count=record.count,
-                defect_family=record.defect_family,
-            ))
+            rec = _recommend_gate_review(record, evidence)
         elif "queue_anomaly" in stypes:
-            anomaly_detail = record.representative_content
-            recs.append(Recommendation(
-                category="policy_change",
-                content=(
-                    f"Queue anomaly '{anomaly_detail}' recurred {record.count} time(s). "
-                    f"Consider reviewing delivery retry policy or terminal assignment "
-                    f"for: {', '.join(record.impacted_features) or 'system-wide'}."
-                ),
-                evidence_basis=base_evidence,
-                severity=record.severity,
-                recurrence_count=record.count,
-                defect_family=record.defect_family,
-            ))
+            rec = _recommend_policy_change(record, evidence)
         elif "session_failure" in stypes and record.providers and len(set(record.providers)) == 1:
-            provider = record.providers[0]
-            recs.append(Recommendation(
-                category="runtime_fix",
-                content=(
-                    f"Session failure repeated {record.count} time(s) exclusively on "
-                    f"provider '{provider}'. Pattern suggests a provider-specific "
-                    f"runtime issue rather than dispatch content. Check provider "
-                    f"health and capability flags."
-                ),
-                evidence_basis=base_evidence,
-                severity=record.severity,
-                recurrence_count=record.count,
-                defect_family=record.defect_family,
-            ))
+            rec = _recommend_runtime_fix(record, evidence)
         elif "session_failure" in stypes:
-            recs.append(Recommendation(
-                category="review_required",
-                content=(
-                    f"Session failure recurred {record.count} time(s) across "
-                    f"features: {', '.join(record.impacted_features) or 'unknown'}. "
-                    f"Review session lifecycle and retry configuration."
-                ),
-                evidence_basis=base_evidence,
-                severity=record.severity,
-                recurrence_count=record.count,
-                defect_family=record.defect_family,
-            ))
+            rec = _recommend_session_review(record, evidence)
         elif "open_item_transition" in stypes and record.severity == "blocker":
-            recs.append(Recommendation(
-                category="review_required",
-                content=(
-                    f"Blocker open item transitioned {record.count} time(s) without "
-                    f"resolution across PRs: {', '.join(record.impacted_prs) or 'unknown'}. "
-                    f"Item may be cycling. Manual T0 review required."
-                ),
-                evidence_basis=base_evidence,
-                severity="blocker",
-                recurrence_count=record.count,
-                defect_family=record.defect_family,
-            ))
-
-    # Sort: blocker first, then by recurrence count desc
+            rec = _recommend_blocker_item_review(record, evidence)
+        if rec is not None:
+            recs.append(rec)
     _sev_order = {"blocker": 2, "warn": 1, "info": 0}
     recs.sort(key=lambda r: (-_sev_order.get(r.severity, 0), -r.recurrence_count))
     return recs
