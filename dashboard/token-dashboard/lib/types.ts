@@ -205,6 +205,36 @@ export interface ConversationsResponse {
   rotation_chains?: RotationChain[];
 }
 
+// ===== Gate Config Types =====
+
+export interface GateEntry {
+  enabled: boolean;
+}
+
+export interface GateConfigResponse {
+  project: string | null;
+  gates: Record<string, Record<string, GateEntry> | GateEntry>;
+  queried_at: string;
+  config_path: string;
+  error?: string;
+}
+
+export interface GateToggleRequest {
+  project: string;
+  gate: string;
+  enabled: boolean;
+}
+
+export interface GateToggleResponse {
+  action: string;
+  project: string;
+  gate: string;
+  enabled: boolean;
+  status: 'success' | 'failed';
+  message: string;
+  timestamp: string;
+}
+
 // ===== Kanban Board Types =====
 
 export interface KanbanCard {

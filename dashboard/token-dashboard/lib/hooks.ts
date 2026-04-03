@@ -7,11 +7,13 @@ import {
   fetchOpenItems,
   fetchAggregateOpenItems,
   fetchKanban,
+  fetchGateConfig,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
+  GateConfigResponse,
 } from './types';
 
 export function useTokenStats(
@@ -119,5 +121,14 @@ export function useKanban(project?: string) {
     key,
     () => fetchKanban(project),
     { refreshInterval: 15000, revalidateOnFocus: true, dedupingInterval: 8000 }
+  );
+}
+
+export function useGateConfig(project?: string) {
+  const key = project ? ['operator-gate-config', project] : 'operator-gate-config';
+  return useSWR<GateConfigResponse>(
+    key,
+    () => fetchGateConfig(project),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
   );
 }
