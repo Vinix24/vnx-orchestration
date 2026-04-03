@@ -261,3 +261,17 @@ export interface KanbanEnvelope {
   degraded?: boolean;
   degraded_reasons?: string[];
 }
+
+export interface GovernanceDigestSourceFreshness {
+  governance_digest: string | null;
+}
+
+export interface GovernanceDigestEnvelope {
+  view: string;
+  queried_at: string;
+  source_freshness: GovernanceDigestSourceFreshness;
+  staleness_seconds: number | null;
+  degraded: boolean;
+  degraded_reasons: string[];
+  data: Record<string, unknown>;
+}
