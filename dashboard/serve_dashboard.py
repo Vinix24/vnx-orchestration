@@ -323,40 +323,9 @@ def _get_db() -> sqlite3.Connection | None:
     return conn
 
 
-def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
-    conn = _get_db()
-    if conn is None:
-        return []
-
-    date_from = (params.get("from") or [None])[0]
-    date_to = (params.get("to") or [None])[0]
-    group = (params.get("group") or ["day"])[0]
-    terminal = (params.get("terminal") or [None])[0]
-    model = (params.get("model") or [None])[0]
-
-    if group not in _GROUP_SQL:
-        group = "day"
-
-    group_expr = _GROUP_SQL[group]
-    today = datetime.now().strftime("%Y-%m-%d")
-    if not date_from:
-        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    if not date_to:
-        date_to = today
-
-    conditions = ["session_date >= ?", "session_date <= ?"]
-    bind = [date_from, date_to]
-
-    if terminal:
-        conditions.append("terminal = ?")
-        bind.append(terminal)
-    if model:
-        conditions.append("session_model = ?")
-        bind.append(model)
-
-    where = " AND ".join(conditions)
-
-    sql = f"""
+def _token_stats_sql(group_expr: str, where: str) -> str:
+    """Return the session_analytics aggregation SQL for the given group/where."""
+    return f"""
         SELECT
             {group_expr} AS period,
             terminal,
@@ -391,6 +360,38 @@ def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
         ORDER BY period DESC, terminal
     """
 
+
+def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
+    conn = _get_db()
+    if conn is None:
+        return []
+
+    date_from = (params.get("from") or [None])[0]
+    date_to = (params.get("to") or [None])[0]
+    group = (params.get("group") or ["day"])[0]
+    terminal = (params.get("terminal") or [None])[0]
+    model = (params.get("model") or [None])[0]
+
+    if group not in _GROUP_SQL:
+        group = "day"
+
+    group_expr = _GROUP_SQL[group]
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not date_from:
+        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    if not date_to:
+        date_to = today
+
+    conditions = ["session_date >= ?", "session_date <= ?"]
+    bind = [date_from, date_to]
+    if terminal:
+        conditions.append("terminal = ?")
+        bind.append(terminal)
+    if model:
+        conditions.append("session_model = ?")
+        bind.append(model)
+
+    sql = _token_stats_sql(_GROUP_SQL[group], " AND ".join(conditions))
     try:
         rows = conn.execute(sql, bind).fetchall()
         result = [dict(r) for r in rows]
