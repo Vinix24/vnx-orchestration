@@ -121,11 +121,7 @@ class ValidationResult:
 def validate_domain_plan(content: str) -> ValidationResult:
     """Validate a domain feature plan against scaffolding rules.
 
-    Args:
-        content: Full markdown content of the feature plan.
-
-    Returns:
-        ValidationResult with findings.
+    Orchestrates per-section helpers and collects findings.
     """
     domain = _extract_field(content, "Domain") or "coding"
     governance = _extract_field(content, "Governance-Profile") or "coding_strict"
@@ -137,7 +133,29 @@ def validate_domain_plan(content: str) -> ValidationResult:
         is_coding=is_coding,
     )
 
-    # V-4: Governance profile must be known
+    _validate_governance_profile(governance, result)
+
+    if is_coding:
+        return result
+
+    if not _validate_onboarding_present(content, result):
+        return result  # Cannot validate further without onboarding section
+
+    _validate_capabilities(content, result)
+    _validate_boundary_acknowledgments(content, result)
+    _validate_activation_prerequisites(content, result)
+    _validate_no_premature_rollout(content, result)
+    _validate_gate_types(content, result)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Per-section validation helpers
+# ---------------------------------------------------------------------------
+
+def _validate_governance_profile(governance: str, result: ValidationResult) -> None:
+    """V-4: Governance profile must be one of the known profiles."""
     if governance not in KNOWN_GOVERNANCE_PROFILES:
         result.findings.append(ValidationFinding(
             rule="V-4", severity="blocker",
@@ -145,34 +163,35 @@ def validate_domain_plan(content: str) -> ValidationResult:
                     f"Must be one of: {', '.join(sorted(KNOWN_GOVERNANCE_PROFILES))}",
         ))
 
-    # Coding plans skip domain onboarding checks
-    if is_coding:
-        return result
 
-    # V-1: Non-coding plans must have Domain Onboarding section
+def _validate_onboarding_present(content: str, result: ValidationResult) -> bool:
+    """V-1: Non-coding plans must have Domain Onboarding section. Returns False if missing."""
     if "## Domain Onboarding" not in content:
         result.findings.append(ValidationFinding(
             rule="V-1", severity="blocker",
             message="Non-coding domain plan must contain '## Domain Onboarding' section",
         ))
-        return result  # Cannot validate further without onboarding section
+        return False
+    return True
 
-    # V-2: Capability profile must have all required fields
+
+def _validate_capabilities(content: str, result: ValidationResult) -> None:
+    """V-2 + V-3: Capability fields present and policy_mutation_blocked is True."""
     for cap_field in sorted(REQUIRED_CAPABILITY_FIELDS):
         if f"`{cap_field}`" not in content:
             result.findings.append(ValidationFinding(
                 rule="V-2", severity="blocker",
                 message=f"Missing capability field: {cap_field}",
             ))
-
-    # V-3: policy_mutation_blocked must be True
     if re.search(r"policy_mutation_blocked.*False", content):
         result.findings.append(ValidationFinding(
             rule="V-3", severity="blocker",
             message="policy_mutation_blocked must be True (contract G-5)",
         ))
 
-    # V-5: Substrate boundary acknowledgments
+
+def _validate_boundary_acknowledgments(content: str, result: ValidationResult) -> None:
+    """V-5: Substrate boundary acknowledgments must be present."""
     for pattern in BOUNDARY_ACKNOWLEDGMENTS:
         if not re.search(pattern, content, re.IGNORECASE):
             result.findings.append(ValidationFinding(
@@ -180,7 +199,9 @@ def validate_domain_plan(content: str) -> ValidationResult:
                 message=f"Missing substrate boundary acknowledgment: {pattern}",
             ))
 
-    # V-6: Activation prerequisites
+
+def _validate_activation_prerequisites(content: str, result: ValidationResult) -> None:
+    """V-6: Activation prerequisites must be present."""
     for pattern in ACTIVATION_PREREQUISITES:
         if not re.search(pattern, content, re.IGNORECASE):
             result.findings.append(ValidationFinding(
@@ -188,7 +209,9 @@ def validate_domain_plan(content: str) -> ValidationResult:
                 message=f"Missing activation prerequisite: {pattern}",
             ))
 
-    # V-7: No premature rollout language
+
+def _validate_no_premature_rollout(content: str, result: ValidationResult) -> None:
+    """V-7: Plan must not contain premature-rollout language."""
     for pattern in PREMATURE_ROLLOUT_PATTERNS:
         match = re.search(pattern, content, re.IGNORECASE)
         if match:
@@ -197,20 +220,22 @@ def validate_domain_plan(content: str) -> ValidationResult:
                 message=f"Premature rollout language detected: '{match.group()}'",
             ))
 
-    # V-8: gate_types must reference implemented gates
-    gate_match = re.search(r"gate_types.*?\|.*?\|(.*?)\|", content)
-    if gate_match:
-        gate_text = gate_match.group(1).strip()
-        if gate_text and gate_text not in ("(none required)", "[list]", "[]"):
-            for gate in re.findall(r"\w+_\w+", gate_text):
-                if gate not in IMPLEMENTED_GATES and gate not in REQUIRED_CAPABILITY_FIELDS:
-                    result.findings.append(ValidationFinding(
-                        rule="V-8", severity="warn",
-                        message=f"Gate '{gate}' referenced but not in implemented gates: "
-                                f"{', '.join(sorted(IMPLEMENTED_GATES))}",
-                    ))
 
-    return result
+def _validate_gate_types(content: str, result: ValidationResult) -> None:
+    """V-8: gate_types must reference only implemented gates."""
+    gate_match = re.search(r"gate_types.*?\|.*?\|(.*?)\|", content)
+    if not gate_match:
+        return
+    gate_text = gate_match.group(1).strip()
+    if not gate_text or gate_text in ("(none required)", "[list]", "[]"):
+        return
+    for gate in re.findall(r"\w+_\w+", gate_text):
+        if gate not in IMPLEMENTED_GATES and gate not in REQUIRED_CAPABILITY_FIELDS:
+            result.findings.append(ValidationFinding(
+                rule="V-8", severity="warn",
+                message=f"Gate '{gate}' referenced but not in implemented gates: "
+                        f"{', '.join(sorted(IMPLEMENTED_GATES))}",
+            ))
 
 
 def _extract_field(content: str, field_name: str) -> Optional[str]:
