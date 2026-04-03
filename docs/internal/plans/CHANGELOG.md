@@ -29,6 +29,25 @@ Artifacts:
 - `scripts/lib/lesson_conflict.py` — conflict detection and resolution (406 lines)
 - `tests/test_preferences_lessons_certification.py` — 20 certification tests
 
+### Feature 23 completed: Dashboard Data Pipeline Fix And Kanban Board
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- dashboard kanban contract with S6 surface (5 columns), dispatch-to-stage mapping, health endpoint, error/degraded rendering
+- health endpoint GET /api/health with 5 data source checks, uptime tracking, all_sources_available flag
+- kanban dispatch scanning with directory-to-stage mapping, bundle parsing, receipt promotion
+- kanban board frontend (Next.js): 5-column view with track colors, duration display, card details
+- 15 certification tests + 153 component tests = 168 Feature 23 tests
+
+Artifacts:
+- `docs/DASHBOARD_KANBAN_CONTRACT.md` — kanban contract (v1)
+- `dashboard/serve_dashboard.py` — health + kanban endpoints
+- `dashboard/token-dashboard/app/operator/kanban/page.tsx` — kanban board component
+- `tests/test_dashboard_kanban_certification.py` — 15 certification tests
+
+---
+
 ### Chain pilot Features 18-22 complete
 
 This closes the five-feature chain pilot (Features 18-22). All features certified with 2225+ tests. See `CHAIN_PILOT_18_22_REPORT.md` for full pilot analysis.
