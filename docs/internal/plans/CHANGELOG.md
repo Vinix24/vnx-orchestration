@@ -9,6 +9,26 @@
 
 ## 2026-04-03
 
+### Feature 20 completed: Business-Light Governance Pilot And Folder-Scoped Orchestration
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- business-light governance contract defining review-by-exception policy, folder-scoped orchestration, cross-profile authority isolation, and pilot limits with rollback criteria
+- folder scope module with ScopeType enum, FolderScope/FolderContext frozen dataclasses, IsolationViolation enforcement, and scope resolution without filesystem I/O
+- business-light review policy with OpenItem severity-based blocking, AuditRecord immutable artifact trail, CloseoutDecision explicit invariant, and GateResult evaluation
+- governance profile selector: coding scopes always get CODING_STRICT (cannot be overridden), business scopes may request BUSINESS_LIGHT, ProfileVisibility operator surface
+- 30 certification tests + 221 component tests = 251 Feature 20 tests
+
+Artifacts:
+- `docs/BUSINESS_LIGHT_GOVERNANCE_CONTRACT.md` — business-light governance contract (v1)
+- `scripts/lib/folder_scope.py` — folder-scoped orchestration (256 lines)
+- `scripts/lib/business_light_policy.py` — review-by-exception policy (263 lines)
+- `scripts/lib/governance_profile_selector.py` — profile selection and visibility (288 lines)
+- `tests/test_business_light_certification.py` — 30 certification tests
+
+---
+
 ### Feature 19 completed: Coding Substrate Generalization And Agent OS Lift-In
 
 Merged: PRs on `feature/orchestration-substrate-extraction` branch, 2026-04-03
