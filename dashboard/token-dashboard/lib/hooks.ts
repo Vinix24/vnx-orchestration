@@ -6,11 +6,12 @@ import {
   fetchTerminals,
   fetchOpenItems,
   fetchAggregateOpenItems,
+  fetchKanban,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
-  OpenItemsEnvelope, AggregateOpenItemsEnvelope,
+  OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
 } from './types';
 
 export function useTokenStats(
@@ -109,5 +110,13 @@ export function useAggregateOpenItems(project?: string) {
     key,
     () => fetchAggregateOpenItems(project),
     { refreshInterval: 20000, revalidateOnFocus: true, dedupingInterval: 8000 }
+  );
+}
+
+export function useKanban() {
+  return useSWR<KanbanEnvelope>(
+    'operator-kanban',
+    () => fetchKanban(),
+    { refreshInterval: 15000, revalidateOnFocus: true, dedupingInterval: 8000 }
   );
 }

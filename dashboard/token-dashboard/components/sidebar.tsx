@@ -3,11 +3,12 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle } from 'lucide-react';
+import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban } from 'lucide-react';
 
 const OPERATOR_NAV = [
   { href: '/operator', label: 'Control Surface', icon: Radio },
   { href: '/operator/open-items', label: 'Open Items', icon: AlertTriangle },
+  { href: '/operator/kanban', label: 'Kanban Board', icon: Kanban },
 ];
 
 const NAV_ITEMS = [
