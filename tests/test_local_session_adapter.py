@@ -175,6 +175,31 @@ class TestCompletionAndAbnormalExit:
         result = adapter.deliver("T0", "dispatch-1")
         assert result.success is False
 
+    def test_stop_signal_killed_is_completed(self) -> None:
+        """OI-622: stop() with SIGTERM (negative rc) is graceful COMPLETED."""
+        adapter = LocalSessionAdapter()
+        adapter.spawn("T0", {"command": "sleep 30"})
+        adapter.stop("T0")
+        attempt = adapter.get_attempt("T0")
+        assert attempt.state == "COMPLETED"  # signal-killed = graceful stop
+
+    def test_mark_failed_stops_running_process(self) -> None:
+        """OI-624: mark_failed must terminate process."""
+        adapter = LocalSessionAdapter()
+        adapter.spawn("T0", {"command": "sleep 30"})
+        adapter.mark_failed("T0", reason="Test failure")
+        assert adapter.health("T0").process_alive is False
+        assert adapter.get_attempt("T0").state == "FAILED"
+
+    def test_stop_already_exited_with_error_detects_failure(self) -> None:
+        """OI-622: stop() on already-exited nonzero process sets FAILED."""
+        adapter = LocalSessionAdapter()
+        adapter.spawn("T0", {"command": "false"})
+        time.sleep(0.2)
+        adapter.stop("T0")
+        attempt = adapter.get_attempt("T0")
+        assert attempt.state == "FAILED"
+
 
 # ---------------------------------------------------------------------------
 # 5. Session/attempt correlation

@@ -141,15 +141,23 @@ class LocalSessionAdapter:
             return StopResult(success=True, was_running=False)
         proc = session.proc
         if proc is None or proc.poll() is not None:
-            self._finalize_attempt(session, "COMPLETED")
+            self._check_and_finalize(session)
             return StopResult(success=True, was_running=False)
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait(timeout=2)
-        self._finalize_attempt(session, "COMPLETED", exit_code=proc.returncode)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        rc = proc.returncode
+        # Negative rc = killed by signal (from our terminate/kill), treat as graceful stop.
+        # Positive nonzero rc = process exited with error before we stopped it.
+        state = "FAILED" if rc is not None and rc > 0 else "COMPLETED"
+        self._finalize_attempt(session, state, exit_code=rc,
+            failure_reason=f"exit code {rc}" if rc and rc > 0 else None)
         return StopResult(success=True, was_running=True)
 
     def deliver(self, terminal_id: str, dispatch_id: str,
@@ -233,18 +241,32 @@ class LocalSessionAdapter:
         session = self._sessions.get(terminal_id)
         if session and session.proc and session.proc.poll() is None:
             session.proc.kill()
-            session.proc.wait(timeout=2)
+            try:
+                session.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass  # process unkillable — finalize state anyway
         if session:
             self._finalize_attempt(session, "TIMED_OUT",
                 failure_reason="Execution timed out")
 
     def mark_failed(self, terminal_id: str, reason: str = "") -> None:
-        """Mark current attempt as FAILED."""
+        """Terminate process and mark current attempt as FAILED."""
         session = self._sessions.get(terminal_id)
-        if session:
-            exit_code = session.proc.returncode if session.proc else None
-            self._finalize_attempt(session, "FAILED",
-                exit_code=exit_code, failure_reason=reason)
+        if not session:
+            return
+        if session.proc and session.proc.poll() is None:
+            session.proc.terminate()
+            try:
+                session.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                session.proc.kill()
+                try:
+                    session.proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        exit_code = session.proc.returncode if session.proc else None
+        self._finalize_attempt(session, "FAILED",
+            exit_code=exit_code, failure_reason=reason)
 
     def _finalize_attempt(self, session: SessionRecord, state: str, *,
                           exit_code: Optional[int] = None,
