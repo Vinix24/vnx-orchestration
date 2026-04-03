@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12, 13, 14, 15, 16, and 17 are complete. Feature 17 merged on `feature/rich-headless-runtime-sessions-and-structured-observability` branch, 2026-04-03.
+Features 12, 13, 14, 15, 16, 17, and 18 are complete. Feature 18 merged on `main` branch, 2026-04-03.
 
 The internal baseline is now:
 
@@ -19,9 +19,10 @@ The internal baseline is now:
 - context injection is bounded and measurable, handovers are structured and validated (Feature 15)
 - runtime adapter boundary is explicit: TmuxAdapter formalized, HeadlessAdapter skeleton operational, RuntimeFacade routes all calls (Feature 16)
 - headless runtime sessions are first-class: LocalSessionAdapter with lifecycle, structured event stream, and provider-aware observability (Feature 17)
-- all six features certified with 1080+ tests, zero blocker open items
+- governance feedback loop enriches recurring failures into reusable signals with evidence-linked retrospective digests and advisory-only recommendations (Feature 18)
+- all seven features certified with 1320+ tests, zero blocker open items
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: secured five-feature chain pilot (Features 18–22) with checkpoints and post-run analysis; Gemini gates disabled for this pilot due to rate limits, Codex required
+- next emphasis: coding substrate generalization (Feature 19) continuing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
 
 ---
 
