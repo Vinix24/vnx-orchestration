@@ -1,0 +1,300 @@
+# Internal Plans Changelog
+
+**Status**: Active (Internal)
+**Last Updated**: 2026-04-03
+**Owner**: T0 / Planning
+**Purpose**: Running changelog for the internal autonomous-coding program, tracking planning milestones, execution-progress milestones, and the ordered next steps expected from future feature completion.
+
+---
+
+## 2026-04-03
+
+### Feature 16 completed: Runtime Adapter Formalization And Headless Transport Abstraction
+
+Merged: PRs on `feature/multi-feature-autonomy-hardening` branch (continued), 2026-04-03
+
+Material changes:
+- canonical RuntimeAdapter protocol defining 12 operations (spawn, stop, deliver, attach, observe, inspect, health, session_health, reheal, adapter_type, capabilities, shutdown)
+- adapter capability model with 9 named capabilities and explicit UnsupportedCapability semantics
+- TmuxAdapter formalized as one implementation of RuntimeAdapter, supporting all 9 capabilities
+- HeadlessAdapter skeleton implementing 7 capabilities (ATTACH and REHEAL explicitly unsupported)
+- RuntimeFacade routing all orchestration/dashboard calls through adapter with capability pre-checks
+- direct tmux coupling freeze guard: test-enforced ban on new subprocess+tmux calls outside adapter files
+- canonical state mapping rules: adapter never writes lease/dispatch state, only records coordination events
+- session_health() accepts caller-provided terminal_ids (adapter never queries canonical DB)
+- deliver() uses dispatcher-provided lease_hint for metadata only (no adapter-side lease reads)
+- 3 pre-existing direct tmux coupling violations identified (dashboard_actions.py, terminal_snapshot.py, terminal_state_reconciler.py) — predating Feature 16, cataloged for future cleanup
+- 29 certification tests + 125 adapter tests + 242 supporting runtime tests = 396 total
+
+Artifacts:
+- `docs/RUNTIME_ADAPTER_CONTRACT.md` — canonical runtime adapter contract (v1)
+- `scripts/lib/adapter_protocol.py` — RuntimeAdapter protocol and validation helpers
+- `scripts/lib/headless_transport_adapter.py` — HeadlessAdapter skeleton (174 lines)
+- `scripts/lib/runtime_facade.py` — RuntimeFacade routing layer (185 lines)
+- `tests/test_runtime_adapter_certification.py` — 29 certification tests
+- `tests/test_adapter_conformance.py` — 31 conformance tests
+- `tests/test_tmux_adapter_interface.py` — 29 interface and freeze tests
+- `tests/test_runtime_facade.py` — 25 facade tests
+
+Codex findings resolved during Feature 16:
+- OI-559: deliver() lease soft-check contradiction — replaced with lease_hint parameter
+- OI-560: CAPTURE_OUTPUT/INTERACTIVE_INPUT without operations — moved to reserved capabilities
+- OI-561: session_health() scope ambiguity — added terminal_ids parameter
+
+### Recommended next execution order
+
+1. ~~Feature 12: runtime state machine and stall supervision~~ — **COMPLETE**
+2. ~~Feature 13: coding operator dashboard and session control~~ — **COMPLETE**
+3. ~~Feature 14: multi-feature autonomy hardening~~ — **COMPLETE**
+4. ~~Feature 15: context injection and handover quality~~ — **COMPLETE**
+5. ~~Feature 16: runtime adapter formalization and headless transport abstraction~~ — **COMPLETE**
+6. Feature 17: rich headless runtime sessions and structured observability
+7. Feature 18: learning-loop signal enrichment and governance feedback hardening
+8. Feature 19: coding substrate generalization and Agent OS lift-in
+
+---
+
+## 2026-04-02
+
+### Feature 15 completed: Context Injection And Handover Quality
+
+Merged: PRs on `feature/multi-feature-autonomy-hardening` branch (continued), 2026-04-02
+
+Material changes:
+- context injection contract defining bounded 7-priority component model (P0-P7)
+- context assembler with budget enforcement: P3-P7 overhead < 20% target, 25% hard limit
+- stale-context rejection with per-component max age and freshness metadata
+- structured handover payload with HO-1..HO-5 invariants and validation
+- resume payload supporting rotation, interruption, and redispatch with RS-1..RS-5 invariants
+- reusable outcome signal extraction from receipts, open items, and carry-forward ledger
+- deferred item validation at code level (blocker deferral rejected)
+- 180 context/handover tests across 4 test files
+- Codex findings resolved: Queue Truth alignment, budget model clarification, chain state source
+
+Artifacts:
+- `docs/CONTEXT_INJECTION_CONTRACT.md` — context injection and handover contract
+- `scripts/lib/context_assembler.py` — bounded context assembly with budget enforcement
+- `scripts/lib/handover_resume.py` — handover and resume payload generation with validation
+- `scripts/lib/outcome_signals.py` — reusable outcome signal extraction (P7)
+- `tests/test_context_assembler.py` — 55 context assembler tests
+- `tests/test_handover_resume.py` — 53 handover/resume tests
+- `tests/test_outcome_signals.py` — 36 outcome signal tests
+- `tests/test_context_resume_certification.py` — 36 certification tests
+
+Context rotation finding:
+- 65% context rotation hooks are correctly wired but `vnx_rotate.sh` fails due to tmux session name mismatch (hardcoded `vnx` vs actual `vnx-vnx-roadmap-autopilot-wt`). Fix required in main vnx-system repo.
+
+### Recommended next execution order
+
+1. ~~Feature 12: runtime state machine and stall supervision~~ — **COMPLETE**
+2. ~~Feature 13: coding operator dashboard and session control~~ — **COMPLETE**
+3. ~~Feature 14: multi-feature autonomy hardening~~ — **COMPLETE**
+4. ~~Feature 15: context injection and handover quality~~ — **COMPLETE**
+5. Feature 16: runtime adapter formalization and early headless transport abstraction
+6. Feature 17: rich headless runtime sessions and structured observability
+7. Feature 18: learning-loop signal enrichment and governance feedback hardening
+8. Feature 19: coding substrate generalization and Agent OS lift-in
+
+---
+
+### Feature 14 completed: Multi-Feature Autonomy Hardening And Chain Recovery
+
+Merged: PRs on `feature/multi-feature-autonomy-hardening` branch, 2026-04-02
+
+Material changes:
+- canonical multi-feature chain execution contract defining 8 chain states, deterministic advancement rules, and 6 explicit stop conditions
+- chain state projection layer: single queryable surface for chain progression truth, active/next feature, advancement blockers, and carry-forward summary
+- recovery decision tree: 3 failure classes (transient/fixable/non-recoverable), max 2 retries per class and 3 total, with deterministic requeue vs escalate
+- resume-safe vs resume-unsafe chain state classification
+- branch baseline guard: merge-base + is-ancestor check prevents stale worktree drift
+- carry-forward ledger: cumulative findings, open items, deferred items, and residual risks across feature boundaries with provenance preservation
+- deferred item validation: blocker deferral rejected at code level (contract O-3 enforcement)
+- chain residual governance model for final certification requirements
+- 130 chain tests passing across 4 test files
+
+Artifacts:
+- `docs/MULTI_FEATURE_CHAIN_CONTRACT.md` — chain execution contract
+- `docs/CHAIN_RESIDUAL_GOVERNANCE.md` — residual governance model
+- `scripts/lib/chain_state_projection.py` — chain state projection and advancement truth
+- `scripts/lib/chain_recovery.py` — recovery, requeue, branch guard, carry-forward snapshot
+- `tests/test_chain_state_projection.py` — 36 projection tests
+- `tests/test_chain_recovery.py` — 39 recovery tests
+- `tests/test_chain_carry_forward_certification.py` — 22 carry-forward certification tests
+- `tests/test_chain_certification.py` — 22 final certification tests (including 5-feature lifecycle with recovery)
+
+Bug found and fixed during certification:
+- `_accumulate_open_items` was overwriting `origin_feature` provenance when updating existing items across feature boundaries — fixed by preserving existing provenance during merge
+
+### Recommended next execution order
+
+1. ~~Feature 12: runtime state machine and stall supervision~~ — **COMPLETE**
+2. ~~Feature 13: coding operator dashboard and session control~~ — **COMPLETE**
+3. ~~Feature 14: multi-feature autonomy hardening~~ — **COMPLETE**
+4. Feature 15: intelligence, context injection, and handover quality
+5. Feature 16: runtime adapter formalization and early headless transport abstraction
+6. Feature 17: rich headless runtime sessions and structured observability
+7. Feature 18: learning-loop signal enrichment and governance feedback hardening
+8. Feature 19: coding substrate generalization and Agent OS lift-in
+
+---
+
+### Feature 12 completed: Autonomous Runtime State Machine And Stall Supervision
+
+Merged: PRs #64–#67, 2026-04-01 19:29–19:55 UTC
+
+Material changes:
+- canonical worker state machine with 9 explicit states and deterministic transition matrix
+- heartbeat/output independence: liveness and progress tracked as separate signals
+- stall detection, dead-worker escalation, and anomaly-to-open-item auto-creation
+- zombie lease and ghost dispatch tie-break detection
+- runtime reliability certification with 129 tests passing
+
+Artifacts:
+- `docs/core/130_RUNTIME_STATE_MACHINE_CONTRACT.md` — state machine contract
+- `docs/core/131_RUNTIME_RELIABILITY_CERTIFICATION.md` — certification report
+- `scripts/lib/worker_state_manager.py` — WorkerStateManager (schema v9)
+- `scripts/lib/runtime_supervisor.py` — RuntimeSupervisor with 9 anomaly types
+- `schemas/runtime_coordination_v9.sql` — worker_states table
+
+### Feature 13 completed: Coding Operator Dashboard And Session Control
+
+Merged: PRs #68–#72, 2026-04-01 20:05–20:44 UTC
+
+Material changes:
+- dashboard read-model contract with 5 operator surfaces and forbidden-path enforcement
+- FreshnessEnvelope on every view response with staleness tracking
+- 6 safe operator actions (start/stop/attach/refresh/reconcile/inspect) with structured ActionOutcome
+- Next.js operator section with terminal status, project cards, aggregate open items
+- cross-project open-item visibility with attention model
+- degraded-state banner that is unmissable (never silent)
+
+Artifacts:
+- `docs/core/140_DASHBOARD_READ_MODEL_CONTRACT.md` — read-model contract
+- `docs/core/141_DASHBOARD_CERTIFICATION.md` — certification report
+- `scripts/lib/dashboard_read_model.py` — 5 read-model views
+- `scripts/lib/dashboard_actions.py` — 6 safe actions
+- `dashboard/serve_dashboard.py` — 12 operator API routes
+- `dashboard/token-dashboard/app/operator/` — operator UI pages
+- `dashboard/token-dashboard/components/operator/` — operator UI components
+
+### Headless review gate correction
+
+During Feature 12/13 execution, headless review gates were not executed:
+- PR #64: gates requested but execution failed (gate_runner.py absent at branch-cut time; became available after origin/main merge but T0 did not retry)
+- PRs #65–#72: gates were never requested (T0 orchestration flow failure)
+
+Root cause: dual — infrastructure gap at branch creation + T0 flow allowed request-without-execute
+
+Correction applied:
+- Codex default changed from disabled to enabled (`VNX_CODEX_HEADLESS_ENABLED` default "1")
+- `request-and-execute` atomic CLI command added to review_gate_manager.py
+- `t0_gate_enforcement.sh` wrapper created for T0 use
+- stall thresholds increased (Gemini 180s, Codex 300s) for agentic CLI behavior
+- retroactive Gemini gate completed for PR #64 (contract_hash: e22f5af309c9b65e)
+- retroactive Codex execution in progress
+
+### Carry-forward open items from Feature 12/13
+
+All warn severity (no blockers):
+- OI-314: `worker_state_manager.py:transition` — 3 lines over threshold
+- OI-370: `runtime_supervisor.py:_check_terminal` — 3 lines over threshold
+- OI-371: `dashboard_read_model.py:get_aggregate` — 14 lines over threshold
+- OI-372: `dashboard_read_model.py:get_items` — 1 line over threshold
+- OI-373: `dashboard_actions.py:start_session` — 36 lines over threshold (highest priority refactor)
+- OI-374: `serve_dashboard.py` — 415 lines over file threshold (pre-existing, needs route decomposition)
+
+### Recommended next execution order
+
+1. Feature 14: multi-feature autonomy hardening
+2. Feature 15: intelligence, context injection, and handover quality
+3. Feature 16: runtime adapter formalization / early headless transport abstraction
+
+Prerequisite for Feature 14: live smoke test proving both Gemini and Codex gates execute end-to-end.
+
+### Planning stack formalized
+
+- internal Agent OS document stack established:
+  - strategy
+  - guardrails
+  - autonomous coding roadmap
+- strategy docs were moved into internal, gitignored locations under `docs/internal/`
+- roadmap sequencing was tightened around:
+  - coding-first wedge
+  - early runtime abstraction discipline
+  - explicit current-state vs target-state framing
+
+### Feature plans added
+
+- Feature 12 plan added:
+  - [FEATURE_PLAN_AUTONOMOUS_RUNTIME_STATE_MACHINE_AND_STALL_SUPERVISION.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_AUTONOMOUS_RUNTIME_STATE_MACHINE_AND_STALL_SUPERVISION.md)
+- Feature 13 plan added:
+  - [FEATURE_PLAN_CODING_OPERATOR_DASHBOARD_AND_SESSION_CONTROL.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_CODING_OPERATOR_DASHBOARD_AND_SESSION_CONTROL.md)
+- Feature 14 plan added:
+  - [FEATURE_PLAN_MULTI_FEATURE_AUTONOMY_HARDENING_AND_CHAIN_RECOVERY.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_MULTI_FEATURE_AUTONOMY_HARDENING_AND_CHAIN_RECOVERY.md)
+- Feature 15 plan added:
+  - [FEATURE_PLAN_CONTEXT_INJECTION_AND_HANDOVER_QUALITY.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_CONTEXT_INJECTION_AND_HANDOVER_QUALITY.md)
+- Feature 16 plan added:
+  - [FEATURE_PLAN_RUNTIME_ADAPTER_FORMALIZATION_AND_HEADLESS_TRANSPORT_ABSTRACTION.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_RUNTIME_ADAPTER_FORMALIZATION_AND_HEADLESS_TRANSPORT_ABSTRACTION.md)
+- Feature 17 plan added:
+  - [FEATURE_PLAN_RICH_HEADLESS_RUNTIME_SESSIONS_AND_STRUCTURED_OBSERVABILITY.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_RICH_HEADLESS_RUNTIME_SESSIONS_AND_STRUCTURED_OBSERVABILITY.md)
+- Feature 18 plan added:
+  - [FEATURE_PLAN_LEARNING_LOOP_SIGNAL_ENRICHMENT_AND_GOVERNANCE_FEEDBACK_HARDENING.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_LEARNING_LOOP_SIGNAL_ENRICHMENT_AND_GOVERNANCE_FEEDBACK_HARDENING.md)
+- Feature 19 plan added:
+  - [FEATURE_PLAN_CODING_SUBSTRATE_GENERALIZATION_AND_AGENT_OS_LIFT_IN.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_CODING_SUBSTRATE_GENERALIZATION_AND_AGENT_OS_LIFT_IN.md)
+
+### Program-management rule introduced
+
+- this internal changelog and the internal project status doc must be updated at the end of every future feature
+- the update must happen inside the feature’s certification/final PR, not as an afterthought
+- future feature plans must include this requirement explicitly in:
+  - scope
+  - deliverables
+  - quality gates
+
+### Recommended next execution order
+
+1. Feature 12: runtime state machine and stall supervision
+2. Feature 13: coding operator dashboard and session control
+3. Feature 14: multi-feature autonomy hardening
+4. Feature 15: context injection and handover quality
+5. Feature 16: runtime adapter formalization / early headless transport abstraction
+6. Feature 17: rich headless runtime sessions and structured observability
+7. Feature 18: learning-loop signal enrichment and governance feedback hardening
+8. Feature 19: coding substrate generalization and Agent OS lift-in
+
+---
+
+## 2026-04-01
+
+### Baseline planning direction sharpened
+
+- Agent OS strategy reframed around:
+  - stateful orchestration
+  - continuity
+  - managers plus bounded workers
+  - governance profiles
+- coding remained the first practical wedge
+- dashboard and runtime work were explicitly placed after runtime-truth hardening, not before it
+
+### Internal status discipline clarified
+
+- internal planning docs were treated as the overkoepelende internal source for:
+  - what comes next
+  - why it comes next
+  - which feature-plan families follow from the roadmap
+
+---
+
+## Maintenance Rule
+
+At the end of every completed future feature, the responsible certification terminal must update:
+
+- [CHANGELOG.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/CHANGELOG.md)
+- [PROJECT_STATUS.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/PROJECT_STATUS.md)
+
+Minimum required update content:
+
+- what the feature materially changed
+- what new capability is now proven
+- what open items or residual risks remain
+- what the next recommended feature order is after completion
