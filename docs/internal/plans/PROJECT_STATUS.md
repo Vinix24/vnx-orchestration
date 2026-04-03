@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12, 13, 14, 15, 16, 17, and 18 are complete. Feature 18 merged on `main` branch, 2026-04-03.
+Features 12, 13, 14, 15, 16, 17, 18, and 19 are complete. Feature 19 merged on `feature/orchestration-substrate-extraction` branch, 2026-04-03.
 
 The internal baseline is now:
 
@@ -20,9 +20,10 @@ The internal baseline is now:
 - runtime adapter boundary is explicit: TmuxAdapter formalized, HeadlessAdapter skeleton operational, RuntimeFacade routes all calls (Feature 16)
 - headless runtime sessions are first-class: LocalSessionAdapter with lifecycle, structured event stream, and provider-aware observability (Feature 17)
 - governance feedback loop enriches recurring failures into reusable signals with evidence-linked retrospective digests and advisory-only recommendations (Feature 18)
-- all seven features certified with 1320+ tests, zero blocker open items
+- coding-first substrate generalized into reusable Agent OS layer with capability profiles, domain readiness surfaces, and planning scaffolding guardrails (Feature 19)
+- all eight features certified with 1470+ tests, zero blocker open items
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: coding substrate generalization (Feature 19) continuing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
+- next emphasis: business-light governance pilot (Feature 20) continuing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
 
 ---
 
