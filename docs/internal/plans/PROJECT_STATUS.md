@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12 through 20 are complete. Feature 20 merged on `main` branch, 2026-04-03.
+Features 12 through 21 are complete. Feature 21 merged on `main` branch, 2026-04-03.
 
 The internal baseline is now:
 
@@ -22,9 +22,10 @@ The internal baseline is now:
 - governance feedback loop enriches recurring failures into reusable signals with evidence-linked retrospective digests and advisory-only recommendations (Feature 18)
 - coding-first substrate generalized into reusable Agent OS layer with capability profiles, domain readiness surfaces, and planning scaffolding guardrails (Feature 19)
 - business-light governance pilot: folder-scoped orchestration, review-by-exception, profile selector with coding_strict authority protection (Feature 20)
-- all nine features certified with 1720+ tests, zero blocker open items
+- regulated-strict governance: explicit approval workflow, audit bundles with completeness gating, strict closure semantics (Feature 21)
+- all ten features certified with 1990+ tests, zero blocker open items
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: regulated-strict governance profile (Feature 21) continuing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
+- next emphasis: preferences and lessons surface generalization (Feature 22) completing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
 
 ---
 
