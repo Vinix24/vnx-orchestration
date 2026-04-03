@@ -475,6 +475,7 @@ class TestStateMachineTransitions:
 
     def test_pending_approval_to_approved(self) -> None:
         state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
         state.transition_to(ApprovalState.APPROVED)
         assert state.state == ApprovalState.APPROVED
 
@@ -485,12 +486,14 @@ class TestStateMachineTransitions:
 
     def test_approved_to_executing(self) -> None:
         state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
         state.transition_to(ApprovalState.APPROVED)
         state.transition_to(ApprovalState.EXECUTING)
         assert state.state == ApprovalState.EXECUTING
 
     def test_executing_to_pending_review(self) -> None:
         state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
         state.transition_to(ApprovalState.APPROVED)
         state.transition_to(ApprovalState.EXECUTING)
         state.transition_to(ApprovalState.PENDING_REVIEW)
@@ -525,6 +528,7 @@ class TestStateMachineTransitions:
 
     def test_invalid_transition_approved_to_closed(self) -> None:
         state = DispatchApprovalState(dispatch_id="d-001")
+        state.add_pre_approval(_make_pre_approval())
         state.transition_to(ApprovalState.APPROVED)
         with pytest.raises(InvalidStateTransitionError):
             state.transition_to(ApprovalState.CLOSED)
