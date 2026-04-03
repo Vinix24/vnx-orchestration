@@ -45,6 +45,8 @@ class DualStackHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+_SERVER_START_TIME = datetime.now(timezone.utc)
+
 VNX_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = VNX_DIR.parents[1]
 SCRIPTS_DIR = VNX_DIR / "scripts"
@@ -321,40 +323,9 @@ def _get_db() -> sqlite3.Connection | None:
     return conn
 
 
-def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
-    conn = _get_db()
-    if conn is None:
-        return []
-
-    date_from = (params.get("from") or [None])[0]
-    date_to = (params.get("to") or [None])[0]
-    group = (params.get("group") or ["day"])[0]
-    terminal = (params.get("terminal") or [None])[0]
-    model = (params.get("model") or [None])[0]
-
-    if group not in _GROUP_SQL:
-        group = "day"
-
-    group_expr = _GROUP_SQL[group]
-    today = datetime.now().strftime("%Y-%m-%d")
-    if not date_from:
-        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    if not date_to:
-        date_to = today
-
-    conditions = ["session_date >= ?", "session_date <= ?"]
-    bind = [date_from, date_to]
-
-    if terminal:
-        conditions.append("terminal = ?")
-        bind.append(terminal)
-    if model:
-        conditions.append("session_model = ?")
-        bind.append(model)
-
-    where = " AND ".join(conditions)
-
-    sql = f"""
+def _token_stats_sql(group_expr: str, where: str) -> str:
+    """Return the session_analytics aggregation SQL for the given group/where."""
+    return f"""
         SELECT
             {group_expr} AS period,
             terminal,
@@ -389,6 +360,38 @@ def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
         ORDER BY period DESC, terminal
     """
 
+
+def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
+    conn = _get_db()
+    if conn is None:
+        return []
+
+    date_from = (params.get("from") or [None])[0]
+    date_to = (params.get("to") or [None])[0]
+    group = (params.get("group") or ["day"])[0]
+    terminal = (params.get("terminal") or [None])[0]
+    model = (params.get("model") or [None])[0]
+
+    if group not in _GROUP_SQL:
+        group = "day"
+
+    group_expr = _GROUP_SQL[group]
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not date_from:
+        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    if not date_to:
+        date_to = today
+
+    conditions = ["session_date >= ?", "session_date <= ?"]
+    bind = [date_from, date_to]
+    if terminal:
+        conditions.append("terminal = ?")
+        bind.append(terminal)
+    if model:
+        conditions.append("session_model = ?")
+        bind.append(model)
+
+    sql = _token_stats_sql(_GROUP_SQL[group], " AND ".join(conditions))
     try:
         rows = conn.execute(sql, bind).fetchall()
         result = [dict(r) for r in rows]
@@ -977,6 +980,39 @@ def _operator_post_action(action: str, body: dict) -> tuple[dict, int]:
     return result, status_code
 
 
+# ---------- Health endpoint ----------
+
+def _api_health() -> dict:
+    """GET /api/health — server status, uptime, and data source availability."""
+    now = datetime.now(timezone.utc)
+    uptime_seconds = round((now - _SERVER_START_TIME).total_seconds(), 1)
+
+    sources = {
+        "receipts":    RECEIPTS_PATH.exists(),
+        "dispatches":  DISPATCHES_DIR.exists(),
+        "reports":     REPORTS_DIR.exists(),
+        "state_dir":   CANONICAL_STATE_DIR.exists(),
+        "quality_db":  DB_PATH.exists(),
+    }
+
+    return {
+        "status": "ok",
+        "uptime_seconds": uptime_seconds,
+        "server_start": _SERVER_START_TIME.isoformat(),
+        "queried_at": now.isoformat(),
+        "data_sources": {name: "available" if ok else "unavailable" for name, ok in sources.items()},
+        "all_sources_available": all(sources.values()),
+    }
+
+
+def _operator_get_kanban() -> dict:
+    """GET /api/operator/kanban — dispatch cards grouped by Kanban stage."""
+    try:
+        return _scan_dispatches()
+    except Exception as exc:
+        return {"stages": {}, "total": 0, "degraded": True, "degraded_reasons": [str(exc)]}
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
@@ -997,6 +1033,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
         params = parse_qs(parsed.query)
+
+        if path == "/api/health":
+            _json_response(self, HTTPStatus.OK, _api_health())
+            return
 
         if path == "/api/events":
             try:
@@ -1059,6 +1099,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/open-items":
             _json_response(self, HTTPStatus.OK, _operator_get_open_items(params))
+            return
+
+        if path == "/api/operator/kanban":
+            _json_response(self, HTTPStatus.OK, _operator_get_kanban())
+            return
+
+        # Return JSON 404 for unrecognised /api/* paths so callers get
+        # structured errors instead of HTML from static file serving.
+        if path.startswith("/api/"):
+            _json_response(
+                self,
+                HTTPStatus.NOT_FOUND,
+                {"error": "not_found", "path": path},
+            )
             return
 
         # Fall through to static file serving
