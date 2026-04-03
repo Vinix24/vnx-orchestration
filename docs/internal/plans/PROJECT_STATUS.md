@@ -24,10 +24,11 @@ The internal baseline is now:
 - business-light governance pilot: folder-scoped orchestration, review-by-exception, profile selector with coding_strict authority protection (Feature 20)
 - regulated-strict governance: explicit approval workflow, audit bundles with completeness gating, strict closure semantics (Feature 21)
 - preferences/lessons surface: scoped store with profile isolation, injection at P6, conflict detection with audit trail (Feature 22)
-- all eleven features certified with 2225+ tests, zero blocker open items
+- dashboard kanban board with 5-column dispatch lifecycle view, health endpoint, and error/degraded rendering (Feature 23)
+- all twelve features certified with 2390+ tests, zero blocker open items
 - five-feature chain pilot (Features 18-22) complete
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: chain pilot post-mortem and next roadmap phase planning
+- next emphasis: next roadmap phase planning post-Feature-23
 
 ---
 
