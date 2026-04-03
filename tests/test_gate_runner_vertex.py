@@ -505,3 +505,125 @@ class TestVertexRoutingInRun:
         assert result["status"] == "not_executable"
         assert result["reason"] == "provider_not_installed"
         mock_urlopen.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests for _build_gemini_prompt enrichment with inline file contents
+# ---------------------------------------------------------------------------
+
+
+class TestBuildGeminiPromptEnrichment:
+    """_build_gemini_prompt must inline file contents for Vertex AI routing."""
+
+    def test_prompt_contains_file_content_when_files_exist(self, tmp_path):
+        """Prompt includes inline content from each changed file."""
+        file_a = tmp_path / "module_a.py"
+        file_a.write_text("def hello():\n    return 'world'\n")
+        file_b = tmp_path / "module_b.py"
+        file_b.write_text("class Foo:\n    pass\n")
+
+        payload = {
+            "changed_files": [str(file_a), str(file_b)],
+            "branch": "fix/something",
+            "risk_class": "medium",
+            "pr_number": 42,
+        }
+        prompt = GateRunner._build_gemini_prompt(payload)
+
+        assert "def hello():" in prompt
+        assert "class Foo:" in prompt
+        assert f"--- FILE: {file_a}" in prompt
+        assert f"--- FILE: {file_b}" in prompt
+
+    def test_prompt_contains_json_response_format(self, tmp_path):
+        """Prompt must include structured JSON response instructions."""
+        f = tmp_path / "a.py"
+        f.write_text("x = 1\n")
+        payload = {
+            "changed_files": [str(f)],
+            "branch": "main",
+            "risk_class": "low",
+            "pr_number": 1,
+        }
+        prompt = GateRunner._build_gemini_prompt(payload)
+
+        assert '"verdict"' in prompt
+        assert '"findings"' in prompt
+        assert "pass|fail|blocked" in prompt
+
+    def test_prompt_skips_missing_files(self, tmp_path):
+        """Files that do not exist on disk are skipped silently."""
+        real = tmp_path / "real.py"
+        real.write_text("y = 2\n")
+        payload = {
+            "changed_files": ["/nonexistent/missing.py", str(real)],
+            "branch": "test",
+            "risk_class": "medium",
+            "pr_number": 0,
+        }
+        prompt = GateRunner._build_gemini_prompt(payload)
+
+        assert "y = 2" in prompt
+        # Missing file must not appear as an inlined section
+        assert "--- FILE: /nonexistent/missing.py" not in prompt
+
+    def test_prompt_respects_max_bytes_env_var(self, tmp_path, monkeypatch):
+        """File content is capped at VNX_GEMINI_MAX_PROMPT_BYTES bytes total."""
+        file_a = tmp_path / "big_a.py"
+        file_a.write_text("A" * 500)
+        file_b = tmp_path / "big_b.py"
+        file_b.write_text("B" * 500)
+
+        payload = {
+            "changed_files": [str(file_a), str(file_b)],
+            "branch": "test",
+            "risk_class": "high",
+            "pr_number": 99,
+        }
+        monkeypatch.setenv("VNX_GEMINI_MAX_PROMPT_BYTES", "300")
+        prompt = GateRunner._build_gemini_prompt(payload)
+
+        # Total bytes from file sections must not exceed 300 + small overhead
+        file_sections = prompt.split("--- FILE:")[1:]
+        total_bytes = sum(len(s.encode("utf-8")) for s in file_sections)
+        assert total_bytes <= 500, "file content should be bounded by max bytes cap"
+
+    def test_prompt_discovers_files_via_git_when_changed_files_empty(self, tmp_path, monkeypatch):
+        """When changed_files is empty, git diff --name-only is used to discover files."""
+        discovered = tmp_path / "discovered.py"
+        discovered.write_text("z = 3\n")
+
+        payload = {
+            "changed_files": [],
+            "branch": "test",
+            "risk_class": "medium",
+            "pr_number": 5,
+        }
+
+        mock_result = MagicMock()
+        mock_result.stdout = str(discovered) + "\n"
+
+        with patch("gate_runner.subprocess.run", return_value=mock_result) as mock_run:
+            prompt = GateRunner._build_gemini_prompt(payload)
+
+        # git diff --name-only must have been called
+        mock_run.assert_called_once()
+        cmd_args = mock_run.call_args[0][0]
+        assert "git" in cmd_args
+        assert "diff" in cmd_args
+        assert "--name-only" in cmd_args
+
+        assert "z = 3" in prompt
+
+    def test_prompt_graceful_when_git_fails(self, monkeypatch):
+        """When git diff raises, prompt still contains review instructions."""
+        payload = {
+            "changed_files": [],
+            "branch": "test",
+            "risk_class": "low",
+            "pr_number": 0,
+        }
+        with patch("gate_runner.subprocess.run", side_effect=OSError("git not found")):
+            prompt = GateRunner._build_gemini_prompt(payload)
+
+        assert "verdict" in prompt
