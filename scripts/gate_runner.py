@@ -56,6 +56,15 @@ class GateRunner:
         self._requests_dir = state_dir / "review_gates" / "requests"
         self._results_dir = state_dir / "review_gates" / "results"
 
+    # ---------------------------------------------------------------------------
+    # Env var constants (read lazily via os.environ.get at call sites)
+    # VNX_GEMINI_ROUTING  — "oauth" (default) or "vertex"
+    # VNX_VERTEX_PROJECT  — GCP project ID; fetched via gcloud when empty
+    # VNX_VERTEX_REGION   — default "us-central1"
+    # VNX_VERTEX_MODEL    — default "gemini-2.5-pro"
+    # VNX_CODEX_HEADLESS_ENABLED — "0" (default) or "1"
+    # ---------------------------------------------------------------------------
+
     def run(
         self,
         *,
@@ -72,13 +81,18 @@ class GateRunner:
         stall_threshold = gate_stall_threshold(gate)
         binary = GATE_BINARIES.get(gate)
 
-        if not binary or shutil.which(binary) is None:
-            return self._record_not_executable(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                reason="provider_not_installed",
-                reason_detail=f"{binary or gate} binary not found in PATH",
-                request_payload=request_payload,
-            )
+        # Vertex AI routing bypasses binary check for gemini_review gate
+        routing = os.environ.get("VNX_GEMINI_ROUTING", "oauth")
+        using_vertex = gate == "gemini_review" and routing == "vertex"
+
+        if not using_vertex:
+            if not binary or shutil.which(binary) is None:
+                return self._record_not_executable(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    reason="provider_not_installed",
+                    reason_detail=f"{binary or gate} binary not found in PATH",
+                    request_payload=request_payload,
+                )
 
         prompt = request_payload.get("prompt", "")
         if not prompt and gate == "gemini_review":
@@ -97,6 +111,33 @@ class GateRunner:
         request_payload["started_at"] = started_at
         request_payload["runner_pid"] = pid
         self._persist_request(gate, request_payload, pr_number=pr_number, pr_id=pr_id)
+
+        if using_vertex:
+            # Vertex AI REST path — call API directly and feed output into
+            # the same artifact materialization pipeline as the CLI path.
+            import time as _time
+            _start = _time.monotonic()
+            try:
+                raw_text = self._run_vertex_ai(prompt)
+            except Exception as exc:
+                duration = _time.monotonic() - _start
+                return self._record_failure(
+                    gate=gate, pr_number=pr_number, pr_id=pr_id,
+                    result={
+                        "reason": "vertex_api_error",
+                        "reason_detail": str(exc),
+                        "duration_seconds": duration,
+                        "partial_output_lines": 0,
+                        "runner_pid": pid,
+                    },
+                    request_payload=request_payload,
+                )
+            duration = _time.monotonic() - _start
+            return self._materialize_artifacts(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                stdout=raw_text, request_payload=request_payload,
+                duration_seconds=duration,
+            )
 
         # Run subprocess with stall detection (GATE-6/7/8)
         result = self._run_with_stall_detection(
@@ -120,6 +161,57 @@ class GateRunner:
             stdout=result["stdout"], request_payload=request_payload,
             duration_seconds=result["duration_seconds"],
         )
+
+    def _run_vertex_ai(self, prompt: str) -> str:
+        """Call Vertex AI REST API using gcloud token. Returns raw text response."""
+        import json as _json
+        import urllib.request
+
+        # Get project (lazy fallback to gcloud)
+        project = os.environ.get("VNX_VERTEX_PROJECT", "").strip()
+        if not project:
+            result = subprocess.run(
+                ["gcloud", "config", "get-value", "project"],
+                capture_output=True, text=True, timeout=10
+            )
+            project = result.stdout.strip()
+            if not project:
+                raise RuntimeError("VNX_VERTEX_PROJECT not set and gcloud has no default project")
+
+        region = os.environ.get("VNX_VERTEX_REGION", "us-central1")
+        model = os.environ.get("VNX_VERTEX_MODEL", "gemini-2.5-pro")
+
+        # Get access token
+        token_result = subprocess.run(
+            ["gcloud", "auth", "print-access-token"],
+            capture_output=True, text=True, timeout=10
+        )
+        token = token_result.stdout.strip()
+        if not token:
+            raise RuntimeError("Failed to get gcloud access token")
+
+        url = (
+            f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
+            f"/locations/{region}/publishers/google/models/{model}:generateContent"
+        )
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 8192},
+        }
+        data = _json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            response_data = _json.loads(resp.read().decode("utf-8"))
+
+        return response_data["candidates"][0]["content"]["parts"][0]["text"]
 
     def _run_with_stall_detection(
         self,
