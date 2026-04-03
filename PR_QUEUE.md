@@ -1,4 +1,4 @@
-# PR Queue - Feature: Runtime Adapter Formalization And Headless Transport Abstraction
+# PR Queue - Feature: Rich Headless Runtime Sessions And Structured Observability
 
 ## Progress Overview
 Total: 5 PRs | Complete: 5 | Active: 0 | Queued: 0 | Blocked: 0
@@ -12,11 +12,11 @@ Review-Stack: gemini_review,codex_gate,claude_github_optional
 ## Status
 
 ### ✅ Completed PRs
-- PR-0: Runtime Adapter Contract And Capability Matrix
-- PR-1: TmuxAdapter Extraction And Direct-Coupling Freeze
-- PR-2: Runtime Launch And Observation Facade
-- PR-3: Early Headless Transport Abstraction And Capability Gating
-- PR-4: Runtime Adapter Certification And Transition Guardrails
+- PR-0: Headless Runtime Session Contract And Observability Schema
+- PR-1: LocalSessionAdapter Lifecycle And Attempt Tracking
+- PR-2: Structured Headless Event Stream And Artifact Correlation
+- PR-3: Provider-Aware Tool Visibility And Progress Projections
+- PR-4: Rich Headless Runtime Certification
 
 ## Dependency Flow
 ```

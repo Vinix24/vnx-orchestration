@@ -21,7 +21,7 @@ The internal baseline is now:
 - headless runtime sessions are first-class: LocalSessionAdapter with lifecycle, structured event stream, and provider-aware observability (Feature 17)
 - all six features certified with 1080+ tests, zero blocker open items
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: learning-loop signal enrichment and governance feedback hardening
+- next emphasis: secured five-feature chain pilot (Features 18–22) with checkpoints and post-run analysis; Gemini gates disabled for this pilot due to rate limits, Codex required
 
 ---
 
@@ -130,6 +130,10 @@ Added detailed execution plans:
 - [FEATURE_PLAN_RICH_HEADLESS_RUNTIME_SESSIONS_AND_STRUCTURED_OBSERVABILITY.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_RICH_HEADLESS_RUNTIME_SESSIONS_AND_STRUCTURED_OBSERVABILITY.md)
 - [FEATURE_PLAN_LEARNING_LOOP_SIGNAL_ENRICHMENT_AND_GOVERNANCE_FEEDBACK_HARDENING.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_LEARNING_LOOP_SIGNAL_ENRICHMENT_AND_GOVERNANCE_FEEDBACK_HARDENING.md)
 - [FEATURE_PLAN_CODING_SUBSTRATE_GENERALIZATION_AND_AGENT_OS_LIFT_IN.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_CODING_SUBSTRATE_GENERALIZATION_AND_AGENT_OS_LIFT_IN.md)
+- [FEATURE_PLAN_BUSINESS_LIGHT_GOVERNANCE_PILOT_AND_FOLDER_SCOPED_ORCHESTRATION.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_BUSINESS_LIGHT_GOVERNANCE_PILOT_AND_FOLDER_SCOPED_ORCHESTRATION.md)
+- [FEATURE_PLAN_REGULATED_STRICT_GOVERNANCE_PROFILE_AND_AUDIT_BUNDLE.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_REGULATED_STRICT_GOVERNANCE_PROFILE_AND_AUDIT_BUNDLE.md)
+- [FEATURE_PLAN_PREFERENCES_AND_LESSONS_SURFACE_GENERALIZATION.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/FEATURE_PLAN_PREFERENCES_AND_LESSONS_SURFACE_GENERALIZATION.md)
+- [CHAIN_PILOT_FEATURES_18_22.md](/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/docs/internal/plans/CHAIN_PILOT_FEATURES_18_22.md)
 
 ---
 
@@ -197,6 +201,9 @@ Features 12, 13, 14, 15, and 16 are complete. Default order from this point:
 6. ~~Feature 17: rich headless runtime sessions and structured observability~~ — **COMPLETE**
 7. Feature 18: learning-loop signal enrichment and governance feedback hardening
 8. Feature 19: coding substrate generalization and Agent OS lift-in
+9. Feature 20: business-light governance pilot and folder-scoped orchestration
+10. Feature 21: regulated-strict governance profile and audit bundle
+11. Feature 22: preferences and lessons surface generalization
 
 Prerequisite for Feature 18: Feature 17 merged with green CI and both review gates passing.
 
