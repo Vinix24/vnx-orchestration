@@ -1,13 +1,116 @@
 # Internal Plans Changelog
 
 **Status**: Active (Internal)
-**Last Updated**: 2026-04-03
+**Last Updated**: 2026-04-04
 **Owner**: T0 / Planning
 **Purpose**: Running changelog for the internal autonomous-coding program, tracking planning milestones, execution-progress milestones, and the ordered next steps expected from future feature completion.
 
 ---
 
+## 2026-04-04
+
+### Feature 25 completed: Governance Digest Pipeline And Dashboard Surface
+
+Merged: PRs on `feat/pr2-digest-api-endpoint-and-signal` branch, 2026-04-04
+
+Material changes:
+- governance digest pipeline contract (D-1..D-5 invariants) defining 5-min daemon cadence, digest JSON schema, freshness tracking, advisory-only enforcement
+- GovernanceDigestRunner in intelligence_daemon.py: reads gate results and queue anomalies from t0_receipts.ndjson, delegates to F18 extractors (collect_governance_signals + build_digest), writes governance_digest.json atomically
+- SignalStore: append-only NDJSON store with thread-safe writes, atomic append, from_env factory
+- GET /api/operator/governance-digest: freshness envelope with staleness tracking, degraded state detection (missing/stale file)
+- governance dashboard page (S7): KPI strip, recurrence table with severity badges, recommendation cards with advisory-only badge, signal volume chart (recharts)
+- TypeScript types: GovernanceDigestEnvelope, DigestRecurrenceRecord, DigestRecommendation, GovernanceDigestData
+- SWR hook (useGovernanceDigest) with 60s refresh interval
+- 48 certification tests + 91 Python component tests + 39 JS component tests = 178 Feature 25 tests
+
+Artifacts:
+- `docs/GOVERNANCE_DIGEST_PIPELINE_CONTRACT.md` — digest pipeline contract (v1)
+- `scripts/intelligence_daemon.py` — GovernanceDigestRunner (extended)
+- `scripts/lib/signal_store.py` — NDJSON signal store (91 lines)
+- `dashboard/serve_dashboard.py` — governance-digest API endpoint (extended)
+- `dashboard/token-dashboard/app/operator/governance/page.tsx` — governance page (822 lines)
+- `dashboard/token-dashboard/lib/types.ts` — TypeScript types (extended)
+- `tests/test_governance_digest_certification.py` — 48 certification tests
+
 ## 2026-04-03
+
+### Feature 22 completed: Preferences And Lessons Surface Generalization
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- preferences/lessons contract defining entity model (preferences + lessons), scoping (profile/domain), cross-profile isolation (PL-1..PL-5), authority boundaries (PA-1..PA-5), and 90-day retirement
+- preference store with immutable PreferenceEntry, ScopeKey-based query, profile validation, scope contamination guard
+- preference injector with profile-scoped dispatch injection, bounded context, InjectionContext frozen dataclass
+- preference surface with ProfileSurface snapshot, active/retired counting, format_surface_line operator view
+- lesson conflict detection and resolution with ConflictPair, ResolutionKind (ACCEPT/DEFER/RETIRE), append-only ResolutionLog audit trail
+- 20 certification tests + 215 component tests = 235 Feature 22 tests
+
+Artifacts:
+- `docs/PREFERENCES_LESSONS_CONTRACT.md` — preferences/lessons contract (v1)
+- `scripts/lib/preference_store.py` — scoped preference/lesson store (359 lines)
+- `scripts/lib/preference_injector.py` — profile-scoped injection (216 lines)
+- `scripts/lib/preference_surface.py` — operator dashboard surface (196 lines)
+- `scripts/lib/lesson_conflict.py` — conflict detection and resolution (406 lines)
+- `tests/test_preferences_lessons_certification.py` — 20 certification tests
+
+### Feature 24 completed: Per-Project Open Items And Gate Toggle
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- open items and gate toggle contract with project switcher UX, gate toggle API, safe-action A7
+- gate config endpoints: GET /api/operator/gate/config, POST /api/operator/gate/toggle with YAML persistence
+- open items page with project dropdown and severity filter chips
+- gate toggle switches on project cards
+- 10 certification tests + 40 component tests = 50 Feature 24 tests
+
+---
+
+### Feature 23 completed: Dashboard Data Pipeline Fix And Kanban Board
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- dashboard kanban contract with S6 surface (5 columns), dispatch-to-stage mapping, health endpoint, error/degraded rendering
+- health endpoint GET /api/health with 5 data source checks, uptime tracking, all_sources_available flag
+- kanban dispatch scanning with directory-to-stage mapping, bundle parsing, receipt promotion
+- kanban board frontend (Next.js): 5-column view with track colors, duration display, card details
+- 15 certification tests + 153 component tests = 168 Feature 23 tests
+
+Artifacts:
+- `docs/DASHBOARD_KANBAN_CONTRACT.md` — kanban contract (v1)
+- `dashboard/serve_dashboard.py` — health + kanban endpoints
+- `dashboard/token-dashboard/app/operator/kanban/page.tsx` — kanban board component
+- `tests/test_dashboard_kanban_certification.py` — 15 certification tests
+
+---
+
+### Chain pilot Features 18-22 complete
+
+This closes the five-feature chain pilot (Features 18-22). All features certified with 2225+ tests. See `CHAIN_PILOT_18_22_REPORT.md` for full pilot analysis.
+
+---
+
+### Feature 21 completed: Regulated-Strict Governance Profile And Audit Bundle
+
+Merged: PRs on `main` branch, 2026-04-03
+
+Material changes:
+- regulated-strict governance contract with explicit approval workflow (7-state machine), approval records with RA-1..RA-4 invariants, audit bundle with 5 evidence types and completeness gating
+- approval workflow: DispatchApprovalState tracking pre-execution and post-review approvals, EmptyRationaleError, AutomatedApprovalError enforcement
+- audit bundle builder: immutable AuditBundle and EvidenceEntry with AB-1..AB-5 invariants, dispatch_id cross-dispatch isolation guards, MappingProxyType payload protection
+- regulated-strict dashboard: RegulatedStrictStatus frozen snapshot, profile-locked invariant, format_status_line operator surface
+- 21 certification tests + 255 component tests = 276 Feature 21 tests
+
+Artifacts:
+- `docs/REGULATED_STRICT_GOVERNANCE_CONTRACT.md` — regulated-strict contract (v1)
+- `scripts/lib/regulated_strict_approval.py` — approval workflow (612 lines)
+- `scripts/lib/audit_bundle.py` — audit bundle builder (479 lines)
+- `scripts/lib/regulated_strict_dashboard.py` — dashboard surface (227 lines)
+- `tests/test_regulated_strict_certification.py` — 21 certification tests
+
+---
 
 ### Feature 20 completed: Business-Light Governance Pilot And Folder-Scoped Orchestration
 

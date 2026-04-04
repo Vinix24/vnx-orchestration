@@ -507,6 +507,7 @@ class TestVertexRoutingInRun:
         mock_urlopen.assert_not_called()
 
 
+
 # ---------------------------------------------------------------------------
 # Tests for _build_gemini_prompt enrichment with inline file contents
 # ---------------------------------------------------------------------------

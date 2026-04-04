@@ -6,11 +6,15 @@ import {
   fetchTerminals,
   fetchOpenItems,
   fetchAggregateOpenItems,
+  fetchKanban,
+  fetchGateConfig,
+  fetchGovernanceDigest,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
-  OpenItemsEnvelope, AggregateOpenItemsEnvelope,
+  OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
+  GateConfigResponse, GovernanceDigestEnvelope,
 } from './types';
 
 export function useTokenStats(
@@ -109,5 +113,31 @@ export function useAggregateOpenItems(project?: string) {
     key,
     () => fetchAggregateOpenItems(project),
     { refreshInterval: 20000, revalidateOnFocus: true, dedupingInterval: 8000 }
+  );
+}
+
+export function useKanban(project?: string) {
+  const key = project ? ['operator-kanban', project] : 'operator-kanban';
+  return useSWR<KanbanEnvelope>(
+    key,
+    () => fetchKanban(project),
+    { refreshInterval: 15000, revalidateOnFocus: true, dedupingInterval: 8000 }
+  );
+}
+
+export function useGateConfig(project?: string) {
+  const key = project ? ['operator-gate-config', project] : 'operator-gate-config';
+  return useSWR<GateConfigResponse>(
+    key,
+    () => fetchGateConfig(project),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useGovernanceDigest() {
+  return useSWR<GovernanceDigestEnvelope>(
+    'operator-governance-digest',
+    fetchGovernanceDigest,
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 15000 }
   );
 }

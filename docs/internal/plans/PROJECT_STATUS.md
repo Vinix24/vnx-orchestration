@@ -1,7 +1,7 @@
 # Internal Plans Project Status
 
 **Status**: Active (Internal)
-**Last Updated**: 2026-04-03
+**Last Updated**: 2026-04-04
 **Owner**: T0 / Planning
 **Purpose**: Internal program-level status for the autonomous coding track. This document tracks confirmed baseline capability, authored planning progress, and the recommended next feature order.
 
@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12 through 20 are complete. Feature 20 merged on `main` branch, 2026-04-03.
+Features 12 through 25 are complete. Feature 25 certified on `feat/pr2-digest-api-endpoint-and-signal` branch, 2026-04-04. Five-feature chain pilot (Features 18-22) complete. Dashboard features (23-25) complete.
 
 The internal baseline is now:
 
@@ -22,9 +22,15 @@ The internal baseline is now:
 - governance feedback loop enriches recurring failures into reusable signals with evidence-linked retrospective digests and advisory-only recommendations (Feature 18)
 - coding-first substrate generalized into reusable Agent OS layer with capability profiles, domain readiness surfaces, and planning scaffolding guardrails (Feature 19)
 - business-light governance pilot: folder-scoped orchestration, review-by-exception, profile selector with coding_strict authority protection (Feature 20)
-- all nine features certified with 1720+ tests, zero blocker open items
+- regulated-strict governance: explicit approval workflow, audit bundles with completeness gating, strict closure semantics (Feature 21)
+- preferences/lessons surface: scoped store with profile isolation, injection at P6, conflict detection with audit trail (Feature 22)
+- dashboard kanban board with 5-column dispatch lifecycle view, health endpoint, and error/degraded rendering (Feature 23)
+- per-project open items with project switcher, severity filter, and gate toggle API (Feature 24)
+- governance digest pipeline: 5-min daemon cadence, digest JSON with freshness tracking, advisory-only recommendations, S7 dashboard surface (Feature 25)
+- all fourteen features certified with 2600+ tests, zero blocker open items
+- five-feature chain pilot (Features 18-22) complete
+- dashboard features (23-25) complete: kanban, open items/gate toggle, governance digest
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
-- next emphasis: regulated-strict governance profile (Feature 21) continuing the five-feature chain pilot; Gemini gates disabled for this pilot due to rate limits, Codex required
 
 ---
 

@@ -23,11 +23,18 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+
+try:
+    import yaml as _yaml
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
 
 # Make scripts/lib importable for conversation_read_model
 _SCRIPTS_LIB = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
@@ -44,6 +51,8 @@ class DualStackHTTPServer(ThreadingHTTPServer):
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         super().server_bind()
 
+
+_SERVER_START_TIME = datetime.now(timezone.utc)
 
 VNX_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = VNX_DIR.parents[1]
@@ -92,6 +101,9 @@ DISPATCH_DIR = Path(os.environ.get("VNX_DISPATCH_DIR", str(PROJECT_ROOT / ".vnx-
 RECEIPTS_PATH = CANONICAL_STATE_DIR / "t0_receipts.ndjson"
 
 DB_PATH = CANONICAL_STATE_DIR / "quality_intelligence.db"
+
+GATE_CONFIG_PATH = VNX_DIR / "configs" / "governance_gates.yaml"
+_gate_config_lock = threading.Lock()
 
 # ---------- Events API ----------
 
@@ -321,40 +333,9 @@ def _get_db() -> sqlite3.Connection | None:
     return conn
 
 
-def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
-    conn = _get_db()
-    if conn is None:
-        return []
-
-    date_from = (params.get("from") or [None])[0]
-    date_to = (params.get("to") or [None])[0]
-    group = (params.get("group") or ["day"])[0]
-    terminal = (params.get("terminal") or [None])[0]
-    model = (params.get("model") or [None])[0]
-
-    if group not in _GROUP_SQL:
-        group = "day"
-
-    group_expr = _GROUP_SQL[group]
-    today = datetime.now().strftime("%Y-%m-%d")
-    if not date_from:
-        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    if not date_to:
-        date_to = today
-
-    conditions = ["session_date >= ?", "session_date <= ?"]
-    bind = [date_from, date_to]
-
-    if terminal:
-        conditions.append("terminal = ?")
-        bind.append(terminal)
-    if model:
-        conditions.append("session_model = ?")
-        bind.append(model)
-
-    where = " AND ".join(conditions)
-
-    sql = f"""
+def _token_stats_sql(group_expr: str, where: str) -> str:
+    """Return the session_analytics aggregation SQL for the given group/where."""
+    return f"""
         SELECT
             {group_expr} AS period,
             terminal,
@@ -389,6 +370,38 @@ def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
         ORDER BY period DESC, terminal
     """
 
+
+def _query_token_stats(params: dict[str, list[str]]) -> list[dict]:
+    conn = _get_db()
+    if conn is None:
+        return []
+
+    date_from = (params.get("from") or [None])[0]
+    date_to = (params.get("to") or [None])[0]
+    group = (params.get("group") or ["day"])[0]
+    terminal = (params.get("terminal") or [None])[0]
+    model = (params.get("model") or [None])[0]
+
+    if group not in _GROUP_SQL:
+        group = "day"
+
+    group_expr = _GROUP_SQL[group]
+    today = datetime.now().strftime("%Y-%m-%d")
+    if not date_from:
+        date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    if not date_to:
+        date_to = today
+
+    conditions = ["session_date >= ?", "session_date <= ?"]
+    bind = [date_from, date_to]
+    if terminal:
+        conditions.append("terminal = ?")
+        bind.append(terminal)
+    if model:
+        conditions.append("session_model = ?")
+        bind.append(model)
+
+    sql = _token_stats_sql(_GROUP_SQL[group], " AND ".join(conditions))
     try:
         rows = conn.execute(sql, bind).fetchall()
         result = [dict(r) for r in rows]
@@ -977,6 +990,201 @@ def _operator_post_action(action: str, body: dict) -> tuple[dict, int]:
     return result, status_code
 
 
+# ---------- Health endpoint ----------
+
+def _api_health() -> dict:
+    """GET /api/health — server status, uptime, and data source availability."""
+    now = datetime.now(timezone.utc)
+    uptime_seconds = round((now - _SERVER_START_TIME).total_seconds(), 1)
+
+    sources = {
+        "receipts":    RECEIPTS_PATH.exists(),
+        "dispatches":  DISPATCHES_DIR.exists(),
+        "reports":     REPORTS_DIR.exists(),
+        "state_dir":   CANONICAL_STATE_DIR.exists(),
+        "quality_db":  DB_PATH.exists(),
+    }
+
+    return {
+        "status": "ok",
+        "uptime_seconds": uptime_seconds,
+        "server_start": _SERVER_START_TIME.isoformat(),
+        "queried_at": now.isoformat(),
+        "data_sources": {name: "available" if ok else "unavailable" for name, ok in sources.items()},
+        "all_sources_available": all(sources.values()),
+    }
+
+
+def _operator_get_kanban() -> dict:
+    """GET /api/operator/kanban — dispatch cards grouped by Kanban stage."""
+    try:
+        return _scan_dispatches()
+    except Exception as exc:
+        return {"stages": {}, "total": 0, "degraded": True, "degraded_reasons": [str(exc)]}
+
+
+# ---------- Gate Config API ----------
+
+def _read_gate_config(path: Path | None = None) -> dict:
+    """Read governance_gates.yaml; return empty gates dict on missing/invalid file."""
+    cfg_path = path or GATE_CONFIG_PATH
+    if not _YAML_AVAILABLE:
+        return {"gates": {}}
+    if not cfg_path.exists():
+        return {"gates": {}}
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+        data = _yaml.safe_load(raw) or {}
+        if not isinstance(data.get("gates"), dict):
+            data["gates"] = {}
+        return data
+    except Exception:
+        return {"gates": {}}
+
+
+def _write_gate_config(config: dict, path: Path | None = None) -> None:
+    """Atomically write gate config YAML under a threading lock."""
+    cfg_path = path or GATE_CONFIG_PATH
+    if not _YAML_AVAILABLE:
+        raise RuntimeError("PyYAML not available — cannot persist gate config")
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cfg_path.with_suffix(".yaml.tmp")
+    tmp.write_text(
+        "# Governance gate configuration\n"
+        "# Managed by POST /api/operator/gate/toggle\n"
+        + _yaml.dump(config, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    tmp.replace(cfg_path)
+
+
+def _operator_get_gate_config(params: dict, config_path: Path | None = None) -> dict:
+    """GET /api/operator/gate/config — per-project gate enabled/disabled state."""
+    project = (params.get("project") or [None])[0]
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with _gate_config_lock:
+            data = _read_gate_config(config_path)
+        gates_root: dict = data.get("gates", {})
+        if project is not None:
+            gates = {
+                gate: entry
+                for gate, entry in gates_root.get(project, {}).items()
+            }
+        else:
+            gates = gates_root
+        return {
+            "project": project,
+            "gates": gates,
+            "queried_at": now,
+            "config_path": str(config_path or GATE_CONFIG_PATH),
+        }
+    except Exception as exc:
+        return {
+            "project": project,
+            "gates": {},
+            "queried_at": now,
+            "config_path": str(config_path or GATE_CONFIG_PATH),
+            "error": str(exc),
+        }
+
+
+def _operator_post_gate_toggle(body: dict, config_path: Path | None = None) -> tuple[dict, int]:
+    """POST /api/operator/gate/toggle — enable or disable a gate for a project."""
+    project = body.get("project", "")
+    gate = body.get("gate", "")
+    enabled = body.get("enabled")
+    now = datetime.now(timezone.utc).isoformat()
+
+    if not project or not isinstance(project, str):
+        return {"status": "failed", "message": "project is required", "timestamp": now}, 400
+    if not gate or not isinstance(gate, str):
+        return {"status": "failed", "message": "gate is required", "timestamp": now}, 400
+    if not isinstance(enabled, bool):
+        return {"status": "failed", "message": "enabled must be a boolean", "timestamp": now}, 400
+
+    if not _YAML_AVAILABLE:
+        return {"status": "failed", "message": "PyYAML not available", "timestamp": now}, 503
+
+    try:
+        with _gate_config_lock:
+            data = _read_gate_config(config_path)
+            if "gates" not in data or not isinstance(data["gates"], dict):
+                data["gates"] = {}
+            if project not in data["gates"]:
+                data["gates"][project] = {}
+            data["gates"][project][gate] = {"enabled": enabled}
+            _write_gate_config(data, config_path)
+        return {
+            "action": "gate/toggle",
+            "project": project,
+            "gate": gate,
+            "enabled": enabled,
+            "status": "success",
+            "message": f"Gate {gate!r} for project {project!r} set to {'enabled' if enabled else 'disabled'}",
+            "timestamp": now,
+        }, 200
+    except Exception as exc:
+        return {
+            "action": "gate/toggle",
+            "project": project,
+            "gate": gate,
+            "enabled": enabled,
+            "status": "failed",
+            "message": str(exc),
+            "timestamp": now,
+        }, 500
+
+
+# ---------- Governance Digest API ----------
+
+_DIGEST_STALE_THRESHOLD = 600  # seconds — digest older than 10 min is degraded
+
+
+def _operator_get_governance_digest(digest_path: Path | None = None) -> dict:
+    """GET /api/operator/governance-digest — governance digest with freshness envelope."""
+    now = datetime.now(timezone.utc)
+    path = digest_path or (CANONICAL_STATE_DIR / "governance_digest.json")
+
+    # Compute source freshness
+    mtime_iso: str | None = None
+    staleness: float | None = None
+    try:
+        mt = path.stat().st_mtime
+        mtime_iso = datetime.fromtimestamp(mt, tz=timezone.utc).isoformat()
+        ts = datetime.fromisoformat(mtime_iso)
+        staleness = (now - ts).total_seconds()
+    except (OSError, ValueError):
+        pass
+
+    # Load digest data
+    data = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    # Compute degraded state
+    degraded_reasons: list[str] = []
+    if data is None:
+        degraded_reasons.append("governance_digest.json not found or unreadable")
+    elif staleness is not None and staleness > _DIGEST_STALE_THRESHOLD:
+        degraded_reasons.append(
+            f"governance_digest.json stale ({staleness:.0f}s old, threshold {_DIGEST_STALE_THRESHOLD}s)"
+        )
+
+    return {
+        "view": "GovernanceDigestView",
+        "queried_at": now.isoformat(),
+        "source_freshness": {"governance_digest": mtime_iso},
+        "staleness_seconds": round(staleness, 1) if staleness is not None else None,
+        "degraded": bool(degraded_reasons),
+        "degraded_reasons": degraded_reasons,
+        "data": data or {},
+    }
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
@@ -997,6 +1205,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
         params = parse_qs(parsed.query)
+
+        if path == "/api/health":
+            _json_response(self, HTTPStatus.OK, _api_health())
+            return
 
         if path == "/api/events":
             try:
@@ -1061,6 +1273,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, _operator_get_open_items(params))
             return
 
+        if path == "/api/operator/kanban":
+            _json_response(self, HTTPStatus.OK, _operator_get_kanban())
+            return
+
+        if path == "/api/operator/gate/config":
+            _json_response(self, HTTPStatus.OK, _operator_get_gate_config(params))
+            return
+
+        if path == "/api/operator/governance-digest":
+            _json_response(self, HTTPStatus.OK, _operator_get_governance_digest())
+            return
+
+        # Return JSON 404 for unrecognised /api/* paths so callers get
+        # structured errors instead of HTML from static file serving.
+        if path.startswith("/api/"):
+            _json_response(
+                self,
+                HTTPStatus.NOT_FOUND,
+                {"error": "not_found", "path": path},
+            )
+            return
+
         # Fall through to static file serving
         super().do_GET()
 
@@ -1123,6 +1357,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "/api/operator/reconcile": "reconcile",
             "/api/operator/open-item/inspect": "open-item/inspect",
         }
+        if parsed_path == "/api/operator/gate/toggle":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body_bytes = self.rfile.read(length) if length else b"{}"
+            try:
+                body_data = json.loads(body_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+                return
+            result, status_int = _operator_post_gate_toggle(body_data)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
         if parsed_path in _OPERATOR_ACTIONS:
             length = int(self.headers.get("Content-Length", "0") or "0")
             body_bytes = self.rfile.read(length) if length else b"{}"

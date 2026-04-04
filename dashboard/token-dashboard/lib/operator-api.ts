@@ -5,7 +5,12 @@ import type {
   TerminalEnvelope,
   OpenItemsEnvelope,
   AggregateOpenItemsEnvelope,
+  KanbanEnvelope,
   ActionOutcome,
+  GateConfigResponse,
+  GateToggleRequest,
+  GateToggleResponse,
+  GovernanceDigestEnvelope,
 } from './types';
 
 const BASE = '/api/operator';
@@ -88,4 +93,20 @@ export function actionRunReconciliation(projectPath: string, dryRun = false): Pr
 
 export function actionInspectOpenItem(projectPath: string, itemId: string): Promise<ActionOutcome> {
   return post(`${BASE}/open-item/inspect`, { project_path: projectPath, item_id: itemId });
+}
+
+export function fetchKanban(project?: string): Promise<KanbanEnvelope> {
+  return get(`${BASE}/kanban`, project ? { project } : undefined);
+}
+
+export function fetchGateConfig(project?: string): Promise<GateConfigResponse> {
+  return get(`${BASE}/gate/config`, project ? { project } : undefined);
+}
+
+export function postGateToggle(req: GateToggleRequest): Promise<GateToggleResponse> {
+  return post(`${BASE}/gate/toggle`, req as unknown as Record<string, unknown>);
+}
+
+export function fetchGovernanceDigest(): Promise<GovernanceDigestEnvelope> {
+  return get(`${BASE}/governance-digest`);
 }

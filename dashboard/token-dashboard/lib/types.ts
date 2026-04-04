@@ -204,3 +204,111 @@ export interface ConversationsResponse {
   worktree_groups?: WorktreeGroupInfo[];
   rotation_chains?: RotationChain[];
 }
+
+// ===== Gate Config Types =====
+
+export interface GateEntry {
+  enabled: boolean;
+}
+
+export interface GateConfigResponse {
+  project: string | null;
+  gates: Record<string, Record<string, GateEntry> | GateEntry>;
+  queried_at: string;
+  config_path: string;
+  error?: string;
+}
+
+export interface GateToggleRequest {
+  project: string;
+  gate: string;
+  enabled: boolean;
+}
+
+export interface GateToggleResponse {
+  action: string;
+  project: string;
+  gate: string;
+  enabled: boolean;
+  status: 'success' | 'failed';
+  message: string;
+  timestamp: string;
+}
+
+// ===== Kanban Board Types =====
+
+export interface KanbanCard {
+  id: string;
+  pr_id: string;
+  track: string;
+  terminal: string;
+  role: string;
+  gate: string;
+  priority: string;
+  status: string;
+  stage: string;
+  duration_secs: number;
+  duration_label: string;
+  has_receipt: boolean;
+  receipt_status: string | null;
+}
+
+export type KanbanStageName = 'staging' | 'pending' | 'active' | 'review' | 'done';
+
+export interface KanbanEnvelope {
+  stages: Partial<Record<KanbanStageName, KanbanCard[]>>;
+  total: number;
+  degraded?: boolean;
+  degraded_reasons?: string[];
+}
+
+export interface GovernanceDigestSourceFreshness {
+  governance_digest: string | null;
+}
+
+export interface DigestRecurrenceRecord {
+  defect_family: string;
+  count: number;
+  representative_content: string;
+  severity: string;
+  signal_types: string[];
+  impacted_features: string[];
+  impacted_prs: string[];
+  impacted_sessions: string[];
+  evidence_pointers: string[];
+  providers: string[];
+}
+
+export interface DigestRecommendation {
+  category: string;
+  content: string;
+  advisory_only: boolean;
+  evidence_basis: string[];
+  severity: string;
+  recurrence_count: number;
+  defect_family: string;
+}
+
+export interface GovernanceDigestData {
+  runner_version?: string;
+  generated_at?: string;
+  total_signals_processed?: number;
+  recurring_pattern_count?: number;
+  single_occurrence_count?: number;
+  recurring_patterns?: DigestRecurrenceRecord[];
+  recommendations?: DigestRecommendation[];
+  source_records?: {
+    gate_results?: number;
+    queue_anomalies?: number;
+  };
+}
+
+export interface GovernanceDigestEnvelope {
+  view: string;
+  queried_at: string;
+  source_freshness: GovernanceDigestSourceFreshness;
+  staleness_seconds: number | null;
+  degraded: boolean;
+  degraded_reasons: string[];
+  data: GovernanceDigestData;
+}
