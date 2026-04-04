@@ -30,8 +30,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+
+from vnx_paths import resolve_paths as _resolve_paths  # noqa: E402
+
+REPO_ROOT = Path(_resolve_paths()["PROJECT_ROOT"])
 
 
 # ---------------------------------------------------------------------------
