@@ -355,6 +355,58 @@ class TerminalView:
 
 
 # ---------------------------------------------------------------------------
+# Shared open-item helpers
+# ---------------------------------------------------------------------------
+
+_SEVERITY_ORDER = {"blocker": 0, "blocking": 0, "warn": 1, "warning": 1, "info": 2}
+
+
+def _is_open(item: Dict[str, Any]) -> bool:
+    return (item.get("status", "open") == "open"
+            and item.get("resolved_at") is None
+            and item.get("closed_at") is None)
+
+
+def _filter_open_items(
+    items: List[Dict[str, Any]],
+    *,
+    severity: Optional[str] = None,
+    status: Optional[str] = None,
+    include_resolved: bool = False,
+) -> List[Dict[str, Any]]:
+    if not include_resolved:
+        items = [i for i in items if _is_open(i)]
+    if severity:
+        items = [i for i in items if i.get("severity") == severity]
+    if status:
+        items = [i for i in items if i.get("status") == status]
+    return items
+
+
+def _sort_by_severity(items: List[Dict[str, Any]]) -> None:
+    items.sort(key=lambda x: (
+        _SEVERITY_ORDER.get(x.get("severity", "info"), 3),
+        x.get("created_at", ""),
+    ))
+
+
+def _enrich_age(items: List[Dict[str, Any]], now: datetime) -> None:
+    for item in items:
+        created = item.get("created_at") or item.get("detected_at")
+        age = _staleness(created, now)
+        item["age_seconds"] = round(age, 0) if age is not None else None
+
+
+def _summarize_open_items(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    open_items = [i for i in items if _is_open(i)]
+    return {
+        "blocker_count": sum(1 for i in open_items if i.get("severity") in ("blocker", "blocking")),
+        "warn_count": sum(1 for i in open_items if i.get("severity") in ("warn", "warning")),
+        "info_count": sum(1 for i in open_items if i.get("severity") == "info"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # OpenItemsView (§2.5)
 # ---------------------------------------------------------------------------
 
@@ -391,40 +443,14 @@ class OpenItemsView:
                 data={"items": [], "summary": {"blocker_count": 0, "warn_count": 0, "info_count": 0}},
             )
 
-        items = raw.get("items", [])
-
-        # Filter
-        if not include_resolved:
-            items = [i for i in items if i.get("status", "open") == "open"
-                     and i.get("resolved_at") is None
-                     and i.get("closed_at") is None]
-        if severity:
-            items = [i for i in items if i.get("severity") == severity]
-        if status:
-            items = [i for i in items if i.get("status") == status]
-
-        # Sort: blocker > warn > info, then oldest first
-        severity_order = {"blocker": 0, "blocking": 0, "warn": 1, "warning": 1, "info": 2}
-        items.sort(key=lambda x: (
-            severity_order.get(x.get("severity", "info"), 3),
-            x.get("created_at", ""),
-        ))
-
-        # Enrich with age
-        for item in items:
-            created = item.get("created_at") or item.get("detected_at")
-            age = _staleness(created, now)
-            item["age_seconds"] = round(age, 0) if age is not None else None
-
-        # Summary
-        open_items = [i for i in items if i.get("status", "open") == "open"
-                      and i.get("resolved_at") is None
-                      and i.get("closed_at") is None]
-        summary = {
-            "blocker_count": sum(1 for i in open_items if i.get("severity") in ("blocker", "blocking")),
-            "warn_count": sum(1 for i in open_items if i.get("severity") in ("warn", "warning")),
-            "info_count": sum(1 for i in open_items if i.get("severity") == "info"),
-        }
+        items = _filter_open_items(
+            raw.get("items", []),
+            severity=severity, status=status,
+            include_resolved=include_resolved,
+        )
+        _sort_by_severity(items)
+        _enrich_age(items, now)
+        summary = _summarize_open_items(items)
 
         return FreshnessEnvelope(
             view="OpenItemsView",
@@ -447,6 +473,42 @@ class AggregateOpenItemsView:
     def __init__(self, registry_path: Optional[Path] = None) -> None:
         self.registry_path = registry_path or DEFAULT_REGISTRY_PATH
 
+    @staticmethod
+    def _collect_project_items(
+        proj: Dict[str, Any],
+        now: datetime,
+        all_items: List[Dict[str, Any]],
+        per_project: Dict[str, Dict[str, Any]],
+        sources: Dict[str, Optional[str]],
+        degraded_reasons: List[str],
+    ) -> None:
+        proj_path = Path(proj["path"])
+        data_dir = proj.get("vnx_data_dir", ".vnx-data")
+        state_dir = proj_path / data_dir / "state"
+        oi_path = state_dir / "open_items.json"
+        source_key = f"{proj['name']}/open_items.json"
+        sources[source_key] = _file_mtime_iso(oi_path)
+
+        raw = _load_json(oi_path)
+        if raw is None:
+            per_project[proj["name"]] = {
+                "status": "unavailable",
+                "blocker_count": 0, "warn_count": 0, "info_count": 0,
+            }
+            degraded_reasons.append(f"{proj['name']}: open_items.json unavailable")
+            return
+
+        open_items = [i for i in raw.get("items", []) if _is_open(i)]
+        _enrich_age(open_items, now)
+        for item in open_items:
+            item["_project_name"] = proj["name"]
+        all_items.extend(open_items)
+
+        per_project[proj["name"]] = {
+            "status": "available",
+            **_summarize_open_items(open_items),
+        }
+
     def get_aggregate(
         self,
         *,
@@ -465,50 +527,11 @@ class AggregateOpenItemsView:
         degraded_reasons: List[str] = []
 
         for proj in projects:
-            proj_path = Path(proj["path"])
-            data_dir = proj.get("vnx_data_dir", ".vnx-data")
-            state_dir = proj_path / data_dir / "state"
-            oi_path = state_dir / "open_items.json"
-            source_key = f"{proj['name']}/open_items.json"
-            oi_mtime = _file_mtime_iso(oi_path)
-            sources[source_key] = oi_mtime
+            self._collect_project_items(
+                proj, now, all_items, per_project, sources, degraded_reasons,
+            )
 
-            raw = _load_json(oi_path)
-            if raw is None:
-                per_project[proj["name"]] = {
-                    "status": "unavailable",
-                    "blocker_count": 0, "warn_count": 0, "info_count": 0,
-                }
-                degraded_reasons.append(f"{proj['name']}: open_items.json unavailable")
-                continue
-
-            items = raw.get("items", [])
-            open_items = [i for i in items
-                          if i.get("status", "open") == "open"
-                          and i.get("resolved_at") is None
-                          and i.get("closed_at") is None]
-
-            for item in open_items:
-                item["_project_name"] = proj["name"]
-                created = item.get("created_at") or item.get("detected_at")
-                age = _staleness(created, now)
-                item["age_seconds"] = round(age, 0) if age is not None else None
-                all_items.append(item)
-
-            per_project[proj["name"]] = {
-                "status": "available",
-                "blocker_count": sum(1 for i in open_items if i.get("severity") in ("blocker", "blocking")),
-                "warn_count": sum(1 for i in open_items if i.get("severity") in ("warn", "warning")),
-                "info_count": sum(1 for i in open_items if i.get("severity") == "info"),
-            }
-
-        # Sort all items: severity then age
-        severity_order = {"blocker": 0, "blocking": 0, "warn": 1, "warning": 1, "info": 2}
-        all_items.sort(key=lambda x: (
-            severity_order.get(x.get("severity", "info"), 3),
-            x.get("created_at", ""),
-        ))
-
+        _sort_by_severity(all_items)
         staleness, degraded, fresh_reasons = _compute_freshness(sources, now)
         degraded_reasons.extend(fresh_reasons)
 

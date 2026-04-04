@@ -247,6 +247,32 @@ class RuntimeSupervisor:
     # Internal detection logic
     # -----------------------------------------------------------------------
 
+    def _check_zombie_lease(
+        self,
+        terminal_id: str,
+        lease: Dict[str, Any],
+        worker: Optional[Dict[str, Any]],
+        dispatch_map: Dict[str, Dict[str, Any]],
+    ) -> Optional[AnomalyRecord]:
+        """Detect zombie lease: leased but dispatch is terminal (§6.3)."""
+        dispatch_id = lease.get("dispatch_id")
+        dispatch = dispatch_map.get(dispatch_id) if dispatch_id else None
+        if not dispatch or dispatch["state"] not in _TERMINAL_DISPATCH_STATES:
+            return None
+        return AnomalyRecord(
+            anomaly_type="zombie_lease",
+            severity="blocking",
+            terminal_id=terminal_id,
+            dispatch_id=dispatch_id,
+            worker_state=worker["state"] if worker else None,
+            lease_state=lease["state"],
+            evidence={
+                "dispatch_state": dispatch["state"],
+                "last_heartbeat_at": lease.get("last_heartbeat_at"),
+                "lease_held_since": lease.get("leased_at"),
+            },
+        )
+
     def _check_terminal(
         self,
         terminal_id: str,
@@ -258,7 +284,6 @@ class RuntimeSupervisor:
         anomalies: List[AnomalyRecord] = []
         lease_state = lease["state"]
 
-        # Recovery timeout check (§7.1)
         if lease_state in ("expired", "recovering"):
             anomalies.extend(
                 self._check_recovery_timeout(terminal_id, lease, now)
@@ -268,25 +293,9 @@ class RuntimeSupervisor:
         if lease_state != "leased":
             return anomalies
 
-        dispatch_id = lease.get("dispatch_id")
-        dispatch = dispatch_map.get(dispatch_id) if dispatch_id else None
-
-        # Zombie lease: lease is leased but dispatch is terminal (§6.3)
-        if dispatch and dispatch["state"] in _TERMINAL_DISPATCH_STATES:
-            anomalies.append(AnomalyRecord(
-                anomaly_type="zombie_lease",
-                severity="blocking",
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                worker_state=worker["state"] if worker else None,
-                lease_state=lease_state,
-                evidence={
-                    "dispatch_state": dispatch["state"],
-                    "last_heartbeat_at": lease.get("last_heartbeat_at"),
-                    "lease_held_since": lease.get("leased_at"),
-                },
-            ))
-            return anomalies
+        zombie = self._check_zombie_lease(terminal_id, lease, worker, dispatch_map)
+        if zombie:
+            return [zombie]
 
         if worker is None:
             return anomalies
@@ -302,19 +311,15 @@ class RuntimeSupervisor:
             dead_threshold=self.dead_threshold,
         )
 
-        # Dead heartbeat → exited_bad (§4.4 H-3)
         if hb_class == "dead":
             anomalies.append(self._escalate_dead_worker(
                 terminal_id, worker, lease, now
             ))
             return anomalies
 
-        # Stall detection per §5.2
         anomalies.extend(
             self._check_stall(terminal_id, worker, lease, hb_class, now)
         )
-
-        # Heartbeat-output divergence (§7.1)
         anomalies.extend(
             self._check_heartbeat_output_divergence(terminal_id, worker, lease, hb_class, now)
         )

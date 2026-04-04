@@ -331,6 +331,59 @@ class WorkerStateManager:
 
         return WorkerStateResult.from_row(dict(row))
 
+    def _apply_transition(
+        self,
+        conn,
+        current: dict,
+        terminal_id: str,
+        to_state: str,
+        *,
+        actor: str,
+        reason: Optional[str],
+        blocked_reason: Optional[str],
+    ) -> WorkerStateResult:
+        """Execute the DB update + event for a validated transition."""
+        from_state = current["state"]
+        now = _now_utc()
+        stall_count = current["stall_count"]
+        if to_state == "stalled":
+            stall_count += 1
+
+        new_blocked_reason = blocked_reason if to_state == "blocked" else None
+
+        conn.execute(
+            """
+            UPDATE worker_states
+            SET state = ?, state_entered_at = ?, stall_count = ?,
+                blocked_reason = ?, updated_at = ?
+            WHERE terminal_id = ?
+            """,
+            (to_state, now, stall_count, new_blocked_reason, now, terminal_id),
+        )
+
+        event_type = _event_type_for_transition(from_state, to_state)
+        _append_worker_event(
+            conn,
+            event_type=event_type,
+            terminal_id=terminal_id,
+            from_state=from_state,
+            to_state=to_state,
+            actor=actor,
+            reason=reason,
+            metadata={
+                "dispatch_id": current["dispatch_id"],
+                "stall_count": stall_count,
+                "blocked_reason": new_blocked_reason,
+            },
+        )
+        conn.commit()
+
+        updated = conn.execute(
+            "SELECT * FROM worker_states WHERE terminal_id = ?",
+            (terminal_id,),
+        ).fetchone()
+        return WorkerStateResult.from_row(dict(updated))
+
     def transition(
         self,
         terminal_id: str,
@@ -361,49 +414,12 @@ class WorkerStateManager:
                 )
 
             current = dict(row)
-            from_state = current["state"]
-            validate_worker_transition(from_state, to_state)
+            validate_worker_transition(current["state"], to_state)
 
-            now = _now_utc()
-            stall_count = current["stall_count"]
-            if to_state == "stalled":
-                stall_count += 1
-
-            new_blocked_reason = blocked_reason if to_state == "blocked" else None
-
-            conn.execute(
-                """
-                UPDATE worker_states
-                SET state = ?, state_entered_at = ?, stall_count = ?,
-                    blocked_reason = ?, updated_at = ?
-                WHERE terminal_id = ?
-                """,
-                (to_state, now, stall_count, new_blocked_reason, now, terminal_id),
+            return self._apply_transition(
+                conn, current, terminal_id, to_state,
+                actor=actor, reason=reason, blocked_reason=blocked_reason,
             )
-
-            event_type = _event_type_for_transition(from_state, to_state)
-            _append_worker_event(
-                conn,
-                event_type=event_type,
-                terminal_id=terminal_id,
-                from_state=from_state,
-                to_state=to_state,
-                actor=actor,
-                reason=reason,
-                metadata={
-                    "dispatch_id": current["dispatch_id"],
-                    "stall_count": stall_count,
-                    "blocked_reason": new_blocked_reason,
-                },
-            )
-            conn.commit()
-
-            updated = conn.execute(
-                "SELECT * FROM worker_states WHERE terminal_id = ?",
-                (terminal_id,),
-            ).fetchone()
-
-        return WorkerStateResult.from_row(dict(updated))
 
     def record_output(
         self,
