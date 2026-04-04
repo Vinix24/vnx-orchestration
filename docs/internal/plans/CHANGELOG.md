@@ -1,11 +1,36 @@
 # Internal Plans Changelog
 
 **Status**: Active (Internal)
-**Last Updated**: 2026-04-03
+**Last Updated**: 2026-04-04
 **Owner**: T0 / Planning
 **Purpose**: Running changelog for the internal autonomous-coding program, tracking planning milestones, execution-progress milestones, and the ordered next steps expected from future feature completion.
 
 ---
+
+## 2026-04-04
+
+### Feature 25 completed: Governance Digest Pipeline And Dashboard Surface
+
+Merged: PRs on `feat/pr2-digest-api-endpoint-and-signal` branch, 2026-04-04
+
+Material changes:
+- governance digest pipeline contract (D-1..D-5 invariants) defining 5-min daemon cadence, digest JSON schema, freshness tracking, advisory-only enforcement
+- GovernanceDigestRunner in intelligence_daemon.py: reads gate results and queue anomalies from t0_receipts.ndjson, delegates to F18 extractors (collect_governance_signals + build_digest), writes governance_digest.json atomically
+- SignalStore: append-only NDJSON store with thread-safe writes, atomic append, from_env factory
+- GET /api/operator/governance-digest: freshness envelope with staleness tracking, degraded state detection (missing/stale file)
+- governance dashboard page (S7): KPI strip, recurrence table with severity badges, recommendation cards with advisory-only badge, signal volume chart (recharts)
+- TypeScript types: GovernanceDigestEnvelope, DigestRecurrenceRecord, DigestRecommendation, GovernanceDigestData
+- SWR hook (useGovernanceDigest) with 60s refresh interval
+- 48 certification tests + 91 Python component tests + 39 JS component tests = 178 Feature 25 tests
+
+Artifacts:
+- `docs/GOVERNANCE_DIGEST_PIPELINE_CONTRACT.md` — digest pipeline contract (v1)
+- `scripts/intelligence_daemon.py` — GovernanceDigestRunner (extended)
+- `scripts/lib/signal_store.py` — NDJSON signal store (91 lines)
+- `dashboard/serve_dashboard.py` — governance-digest API endpoint (extended)
+- `dashboard/token-dashboard/app/operator/governance/page.tsx` — governance page (822 lines)
+- `dashboard/token-dashboard/lib/types.ts` — TypeScript types (extended)
+- `tests/test_governance_digest_certification.py` — 48 certification tests
 
 ## 2026-04-03
 
