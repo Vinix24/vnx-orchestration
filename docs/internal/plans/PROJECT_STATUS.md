@@ -9,7 +9,7 @@
 
 ## 1. Current Snapshot
 
-Features 12 through 25 are complete. Feature 25 certified on `feat/pr2-digest-api-endpoint-and-signal` branch, 2026-04-04. Five-feature chain pilot (Features 18-22) complete. Dashboard features (23-25) complete.
+Features 12 through 26 are complete. Feature 26 certified on `fix/serve-dashboard-module-split` branch, 2026-04-04. Five-feature chain pilot (Features 18-22) complete. Dashboard features (23-26) complete.
 
 The internal baseline is now:
 
@@ -27,9 +27,10 @@ The internal baseline is now:
 - dashboard kanban board with 5-column dispatch lifecycle view, health endpoint, and error/degraded rendering (Feature 23)
 - per-project open items with project switcher, severity filter, and gate toggle API (Feature 24)
 - governance digest pipeline: 5-min daemon cadence, digest JSON with freshness tracking, advisory-only recommendations, S7 dashboard surface (Feature 25)
-- all fourteen features certified with 2600+ tests, zero blocker open items
+- terminal startup and session control: profile-aware start (2x2 dev, single business), stop, attach, dry-run, dashboard buttons, serve_dashboard module split (Feature 26)
+- all fifteen features certified with 2800+ tests, zero blocker open items
 - five-feature chain pilot (Features 18-22) complete
-- dashboard features (23-25) complete: kanban, open items/gate toggle, governance digest
+- dashboard features (23-26) complete: kanban, open items/gate toggle, governance digest, terminal startup and session control
 - headless review gate infrastructure corrected: both Gemini and Codex now default-enabled with atomic request-and-execute flow
 
 ---
