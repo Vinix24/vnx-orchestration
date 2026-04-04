@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "dashboard"))
 
 import serve_dashboard as sd
+import api_operator as ao
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +156,10 @@ class TestOperatorKanban:
                 "[[TARGET: T1]]\nDispatch-ID: test-dispatch-001\nPR-ID: PR-1\n",
                 encoding="utf-8",
             )
+            reports_dir = Path(tmpdir) / "reports"
             with (
-                patch.object(sd, "DISPATCHES_DIR", dispatches_dir),
-                patch.object(sd, "REPORTS_DIR", Path(tmpdir) / "reports"),
+                patch.object(ao, "DISPATCHES_DIR", dispatches_dir),
+                patch.object(ao, "REPORTS_DIR", reports_dir),
             ):
                 result = sd._operator_get_kanban()
 
@@ -192,7 +194,7 @@ class TestOperatorKanban:
         def _boom():
             raise RuntimeError("unexpected failure")
 
-        with patch.object(sd, "_scan_dispatches", _boom):
+        with patch.object(ao, "_scan_dispatches", _boom):
             result = sd._operator_get_kanban()
 
         assert result.get("degraded") is True
