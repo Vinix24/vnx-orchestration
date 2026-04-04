@@ -63,6 +63,7 @@ class GateRunner:
     # VNX_VERTEX_REGION   — default "us-central1"
     # VNX_VERTEX_MODEL    — default "gemini-2.5-pro"
     # VNX_CODEX_HEADLESS_ENABLED — "0" (default) or "1"
+    # VNX_GEMINI_MAX_PROMPT_BYTES — max inline file content bytes (default 100000)
     # ---------------------------------------------------------------------------
 
     def run(
@@ -794,11 +795,57 @@ class GateRunner:
 
     @staticmethod
     def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
-        """Build a minimal prompt from request payload when no prompt is present."""
+        """Build an enriched prompt with inline file contents for Vertex AI routing."""
         files = request_payload.get("changed_files", [])
         branch = request_payload.get("branch", "")
         risk = request_payload.get("risk_class", "medium")
-        return f"Review the following changes on branch {branch} (risk: {risk}):\nFiles: {', '.join(files)}\n"
+        pr = request_payload.get("pr_number", "")
+
+        # If no changed_files in payload, discover via git
+        if not files:
+            try:
+                result = subprocess.run(
+                    ["git", "diff", "--name-only", "origin/main...HEAD"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                files = [f for f in result.stdout.splitlines() if f.strip()]
+            except Exception:
+                files = []
+
+        max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
+        review_instructions = (
+            f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
+            f"Changed files: {', '.join(files)}\n\n"
+            "Perform a thorough code review of the file contents below.\n\n"
+            "Respond with a structured JSON verdict only:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "pass|fail|blocked",\n'
+            '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
+            '  "residual_risk": "description of remaining risks or null",\n'
+            '  "rerun_required": false,\n'
+            '  "rerun_reason": null\n'
+            "}\n"
+            "```\n"
+        )
+
+        file_content = ""
+        bytes_used = 0
+        for f in files:
+            if not os.path.exists(f):
+                continue
+            remaining = max_bytes - bytes_used
+            if remaining <= 0:
+                break
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    content = fh.read(remaining)
+                file_content += f"\n--- FILE: {f} ---\n{content}"
+                bytes_used += len(content.encode("utf-8"))
+            except OSError:
+                continue
+
+        return f"{review_instructions}\n{file_content}"
 
     @staticmethod
     def _build_codex_prompt(request_payload: Dict[str, Any]) -> str:
