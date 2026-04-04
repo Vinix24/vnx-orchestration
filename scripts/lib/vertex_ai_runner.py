@@ -157,6 +157,23 @@ def build_gemini_prompt(
     return f"{review_instructions}\n{file_content}"
 
 
+def collect_file_contents(
+    request_payload: Dict[str, Any],
+    *,
+    subprocess_run: Callable,
+) -> str:
+    """Return inline file content string for Vertex AI prompt enrichment.
+
+    Uses changed_files from payload, falling back to git diff when empty.
+    Respects VNX_GEMINI_MAX_PROMPT_BYTES (default 100000).
+    """
+    files = _gather_changed_files(
+        request_payload.get("changed_files", []), subprocess_run
+    )
+    max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
+    return _inline_file_contents(files, max_bytes)
+
+
 def build_codex_prompt(request_payload: Dict[str, Any]) -> str:
     """Build a review prompt for codex gate when no prompt is present."""
     files = request_payload.get("changed_files", [])
