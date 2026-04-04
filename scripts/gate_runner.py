@@ -101,6 +101,14 @@ class GateRunner:
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
 
+        # Vertex AI path: always append inline file contents even when a contract
+        # prompt is pre-provided. The contract text is preserved; file content is
+        # appended so the model receives actual code to review.
+        if using_vertex and gate == "gemini_review" and prompt:
+            file_contents = self._collect_file_contents(request_payload)
+            if file_contents:
+                prompt = prompt + "\n\n" + file_contents
+
         # Ensure prompt is in request_payload for contract_hash fallback
         if prompt and "prompt" not in request_payload:
             request_payload["prompt"] = prompt
@@ -794,14 +802,13 @@ class GateRunner:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     @staticmethod
-    def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
-        """Build an enriched prompt with inline file contents for Vertex AI routing."""
-        files = request_payload.get("changed_files", [])
-        branch = request_payload.get("branch", "")
-        risk = request_payload.get("risk_class", "medium")
-        pr = request_payload.get("pr_number", "")
+    def _collect_file_contents(request_payload: Dict[str, Any]) -> str:
+        """Read changed files and return inline content string respecting byte cap.
 
-        # If no changed_files in payload, discover via git
+        Falls back to git diff --name-only when changed_files is empty.
+        Respects VNX_GEMINI_MAX_PROMPT_BYTES (default 100000).
+        """
+        files = request_payload.get("changed_files", [])
         if not files:
             try:
                 result = subprocess.run(
@@ -813,22 +820,6 @@ class GateRunner:
                 files = []
 
         max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
-        review_instructions = (
-            f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
-            f"Changed files: {', '.join(files)}\n\n"
-            "Perform a thorough code review of the file contents below.\n\n"
-            "Respond with a structured JSON verdict only:\n"
-            "```json\n"
-            "{\n"
-            '  "verdict": "pass|fail|blocked",\n'
-            '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
-            '  "residual_risk": "description of remaining risks or null",\n'
-            '  "rerun_required": false,\n'
-            '  "rerun_reason": null\n'
-            "}\n"
-            "```\n"
-        )
-
         file_content = ""
         bytes_used = 0
         for f in files:
@@ -844,7 +835,32 @@ class GateRunner:
                 bytes_used += len(content.encode("utf-8"))
             except OSError:
                 continue
+        return file_content
 
+    @staticmethod
+    def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
+        """Build an enriched prompt with inline file contents for Vertex AI routing."""
+        branch = request_payload.get("branch", "")
+        risk = request_payload.get("risk_class", "medium")
+        pr = request_payload.get("pr_number", "")
+        files = request_payload.get("changed_files", [])
+
+        review_instructions = (
+            f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
+            f"Changed files: {', '.join(files)}\n\n"
+            "Perform a thorough code review of the file contents below.\n\n"
+            "Respond with a structured JSON verdict only:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "pass|fail|blocked",\n'
+            '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
+            '  "residual_risk": "description of remaining risks or null",\n'
+            '  "rerun_required": false,\n'
+            '  "rerun_reason": null\n'
+            "}\n"
+            "```\n"
+        )
+        file_content = GateRunner._collect_file_contents(request_payload)
         return f"{review_instructions}\n{file_content}"
 
     @staticmethod

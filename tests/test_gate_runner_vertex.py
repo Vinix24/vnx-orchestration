@@ -628,3 +628,126 @@ class TestBuildGeminiPromptEnrichment:
             prompt = GateRunner._build_gemini_prompt(payload)
 
         assert "verdict" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Tests for contract prompt + Vertex enrichment (dispatch 20260404-174925)
+# ---------------------------------------------------------------------------
+
+
+class TestVertexContractPromptEnrichment:
+    """When a contract prompt is pre-provided, Vertex path must still append file contents."""
+
+    def _gcloud_side_effect(self, cmd, **kwargs):
+        m = MagicMock()
+        if "print-access-token" in cmd:
+            m.stdout = "ya29.fake-token\n"
+        elif "get-value" in cmd:
+            m.stdout = "enrich-test-proj\n"
+        else:
+            m.stdout = ""
+        return m
+
+    def _make_vertex_run_patches(self, response_text):
+        def gcloud_se(cmd, **kwargs):
+            return self._gcloud_side_effect(cmd, **kwargs)
+        return gcloud_se, _mock_urlopen(response_text)
+
+    def test_contract_prompt_with_vertex_appends_file_contents(self, gate_env, monkeypatch, tmp_path):
+        """contract prompt + using_vertex=True → file contents still appended to prompt."""
+        monkeypatch.setenv("VNX_GEMINI_ROUTING", "vertex")
+        monkeypatch.setenv("VNX_VERTEX_PROJECT", "enrich-proj")
+
+        source_file = tmp_path / "reviewed.py"
+        source_file.write_text("def contract_enriched():\n    return True\n")
+
+        captured_prompts = []
+
+        def fake_urlopen(req, timeout=None):
+            import json as _json
+            body = _json.loads(req.data.decode("utf-8"))
+            captured_prompts.append(body["contents"][0]["parts"][0]["text"])
+            return _mock_urlopen(
+                "Code review complete.\nNo blocking issues.\nApproved.\nLGTM.\n"
+            )
+
+        contract_text = "CONTRACT: Review the following deliverable for PR #7."
+        payload = _make_payload(gate_env, prompt=contract_text)
+        payload["changed_files"] = [str(source_file)]
+        runner = _make_runner(gate_env)
+
+        gcloud_se, _ = self._make_vertex_run_patches("ok")
+        with patch("gate_runner.subprocess.run", side_effect=gcloud_se), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = runner.run(gate="gemini_review", request_payload=payload, pr_number=7)
+
+        assert result["status"] == "completed"
+        assert len(captured_prompts) == 1
+        sent = captured_prompts[0]
+        assert "contract_enriched" in sent, "file contents must be appended to contract prompt"
+
+    def test_original_contract_prompt_text_preserved(self, gate_env, monkeypatch, tmp_path):
+        """Contract prompt text must not be replaced — it must appear in the sent prompt."""
+        monkeypatch.setenv("VNX_GEMINI_ROUTING", "vertex")
+        monkeypatch.setenv("VNX_VERTEX_PROJECT", "preserve-proj")
+
+        source_file = tmp_path / "mod.py"
+        source_file.write_text("x = 42\n")
+
+        captured_prompts = []
+
+        def fake_urlopen(req, timeout=None):
+            import json as _json
+            body = _json.loads(req.data.decode("utf-8"))
+            captured_prompts.append(body["contents"][0]["parts"][0]["text"])
+            return _mock_urlopen(
+                "Review done.\nNo issues.\nAll clear.\nApproved for merge.\n"
+            )
+
+        contract_text = "UNIQUE_CONTRACT_MARKER: validate delivery evidence for batch X."
+        payload = _make_payload(gate_env, prompt=contract_text)
+        payload["changed_files"] = [str(source_file)]
+        runner = _make_runner(gate_env)
+
+        gcloud_se, _ = self._make_vertex_run_patches("ok")
+        with patch("gate_runner.subprocess.run", side_effect=gcloud_se), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            runner.run(gate="gemini_review", request_payload=payload, pr_number=8)
+
+        sent = captured_prompts[0]
+        assert "UNIQUE_CONTRACT_MARKER" in sent, "original contract text must be preserved"
+        assert "x = 42" in sent, "file contents must also be present"
+
+    def test_byte_cap_respected_when_enriching_existing_prompt(self, gate_env, monkeypatch, tmp_path):
+        """VNX_GEMINI_MAX_PROMPT_BYTES cap is respected when appending to contract prompt."""
+        monkeypatch.setenv("VNX_GEMINI_ROUTING", "vertex")
+        monkeypatch.setenv("VNX_VERTEX_PROJECT", "cap-proj")
+        monkeypatch.setenv("VNX_GEMINI_MAX_PROMPT_BYTES", "200")
+
+        big_file = tmp_path / "big.py"
+        big_file.write_text("Z" * 1000)
+
+        captured_prompts = []
+
+        def fake_urlopen(req, timeout=None):
+            import json as _json
+            body = _json.loads(req.data.decode("utf-8"))
+            captured_prompts.append(body["contents"][0]["parts"][0]["text"])
+            return _mock_urlopen(
+                "Cap test review.\nNo blocking issues.\nApproved.\nLGTM.\n"
+            )
+
+        payload = _make_payload(gate_env, prompt="CONTRACT: cap test")
+        payload["changed_files"] = [str(big_file)]
+        runner = _make_runner(gate_env)
+
+        gcloud_se, _ = self._make_vertex_run_patches("ok")
+        with patch("gate_runner.subprocess.run", side_effect=gcloud_se), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            runner.run(gate="gemini_review", request_payload=payload, pr_number=9)
+
+        sent = captured_prompts[0]
+        # File section in sent prompt must not exceed cap + small overhead
+        file_sections = sent.split("--- FILE:")[1:]
+        file_bytes = sum(len(s.encode("utf-8")) for s in file_sections)
+        assert file_bytes <= 400, f"file content bytes {file_bytes} exceeded cap (200 + overhead)"
