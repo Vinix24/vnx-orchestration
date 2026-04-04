@@ -5,7 +5,7 @@ VNX Dashboard Control Actions — Safe operator actions for the Coding Operator 
 Implements the safe action model from the Dashboard Contract
 (docs/core/140_DASHBOARD_READ_MODEL_CONTRACT.md §4):
 
-  A1: Start Session — invoke vnx start for a project
+  A1: Start Session — invoke vnx start for a project (profile-aware layout)
   A2: Attach Terminal — resolve tmux pane from session profile
   A3: Refresh Projections — re-project from canonical sources
   A4: Run Reconciliation — detect and report mismatches
@@ -17,6 +17,12 @@ Every action returns a structured ActionOutcome per §4.4:
   - AO-2: 'failed' outcomes include human-readable message and error_code.
   - AO-3: 'already_active' is a valid success variant, not an error.
   - AO-4: 'degraded' means partially succeeded but result cannot be fully verified.
+
+Profile-aware session creation (A1):
+  - coding_strict projects (VNX coding worktrees) receive a 2x2 tmux layout (4 panes).
+  - business_light projects (non-coding folders) receive a single terminal.
+  - Profile is auto-detected via governance_profile_selector when not supplied.
+  - Fallback to `vnx start` when profile detection fails.
 
 The action layer sits between the dashboard UI and the runtime system.
 Actions read from the read-model (PR-1) and invoke shell commands only
@@ -76,24 +82,117 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Profile detection
+# ---------------------------------------------------------------------------
+
+def _detect_profile(project_path: Path) -> Optional[str]:
+    """Detect governance profile for a project path.
+
+    Uses governance_profile_selector to classify the path.  A project with a
+    .vnx directory is treated as a coding worktree (coding_strict).  All other
+    paths are treated as business folders and receive business_light.
+
+    Note: select_profile() defaults to coding_strict unless business_light is
+    explicitly requested for non-coding scopes.  This function explicitly
+    requests business_light for business folder scopes so detection is accurate.
+
+    Returns "coding_strict", "business_light", or None on detection failure.
+    """
+    try:
+        from folder_scope import resolve_scope
+        from governance_profile_selector import GovernanceProfile, select_profile
+
+        coding_roots = [str(project_path)] if (project_path / ".vnx").is_dir() else []
+        scope = resolve_scope(str(project_path), coding_roots=coding_roots)
+        if scope.is_business_scope():
+            selection = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        else:
+            selection = select_profile(scope)
+        return selection.profile.value
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Layout builders (direct tmux invocation)
+# ---------------------------------------------------------------------------
+
+_TMUX_TIMEOUT = 10  # seconds per tmux command
+
+
+def _tmux(args: List[str]) -> "subprocess.CompletedProcess[str]":
+    """Run a single tmux command, returning CompletedProcess."""
+    return subprocess.run(
+        ["tmux"] + args,
+        capture_output=True,
+        text=True,
+        timeout=_TMUX_TIMEOUT,
+    )
+
+
+def _create_dev_layout(session_name: str) -> Optional[str]:
+    """Create a 2x2 tmux layout for a coding_strict (dev) project.
+
+    Pane layout after creation:
+      +--------+--------+
+      |  0     |  1     |
+      +--------+--------+
+      |  2     |  3     |
+      +--------+--------+
+
+    Returns an error message string on failure, None on success.
+    """
+    steps = [
+        ["new-session", "-d", "-s", session_name],
+        ["split-window", "-h", "-t", f"{session_name}:0"],
+        ["split-window", "-v", "-t", f"{session_name}:0.0"],
+        ["split-window", "-v", "-t", f"{session_name}:0.1"],
+    ]
+    for args in steps:
+        result = _tmux(args)
+        if result.returncode != 0:
+            return result.stderr.strip() or f"tmux {args[0]} failed (rc={result.returncode})"
+    return None
+
+
+def _create_business_layout(session_name: str) -> Optional[str]:
+    """Create a single-pane tmux session for a business_light project.
+
+    Returns an error message string on failure, None on success.
+    """
+    result = _tmux(["new-session", "-d", "-s", session_name])
+    if result.returncode != 0:
+        return result.stderr.strip() or f"tmux new-session failed (rc={result.returncode})"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # A1: Start Session (§4.2)
 # ---------------------------------------------------------------------------
 
 def start_session(
     project_path: str,
     *,
+    profile: Optional[str] = None,
     vnx_bin: Optional[str] = None,
     dry_run: bool = False,
 ) -> ActionOutcome:
     """Start a VNX session for the given project.
 
-    Safe — creates tmux session, initializes state files. Idempotent if session exists.
-    Uses `vnx start` which handles cleanup of existing sessions.
+    Profile-aware: detects governance profile and creates the appropriate tmux
+    layout without requiring a vnx binary.
+
+      coding_strict  → 2x2 tmux layout (4 panes, one per terminal T0-T3)
+      business_light → single terminal
+
+    Falls back to `vnx start` when profile cannot be determined.
 
     Args:
         project_path: Absolute path to the project directory.
-        vnx_bin: Path to vnx binary. Auto-detected if None.
-        dry_run: If True, validate without executing. For testing.
+        profile: Override profile ("coding_strict" | "business_light"). Auto-
+                 detected from governance_profile_selector when None.
+        vnx_bin: Path to vnx binary (used for fallback path only).
+        dry_run: If True, validate and return planned actions without executing.
     """
     proj = Path(project_path)
     if not proj.is_dir():
@@ -105,7 +204,79 @@ def start_session(
             error_code="project_not_found",
         )
 
-    # Locate vnx binary
+    session_name = f"vnx-{proj.name}"
+    session_active = _tmux_session_exists(session_name)
+
+    # Resolve effective profile
+    effective_profile = profile or _detect_profile(proj)
+
+    if dry_run:
+        status = "already_active" if session_active else "success"
+        layout = "2x2" if effective_profile == "coding_strict" else (
+            "single" if effective_profile == "business_light" else "vnx_start_fallback"
+        )
+        return ActionOutcome(
+            action="start_session",
+            project=project_path,
+            status=status,
+            message=f"Dry run: session {'already active' if session_active else 'would be started'}",
+            details={
+                "session_name": session_name,
+                "profile": effective_profile,
+                "layout": layout,
+                "dry_run": True,
+            },
+        )
+
+    if session_active:
+        return ActionOutcome(
+            action="start_session",
+            project=project_path,
+            status="already_active",
+            message=f"Session '{session_name}' is already active.",
+            details={"session_name": session_name, "profile": effective_profile},
+        )
+
+    # Profile-aware direct tmux path
+    if effective_profile == "coding_strict":
+        error = _create_dev_layout(session_name)
+        if error:
+            return ActionOutcome(
+                action="start_session",
+                project=project_path,
+                status="failed",
+                message=f"Failed to create 2x2 dev layout: {error}",
+                error_code="tmux_layout_error",
+                details={"session_name": session_name, "profile": effective_profile},
+            )
+        return ActionOutcome(
+            action="start_session",
+            project=project_path,
+            status="success",
+            message=f"Session '{session_name}' started with 2x2 dev layout",
+            details={"session_name": session_name, "profile": effective_profile, "layout": "2x2"},
+        )
+
+    if effective_profile == "business_light":
+        error = _create_business_layout(session_name)
+        if error:
+            return ActionOutcome(
+                action="start_session",
+                project=project_path,
+                status="failed",
+                message=f"Failed to create business session: {error}",
+                error_code="tmux_layout_error",
+                details={"session_name": session_name, "profile": effective_profile},
+            )
+        return ActionOutcome(
+            action="start_session",
+            project=project_path,
+            status="success",
+            message=f"Session '{session_name}' started with single terminal",
+            details={"session_name": session_name, "profile": effective_profile, "layout": "single"},
+        )
+
+    # Fallback: vnx start (profile unknown)
     if vnx_bin is None:
         vnx_bin = _find_vnx_bin(proj)
     if vnx_bin is None:
@@ -117,32 +288,6 @@ def start_session(
             error_code="vnx_not_found",
         )
 
-    # Check for existing session
-    session_name = f"vnx-{proj.name}"
-    session_active = _tmux_session_exists(session_name)
-
-    if dry_run:
-        status = "already_active" if session_active else "success"
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status=status,
-            message=f"Dry run: session {'already active' if session_active else 'would be started'}",
-            details={"session_name": session_name, "dry_run": True},
-        )
-
-    # Check if session is already running — vnx start is idempotent
-    # (it kills and recreates), but we report already_active for clarity
-    if session_active:
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="already_active",
-            message=f"Session '{session_name}' is already active. vnx start would recreate it.",
-            details={"session_name": session_name},
-        )
-
-    # Execute vnx start
     try:
         result = subprocess.run(
             [vnx_bin, "start"],

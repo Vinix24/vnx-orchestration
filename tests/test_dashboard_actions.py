@@ -154,22 +154,26 @@ class TestStartSession(unittest.TestCase):
 
     def test_missing_vnx_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("dashboard_actions._find_vnx_bin", return_value=None):
+            with patch("dashboard_actions._find_vnx_bin", return_value=None), \
+                 patch("dashboard_actions._detect_profile", return_value=None), \
+                 patch("dashboard_actions._tmux_session_exists", return_value=False):
                 outcome = start_session(tmp)
             self.assertEqual(outcome.status, "failed")
             self.assertEqual(outcome.error_code, "vnx_not_found")
 
     @patch("dashboard_actions._tmux_session_exists", return_value=False)
+    @patch("dashboard_actions._detect_profile", return_value=None)
     @patch("dashboard_actions.subprocess.run")
-    def test_successful_start(self, mock_run, _):
+    def test_successful_start(self, mock_run, _detect, _exists):
         mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
         with tempfile.TemporaryDirectory() as tmp:
             outcome = start_session(tmp, vnx_bin="/usr/bin/true")
         self.assertEqual(outcome.status, "success")
 
     @patch("dashboard_actions._tmux_session_exists", return_value=False)
+    @patch("dashboard_actions._detect_profile", return_value=None)
     @patch("dashboard_actions.subprocess.run")
-    def test_failed_start(self, mock_run, _):
+    def test_failed_start(self, mock_run, _detect, _exists):
         mock_run.return_value = MagicMock(returncode=1, stderr="error msg", stdout="")
         with tempfile.TemporaryDirectory() as tmp:
             outcome = start_session(tmp, vnx_bin="/usr/bin/false")
