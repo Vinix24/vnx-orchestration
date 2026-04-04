@@ -8,12 +8,41 @@
 
 VNX is an open-source governance-first orchestration runtime for AI CLI workflows. One orchestrator breaks down work, interactive and headless workers execute in parallel, and everything is tracked through receipts, quality gates, and end-to-end provenance.
 
-**No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
+**No framework to import. No cloud dependency. No OAuth tokens. Governance, provenance, and operator control built in.**
 
 Current release: `v0.5.0`
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
-## The Problem
+## Full Autonomous Mode
+
+VNX runs **full autonomous multi-agent orchestration** today — 4 tmux terminals, one orchestrator (Claude Opus) coordinating three parallel workers. Queue popup → human approval → dispatch → execution → quality gate → merge. No permission popups, no dangerous-scope interruptions.
+
+**What's working in production (9 months):**
+
+- **Smart dispatches with intelligence injection** — an FTS5 database stores patterns, learnings, and prevention rules from 1,400+ receipts. Before every dispatch, relevant intelligence gets injected into the worker's context. Agents start with institutional knowledge.
+- **Self-learning loops** — patterns agents adopt successfully get boosted. Patterns they ignore decay. The system learns from its own behavior.
+- **Multi-feature chaining** — orchestrated sequences where PR-0 feeds into PR-1, each with independent quality gates.
+- **Open items tracking** — unresolved issues persist across dispatches. Nothing falls through the cracks.
+- **87% token reduction** via native skill architecture instead of template compilation.
+
+### Why CLI Subprocess — Not OAuth, Not API
+
+Anthropic's April 2026 policy bans third-party tools from using OAuth tokens obtained through Pro/Max subscriptions. OpenClaw (340K+ stars) and similar "harness" tools were affected. **VNX was not.**
+
+VNX exclusively spawns official `claude` CLI processes via subprocess. The binary handles authentication internally. VNX never touches OAuth tokens, never calls `api.anthropic.com`, never imports the Anthropic SDK. A [formal audit](docs/compliance/) confirms this with line-by-line evidence:
+
+| Audit Question | Result |
+|----------------|--------|
+| Does any code call Anthropic OAuth endpoints? | **NO** |
+| Does any code call `api.anthropic.com` using subscription credentials? | **NO** |
+| Does it only launch `claude` CLI processes? | **YES** |
+| Are there HTTP clients targeting Anthropic endpoints? | **NO** |
+
+The cost advantage is significant: $200/month Max subscription versus ~$3,000/month in equivalent API tokens for the same workload. CLI subprocess trades some observability for a 15x cost reduction — without sacrificing core functionality.
+
+Read the full analysis: [Best OpenClaw Alternative? How CLI Subprocess Orchestration Survives Anthropic's OAuth Ban](https://vincentvandeth.nl/blog/best-openclaw-alternative-cli-subprocess-oauth-ban)
+
+## Why
 
 You're already using AI coding agents. But when you run multiple agents on the same project:
 
@@ -250,6 +279,7 @@ See [Who Should Use VNX](docs/audience_and_use_cases.md) for detailed use cases 
 | | VNX | Raw Claude Code | OpenClaw / CrewAI / LangGraph |
 |---|-----|----------------|-------------------------------|
 | **Multi-agent coordination** | Built-in (T0-T3 grid) | Manual (multiple terminals) | Framework-level orchestration |
+| **Auth method** | CLI subprocess (unaffected by OAuth ban) | CLI OAuth (subscription) | Direct API keys |
 | **Audit trail** | Append-only NDJSON ledger | Chat logs only | Varies; often requires custom logging |
 | **Quality gates** | Deterministic, non-LLM | None built-in | Framework-dependent |
 | **Human approval** | Mandatory on every dispatch | Per-tool approval | Configurable but not default |
@@ -259,11 +289,42 @@ See [Who Should Use VNX](docs/audience_and_use_cases.md) for detailed use cases 
 
 Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) | [VNX vs Multi-Agent Frameworks](docs/comparisons/vnx_vs_frameworks.md)
 
+## Roadmap
+
+### Current: Subprocess Migration (F27–F29)
+
+VNX is migrating from tmux-based terminal management to pure subprocess execution. This resolves the class of operational failures (stale panes, input-mode probing, `/clear` failures, capture-pane scraping) while maintaining the CLI-only billing profile.
+
+| Feature | What | Status |
+|---------|------|--------|
+| **F27** | Batch refactor — resolve 57 blocker open items (file/function size violations) | Planned |
+| **F28** | SubprocessAdapter — replace `tmux send-keys` with `subprocess.Popen(["claude", "-p", ...])` | Planned |
+| **F29** | Dashboard agent stream — subprocess stdout → SSE → real-time browser UI | Planned |
+
+**Key constraint:** All interaction with Claude stays through the official `claude` CLI binary. No Anthropic SDK imports, no direct API calls, no OAuth token handling. The [formal audit](docs/compliance/vnx_anthropic_billing_audit.pdf) criteria must pass after every merge.
+
+### Completed: Dashboard & Supervisor (F22–F26)
+
+| Feature | What | Status |
+|---------|------|--------|
+| **F22** | Supervisor system — health monitoring, process recovery | ✅ Done |
+| **F23** | Queue popup watcher — real-time queue visualization | ✅ Done |
+| **F24** | Track removal manifest — merged PR cleanup | ✅ Done |
+| **F25** | Staging workflow — pre-validation before dispatch | ✅ Done |
+| **F26** | Demo & distribution mode — replay without API keys | ✅ Done |
+
+### Future direction
+
+tmux elimination (F30) is deferred until F28+F29 are stable in production. The subprocess adapter and tmux adapter coexist behind the `RuntimeAdapter` protocol — operators can fall back to tmux if needed.
+
+Long-term: browser-based dashboard replaces all terminal observation. Subprocess stdout piped to SSE for real-time agent visibility. The CLI subprocess pattern stays as the transport layer.
+
 ## Architecture & Docs
 
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/manifesto/ARCHITECTURE.md) | Glass Box Governance design and data flow |
+| [Compliance Audit](docs/compliance/vnx_anthropic_billing_audit.pdf) | Formal billing policy audit — zero OAuth, zero API calls |
 | [Productization Contract](docs/productization_contract.md) | User modes, command surface, migration plan |
 | [Dispatch Guide](docs/DISPATCH_GUIDE.md) | How T0 routes tasks to workers |
 | [Limitations](docs/manifesto/LIMITATIONS.md) | Known constraints and failure modes |
@@ -280,7 +341,12 @@ Two offline GitHub Actions workflows (no API calls, no secrets):
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**Most valuable contributions:** test coverage, failure-mode hardening, provider adapters, docs clarity.
+**Most valuable contributions right now:**
+- **Subprocess adapter** — help migrate from tmux to pure subprocess execution (F28)
+- **Dashboard event stream** — SSE endpoint + React components for real-time agent visibility (F29)
+- **Test coverage** — especially for dispatch lifecycle and quality gate edge cases
+- **Provider adapters** — Gemini CLI, Codex CLI headless patterns
+- **Docs clarity** — architecture diagrams, getting-started improvements
 
 ## Blog
 
