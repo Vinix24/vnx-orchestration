@@ -9,6 +9,32 @@
 
 ## 2026-04-04
 
+### Feature 26 completed: Terminal Startup And Session Control
+
+Merged: PRs on `fix/serve-dashboard-module-split` branch, 2026-04-04
+
+Material changes:
+- profile-aware start_session(): coding_strict (dev) projects receive 2x2 tmux layout (4 panes), business_light projects receive single terminal
+- profile auto-detection via governance_profile_selector with fallback to vnx start when detection fails
+- session stop via vnx stop with clean tmux teardown
+- dry-run mode returns planned layout and session state without executing any tmux or subprocess calls
+- dashboard session control buttons: Start, Stop, Attach with pending states, cross-button disable, and structured outcome display
+- serve_dashboard.py module split: api_operator.py (762 lines) and api_token_stats.py (380 lines) extracted, reducing serve_dashboard.py from ~1570 to 438 lines
+- 28 session profile tests + 33 dashboard actions tests + 62 dashboard feature tests + 60 serve dashboard API tests + 25 frontend session control tests = 208 total Feature 26 tests
+
+Resolves:
+- OI-373: dashboard_actions.py:start_session refactored — no longer a monolithic function, profile-aware with direct tmux path
+- OI-374: serve_dashboard.py decomposed — 3 focused modules (438 + 762 + 380 lines)
+
+Artifacts:
+- `scripts/lib/dashboard_actions.py` — profile-aware start_session, stop_session, attach_terminal (extended)
+- `dashboard/api_operator.py` — extracted operator API handlers (762 lines)
+- `dashboard/api_token_stats.py` — extracted token stats handlers (380 lines)
+- `dashboard/serve_dashboard.py` — slimmed core server (438 lines)
+- `dashboard/token-dashboard/components/operator/project-card.tsx` — session control UI (extended)
+- `tests/test_session_start_profile.py` — 28 profile and layout tests
+- `dashboard/token-dashboard/__tests__/session-control-buttons.test.tsx` — 25 UI tests
+
 ### Feature 25 completed: Governance Digest Pipeline And Dashboard Surface
 
 Merged: PRs on `feat/pr2-digest-api-endpoint-and-signal` branch, 2026-04-04

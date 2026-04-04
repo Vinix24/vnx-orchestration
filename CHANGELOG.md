@@ -2,6 +2,22 @@
 
 All notable changes to VNX are documented here.
 
+## v0.5.1 — Terminal Startup And Session Control (Feature 26)
+
+Released: 2026-04-04
+
+Highlights:
+- profile-aware session startup: coding_strict projects get 2x2 tmux layout (4 panes), business_light projects get single terminal
+- session stop with clean tmux teardown via vnx stop
+- dry-run mode returns planned actions without executing side effects
+- dashboard session control buttons (Start, Stop, Attach) on project cards with pending states and outcome display
+- serve_dashboard.py module split: extracted api_operator.py (762 lines) and api_token_stats.py (380 lines), reducing serve_dashboard.py from ~1570 to 438 lines
+- 208 tests across backend (183 Python) and frontend (25 TypeScript) covering session lifecycle, profile detection, layout creation, dry-run safety, and UI interactions
+
+Resolves:
+- OI-373: dashboard_actions.py:start_session refactored with profile-aware direct tmux path
+- OI-374: serve_dashboard.py decomposed into focused modules (438 + 762 + 380 lines)
+
 ## v0.5.0 — Governance Runtime Upgrade
 
 Released: 2026-03-30

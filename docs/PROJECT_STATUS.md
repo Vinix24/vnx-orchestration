@@ -1,15 +1,15 @@
 # VNX Project Status
 
 **Status**: Active  
-**Last Updated**: 2026-04-02  
+**Last Updated**: 2026-04-04  
 **Owner**: VNX Maintainer  
-**Purpose**: Commit-backed status after Feature 12 and Feature 13 completion.
+**Purpose**: Commit-backed status after Feature 26 completion.
 
 ---
 
 ## Current Summary
 
-Feature 12 and Feature 13 are complete and merged (PRs #64–#72, 2026-04-01).
+Features 12 through 26 are complete. Feature 26 certified 2026-04-04.
 
 This baseline now includes all prior hardening (Features 5–11) plus:
 
@@ -26,13 +26,20 @@ This baseline now includes all prior hardening (Features 5–11) plus:
 8. **Headless review gate hardening** (post-Feature 13)
    - both Gemini and Codex gates default-enabled
    - atomic request-and-execute flow prevents silent non-execution
+9. **Terminal startup and session control** (Feature 26)
+   - profile-aware session startup: 2x2 tmux layout for dev, single terminal for business
+   - session stop/attach with structured outcome model
+   - dry-run mode for side-effect-free planning
+   - dashboard session control buttons with pending states
+   - serve_dashboard.py module split into 3 focused modules
 
 The system is now:
 
 - governance-first with explicit runtime truth
 - operator-visible through dashboard read-model
-- receipt-led with 245+ tests across runtime and dashboard layers
+- receipt-led with 2800+ tests across runtime and dashboard layers
 - headless-review capable with both providers enabled by default
+- session-controllable from dashboard with profile-aware layout creation
 
 ---
 
