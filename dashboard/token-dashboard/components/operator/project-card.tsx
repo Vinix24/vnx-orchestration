@@ -1,9 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { Play, Square, RotateCcw, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Play, Square, RotateCcw, AlertTriangle, CheckCircle2, Monitor } from 'lucide-react';
 import type { ProjectEntry, ActionOutcome, GateEntry } from '@/lib/types';
-import { actionStartSession, actionStopSession, actionRefreshProjections, postGateToggle } from '@/lib/operator-api';
+import { actionStartSession, actionStopSession, actionAttachTerminal, actionRefreshProjections, postGateToggle } from '@/lib/operator-api';
 import { useGateConfig } from '@/lib/hooks';
 
 interface Props {
@@ -119,6 +119,7 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
 
         {/* Session badge */}
         <div
+          data-testid="session-badge"
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -292,6 +293,7 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
       <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
         {!project.session_active ? (
           <button
+            data-testid="btn-start"
             onClick={() => runAction('start', () => actionStartSession(project.path))}
             disabled={pending !== null}
             style={{
@@ -314,31 +316,58 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
             {pending === 'start' ? 'Starting…' : 'Start Session'}
           </button>
         ) : (
-          <button
-            onClick={() => runAction('stop', () => actionStopSession(project.path))}
-            disabled={pending !== null}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '7px 14px',
-              borderRadius: 8,
-              background: 'rgba(255, 107, 107, 0.12)',
-              border: '1px solid rgba(255, 107, 107, 0.3)',
-              cursor: pending ? 'not-allowed' : 'pointer',
-              opacity: pending ? 0.6 : 1,
-              fontSize: 12,
-              fontWeight: 600,
-              color: 'var(--color-error)',
-              transition: 'opacity 0.15s',
-            }}
-          >
-            <Square size={13} />
-            {pending === 'stop' ? 'Stopping…' : 'Stop Session'}
-          </button>
+          <>
+            <button
+              data-testid="btn-stop"
+              onClick={() => runAction('stop', () => actionStopSession(project.path))}
+              disabled={pending !== null}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '7px 14px',
+                borderRadius: 8,
+                background: 'rgba(255, 107, 107, 0.12)',
+                border: '1px solid rgba(255, 107, 107, 0.3)',
+                cursor: pending ? 'not-allowed' : 'pointer',
+                opacity: pending ? 0.6 : 1,
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--color-error)',
+                transition: 'opacity 0.15s',
+              }}
+            >
+              <Square size={13} />
+              {pending === 'stop' ? 'Stopping…' : 'Stop Session'}
+            </button>
+            <button
+              data-testid="btn-attach"
+              onClick={() => runAction('attach', () => actionAttachTerminal(project.path, 'T0'))}
+              disabled={pending !== null}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '7px 12px',
+                borderRadius: 8,
+                background: 'rgba(107, 138, 230, 0.12)',
+                border: '1px solid rgba(107, 138, 230, 0.25)',
+                cursor: pending ? 'not-allowed' : 'pointer',
+                opacity: pending ? 0.6 : 1,
+                fontSize: 12,
+                fontWeight: 600,
+                color: '#6B8AE6',
+                transition: 'opacity 0.15s',
+              }}
+            >
+              <Monitor size={13} />
+              {pending === 'attach' ? 'Attaching…' : 'Attach'}
+            </button>
+          </>
         )}
 
         <button
+          data-testid="btn-refresh"
           onClick={() => runAction('refresh', () => actionRefreshProjections(project.path))}
           disabled={pending !== null}
           style={{
@@ -364,6 +393,7 @@ export default function ProjectCard({ project, onActionComplete }: Props) {
       {/* Last action outcome */}
       {lastOutcome && (
         <div
+          data-testid="action-outcome"
           style={{
             marginTop: 12,
             padding: '8px 12px',
