@@ -54,42 +54,15 @@ class GateExecutorMixin:
             pr_id=pr_id,
         )
 
-    def request_and_execute(
+    def _execute_requested_gates(
         self,
-        *,
+        request_result: Dict[str, Any],
         pr_number: int,
-        branch: str,
-        review_stack: Optional[Iterable[str]] = None,
-        risk_class: str,
-        changed_files: Iterable[str],
-        mode: str,
-    ) -> Dict[str, Any]:
-        """Request and immediately execute all gates atomically.
+    ) -> tuple:
+        """Execute all requested gates and classify results.
 
-        Ensures gates cannot be requested without execution -- a single call
-        does both so that T0 enforcement never leaves a gate in ``requested``
-        state without a subsequent execution attempt.
-
-        Sets ``VNX_CODEX_HEADLESS_ENABLED=1`` in the process environment before
-        checking availability so codex is never silently disabled during
-        enforcement.
-
-        Returns a dict with ``pr_number``, ``branch``, and ``gates`` list where
-        each gate entry contains its final status after request + execution.
-        Exits with code 1 (via the CLI layer) if any required gate ends in
-        ``not_executable`` or ``not_configured``.
+        Returns (gates_list, has_required_failure) tuple.
         """
-        os.environ["VNX_CODEX_HEADLESS_ENABLED"] = "1"
-
-        request_result = self.request_reviews(
-            pr_number=pr_number,
-            branch=branch,
-            review_stack=review_stack,
-            risk_class=risk_class,
-            changed_files=changed_files,
-            mode=mode,
-        )
-
         gates: List[Dict[str, Any]] = []
         has_required_failure = False
 
@@ -123,6 +96,39 @@ class GateExecutorMixin:
                     required = req.get("required", True)
                     if gate_name != "claude_github_optional" and required:
                         has_required_failure = True
+
+        return gates, has_required_failure
+
+    def request_and_execute(
+        self,
+        *,
+        pr_number: int,
+        branch: str,
+        review_stack: Optional[Iterable[str]] = None,
+        risk_class: str,
+        changed_files: Iterable[str],
+        mode: str,
+    ) -> Dict[str, Any]:
+        """Request and immediately execute all gates atomically.
+
+        Sets ``VNX_CODEX_HEADLESS_ENABLED=1`` in the process environment before
+        checking availability so codex is never silently disabled during
+        enforcement.
+        """
+        os.environ["VNX_CODEX_HEADLESS_ENABLED"] = "1"
+
+        request_result = self.request_reviews(
+            pr_number=pr_number,
+            branch=branch,
+            review_stack=review_stack,
+            risk_class=risk_class,
+            changed_files=changed_files,
+            mode=mode,
+        )
+
+        gates, has_required_failure = self._execute_requested_gates(
+            request_result, pr_number,
+        )
 
         return {
             "pr_number": pr_number,

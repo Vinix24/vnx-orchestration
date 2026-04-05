@@ -17,6 +17,25 @@ def _default_expires(seconds: int = 600) -> str:
     ) + "Z"
 
 
+def _get_lease_row(conn: sqlite3.Connection, terminal_id: str) -> sqlite3.Row:
+    """Fetch a terminal lease row or raise KeyError."""
+    row = conn.execute(
+        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
+    ).fetchone()
+    if row is None:
+        raise KeyError(f"Terminal not found: {terminal_id!r}")
+    return row
+
+
+def _verify_generation(row: sqlite3.Row, terminal_id: str, generation: int) -> None:
+    """Raise ValueError if the provided generation doesn't match current."""
+    if row["generation"] != generation:
+        raise ValueError(
+            f"Lease generation mismatch for {terminal_id!r}: "
+            f"provided {generation}, current {row['generation']}. Stale operation rejected."
+        )
+
+
 def acquire_lease(
     conn: sqlite3.Connection,
     *,
@@ -27,12 +46,7 @@ def acquire_lease(
     reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Acquire a lease for a terminal. Raises InvalidTransitionError if not idle."""
-    row = conn.execute(
-        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"Terminal lease record not found for: {terminal_id!r}. "
-                       f"Was the schema initialized?")
+    row = _get_lease_row(conn, terminal_id)
 
     from_state = row["state"]
     validate_lease_transition(from_state, "leased")
@@ -71,21 +85,12 @@ def renew_lease(
     actor: str = "runtime",
 ) -> Dict[str, Any]:
     """Renew a lease heartbeat. Generation must match to prevent stale renewal."""
-    row = conn.execute(
-        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"Terminal not found: {terminal_id!r}")
-
+    row = _get_lease_row(conn, terminal_id)
     if row["state"] != "leased":
         raise InvalidTransitionError(
             f"Cannot renew lease for {terminal_id!r}: current state is {row['state']!r}, expected 'leased'"
         )
-    if row["generation"] != generation:
-        raise ValueError(
-            f"Lease generation mismatch for {terminal_id!r}: "
-            f"provided {generation}, current {row['generation']}. Stale renewal rejected."
-        )
+    _verify_generation(row, terminal_id, generation)
 
     now = _now_utc()
     expires_at = _default_expires(lease_seconds)
@@ -112,22 +117,13 @@ def release_lease(
     reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Release a lease, returning terminal to idle. Generation must match (G-R3)."""
-    row = conn.execute(
-        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"Terminal not found: {terminal_id!r}")
-
+    row = _get_lease_row(conn, terminal_id)
     from_state = row["state"]
     if from_state not in ("leased", "recovering"):
         raise InvalidTransitionError(
             f"Cannot release lease for {terminal_id!r}: current state is {from_state!r}"
         )
-    if row["generation"] != generation:
-        raise ValueError(
-            f"Lease generation mismatch for {terminal_id!r}: "
-            f"provided {generation}, current {row['generation']}. Stale release rejected."
-        )
+    _verify_generation(row, terminal_id, generation)
 
     now = _now_utc()
     conn.execute(
@@ -165,11 +161,7 @@ def expire_lease(
     reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Mark a lease as expired (used by reconciler for TTL enforcement)."""
-    row = conn.execute(
-        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"Terminal not found: {terminal_id!r}")
+    row = _get_lease_row(conn, terminal_id)
 
     from_state = row["state"]
     validate_lease_transition(from_state, "expired")
@@ -195,11 +187,7 @@ def recover_lease(
     reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transition an expired lease to recovering, then idle."""
-    row = conn.execute(
-        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
-    ).fetchone()
-    if row is None:
-        raise KeyError(f"Terminal not found: {terminal_id!r}")
+    row = _get_lease_row(conn, terminal_id)
 
     from_state = row["state"]
     validate_lease_transition(from_state, "recovering")
