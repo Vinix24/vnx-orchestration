@@ -131,7 +131,8 @@ def _parse_changed_files(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -176,7 +177,57 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     status_parser.add_argument("--pr", type=int, required=True)
     status_parser.add_argument("--json", action="store_true")
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Namespace) -> int:
+    """Handle request-and-execute subcommand."""
+    result = manager.request_and_execute(
+        pr_number=args.pr,
+        branch=args.branch,
+        review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
+        risk_class=args.risk_class,
+        changed_files=_parse_changed_files(args.changed_files),
+        mode=args.mode,
+    )
+    print(json.dumps(result, indent=2))
+    if result.get("has_required_failure"):
+        failed_gates = [
+            g["gate"] for g in result.get("gates", [])
+            if g.get("execution_status") in ("not_executable", "not_configured")
+            and g.get("gate") != "claude_github_optional"
+        ]
+        print(
+            f"ERROR: required gates not executable: {', '.join(failed_gates)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def _handle_record_result(manager: ReviewGateManager, args: argparse.Namespace) -> int:
+    """Handle record-result subcommand."""
+    findings = []
+    if args.findings_file:
+        findings = json.loads(Path(args.findings_file).read_text(encoding="utf-8"))
+    result = manager.record_result(
+        gate=args.gate,
+        pr_number=args.pr,
+        branch=args.branch,
+        status=args.status,
+        summary=args.summary,
+        findings=findings,
+        residual_risk=args.residual_risk,
+        contract_hash=args.contract_hash,
+        pr_id=args.pr_id,
+        report_path=args.report_path,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
     manager = ReviewGateManager()
 
     if args.command == "request":
@@ -188,63 +239,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             changed_files=_parse_changed_files(args.changed_files),
             mode=args.mode,
         )
-        print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2))
         return 0
 
     if args.command == "record-result":
-        findings = []
-        if args.findings_file:
-            findings = json.loads(Path(args.findings_file).read_text(encoding="utf-8"))
-        result = manager.record_result(
-            gate=args.gate,
-            pr_number=args.pr,
-            branch=args.branch,
-            status=args.status,
-            summary=args.summary,
-            findings=findings,
-            residual_risk=args.residual_risk,
-            contract_hash=args.contract_hash,
-            pr_id=args.pr_id,
-            report_path=args.report_path,
-        )
-        print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
-        return 0
+        return _handle_record_result(manager, args)
 
     if args.command == "request-and-execute":
-        result = manager.request_and_execute(
-            pr_number=args.pr,
-            branch=args.branch,
-            review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
-            risk_class=args.risk_class,
-            changed_files=_parse_changed_files(args.changed_files),
-            mode=args.mode,
-        )
-        print(json.dumps(result, indent=2))
-        if result.get("has_required_failure"):
-            failed_gates = [
-                g["gate"] for g in result.get("gates", [])
-                if g.get("execution_status") in ("not_executable", "not_configured")
-                and g.get("gate") != "claude_github_optional"
-            ]
-            print(
-                f"ERROR: required gates not executable: {', '.join(failed_gates)}",
-                file=sys.stderr,
-            )
-            return 1
-        return 0
+        return _handle_request_and_execute(manager, args)
 
     if args.command == "execute":
-        result = manager.execute_gate(
-            gate=args.gate,
-            pr_number=args.pr,
-            pr_id=args.pr_id,
-        )
+        result = manager.execute_gate(gate=args.gate, pr_number=args.pr, pr_id=args.pr_id)
         print(json.dumps(result, indent=2))
         return 0
 
     if args.command == "status":
-        result = manager.status(args.pr)
-        print(json.dumps(result, indent=2) if args.json else json.dumps(result, indent=2))
+        print(json.dumps(manager.status(args.pr), indent=2))
         return 0
 
     return 1

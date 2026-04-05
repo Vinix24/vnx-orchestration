@@ -167,14 +167,11 @@ dispatch_with_skill_activation() {
 # Globals set by validate_dispatch_preconditions
 _PD_TRACK="" _PD_COGNITION="" _PD_PRIORITY="" _PD_GATE="" _PD_DISPATCH_ID="" _PD_TARGET_TERMINAL=""
 
-# validate_dispatch_preconditions — pre-delivery guard: skill/role/agent validation + metadata.
-# Sets: _PD_TRACK _PD_COGNITION _PD_PRIORITY _PD_GATE _PD_DISPATCH_ID _PD_TARGET_TERMINAL
-# Returns 1 (caller should continue) if dispatch should be skipped.
-validate_dispatch_preconditions() {
+# _validate_stuck_files — check for blocked markers and validate skill registry.
+# Returns 1 if dispatch should be skipped due to invalid skill markers.
+_validate_stuck_files() {
     local dispatch="$1"
-    local agent_role
-    agent_role=$(extract_agent_role "$dispatch")
-    log "V8: Processing dispatch: $(basename "$dispatch") (Role: $agent_role)"
+    local agent_role="$2"
 
     if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
         log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
@@ -199,35 +196,54 @@ validate_dispatch_preconditions() {
         return 1
     fi
     log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
+    return 0
+}
 
-    # V7.4 INTELLIGENCE: Validate agent — command failure blocks dispatch (RES-A3)
-    if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
-        local validation_rc=0 validation_result
-        set +e
-        validation_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" validate "$agent_role" 2>&1)
-        validation_rc=$?
-        set -e
-        if [ "$validation_rc" -ne 0 ]; then
-            log_structured_failure "agent_validation_dependency_failed" "Agent validation command failed; dispatch blocked" "role=$agent_role rc=$validation_rc"
-            if ! grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
-                echo -e "\n\n[DEPENDENCY_ERROR] gather_intelligence validate failed (rc=$validation_rc). Resolve runtime dependency and retry.\n" >> "$dispatch"
-            fi
-            return 1
-        fi
-        if echo "$validation_result" | grep -q '"valid": false'; then
-            log "V8 ERROR: Agent validation failed for '$agent_role'"
-            log "Validation result: $validation_result"
-            local suggested
-            suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4)
-            log "Suggested agent: $suggested"
-            if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-                echo -e "\n\n[SKILL_INVALID] Skill '$agent_role' not found. Suggested: '$suggested'. Update Role and remove this marker to retry.\n" >> "$dispatch"
-            fi
-            return 1
-        else
-            log "V8: Agent validated: $agent_role"
-        fi
+# _validate_agent_intelligence — V7.4 agent validation via gather_intelligence (RES-A3).
+# Returns 1 if agent validation command fails or agent is invalid.
+_validate_agent_intelligence() {
+    local dispatch="$1"
+    local agent_role="$2"
+
+    if [ -z "$agent_role" ] || [ "$agent_role" = "none" ] || [ "$agent_role" = "None" ]; then
+        return 0
     fi
+
+    local validation_rc=0 validation_result
+    set +e
+    validation_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" validate "$agent_role" 2>&1)
+    validation_rc=$?
+    set -e
+
+    if [ "$validation_rc" -ne 0 ]; then
+        log_structured_failure "agent_validation_dependency_failed" "Agent validation command failed; dispatch blocked" "role=$agent_role rc=$validation_rc"
+        if ! grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
+            echo -e "\n\n[DEPENDENCY_ERROR] gather_intelligence validate failed (rc=$validation_rc). Resolve runtime dependency and retry.\n" >> "$dispatch"
+        fi
+        return 1
+    fi
+
+    if echo "$validation_result" | grep -q '"valid": false'; then
+        log "V8 ERROR: Agent validation failed for '$agent_role'"
+        log "Validation result: $validation_result"
+        local suggested
+        suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4)
+        log "Suggested agent: $suggested"
+        if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+            echo -e "\n\n[SKILL_INVALID] Skill '$agent_role' not found. Suggested: '$suggested'. Update Role and remove this marker to retry.\n" >> "$dispatch"
+        fi
+        return 1
+    fi
+
+    log "V8: Agent validated: $agent_role"
+    return 0
+}
+
+# _validate_dispatch_fields — extract and validate track/terminal metadata.
+# Sets: _PD_TRACK _PD_COGNITION _PD_PRIORITY _PD_GATE _PD_DISPATCH_ID _PD_TARGET_TERMINAL
+# Returns 1 if dispatch should be skipped due to invalid fields or lock.
+_validate_dispatch_fields() {
+    local dispatch="$1"
 
     _PD_TRACK=$(extract_track "$dispatch")
     _PD_COGNITION=$(extract_cognition "$dispatch")
@@ -254,6 +270,21 @@ validate_dispatch_preconditions() {
         log "V8 LOCK: deferring $(basename "$dispatch") until terminal $_PD_TARGET_TERMINAL is unlocked"
         return 1
     fi
+    return 0
+}
+
+# validate_dispatch_preconditions — pre-delivery guard: skill/role/agent validation + metadata.
+# Sets: _PD_TRACK _PD_COGNITION _PD_PRIORITY _PD_GATE _PD_DISPATCH_ID _PD_TARGET_TERMINAL
+# Returns 1 (caller should continue) if dispatch should be skipped.
+validate_dispatch_preconditions() {
+    local dispatch="$1"
+    local agent_role
+    agent_role=$(extract_agent_role "$dispatch")
+    log "V8: Processing dispatch: $(basename "$dispatch") (Role: $agent_role)"
+
+    _validate_stuck_files "$dispatch" "$agent_role" || return 1
+    _validate_agent_intelligence "$dispatch" "$agent_role" || return 1
+    _validate_dispatch_fields "$dispatch" || return 1
     return 0
 }
 

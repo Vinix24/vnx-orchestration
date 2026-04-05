@@ -90,6 +90,32 @@ class GateRequestHandlerMixin:
             "requested": requested,
         }
 
+    def _mark_gate_unavailable(
+        self,
+        payload: Dict[str, Any],
+        *,
+        gate: str,
+        binary_name: str,
+        pr_number: Optional[int],
+        pr_id: str,
+        contract_hash: str = "",
+    ) -> None:
+        """Record unavailability in payload and write skip/result records."""
+        reason, detail = self._classify_unavailable(gate, binary_name)
+        payload["reason"] = reason
+        payload["reason_detail"] = detail
+        payload["resolved_at"] = payload["requested_at"]
+        self._write_not_executable_result(
+            gate=gate, pr_number=pr_number, pr_id=pr_id,
+            reason=reason, reason_detail=detail,
+            contract_hash=contract_hash,
+        )
+        self._write_skip_rationale(
+            gate=gate, pr_id=pr_id or str(pr_number),
+            reason=reason, reason_detail=detail,
+            binary_name=binary_name,
+        )
+
     def _request_gemini(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
     ) -> Dict[str, Any]:
@@ -114,18 +140,9 @@ class GateRequestHandlerMixin:
             ),
         }
         if not available:
-            reason, detail = self._classify_unavailable("gemini_review", "gemini")
-            payload["reason"] = reason
-            payload["reason_detail"] = detail
-            payload["resolved_at"] = requested_at
-            self._write_not_executable_result(
-                gate="gemini_review", pr_number=pr_number, pr_id="",
-                reason=reason, reason_detail=detail,
-            )
-            self._write_skip_rationale(
-                gate="gemini_review", pr_id=str(pr_number),
-                reason=reason, reason_detail=detail,
-                binary_name="gemini",
+            self._mark_gate_unavailable(
+                payload, gate="gemini_review", binary_name="gemini",
+                pr_number=pr_number, pr_id="",
             )
         self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -169,19 +186,10 @@ class GateRequestHandlerMixin:
             ),
         }
         if not available:
-            reason, detail = self._classify_unavailable("gemini_review", "gemini")
-            payload["reason"] = reason
-            payload["reason_detail"] = detail
-            payload["resolved_at"] = requested_at
-            self._write_not_executable_result(
-                gate="gemini_review", pr_number=None, pr_id=contract.pr_id,
-                reason=reason, reason_detail=detail,
+            self._mark_gate_unavailable(
+                payload, gate="gemini_review", binary_name="gemini",
+                pr_number=None, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
-            )
-            self._write_skip_rationale(
-                gate="gemini_review", pr_id=contract.pr_id,
-                reason=reason, reason_detail=detail,
-                binary_name="gemini",
             )
 
         request_file = self._contract_request_path("gemini_review", contract.pr_id)
@@ -315,18 +323,9 @@ class GateRequestHandlerMixin:
             ),
         }
         if not available:
-            reason, detail = self._classify_unavailable("codex_gate", "codex")
-            payload["reason"] = reason
-            payload["reason_detail"] = detail
-            payload["resolved_at"] = requested_at
-            self._write_not_executable_result(
-                gate="codex_gate", pr_number=pr_number, pr_id="",
-                reason=reason, reason_detail=detail,
-            )
-            self._write_skip_rationale(
-                gate="codex_gate", pr_id=str(pr_number),
-                reason=reason, reason_detail=detail,
-                binary_name="codex",
+            self._mark_gate_unavailable(
+                payload, gate="codex_gate", binary_name="codex",
+                pr_number=pr_number, pr_id="",
             )
         self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
