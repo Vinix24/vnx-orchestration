@@ -89,25 +89,28 @@ extract_context_files() {
 
 # ===== RECEIPT GENERATION (from V7) =====
 
-# Function to generate receipt footer
-generate_receipt_footer() {
+# _build_receipt_metadata — resolve dispatch and PR identifiers for receipt footer.
+# Outputs: two lines — dispatch_id_for_footer and footer_pr_id.
+_build_receipt_metadata() {
     local dispatch_file="$1"
-    local track="$2"
-    local phase="$3"
-    local gate="$4"
-    local task_id="$5"
-    local cmd_id="$6"
-    local dispatch_id="$7"
+    local dispatch_id="$2"
 
-    # Extract PR-ID from dispatch file
     local footer_pr_id
     footer_pr_id=$(extract_pr_id "$dispatch_file" 2>/dev/null)
+
     local dispatch_id_for_footer="$dispatch_id"
     if [ -z "$dispatch_id_for_footer" ]; then
         dispatch_id_for_footer=$(vnx_dispatch_extract_dispatch_id "$dispatch_file" 2>/dev/null)
     fi
 
-    # Generate inline receipt footer — no external template dependency
+    printf '%s\n%s\n' "${dispatch_id_for_footer:-unknown}" "${footer_pr_id:-unknown}"
+}
+
+# _emit_receipt_template — output the receipt footer heredoc template.
+# Args: dispatch_id_for_footer pr_id track gate
+_emit_receipt_template() {
+    local rid="$1" pr="$2" track="$3" gate="$4"
+
     cat <<RECEIPT_EOF
 
 ---
@@ -118,8 +121,8 @@ generate_receipt_footer() {
 Your report MUST include this metadata block exactly as shown below. The receipt processor parses these fields to track progress and deliver receipts to T0.
 
 \`\`\`
-**Dispatch ID**: ${dispatch_id_for_footer:-unknown}
-**PR**: ${footer_pr_id:-unknown}
+**Dispatch ID**: ${rid}
+**PR**: ${pr}
 **Track**: ${track}
 **Gate**: ${gate}
 **Status**: success
@@ -129,7 +132,7 @@ Your report MUST include this metadata block exactly as shown below. The receipt
 
 1. Stage and commit ALL code changes from this task:
    - Conventional commit: \`feat|fix|test|refactor(<scope>): <description>\`
-   - Include in commit body: \`Dispatch-ID: ${dispatch_id_for_footer:-unknown}\`
+   - Include in commit body: \`Dispatch-ID: ${rid}\`
    - Do NOT commit VNX infrastructure or state directories
 2. Then write your report below
 
@@ -150,6 +153,24 @@ Filename: \`$(date +%Y%m%d-%H%M%S)-${track}-<short-title>.md\`
 ---
 *VNX V8 - Native Skills + Instruction-Only Dispatch*
 RECEIPT_EOF
+}
+
+# Function to generate receipt footer
+generate_receipt_footer() {
+    local dispatch_file="$1"
+    local track="$2"
+    local phase="$3"
+    local gate="$4"
+    local task_id="$5"
+    local cmd_id="$6"
+    local dispatch_id="$7"
+
+    local _meta_output _dispatch_id_for_footer _footer_pr_id
+    _meta_output=$(_build_receipt_metadata "$dispatch_file" "$dispatch_id")
+    _dispatch_id_for_footer=$(echo "$_meta_output" | head -1)
+    _footer_pr_id=$(echo "$_meta_output" | tail -1)
+
+    _emit_receipt_template "$_dispatch_id_for_footer" "$_footer_pr_id" "$track" "$gate"
 }
 
 # ===== SKILL ACTIVATION MAPPING (V8 Core) =====
