@@ -71,12 +71,13 @@ The subprocess migration was evaluated against four alternatives. Each was rejec
 - **Why chosen**: Same CLI binary, same billing profile, no new dependencies. Workers run as isolated OS processes instead of tmux panes. Process lifecycle is managed by the OS, not by tmux session state.
 - **Billing impact**: None. Still launching `claude` CLI — the same binary the operator uses manually.
 
-### Chosen: Claude Code SDK for Event Streaming
+### Chosen: CLI stream-json Output
 
-- **What it is**: `@anthropic-ai/claude-code-sdk` (Node.js) — programmatic interface to spawn and interact with `claude` CLI processes.
-- **Why chosen**: Provides structured event streaming (thinking, tool calls, results) from CLI processes. No Anthropic SDK import — it wraps the CLI binary, not the API.
+- **What it is**: `claude -p --output-format stream-json` — native CLI flag that emits real-time NDJSON events via stdout.
+- **Why chosen**: The `claude` CLI binary already supports structured event streaming natively. `subprocess.Popen` with `stdout=PIPE` reads events line by line. No external dependency needed — pure Python subprocess.
 - **Use case**: Dashboard agent stream (F29). Real-time visibility into worker output without tmux capture-pane scraping.
-- **Billing impact**: None. The SDK spawns `claude` CLI processes. It does not call the API directly.
+- **Billing impact**: None. Same CLI binary, same subscription. No additional SDK, no Node.js wrapper.
+- **Why not Claude Code SDK**: `@anthropic-ai/claude-code-sdk` (Node.js) wraps the same CLI binary but adds an external dependency and a Node.js runtime requirement. Since `stream-json` is built into the CLI, the SDK is unnecessary. Keeping the stack Python-only reduces complexity.
 
 ---
 
@@ -90,7 +91,7 @@ Moving from tmux-based terminal management to subprocess execution resolves a cl
 |-------------|---------------------|
 | Stale pane IDs / `panes.json` discovery failures | No pane IDs. Process PIDs from `Popen`. |
 | Input-mode probing / `/clear` failures (ref: T3 feedback memory) | No input mode. Instruction passed via `-p` flag at process start. |
-| `tmux capture-pane` scraping for output | `stdout` pipe from subprocess. Structured events via SDK. |
+| `tmux capture-pane` scraping for output | `stdout` pipe from subprocess. Structured events via `--output-format stream-json`. |
 | Cross-pane contamination | Process isolation. Each worker is a separate OS process. |
 | Tmux session state corruption | No session state. Each dispatch starts a fresh process. |
 | Pane-still-running detection heuristics | `process.poll()` / `process.returncode`. Deterministic. |
@@ -99,7 +100,7 @@ Moving from tmux-based terminal management to subprocess execution resolves a cl
 
 - **Process isolation per terminal**: Each worker runs in its own process with its own environment. No shared tmux session state.
 - **Clean context per dispatch**: New process = fresh Claude Code context. No carry-over from previous dispatches. No need for `/clear`.
-- **Structured event streaming**: Claude Code SDK emits typed events (thinking, tool_use, result). No regex parsing of captured pane output.
+- **Structured event streaming**: `--output-format stream-json` emits typed NDJSON events (thinking, tool_use, result) via stdout. No regex parsing of captured pane output.
 - **Dashboard as primary surface**: With subprocess stdout piped to SSE, the dashboard can show real-time agent output. Operators no longer need to `tmux attach` to see what workers are doing.
 - **Deterministic lifecycle**: `SIGTERM` → `SIGKILL` escalation for hung processes. No more "is this pane still alive?" heuristics.
 
@@ -136,8 +137,14 @@ CLI-only execution comes with real limitations. These are accepted trade-offs, n
 ### Streaming Granularity
 
 - No token-level streaming in VNX's own code.
-- Claude Code SDK provides event-level streaming (thinking blocks, tool calls, results), which is sufficient for dashboard visibility.
+- `--output-format stream-json` provides event-level NDJSON streaming (thinking blocks, tool calls, results), which is sufficient for dashboard visibility.
 - Token-level rendering is handled by the dashboard's SSE consumer if needed.
+
+### Session Continuity
+
+- `--resume $session_id` enables follow-up dispatches to continue an existing session without re-sending full context.
+- Session ID is extracted from the first `init` event in `stream-json` output.
+- This is an optimization, not a requirement — dispatches default to fresh context unless explicitly resuming.
 
 ---
 
@@ -177,14 +184,32 @@ Dispatcher
     ▼
 SubprocessAdapter (implements RuntimeAdapter protocol)
     │
-    ├── spawn(terminal, instruction, model) → Process
+    ├── spawn(terminal, instruction, model, resume_session=None) → Process
     ├── poll(process) → ProcessState
     ├── read_output(process) → str
+    ├── get_session_id(process) → Optional[str]
     ├── terminate(process) → None
     └── kill(process) → None
     │
     ▼
-subprocess.Popen(["claude", "-p", instruction, "--model", model])
+subprocess.Popen(["claude", "-p", "--output-format", "stream-json", "--model", model])
+    (optionally: ["--resume", session_id])
+```
+
+**Session Continuity via --resume**:
+
+```python
+class SubprocessAdapter(RuntimeAdapter):
+    def spawn(self, terminal, instruction, model, resume_session=None) -> Process:
+        cmd = ["claude", "-p", "--output-format", "stream-json", "--model", model]
+        if resume_session:
+            cmd.extend(["--resume", resume_session])
+        cmd.append(instruction)
+        return subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE)
+
+    def get_session_id(self, process) -> Optional[str]:
+        """Extract session_id from first init event in stream-json output."""
+        ...
 ```
 
 **Key Constraint**: CLI-ONLY. The SubprocessAdapter must never import the Anthropic SDK, make HTTP requests to Anthropic endpoints, or handle OAuth tokens. It wraps `subprocess.Popen` around the `claude` binary — nothing more.
@@ -200,6 +225,16 @@ subprocess.Popen(["claude", "-p", instruction, "--model", model])
 | `scripts/lib/tmux_adapter.py` (798L) | RETAIN — Backward compatibility, not deleted |
 
 **Prerequisite**: Extract shared types (`RuntimeAdapter` protocol, `ProcessState`, `TerminalInfo`) from `tmux_adapter.py` into `adapter_types.py`. This decouples the protocol definition from the tmux implementation, allowing `SubprocessAdapter` to implement it independently.
+
+**PR Breakdown**:
+
+| PR | Scope | Key Files |
+|----|-------|-----------|
+| PR-0 | Extract adapter_types.py | Shared types from `tmux_adapter.py` |
+| PR-1 | RuntimeFacade accepts RuntimeAdapter protocol | Type signature change + factory |
+| PR-2 | SubprocessAdapter core (spawn/poll/read/terminate) | `subprocess_adapter.py` |
+| PR-3 | stream-json event parsing + session_id extraction | Output handling + `--resume` support |
+| PR-4 | Dispatcher routing via subprocess + feature flag | `VNX_ADAPTER_T{n}=subprocess` env vars |
 
 **Complexity**: XL (Extra Large)
 **PRs**: 5
