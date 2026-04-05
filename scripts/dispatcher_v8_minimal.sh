@@ -22,11 +22,8 @@ VNX_DIR="$VNX_HOME"
 # --- Runtime Core defaults (PR-5 cutover) ---
 # VNX_RUNTIME_PRIMARY=1: broker + canonical lease are the authoritative path.
 # Set VNX_RUNTIME_PRIMARY=0 to revert to legacy-only mode (rollback).
-# See docs/runtime_core_rollback.md for full rollback procedure.
 VNX_RUNTIME_PRIMARY="${VNX_RUNTIME_PRIMARY:-1}"
-# Broker authoritative (not shadow) after cutover
 VNX_BROKER_SHADOW="${VNX_BROKER_SHADOW:-0}"
-# Canonical lease active after cutover
 VNX_CANONICAL_LEASE_ACTIVE="${VNX_CANONICAL_LEASE_ACTIVE:-1}"
 export VNX_RUNTIME_PRIMARY VNX_BROKER_SHADOW VNX_CANONICAL_LEASE_ACTIVE
 
@@ -68,1843 +65,258 @@ for dir in "$QUEUE_DIR" "$PENDING_DIR" "$ACTIVE_DIR" "$COMPLETED_DIR" "$REJECTED
     mkdir -p "$dir"
 done
 
-# Function to log with timestamp
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
+# Source decomposed modules (order: logging first, lifecycle second,
+# deliver third — depends on lifecycle; create fourth — depends on deliver)
+source "$SCRIPT_DIR/lib/dispatch_logging.sh"
+source "$SCRIPT_DIR/lib/dispatch_lifecycle.sh"
+source "$SCRIPT_DIR/lib/dispatch_deliver.sh"
+source "$SCRIPT_DIR/lib/dispatch_create.sh"
 
-# Structured failure event logging for shell/Python boundary diagnostics.
-# Enhanced per DFL-LOG-1 (Contract 160): emits failure_code, failure_class,
-# retryable, operator_summary, dispatch_id, terminal_id, provider, and phase.
-#
-# Usage: log_structured_failure <code> <message> <details> [<failure_code> <dispatch_id> <terminal_id> <provider>]
-log_structured_failure() {
-    local code="$1"
-    local message="$2"
-    local details="${3:-}"
-    local failure_code="${4:-}"
-    local dispatch_id="${5:-}"
-    local terminal_id="${6:-}"
-    local provider="${7:-}"
-    local ts
-    ts="$(date '+%Y-%m-%d %H:%M:%S')"
-
-    local payload
-    payload="$(python3 - "$code" "$message" "$details" "$failure_code" "$dispatch_id" "$terminal_id" "$provider" <<'PY'
-import json, sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(".")), "scripts", "lib"))
-code, message, details, failure_code, dispatch_id, terminal_id, provider = sys.argv[1:8]
-event = {
-    "event": "delivery_failure",
-    "component": "dispatcher_v8_minimal.sh",
-    "code": code,
-    "message": message,
-}
-if details:
-    event["details"] = details
-if failure_code:
-    event["failure_code"] = failure_code
-    phase = failure_code.split("_")[0] if "_" in failure_code else ""
-    event["phase"] = phase
-    try:
-        sys.path.insert(0, os.path.join(os.environ.get("VNX_HOME", "."), "scripts", "lib"))
-        from failure_classifier import FAILURE_CODE_REGISTRY
-        entry = FAILURE_CODE_REGISTRY.get(failure_code)
-        if entry:
-            event["failure_class"] = entry[0]
-            event["retryable"] = entry[1]
-            event["operator_summary"] = entry[3]
-    except Exception:
-        pass
-if dispatch_id:
-    event["dispatch_id"] = dispatch_id
-if terminal_id:
-    event["terminal_id"] = terminal_id
-if provider:
-    event["provider"] = provider
-print(json.dumps(event, separators=(",", ":")))
-PY
-)"
-
-    echo "[$ts] $payload"
-}
-
-# Classify a block reason into category and requeueable flag.
-# Outputs: "<category> <requeueable>" where category is one of:
-#   busy      — terminal has a healthy active lease (defer)
-#   ambiguous — lease expired or state unreadable (requeue)
-#   invalid   — metadata invalid, skill bad, dependency error (reject)
-_classify_blocked_dispatch() {
-    local reason="$1"
-    case "$reason" in
-        active_claim:*|status_claimed:*)
-            echo "busy true" ;;
-        canonical_lease:lease_expired*|recent_*|canonical_check_error:*|terminal_state_unreadable)
-            echo "ambiguous true" ;;
-        canonical_check_parse_error|canonical_lease_acquire_failed)
-            # RC-2: canonical_check_parse_error is a transient JSON parse failure
-            # (not a metadata defect) — must be ambiguous, not invalid (contract 140 §2.3).
-            # canonical_lease_acquire_failed is contention, also transient.
-            echo "ambiguous true" ;;
-        canonical_lease:*)
-            echo "busy true" ;;
-        blocked_input_mode|recovery_failed|pane_dead|probe_failed|input_mode_blocked|recovery_cooldown_deferred)
-            # Input-mode blocks: terminal is not busy but pane is non-interactive.
-            # Requeue after operator resolves copy/search mode.
-            # RES-A4: recovery_cooldown_deferred — pane blocked during cooldown, requeueable.
-            echo "ambiguous true" ;;
-        # DFL-LOG per-code classification (Contract 160 Section 4.4)
-        delivery_failed:tx_*|delivery_failed:post_*)
-            echo "ambiguous true" ;;
-        delivery_failed:pre_skill_*|delivery_failed:pre_instruction_*|delivery_failed:pre_validation_empty_role)
-            echo "invalid false" ;;
-        delivery_failed:pre_canonical_lease_busy|delivery_failed:pre_legacy_lock_busy|delivery_failed:pre_duplicate_delivery)
-            echo "busy true" ;;
-        delivery_failed:pre_*)
-            echo "ambiguous true" ;;
-        *)
-            echo "invalid false" ;;
-    esac
-}
-
-# Emit a structured NDJSON event when a dispatch is blocked.
-# Usage: emit_blocked_dispatch_audit <dispatch_id> <terminal_id> <block_reason> [<event_type>] [<failure_code>]
-# event_type defaults to "dispatch_blocked"; use "duplicate_delivery_prevented" for duplicates.
-# DFL-LOG-2: failure_code and failure_class fields are included when failure_code is provided.
-emit_blocked_dispatch_audit() {
-    local dispatch_id="$1"
-    local terminal_id="$2"
-    local block_reason="$3"
-    local event_type="${4:-dispatch_blocked}"
-    local failure_code="${5:-}"
-    local audit_file="$STATE_DIR/blocked_dispatch_audit.ndjson"
-
-    local classification
-    classification=$(_classify_blocked_dispatch "$block_reason")
-    local block_category="${classification%% *}"
-    local requeueable="${classification##* }"
-
-    local ts
-    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$block_reason" \
-        "$block_category" "$requeueable" "$ts" "$audit_file" "$failure_code" <<'PY'
-import json, sys, os
-event_type, dispatch_id, terminal_id, block_reason, block_category, requeueable_str, ts, audit_file, failure_code = sys.argv[1:]
-event = {
-    "event_type": event_type,
-    "dispatch_id": dispatch_id,
-    "terminal_id": terminal_id,
-    "block_reason": block_reason,
-    "block_category": block_category,
-    "requeueable": requeueable_str == "true",
-    "timestamp": ts,
-}
-if failure_code:
-    event["failure_code"] = failure_code
-    try:
-        sys.path.insert(0, os.path.join(os.environ.get("VNX_HOME", "."), "scripts", "lib"))
-        from failure_classifier import FAILURE_CODE_REGISTRY
-        entry = FAILURE_CODE_REGISTRY.get(failure_code)
-        if entry:
-            event["failure_class"] = entry[0]
-    except Exception:
-        pass
-os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
-with open(audit_file, "a", encoding="utf-8") as fh:
-    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
-PY
-}
-
-tmux_send_best_effort() {
-    local target_pane="$1"
-    shift
-    if ! tmux send-keys -t "$target_pane" "$@" 2>/dev/null; then
-        log_structured_failure "tmux_send_failed" "tmux send-keys failed (best-effort)" "pane=$target_pane args=$*"
-        return 1
-    fi
-    return 0
-}
-
-# Large-payload tmux buffer loading: uses temp file for payloads > threshold
-# to avoid silent truncation in tmux stdin pipe.
+# Large-payload threshold (referenced by dispatch_deliver.sh tmux_load_buffer_safe)
 VNX_DISPATCH_MAX_INLINE="${VNX_DISPATCH_MAX_INLINE:-51200}"  # 50KB default
 VNX_DISPATCH_PAYLOAD_DIR="${VNX_DATA_DIR:-/tmp}/dispatch_payloads"
-
-tmux_load_buffer_safe() {
-    local content="$1"
-    local payload_size=${#content}
-
-    if [ "$payload_size" -gt "$VNX_DISPATCH_MAX_INLINE" ]; then
-        # Large payload: write to temp file to avoid truncation
-        mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
-        local tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/payload_$$.txt"
-        printf '%s' "$content" > "$tmpfile"
-        log "V8 DELIVERY: Large payload (${payload_size}B > ${VNX_DISPATCH_MAX_INLINE}B), using temp file"
-        if tmux load-buffer "$tmpfile"; then
-            rm -f "$tmpfile"
-            return 0
-        else
-            rm -f "$tmpfile"
-            return 1
-        fi
-    else
-        printf '%s' "$content" | tmux load-buffer -
-    fi
-}
-
-# Retry wrapper for tmux delivery operations with exponential backoff.
-# Usage: tmux_retry <max_attempts> <command...>
-tmux_retry() {
-    local max_attempts="$1"
-    shift
-    local attempt=1
-    local delay=1
-
-    while [ "$attempt" -le "$max_attempts" ]; do
-        if "$@"; then
-            [ "$attempt" -gt 1 ] && log "V8 DELIVERY: Succeeded on attempt $attempt"
-            return 0
-        fi
-        if [ "$attempt" -lt "$max_attempts" ]; then
-            log "V8 DELIVERY: Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
-            sleep "$delay"
-            delay=$((delay * 2))
-        fi
-        attempt=$((attempt + 1))
-    done
-
-    log "V8 DELIVERY: All $max_attempts attempts failed"
-    return 1
-}
-
-# Map track identifier to canonical terminal id.
-track_to_terminal() {
-    case "$1" in
-        A) echo "T1" ;;
-        B) echo "T2" ;;
-        C) echo "T3" ;;
-        *) echo "" ;;
-    esac
-}
-
-# Check if terminal has an active conflicting claim/lock.
-terminal_lock_allows_dispatch() {
-    local terminal_id="$1"
-    local dispatch_id="$2"
-    local state_file="$STATE_DIR/terminal_state.json"
-
-    if [ ! -f "$state_file" ]; then
-        return 0
-    fi
-
-    local check_output
-    set +e
-    check_output=$(python3 - "$state_file" "$terminal_id" "$dispatch_id" <<'PY'
-import json
-import sys
-from datetime import datetime, timezone
-
-state_file, terminal_id, dispatch_id = sys.argv[1], sys.argv[2], sys.argv[3]
-
-def parse_iso(value):
-    if not value or not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-try:
-    with open(state_file, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-except Exception:
-    print("BLOCK:terminal_state_unreadable")
-    sys.exit(0)
-
-record = ((payload.get("terminals") or {}).get(terminal_id) or {})
-if not isinstance(record, dict) or not record:
-    print("ALLOW:no_record")
-    sys.exit(0)
-
-now = datetime.now(timezone.utc)
-status = str(record.get("status") or "").strip().lower()
-claimed_by = str(record.get("claimed_by") or "").strip()
-lease_expires_at = parse_iso(record.get("lease_expires_at"))
-last_activity = parse_iso(record.get("last_activity"))
-
-claim_active = bool(claimed_by) and (lease_expires_at is None or lease_expires_at > now)
-if claim_active and claimed_by != dispatch_id:
-    print(f"BLOCK:active_claim:{claimed_by}")
-    sys.exit(0)
-
-# Only block by claimed status when the claim is still active.
-# Expired claims should not prevent new dispatches.
-if status in {"working", "blocked"} and claim_active and claimed_by and claimed_by != dispatch_id:
-    print(f"BLOCK:status_claimed:{claimed_by}:{status}")
-    sys.exit(0)
-
-if status in {"working", "blocked"} and not claimed_by and last_activity is not None:
-    age_seconds = max(0, int((now - last_activity).total_seconds()))
-    if age_seconds <= 900:
-        print(f"BLOCK:recent_{status}_without_claim:{age_seconds}s")
-        sys.exit(0)
-
-print("ALLOW:clear")
-PY
-)
-    local rc=$?
-    set -e
-
-    if [ $rc -ne 0 ]; then
-        log "V8 LOCK: check_failed terminal=$terminal_id dispatch=$dispatch_id rc=$rc"
-        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "legacy_check_failed:rc=$rc" "dispatch_blocked"
-        return 1
-    fi
-
-    if [[ "$check_output" == BLOCK:* ]]; then
-        local _block_reason="${check_output#BLOCK:}"
-        log "V8 LOCK: blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_block_reason}"
-        # Detect duplicate: active_claim held by same dispatch_id
-        if [[ "$_block_reason" == active_claim:* ]]; then
-            local _holder="${_block_reason#active_claim:}"
-            if [[ "$_holder" == "$dispatch_id" ]]; then
-                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "duplicate_delivery_prevented"
-            else
-                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
-            fi
-        else
-            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_block_reason" "dispatch_blocked"
-        fi
-        return 1
-    fi
-
-    return 0
-}
-
-acquire_terminal_claim() {
-    local terminal_id="$1"
-    local dispatch_id="$2"
-    local now_iso
-    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    if ! python3 "$VNX_DIR/scripts/terminal_state_shadow.py" \
-        --state-dir "$STATE_DIR" \
-        --terminal-id "$terminal_id" \
-        --status working \
-        --claimed-by "$dispatch_id" \
-        --claimed-at "$now_iso" \
-        --last-activity "$now_iso" \
-        --lease-seconds "${VNX_DISPATCH_LEASE_SECONDS:-600}" >/dev/null 2>&1; then
-        log "V8 LOCK: acquire_failed terminal=$terminal_id dispatch=$dispatch_id"
-        return 1
-    fi
-
-    log "V8 LOCK: acquired terminal=$terminal_id dispatch=$dispatch_id"
-    return 0
-}
-
-release_terminal_claim() {
-    local terminal_id="$1"
-    local dispatch_id="$2"
-    local now_iso
-    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    if ! python3 "$VNX_DIR/scripts/terminal_state_shadow.py" \
-        --state-dir "$STATE_DIR" \
-        --terminal-id "$terminal_id" \
-        --status idle \
-        --last-activity "$now_iso" \
-        --clear-claim >/dev/null 2>&1; then
-        log "V8 LOCK: release_failed terminal=$terminal_id dispatch=$dispatch_id"
-        return 1
-    fi
-
-    log "V8 LOCK: released terminal=$terminal_id dispatch=$dispatch_id"
-    return 0
-}
-
-# ===== RUNTIME CORE INTEGRATION (PR-5) =====
-# All functions are non-fatal: failures are logged but never block dispatch.
-# When VNX_RUNTIME_PRIMARY=0, functions return immediately without calling Python.
-
-_rc_enabled() {
-    [[ "${VNX_RUNTIME_PRIMARY:-1}" == "1" ]]
-}
-
-_rc_python() {
-    python3 "$VNX_DIR/scripts/runtime_core_cli.py" "$@" 2>/dev/null
-}
-
-# Register dispatch with broker before any terminal delivery.
-# Writes bundle.json + prompt.txt to .vnx-data/dispatches/<id>/.
-rc_register() {
-    local dispatch_id="$1" terminal_id="$2" track="$3" skill_name="$4" gate="$5"
-    local prompt_file="${6:-}"
-    _rc_enabled || return 0
-
-    local args=(register
-        --dispatch-id "$dispatch_id"
-        --terminal "$terminal_id"
-        --track "$track"
-        --skill "$skill_name"
-        --gate "$gate"
-    )
-    if [[ -n "$prompt_file" ]]; then
-        args+=(--prompt-file "$prompt_file")
-    fi
-
-    if ! _rc_python "${args[@]}" > /dev/null; then
-        # BOOT-7: fail-closed — registration failure blocks dispatch before lease acquire
-        log_structured_failure "registration_failed" \
-            "Dispatch registration failed — blocking delivery" \
-            "dispatch=$dispatch_id terminal=$terminal_id"
-        return 1
-    fi
-    log "V8 RUNTIME_CORE: registered dispatch=$dispatch_id terminal=$terminal_id"
-}
-
-# Check terminal availability via canonical lease before legacy lock check.
-# Outputs BLOCK:<reason> or ALLOW if canonical lease says terminal is busy.
-# Fail-closed: Python failure or parse error outputs BLOCK, not ALLOW.
-rc_check_terminal() {
-    local terminal_id="$1" dispatch_id="$2"
-    _rc_enabled || { echo "ALLOW"; return 0; }
-
-    local result
-    result=$(_rc_python check-terminal --terminal "$terminal_id" --dispatch-id "$dispatch_id") || {
-        log "V8 RUNTIME_CORE: check-terminal python failed terminal=$terminal_id dispatch=$dispatch_id — fail closed"
-        echo "BLOCK:canonical_check_error:python_failed"
-        return 0
-    }
-
-    # Fail-closed: JSON parse failure defaults to blocked (not available)
-    local available
-    available=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("yes" if d.get("available") else "no")' 2>/dev/null || echo "no")
-
-    if [[ "$available" == "no" ]]; then
-        local reason
-        reason=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("reason","canonical_lease_conflict"))' 2>/dev/null || echo "canonical_check_parse_error")
-        echo "BLOCK:canonical_lease:$reason"
-    else
-        echo "ALLOW"
-    fi
-}
-
-# Acquire canonical lease alongside terminal_state_shadow write.
-# Returns the lease generation (integer) on stdout for later release.
-# Fail-closed: on failure, outputs FAIL and returns 1. Caller must block dispatch.
-rc_acquire_lease() {
-    local terminal_id="$1" dispatch_id="$2"
-    local lease_seconds="${VNX_DISPATCH_LEASE_SECONDS:-600}"
-    _rc_enabled || { echo "0"; return 0; }
-
-    local result
-    result=$(_rc_python acquire-lease \
-        --terminal "$terminal_id" \
-        --dispatch-id "$dispatch_id" \
-        --lease-seconds "$lease_seconds") || {
-        log "V8 RUNTIME_CORE: acquire-lease failed terminal=$terminal_id dispatch=$dispatch_id — fail closed"
-        echo "FAIL"
-        return 1
-    }
-
-    # Fail-closed: JSON parse failure means we cannot confirm lease was acquired
-    local generation
-    generation=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); g=d.get("generation"); print(g if g is not None else "FAIL")' 2>/dev/null || echo "FAIL")
-    if [[ "$generation" == "FAIL" ]]; then
-        log "V8 RUNTIME_CORE: acquire-lease result parse failed terminal=$terminal_id — fail closed"
-        echo "FAIL"
-        return 1
-    fi
-    log "V8 RUNTIME_CORE: lease acquired terminal=$terminal_id generation=$generation"
-    echo "$generation"
-}
-
-# Record delivery start (broker: claimed -> delivering). Returns attempt_id.
-rc_delivery_start() {
-    local dispatch_id="$1" terminal_id="$2"
-    _rc_enabled || { echo ""; return 0; }
-
-    local result
-    result=$(_rc_python delivery-start \
-        --dispatch-id "$dispatch_id" \
-        --terminal "$terminal_id") || {
-        log "V8 RUNTIME_CORE: delivery-start non-fatal failure dispatch=$dispatch_id"
-        echo ""
-        return 0
-    }
-
-    local attempt_id
-    attempt_id=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("attempt_id",""))' 2>/dev/null || echo "")
-    echo "$attempt_id"
-}
-
-# Record delivery success (broker: delivering -> accepted).
-# Idempotent: duplicate acceptance returns noop=true instead of failing.
-rc_delivery_success() {
-    local dispatch_id="$1" attempt_id="$2"
-    _rc_enabled || return 0
-    [[ -n "$attempt_id" ]] || return 0
-
-    local result
-    if result=$(_rc_python delivery-success \
-        --dispatch-id "$dispatch_id" \
-        --attempt-id "$attempt_id" 2>/dev/null); then
-        # Check if this was a no-op (duplicate acceptance)
-        local is_noop
-        is_noop=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop","false"))' 2>/dev/null || echo "false")
-        if [[ "$is_noop" == "True" || "$is_noop" == "true" ]]; then
-            log "V8 RUNTIME_CORE: delivery-success idempotent no-op dispatch=$dispatch_id (already accepted/beyond)"
-        fi
-    else
-        # Check if this was a terminal-state rejection vs real error
-        local is_rejected
-        is_rejected=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop_rejected","false"))' 2>/dev/null || echo "false")
-        if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
-            log "V8 RUNTIME_CORE: delivery-success rejected dispatch=$dispatch_id (terminal state)"
-        else
-            # RES-D2: Log structured failure when delivery_success recording fails.
-            # Broker will show 'delivering' instead of 'accepted' for this dispatch.
-            log_structured_failure "delivery_success_record_failed" \
-                "delivery-success recording failed — broker state may show delivering instead of accepted" \
-                "dispatch=$dispatch_id attempt=$attempt_id"
-        fi
-    fi
-}
-
-# Record delivery failure durably (broker: delivering -> failed_delivery).
-rc_delivery_failure() {
-    local dispatch_id="$1" attempt_id="$2" reason="${3:-delivery failed}"
-    _rc_enabled || return 0
-    [[ -n "$attempt_id" ]] || return 0
-
-    if ! _rc_python delivery-failure \
-        --dispatch-id "$dispatch_id" \
-        --attempt-id "$attempt_id" \
-        --reason "$reason" > /dev/null; then
-        log "V8 RUNTIME_CORE: delivery-failure non-fatal failure dispatch=$dispatch_id"
-    fi
-}
-
-# Emit a structured NDJSON audit entry for a lease cleanup outcome.
-# Usage: emit_lease_cleanup_audit <dispatch_id> <terminal_id> <event_type> <lease_released> [<error>]
-# event_type should be "lease_released_on_failure" or "lease_release_failed"
-emit_lease_cleanup_audit() {
-    local dispatch_id="$1"
-    local terminal_id="$2"
-    local event_type="$3"
-    local lease_released="$4"
-    local error_detail="${5:-}"
-    local audit_file="$STATE_DIR/lease_cleanup_audit.ndjson"
-    local ts
-    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-    python3 - "$event_type" "$dispatch_id" "$terminal_id" "$lease_released" \
-        "$error_detail" "$ts" "$audit_file" <<'PY'
-import json, sys, os
-event_type, dispatch_id, terminal_id, lease_released, error_detail, ts, audit_file = sys.argv[1:]
-event = {
-    "event_type": event_type,
-    "dispatch_id": dispatch_id,
-    "terminal_id": terminal_id,
-    "lease_released": lease_released == "true",
-    "timestamp": ts,
-}
-if error_detail:
-    event["error"] = error_detail
-os.makedirs(os.path.dirname(os.path.abspath(audit_file)), exist_ok=True)
-with open(audit_file, "a", encoding="utf-8") as fh:
-    fh.write(json.dumps(event, separators=(",", ":")) + "\n")
-PY
-}
-
-# Release canonical lease (leased -> idle).
-# Emits structured audit on success and uses log_structured_failure on error.
-rc_release_lease() {
-    local terminal_id="$1" generation="$2"
-    local dispatch_id="${3:-unknown}"
-    _rc_enabled || return 0
-    [[ -n "$generation" && "$generation" != "0" ]] || return 0
-
-    if ! _rc_python release-lease \
-        --terminal "$terminal_id" \
-        --generation "$generation" > /dev/null; then
-        log_structured_failure "lease_release_failed" \
-            "Canonical lease release failed after delivery" \
-            "terminal=$terminal_id dispatch=$dispatch_id generation=$generation"
-        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-            "lease_release_failed" "false" "release-lease python invocation failed"
-        return 1
-    fi
-    log "V8 RUNTIME_CORE: lease released terminal=$terminal_id dispatch=$dispatch_id"
-    emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-        "lease_released_on_failure" "true"
-}
-
-# Release canonical lease and record delivery failure atomically.
-# Preferred over separate rc_delivery_failure + rc_release_lease calls because
-# both operations are performed regardless of individual step failure, and the
-# combined result is captured in a single structured audit entry.
-# Usage: rc_release_on_failure <dispatch_id> <attempt_id> <terminal_id> <generation> [<reason>]
-rc_release_on_failure() {
-    local dispatch_id="$1" attempt_id="$2" terminal_id="$3" generation="$4"
-    local reason="${5:-delivery failed}"
-    _rc_enabled || return 0
-    [[ -n "$generation" && "$generation" != "0" ]] || return 0
-
-    local result
-    result=$(_rc_python release-on-failure \
-        --dispatch-id "$dispatch_id" \
-        --attempt-id "$attempt_id" \
-        --terminal "$terminal_id" \
-        --generation "$generation" \
-        --reason "$reason") || {
-        log_structured_failure "release_on_failure_cli_failed" \
-            "release-on-failure CLI invocation failed — emitting direct lease release" \
-            "dispatch=$dispatch_id terminal=$terminal_id"
-        # Fall back to direct release-lease so the lease is not stranded
-        rc_release_lease "$terminal_id" "$generation" "$dispatch_id"
-        return 1
-    }
-
-    local lease_released cleanup_complete lease_error
-    lease_released=$(echo "$result" | python3 -c \
-        'import sys,json; d=json.load(sys.stdin); print(str(d.get("lease_released","false")).lower())' \
-        2>/dev/null || echo "false")
-    cleanup_complete=$(echo "$result" | python3 -c \
-        'import sys,json; d=json.load(sys.stdin); print(str(d.get("cleanup_complete","false")).lower())' \
-        2>/dev/null || echo "false")
-    lease_error=$(echo "$result" | python3 -c \
-        'import sys,json; d=json.load(sys.stdin); print(d.get("lease_error","") or "")' \
-        2>/dev/null || echo "")
-
-    if [[ "$lease_released" == "true" ]]; then
-        log "V8 RUNTIME_CORE: lease released on delivery failure terminal=$terminal_id dispatch=$dispatch_id"
-        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-            "lease_released_on_failure" "true"
-    else
-        log_structured_failure "lease_release_failed" \
-            "Canonical lease not released after delivery failure" \
-            "dispatch=$dispatch_id terminal=$terminal_id error=${lease_error}"
-        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-            "lease_release_failed" "false" "$lease_error"
-    fi
-}
-
-# ===== END RUNTIME CORE INTEGRATION =====
 
 # Source smart pane manager for self-healing pane discovery
 source "$VNX_DIR/scripts/pane_manager_v2.sh"
 
-# Function to get pane IDs from state
-get_pane_ids() {
-    # Use unified pane configuration
-    if ! T0_PANE=$(get_pane_id "t0" "$STATE_DIR/panes.json"); then
-        T0_PANE=""
-        log_structured_failure "pane_lookup_failed" "Failed to resolve T0 pane id" "pane_file=$STATE_DIR/panes.json"
-    fi
-    if ! T1_PANE=$(get_pane_id "T1" "$STATE_DIR/panes.json"); then
-        T1_PANE=""
-        log_structured_failure "pane_lookup_failed" "Failed to resolve T1 pane id" "pane_file=$STATE_DIR/panes.json"
-    fi
-    if ! T2_PANE=$(get_pane_id "T2" "$STATE_DIR/panes.json"); then
-        T2_PANE=""
-        log_structured_failure "pane_lookup_failed" "Failed to resolve T2 pane id" "pane_file=$STATE_DIR/panes.json"
-    fi
-    if ! T3_PANE=$(get_pane_id "T3" "$STATE_DIR/panes.json"); then
-        T3_PANE=""
-        log_structured_failure "pane_lookup_failed" "Failed to resolve T3 pane id" "pane_file=$STATE_DIR/panes.json"
-    fi
-
-    return 0
-}
-
 # ===== METADATA EXTRACTION FUNCTIONS (from V7) =====
 
-# Function to extract track from dispatch
-extract_track() {
-    vnx_dispatch_extract_track "$1"
-}
-
-# Function to extract cognition level
-extract_cognition() {
-    vnx_dispatch_extract_cognition "$1"
-}
-
-# Function to extract priority
-extract_priority() {
-    vnx_dispatch_extract_priority "$1"
-}
-
-# Function to extract agent role from dispatch (handles malformed role strings)
-extract_agent_role() {
-    vnx_dispatch_extract_agent_role "$1"
-}
-
-# Function to normalize role for flexible matching
-normalize_role() {
-    vnx_dispatch_normalize_role "$1"
-}
-
-# Function to extract phase from dispatch
-extract_phase() {
-    vnx_dispatch_extract_phase "$1"
-}
-
-# Function to extract new gate from dispatch
-extract_new_gate() {
-    vnx_dispatch_extract_new_gate "$1"
-}
-
-# Function to extract task_id from dispatch filename or content
-extract_task_id() {
-    vnx_dispatch_extract_task_id "$1" "$2"
-}
-
-# SPRINT 2: Function to extract PR-ID from dispatch
-extract_pr_id() {
-    vnx_dispatch_extract_pr_id "$1"
-}
+extract_track() { vnx_dispatch_extract_track "$1"; }
+extract_cognition() { vnx_dispatch_extract_cognition "$1"; }
+extract_priority() { vnx_dispatch_extract_priority "$1"; }
+extract_agent_role() { vnx_dispatch_extract_agent_role "$1"; }
+normalize_role() { vnx_dispatch_normalize_role "$1"; }
+extract_phase() { vnx_dispatch_extract_phase "$1"; }
+extract_new_gate() { vnx_dispatch_extract_new_gate "$1"; }
+extract_task_id() { vnx_dispatch_extract_task_id "$1" "$2"; }
+extract_pr_id() { vnx_dispatch_extract_pr_id "$1"; }
 
 # ===== MODE CONTROL FUNCTIONS (from V7 Track 2b) =====
 
 # Terminal provider resolution (Claude Code vs Codex CLI)
 get_terminal_provider() {
     local terminal_id="$1"  # T0|T1|T2|T3
-
-    # 1) Explicit env var override (e.g., VNX_T1_PROVIDER=codex_cli)
     local env_key="VNX_${terminal_id}_PROVIDER"
     local env_provider="${!env_key:-}"
     if [ -n "$env_provider" ]; then
-        echo "$env_provider" | tr '[:upper:]' '[:lower:]'
-        return 0
+        echo "$env_provider" | tr '[:upper:]' '[:lower:]'; return 0
     fi
-
-    # 2) panes.json provider field (optional)
     if command -v jq >/dev/null 2>&1 && [ -f "$STATE_DIR/panes.json" ]; then
-        local provider
-        local terminal_lower
+        local provider terminal_lower
         terminal_lower=$(echo "$terminal_id" | tr '[:upper:]' '[:lower:]')
         if ! provider=$(jq -r ".${terminal_id}.provider // .${terminal_lower}.provider // empty" "$STATE_DIR/panes.json" 2>/dev/null); then
             provider=""
             log_structured_failure "pane_provider_lookup_failed" "Failed to resolve terminal provider from panes.json" "terminal=$terminal_id"
         fi
         if [ -n "$provider" ] && [ "$provider" != "null" ]; then
-            echo "$provider" | tr '[:upper:]' '[:lower:]'
-            return 0
+            echo "$provider" | tr '[:upper:]' '[:lower:]'; return 0
         fi
     fi
-
-    # Default
     echo "claude_code"
 }
 
 get_context_reset_command() {
     local provider="$1"
     case "$provider" in
-        codex_cli|codex)
-            echo "/new"
-            ;;
-        *)
-            echo "/clear"
-            ;;
+        codex_cli|codex) echo "/new" ;;
+        *) echo "/clear" ;;
     esac
 }
 
-# Function to extract Mode field from dispatch
 extract_mode() {
     local mode
     mode=$(vnx_dispatch_extract_mode "$1")
-
     if [ "$mode" = "planning" ]; then
         log "V8: Planning mode detected - will activate Opus and @planner skill"
     fi
-
     echo "$mode"
 }
 
-# Function to extract ClearContext field
-extract_clear_context() {
-    vnx_dispatch_extract_clear_context "$1"
-}
-
-# Function to extract ForceNormalMode field
-extract_force_normal_mode() {
-    vnx_dispatch_extract_force_normal_mode "$1"
-}
-
-# Function to extract Requires-Model field (for model switching)
-extract_requires_model() {
-    vnx_dispatch_extract_requires_model "$1"
-}
-
-# Function to extract Requires-Model strength ("required" or "advisory")
-extract_requires_model_strength() {
-    vnx_dispatch_extract_requires_model_strength "$1"
-}
-
-# Function to extract Requires-Provider field (provider id only, no strength suffix)
-extract_requires_provider() {
-    vnx_dispatch_extract_requires_provider "$1"
-}
-
-# Function to extract Requires-Provider strength ("required" or "advisory")
-extract_requires_provider_strength() {
-    vnx_dispatch_extract_requires_provider_strength "$1"
-}
-
-# Function to configure terminal mode based on dispatch fields
-configure_terminal_mode() {
-    local target_pane="$1"
-    local dispatch_file="$2"
-
-    local terminal_id
-    terminal_id=$(get_terminal_from_pane "$target_pane" "$STATE_DIR/panes.json" 2>/dev/null || echo "UNKNOWN")
-    local provider
-    provider=$(get_terminal_provider "$terminal_id")
-
-    # Extract mode control fields
-    local mode=$(extract_mode "$dispatch_file")
-    local clear_context=$(extract_clear_context "$dispatch_file")
-    local requires_model=$(extract_requires_model "$dispatch_file")
-    local requires_model_strength
-    requires_model_strength=$(extract_requires_model_strength "$dispatch_file")
-    local force_normal=$(extract_force_normal_mode "$dispatch_file")
-    local requires_provider
-    requires_provider=$(extract_requires_provider "$dispatch_file")
-    local requires_provider_strength
-    requires_provider_strength=$(extract_requires_provider_strength "$dispatch_file")
-
-    # Provider routing enforcement (fail-closed for required, warn-through for advisory)
-    local routing_event
-    if ! routing_event=$(vnx_eval_provider_routing \
-            "$requires_provider" "$requires_provider_strength" "$provider" \
-            "$terminal_id" "$(basename "$dispatch_file")"); then
-        log "V8 PROVIDER_ROUTING: $routing_event"
-        log_structured_failure "provider_mismatch_blocked" \
-            "Dispatch blocked — required provider mismatch" \
-            "requested_provider=$requires_provider actual_provider=$provider terminal=$terminal_id"
-        return 1
-    fi
-    # Always log the routing event (covers advisory mismatch audit trail and match confirmation)
-    log "V8 PROVIDER_ROUTING: $routing_event"
-
-    # Log configuration for debugging
-    log "V8 MODE_CONTROL: Config - terminal=$terminal_id provider=$provider mode=$mode clear=$clear_context model=$requires_model model_strength=$requires_model_strength force=$force_normal"
-
-    # Step 1: Force normal mode if requested (to handle persistence issue)
-    if [[ "$force_normal" == "true" && "$provider" == "claude_code" ]]; then
-        log "V8 MODE_CONTROL: Forcing normal mode first (safety reset)..."
-        # Cycle through modes to ensure we're in normal
-        if ! tmux_send_best_effort "$target_pane" Tab; then
-            log "V8 MODE_CONTROL: best-effort Tab reset failed (continuing)"
-        fi  # Exit thinking if active
-        sleep 0.5
-        if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-            log "V8 MODE_CONTROL: best-effort Shift+Tab reset failed (continuing)"
-        fi  # Exit plan if active
-        sleep 0.5
-        if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-            log "V8 MODE_CONTROL: best-effort Shift+Tab cycle failed (continuing)"
-        fi  # Cycle once more
-        sleep 0.5
-        if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-            log "V8 MODE_CONTROL: best-effort Shift+Tab normalization failed (continuing)"
-        fi  # Back to normal
-        sleep 1
-    fi
-
-    # Step 2: Clear context if requested
-    if [[ "$clear_context" == "true" ]]; then
-        local reset_cmd
-        reset_cmd=$(get_context_reset_command "$provider")
-        log "V8 MODE_CONTROL: Clearing context via $reset_cmd ..."
-
-        # Pre-clear: ensure input line is empty before typing command
-        # Without this, leftover characters in the input buffer cause
-        # /new to become " /new" (leading space) which Codex doesn't
-        # recognize as a command (white text instead of blue).
-        # NOTE: Do NOT use C-c here — it can kill the CLI process entirely,
-        # leaving a bare zsh shell where dispatch content gets executed as
-        # shell commands. C-u alone safely clears the input line.
-        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-        sleep 0.3
-
-        if ! tmux_send_best_effort "$target_pane" -l "$reset_cmd"; then
-            log_structured_failure "context_reset_failed" "Failed to send context reset command" "pane=$target_pane provider=$provider"
-            return 1
-        fi
-        sleep 1  # Allow CLI to fully render typed command before submitting
-        if ! tmux_send_best_effort "$target_pane" Enter; then
-            log_structured_failure "context_reset_submit_failed" "Failed to submit context reset command" "pane=$target_pane provider=$provider"
-            return 1
-        fi
-        # Provider-aware delay: Gemini /clear needs more time to reset UI than
-        # Claude /clear or Codex /new (different rendering cycle + history wipe).
-        case "$provider" in
-            gemini_cli|gemini) sleep 6 ;;
-            codex_cli|codex)   sleep 4 ;;
-            *)                 sleep 3 ;;
-        esac
-
-        # Verify terminal shows ready prompt after clear-context.
-        # Handle feedback modal ("Was this conversation helpful?") by pressing Enter.
-        local pane_content
-        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-        if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
-            log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
-            tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
-            sleep 2
-            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-        fi
-        # Confirm terminal is back to input-ready state (prompt visible, not rendering)
-        if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
-            log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
-            sleep 2
-        fi
-    fi
-
-    # Step 3: Verified model switch (replaces best-effort fire-and-forget)
-    # Implements contract: docs/core/100_VERIFIED_PROVIDER_MODEL_ROUTING_CONTRACT.md §5
-    local model_pre_event
-    if ! model_pre_event=$(vnx_eval_model_routing \
-            "$requires_model" "$requires_model_strength" "$provider" \
-            "$terminal_id" "$(basename "$dispatch_file")"); then
-        log "V8 MODEL_ROUTING: $model_pre_event"
-        log_structured_failure "model_routing_blocked" \
-            "Dispatch blocked — required model routing pre-check failed" \
-            "requested_model=$requires_model provider=$provider terminal=$terminal_id"
-        return 1
-    fi
-    log "V8 MODEL_ROUTING: $model_pre_event"
-
-    # Determine pre-check result
-    local model_pre_result
-    model_pre_result=$(echo "$model_pre_event" | \
-        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "")
-
-    if [[ "$model_pre_result" == "needs_switch" ]]; then
-        # Normalize: "opus" → "default" to select Opus 4.6 1M context (not 200K)
-        local model_cmd="$requires_model"
-        if [[ "$model_cmd" == "opus" ]]; then
-            model_cmd="default"
-        fi
-
-        log "V8 MODEL_ROUTING: Switching to model: $model_cmd (raw=$requires_model provider=$provider)"
-        # Pre-clear input line (C-u only — C-c would kill the CLI process)
-        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-        sleep 0.3
-
-        local switch_send_ok=true
-        if ! tmux_send_best_effort "$target_pane" -l "/model $model_cmd"; then
-            switch_send_ok=false
-        fi
-
-        if [[ "$switch_send_ok" == "true" ]]; then
-            sleep 1  # Allow CLI to render command before submitting
-            if ! tmux_send_best_effort "$target_pane" Enter; then
-                switch_send_ok=false
-            fi
-        fi
-
-        if [[ "$switch_send_ok" == "false" ]]; then
-            local fail_event
-            if ! fail_event=$(vnx_emit_model_switch_result \
-                    "$requires_model" "failed" "" "$requires_model_strength" \
-                    "$terminal_id" "$(basename "$dispatch_file")"); then
-                log "V8 MODEL_ROUTING: $fail_event"
-                log_structured_failure "model_switch_blocked" \
-                    "Dispatch blocked — required model switch command could not be sent" \
-                    "requested_model=$requires_model terminal=$terminal_id"
-                return 1
-            fi
-            log "V8 MODEL_ROUTING: $fail_event"
-        else
-            sleep 4  # Critical delay for model switch to complete
-
-            # Post-switch verification: capture pane and parse confirmation
-            local pane_content
-            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-            local switch_result
-            switch_result=$(vnx_verify_model_switch_output "$pane_content" "$model_cmd")
-
-            local result_event
-            if ! result_event=$(vnx_emit_model_switch_result \
-                    "$requires_model" "$switch_result" "" "$requires_model_strength" \
-                    "$terminal_id" "$(basename "$dispatch_file")"); then
-                log "V8 MODEL_ROUTING: $result_event"
-                log_structured_failure "model_switch_blocked" \
-                    "Dispatch blocked — required model switch could not be verified" \
-                    "requested_model=$requires_model switch_result=$switch_result terminal=$terminal_id"
-                return 1
-            fi
-            log "V8 MODEL_ROUTING: $result_event"
-        fi
-    fi
-
-    # Step 4: Activate requested mode
-    if [[ "$provider" != "claude_code" ]]; then
-        if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-            if [[ "$mode" == "planning" ]]; then
-                log "V8 MODE_CONTROL: Codex planning mode via /plan"
-                # Pre-clear input line (C-u only — C-c would kill the CLI process)
-                tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-                sleep 0.3
-                if ! tmux_send_best_effort "$target_pane" -l "/plan"; then
-                    log_structured_failure "plan_mode_activation_failed" "Failed to send /plan command" "pane=$target_pane provider=$provider"
-                    return 1
-                fi
-                sleep 1  # Allow CLI to render command before submitting
-                if ! tmux_send_best_effort "$target_pane" Enter; then
-                    log_structured_failure "plan_mode_submit_failed" "Failed to submit /plan command" "pane=$target_pane provider=$provider"
-                    return 1
-                fi
-                sleep 2  # Wait for plan mode activation
-            else
-                log "V8 MODE_CONTROL: Codex - skipping unsupported mode: $mode"
-            fi
-        elif [[ "$provider" == "gemini_cli" || "$provider" == "gemini" ]]; then
-            log "V8 MODE_CONTROL: Gemini - no mode toggles available (mode=$mode skipped)"
-        else
-            log "V8 MODE_CONTROL: Unknown provider '$provider' - skipping mode: $mode"
-        fi
-        log "V8 MODE_CONTROL: Configuration complete"
-        return 0
-    fi
-
-    case "$mode" in
-        planning)
-            # Planning mode with Opus model and @planner skill
-            log "V8 MODE_CONTROL: Activating PLANNING mode with Opus model..."
-
-            # First, ensure we're using Opus for planning
-            log "V8: Switching to Opus model for planning mode"
-            # Pre-clear input line (C-u only — C-c would kill the CLI process)
-            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-            sleep 0.3
-            if ! tmux_send_best_effort "$target_pane" -l "/model opus"; then
-                log_structured_failure "planning_model_switch_failed" "Failed to switch to Opus for planning mode" "pane=$target_pane"
-                return 1
-            fi
-            sleep 1  # Allow CLI to render command before submitting
-            if ! tmux_send_best_effort "$target_pane" Enter; then
-                log_structured_failure "planning_model_submit_failed" "Failed to submit Opus switch for planning mode" "pane=$target_pane"
-                return 1
-            fi
-            sleep 4  # Critical delay for model switch to complete
-
-            # Then activate PLAN mode
-            log "V8 MODE_CONTROL: Activating PLAN mode (⏸)..."
-            if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-                log_structured_failure "planning_mode_toggle_failed" "Failed first Shift+Tab for planning mode" "pane=$target_pane"
-                return 1
-            fi
-            sleep 0.5
-            if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-                log_structured_failure "planning_mode_toggle_failed" "Failed second Shift+Tab for planning mode" "pane=$target_pane"
-                return 1
-            fi
-            sleep 2
-            log "V8 MODE_CONTROL: Plan mode activated - look for ⏸ indicator"
-            ;;
-        thinking)
-            log "V8 MODE_CONTROL: Activating THINKING mode (✽)..."
-            if ! tmux_send_best_effort "$target_pane" Tab; then
-                log_structured_failure "thinking_mode_toggle_failed" "Failed Tab toggle for thinking mode" "pane=$target_pane"
-                return 1
-            fi
-            sleep 2
-            log "V8 MODE_CONTROL: Thinking mode activated - look for ✽ indicator"
-            ;;
-        none|normal)
-            log "V8 MODE_CONTROL: Staying in NORMAL mode"
-            ;;
-        *)
-            log "V8 MODE_CONTROL: Unknown mode: $mode (ignoring)"
-            ;;
-    esac
-
-    log "V8 MODE_CONTROL: Configuration complete"
-}
+extract_clear_context() { vnx_dispatch_extract_clear_context "$1"; }
+extract_force_normal_mode() { vnx_dispatch_extract_force_normal_mode "$1"; }
+extract_requires_model() { vnx_dispatch_extract_requires_model "$1"; }
+extract_requires_model_strength() { vnx_dispatch_extract_requires_model_strength "$1"; }
+extract_requires_provider() { vnx_dispatch_extract_requires_provider "$1"; }
+extract_requires_provider_strength() { vnx_dispatch_extract_requires_provider_strength "$1"; }
 
 # ===== END MODE CONTROL FUNCTIONS =====
 
-# Function to determine which executor (terminal) to use
-determine_executor() {
-    local track="$1"
-    local cognition="$2"
-    local requires_mcp="${3:-false}"
-
-    # MCP-aware routing: redirect to T3 if task needs full MCP capabilities
-    if [ "$requires_mcp" = "true" ] && [ "$track" != "C" ]; then
-        log "V8 MCP routing: Track $track → T3 (requires MCP)"
-        if [ -n "${T3_PANE:-}" ]; then
-            echo "$T3_PANE"
-        else
-            echo "$(get_pane_id "T3" "$STATE_DIR/panes.json")"
-        fi
-        return 0
-    fi
-
-    # Track-based routing with automatic model switching per dispatch
-    case "$track" in
-        A) echo "${T1_PANE:-$(get_pane_id "T1" "$STATE_DIR/panes.json")}" ;;  # T1 (Track A)
-        B) echo "${T2_PANE:-$(get_pane_id "T2" "$STATE_DIR/panes.json")}" ;;  # T2 (Track B)
-        C) echo "${T3_PANE:-$(get_pane_id "T3" "$STATE_DIR/panes.json")}" ;;  # T3 (Track C)
-        *) echo "${T1_PANE:-$(get_pane_id "T1" "$STATE_DIR/panes.json")}" ;;  # Default to T1
-    esac
-}
-
-# ===== INSTRUCTION EXTRACTION (V8 Core) =====
-
-# Function to extract instruction content from dispatch
-extract_instruction_content() {
-    local dispatch_file="$1"
-
-    # Extract content between "Instruction:" and "[[DONE]]"
-    local content
-    content=$(awk '/^Instruction:/{flag=1; next} /^\[\[DONE\]\]/{flag=0} flag' "$dispatch_file")
-    if [ -n "$content" ]; then
-        echo "$content"
-        return 0
-    fi
-
-    # Fallback: use everything after YAML frontmatter, excluding [[TARGET:...]] markers.
-    content=$(awk '
-        BEGIN { in_frontmatter = 0; saw_frontmatter = 0 }
-        /^---$/ {
-            if (saw_frontmatter == 0) { saw_frontmatter = 1; in_frontmatter = 1; next }
-            if (in_frontmatter == 1) { in_frontmatter = 0; next }
-        }
-        in_frontmatter == 1 { next }
-        { print }
-    ' "$dispatch_file" | sed '/^\[\[TARGET:/d')
-
-    if [ -n "$content" ]; then
-        echo "$content"
-        return 0
-    fi
-
-    return 1
-}
-
-extract_context_files() {
-    local dispatch_file="$1"
-
-    # Extract Context: line(s) - simpler approach: grab Context line + next non-blank line before Instruction
-    local context
-    context=$(awk '
-        /^Context:/ {
-            sub(/^Context: */, "")
-            context = $0
-            in_context = 1
-            next
-        }
-        in_context == 1 && /^$/ {
-            next
-        }
-        in_context == 1 && /^Instruction:/ {
-            in_context = 0
-        }
-        in_context == 1 && /^\[\[@/ {
-            context = context " " $0
-            next
-        }
-        in_context == 1 {
-            in_context = 0
-        }
-        END {
-            if (context) print context
-        }
-    ' "$dispatch_file" | tr ' ' '\n' | grep '^\[\[@' )
-
-    if [ -n "$context" ]; then
-        echo "$context"
-        return 0
-    fi
-
-    # Fallback: YAML frontmatter context_files list.
-    awk '
-        BEGIN { in_frontmatter = 0; saw_frontmatter = 0; in_list = 0 }
-        /^---$/ {
-            if (saw_frontmatter == 0) { saw_frontmatter = 1; in_frontmatter = 1; next }
-            if (in_frontmatter == 1) { in_frontmatter = 0; in_list = 0; next }
-        }
-        in_frontmatter == 1 && /^context_files:/ { in_list = 1; next }
-        in_frontmatter == 1 && in_list == 1 {
-            if ($0 ~ /^ *-/) { sub(/^ *- */, ""); print; next }
-            if ($0 ~ /^[a-zA-Z_]+:/) { in_list = 0 }
-        }
-    ' "$dispatch_file"
-}
-
-# ===== RECEIPT GENERATION (from V7) =====
-
-# Function to generate receipt footer
-generate_receipt_footer() {
-    local dispatch_file="$1"
-    local track="$2"
-    local phase="$3"
-    local gate="$4"
-    local task_id="$5"
-    local cmd_id="$6"
-    local dispatch_id="$7"
-
-    # Extract PR-ID from dispatch file
-    local footer_pr_id
-    footer_pr_id=$(extract_pr_id "$dispatch_file" 2>/dev/null)
-    local dispatch_id_for_footer="$dispatch_id"
-    if [ -z "$dispatch_id_for_footer" ]; then
-        dispatch_id_for_footer=$(vnx_dispatch_extract_dispatch_id "$dispatch_file" 2>/dev/null)
-    fi
-
-    # Generate inline receipt footer — no external template dependency
-    cat <<RECEIPT_EOF
-
----
-# Task Completion Guidelines
-
-## Report Metadata (REQUIRED — include this section in your report)
-
-Your report MUST include this metadata block exactly as shown below. The receipt processor parses these fields to track progress and deliver receipts to T0.
-
-\`\`\`
-**Dispatch ID**: ${dispatch_id_for_footer:-unknown}
-**PR**: ${footer_pr_id:-unknown}
-**Track**: ${track}
-**Gate**: ${gate}
-**Status**: success
-\`\`\`
-
-## Before Completing
-
-1. Stage and commit ALL code changes from this task:
-   - Conventional commit: \`feat|fix|test|refactor(<scope>): <description>\`
-   - Include in commit body: \`Dispatch-ID: ${dispatch_id_for_footer:-unknown}\`
-   - Do NOT commit VNX infrastructure or state directories
-2. Then write your report below
-
-## Expected Outputs
-
-When completing your task, create a markdown report with:
-
-- **Implementation Summary**: What was done, key decisions made
-- **Files Modified**: List of changed/created files with brief descriptions
-- **Testing Evidence**: Test results, validation performed
-- **Open Items**: Issues discovered outside dispatch scope (blocker/warn/info)
-
-**Report Format**: Structured markdown with clear sections and evidence-based findings.
-
-Write your report to: \`${VNX_DATA_DIR}/unified_reports/\`
-Filename: \`$(date +%Y%m%d-%H%M%S)-${track}-<short-title>.md\`
-
----
-*VNX V8 - Native Skills + Instruction-Only Dispatch*
-RECEIPT_EOF
-}
-
-# ===== SKILL ACTIVATION MAPPING (V8 Core) =====
-
-# Function to map dispatch role to skill name
-map_role_to_skill() {
-    local role="$1"
-
-    # Map dispatch roles to native skill names
-    case "$role" in
-        "debugging-specialist"|"debugging_specialist")
-            echo "debugger"
-            ;;
-        "developer")
-            echo "backend-developer"
-            ;;
-        "senior-developer")
-            echo "reviewer"
-            ;;
-        "performance-engineer"|"perf-engineer")
-            echo "performance-profiler"
-            ;;
-        "integration-specialist")
-            echo "api-developer"
-            ;;
-        "refactoring-expert")
-            echo "python-optimizer"
-            ;;
-        "planner"|"architect"|"backend-developer"|"api-developer"|"frontend-developer"|"test-engineer"|"security-engineer"|"quality-engineer"|"reviewer"|"debugger"|"data-analyst"|"supabase-expert"|"performance-profiler"|"excel-reporter"|"python-optimizer"|"monitoring-specialist"|"vnx-manager"|"t0-orchestrator")
-            # Already native skill names - pass through
-            echo "$role"
-            ;;
-        *)
-            # Unknown role - pass through (log to stderr to avoid corrupting subshell capture)
-            log "V8 WARNING: Unknown role '$role' - using as-is (may fail skill activation)" >&2
-            echo "$role"
-            ;;
-    esac
-}
-
 # ===== V8 CORE DISPATCH FUNCTION =====
 
-# Function to send dispatch with skill activation
+# dispatch_with_skill_activation — thin wrapper calling the 4 module functions.
 dispatch_with_skill_activation() {
-    local dispatch_file="$1"
-    local track="$2"
-    local agent_role="$3"
-    local intelligence_data="${4:-}"  # Optional intelligence JSON
-    local dispatch_id="${5:-}"
+    local dispatch_file="$1" track="$2" agent_role="$3"
+    local intelligence_data="${4:-}" dispatch_id="${5:-}"
+    if [ -z "$dispatch_id" ]; then dispatch_id="$(basename "$dispatch_file" .md)"; fi
 
-    if [ -z "$dispatch_id" ]; then
-        dispatch_id="$(basename "$dispatch_file" .md)"
-    fi
+    prepare_dispatch_payload "$dispatch_file" "$track" "$agent_role" "$intelligence_data" "$dispatch_id" || return 1
 
-    # Determine target terminal pane (MCP-aware routing)
-    local requires_mcp
-    requires_mcp=$(vnx_dispatch_extract_requires_mcp "$dispatch_file")
-    local target_pane
-    if ! target_pane=$(determine_executor "$track" "normal" "$requires_mcp"); then
-        log "V8 ERROR: Failed to determine target terminal"
-        return 1
-    fi
+    acquire_dispatch_lease "$dispatch_file" "$track" \
+        "$_DP_TERMINAL_ID" "$dispatch_id" "$_DP_SKILL_NAME" "$_DP_GATE" "$_DP_COMPLETE_PROMPT" || return 1
 
-    log "V8 DISPATCH: Routing to terminal $target_pane (Track: $track, Role: $agent_role)"
+    deliver_dispatch_to_terminal "$dispatch_file" "$track" "$agent_role" "$dispatch_id" \
+        "$_DP_TARGET_PANE" "$_DP_TERMINAL_ID" "$_DP_PROVIDER" \
+        "$_DP_COMPLETE_PROMPT" "$_DP_SKILL_COMMAND" || return 1
 
-    # RES-B1 (OI-024): Best-effort pre-lease pane mode check before mode configuration.
-    # If pane is in copy/search mode, skip mode config (which uses send-keys) to avoid
-    # corrupting operator scrollback. No lease is held at this point — safe to return 1.
-    local _pre_probe
-    if _pre_probe=$(_input_mode_probe "$target_pane" 2>/dev/null); then
-        local _pre_in_mode
-        IFS=: read -r _pre_in_mode _ _ <<< "$_pre_probe"
-        if [[ "$_pre_in_mode" == "1" ]]; then
-            log "V8 INPUT_MODE: pre-lease probe blocked — pane in non-interactive mode, skipping mode config pane=$target_pane dispatch=$(basename "$dispatch_file")"
-            return 1
-        fi
-    fi
-
-    # Configure terminal mode (clear, model switch, mode activation)
-    # RES-B2: Use pre_mode_configuration canonical failure code on failure.
-    if ! configure_terminal_mode "$target_pane" "$dispatch_file"; then
-        log_structured_failure "mode_configuration_failed" "Terminal mode configuration failed" \
-            "pane=$target_pane dispatch=$(basename "$dispatch_file")" \
-            "pre_mode_configuration" "$(basename "$dispatch_file")" "" ""
-        return 1
-    fi
-
-    # CRITICAL: Add delay after mode configuration to ensure commands complete
-    # This matches V7 behavior where mode changes need time to settle
-    sleep 2
-
-    # Pre-clear: ensure terminal input line is empty before skill activation
-    # NOTE: Do NOT use C-c here — it kills the CLI process, leaving a bare
-    # zsh shell where dispatch content gets executed as shell commands.
-    # C-u alone safely clears the readline input buffer.
-    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-    sleep 0.5
-
-    # Map role to skill name
-    local skill_name=$(map_role_to_skill "$agent_role")
-    if [ -z "$skill_name" ]; then
-        log "V8 WARNING: Empty skill name for role '$agent_role' (waiting for edit)"
-        if ! grep -q "\[SKILL_INVALID\]" "$dispatch_file"; then
-            echo -e "\n\n[SKILL_INVALID] Skill for role '$agent_role' not found. Update Role and remove this marker to retry.\n" >> "$dispatch_file"
-        fi
-        return 1
-    fi
-
-    # Validate skill against skills.yaml before dispatching
-    if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$skill_name" >/dev/null 2>&1; then
-        log "V8 WARNING: Skill '@${skill_name}' not found in skills.yaml (waiting for edit)"
-        if ! grep -q "\[SKILL_INVALID\]" "$dispatch_file"; then
-            echo -e "\n\n[SKILL_INVALID] Skill '@${skill_name}' not found in skills.yaml. Update Role and remove this marker to retry.\n" >> "$dispatch_file"
-        fi
-        return 1
-    fi
-
-    log "V8 SKILL: Activating skill @$skill_name for role $agent_role"
-
-    # Extract instruction content
-    local instruction_content
-    if ! instruction_content=$(extract_instruction_content "$dispatch_file"); then
-        log "V8 ERROR: Failed to extract instruction content"
-        return 1
-    fi
-
-    if [ -z "$instruction_content" ]; then
-        log "V8 ERROR: No instruction content found in dispatch"
-        return 1
-    fi
-
-    # Extract context files (Workflow + Context lines with @ references)
-    local context_files=$(extract_context_files "$dispatch_file")
-    if [ -n "$context_files" ]; then
-        log "V8 CONTEXT: Extracted context files from dispatch"
-    fi
-
-    # Extract metadata for receipt
-    local phase=$(extract_phase "$dispatch_file")
-    local gate=$(extract_new_gate "$dispatch_file")
-    local task_id=$(extract_task_id "$dispatch_file" "$track")
-    local cmd_id=$(uuidgen 2>/dev/null || echo "$(date +%s)-$$" | sha256sum | cut -c1-16)
-
-    # Fallback to planning if no gate specified
-    if [ -z "$gate" ]; then
-        log "V8: No gate specified, defaulting to 'planning'"
-        gate="planning"
-    fi
-
-    # Generate receipt footer
-    # RES-D3: Receipt footer generation failure is intentionally non-fatal.
-    # The dispatch is still valid and the receipt can be processed without it.
-    # The footer adds metadata for T0 convenience but is not a required artifact.
-    local receipt_footer
-    if ! receipt_footer=$(generate_receipt_footer "$dispatch_file" "$track" "$phase" "$gate" "$task_id" "$cmd_id" "$dispatch_id"); then
-        log "V8 WARNING: Failed to generate receipt footer, continuing without (intentionally non-fatal per RES-D3)"
-        receipt_footer=""
-    fi
-
-    # Format intelligence data if provided
-    local intelligence_section=""
-    if [ -n "$intelligence_data" ]; then
-        # Extract pattern summaries (title + description, max 5 patterns)
-        local pattern_summaries=$(echo "$intelligence_data" | python3 -c '
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    patterns = data.get("suggested_patterns", [])[:5]  # Top 5 patterns
-    if patterns:
-        print("### 🧠 Relevant Patterns\n")
-        for p in patterns:
-            title = p.get("title", "Unknown")
-            desc = p.get("description", "")[:100]
-            rel = p.get("relevance_score", 0)
-            fp = p.get("file_path", "")
-            lr = p.get("line_range", "")
-            loc = f" @ `{fp}:{lr}`" if fp and lr else ""
-            print(f"- **{title}** (relevance: {rel:.2f}): {desc}{loc}")
-except (json.JSONDecodeError, TypeError) as exc:
-    print(f"[NON_CRITICAL] pattern_summary_parse_failed: {exc}", file=sys.stderr)
-' 2>/dev/null)
-
-        # Extract prevention rules
-        local prevention_summaries=$(echo "$intelligence_data" | python3 -c '
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    rules = data.get("prevention_rules", [])[:3]  # Top 3 rules
-    if rules:
-        print("\n### ⚠️ Prevention Rules\n")
-        for r in rules:
-            print(f"- {r}")
-except (json.JSONDecodeError, TypeError) as exc:
-    print(f"[NON_CRITICAL] prevention_summary_parse_failed: {exc}", file=sys.stderr)
-' 2>/dev/null)
-
-        # Combine intelligence sections if they exist
-        if [ -n "$pattern_summaries" ] || [ -n "$prevention_summaries" ]; then
-            intelligence_section="
-
----
-## Intelligence Context
-
-$pattern_summaries$prevention_summaries
-
----
-"
-        fi
-    fi
-
-    # Build context section if files were specified
-    local context_section=""
-    if [ -n "$context_files" ]; then
-        context_section="
-
----
-## Context Files
-
-Read the following files for context before starting:
-
-$context_files
-
----
-"
-    fi
-
-    # Resolve terminal_id and provider early (needed for skill command format)
-    local terminal_id
-    if ! terminal_id="$(get_terminal_from_pane "$target_pane" 2>/dev/null)"; then
-        terminal_id=""
-        log_structured_failure "terminal_resolution_failed" "Failed to resolve terminal id from pane" "pane=$target_pane"
-    fi
-    if [ -z "$terminal_id" ] || [ "$terminal_id" = "UNKNOWN" ]; then
-        terminal_id="$(track_to_terminal "$track")"
-    fi
-
-    if [ -z "$terminal_id" ]; then
-        log "V8 LOCK: unable to resolve terminal for track=$track dispatch=$dispatch_id"
-        return 1
-    fi
-
-    local provider
-    provider=$(get_terminal_provider "$terminal_id")
-
-    # Extract PR-ID early so it can be included in the prompt
-    local pr_id=$(extract_pr_id "$dispatch_file")
-
-    # BUILD COMPLETE PROMPT: skill activation + context + intelligence + instruction + receipt
-    # V8.1: Hybrid dispatch - skill via send-keys, instruction via paste-buffer
-    # Provider-aware skill invocation:
-    #   Claude Code: /skill-name  (slash command)
-    #   Codex CLI:   $skill-name  (dollar-sign mention)
-    #   Gemini CLI:  @skill-name  (at-sign prefix, also auto-activates on description match)
-    local skill_command
-    local extra_skills_hint
-    case "$provider" in
-        codex_cli|codex)
-            skill_command="\$${skill_name} "
-            extra_skills_hint="Use additional skills as needed (\$test-engineer, \$reviewer, \$debugger) to deliver production-quality results."
-            ;;
-        gemini_cli|gemini)
-            skill_command="@${skill_name} "
-            extra_skills_hint="Use additional skills as needed (@test-engineer, @reviewer, @debugger) to deliver production-quality results."
-            ;;
-        *)
-            skill_command="/${skill_name} "
-            extra_skills_hint="Use additional skills as needed (/test-engineer, /reviewer, /debugger) to deliver production-quality results."
-            ;;
-    esac
-
-    log "V8 SKILL_FORMAT: provider=$provider command='${skill_command}'"
-
-    # Build dispatch header so workers know what they're working on
-    local dispatch_header="## Dispatch Assignment
-| Field | Value |
-|-------|-------|
-| **PR** | ${pr_id:-unknown} |
-| **Dispatch-ID** | ${dispatch_id} |
-| **Track** | ${track} |
-| **Gate** | ${gate} |
-"
-
-    local complete_prompt="${dispatch_header}
-Apply your specialized expertise to this task.
-
-**Critical Success Factors:**
-- Maintain high code quality standards and best practices
-- Ensure comprehensive test coverage where applicable
-- Follow established project patterns and conventions
-- Validate all changes against requirements
-- Document significant design decisions
-
-$extra_skills_hint
-$context_section$intelligence_section
-$instruction_content
-
-$receipt_footer"
-
-    # --- Runtime Core: canonical lease check (before legacy lock) ---
-    # When VNX_RUNTIME_PRIMARY=1, check canonical lease first.
-    # BLOCK from canonical lease blocks dispatch regardless of legacy lock.
-    local _rc_canonical_check
-    _rc_canonical_check=$(rc_check_terminal "$terminal_id" "$dispatch_id")
-    if [[ "$_rc_canonical_check" == BLOCK:* ]]; then
-        local _rc_block_reason="${_rc_canonical_check#BLOCK:}"
-        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_block_reason}"
-        # Detect duplicate delivery: canonical lease held by same dispatch_id prefix
-        if [[ "$_rc_block_reason" == canonical_lease:leased:* ]]; then
-            local _current_holder="${_rc_block_reason#canonical_lease:leased:}"
-            if [[ "$_current_holder" == "$dispatch_id" ]]; then
-                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "duplicate_delivery_prevented"
-            else
-                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
-            fi
-        else
-            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
-        fi
-        return 1
-    fi
-
-    if ! terminal_lock_allows_dispatch "$terminal_id" "$dispatch_id"; then
-        return 1
-    fi
-
-    if ! acquire_terminal_claim "$terminal_id" "$dispatch_id"; then
-        return 1
-    fi
-
-    # --- Runtime Core: register dispatch bundle BEFORE canonical lease acquire ---
-    # BOOT-6: registration must precede lease acquire to satisfy FK constraint:
-    #         terminal_leases.dispatch_id REFERENCES dispatches(dispatch_id)
-    # BOOT-7: rc_register() is fail-closed — blocks dispatch before any lease is acquired
-    local _rc_prompt_tmpfile=""
-    local _rc_attempt_id=""
-    if _rc_enabled; then
-        _rc_prompt_tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/rc_prompt_${dispatch_id}.txt"
-        mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
-        printf '%s' "$complete_prompt" > "$_rc_prompt_tmpfile"
-        if ! rc_register "$dispatch_id" "$terminal_id" "$track" "$skill_name" "$gate" "$_rc_prompt_tmpfile"; then
-            rm -f "$_rc_prompt_tmpfile"
-            log "V8 RUNTIME_CORE: registration blocked dispatch — releasing claim terminal=$terminal_id dispatch=$dispatch_id"
-            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" \
-                    "Failed to release claim after registration failure" \
-                    "terminal=$terminal_id dispatch=$dispatch_id"
-            fi
-            return 1
-        fi
-        rm -f "$_rc_prompt_tmpfile"
-    fi
-
-    # --- Runtime Core: acquire canonical lease alongside terminal_state_shadow ---
-    # Fail-closed: if acquire returns FAIL or non-zero, release claim and block dispatch.
-    # BOOT-6: acquire happens AFTER registration — FK constraint on terminal_leases satisfied.
-    local _rc_generation
-    local _rc_acquire_rc=0
-    _rc_generation=$(rc_acquire_lease "$terminal_id" "$dispatch_id") || _rc_acquire_rc=$?
-    if [[ "$_rc_acquire_rc" -ne 0 || "$_rc_generation" == "FAIL" ]]; then
-        log "V8 LOCK: canonical lease acquire failed — blocking dispatch terminal=$terminal_id dispatch=$dispatch_id"
-        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "canonical_lease_acquire_failed" "dispatch_blocked"
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after lease acquire failure" "terminal=$terminal_id dispatch=$dispatch_id"
-        fi
-        return 1
-    fi
-
-    # Record delivery start (queued -> claimed -> delivering) — after lease acquired
-    if _rc_enabled; then
-        _rc_attempt_id=$(rc_delivery_start "$dispatch_id" "$terminal_id")
-        # RES-D1: Log when delivery_start returns empty attempt_id (DFL-2).
-        # Downstream rc_delivery_failure guards on non-empty attempt_id, so an
-        # empty value means the failure won't be recorded in the broker.
-        if [[ -z "$_rc_attempt_id" ]]; then
-            log_structured_failure "delivery_start_no_attempt" \
-                "delivery_start returned empty attempt_id — broker failure record will be lost" \
-                "dispatch=$dispatch_id terminal=$terminal_id"
-        fi
-    fi
-
-    # --- Input-Mode Guard (IMR-1, IMR-2) — PR-1 ---
-    # Post-lease, pre-send-keys: probe pane_in_mode before any tmux key delivery.
-    # Blocks slash-prefixed dispatch into copy/search mode (silent corruption path).
-    # Recovery: programmatic cancel (attempt 1) + Escape (attempt 2).
-    # Fail-closed on recovery failure: release lease + claim, block dispatch.
-    # Headless providers are exempt (no tmux send-keys used).
-    if ! check_pane_input_ready "$target_pane" "$terminal_id" "$dispatch_id" "$provider"; then
-        log "V8 INPUT_MODE: delivery blocked — unrecoverable pane mode terminal=$terminal_id dispatch=$dispatch_id"
-        emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "blocked_input_mode" "dispatch_blocked" "post_input_mode_blocked"
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "delivery_failed:post_input_mode_blocked"
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" \
-                "Failed to release claim after input mode block" \
-                "terminal=$terminal_id dispatch=$dispatch_id"
-        fi
-        return 1
-    fi
-
-    # Resolve worktree path for this terminal (falls back to PROJECT_ROOT)
-    local worktree_path
-    worktree_path=$(python3 "$VNX_DIR/scripts/terminal_state_shadow.py" \
-        get-worktree "$terminal_id" 2>/dev/null || true)
-    worktree_path="${worktree_path:-$PROJECT_ROOT}"
-
-    # Inject Working-Directory header into prompt if using a worktree
-    if [ "$worktree_path" != "$PROJECT_ROOT" ] && [ -n "$worktree_path" ]; then
-        complete_prompt="Working-Directory: ${worktree_path}
-${complete_prompt}"
-        log "V8 WORKTREE: terminal=$terminal_id path=$worktree_path"
-
-        # cd terminal to worktree before dispatching skill
-        # Skip for Codex CLI — it runs in the worktree directory already
-        if [[ "$provider" != "codex_cli" && "$provider" != "codex" ]]; then
-            if ! tmux_send_best_effort "$target_pane" "cd '${worktree_path}'" Enter; then
-                log "V8 WARNING: Failed to cd to worktree (non-fatal)"
-            fi
-            sleep 0.3
-        fi
-    fi
-
-    # V8 CORE: Hybrid dispatch - skill via send-keys, instruction via paste-buffer
-    # Uses tmux_load_buffer_safe for large payloads (temp file transport)
-    # and tmux_retry for transient tmux failures (3 attempts, exponential backoff).
-    log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
-
-    local _delivery_failed=false
-    local _failed_substep=""  # Tracks which substep set _delivery_failed=true
-
-    # Provider-aware dispatch: Codex CLI paste-buffer replaces typed input,
-    # so prepend skill command to buffer content instead of typing separately.
-    if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-        # Codex: single paste-buffer with skill + instruction combined
-        # Substep: load_buffer
-        if ! tmux_retry 3 tmux_load_buffer_safe "${skill_command}${complete_prompt}"; then
-            _delivery_failed=true
-            _failed_substep="load_buffer"
-            log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
-        fi
-
-        if [ "$_delivery_failed" = false ]; then
-            # Substep: paste_buffer
-            if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
-                _delivery_failed=true
-                _failed_substep="paste_buffer"
-                log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-            fi
-        fi
-    else
-        # Claude Code / others: type skill via send-keys, then paste instruction
-        # Step 1: Type skill command via send-keys (triggers skill activation)
-        # Use -l (literal) for providers that use $ prefix to prevent tmux key interpretation
-        # Substep: send_skill
-        if ! tmux_retry 3 tmux_send_best_effort "$target_pane" -l "$skill_command"; then
-            _delivery_failed=true
-            _failed_substep="send_skill"
-            log "V8 ERROR: Failed to send skill command to terminal $target_pane"
-        fi
-
-        if [ "$_delivery_failed" = false ]; then
-            # Allow CLI to render the skill command before pasting instruction
-            sleep 0.5
-
-            # Step 2: Load instruction into buffer and paste after typed skill command
-            # Substep: load_buffer
-            if ! tmux_retry 3 tmux_load_buffer_safe "$complete_prompt"; then
-                _delivery_failed=true
-                _failed_substep="load_buffer"
-                log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
-            fi
-        fi
-
-        if [ "$_delivery_failed" = false ]; then
-            # Substep: paste_buffer
-            if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
-                _delivery_failed=true
-                _failed_substep="paste_buffer"
-                log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-            fi
-        fi
-    fi
-
-    if [ "$_delivery_failed" = true ]; then
-        # Map substep to canonical failure code (DFL-LOG-3, Contract 160 Section 3.4)
-        local _failure_code="tx_${_failed_substep}"
-        if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-            case "$_failed_substep" in
-                load_buffer) _failure_code="tx_load_buffer_codex" ;;
-                paste_buffer) _failure_code="tx_paste_buffer_codex" ;;
-            esac
-        fi
-
-        # Annotate dispatch with canonical failure code for operator observability.
-        # [DELIVERY_SUBSTEP_FAILED:] is requeueable — does not trigger permanent rejection.
-        log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
-            "substep=$_failed_substep dispatch=$dispatch_id terminal=$terminal_id" \
-            "$_failure_code" "$dispatch_id" "$terminal_id" "$provider"
-        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=%s] tmux delivery failed at substep. Retry is automatic.\n' \
-            "$_failure_code" >> "$dispatch_file"
-
-        # Record failure and release canonical lease atomically (PR-1: always paired)
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "delivery_failed:$_failure_code"
-
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
-        fi
-        return 1
-    fi
-
-    # Add delay before Enter to ensure content is fully pasted and rendered
-    sleep 1
-
-    # Substep: enter
-    if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
-        # Annotate dispatch with canonical failure code for operator observability.
-        log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
-            "substep=enter dispatch=$dispatch_id terminal=$terminal_id" \
-            "tx_send_enter" "$dispatch_id" "$terminal_id" "$provider"
-        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=tx_send_enter] tmux Enter failed at substep. Retry is automatic.\n' \
-            >> "$dispatch_file"
-
-        # Record failure and release canonical lease atomically (PR-1: always paired)
-        rc_release_on_failure "$dispatch_id" "$_rc_attempt_id" "$terminal_id" "$_rc_generation" "delivery_failed:tx_send_enter"
-
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
-        fi
-        log "V8 ERROR: Failed to send Enter to terminal $target_pane"
-        return 1
-    fi
-
-    # Record delivery success in broker (delivering -> accepted)
-    rc_delivery_success "$dispatch_id" "$_rc_attempt_id"
-
-    log "V8 DISPATCH: Successfully sent dispatch to $target_pane"
-
-    # Update progress_state.yaml (from V7)
-    local filename
-    filename=$(basename "$dispatch_file")
-
-    if [ -f "$VNX_DIR/scripts/update_progress_state.py" ]; then
-        log "V8 PROGRESS_STATE: Updating Track $track → gate=$gate, status=working, dispatch_id=$dispatch_id"
-
-        if python3 "$VNX_DIR/scripts/update_progress_state.py" \
-            --track "$track" \
-            --gate "$gate" \
-            --status working \
-            --dispatch-id "$dispatch_id" \
-            --updated-by dispatcher 2>&1; then
-            log "V8 PROGRESS_STATE: ✅ Successfully updated progress_state.yaml for Track $track"
-        else
-            log "V8 PROGRESS_STATE: ⚠️  Failed to update progress_state.yaml (non-fatal)"
-        fi
-    else
-        log "V8 PROGRESS_STATE: ⚠️  update_progress_state.py not found (non-fatal)"
-    fi
-
-    # Notify heartbeat ACK monitor (from V7)
-    # pr_id already extracted earlier for inclusion in dispatch prompt
-    python3 "$VNX_DIR/scripts/notify_dispatch.py" "$dispatch_id" "$terminal_id" "$dispatch_id" "$pr_id" 2>/dev/null || {
-        log "V8 WARNING: Failed to notify heartbeat ACK monitor (non-fatal)"
-    }
-
-    # Log dispatch metadata to quality_intelligence.db (non-fatal)
-    local _dm_cognition _dm_priority _dm_pattern_count _dm_rule_count _dm_instr_chars
-    _dm_cognition=$(vnx_dispatch_extract_cognition "$dispatch_file" 2>/dev/null || echo "normal")
-    _dm_priority=$(vnx_dispatch_extract_priority "$dispatch_file" 2>/dev/null || echo "P1")
-    _dm_pattern_count=$(echo "$intelligence_data" | grep -o '"pattern_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
-    _dm_rule_count=$(echo "$intelligence_data" | grep -o '"prevention_rule_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
-    _dm_instr_chars=${#instruction_content}
-    # Extract OI-NNN references from dispatch instructions for target tracking
-    local _dm_target_oi=""
-    _dm_target_oi=$(echo "$instruction_content" | grep -oE 'OI-[0-9]{3,}' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
-    python3 "$VNX_DIR/scripts/log_dispatch_metadata.py" \
-        --dispatch-id "$dispatch_id" \
-        --terminal "$terminal_id" \
-        --track "$track" \
-        --role "$agent_role" \
-        --skill-name "$agent_role" \
-        --gate "$gate" \
-        --cognition "$_dm_cognition" \
-        --priority "$_dm_priority" \
-        --pr-id "${pr_id:-}" \
-        --pattern-count "${_dm_pattern_count:-0}" \
-        --prevention-rule-count "${_dm_rule_count:-0}" \
-        --intelligence-json "$intelligence_data" \
-        --instruction-char-count "${_dm_instr_chars:-0}" \
-        --target-open-items "${_dm_target_oi:-}" 2>/dev/null || {
-        log "V8 WARNING: Failed to log dispatch metadata (non-fatal)"
-    }
-
-    # Move dispatch to active (receipt_processor moves to completed on task_complete)
-    mv "$dispatch_file" "$ACTIVE_DIR/$filename"
-
-    log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
-    return 0
+    finalize_dispatch_delivery "$dispatch_file" "$track" "$_DP_TERMINAL_ID" "$dispatch_id" \
+        "$_DP_PR_ID" "$_DP_GATE" "$agent_role" "$_DP_INSTRUCTION_CONTENT" "$intelligence_data"
 }
 
 # ===== INTELLIGENCE INTEGRATION (V7.4) =====
 
-# Function to process pending dispatches with intelligence
-process_dispatches() {
-    local count=0
+# Globals set by validate_dispatch_preconditions
+_PD_TRACK="" _PD_COGNITION="" _PD_PRIORITY="" _PD_GATE="" _PD_DISPATCH_ID="" _PD_TARGET_TERMINAL=""
 
-    # Clean up stuck files in active directory (older than 1 hour)
+# validate_dispatch_preconditions — pre-delivery guard: skill/role/agent validation + metadata.
+# Sets: _PD_TRACK _PD_COGNITION _PD_PRIORITY _PD_GATE _PD_DISPATCH_ID _PD_TARGET_TERMINAL
+# Returns 1 (caller should continue) if dispatch should be skipped.
+validate_dispatch_preconditions() {
+    local dispatch="$1"
+    local agent_role
+    agent_role=$(extract_agent_role "$dispatch")
+    log "V8: Processing dispatch: $(basename "$dispatch") (Role: $agent_role)"
+
+    if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+        log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
+        return 1
+    fi
+
+    if [ -z "$agent_role" ] || [ "$agent_role" = "none" ] || [ "$agent_role" = "None" ]; then
+        log "V8 ERROR: Empty or 'none' role — dispatch blocked at pre-validation: $(basename "$dispatch")"
+        if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+            printf '\n\n[SKILL_INVALID] Role is empty or '"'"'none'"'"'. Set a valid Role and remove this marker to retry.\n' >> "$dispatch"
+        fi
+        return 1
+    fi
+
+    local _mapped_skill_pre
+    _mapped_skill_pre="$(map_role_to_skill "$agent_role" 2>/dev/null || echo "$agent_role")"
+    if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$_mapped_skill_pre" >/dev/null 2>&1; then
+        log "V8 ERROR: Skill '@${_mapped_skill_pre}' failed registry validation — blocking dispatch before terminal operations"
+        if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+            printf '\n\n[SKILL_INVALID] Skill '"'"'@%s'"'"' not found in registry. Update Role and remove this marker to retry.\n' "$_mapped_skill_pre" >> "$dispatch"
+        fi
+        return 1
+    fi
+    log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
+
+    # V7.4 INTELLIGENCE: Validate agent — command failure blocks dispatch (RES-A3)
+    if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
+        local validation_rc=0 validation_result
+        set +e
+        validation_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" validate "$agent_role" 2>&1)
+        validation_rc=$?
+        set -e
+        if [ "$validation_rc" -ne 0 ]; then
+            log_structured_failure "agent_validation_dependency_failed" "Agent validation command failed; dispatch blocked" "role=$agent_role rc=$validation_rc"
+            if ! grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
+                echo -e "\n\n[DEPENDENCY_ERROR] gather_intelligence validate failed (rc=$validation_rc). Resolve runtime dependency and retry.\n" >> "$dispatch"
+            fi
+            return 1
+        fi
+        if echo "$validation_result" | grep -q '"valid": false'; then
+            log "V8 ERROR: Agent validation failed for '$agent_role'"
+            log "Validation result: $validation_result"
+            local suggested
+            suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4)
+            log "Suggested agent: $suggested"
+            if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+                echo -e "\n\n[SKILL_INVALID] Skill '$agent_role' not found. Suggested: '$suggested'. Update Role and remove this marker to retry.\n" >> "$dispatch"
+            fi
+            return 1
+        else
+            log "V8: Agent validated: $agent_role"
+        fi
+    fi
+
+    _PD_TRACK=$(extract_track "$dispatch")
+    _PD_COGNITION=$(extract_cognition "$dispatch")
+    _PD_PRIORITY=$(extract_priority "$dispatch")
+    _PD_GATE=$(extract_new_gate "$dispatch")
+    _PD_DISPATCH_ID="$(basename "$dispatch" .md)"
+
+    if [ -z "$_PD_TRACK" ]; then
+        log "V8 WARNING: No track found in dispatch, skipping"
+        mv "$dispatch" "$REJECTED_DIR/"; return 1
+    fi
+    if [ "$_PD_TRACK" = "0" ] || [ "$_PD_TRACK" = "T0" ]; then
+        log "V8 ERROR: Attempting to dispatch to T0 - BLOCKED"
+        mv "$dispatch" "$REJECTED_DIR/"; return 1
+    fi
+
+    _PD_TARGET_TERMINAL="$(track_to_terminal "$_PD_TRACK")"
+    if [ -z "$_PD_TARGET_TERMINAL" ]; then
+        log "V8 ERROR: Invalid track '$_PD_TRACK' for dispatch $(basename "$dispatch")"
+        mv "$dispatch" "$REJECTED_DIR/"; return 1
+    fi
+
+    if ! terminal_lock_allows_dispatch "$_PD_TARGET_TERMINAL" "$_PD_DISPATCH_ID"; then
+        log "V8 LOCK: deferring $(basename "$dispatch") until terminal $_PD_TARGET_TERMINAL is unlocked"
+        return 1
+    fi
+    return 0
+}
+
+# Global set by gather_dispatch_intelligence
+_PD_INTEL_RESULT=""
+
+# gather_dispatch_intelligence — gather intelligence for dispatch (V7.4).
+# Sets: _PD_INTEL_RESULT. Returns 1 if DEPENDENCY_ERROR blocks dispatch.
+gather_dispatch_intelligence() {
+    local dispatch="$1" agent_role="$2" track="$3" dispatch_id="$4" gate="$5"
+    _PD_INTEL_RESULT=""
+    [ -f "$VNX_DIR/scripts/gather_intelligence.py" ] || return 0
+
+    log "V8 INTELLIGENCE: Gathering intelligence for dispatch"
+    local task_description terminal
+    task_description=$(extract_instruction_content "$dispatch")
+    terminal=$(track_to_terminal "$track")
+    local intel_rc=0
+    set +e
+    _PD_INTEL_RESULT=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather "$task_description" "$terminal" "$agent_role" "$gate" 2>&1)
+    intel_rc=$?
+    set -e
+
+    if [ "$intel_rc" -ne 0 ]; then
+        log_structured_failure "intelligence_gather_failed" "Intelligence gather command failed; dispatch blocked" "dispatch=$dispatch_id terminal=$terminal rc=$intel_rc"
+        if ! grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
+            echo -e "\n\n[DEPENDENCY_ERROR] gather_intelligence gather failed (rc=$intel_rc). Resolve runtime dependency and retry.\n" >> "$dispatch"
+        fi
+        return 1
+    fi
+
+    local pattern_count prevention_rules
+    pattern_count=$(echo "$_PD_INTEL_RESULT" | grep '"pattern_count":' | grep -o '[0-9]*' | head -1 || echo "0")
+    prevention_rules=$(echo "$_PD_INTEL_RESULT" | grep '"prevention_rule_count":' | grep -o '[0-9]*' | head -1 || echo "0")
+    log "V8 INTELLIGENCE: Gathered $pattern_count patterns, $prevention_rules rules → injecting into prompt"
+    return 0
+}
+
+# execute_and_classify_dispatch — call dispatch_with_skill_activation and classify result.
+# Returns 0 on success, 1 to skip/continue.
+execute_and_classify_dispatch() {
+    local dispatch="$1" track="$2" agent_role="$3" intel_result="$4" dispatch_id="$5"
+
+    if ! dispatch_with_skill_activation "$dispatch" "$track" "$agent_role" "$intel_result" "$dispatch_id"; then
+        if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+            log "V8 WARNING: Dispatch blocked due to invalid skill (waiting for edit): $(basename "$dispatch")"; return 1
+        fi
+        if grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
+            log "V8 WARNING: Dispatch blocked due to dependency error (waiting for resolution): $(basename "$dispatch")"; return 1
+        fi
+        # RC-3: Only reject when explicit [REJECTED:] marker was written by the failure path
+        if grep -q "\[REJECTED:" "$dispatch"; then
+            log "V8 ERROR: Dispatch permanently rejected: $(basename "$dispatch")"
+            [ -f "$dispatch" ] && mv "$dispatch" "$REJECTED_DIR/"
+            return 1
+        fi
+        log "V8 INFO: Dispatch failed with requeueable condition — deferring to pending: $(basename "$dispatch")"
+        return 1
+    fi
+    return 0
+}
+
+_cleanup_stuck_dispatches() {
     while IFS= read -r stuck_file; do
         if [ -f "$stuck_file" ]; then
             log "V8: Moving stuck file to completed: $(basename "$stuck_file")"
@@ -1913,197 +325,29 @@ process_dispatches() {
             fi
         fi
     done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
+}
+
+process_dispatches() {
+    local count=0
+    _cleanup_stuck_dispatches
 
     for dispatch in "$PENDING_DIR"/*.md; do
         [ -f "$dispatch" ] || continue
+        local agent_role
+        agent_role=$(extract_agent_role "$dispatch")
 
-        local agent_role=$(extract_agent_role "$dispatch")
-        log "V8: Processing dispatch: $(basename "$dispatch") (Role: $agent_role)"
-
-        # Skip dispatches waiting for manual skill fix
-        if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-            log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
-            continue
-        fi
-
-        # RC-4: Catch empty or 'none' role before any terminal operations.
-        # An empty/none role bypasses the validation guard below and reaches
-        # dispatch_with_skill_activation() where map_role_to_skill("") returns
-        # empty, triggering [SKILL_INVALID] deep in delivery after terminal
-        # operations may have started. Block here at pre-validation instead.
-        if [ -z "$agent_role" ] || [ "$agent_role" = "none" ] || [ "$agent_role" = "None" ]; then
-            log "V8 ERROR: Empty or 'none' role — dispatch blocked at pre-validation: $(basename "$dispatch")"
-            if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-                printf '\n\n[SKILL_INVALID] Role is empty or '"'"'none'"'"'. Set a valid Role and remove this marker to retry.\n' >> "$dispatch"
-            fi
-            continue
-        fi
-
-        # Validate skill against skills.yaml registry before any terminal operations.
-        # An invalid skill must never advance to delivery — block here before canonical
-        # check or lease acquire so no terminal state is touched for an invalid dispatch.
-        # Note: empty/none role already caught by RC-4 guard above, so agent_role is
-        # always non-empty and non-"none" at this point.
-        local _mapped_skill_pre
-        _mapped_skill_pre="$(map_role_to_skill "$agent_role" 2>/dev/null || echo "$agent_role")"
-        if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$_mapped_skill_pre" >/dev/null 2>&1; then
-            log "V8 ERROR: Skill '@${_mapped_skill_pre}' failed registry validation — blocking dispatch before terminal operations"
-            if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-                printf '\n\n[SKILL_INVALID] Skill '"'"'@%s'"'"' not found in registry. Update Role and remove this marker to retry.\n' "$_mapped_skill_pre" >> "$dispatch"
-            fi
-            continue
-        fi
-        log "V8 SKILL_VALIDATION: Skill '@${_mapped_skill_pre}' validated against registry"
-
-        # V7.4 INTELLIGENCE: Validate agent if specified
-        # RES-A3 (Contract 140 RC-6): Command failure (non-zero exit) blocks dispatch
-        # with [DEPENDENCY_ERROR]. JSON parse failure is non-fatal — dispatch proceeds
-        # without intelligence data, not blocked.
-        if [ -n "$agent_role" ] && [ "$agent_role" != "none" ] && [ "$agent_role" != "None" ]; then
-            # Validate agent using intelligence gatherer — command failure blocks dispatch
-            local validation_rc=0
-            set +e
-            validation_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" validate "$agent_role" 2>&1)
-            validation_rc=$?
-            set -e
-
-            if [ "$validation_rc" -ne 0 ]; then
-                log_structured_failure "agent_validation_dependency_failed" "Agent validation command failed; dispatch blocked" "role=$agent_role rc=$validation_rc"
-                if ! grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
-                    echo -e "\n\n[DEPENDENCY_ERROR] gather_intelligence validate failed (rc=$validation_rc). Resolve runtime dependency and retry.\n" >> "$dispatch"
-                fi
-                continue
-            fi
-
-            # Check if validation failed
-            if echo "$validation_result" | grep -q '"valid": false'; then
-                log "V8 ERROR: Agent validation failed for '$agent_role'"
-                log "Validation result: $validation_result"
-
-                # Extract suggested agent
-                suggested=$(echo "$validation_result" | grep -o '"suggestion": "[^"]*"' | cut -d'"' -f4)
-                log "Suggested agent: $suggested"
-
-                # Mark for manual fix (do not reject)
-                if ! grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-                    echo -e "\n\n[SKILL_INVALID] Skill '$agent_role' not found. Suggested: '$suggested'. Update Role and remove this marker to retry.\n" >> "$dispatch"
-                fi
-                continue
-            else
-                log "V8: Agent validated: $agent_role"
-            fi
-        fi
-
-        # Extract metadata
-        local track=$(extract_track "$dispatch")
-        local cognition=$(extract_cognition "$dispatch")
-        local priority=$(extract_priority "$dispatch")
-        local gate=$(extract_new_gate "$dispatch")
-        local dispatch_id
-        dispatch_id="$(basename "$dispatch" .md)"
-
-        if [ -z "$track" ]; then
-            log "V8 WARNING: No track found in dispatch, skipping"
-            mv "$dispatch" "$REJECTED_DIR/"
-            continue
-        fi
-
-        # Never send to T0
-        if [ "$track" = "0" ] || [ "$track" = "T0" ]; then
-            log "V8 ERROR: Attempting to dispatch to T0 - BLOCKED"
-            mv "$dispatch" "$REJECTED_DIR/"
-            continue
-        fi
-
-        local target_terminal
-        target_terminal="$(track_to_terminal "$track")"
-        if [ -z "$target_terminal" ]; then
-            log "V8 ERROR: Invalid track '$track' for dispatch $(basename "$dispatch")"
-            mv "$dispatch" "$REJECTED_DIR/"
-            continue
-        fi
-
-        if ! terminal_lock_allows_dispatch "$target_terminal" "$dispatch_id"; then
-            log "V8 LOCK: deferring $(basename "$dispatch") until terminal $target_terminal is unlocked"
-            continue
-        fi
-
-        # V7.4 INTELLIGENCE: Gather intelligence for dispatch
-        local intel_result=""
-        if [ -f "$VNX_DIR/scripts/gather_intelligence.py" ]; then
-            log "V8 INTELLIGENCE: Gathering intelligence for dispatch"
-
-            # Extract task description for intelligence gathering
-            local task_description=$(extract_instruction_content "$dispatch")
-
-            # Gather intelligence (convert track letter to terminal ID)
-            # RES-A3: Command failure (rc!=0) blocks dispatch. JSON parse failure
-            # downstream is non-fatal — dispatch proceeds without intelligence data.
-            local terminal
-            terminal=$(track_to_terminal "$track")
-            local intel_rc=0
-            set +e
-            intel_result=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather "$task_description" "$terminal" "$agent_role" "$gate" 2>&1)
-            intel_rc=$?
-            set -e
-
-            if [ "$intel_rc" -ne 0 ]; then
-                log_structured_failure "intelligence_gather_failed" "Intelligence gather command failed; dispatch blocked" "dispatch=$dispatch_id terminal=$terminal rc=$intel_rc"
-                if ! grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
-                    echo -e "\n\n[DEPENDENCY_ERROR] gather_intelligence gather failed (rc=$intel_rc). Resolve runtime dependency and retry.\n" >> "$dispatch"
-                fi
-                continue
-            fi
-
-            # Parse JSON results for logging
-            local pattern_count=$(echo "$intel_result" | grep '"pattern_count":' | grep -o '[0-9]*' | head -1 || echo "0")
-            local prevention_rules=$(echo "$intel_result" | grep '"prevention_rule_count":' | grep -o '[0-9]*' | head -1 || echo "0")
-
-            log "V8 INTELLIGENCE: Gathered $pattern_count patterns, $prevention_rules rules → injecting into prompt"
-
-            # Intelligence is now passed to dispatch_with_skill_activation
-            # and injected directly into the terminal prompt (not the dispatch file)
-        fi
-
-        # Send dispatch with skill activation + intelligence injection (V8 core)
-        if ! dispatch_with_skill_activation "$dispatch" "$track" "$agent_role" "$intel_result" "$dispatch_id"; then
-            if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-                log "V8 WARNING: Dispatch blocked due to invalid skill (waiting for edit): $(basename "$dispatch")"
-                continue  # Stay in pending — waiting for operator to fix role
-            fi
-            if grep -q "\[DEPENDENCY_ERROR\]" "$dispatch"; then
-                log "V8 WARNING: Dispatch blocked due to dependency error (waiting for resolution): $(basename "$dispatch")"
-                continue  # Stay in pending — waiting for dependency to recover
-            fi
-            # RC-3: Only move to rejected when an explicit [REJECTED:] marker was written
-            # by the failure path that determined the failure is permanent. No-marker
-            # return-1 means requeueable transient failure — do NOT reject (contract 140 §3.2).
-            if grep -q "\[REJECTED:" "$dispatch"; then
-                log "V8 ERROR: Dispatch permanently rejected: $(basename "$dispatch")"
-                if [ -f "$dispatch" ]; then
-                    mv "$dispatch" "$REJECTED_DIR/"
-                fi
-                continue
-            fi
-            log "V8 INFO: Dispatch failed with requeueable condition — deferring to pending: $(basename "$dispatch")"
-            continue  # Stay in pending — requeueable transient failure, retry on next loop
-        fi
+        validate_dispatch_preconditions "$dispatch" || continue
+        gather_dispatch_intelligence "$dispatch" "$agent_role" "$_PD_TRACK" "$_PD_DISPATCH_ID" "$_PD_GATE" || continue
+        execute_and_classify_dispatch "$dispatch" "$_PD_TRACK" "$agent_role" "$_PD_INTEL_RESULT" "$_PD_DISPATCH_ID" || continue
 
         ((count++))
-
-        # Small delay between dispatches
-        sleep 1
+        sleep 1  # Small delay between dispatches
     done
 
-    if [ $count -gt 0 ]; then
-        log "V8: Processed $count dispatches"
-    fi
+    [ $count -gt 0 ] && log "V8: Processed $count dispatches"
 }
 
 # BOOT-3: Fail-closed startup precondition check.
-# VNX_STATE_DIR and VNX_DATA_DIR must be set and point to existing directories.
-# This runs before the main dispatch loop, before any rc_* calls, and before
-# any file operations against $STATE_DIR in the dispatch path.
 if [[ -z "${VNX_STATE_DIR:-}" ]] || [[ ! -d "$VNX_STATE_DIR" ]]; then
     echo "FATAL: VNX_STATE_DIR is unset or does not exist: '${VNX_STATE_DIR:-}'" >&2
     echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
@@ -2121,20 +365,14 @@ log "V8 Features: Native skills + instruction-only dispatch (~200 tokens vs 1500
 log "V8 Maintains: Mode control, model switching, intelligence v7.4, receipt tracking"
 log "Track routing: A→T1(%1), B→T2(%2), C→T3(%3)"
 
-# Get initial pane IDs (non-fatal)
 if ! get_pane_ids; then
     log_structured_failure "pane_refresh_failed" "Initial pane ID refresh failed" "phase=startup"
 fi
 
 while true; do
-    # Update pane IDs periodically (non-fatal)
     if ! get_pane_ids; then
         log_structured_failure "pane_refresh_failed" "Periodic pane ID refresh failed" "phase=loop"
     fi
-
-    # Process any pending dispatches
     process_dispatches
-
-    # Wait before next check
     sleep 2
 done
