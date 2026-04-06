@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-06
 **Branch**: `feature/headless-burn-in-plan`
-**Status**: Draft — awaiting operator approval before execution
+**Components under test**: SubprocessAdapter, EventStore, SSE endpoint, Dashboard agent-stream page
 
 ---
 
@@ -11,202 +11,215 @@
 ### Environment Configuration
 
 ```bash
-# Set subprocess adapter for T1 (primary burn-in terminal)
+# Enable subprocess adapter for T1 (primary burn-in target)
 export VNX_ADAPTER_T1=subprocess
 
-# For parallel test (S4), also enable T2
+# Optionally enable T2 for parallel dispatch testing
 export VNX_ADAPTER_T2=subprocess
 
-# Verify VNX_DATA_DIR is set (events write here)
-echo "${VNX_DATA_DIR:-.vnx-data}"
+# Verify the env vars are set
+env | grep VNX_ADAPTER
 ```
 
-### Required Services
-
-| Service | Command | Verify |
-|---------|---------|--------|
-| Dashboard API | `cd dashboard && python3 api_server.py` | `curl -s http://localhost:8787/api/agent-stream/status` returns JSON |
-| Dashboard UI | `cd dashboard/token-dashboard && npm run dev` | Browser at `http://localhost:3000/agent-stream` loads |
-| `claude` CLI | `claude --version` | Prints version (must support `--output-format stream-json`) |
-
-### Pre-Flight Checks
+### Infrastructure Checks
 
 ```bash
-# 1. Verify event store directory exists
-mkdir -p "${VNX_DATA_DIR:-.vnx-data}/events"
+# 1. Verify claude CLI is available and responds
+claude --version
 
-# 2. Clear stale events from prior runs
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T2.ndjson"
+# 2. Verify EventStore data directory exists
+ls -la .vnx-data/events/
 
-# 3. Verify subprocess_dispatch.py is reachable
-python3 scripts/lib/subprocess_dispatch.py --help
-```
+# 3. Verify dashboard API server is running (or start it)
+curl -s http://localhost:8765/api/agent-stream/status | python3 -m json.tool
 
----
+# 4. Verify no stale subprocess from prior runs
+ps aux | grep "claude -p" | grep -v grep
 
-## 2. Critical Gap: Event Consumption Pipeline
-
-### The Problem
-
-`subprocess_dispatch.py` calls `adapter.deliver()` which spawns the `claude -p --output-format stream-json` subprocess, but **never calls `adapter.read_events()`**. The subprocess writes stream-json to stdout, but nobody reads it. Events are never persisted to EventStore.
-
-**Current flow (broken)**:
-```
-dispatch_deliver.sh → subprocess_dispatch.py → adapter.deliver()
-                                                  ↓
-                                          Popen(claude -p ...)
-                                                  ↓
-                                          stdout: stream-json lines (UNREAD)
-                                                  ↓
-                                          EventStore: EMPTY
-                                                  ↓
-                                          SSE endpoint: NO EVENTS
-```
-
-**Required flow (working)**:
-```
-dispatch_deliver.sh → subprocess_dispatch.py → adapter.deliver()
-                                                  ↓
-                                          Popen(claude -p ...)
-                                                  ↓
-                                          adapter.read_events() consumes stdout
-                                                  ↓
-                                          EventStore.append() per event
-                                                  ↓
-                                          SSE endpoint polls EventStore
-                                                  ↓
-                                          Dashboard renders events
-```
-
-### Validation Approach
-
-Before running any scenario, verify the read loop works:
-
-```bash
-# Manual integration test: spawn claude directly, pipe to event store
-cd scripts/lib
+# 5. Verify no stale leases blocking terminals
 python3 -c "
-from subprocess_adapter import SubprocessAdapter
-adapter = SubprocessAdapter()
-adapter.deliver('T1', 'test-manual-001', instruction='List the files in the current directory. Only use the ls command.', model='haiku')
-count = 0
-for event in adapter.read_events('T1'):
-    count += 1
-    print(f'[{event.type}] seq={count}')
-print(f'Total events: {count}')
+from scripts.lib.runtime_coordination import RuntimeCoordinator
+rc = RuntimeCoordinator()
+for t in ['T1','T2','T3']:
+    lease = rc.get_lease(t)
+    print(f'{t}: {lease}')
+"
+
+# 6. Clear prior event files to start clean
+python3 -c "
+from scripts.lib.event_store import EventStore
+es = EventStore()
+for t in ['T1','T2']:
+    es.clear(t)
+    print(f'Cleared {t}')
 "
 ```
 
-**Expected**: Multiple events printed (init, thinking, tool_use, tool_result, text, result). If count=0, the read loop or subprocess spawn is broken — stop burn-in and fix first.
+### Dashboard Verification
 
-Then verify events reached EventStore:
-
-```bash
-wc -l "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
-# Expected: same count as printed above
-
-# Inspect first and last event
-head -1 "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -m json.tool
-tail -1 "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -m json.tool
-```
+Open `http://localhost:3000/agent-stream` in a browser. Confirm the terminal selector renders and no stale events display.
 
 ---
 
-## 3. Test Scenarios
+## 2. Test Scenarios
 
-### S1: Simple Task via Subprocess
+### Scenario 1: Simple Single-Tool Task
 
-**Purpose**: Validate the minimum viable path — one task, one terminal, events persisted.
+**Goal**: Verify basic end-to-end subprocess delivery, event capture, and SSE streaming.
 
 ```bash
-# Clear prior events
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
+export VNX_ADAPTER_T1=subprocess
 
-# Dispatch
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
-  --dispatch-id "burnin-S1-simple-$(date +%s)" \
-  --model haiku \
-  --instruction "List the files in the scripts/ directory. Report the count."
+  --instruction "Read the file bin/vnx and report the first 5 lines." \
+  --model sonnet \
+  --dispatch-id burnin-001-simple
 ```
 
 **Validation Checklist**:
 - [ ] Process exits with code 0
-- [ ] `T1.ndjson` exists and is non-empty
-- [ ] Event count: `wc -l "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"` > 3
-- [ ] Event types present (check with): `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; types=set(); [types.add(json.loads(l)['type']) for l in sys.stdin]; print(sorted(types))"`
-  - Expected types include at minimum: `init`, `text` or `result`
-- [ ] Every event has `dispatch_id` field: `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; missing=[i for i,l in enumerate(sys.stdin) if not json.loads(l).get('dispatch_id')]; print(f'Missing dispatch_id on lines: {missing}' if missing else 'All events have dispatch_id')"`
-- [ ] Every event has `terminal` field set to `T1`
-- [ ] Every event has monotonically increasing `sequence` numbers
+- [ ] `.vnx-data/events/T1.ndjson` exists and is non-empty
+- [ ] Event file contains `init` event as first line
+- [ ] Event file contains at least one `tool_use` event (Read file)
+- [ ] Event file contains at least one `tool_result` event
+- [ ] Event file contains a `result` event as final line
+- [ ] Every event line has `"dispatch_id": "burnin-001-simple"`
+- [ ] Every event line has `"terminal": "T1"`
+- [ ] Sequence numbers are contiguous (1, 2, 3, ...)
+- [ ] `curl http://localhost:8765/api/agent-stream/status` shows T1 with correct event_count
+- [ ] SSE stream delivers all events: `curl -N http://localhost:8765/api/agent-stream/T1`
 
-### S2: Multi-Tool Task
+**Event Count Cross-Check**:
+```bash
+# Count events in NDJSON
+wc -l .vnx-data/events/T1.ndjson
 
-**Purpose**: Validate stream completeness for tasks that use multiple tool calls.
+# Count events via API
+curl -s http://localhost:8765/api/agent-stream/status | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print('T1 events:', d.get('terminals',{}).get('T1',{}).get('event_count', 0))
+"
+```
+
+---
+
+### Scenario 2: Multi-Tool Complex Task
+
+**Goal**: Verify event completeness when the agent uses multiple tools across thinking/tool_use/tool_result cycles.
 
 ```bash
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
+export VNX_ADAPTER_T1=subprocess
 
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
-  --dispatch-id "burnin-S2-multitool-$(date +%s)" \
-  --model haiku \
-  --instruction "Find the file scripts/lib/event_store.py, read it, and count the number of methods defined in the EventStore class. Report each method name."
+  --instruction "List all Python files in scripts/lib/, then read the first 10 lines of event_store.py and subprocess_adapter.py, and summarize what each file does in one sentence." \
+  --model sonnet \
+  --dispatch-id burnin-002-multi-tool
 ```
 
 **Validation Checklist**:
-- [ ] All S1 checks pass
-- [ ] Event types include `tool_use` and `tool_result`
-- [ ] At least 2 `tool_use` events (find + read): `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; c=sum(1 for l in sys.stdin if json.loads(l)['type']=='tool_use'); print(f'tool_use count: {c}')"`
-- [ ] Each `tool_use` has a corresponding `tool_result` (count should match)
-- [ ] Final `result` event contains the method names
+- [ ] Process exits with code 0
+- [ ] Event file contains multiple `tool_use` events (Glob + Read x2 minimum)
+- [ ] Each `tool_use` is followed by a corresponding `tool_result`
+- [ ] `thinking` events appear (model reasoning visible)
+- [ ] `text` events contain the final summary
+- [ ] `result` event present
+- [ ] All events have `"dispatch_id": "burnin-002-multi-tool"`
+- [ ] Event type distribution check:
+  ```bash
+  python3 -c "
+  import json
+  from collections import Counter
+  types = Counter()
+  with open('.vnx-data/events/T1.ndjson') as f:
+      for line in f:
+          e = json.loads(line)
+          types[e['type']] += 1
+  for t, c in types.most_common():
+      print(f'  {t}: {c}')
+  "
+  ```
+- [ ] Types include: init, thinking, tool_use, tool_result, text, result
 
-### S3: Error Case — Invalid Model
+---
 
-**Purpose**: Validate error handling when claude CLI rejects the model name.
+### Scenario 3: Error Cases
+
+**Goal**: Verify graceful failure handling for invalid inputs.
+
+#### 3a: Invalid Model
 
 ```bash
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
+export VNX_ADAPTER_T1=subprocess
 
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
-  --dispatch-id "burnin-S3-error-$(date +%s)" \
-  --model "nonexistent-model-xyz" \
-  --instruction "Say hello."
+  --instruction "Say hello" \
+  --model nonexistent-model-xyz \
+  --dispatch-id burnin-003a-bad-model
 ```
 
-**Validation Checklist**:
-- [ ] Process exits with non-zero code OR events contain an `error` type event
-- [ ] `T1.ndjson` contains at least one event (even errors should be captured)
-- [ ] Error is identifiable: `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; [print(json.loads(l)) for l in sys.stdin if json.loads(l)['type'] in ('error','result')]"`
-- [ ] No zombie process left: `ps aux | grep "claude.*nonexistent-model" | grep -v grep`
+**Validation**:
+- [ ] Process exits with non-zero code OR event stream contains an `error` event
+- [ ] No zombie `claude` process left running: `ps aux | grep "claude -p" | grep -v grep`
+- [ ] EventStore state is clean (either empty or contains error event)
 
-### S4: Parallel Dispatches — T1 and T2 Simultaneously
+#### 3b: Invalid Terminal ID
 
-**Purpose**: Validate concurrent subprocess execution and per-terminal event isolation.
+```bash
+python3 scripts/lib/subprocess_dispatch.py \
+  --terminal-id T99 \
+  --instruction "Say hello" \
+  --model sonnet \
+  --dispatch-id burnin-003b-bad-terminal
+```
+
+**Validation**:
+- [ ] Process exits with non-zero code
+- [ ] No event file created at `.vnx-data/events/T99.ndjson`
+- [ ] Error message logged to stderr
+
+#### 3c: Empty Instruction
+
+```bash
+export VNX_ADAPTER_T1=subprocess
+
+python3 scripts/lib/subprocess_dispatch.py \
+  --terminal-id T1 \
+  --instruction "" \
+  --model sonnet \
+  --dispatch-id burnin-003c-empty
+```
+
+**Validation**:
+- [ ] Process exits with non-zero code or produces minimal output
+- [ ] No hanging subprocess
+
+---
+
+### Scenario 4: Parallel Dispatches to T1 + T2
+
+**Goal**: Verify concurrent subprocess execution with independent event streams.
 
 ```bash
 export VNX_ADAPTER_T1=subprocess
 export VNX_ADAPTER_T2=subprocess
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T2.ndjson"
-
-DISPATCH_TS=$(date +%s)
 
 # Launch both in background
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
-  --dispatch-id "burnin-S4-parallel-T1-${DISPATCH_TS}" \
-  --model haiku \
-  --instruction "Count the number of Python files in scripts/lib/. Report the count." &
+  --instruction "Read bin/vnx and count the number of lines." \
+  --model sonnet \
+  --dispatch-id burnin-004-parallel-t1 &
 PID_T1=$!
 
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T2 \
-  --dispatch-id "burnin-S4-parallel-T2-${DISPATCH_TS}" \
-  --model haiku \
-  --instruction "Count the number of shell scripts in scripts/. Report the count." &
+  --instruction "Read scripts/lib/event_store.py and list all method names." \
+  --model sonnet \
+  --dispatch-id burnin-004-parallel-t2 &
 PID_T2=$!
 
 # Wait for both
@@ -216,130 +229,167 @@ wait $PID_T2; echo "T2 exit: $?"
 
 **Validation Checklist**:
 - [ ] Both processes exit with code 0
-- [ ] `T1.ndjson` and `T2.ndjson` both exist and are non-empty
-- [ ] T1 events only contain `"terminal":"T1"`: `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; bad=[i for i,l in enumerate(sys.stdin) if json.loads(l).get('terminal')!='T1']; print(f'Cross-contaminated lines: {bad}' if bad else 'T1 isolation OK')"`
-- [ ] T2 events only contain `"terminal":"T2"` (same check with T2)
-- [ ] T1 dispatch_ids all match the T1 dispatch ID
-- [ ] T2 dispatch_ids all match the T2 dispatch ID
-- [ ] No shared sequence numbers between T1 and T2 (sequences are per-terminal)
+- [ ] `.vnx-data/events/T1.ndjson` contains events with `dispatch_id: burnin-004-parallel-t1`
+- [ ] `.vnx-data/events/T2.ndjson` contains events with `dispatch_id: burnin-004-parallel-t2`
+- [ ] No cross-contamination (T1 events in T2 file or vice versa)
+- [ ] Event counts are independent:
+  ```bash
+  echo "T1 events: $(wc -l < .vnx-data/events/T1.ndjson)"
+  echo "T2 events: $(wc -l < .vnx-data/events/T2.ndjson)"
+  ```
+- [ ] SSE status shows both terminals:
+  ```bash
+  curl -s http://localhost:8765/api/agent-stream/status | python3 -m json.tool
+  ```
+- [ ] Dashboard shows both T1 and T2 streams when switching terminals
 
-### S5: Long-Running Task with Many Tool Calls
+---
 
-**Purpose**: Validate stream stability for tasks generating 20+ events.
+### Scenario 5: Long-Running Task with Many Tool Calls
+
+**Goal**: Stress-test event capture volume, sequence integrity, and SSE streaming under sustained output.
 
 ```bash
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
+export VNX_ADAPTER_T1=subprocess
 
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
-  --dispatch-id "burnin-S5-long-$(date +%s)" \
-  --model haiku \
-  --instruction "Read each of these files and report the line count for each: scripts/lib/subprocess_adapter.py, scripts/lib/event_store.py, scripts/lib/subprocess_dispatch.py, dashboard/api_agent_stream.py, scripts/lib/dispatch_deliver.sh. Then summarize the total lines across all files."
+  --instruction "For each Python file in scripts/lib/, read its first 20 lines and write a one-paragraph summary. There are approximately 15+ files. Process all of them." \
+  --model sonnet \
+  --dispatch-id burnin-005-long-running
 ```
 
 **Validation Checklist**:
-- [ ] All S1 checks pass
-- [ ] Event count > 20: `wc -l "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"`
-- [ ] At least 5 `tool_use` events (one per file read)
-- [ ] Sequence numbers are contiguous (no gaps): `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; seqs=[json.loads(l)['sequence'] for l in sys.stdin]; expected=list(range(1,len(seqs)+1)); print('Contiguous' if seqs==expected else f'Gaps: expected {expected}, got {seqs}')"`
-- [ ] File size stays under 10MB warning threshold: `ls -la "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"`
-- [ ] No malformed JSON lines: `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; bad=[i for i,l in enumerate(sys.stdin) if not l.strip()]; print(f'Empty lines: {bad}' if bad else 'No empty lines')"`
+- [ ] Process exits with code 0
+- [ ] Event count exceeds 50 (many tool_use/tool_result pairs)
+- [ ] Sequence numbers are strictly monotonic:
+  ```bash
+  python3 -c "
+  import json
+  prev = 0
+  with open('.vnx-data/events/T1.ndjson') as f:
+      for i, line in enumerate(f, 1):
+          e = json.loads(line)
+          seq = e.get('sequence', 0)
+          if seq != prev + 1:
+              print(f'SEQUENCE GAP at line {i}: expected {prev+1}, got {seq}')
+          prev = seq
+  print(f'Total events: {prev}, all sequential: {prev == i}')
+  "
+  ```
+- [ ] No malformed JSON lines:
+  ```bash
+  python3 -c "
+  import json
+  with open('.vnx-data/events/T1.ndjson') as f:
+      for i, line in enumerate(f, 1):
+          try:
+              json.loads(line)
+          except json.JSONDecodeError as e:
+              print(f'MALFORMED line {i}: {e}')
+  print(f'Checked {i} lines')
+  "
+  ```
+- [ ] File size stays under 10 MB warning threshold:
+  ```bash
+  ls -lh .vnx-data/events/T1.ndjson
+  ```
+- [ ] SSE stream delivers events in real-time during execution (manual observation via `curl -N`)
+- [ ] All events share `dispatch_id: burnin-005-long-running`
 
-### S6: Tmux vs Subprocess Comparison
+---
 
-**Purpose**: Run the same task via both delivery paths and compare outputs.
+### Scenario 6: tmux vs Subprocess Comparison
+
+**Goal**: Execute identical tasks via both adapters and compare outputs for functional parity.
 
 ```bash
-TASK="List the Python files in scripts/lib/ and count them."
-DISPATCH_TS=$(date +%s)
+TASK="Read the file scripts/lib/event_store.py and report the number of methods defined in the EventStore class."
 
-# --- Subprocess path ---
+# --- Run via subprocess ---
 export VNX_ADAPTER_T1=subprocess
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
-
 python3 scripts/lib/subprocess_dispatch.py \
   --terminal-id T1 \
-  --dispatch-id "burnin-S6-subprocess-${DISPATCH_TS}" \
-  --model haiku \
-  --instruction "$TASK"
+  --instruction "$TASK" \
+  --model sonnet \
+  --dispatch-id burnin-006-subprocess
 
 # Save subprocess events
-cp "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" "/tmp/burnin-S6-subprocess.ndjson"
+cp .vnx-data/events/T1.ndjson /tmp/burnin-006-subprocess-events.ndjson
 
-# Extract final result text
-cat "/tmp/burnin-S6-subprocess.ndjson" | python3 -c "
-import sys, json
-for line in sys.stdin:
-    ev = json.loads(line)
-    if ev['type'] == 'result':
-        print(json.dumps(ev.get('data', {}), indent=2))
-" > /tmp/burnin-S6-subprocess-result.json
-
-# --- Tmux path ---
-# Unset to use tmux delivery
+# --- Run via tmux (default) ---
 unset VNX_ADAPTER_T1
+# Dispatch same task through normal tmux path
+# (use bin/vnx dispatch or manual tmux send-keys equivalent)
+# Capture tmux pane output after completion:
+tmux capture-pane -t T1 -p > /tmp/burnin-006-tmux-output.txt
+```
 
-# Dispatch same task via normal tmux path (requires interactive T1 terminal)
-# Capture tmux output after task completes:
-tmux capture-pane -t T1 -p > /tmp/burnin-S6-tmux-output.txt
+**Comparison Methodology**:
+```bash
+# 1. Extract final result text from subprocess events
+python3 -c "
+import json
+with open('/tmp/burnin-006-subprocess-events.ndjson') as f:
+    for line in f:
+        e = json.loads(line)
+        if e['type'] == 'result':
+            print(e['data'].get('result', ''))
+" > /tmp/burnin-006-subprocess-result.txt
 
-# --- Session JSONL comparison ---
-# Find the most recent claude session log
-LATEST_SESSION=$(ls -t ~/.claude/projects/*/sessions/*.jsonl 2>/dev/null | head -1)
-echo "Latest session JSONL: $LATEST_SESSION"
+# 2. Compare final answers (should be functionally equivalent)
+diff /tmp/burnin-006-subprocess-result.txt /tmp/burnin-006-tmux-output.txt
 
-# Extract event types from session JSONL
-cat "$LATEST_SESSION" | python3 -c "
-import sys, json
-types = {}
-for line in sys.stdin:
-    try:
-        ev = json.loads(line)
-        t = ev.get('type', 'unknown')
-        types[t] = types.get(t, 0) + 1
-    except: pass
-for t, c in sorted(types.items()):
-    print(f'  {t}: {c}')
-" > /tmp/burnin-S6-session-types.txt
+# 3. Check event type coverage in subprocess (tmux has no structured events)
+python3 -c "
+import json
+types = set()
+with open('/tmp/burnin-006-subprocess-events.ndjson') as f:
+    for line in f:
+        types.add(json.loads(line)['type'])
+print('Event types captured:', sorted(types))
+"
 ```
 
 **Validation Checklist**:
-- [ ] Both paths produce a result containing the file count
-- [ ] Subprocess event types are a subset of session JSONL event types
-- [ ] Event counts comparison: `echo "Subprocess events: $(wc -l < /tmp/burnin-S6-subprocess.ndjson)" && echo "Session JSONL lines: $(wc -l < "$LATEST_SESSION")"`
-- [ ] Final answer content is semantically equivalent (manual check)
+- [ ] Both runs produce functionally equivalent answers
+- [ ] Subprocess run captures structured event types (init, thinking, tool_use, tool_result, text, result)
+- [ ] tmux run produces only unstructured terminal text (no event stream)
+- [ ] Subprocess events include tool call details not visible in tmux output
+- [ ] Subprocess provides dispatch_id correlation; tmux does not
 
-### S7: Event Persistence After Dispatch Completes
+---
 
-**Purpose**: Verify events survive after the subprocess exits and are not prematurely cleared.
+## 3. Session JSONL Cross-Reference
+
+Claude Code writes session logs to `~/.claude/projects/*/sessions/*/`. After each scenario, cross-reference:
 
 ```bash
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
+# Find the most recent session log
+LATEST_SESSION=$(ls -t ~/.claude/projects/*/sessions/*/*.jsonl 2>/dev/null | head -1)
+echo "Latest session: $LATEST_SESSION"
 
-python3 scripts/lib/subprocess_dispatch.py \
-  --terminal-id T1 \
-  --dispatch-id "burnin-S7-persist-$(date +%s)" \
-  --model haiku \
-  --instruction "Say the word 'persisted' and nothing else."
+# Count message types in session JSONL
+python3 -c "
+import json, sys
+from collections import Counter
+types = Counter()
+with open('$LATEST_SESSION') as f:
+    for line in f:
+        try:
+            msg = json.loads(line)
+            types[msg.get('type', 'unknown')] += 1
+        except: pass
+for t, c in types.most_common():
+    print(f'  {t}: {c}')
+"
 
-# Record event count immediately after completion
-EVENTS_AFTER=$(wc -l < "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson")
-echo "Events after completion: $EVENTS_AFTER"
-
-# Wait 10 seconds — events should still be there
-sleep 10
-EVENTS_LATER=$(wc -l < "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson")
-echo "Events after 10s: $EVENTS_LATER"
-
-# Verify SSE endpoint still serves them
-curl -s "http://localhost:8787/api/agent-stream/status" | python3 -m json.tool
+# Compare event counts: EventStore vs Session JSONL
+echo "EventStore events: $(wc -l < .vnx-data/events/T1.ndjson)"
+echo "Session JSONL lines: $(wc -l < $LATEST_SESSION)"
 ```
 
-**Validation Checklist**:
-- [ ] `EVENTS_AFTER` equals `EVENTS_LATER` (no events lost)
-- [ ] SSE status endpoint shows T1 with event_count matching
-- [ ] Events are readable: `cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "import sys,json; [json.loads(l) for l in sys.stdin]; print('All events parseable')"`
-- [ ] Dashboard at `/agent-stream` shows events when T1 is selected
+**Expected**: EventStore event count should be a subset of session JSONL lines. The session log contains additional metadata (system prompts, conversation management) not emitted as stream events.
 
 ---
 
@@ -347,213 +397,229 @@ curl -s "http://localhost:8787/api/agent-stream/status" | python3 -m json.tool
 
 ### Problem
 
-`EventStore.clear()` truncates the terminal's NDJSON file on every new dispatch. This destroys the audit trail for completed dispatches.
+`EventStore.clear(terminal)` is called at the start of every new dispatch (`subprocess_adapter.py:213`), permanently deleting prior events. This prevents:
+- Post-hoc debugging of completed dispatches
+- Audit trail across dispatch boundaries
+- Historical event analysis
 
-### Proposed Solution
+### Proposed Archive Design
 
-**Archive path**: `.vnx-data/events/archive/{dispatch_id}.ndjson`
+**Archive Path**: `.vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson`
 
-**When to archive**: In `EventStore.clear()`, before truncation:
+**Example**:
+```
+.vnx-data/events/
+  T1.ndjson                          # Active dispatch events (current behavior)
+  archive/
+    T1/
+      burnin-001-simple.ndjson       # Archived on next dispatch
+      burnin-002-multi-tool.ndjson
+    T2/
+      burnin-004-parallel-t2.ndjson
+```
+
+**When to Archive**: Before `clear()` in `EventStore`, move the current file to the archive path using the `dispatch_id` from the last event's metadata.
+
+**Retention Policy**:
+- Keep archives for 7 days by default (configurable via `VNX_EVENT_ARCHIVE_RETENTION_DAYS`)
+- Archives older than retention period cleaned up on next `clear()` call
+- Total archive size cap: 100 MB per terminal (oldest-first eviction)
+
+### Code Changes Required
+
+**File: `scripts/lib/event_store.py`**
+
+Add `archive(terminal, dispatch_id)` method:
 
 ```python
-# In event_store.py — clear() method modification
-def clear(self, terminal: str) -> None:
-    path = self._terminal_path(terminal)
-    self._sequences.pop(terminal, None)
+def archive(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+    """Move current event file to archive before clearing."""
+    event_file = self._event_file(terminal)
+    if not event_file.exists() or event_file.stat().st_size == 0:
+        return None
 
-    if not path.exists():
+    archive_dir = self._events_dir / "archive" / terminal
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"{dispatch_id}.ndjson"
+
+    shutil.copy2(str(event_file), str(archive_path))
+    return archive_path
+
+def cleanup_archives(self, terminal: str, max_age_days: int = 7, max_size_mb: int = 100):
+    """Remove archives older than max_age_days or exceeding max_size_mb."""
+    archive_dir = self._events_dir / "archive" / terminal
+    if not archive_dir.exists():
         return
 
-    # Archive: copy current events before truncation
-    archive_dir = self._events_dir / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - (max_age_days * 86400)
+    files = sorted(archive_dir.glob("*.ndjson"), key=lambda f: f.stat().st_mtime)
 
-    # Read the last dispatch_id from the file to name the archive
-    last_dispatch_id = None
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    ev = json.loads(line)
-                    last_dispatch_id = ev.get("dispatch_id")
-                except json.JSONDecodeError:
-                    pass
+    # Age-based cleanup
+    for f in files:
+        if f.stat().st_mtime < cutoff:
+            f.unlink()
 
-    if last_dispatch_id:
-        archive_path = archive_dir / f"{last_dispatch_id}.ndjson"
-        import shutil
-        shutil.copy2(path, archive_path)
-        logger.info("event_store: archived %s -> %s", path, archive_path)
-
-    # Then truncate as before
-    with open(path, "w", encoding="utf-8") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        try:
-            f.truncate(0)
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    # Size-based cleanup (oldest first)
+    total = sum(f.stat().st_size for f in archive_dir.glob("*.ndjson"))
+    max_bytes = max_size_mb * 1024 * 1024
+    remaining = sorted(archive_dir.glob("*.ndjson"), key=lambda f: f.stat().st_mtime)
+    for f in remaining:
+        if total <= max_bytes:
+            break
+        total -= f.stat().st_size
+        f.unlink()
 ```
 
-**Alternative — accept dispatch_id parameter**: Instead of reading the file to find the dispatch_id, pass it explicitly from `SubprocessAdapter.deliver()` which already knows it:
+**File: `scripts/lib/subprocess_adapter.py`**
+
+Modify `deliver()` to archive before clearing:
 
 ```python
-# In subprocess_adapter.py deliver() method, change:
+# In deliver(), before es.clear():
+last = es.last_event(terminal_id)
+if last and last.get("dispatch_id"):
+    es.archive(terminal_id, last["dispatch_id"])
+    es.cleanup_archives(terminal_id)
 es.clear(terminal_id)
-# To:
-es.clear(terminal_id, archive_dispatch_id=previous_dispatch_id)
 ```
 
-This is cleaner but requires tracking the previous dispatch_id per terminal.
+**File: `dashboard/api_agent_stream.py`**
 
-**Retention policy**:
-- Keep archives for 7 days
-- Cleanup via cron or operator script: `find .vnx-data/events/archive/ -name "*.ndjson" -mtime +7 -delete`
-- Total archive size cap: warn at 100MB (add to existing size warning logic)
+Add archive query endpoint:
 
-**Files to modify**:
-- `scripts/lib/event_store.py` — add archive logic to `clear()`, add `archive_dir` property
-- `scripts/lib/subprocess_adapter.py` — pass dispatch_id context to `clear()` if using the explicit parameter approach
+```python
+# GET /api/agent-stream/archive/{terminal}/{dispatch_id}
+# Returns archived events for a completed dispatch
+```
 
 ---
 
-## 5. Comparison Methodology
+## 5. Comparison Methodology: Subprocess vs tmux vs JSONL
 
-### Subprocess NDJSON vs Claude Session JSONL
+### Data Sources
 
-Claude Code writes session logs to `~/.claude/projects/{project-hash}/sessions/{session-id}.jsonl`. Each line is a conversation turn.
+| Source | Format | Location | Structured | Dispatch-Aware |
+|--------|--------|----------|-----------|----------------|
+| EventStore | NDJSON | `.vnx-data/events/{terminal}.ndjson` | Yes | Yes (dispatch_id field) |
+| Session JSONL | JSONL | `~/.claude/projects/*/sessions/*/*.jsonl` | Yes | No |
+| tmux pane | Plain text | `tmux capture-pane -t {terminal} -p` | No | No |
 
-```bash
-# After running a subprocess dispatch, find the matching session
-SESSION_ID=$(cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "
-import sys, json
-for line in sys.stdin:
-    ev = json.loads(line)
-    sid = ev.get('data', {}).get('session_id')
-    if sid:
-        print(sid)
-        break
-")
-
-# Find session file
-JSONL_FILE=$(find ~/.claude -name "*.jsonl" -path "*${SESSION_ID}*" 2>/dev/null | head -1)
-
-# Compare event type distributions
-echo "=== Subprocess EventStore ==="
-cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "
-import sys, json, collections
-types = collections.Counter()
-for line in sys.stdin:
-    types[json.loads(line)['type']] += 1
-for t, c in sorted(types.items()):
-    print(f'  {t}: {c}')
-"
-
-echo "=== Session JSONL ==="
-cat "$JSONL_FILE" | python3 -c "
-import sys, json, collections
-types = collections.Counter()
-for line in sys.stdin:
-    try:
-        ev = json.loads(line)
-        types[ev.get('type', 'unknown')] += 1
-    except: pass
-for t, c in sorted(types.items()):
-    print(f'  {t}: {c}')
-"
-```
-
-### Subprocess vs Tmux Output
-
-Tmux capture-pane only captures rendered terminal text — it cannot provide structured event data. Comparison is limited to:
-
-1. **Final answer equivalence**: Both paths should produce the same factual answer
-2. **Completion**: Both paths should complete without hanging
-3. **No data loss**: Subprocess events should contain all tool calls visible in tmux output
+### Comparison Commands
 
 ```bash
-# Rough comparison: extract tool names from both
-echo "=== Subprocess tool calls ==="
-cat "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson" | python3 -c "
-import sys, json
-for line in sys.stdin:
-    ev = json.loads(line)
-    if ev['type'] == 'tool_use':
-        print(f\"  {ev.get('data', {}).get('name', 'unknown')}\")
+# --- After running the same task via all three paths ---
+
+# 1. Event type coverage
+echo "=== EventStore event types ==="
+python3 -c "
+import json
+from collections import Counter
+c = Counter()
+with open('.vnx-data/events/T1.ndjson') as f:
+    for line in f:
+        c[json.loads(line)['type']] += 1
+for t, n in sorted(c.items()): print(f'  {t}: {n}')
 "
 
-echo "=== Tmux output tool references ==="
-grep -oE '(Read|Write|Edit|Bash|Glob|Grep|Agent)\b' /tmp/burnin-S6-tmux-output.txt | sort | uniq -c
+# 2. Session JSONL message types
+echo "=== Session JSONL types ==="
+LATEST=\$(ls -t ~/.claude/projects/*/sessions/*/*.jsonl 2>/dev/null | head -1)
+python3 -c "
+import json
+from collections import Counter
+c = Counter()
+with open('\$LATEST') as f:
+    for line in f:
+        try: c[json.loads(line).get('type','?')] += 1
+        except: pass
+for t, n in sorted(c.items()): print(f'  {t}: {n}')
+"
+
+# 3. tmux output line count
+echo "=== tmux output ==="
+tmux capture-pane -t T1 -p | wc -l
+
+# 4. Tool call count comparison
+echo "=== Tool calls in EventStore ==="
+python3 -c "
+import json
+with open('.vnx-data/events/T1.ndjson') as f:
+    tools = [json.loads(l)['data'].get('tool','') for l in f if json.loads(l)['type']=='tool_use']
+print(f'Tool calls: {len(tools)}')
+for t in tools: print(f'  - {t}')
+" 2>/dev/null || echo "(re-read file for tool extraction)"
 ```
+
+### Expected Differences
+
+| Aspect | Subprocess EventStore | Session JSONL | tmux |
+|--------|----------------------|---------------|------|
+| Event granularity | Per-token/tool-call | Per-message | None |
+| dispatch_id | Present | Absent | Absent |
+| Tool call details | Full (name, input, output) | Full | Partial (visible output only) |
+| Thinking content | Captured | Captured | Not visible |
+| Timing precision | Millisecond timestamps | Timestamps | None |
+| Audit trail | NDJSON per terminal | Session-scoped | Scrollback buffer |
 
 ---
 
 ## 6. Success Criteria
 
-| Criterion | Threshold | How to Measure |
-|-----------|-----------|----------------|
-| Event pipeline works | S1 produces > 3 events in EventStore | `wc -l T1.ndjson` |
-| Stream completeness | Every `tool_use` has a matching `tool_result` | Type count comparison script |
-| dispatch_id linkage | 100% of events have non-empty `dispatch_id` | Validation script from S1 |
-| Terminal isolation | 0 cross-contaminated events in S4 | Isolation check script |
-| Sequence integrity | Contiguous 1..N sequences per dispatch | Sequence check script from S5 |
-| Error capture | S3 produces identifiable error event or non-zero exit | Manual check |
-| Persistence | Events survive 10s after completion (S7) | Count comparison |
-| Dashboard renders | SSE endpoint serves events, dashboard displays them | Manual browser check |
-| No zombie processes | `ps aux \| grep claude` shows no orphans after all scenarios | Manual check |
+### Must-Pass (Burn-In Fails Without These)
 
-**Overall pass**: All 9 criteria met. Any failure blocks burn-in sign-off.
+1. **Scenarios 1-2 complete successfully**: Simple and multi-tool tasks execute, events captured
+2. **Event integrity**: Every event has valid JSON, dispatch_id, terminal, contiguous sequence
+3. **Event type coverage**: At least `init`, `tool_use`, `tool_result`, `text`, `result` types present
+4. **Parallel isolation** (Scenario 4): T1 and T2 event files contain only their own dispatch_id
+5. **SSE streaming works**: `curl -N` against the SSE endpoint delivers events matching the NDJSON file
+6. **No zombie processes**: After every scenario, `ps aux | grep "claude -p"` shows no orphans
+
+### Should-Pass (Degraded but Acceptable if Failed)
+
+7. **Error cases** (Scenario 3): Graceful failures, no crashes
+8. **Long-running stability** (Scenario 5): 50+ events captured without gaps
+9. **Dashboard renders**: Agent-stream page shows events color-coded by type
+10. **tmux parity** (Scenario 6): Subprocess produces functionally equivalent results
+
+### Informational (Observed but Not Blocking)
+
+11. Session JSONL cross-reference: EventStore event count as expected fraction of JSONL lines
+12. Event file size stays under 10 MB for all scenarios
+13. SSE latency: Events appear in dashboard within 1 second of generation
 
 ---
 
 ## 7. Risk Assessment
 
-| Risk | Likelihood | Impact | Detection | Mitigation |
-|------|-----------|--------|-----------|------------|
-| `read_events()` never called (current state) | **Certain** | Events never reach EventStore | S1 produces 0 events | Wire up read loop in `subprocess_dispatch.py` before burn-in |
-| Subprocess hangs (no stdout, no exit) | Medium | Terminal blocked indefinitely | Process still running after 5 min with 0 new events | Add timeout to `read_events()` or watchdog in SubprocessAdapter |
-| NDJSON corruption from concurrent writes | Low | SSE serves partial JSON | Malformed line check in validation | fcntl.flock already in place; verify via S4 |
-| EventStore.clear() races with SSE reader | Low | SSE gets empty/partial read | Events disappear mid-stream during S4 | LOCK_SH in tail() should prevent; verify |
-| Large output exceeds 10MB warning | Low | Performance degradation | Size check in S5 | Already logged; add hard cap if needed |
-| claude CLI version incompatible | Low | `--output-format stream-json` not recognized | S1 fails to spawn | Pre-flight: `claude --version` check |
-| Process group cleanup fails on macOS | Low | Orphan claude processes | `ps aux` check post-test | os.killpg in stop(); verify with S3 |
-| Session JSONL path changes between CLI versions | Medium | S6 comparison fails | Session file not found | Fallback: `find ~/.claude -name "*.jsonl" -newer` |
+### Failure Modes
 
-### Rollback
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| `claude` CLI not installed or wrong version | Low | Blocks all scenarios | Check `claude --version` in prerequisites |
+| Subprocess hangs (no exit) | Medium | Blocks test completion | Set timeout: `timeout 300 python3 scripts/lib/subprocess_dispatch.py ...` |
+| EventStore file locking deadlock | Low | Corrupts event file | Monitor with `lsof .vnx-data/events/T1.ndjson` |
+| Dashboard API server not running | Medium | SSE validation fails | Start server before burn-in; test with curl first |
+| Model rate limiting | Medium | Intermittent failures | Space scenarios 30s apart; use sonnet (lower rate limit pressure) |
+| Stale terminal lease blocks dispatch | High | Dispatch rejected | Clear leases in prerequisites (see Section 1) |
+| Event clear() destroys evidence | High | Can't review prior scenarios | Copy NDJSON after each scenario before running next |
 
-If burn-in reveals blocking issues:
+### Rollback Plan
+
+The burn-in is read-only from a code perspective; no production code is modified during testing. If issues arise:
+
+1. Kill any hanging subprocesses: `pkill -f "claude -p --output-format stream-json"`
+2. Clear event files: `rm .vnx-data/events/*.ndjson`
+3. Unset adapter flags: `unset VNX_ADAPTER_T1 VNX_ADAPTER_T2`
+4. Release terminal leases via RuntimeCoordinator CLI
+5. Normal tmux dispatch resumes immediately (default adapter)
+
+### Critical Note on Evidence Preservation
+
+Since `clear()` wipes events on each new dispatch, **copy the NDJSON file after each scenario**:
 
 ```bash
-# 1. Kill any orphan subprocess processes
-pkill -f "claude -p --output-format stream-json" || true
-
-# 2. Disable subprocess adapter
-unset VNX_ADAPTER_T1
-unset VNX_ADAPTER_T2
-
-# 3. Clear corrupted event files
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T1.ndjson"
-rm -f "${VNX_DATA_DIR:-.vnx-data}/events/T2.ndjson"
-
-# 4. Verify tmux delivery still works (should be unaffected)
-# Normal dispatch cycle continues via tmux path
+# After each scenario N:
+cp .vnx-data/events/T1.ndjson .vnx-data/events/burnin-snapshot-scenario-N.ndjson
 ```
 
----
-
-## Appendix: Event Envelope Schema
-
-Each line in `{terminal}.ndjson` follows this schema (from `event_store.py`):
-
-```json
-{
-  "type": "text|thinking|tool_use|tool_result|result|error|init",
-  "timestamp": "2026-04-06T12:00:00.000+00:00",
-  "dispatch_id": "burnin-S1-simple-1712400000",
-  "terminal": "T1",
-  "sequence": 1,
-  "data": { /* original stream-json payload */ }
-}
-```
-
-The `data` field contains the raw event from `claude --output-format stream-json`. The envelope fields (`timestamp`, `dispatch_id`, `terminal`, `sequence`) are added by EventStore.
+This preserves evidence until the archive proposal (Section 4) is implemented.
