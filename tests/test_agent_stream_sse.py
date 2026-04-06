@@ -217,3 +217,111 @@ class TestClientDisconnect:
 
         with patch("api_agent_stream._store", store):
             handle_agent_stream(handler, "T1", None)
+
+
+@pytest.fixture
+def seeded_store(tmp_events_dir):
+    """EventStore pre-loaded with all normalized event types."""
+    es = EventStore(events_dir=tmp_events_dir)
+    events = [
+        {"type": "init", "data": {"session_id": "test-123"}},
+        {"type": "thinking", "data": {"thinking": "Analyzing..."}},
+        {"type": "tool_use", "data": {"name": "Read", "input": {"path": "test.py"}}},
+        {"type": "tool_result", "data": {"output": "contents"}},
+        {"type": "result", "data": {"result": "Done!"}},
+    ]
+    for ev in events:
+        es.append("T1", ev, dispatch_id="test-001")
+    return es
+
+
+class TestNormalizedTypeSeeding:
+    """Verify EventStore correctly stores all normalized event types with dispatch correlation."""
+
+    def test_all_types_stored(self, seeded_store):
+        events = list(seeded_store.tail("T1"))
+        types = [e["type"] for e in events]
+        assert types == ["init", "thinking", "tool_use", "tool_result", "result"]
+
+    def test_dispatch_id_on_all_events(self, seeded_store):
+        for ev in seeded_store.tail("T1"):
+            assert ev["dispatch_id"] == "test-001"
+
+    def test_sequence_numbers_monotonic(self, seeded_store):
+        seqs = [e["sequence"] for e in seeded_store.tail("T1")]
+        assert seqs == [1, 2, 3, 4, 5]
+
+    def test_terminal_field_consistent(self, seeded_store):
+        for ev in seeded_store.tail("T1"):
+            assert ev["terminal"] == "T1"
+
+    def test_data_payloads_preserved(self, seeded_store):
+        events = list(seeded_store.tail("T1"))
+        assert events[0]["data"]["session_id"] == "test-123"
+        assert events[1]["data"]["thinking"] == "Analyzing..."
+        assert events[2]["data"]["name"] == "Read"
+        assert events[3]["data"]["output"] == "contents"
+        assert events[4]["data"]["result"] == "Done!"
+
+    def test_sse_streams_all_normalized_types(self, seeded_store):
+        handler = _make_handler()
+        flush_count = 0
+
+        def limited_flush():
+            nonlocal flush_count
+            flush_count += 1
+            if flush_count > 1:
+                raise BrokenPipeError()
+
+        handler.wfile.flush = limited_flush
+
+        with patch("api_agent_stream._store", seeded_store):
+            handle_agent_stream(handler, "T1", None)
+
+        output = handler.wfile.getvalue().decode("utf-8")
+        lines = [l for l in output.split("\n") if l.startswith("data: ")]
+        assert len(lines) == 5
+
+        types = [json.loads(l[len("data: "):])["type"] for l in lines]
+        assert types == ["init", "thinking", "tool_use", "tool_result", "result"]
+
+
+class TestArchiveAccessibility:
+    """Verify archive NDJSON files are created and contain correct data."""
+
+    def test_archive_creates_ndjson_file(self, seeded_store, tmp_events_dir):
+        path = seeded_store.archive("T1", "test-001")
+        assert path is not None
+        assert path.exists()
+        assert path.suffix == ".ndjson"
+        assert path.name == "test-001.ndjson"
+
+    def test_archive_preserves_all_events(self, seeded_store, tmp_events_dir):
+        path = seeded_store.archive("T1", "test-001")
+        lines = [l for l in path.read_text().strip().split("\n") if l]
+        assert len(lines) == 5
+
+    def test_archive_events_have_dispatch_id(self, seeded_store, tmp_events_dir):
+        path = seeded_store.archive("T1", "test-001")
+        for line in path.read_text().strip().split("\n"):
+            ev = json.loads(line)
+            assert ev["dispatch_id"] == "test-001"
+
+    def test_archive_dir_matches_terminal(self, seeded_store, tmp_events_dir):
+        seeded_store.archive("T1", "test-001")
+        archive_dir = seeded_store.archive_dir("T1")
+        assert archive_dir.exists()
+        assert archive_dir.name == "T1"
+        assert (archive_dir / "test-001.ndjson").exists()
+
+    def test_clear_with_archive_preserves_data(self, seeded_store, tmp_events_dir):
+        seeded_store.clear("T1", archive_dispatch_id="test-001")
+        assert seeded_store.event_count("T1") == 0
+        archive_path = seeded_store.archive_dir("T1") / "test-001.ndjson"
+        assert archive_path.exists()
+        lines = [l for l in archive_path.read_text().strip().split("\n") if l]
+        assert len(lines) == 5
+
+    def test_archive_empty_terminal_returns_none(self, store, tmp_events_dir):
+        result = store.archive("T2", "no-events")
+        assert result is None
