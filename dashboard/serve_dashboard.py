@@ -126,6 +126,7 @@ from api_operator import (  # noqa: E402
     _operator_get_open_items_aggregate,
     _operator_get_projects,
     _operator_get_session,
+    _operator_get_system_health,
     _operator_get_terminal,
     _operator_get_terminals,
     _operator_post_action,
@@ -245,6 +246,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/governance-digest":
             _json_response(self, HTTPStatus.OK, _operator_get_governance_digest())
+            return
+
+        if path == "/api/operator/system-health":
+            _json_response(self, HTTPStatus.OK, _operator_get_system_health())
             return
 
         # Return JSON 404 for unrecognised /api/* paths so callers get
