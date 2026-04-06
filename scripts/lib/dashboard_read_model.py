@@ -37,6 +37,7 @@ except ImportError:
 
 FRESH_THRESHOLD = 60
 AGING_THRESHOLD = 300
+REGISTRY_AGING_THRESHOLD = 86400  # 24h — registry files change infrequently
 
 
 @dataclass
@@ -117,6 +118,8 @@ def _load_yaml(path: Path) -> Optional[Dict[str, Any]]:
 def _compute_freshness(
     sources: Dict[str, Optional[str]],
     now: datetime,
+    *,
+    threshold_overrides: Optional[Dict[str, float]] = None,
 ) -> tuple[float, bool, List[str]]:
     """Compute max staleness and degraded state from source freshness map.
 
@@ -125,6 +128,7 @@ def _compute_freshness(
     max_staleness = 0.0
     degraded = False
     reasons: List[str] = []
+    overrides = threshold_overrides or {}
 
     for name, mtime in sources.items():
         if mtime is None:
@@ -138,7 +142,8 @@ def _compute_freshness(
             continue
         if age > max_staleness:
             max_staleness = age
-        if age > AGING_THRESHOLD:
+        threshold = overrides.get(name, AGING_THRESHOLD)
+        if age > threshold:
             degraded = True
             reasons.append(f"{name}: stale ({age:.0f}s)")
 
@@ -708,7 +713,10 @@ class ProjectsView:
 
             results.append(entry)
 
-        staleness, degraded, reasons = _compute_freshness(sources, now)
+        staleness, degraded, reasons = _compute_freshness(
+            sources, now,
+            threshold_overrides={"projects.json": REGISTRY_AGING_THRESHOLD},
+        )
 
         return FreshnessEnvelope(
             view="ProjectsView",
