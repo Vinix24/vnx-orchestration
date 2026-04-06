@@ -291,11 +291,12 @@ class TestGetAdapterFactory:
             adapter = get_adapter("T1")
         assert isinstance(adapter, TmuxAdapter)
 
-    def test_subprocess_raises_not_implemented(self) -> None:
-        """VNX_ADAPTER_T1=subprocess — must raise NotImplementedError (placeholder)."""
+    def test_subprocess_returns_subprocess_adapter(self) -> None:
+        """VNX_ADAPTER_T1=subprocess — must return SubprocessAdapter."""
+        from subprocess_adapter import SubprocessAdapter
         with patch.dict("os.environ", {"VNX_ADAPTER_T1": "subprocess"}):
-            with pytest.raises(NotImplementedError, match="SubprocessAdapter"):
-                get_adapter("T1")
+            adapter = get_adapter("T1")
+        assert isinstance(adapter, SubprocessAdapter)
 
     def test_invalid_value_raises_value_error(self) -> None:
         """Unrecognised value raises ValueError with the offending key."""
