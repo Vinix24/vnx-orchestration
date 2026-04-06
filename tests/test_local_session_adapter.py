@@ -21,9 +21,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from adapter_protocol import RuntimeAdapter, validate_required_capabilities
+from adapter_types import RuntimeAdapter, UnsupportedCapability, validate_required_capabilities
 from local_session_adapter import LocalSessionAdapter, SessionAttempt
-from tmux_adapter import UnsupportedCapability
 
 
 # ---------------------------------------------------------------------------

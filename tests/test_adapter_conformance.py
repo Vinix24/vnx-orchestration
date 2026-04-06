@@ -25,9 +25,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from adapter_protocol import (
+from adapter_types import (
+    CAPABILITY_ATTACH,
+    CAPABILITY_REHEAL,
     REQUIRED_CAPABILITIES,
     RuntimeAdapter,
+    UnsupportedCapability,
     validate_required_capabilities,
 )
 from headless_transport_adapter import (
@@ -35,11 +38,8 @@ from headless_transport_adapter import (
     HeadlessAdapter,
 )
 from tmux_adapter import (
-    CAPABILITY_ATTACH,
-    CAPABILITY_REHEAL,
     TMUX_CAPABILITIES,
     TmuxAdapter,
-    UnsupportedCapability,
 )
 
 
@@ -182,7 +182,7 @@ class TestCapabilityDeclarationAccuracy:
 
     def test_headless_inspect_declared(self, headless_adapter: HeadlessAdapter) -> None:
         """HeadlessAdapter declares INSPECT (partial support)."""
-        from tmux_adapter import CAPABILITY_INSPECT
+        from adapter_types import CAPABILITY_INSPECT
         assert CAPABILITY_INSPECT in headless_adapter.capabilities()
 
     def test_headless_inspect_returns_result(self, headless_adapter: HeadlessAdapter) -> None:

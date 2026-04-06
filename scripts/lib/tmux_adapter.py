@@ -17,6 +17,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from adapter_types import (
+    CAPABILITY_ATTACH,
+    CAPABILITY_DELIVER,
+    CAPABILITY_HEALTH,
+    CAPABILITY_INSPECT,
+    CAPABILITY_OBSERVE,
+    CAPABILITY_REHEAL,
+    CAPABILITY_SESSION_HEALTH,
+    CAPABILITY_SPAWN,
+    CAPABILITY_STOP,
+    AttachResult,
+    DeliveryResult,
+    HealthResult,
+    InspectionResult,
+    ObservationResult,
+    RehealResult,
+    RuntimeAdapterError,
+    SessionHealthResult,
+    SpawnResult,
+    StopResult,
+    UnsupportedCapability,
+)
 from runtime_coordination import _append_event, get_connection, get_lease
 
 
@@ -46,115 +68,12 @@ class PaneTarget:
     provider: str = "claude_code"
 
 
-@dataclass
-class DeliveryResult:
-    """Result of a single delivery attempt."""
-    success: bool
-    terminal_id: str
-    dispatch_id: str
-    pane_id: Optional[str]
-    path_used: str          # "primary" | "legacy" | "none"
-    failure_reason: Optional[str] = None
-    tmux_returncode: Optional[int] = None
-
-
-@dataclass
-class SpawnResult:
-    """Result of spawning an execution surface."""
-    success: bool
-    transport_ref: str = ""
-    error: Optional[str] = None
-
-
-@dataclass
-class StopResult:
-    """Result of stopping an execution surface."""
-    success: bool
-    was_running: bool = False
-    error: Optional[str] = None
-
-
-@dataclass
-class AttachResult:
-    """Result of switching operator focus."""
-    success: bool
-    error: Optional[str] = None
-
-
-@dataclass
-class ObservationResult:
-    """Read-only state probe result."""
-    exists: bool
-    responsive: bool = False
-    transport_state: Dict[str, Any] = field(default_factory=dict)
-    last_output_fragment: Optional[str] = None
-    error: Optional[str] = None
-
-
-@dataclass
-class InspectionResult:
-    """Deep diagnostic inspection result."""
-    exists: bool
-    transport_ref: str = ""
-    transport_details: Dict[str, Any] = field(default_factory=dict)
-    pane_content: Optional[str] = None
-    environment: Optional[Dict[str, str]] = None
-    error: Optional[str] = None
-
-
-@dataclass
-class HealthResult:
-    """Fast health check result."""
-    healthy: bool
-    surface_exists: bool = False
-    process_alive: bool = False
-    details: Dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
-
-
-@dataclass
-class SessionHealthResult:
-    """Aggregate health check result."""
-    session_exists: bool
-    terminals: Dict[str, HealthResult] = field(default_factory=dict)
-    degraded_terminals: List[str] = field(default_factory=list)
-    error: Optional[str] = None
-
-
-@dataclass
-class RehealResult:
-    """Transport drift recovery result."""
-    rehealed: bool
-    old_ref: Optional[str] = None
-    new_ref: Optional[str] = None
-    strategy: str = ""
-    error: Optional[str] = None
-
-
-# Capability constants
-CAPABILITY_SPAWN = "SPAWN"
-CAPABILITY_STOP = "STOP"
-CAPABILITY_DELIVER = "DELIVER"
-CAPABILITY_ATTACH = "ATTACH"
-CAPABILITY_OBSERVE = "OBSERVE"
-CAPABILITY_INSPECT = "INSPECT"
-CAPABILITY_HEALTH = "HEALTH"
-CAPABILITY_SESSION_HEALTH = "SESSION_HEALTH"
-CAPABILITY_REHEAL = "REHEAL"
 
 TMUX_CAPABILITIES = frozenset({
     CAPABILITY_SPAWN, CAPABILITY_STOP, CAPABILITY_DELIVER, CAPABILITY_ATTACH,
     CAPABILITY_OBSERVE, CAPABILITY_INSPECT, CAPABILITY_HEALTH,
     CAPABILITY_SESSION_HEALTH, CAPABILITY_REHEAL,
 })
-
-
-class RuntimeAdapterError(Exception):
-    """Base error for all runtime adapter failures."""
-    def __init__(self, message: str, adapter_type: str = "tmux", operation: str = ""):
-        self.adapter_type = adapter_type
-        self.operation = operation
-        super().__init__(message)
 
 
 class AdapterError(RuntimeAdapterError):
@@ -170,13 +89,6 @@ class AdapterTransportError(RuntimeAdapterError):
     def __init__(self, message: str, transport_detail: str = "", **kwargs: Any):
         self.transport_detail = transport_detail
         super().__init__(message, **kwargs)
-
-
-class UnsupportedCapability(RuntimeAdapterError):
-    """Raised when an operation is invoked on an adapter that does not support it."""
-    def __init__(self, operation: str, adapter_type: str = "tmux", reason: str = ""):
-        self.reason = reason or f"{adapter_type} adapter does not support {operation}"
-        super().__init__(self.reason, adapter_type=adapter_type, operation=operation)
 
 
 class AdapterDisabledError(AdapterError):

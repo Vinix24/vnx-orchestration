@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from tmux_adapter import (
+from adapter_types import (
     CAPABILITY_DELIVER,
     CAPABILITY_HEALTH,
     CAPABILITY_INSPECT,

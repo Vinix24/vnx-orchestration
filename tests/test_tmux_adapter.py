@@ -32,9 +32,9 @@ from runtime_coordination import (
     init_schema,
     register_dispatch,
 )
+from adapter_types import DeliveryResult
 from tmux_adapter import (
     AdapterDisabledError,
-    DeliveryResult,
     LeaseNotActiveError,
     PaneNotFoundError,
     PaneTarget,

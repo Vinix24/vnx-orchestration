@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from tmux_adapter import (
+from adapter_types import (
     CAPABILITY_ATTACH,
     CAPABILITY_DELIVER,
     CAPABILITY_HEALTH,
@@ -34,9 +34,6 @@ from tmux_adapter import (
     CAPABILITY_SESSION_HEALTH,
     CAPABILITY_SPAWN,
     CAPABILITY_STOP,
-    TMUX_CAPABILITIES,
-    AdapterConfigError,
-    AdapterTransportError,
     AttachResult,
     HealthResult,
     InspectionResult,
@@ -46,8 +43,13 @@ from tmux_adapter import (
     SessionHealthResult,
     SpawnResult,
     StopResult,
-    TmuxAdapter,
     UnsupportedCapability,
+)
+from tmux_adapter import (
+    TMUX_CAPABILITIES,
+    AdapterConfigError,
+    AdapterTransportError,
+    TmuxAdapter,
 )
 
 
