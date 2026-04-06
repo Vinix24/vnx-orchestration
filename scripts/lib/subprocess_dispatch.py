@@ -8,10 +8,13 @@ BILLING SAFETY: Only calls subprocess.Popen(["claude", ...]). No Anthropic SDK.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -114,6 +117,102 @@ def deliver_via_subprocess(
             heartbeat_thread.join(timeout=5)
 
 
+def _write_receipt(
+    dispatch_id: str,
+    terminal_id: str,
+    status: str,
+    *,
+    event_count: int = 0,
+    session_id: str | None = None,
+    attempt: int | None = None,
+    failure_reason: str | None = None,
+) -> Path:
+    """Append a subprocess completion receipt to t0_receipts.ndjson.
+
+    Returns the path to the receipt file.
+    """
+    receipt = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_type": "subprocess_completion",
+        "dispatch_id": dispatch_id,
+        "terminal": terminal_id,
+        "status": status,
+        "event_count": event_count,
+        "session_id": session_id,
+        "source": "subprocess",
+    }
+    if attempt is not None:
+        receipt["attempt"] = attempt
+    if failure_reason:
+        receipt["failure_reason"] = failure_reason
+
+    receipt_path = _default_state_dir() / "t0_receipts.ndjson"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(receipt_path, "a") as f:
+        f.write(json.dumps(receipt) + "\n")
+
+    logger.info(
+        "Receipt written: dispatch=%s terminal=%s status=%s",
+        dispatch_id, terminal_id, status,
+    )
+    return receipt_path
+
+
+def deliver_with_recovery(
+    terminal_id: str,
+    instruction: str,
+    model: str,
+    dispatch_id: str,
+    *,
+    max_retries: int = 3,
+    lease_generation: int | None = None,
+    heartbeat_interval: float = 300.0,
+    chunk_timeout: float = 120.0,
+    total_deadline: float = 600.0,
+) -> bool:
+    """Deliver with automatic retry on failure.
+
+    On success, writes a receipt with status="done".
+    On final failure (budget exhausted), writes a receipt with status="failed".
+    Retries use exponential backoff: 30s, 60s, 120s.
+
+    Returns True on success, False on failure.
+    """
+    for attempt in range(max_retries + 1):
+        success = deliver_via_subprocess(
+            terminal_id,
+            instruction,
+            model,
+            dispatch_id,
+            lease_generation=lease_generation,
+            heartbeat_interval=heartbeat_interval,
+            chunk_timeout=chunk_timeout,
+            total_deadline=total_deadline,
+        )
+        if success:
+            _write_receipt(
+                dispatch_id, terminal_id, "done",
+                attempt=attempt,
+            )
+            return True
+
+        if attempt < max_retries:
+            backoff = 30 * (2 ** attempt)  # 30s, 60s, 120s
+            logger.warning(
+                "Delivery failed for %s, retry %d/%d in %ds",
+                dispatch_id, attempt + 1, max_retries, backoff,
+            )
+            time.sleep(backoff)
+        else:
+            _write_receipt(
+                dispatch_id, terminal_id, "failed",
+                attempt=attempt,
+                failure_reason=f"Exhausted {max_retries} retries",
+            )
+
+    return False
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -122,12 +221,14 @@ if __name__ == "__main__":
     parser.add_argument("--instruction", required=True)
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--dispatch-id", required=True)
+    parser.add_argument("--max-retries", type=int, default=3)
     args = parser.parse_args()
 
-    ok = deliver_via_subprocess(
+    ok = deliver_with_recovery(
         terminal_id=args.terminal_id,
         instruction=args.instruction,
         model=args.model,
         dispatch_id=args.dispatch_id,
+        max_retries=args.max_retries,
     )
     sys.exit(0 if ok else 1)
