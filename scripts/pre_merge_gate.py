@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -35,8 +34,8 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
-from result_contract import EXIT_OK, EXIT_VALIDATION, EXIT_IO, EXIT_INTERNAL
-from contract_parser import find_dispatch_for_receipt, parse_contract_from_file
+from result_contract import EXIT_OK
+from contract_parser import parse_contract_from_file
 from verify_claims import verify_contract
 from quality_advisory import (
     generate_quality_advisory,

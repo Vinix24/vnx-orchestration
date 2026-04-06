@@ -31,7 +31,6 @@ import re
 import shutil
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 
 def find_vnx_home(project_root: str) -> str:

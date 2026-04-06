@@ -10,7 +10,7 @@ import fcntl
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Literal, Tuple
+from typing import List, Optional, Literal, Tuple
 import sys
 
 # Path configuration
@@ -486,69 +486,6 @@ def generate_markdown(data: dict, digest: dict):
 
     with open(MARKDOWN_FILE, 'w') as f:
         f.write('\n'.join(lines))
-
-def close_item_programmatic(
-    *,
-    item_id: str,
-    status: str = "done",
-    reason: str = "",
-    dispatch_id: str = "",
-) -> bool:
-    """Thread-safe programmatic API for closing open items.
-
-    Uses fcntl.flock on a dedicated lock file for concurrent terminal safety.
-
-    Returns:
-        True if item was closed, False if not found or already closed.
-    """
-    lock_path = STATE_DIR / "open_items.lock"
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    with lock_path.open("a+", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            data = load_items()
-
-            item = None
-            for i in data["items"]:
-                if i["id"] == item_id:
-                    item = i
-                    break
-
-            if not item or item["status"] != "open":
-                return False
-
-            item["status"] = status
-            item["closed_reason"] = reason
-            item["closed_by_dispatch_id"] = dispatch_id or None
-            item["closed_at"] = datetime.now().isoformat()
-            item["updated_at"] = datetime.now().isoformat()
-
-            save_items(data)
-
-            audit_log_entry(
-                "close",
-                item_id=item_id,
-                from_status="open",
-                to_status=status,
-                reason=reason,
-                dispatch_id=dispatch_id,
-            )
-
-            generate_digest()
-            return True
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-
-
-def get_items_by_origin_dispatch(dispatch_id: str) -> List[dict]:
-    """Items created by this dispatch (origin_dispatch_id matches)."""
-    data = load_items()
-    return [
-        item for item in data["items"]
-        if item.get("origin_dispatch_id") == dispatch_id
-    ]
-
 
 def count_items_closed_by_dispatch(dispatch_id: str) -> int:
     """Count items where closed_by_dispatch_id matches."""

@@ -18,9 +18,8 @@ import re
 import sqlite3
 import subprocess
 import sys
-import urllib.parse
 from dataclasses import dataclass, field
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 

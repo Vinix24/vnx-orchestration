@@ -1696,21 +1696,18 @@ def main():
             return EXIT_VALIDATION
 
     else:
+        pattern_count = None
         if gatherer.quality_db:
             try:
                 pattern_count = gatherer.quality_db.execute("SELECT COUNT(*) FROM code_snippets").fetchone()[0]
             except Exception:
-                pattern_count = None
-        else:
-            pattern_count = None
-
+                pass
+        stats = {}
         if gatherer.tag_engine:
             try:
                 stats = gatherer.tag_engine.get_statistics()
             except Exception:
-                stats = {}
-        else:
-            stats = {}
+                pass
 
         if human:
             emit_human("VNX Intelligence Gatherer v1.4.0")

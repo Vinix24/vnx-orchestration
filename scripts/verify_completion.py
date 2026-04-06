@@ -19,13 +19,11 @@ Exit codes:
 """
 
 import argparse
-import hashlib
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any
 
 
 class CompletionVerifier:

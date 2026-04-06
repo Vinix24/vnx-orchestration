@@ -20,7 +20,6 @@ The dashboard UI queries ONLY these views — never raw files (§6.1).
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -560,6 +559,18 @@ class AggregateOpenItemsView:
 # SessionView (§2.3)
 # ---------------------------------------------------------------------------
 
+
+def _latest_terminal_activity(terminal_states: List[Dict[str, Any]]) -> Optional[str]:
+    """Return the most recent heartbeat or output timestamp across terminals."""
+    last_activity: Optional[str] = None
+    for t in terminal_states:
+        for ts_field in ("last_heartbeat_at", "last_output_at"):
+            val = t.get(ts_field)
+            if val and (last_activity is None or val > last_activity):
+                last_activity = val
+    return last_activity
+
+
 class SessionView:
     """Per-project session detail with PR progress and terminal summary."""
 
@@ -612,19 +623,11 @@ class SessionView:
         else:
             session["track_status"] = {}
 
-        # Terminal summary
+        # Terminal summary and activity
         tv = TerminalView(self.state_dir)
         terminal_env = tv.get_all_terminals()
         session["terminal_states"] = terminal_env.data if terminal_env.data else []
-
-        # Last activity: most recent heartbeat or output across terminals
-        last_activity = None
-        for t in session.get("terminal_states", []):
-            for ts_field in ("last_heartbeat_at", "last_output_at"):
-                val = t.get(ts_field)
-                if val and (last_activity is None or val > last_activity):
-                    last_activity = val
-        session["last_activity"] = last_activity
+        session["last_activity"] = _latest_terminal_activity(session["terminal_states"])
 
         # Open item summary
         oi = OpenItemsView(self.state_dir)

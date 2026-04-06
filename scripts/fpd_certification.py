@@ -423,7 +423,7 @@ def _certify_section_5(conn, report: CertReport) -> None:
 # ---------------------------------------------------------------------------
 
 def _certify_section_6(conn, report: CertReport) -> None:
-    from provenance_verification import governance_audit_view, provenance_audit_view
+    from provenance_verification import governance_audit_view
 
     # 6.1-6.3 — require receipt files and git state, verify structurally
     report.add(CertRow(6, "6.1", "Complete provenance chain", "skip", "", "Requires live receipt+git state"))

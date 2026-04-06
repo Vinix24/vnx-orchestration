@@ -289,18 +289,6 @@ _activate_venv() {
   return 1
 }
 
-# Export resolved node path for use in tmux send-keys and PATH construction.
-# Sets VNX_RESOLVED_NODE_PATH. Returns 1 if node is not found.
-_export_node_path() {
-  local node_dir=""
-  node_dir="$(_resolve_node_path 2>/dev/null)" || true
-  if [ -n "$node_dir" ]; then
-    export VNX_RESOLVED_NODE_PATH="$node_dir"
-    return 0
-  fi
-  return 1
-}
-
 unset _VNX_PATHS_DIR
 unset -f _vnx_canon_dir _vnx_is_embedded_layout _vnx_git_toplevel _vnx_git_common_root
 eval "$__VNX_PATHS_SHELLOPTS"

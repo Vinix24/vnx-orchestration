@@ -58,7 +58,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from itertools import combinations
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from preference_store import EntryKind, PreferenceEntry, PreferenceStore, ScopeKey
 

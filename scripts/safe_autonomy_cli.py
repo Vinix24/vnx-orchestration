@@ -23,7 +23,6 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-from vnx_paths import ensure_env  # noqa: E402
 from runtime_coordination import get_connection, init_schema  # noqa: E402
 
 
