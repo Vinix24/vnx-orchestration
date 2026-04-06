@@ -72,11 +72,11 @@ export default function OpenItemsPage() {
   const projects = projectsEnv?.data ?? [];
   const data = aggregateEnv?.data;
   const allItems: OpenItem[] = data?.items ?? [];
-  const rawSummary = data?.total_summary ?? {};
+  const rawSummary = data?.total_summary;
   const summary = {
-    blocker_count: rawSummary.blocker_count ?? 0,
-    warn_count: rawSummary.warn_count ?? 0,
-    info_count: rawSummary.info_count ?? 0,
+    blocker_count: rawSummary?.blocker_count ?? 0,
+    warn_count: rawSummary?.warn_count ?? 0,
+    info_count: rawSummary?.info_count ?? 0,
   };
   const perProject = data?.per_project_subtotals ?? {};
   const degradedReasons = aggregateEnv?.degraded

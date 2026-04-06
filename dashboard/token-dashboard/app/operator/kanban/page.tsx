@@ -1,10 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { RefreshCw } from 'lucide-react';
 import { useKanban, useProjects } from '@/lib/hooks';
 import DegradedBanner from '@/components/operator/degraded-banner';
 import type { KanbanCard, KanbanStageName } from '@/lib/types';
+
+const DOMAIN_OPTIONS = ['All', 'Coding', 'Content', 'Marketing', 'Research'] as const;
 
 // ---- Track color palette ----
 const TRACK_COLORS: Record<string, { bg: string; border: string; text: string }> = {
@@ -312,12 +315,32 @@ function KanbanColumn({
 
 // ---- Page ----
 export default function KanbanPage() {
+  return (
+    <Suspense>
+      <KanbanContent />
+    </Suspense>
+  );
+}
+
+function KanbanContent() {
+  const searchParams = useSearchParams();
+  const sidebarDomain = searchParams.get('domain') ?? undefined;
   const [projectFilter, setProjectFilter] = useState<string | undefined>(undefined);
+  const [localDomainFilter, setLocalDomainFilter] = useState<string | undefined>(undefined);
   const { data, isLoading, error, mutate } = useKanban(projectFilter);
   const { data: projectsEnv } = useProjects();
   const projects = projectsEnv?.data ?? [];
 
-  const stages = data?.stages ?? {};
+  const domainFilter = localDomainFilter ?? sidebarDomain;
+
+  // Apply domain filter to cards within each stage
+  const rawStages = data?.stages ?? {};
+  const stages: Partial<Record<KanbanStageName, KanbanCard[]>> = {};
+  for (const [key, cards] of Object.entries(rawStages)) {
+    stages[key as KanbanStageName] = domainFilter
+      ? (cards as KanbanCard[]).filter((c) => c.domain === domainFilter)
+      : (cards as KanbanCard[]);
+  }
   const degradedReasons = data?.degraded
     ? (data.degraded_reasons ?? ['Kanban view degraded'])
     : error
@@ -422,6 +445,38 @@ export default function KanbanPage() {
           ))}
         </div>
       )}
+
+      {/* Domain filter */}
+      <div
+        data-testid="domain-filter"
+        className="flex items-center gap-2"
+        style={{ marginBottom: 20, flexWrap: 'wrap' }}
+      >
+        <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Domain:</span>
+        {DOMAIN_OPTIONS.map((d) => {
+          const value = d === 'All' ? undefined : d.toLowerCase();
+          const isActive = domainFilter === value;
+          return (
+            <button
+              key={d}
+              data-testid={`domain-filter-${d.toLowerCase()}`}
+              onClick={() => setLocalDomainFilter(isActive ? undefined : value)}
+              style={{
+                padding: '4px 12px',
+                borderRadius: 20,
+                fontSize: 11,
+                fontWeight: isActive ? 600 : 400,
+                background: isActive ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${isActive ? 'rgba(249, 115, 22, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
+                cursor: 'pointer',
+              }}
+            >
+              {d}
+            </button>
+          );
+        })}
+      </div>
 
       {/* 5-column grid */}
       <div

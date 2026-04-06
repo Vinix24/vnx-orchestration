@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import type { Metadata } from 'next';
 import Sidebar from '@/components/sidebar';
 import './globals.css';
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body>
-        <Sidebar />
+        <Suspense>
+          <Sidebar />
+        </Suspense>
         <main
           className="min-h-screen page-enter"
           style={{

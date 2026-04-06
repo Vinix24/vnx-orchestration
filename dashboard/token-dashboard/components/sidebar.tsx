@@ -2,8 +2,10 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban, ShieldAlert, Activity } from 'lucide-react';
+
+const DOMAINS = ['All', 'Coding', 'Content', 'Marketing', 'Research'] as const;
 
 const OPERATOR_NAV = [
   { href: '/operator', label: 'Control Surface', icon: Radio },
@@ -24,6 +26,19 @@ const NAV_ITEMS = [
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const activeDomain = searchParams.get('domain') ?? undefined;
+
+  function setDomain(domain: string | undefined) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (domain) {
+      params.set('domain', domain);
+    } else {
+      params.delete('domain');
+    }
+    router.push(`${pathname}?${params.toString()}`);
+  }
 
   return (
     <aside
@@ -68,6 +83,44 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-3 py-5" style={{ display: 'flex', flexDirection: 'column', gap: 2, overflowY: 'auto' }}>
+
+        {/* Domain filter tabs */}
+        <div
+          data-testid="domain-tabs"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 6,
+            padding: '4px 14px 12px',
+          }}
+        >
+          {DOMAINS.map((d) => {
+            const value = d === 'All' ? undefined : d.toLowerCase();
+            const isActive = activeDomain === value;
+            return (
+              <button
+                key={d}
+                data-testid={`domain-tab-${d.toLowerCase()}`}
+                onClick={() => setDomain(value)}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: 20,
+                  fontSize: 11,
+                  fontWeight: isActive ? 600 : 400,
+                  background: isActive ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.04)',
+                  border: `1px solid ${isActive ? 'rgba(249, 115, 22, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                  color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
+                  cursor: 'pointer',
+                }}
+              >
+                {d}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Divider */}
+        <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', margin: '0 14px 8px' }} />
 
         {/* Operator section */}
         <div style={{ marginBottom: 4, marginTop: 2 }}>

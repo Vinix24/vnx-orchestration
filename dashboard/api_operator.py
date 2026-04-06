@@ -152,6 +152,7 @@ def _scan_dispatches() -> dict:
                     "priority": header.get("priority", "\u2014"),
                     "status": header.get("status", "\u2014"),
                     "reason": header.get("reason", "\u2014"),
+                    "domain": header.get("domain", "coding"),
                     "dir": dir_name,
                     "stage": stage,
                     "duration_secs": int(duration_secs),

@@ -248,6 +248,7 @@ export interface KanbanCard {
   status: string;
   reason?: string;
   stage: string;
+  domain: string;
   duration_secs: number;
   duration_label: string;
   has_receipt: boolean;
