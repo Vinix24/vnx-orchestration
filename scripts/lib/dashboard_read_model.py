@@ -433,7 +433,10 @@ class OpenItemsView:
         oi_path = self.state_dir / "open_items.json"
         oi_mtime = _file_mtime_iso(oi_path)
         sources = {"open_items.json": oi_mtime}
-        staleness, degraded, reasons = _compute_freshness(sources, now)
+        staleness, degraded, reasons = _compute_freshness(
+            sources, now,
+            threshold_overrides={"open_items.json": REGISTRY_AGING_THRESHOLD},
+        )
 
         raw = _load_json(oi_path)
         if raw is None:
@@ -538,7 +541,10 @@ class AggregateOpenItemsView:
             )
 
         _sort_by_severity(all_items)
-        staleness, degraded, fresh_reasons = _compute_freshness(sources, now)
+        oi_overrides = {k: REGISTRY_AGING_THRESHOLD for k in sources if k.endswith("open_items.json")}
+        staleness, degraded, fresh_reasons = _compute_freshness(
+            sources, now, threshold_overrides=oi_overrides,
+        )
         degraded_reasons.extend(fresh_reasons)
 
         total_summary = {
@@ -595,7 +601,13 @@ class SessionView:
             "progress_state.yaml": _file_mtime_iso(progress_path),
             "runtime_coordination.db": _file_mtime_iso(db_path),
         }
-        staleness, degraded, reasons = _compute_freshness(sources, now)
+        staleness, degraded, reasons = _compute_freshness(
+            sources, now,
+            threshold_overrides={
+                "pr_queue_state.json": REGISTRY_AGING_THRESHOLD,
+                "progress_state.yaml": REGISTRY_AGING_THRESHOLD,
+            },
+        )
 
         queue_data = _load_json(queue_path)
         progress_data = _load_yaml(progress_path)
