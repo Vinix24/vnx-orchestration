@@ -19,46 +19,61 @@ intelligent task routing to the right model — from 3B local housekeeping to Op
 
 ### 1.1 Get Shit Done (GSD)
 
-**Repository**: Various implementations exist; the pattern is a CLI-driven task decomposer.
+**Repository**: `gsd-build/gsd-2`
 
-**Decomposition heuristic**: GSD-style tools typically use a 3-phase approach:
-1. **Capture**: Free-form feature description input
-2. **Decompose**: LLM breaks feature into atomic tasks with explicit acceptance criteria
-3. **Sequence**: Tasks ordered by dependency graph, each tagged with estimated complexity
+**Decomposition heuristic**: Three-level hierarchy: Milestone (shippable version, 4-10 slices) → Slice (one demoable vertical capability, 1-7 tasks) → Task (one context-window-sized unit). The iron rule: "a task must fit in one context window; if it can't, it's two tasks."
 
-**Key insight for F30**: The decomposition prompt matters more than the decomposition algorithm. A well-crafted system prompt with examples of "good" task breakdowns produces consistent granularity. The heuristic is: each task should be completable in a single focused session (1-2 PRs).
+**Key patterns**:
+- State-machine auto-mode driven by `.gsd/` files on disk
+- Fresh context per task (no accumulated garbage) — pre-inlined relevant files + prior task summaries
+- Git worktree isolation per milestone with squash-merge
+- Stuck detection via sliding-window repeated-dispatch analysis
+- Automatic roadmap reassessment after each slice
+
+**Key insight for F30**: The context-window-as-hard-ceiling heuristic is directly applicable to local model routing. A task that fits in 4K context = local 14B candidate. A task needing 32K+ context = Sonnet/Opus.
 
 ### 1.2 Ralph Loops
 
-**Pattern**: Iterative refinement loops for feature implementation.
+**Repository**: `ghuntley/how-to-ralph-wiggum`, `vercel-labs/ralph-loop-agent`
 
-**Decomposition heuristic**: Features are split using a "vertical slice" model:
-1. Each slice delivers end-to-end functionality (not horizontal layers)
-2. Complexity is estimated by counting: files touched, new APIs, new DB schema, new tests
-3. If a slice exceeds 3 of these 4 dimensions, it gets further decomposed
+**Decomposition heuristic**: Deliberately simple — run an AI agent in a bash `while` loop with a completion promise string. A parent agent owns the end-to-end plan (~1,500 lines), then shells out specific phases to sub-agents in their own loops. "One loop iteration = one coherent attempt." `--max-iterations` is the safety valve.
 
-**Key insight for F30**: The 4-dimension complexity estimator is directly applicable to VNX routing decisions. A task touching 1 file with no new APIs = local model candidate. A task touching 5+ files with new schema = Opus.
+**Key patterns**:
+- Ruthless context resets (each iteration starts fresh)
+- Git worktree isolation per worker
+- Fan-out via parallel workers with `event collect` fan-in
+- Multi-step pipelines (pick issue → plan → implement → review) use chained loops where review failure jumps back to implementation
+
+**Key insight for F30**: The simplicity principle applies to routing. Ralph loops prove that a 300-line loop + LLM tokens can orchestrate complex work. Our routing decision tree should stay deterministic and simple — no meta-LLM deciding which LLM to use.
 
 ### 1.3 DimitriGeelen/agentic-engineering-framework
 
-**Repository**: Agentic engineering framework with task management and healing loops.
+**Repository**: `DimitriGeelen/agentic-engineering-framework`
 
 **Key patterns**:
-- **Task system**: Tasks have type (implement, test, review, refactor), complexity (S/M/L/XL), and risk (low/med/high). These three axes drive agent selection.
-- **Healing loop**: Failed tasks are analyzed, the failure pattern is classified, and a corrective task is auto-generated. This runs until the task passes or a retry limit is hit.
-- **Learning promotion**: When a pattern (failure or success) repeats 3+ times, it's promoted from task-local context to project-level memory. This prevents the same mistakes across sessions.
+- **Task system**: Flat tasks (Markdown + YAML frontmatter in `.tasks/`) with workflow types (specification, design, build, test, refactor, decommission) that determine agent selection. "Nothing gets done without a task" enforced structurally via pre-operation hooks.
+- **Four-tier enforcement**: Tier 0 (unconditional blocking for destructive ops), Tier 1 (strict default requiring task context), Tier 2 (human-authorized bypass).
+- **Healing loop**: Failed tasks are classified, recovery suggested, patterns recorded for learning.
+- **Three-layer memory**: Working, project, episodic. When a pattern repeats 3+ times, it's promoted from task-local to project-level.
+- **Constitutional directives**: Antifragility, reliability, usability, portability as architectural north star.
+- **545+ self-governed tasks** as proof of concept; 150+ audit checks.
 
-**Key insight for F30**: The healing loop pattern is directly applicable to the housekeeping sidecar — stale OIs, broken leases, and orphaned dispatches are all "failures" that can be auto-corrected by a local model following deterministic rules.
+**Key insight for F30**: The healing loop pattern is directly applicable to the housekeeping sidecar — stale OIs, broken leases, and orphaned dispatches are all "failures" that can be auto-corrected by a local model following deterministic rules. The task-type → agent-selection mapping validates our routing approach.
 
 ### 1.4 DimitriGeelen/termlink
 
-**Repository**: Terminal session routing with MCP tools.
+**Repository**: `DimitriGeelen/termlink`
 
 **Key patterns**:
-- **Session routing**: Tasks are routed to terminals based on a capability matrix — each terminal declares what it can do (code, test, review), and the router matches tasks to capable terminals.
-- **MCP integration**: Uses Model Context Protocol for tool access, allowing different models to share the same tool surface.
+- **Dual-plane design**: Control plane (JSON-RPC 2.0 for commands/queries/events) and data plane (binary frames for raw terminal I/O).
+- **37 MCP tools** exposing all session operations to AI agents
+- **Event bus** for inter-session signaling (emit/poll/watch/broadcast/collect/wait)
+- **Hub supervision**: Multi-session coordinator with 30-second sweep cycle
+- **Spawn backends**: Auto-detect platform (Terminal.app, tmux, background daemon)
+- **`--isolate` flag**: Git worktree per worker with `--auto-merge`
+- **Capability tokens**: HMAC-SHA256 for security
 
-**Key insight for F30**: VNX already has terminal specialization (T1=implement, T2=test, T3=review). The gap is model specialization within those terminals. termlink's capability matrix can inform our routing decision tree.
+**Key insight for F30**: VNX already has terminal specialization (T1=implement, T2=test, T3=review). The gap is model specialization within those terminals. termlink's MCP-tool-per-session pattern could inform future `/idea` integration — ideas captured via MCP tools rather than just CLI commands.
 
 ---
 
@@ -68,34 +83,40 @@ intelligent task routing to the right model — from 3B local housekeeping to Op
 
 | Size | Representative Model | Realistic Tasks | Limitations |
 |------|---------------------|----------------|-------------|
-| **3B** | qwen2.5-coder:3b | Classification, tagging, JSON extraction, text summarization, stale-check heuristics | Cannot generate correct multi-file code; hallucination rate >30% on novel tasks |
-| **7B** | qwen2.5-coder:7b | Formatting, linting suggestions, single-function refactors, docstring generation, simple test scaffolds | Struggles with cross-file context; accuracy drops sharply beyond 2K token output |
-| **14B** | qwen2.5-coder:14b | Small refactors (<50 lines), code review with structured output, test generation for isolated functions, bash script fixes | Cannot maintain coherence across 3+ file changes; misses edge cases in complex logic |
+| **3B** | qwen2.5-coder:3b | Classification, tagging, JSON extraction, commit message drafting, simple regex, lint explanations | Cannot generate correct multi-file code; official HumanEval (84.1) contested — independent reproduction shows ~45; quantization degrades quality sharply |
+| **7B** | qwen2.5-coder:7b | Formatting, linting fixes, single-function refactors, docstring generation, import sorting, type annotations | HumanEval 88.4 — strongest at this size, rivals 20B+ models; struggles with cross-file context |
+| **14B** | qwen2.5-coder:14b | Small refactors (<50 lines), code review, test generation, bug fixes, PR descriptions, boilerplate | HumanEval ~89-90; surpasses CodeStral-22B; cannot maintain coherence across 3+ file changes |
+| **32B** | qwen2.5-coder:32b | Complex single-file tasks, multi-function refactors | HumanEval 92.7, matches GPT-4o; only viable on Max chips (64GB+); ~15-20 tok/s |
 
 ### 2.2 Performance on Apple Silicon
 
-Based on community benchmarks and VNX's existing benchmark framework:
+Based on community benchmarks (Q4_K_M quantization, Ollama/llama.cpp):
 
-| Model | M1 Pro (16GB) | M2 Pro (32GB) | M3 Pro (36GB) | M4 Pro (48GB) |
-|-------|--------------|---------------|---------------|---------------|
-| 3B | ~60 tok/s | ~70 tok/s | ~80 tok/s | ~90 tok/s |
-| 7B | ~30 tok/s | ~40 tok/s | ~50 tok/s | ~55 tok/s |
-| 14B | ~15 tok/s | ~20 tok/s | ~25 tok/s | ~30 tok/s |
-| 35B (MoE, 3B active) | ~10 tok/s | ~15 tok/s | ~20 tok/s | ~25 tok/s |
+| Model | M1 Pro (16 GPU) | M1/M2 Max (32+ GPU) | M4 Pro (20 GPU) | M4 Max (40 GPU) |
+|-------|----------------|---------------------|----------------|----------------|
+| 3B | ~60-70 tok/s | ~100+ tok/s | ~85 tok/s | ~140+ tok/s |
+| 7B | ~36 tok/s | ~61-66 tok/s | ~51 tok/s | ~83 tok/s |
+| 14B | ~18-22 tok/s | ~30-40 tok/s | ~28-32 tok/s | ~39-45 tok/s |
+| 32B | too slow | ~15-20 tok/s | ~12-15 tok/s | ~20-25 tok/s |
 
-**Note**: These are approximate ranges from ollama community benchmarks. VNX already has `scripts/llm_benchmark_coding_v2.py` which can produce exact numbers for the operator's specific hardware. PR-1 should include a calibration step.
+**Note**: 7B numbers are measured; 3B/14B estimated proportionally. Direct datapoint: Qwen2.5-14B Q4 on M2 Max = ~39 tok/s. MLX backend runs 30-50% faster than Ollama GGUF on Apple Silicon. VNX already has `scripts/llm_benchmark_coding_v2.py` which can produce exact numbers for the operator's specific hardware. PR-1 should include a calibration step.
 
 ### 2.3 Code Quality Benchmarks
 
 | Model | HumanEval (pass@1) | MBPP (pass@1) | Practical Assessment |
 |-------|-------------------|---------------|---------------------|
-| qwen2.5-coder:3b | ~45% | ~50% | Useful only for classification/extraction, not generation |
-| qwen2.5-coder:7b | ~65% | ~68% | Can handle single-function tasks with clear specs |
-| qwen2.5-coder:14b | ~78% | ~80% | Competitive with GPT-3.5; reliable for scoped tasks |
+| qwen2.5-coder:3b | ~45% (reproduced) | ~30% (reproduced) | Official claims 84.1/73.6 contested; useful only for classification/extraction |
+| qwen2.5-coder:7b | **88.4%** | 83.5% | Strongest at size class; rivals 20B+ models |
+| qwen2.5-coder:14b | ~89-90% | ~84%+ | Surpasses CodeStral-22B and DS-Coder-33B |
+| qwen2.5-coder:32b | **92.7%** | ~87% | Matches GPT-4o; Aider score 73.7; needs 64GB+ RAM |
 | qwen3.5:9b | ~70% | ~72% | Good reasoning, moderate code quality |
 | devstral | ~72% | ~75% | Strong on code editing, weaker on generation |
 
-**Key finding**: 14B models are the sweet spot for local code tasks — fast enough for interactive use (~20-30 tok/s on modern Macs), accurate enough for scoped single-file changes. Below 7B, code generation quality is too unreliable for production use; classification and extraction remain viable.
+**Key findings**:
+- 7B is the surprise performer — 88.4% HumanEval beats many 20B+ models
+- 14B is the practical sweet spot for local code tasks — fast enough for interactive use (~20-35 tok/s), accurate enough for scoped changes
+- 3B official benchmarks are inflated; independent reproduction shows ~45% HumanEval. Reliable only for classification
+- No SWE-bench results exist for sub-32B models — multi-file reasoning at these sizes is unreliable
 
 ---
 
@@ -236,7 +257,7 @@ A lightweight Python daemon that runs a local model on a 5-minute poll cycle to 
 
 ### 4.3 Implementation Pattern
 
-Reuse the existing Ollama HTTP API pattern from `scripts/conversation_analyzer.py`:
+Reuse the existing Ollama HTTP API pattern from `scripts/conversation_analyzer.py` (also in `scripts/llm_benchmark.py` which adds streaming, model management via `pull_ollama_model()`, and `list_ollama_models()`). The `retrospective_model_hook.py` adds a protocol-based design (`LocalModelHook` with `is_available()` and `analyze()`) that validates model output against an evidence pool — a pattern the housekeeping sidecar should adopt:
 
 ```python
 def query_ollama(model: str, prompt: str, temperature: float = 0.3) -> str:
