@@ -580,12 +580,15 @@ for t in tools: print(f'  - {t}')
 8. **Long-running stability** (Scenario 5): 50+ events captured without gaps
 9. **Dashboard renders**: Agent-stream page shows events color-coded by type
 10. **tmux parity** (Scenario 6): Subprocess produces functionally equivalent results
+11. **Model variations** (Scenario 7): haiku, opus, and sonnet all produce valid streams
+12. **Session resume** (Scenario 8): `--resume` flag produces context-aware continuation
 
 ### Informational (Observed but Not Blocking)
 
-11. Session JSONL cross-reference: EventStore event count as expected fraction of JSONL lines
-12. Event file size stays under 10 MB for all scenarios
-13. SSE latency: Events appear in dashboard within 1 second of generation
+13. Session JSONL cross-reference: EventStore event count as expected fraction of JSONL lines
+14. Event file size stays under 10 MB for all scenarios
+15. SSE latency: Events appear in dashboard within 1 second of generation
+16. Shell routing (Scenario 9): `VNX_ADAPTER_T{n}` variable correctly routes through dispatcher
 
 ---
 
@@ -623,3 +626,162 @@ cp .vnx-data/events/T1.ndjson .vnx-data/events/burnin-snapshot-scenario-N.ndjson
 ```
 
 This preserves evidence until the archive proposal (Section 4) is implemented.
+
+---
+
+## 8. CLI Flag Variation Scenarios
+
+`SubprocessAdapter.deliver()` builds the command: `claude -p --output-format stream-json --model <model> [--resume <session_id>] <instruction>`. These scenarios validate the flag combinations that the dispatcher can produce.
+
+### Scenario 7: Model Variations
+
+**Goal**: Verify all model values the dispatcher might pass produce valid streams.
+
+#### 7a: Explicit Haiku (cheapest — good for burn-in volume)
+
+```bash
+export VNX_ADAPTER_T1=subprocess
+
+python3 scripts/lib/subprocess_dispatch.py \
+  --terminal-id T1 \
+  --instruction "Say the word 'haiku-ok'." \
+  --model haiku \
+  --dispatch-id burnin-007a-model-haiku
+```
+
+**Validation**:
+- [ ] Process exits 0, `result` event contains "haiku-ok" or equivalent
+- [ ] `init` event `data` field shows the haiku model was used
+
+#### 7b: Explicit Opus
+
+```bash
+python3 scripts/lib/subprocess_dispatch.py \
+  --terminal-id T1 \
+  --instruction "Say the word 'opus-ok'." \
+  --model opus \
+  --dispatch-id burnin-007b-model-opus
+```
+
+**Validation**:
+- [ ] Process exits 0, `result` event present
+- [ ] Note: dispatcher normalizes "opus" → "default" for `/model` command in tmux path; verify `subprocess_adapter.py` passes "opus" raw to CLI (it does — no normalization in SubprocessAdapter)
+
+#### 7c: Default model (sonnet — omitted is same as sonnet)
+
+```bash
+python3 scripts/lib/subprocess_dispatch.py \
+  --terminal-id T1 \
+  --instruction "Say the word 'sonnet-ok'." \
+  --model sonnet \
+  --dispatch-id burnin-007c-model-sonnet
+```
+
+**Validation**:
+- [ ] Process exits 0
+- [ ] This is the baseline — should behave identically to S1
+
+### Scenario 8: Session Resume via --resume
+
+**Goal**: Verify `--resume <session_id>` flag produces a valid continuation stream.
+
+`SubprocessAdapter.deliver()` accepts `resume_session` which adds `--resume <session_id>` to the CLI command. This is used for session continuity (e.g., retrying a failed dispatch against the same conversation).
+
+**Note**: `subprocess_dispatch.py` CLI does not currently expose `--resume`. This scenario requires direct Python invocation.
+
+```bash
+export VNX_ADAPTER_T1=subprocess
+
+# Step 1: Run initial dispatch, capture session_id from init event
+python3 -c "
+import sys
+sys.path.insert(0, 'scripts/lib')
+from subprocess_adapter import SubprocessAdapter
+
+adapter = SubprocessAdapter()
+adapter.deliver('T1', 'burnin-008a-resume-init', instruction='Say hello and tell me your session ID.', model='haiku')
+
+session_id = None
+for event in adapter.read_events('T1'):
+    if event.type == 'init' and event.session_id:
+        session_id = event.session_id
+        print(f'Captured session_id: {session_id}')
+
+# Save for step 2
+if session_id:
+    with open('/tmp/burnin-008-session-id.txt', 'w') as f:
+        f.write(session_id)
+    print(f'Session ID saved: {session_id}')
+else:
+    print('WARNING: No session_id captured from init event')
+    sys.exit(1)
+"
+
+# Step 2: Resume the same session
+SESSION_ID=$(cat /tmp/burnin-008-session-id.txt)
+echo "Resuming session: $SESSION_ID"
+
+python3 -c "
+import sys
+sys.path.insert(0, 'scripts/lib')
+from subprocess_adapter import SubprocessAdapter
+
+adapter = SubprocessAdapter()
+adapter.deliver('T1', 'burnin-008b-resume-continue',
+    instruction='What was the first thing I asked you?',
+    model='haiku',
+    resume_session='$SESSION_ID')
+
+for event in adapter.read_events('T1'):
+    if event.type in ('text', 'result'):
+        print(f'[{event.type}] {event.data}')
+"
+```
+
+**Validation Checklist**:
+- [ ] Step 1 produces events with a valid `session_id` in the `init` event
+- [ ] Step 2 process exits 0 (session resume accepted by CLI)
+- [ ] Step 2 `init` event has the same `session_id` as Step 1
+- [ ] Step 2 response references the prior conversation (proves context continuity)
+- [ ] Step 2 events have `dispatch_id: burnin-008b-resume-continue` (not the Step 1 ID)
+- [ ] `clear()` was called between Step 1 and Step 2 (Step 2 events start at sequence 1)
+
+### Scenario 9: Dispatch-Level Flag Integration Test
+
+**Goal**: Verify the full dispatcher shell path correctly passes `VNX_ADAPTER_T{n}=subprocess` flag through `dispatch_deliver.sh` → `subprocess_dispatch.py`.
+
+This is not a direct Python call — it tests the actual shell routing.
+
+```bash
+export VNX_ADAPTER_T1=subprocess
+
+# Create a minimal dispatch file for testing
+DISPATCH_ID="burnin-009-shell-route"
+DISPATCH_FILE=".vnx-data/dispatches/pending/${DISPATCH_ID}.md"
+mkdir -p .vnx-data/dispatches/pending
+
+cat > "$DISPATCH_FILE" << 'DISPATCH'
+---
+dispatch-id: burnin-009-shell-route
+track: A
+agent-role: architect
+pr: HEADLESS-BURNIN
+gate: planning
+---
+
+Say 'shell-route-ok' and nothing else.
+DISPATCH
+
+# Verify the dispatcher would route to subprocess
+# (dry-run: check adapter var resolution)
+bash -c '
+  terminal_id="T1"
+  adapter_var="VNX_ADAPTER_${terminal_id}"
+  echo "Adapter for $terminal_id: ${!adapter_var:-tmux}"
+'
+```
+
+**Validation**:
+- [ ] Shell variable resolution correctly yields "subprocess"
+- [ ] If running a full dispatch cycle: events appear in T1.ndjson
+- [ ] dispatch_deliver.sh `_ddt_subprocess_delivery` path is exercised (check dispatcher logs)

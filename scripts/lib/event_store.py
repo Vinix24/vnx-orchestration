@@ -15,6 +15,7 @@ import fcntl
 import json
 import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
@@ -120,11 +121,38 @@ class EventStore:
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-    def clear(self, terminal: str) -> None:
+    def archive_dir(self, terminal: str) -> Path:
+        """Return the archive directory for a terminal."""
+        return self._events_dir / "archive" / terminal
+
+    def archive(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+        """Copy current event file to archive before clearing.
+
+        Returns the archive path on success, None if nothing to archive.
+        """
+        event_file = self._terminal_path(terminal)
+        if not event_file.exists() or event_file.stat().st_size == 0:
+            return None
+
+        archive_path = self.archive_dir(terminal)
+        archive_path.mkdir(parents=True, exist_ok=True)
+        dest = archive_path / f"{dispatch_id}.ndjson"
+        shutil.copy2(str(event_file), str(dest))
+        logger.info("event_store: archived %s -> %s", event_file, dest)
+        return dest
+
+    def clear(self, terminal: str, archive_dispatch_id: Optional[str] = None) -> None:
         """Truncate the event file for a terminal (new dispatch clears old events).
+
+        If archive_dispatch_id is provided and the file has content, the events
+        are archived to .vnx-data/events/archive/{terminal}/{dispatch_id}.ndjson
+        before truncation.
 
         Also resets the sequence counter.
         """
+        if archive_dispatch_id:
+            self.archive(terminal, archive_dispatch_id)
+
         path = self._terminal_path(terminal)
         self._sequences.pop(terminal, None)
 

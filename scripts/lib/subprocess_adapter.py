@@ -207,10 +207,12 @@ class SubprocessAdapter:
 
         self._processes[terminal_id] = process
 
-        # Clear event store for new dispatch (per retention policy)
+        # Archive previous dispatch events, then clear for new dispatch
         es = self._get_event_store()
         if es is not None:
-            es.clear(terminal_id)
+            last = es.last_event(terminal_id)
+            prev_dispatch_id = last.get("dispatch_id") if last else None
+            es.clear(terminal_id, archive_dispatch_id=prev_dispatch_id or None)
 
         return DeliveryResult(
             success=True,
