@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import signal
 import subprocess
 import time
@@ -353,6 +354,89 @@ class SubprocessAdapter:
             # Normalize CLI event to dashboard-friendly format
             normalized_events = self._normalize_cli_event(payload)
 
+            dispatch_id = self._dispatch_ids.get(terminal_id, "")
+            es = self._get_event_store()
+
+            for norm in normalized_events:
+                if es is not None:
+                    es.append(terminal_id, norm, dispatch_id=dispatch_id)
+                yield StreamEvent(
+                    type=norm["type"],
+                    data=norm.get("data", {}),
+                    session_id=session_id if is_init else None,
+                )
+
+    def read_events_with_timeout(
+        self,
+        terminal_id: str,
+        chunk_timeout: float = 120.0,
+        total_deadline: float = 600.0,
+    ) -> Iterator[StreamEvent]:
+        """Like read_events() but with timeout protection.
+
+        chunk_timeout: max seconds to wait for the next line of output.
+        total_deadline: max total seconds for the entire read.
+
+        On timeout, the subprocess is killed via stop() and iteration ends.
+        """
+        process = self._processes.get(terminal_id)
+        if process is None or process.stdout is None:
+            return
+
+        start_time = time.time()
+        fd = process.stdout.fileno()
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > total_deadline:
+                logger.warning(
+                    "read_events_with_timeout: total deadline (%.0fs) exceeded for %s",
+                    total_deadline, terminal_id,
+                )
+                self.stop(terminal_id)
+                break
+
+            remaining = min(chunk_timeout, total_deadline - elapsed)
+            ready, _, _ = select.select([fd], [], [], remaining)
+
+            if not ready:
+                logger.warning(
+                    "read_events_with_timeout: chunk timeout (%.0fs) for %s",
+                    chunk_timeout, terminal_id,
+                )
+                self.stop(terminal_id)
+                break
+
+            raw_line = process.stdout.readline()
+            if not raw_line:
+                break  # EOF — process exited
+
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "subprocess_adapter: malformed NDJSON line for %s (skipped): %r",
+                    terminal_id, line[:200],
+                )
+                continue
+
+            # Extract session_id before normalization
+            event_type = payload.get("type", "")
+            event_subtype = payload.get("subtype", "")
+            session_id: Optional[str] = payload.get("session_id")
+
+            is_init = (
+                (event_type == "system" and event_subtype == "init")
+                or event_type == "init"
+            )
+            if is_init and session_id and terminal_id not in self._session_ids:
+                self._session_ids[terminal_id] = session_id
+
+            # Normalize and yield
+            normalized_events = self._normalize_cli_event(payload)
             dispatch_id = self._dispatch_ids.get(terminal_id, "")
             es = self._get_event_store()
 

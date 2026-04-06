@@ -25,7 +25,7 @@ def mock_adapter():
 class TestDeliverViaSubprocess:
     def test_success_consumes_all_events(self, mock_adapter):
         mock_adapter.deliver.return_value = MagicMock(success=True)
-        mock_adapter.read_events.return_value = iter([
+        mock_adapter.read_events_with_timeout.return_value = iter([
             MagicMock(type="init"),
             MagicMock(type="text"),
             MagicMock(type="result"),
@@ -37,7 +37,9 @@ class TestDeliverViaSubprocess:
         mock_adapter.deliver.assert_called_once_with(
             "T1", "d-001", instruction="do stuff", model="sonnet",
         )
-        mock_adapter.read_events.assert_called_once_with("T1")
+        mock_adapter.read_events_with_timeout.assert_called_once_with(
+            "T1", chunk_timeout=120.0, total_deadline=600.0,
+        )
 
     def test_failure_returns_false_without_reading(self, mock_adapter):
         mock_adapter.deliver.return_value = MagicMock(success=False)
@@ -45,13 +47,15 @@ class TestDeliverViaSubprocess:
         result = deliver_via_subprocess("T1", "do stuff", "sonnet", "d-002")
 
         assert result is False
-        mock_adapter.read_events.assert_not_called()
+        mock_adapter.read_events_with_timeout.assert_not_called()
 
     def test_empty_event_stream_succeeds(self, mock_adapter):
         mock_adapter.deliver.return_value = MagicMock(success=True)
-        mock_adapter.read_events.return_value = iter([])
+        mock_adapter.read_events_with_timeout.return_value = iter([])
 
         result = deliver_via_subprocess("T1", "do stuff", "sonnet", "d-003")
 
         assert result is True
-        mock_adapter.read_events.assert_called_once_with("T1")
+        mock_adapter.read_events_with_timeout.assert_called_once_with(
+            "T1", chunk_timeout=120.0, total_deadline=600.0,
+        )
