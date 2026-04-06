@@ -10,10 +10,16 @@ BILLING SAFETY: Only calls subprocess.Popen(["claude", ...]). No Anthropic SDK.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import signal
 import subprocess
-from typing import Any, Dict, List, Optional
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterator, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from adapter_types import (
     CAPABILITY_DELIVER,
@@ -29,6 +35,21 @@ from adapter_types import (
     SpawnResult,
     StopResult,
 )
+
+
+
+# ---------------------------------------------------------------------------
+# StreamEvent dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StreamEvent:
+    """A single parsed event from --output-format stream-json stdout."""
+    type: str          # init, thinking, tool_use, tool_result, text, result, error
+    data: Dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+    session_id: Optional[str] = None  # extracted from init event
+
 
 SUBPROCESS_CAPABILITIES = frozenset({
     CAPABILITY_SPAWN,
@@ -58,6 +79,8 @@ class SubprocessAdapter:
         self._processes: Dict[str, subprocess.Popen] = {}
         # terminal_id -> spawn config (preserved for re-spawn if needed)
         self._configs: Dict[str, Dict[str, Any]] = {}
+        # terminal_id -> session_id extracted from init event
+        self._session_ids: Dict[str, str] = {}
 
     def adapter_type(self) -> str:
         return "subprocess"
@@ -115,6 +138,7 @@ class SubprocessAdapter:
         *,
         instruction: Optional[str] = None,
         model: Optional[str] = None,
+        resume_session: Optional[str] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -122,6 +146,9 @@ class SubprocessAdapter:
         instruction and model can be passed directly or pulled from the stored
         config registered via spawn(). dispatch_id is always appended to the
         instruction so the subprocess can identify its work.
+
+        resume_session: if provided, adds --resume <session_id> to the CLI
+        command for session continuity.
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
@@ -132,8 +159,10 @@ class SubprocessAdapter:
             "-p",
             "--output-format", "stream-json",
             "--model", effective_model,
-            effective_instruction,
         ]
+        if resume_session:
+            cmd.extend(["--resume", resume_session])
+        cmd.append(effective_instruction)
 
         try:
             process = subprocess.Popen(
@@ -170,6 +199,58 @@ class SubprocessAdapter:
             pane_id=None,
             path_used="subprocess",
         )
+
+    # ------------------------------------------------------------------
+    # Stream event parsing
+    # ------------------------------------------------------------------
+
+    def read_events(self, terminal_id: str) -> Iterator[StreamEvent]:
+        """Yield parsed StreamEvents from subprocess stdout line-by-line.
+
+        Reads until EOF (process exited or pipe closed). Malformed NDJSON lines
+        are logged as warnings and skipped — they do not raise.
+
+        The first `init` event's session_id is stored and retrievable via
+        get_session_id().
+        """
+        process = self._processes.get(terminal_id)
+        if process is None or process.stdout is None:
+            return
+
+        for raw_line in process.stdout:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "subprocess_adapter: malformed NDJSON line for %s (skipped): %r",
+                    terminal_id,
+                    line[:200],
+                )
+                continue
+
+            event_type = payload.get("type", "")
+            session_id: Optional[str] = payload.get("session_id")
+
+            # Extract session_id from first init event
+            if event_type == "init" and session_id and terminal_id not in self._session_ids:
+                self._session_ids[terminal_id] = session_id
+
+            yield StreamEvent(
+                type=event_type,
+                data=payload,
+                session_id=session_id,
+            )
+
+    def get_session_id(self, terminal_id: str) -> Optional[str]:
+        """Return session_id extracted from the init event, or None.
+
+        Will be None if read_events() has not yet yielded the init event for
+        this terminal_id.
+        """
+        return self._session_ids.get(terminal_id)
 
     # ------------------------------------------------------------------
     # Observe
