@@ -80,12 +80,8 @@ def get_adapter(terminal: str) -> RuntimeAdapter:
     if value == "tmux":
         return TmuxAdapter(_resolve_state_dir())
     if value == "subprocess":
-        # SubprocessAdapter does not exist yet; import is deferred so that the
-        # module loads without error on standard paths.
-        raise NotImplementedError(
-            f"SubprocessAdapter is not yet implemented. "
-            f"Set {env_key}=tmux or leave unset."
-        )
+        from subprocess_adapter import SubprocessAdapter
+        return SubprocessAdapter()
     raise ValueError(
         f"Unknown adapter value {value!r} for {env_key}. "
         f"Valid values: tmux, subprocess."
