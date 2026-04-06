@@ -11,8 +11,7 @@ import sqlite3
 import glob
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
-import hashlib
+from typing import Dict, List, Optional, Any
 
 
 class ReportMiner:

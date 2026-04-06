@@ -26,11 +26,10 @@ import re
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from runtime_coordination import _append_event, _now_utc, get_connection, init_schema
+from runtime_coordination import _append_event, _now_utc
 
 # ── Reuse trace token regexes from PR-0 ──────────────────────────────────
 

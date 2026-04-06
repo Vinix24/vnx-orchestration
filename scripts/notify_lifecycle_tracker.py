@@ -10,9 +10,7 @@ Date: 2026-01-07
 """
 
 import sys
-import json
 from pathlib import Path
-from datetime import datetime
 
 def notify_lifecycle_tracker(dispatch_id: str, terminal: str, track: str, task_id: str):
     """Notify lifecycle tracker about new dispatch

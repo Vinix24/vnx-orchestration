@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 _UTC = timezone.utc
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))

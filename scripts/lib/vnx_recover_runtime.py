@@ -29,12 +29,11 @@ Governance references:
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from runtime_coordination import (
     DISPATCH_TRANSITIONS,
@@ -46,7 +45,7 @@ from runtime_coordination import (
 )
 from lease_manager import LeaseManager
 from runtime_reconciler import ReconcilerConfig, RuntimeReconciler
-from vnx_doctor_runtime import DoctorReport, run_runtime_checks, FAIL, WARN, PASS
+from vnx_doctor_runtime import run_runtime_checks, FAIL
 from incident_log import (
     generate_incident_summary,
     get_active_incidents,

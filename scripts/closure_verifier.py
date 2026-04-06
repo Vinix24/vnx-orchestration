@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -25,7 +24,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from review_contract import ReviewContract
-from codex_final_gate import enforce_codex_gate, CodexFinalGateReceipt
+from codex_final_gate import enforce_codex_gate
 
 
 @dataclass(frozen=True)

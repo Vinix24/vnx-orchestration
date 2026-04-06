@@ -640,111 +640,107 @@ class IntelligenceDaemon:
     _PR_GATE_RE = re.compile(r"gate_pr(\d+)_(.*)", re.IGNORECASE)
     _PR_REF_RE = re.compile(r"PR[- ]?(\d+)", re.IGNORECASE)
 
+    @staticmethod
+    def _register_gate(discovered: dict, gate: str, gate_re) -> None:
+        """Register a PR from a gate name if it matches the pattern."""
+        m = gate_re.match(gate)
+        if m:
+            pr_num = int(m.group(1))
+            desc = m.group(2).replace("_", " ").strip().title()
+            if pr_num not in discovered:
+                discovered[pr_num] = {
+                    "id": f"PR{pr_num}", "num": pr_num, "description": desc,
+                    "gate_trigger": gate, "receipt_done": False,
+                }
+
+    def _discover_from_track_history(self, discovered: dict) -> None:
+        """Discover PRs from progress_state.yaml track history."""
+        progress_file = self._find_state_file("progress_state.yaml")
+        if not (progress_file and progress_file.exists()):
+            return
+        try:
+            import yaml
+            with open(progress_file, "r") as f:
+                progress = yaml.safe_load(f) or {}
+            for track_id, track_data in progress.get("tracks", {}).items():
+                self._register_gate(discovered, track_data.get("current_gate", ""), self._PR_GATE_RE)
+                for entry in track_data.get("history", []):
+                    self._register_gate(discovered, entry.get("gate", ""), self._PR_GATE_RE)
+        except Exception as e:
+            logger.error(f"Error reading progress_state.yaml: {e}")
+
+    def _discover_from_receipts(self, discovered: dict) -> None:
+        """Discover PRs from t0_receipts.ndjson receipt history."""
+        receipts_file = self._find_state_file("t0_receipts.ndjson")
+        if not (receipts_file and receipts_file.exists()):
+            return
+        try:
+            with open(receipts_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        receipt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    self._process_receipt_pr_refs(discovered, receipt)
+        except Exception as e:
+            logger.error(f"Error scanning receipts for PR discovery: {e}")
+
+    def _process_receipt_pr_refs(self, discovered: dict, receipt: dict) -> None:
+        """Extract and register PR references from a single receipt."""
+        searchable = " ".join(
+            str(receipt.get(k, "")) for k in ("type", "title", "gate", "task_id", "dispatch_id")
+        )
+        for m in self._PR_REF_RE.finditer(searchable):
+            pr_num = int(m.group(1))
+            is_done = (
+                receipt.get("event_type") == "task_complete"
+                and receipt.get("status") in ("success", "unknown")
+            )
+            if pr_num not in discovered:
+                title = receipt.get("title", "")
+                desc = self._PR_REF_RE.sub("", title).strip(" -\u2013\u2014:").strip() or f"PR {pr_num}"
+                discovered[pr_num] = {
+                    "id": f"PR{pr_num}", "num": pr_num, "description": desc,
+                    "gate_trigger": f"gate_pr{pr_num}_unknown", "receipt_done": is_done,
+                }
+            elif is_done:
+                discovered[pr_num]["receipt_done"] = True
+            receipt_gate = receipt.get("gate", "")
+            gm = self._PR_GATE_RE.match(receipt_gate)
+            if gm and int(gm.group(1)) == pr_num:
+                discovered[pr_num]["gate_trigger"] = receipt_gate
+                if not discovered[pr_num]["description"] or discovered[pr_num]["description"] == f"PR {pr_num}":
+                    discovered[pr_num]["description"] = gm.group(2).replace("_", " ").strip().title()
+
     def _auto_discover_prs(self, brief: dict) -> dict:
         """Auto-discover PRs from tracks, track history, receipts, and dispatches.
 
         Returns dict: { pr_num: { id, num, description, gate_trigger, receipt_done } }
         """
-        discovered = {}  # pr_num (int) -> pr_info dict
+        discovered = {}
 
-        def _register_gate(gate: str):
-            """Register a PR from a gate name if it matches the pattern."""
-            m = self._PR_GATE_RE.match(gate)
-            if m:
-                pr_num = int(m.group(1))
-                desc = m.group(2).replace("_", " ").strip().title()
-                if pr_num not in discovered:
-                    discovered[pr_num] = {
-                        "id": f"PR{pr_num}",
-                        "num": pr_num,
-                        "description": desc,
-                        "gate_trigger": gate,
-                        "receipt_done": False,
-                    }
-
-        # ── Source 1: Current track gates ──
+        # Source 1: Current track gates
         for track_id, track_data in brief.get("tracks", {}).items():
-            _register_gate(track_data.get("current_gate", ""))
+            self._register_gate(discovered, track_data.get("current_gate", ""), self._PR_GATE_RE)
 
-        # ── Source 1b: Track history from progress_state.yaml ──
-        progress_file = self._find_state_file("progress_state.yaml")
-        if progress_file and progress_file.exists():
-            try:
-                import yaml
-                with open(progress_file, "r") as f:
-                    progress = yaml.safe_load(f) or {}
-                for track_id, track_data in progress.get("tracks", {}).items():
-                    _register_gate(track_data.get("current_gate", ""))
-                    for entry in track_data.get("history", []):
-                        _register_gate(entry.get("gate", ""))
-            except Exception as e:
-                logger.error(f"Error reading progress_state.yaml: {e}")
+        # Source 1b: Track history
+        self._discover_from_track_history(discovered)
 
-        # ── Source 2: Receipt history ──
-        receipts_file = self._find_state_file("t0_receipts.ndjson")
-        if receipts_file and receipts_file.exists():
-            try:
-                with open(receipts_file, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            receipt = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+        # Source 2: Receipt history
+        self._discover_from_receipts(discovered)
 
-                        # Extract PR numbers from multiple fields
-                        searchable = " ".join(
-                            str(receipt.get(k, ""))
-                            for k in ("type", "title", "gate", "task_id", "dispatch_id")
-                        )
-                        for m in self._PR_REF_RE.finditer(searchable):
-                            pr_num = int(m.group(1))
-                            is_done = (
-                                receipt.get("event_type") == "task_complete"
-                                and receipt.get("status") in ("success", "unknown")
-                            )
-
-                            if pr_num not in discovered:
-                                # Build description from receipt title if available
-                                title = receipt.get("title", "")
-                                desc = self._PR_REF_RE.sub("", title).strip(" -–—:").strip()
-                                if not desc:
-                                    desc = f"PR {pr_num}"
-                                discovered[pr_num] = {
-                                    "id": f"PR{pr_num}",
-                                    "num": pr_num,
-                                    "description": desc,
-                                    "gate_trigger": f"gate_pr{pr_num}_unknown",
-                                    "receipt_done": is_done,
-                                }
-                            elif is_done:
-                                discovered[pr_num]["receipt_done"] = True
-
-                            # Enrich gate_trigger from receipt gate field if we only had a stub
-                            receipt_gate = receipt.get("gate", "")
-                            gm = self._PR_GATE_RE.match(receipt_gate)
-                            if gm and int(gm.group(1)) == pr_num:
-                                discovered[pr_num]["gate_trigger"] = receipt_gate
-                                if not discovered[pr_num]["description"] or discovered[pr_num]["description"] == f"PR {pr_num}":
-                                    discovered[pr_num]["description"] = gm.group(2).replace("_", " ").strip().title()
-
-            except Exception as e:
-                logger.error(f"Error scanning receipts for PR discovery: {e}")
-
-        # ── Source 3: Dispatch IDs in brief ──
+        # Source 3: Dispatch IDs in brief
         for receipt in brief.get("recent_receipts", []):
             dispatch_id = receipt.get("dispatch_id", "")
             for m in self._PR_REF_RE.finditer(dispatch_id):
                 pr_num = int(m.group(1))
                 if pr_num not in discovered:
                     discovered[pr_num] = {
-                        "id": f"PR{pr_num}",
-                        "num": pr_num,
-                        "description": f"PR {pr_num}",
-                        "gate_trigger": f"gate_pr{pr_num}_unknown",
-                        "receipt_done": False,
+                        "id": f"PR{pr_num}", "num": pr_num, "description": f"PR {pr_num}",
+                        "gate_trigger": f"gate_pr{pr_num}_unknown", "receipt_done": False,
                     }
 
         return discovered
@@ -816,59 +812,28 @@ class IntelligenceDaemon:
 
         return status_map
 
-    def _build_pr_queue(self, brief: dict, existing_dashboard: dict) -> dict:
-        """Build PR queue from auto-discovered data with persistence.
-
-        Merges newly discovered PRs with previously persisted registry so
-        PRs that were on a track gate in the past are not lost when the
-        track moves forward.
-        """
-        tracks = brief.get("tracks", {})
-
-        # Auto-discover PRs from current data sources
-        discovered = self._auto_discover_prs(brief)
-
-        # ── Merge with persisted registry ──
-        # The registry lives in dashboard._pr_registry and accumulates
-        # all PRs ever discovered. New data enriches but never removes.
-        registry = existing_dashboard.get("_pr_registry", {})
-
-        # Import persisted entries (keyed by pr_num as string)
+    @staticmethod
+    def _merge_pr_registry(discovered: dict, registry: dict) -> None:
+        """Merge persisted PR registry into discovered dict (enriches, never removes)."""
         for num_str, pr_info in registry.items():
             pr_num = int(num_str)
             if pr_num not in discovered:
                 discovered[pr_num] = pr_info
             else:
-                # Enrich: keep better description if the new one is generic
                 if discovered[pr_num]["description"] == f"PR {pr_num}":
                     discovered[pr_num]["description"] = pr_info.get("description", discovered[pr_num]["description"])
-                # Keep receipt_done if it was ever true
                 if pr_info.get("receipt_done"):
                     discovered[pr_num]["receipt_done"] = True
 
-        if not discovered:
-            return {
-                "active_feature": "Active Development",
-                "total_prs": 0,
-                "completed_prs": 0,
-                "progress_percent": 0,
-                "prs": [],
-                "_pr_registry": {},
-            }
-
-        # Determine statuses
-        status_map = self._determine_pr_statuses(discovered, tracks)
-
-        # Build sorted PR list
+    @staticmethod
+    def _build_pr_list(discovered: dict, status_map: dict) -> List[dict]:
+        """Build sorted PR list with dependencies and blocked status."""
         all_prs = []
         sorted_nums = sorted(discovered.keys())
-
         for pr_num in sorted_nums:
             pr_info = discovered[pr_num]
             pr_id = pr_info["id"]
             status = status_map.get(pr_id, "pending")
-
-            # Auto-infer sequential dependencies: PR N depends on nearest lower PR
             deps = []
             if pr_num > 1:
                 prev_num = None
@@ -879,33 +844,102 @@ class IntelligenceDaemon:
                         break
                 if prev_num is not None and prev_num in discovered:
                     deps = [discovered[prev_num]["id"]]
-
-            # Blocked: pending + dependencies not done
-            blocked = False
-            if status == "pending" and deps:
-                blocked = any(status_map.get(d) != "done" for d in deps)
-
+            blocked = status == "pending" and deps and any(status_map.get(d) != "done" for d in deps)
             all_prs.append({
-                "id": pr_id,
-                "description": pr_info["description"],
-                "status": status,
-                "deps": deps,
-                "blocked": blocked,
+                "id": pr_id, "description": pr_info["description"],
+                "status": status, "deps": deps, "blocked": blocked,
             })
+        return all_prs
 
+    def _build_pr_queue(self, brief: dict, existing_dashboard: dict) -> dict:
+        """Build PR queue from auto-discovered data with persistence.
+
+        Merges newly discovered PRs with previously persisted registry so
+        PRs that were on a track gate in the past are not lost when the
+        track moves forward.
+        """
+        tracks = brief.get("tracks", {})
+        discovered = self._auto_discover_prs(brief)
+        self._merge_pr_registry(discovered, existing_dashboard.get("_pr_registry", {}))
+
+        if not discovered:
+            return {
+                "active_feature": "Active Development", "total_prs": 0,
+                "completed_prs": 0, "progress_percent": 0, "prs": [], "_pr_registry": {},
+            }
+
+        status_map = self._determine_pr_statuses(discovered, tracks)
+        all_prs = self._build_pr_list(discovered, status_map)
         completed_count = sum(1 for pr in all_prs if pr["status"] == "done")
         total_count = len(all_prs)
 
-        # Persist registry for next cycle (keyed by pr_num string for JSON compat)
-        new_registry = {str(k): v for k, v in discovered.items()}
-
         return {
-            "active_feature": "Active Development",
-            "total_prs": total_count,
+            "active_feature": "Active Development", "total_prs": total_count,
             "completed_prs": completed_count,
             "progress_percent": int((completed_count / total_count * 100)) if total_count > 0 else 0,
             "prs": all_prs,
-            "_pr_registry": new_registry,
+            "_pr_registry": {str(k): v for k, v in discovered.items()},
+        }
+
+    def _build_terminals_from_brief(self, brief: dict) -> dict:
+        """Build terminal status dict from t0_brief data."""
+        terminals = {"T0": {
+            "status": "active", "gate": "ORCHESTRATION",
+            "type": "ORCHESTRATOR", "ready": True,
+        }}
+        for tid, tdata in brief.get("terminals", {}).items():
+            terminals[tid] = {
+                "status": "active" if tdata.get("status") in ["working", "idle"] else "offline",
+                "gate": tdata.get("track", ""),
+                "current_task": tdata.get("current_task", ""),
+                "ready": tdata.get("ready", False),
+                "type": "WORKER",
+            }
+        return terminals
+
+    def _build_open_items(self, brief: dict, pr_queue: dict) -> dict:
+        """Build open items section from terminals with PR correlation."""
+        gate_to_pr_id = {}
+        for pr in pr_queue.get("prs", []):
+            for track_id, track_data in brief.get("tracks", {}).items():
+                gate = track_data.get("current_gate", "")
+                m = self._PR_GATE_RE.match(gate)
+                if m and f"PR{m.group(1)}" == pr["id"]:
+                    gate_to_pr_id[gate] = pr["id"]
+
+        open_items = []
+        for tid, tdata in brief.get("terminals", {}).items():
+            if tdata.get("current_task"):
+                severity = "warning" if tdata.get("status") == "working" else "info"
+                pr_id = None
+                track_id = tdata.get("track", "")
+                if track_id:
+                    track_info = brief.get("tracks", {}).get(track_id, {})
+                    pr_id = gate_to_pr_id.get(track_info.get("current_gate", ""))
+                open_items.append({
+                    "id": tdata["current_task"],
+                    "title": f"{tdata.get('current_task', 'Task')} ({tid})",
+                    "severity": severity, "pr_id": pr_id,
+                })
+        return {
+            "open_count": len(open_items),
+            "summary": {
+                "open_count": len(open_items), "blocker_count": 0,
+                "warn_count": sum(1 for i in open_items if i["severity"] == "warning"),
+                "info_count": sum(1 for i in open_items if i["severity"] == "info"),
+            },
+            "top_blockers": [], "open_items": open_items,
+        }
+
+    def _build_intelligence_section(self) -> dict:
+        """Build the intelligence_daemon section for the dashboard."""
+        return {
+            'status': self.health_status['status'],
+            'last_extraction': self.health_status['last_extraction'],
+            'patterns_available': self.health_status['patterns_available'],
+            'extraction_errors': self.health_status['extraction_errors'],
+            'uptime_seconds': self.health_status['uptime_seconds'],
+            'last_update': datetime.now().isoformat(),
         }
 
     def write_health_status(self):
@@ -913,107 +947,29 @@ class IntelligenceDaemon:
         if not self.dashboard_write_enabled:
             return
         try:
-            # Load current dashboard
             dashboard = {}
             dashboard_source = self._find_state_file("dashboard_status.json")
             if dashboard_source and dashboard_source.exists():
                 with open(dashboard_source, 'r') as f:
                     dashboard = json.load(f)
 
-            # Load t0_brief.json for terminal and track data
             t0_brief_file = self._find_state_file("t0_brief.json")
-
             if t0_brief_file and t0_brief_file.exists():
                 with open(t0_brief_file, 'r') as f:
                     brief = json.load(f)
-
-                # Update terminals from brief
-                terminals = {"T0": {
-                    "status": "active",
-                    "gate": "ORCHESTRATION",
-                    "type": "ORCHESTRATOR",
-                    "ready": True
-                }}
-
-                for tid, tdata in brief.get("terminals", {}).items():
-                    terminals[tid] = {
-                        "status": "active" if tdata.get("status") in ["working", "idle"] else "offline",
-                        "gate": tdata.get("track", ""),
-                        "current_task": tdata.get("current_task", ""),
-                        "ready": tdata.get("ready", False),
-                        "type": "WORKER"
-                    }
-                dashboard["terminals"] = terminals
-
-                # Build PR queue via auto-discovery (persists registry in dashboard)
+                dashboard["terminals"] = self._build_terminals_from_brief(brief)
                 pr_result = self._build_pr_queue(brief, dashboard)
-                # Store registry separately, keep pr_queue clean for dashboard
                 dashboard["_pr_registry"] = pr_result.pop("_pr_registry", {})
                 dashboard["pr_queue"] = pr_result
-
-                # Build open items from terminals with PR correlation
-                open_items = []
-                pr_queue = dashboard["pr_queue"]
-                # Build gate→PR lookup from discovered PRs
-                gate_to_pr_id = {}
-                for pr in pr_queue.get("prs", []):
-                    # Find gate from tracks that match this PR
-                    for track_id, track_data in brief.get("tracks", {}).items():
-                        gate = track_data.get("current_gate", "")
-                        m = self._PR_GATE_RE.match(gate)
-                        if m and f"PR{m.group(1)}" == pr["id"]:
-                            gate_to_pr_id[gate] = pr["id"]
-
-                for tid, tdata in brief.get("terminals", {}).items():
-                    if tdata.get("current_task"):
-                        severity = "warning" if tdata.get("status") == "working" else "info"
-                        # Correlate task with PR via gate matching
-                        pr_id = None
-                        track_id = tdata.get("track", "")
-                        if track_id:
-                            track_info = brief.get("tracks", {}).get(track_id, {})
-                            current_gate = track_info.get("current_gate", "")
-                            pr_id = gate_to_pr_id.get(current_gate)
-
-                        open_items.append({
-                            "id": tdata["current_task"],
-                            "title": f"{tdata.get('current_task', 'Task')} ({tid})",
-                            "severity": severity,
-                            "pr_id": pr_id
-                        })
-
-                dashboard["open_items"] = {
-                    "open_count": len(open_items),
-                    "summary": {
-                        "open_count": len(open_items),
-                        "blocker_count": 0,
-                        "warn_count": sum(1 for item in open_items if item["severity"] == "warning"),
-                        "info_count": sum(1 for item in open_items if item["severity"] == "info")
-                    },
-                    "top_blockers": [],
-                    "open_items": open_items
-                }
-
-                # Copy other fields from brief
+                dashboard["open_items"] = self._build_open_items(brief, dashboard["pr_queue"])
                 dashboard["tracks"] = brief.get("tracks", {})
                 dashboard["recent_receipts"] = brief.get("recent_receipts", [])
                 dashboard["queues"] = brief.get("queues", {})
 
-            # Update intelligence section
-            dashboard['intelligence_daemon'] = {
-                'status': self.health_status['status'],
-                'last_extraction': self.health_status['last_extraction'],
-                'patterns_available': self.health_status['patterns_available'],
-                'extraction_errors': self.health_status['extraction_errors'],
-                'uptime_seconds': self.health_status['uptime_seconds'],
-                'last_update': datetime.now().isoformat()
-            }
-
-            # Write canonical first; mirror legacy only in rollback mode.
+            dashboard['intelligence_daemon'] = self._build_intelligence_section()
             self._write_json_atomic(self.dashboard_file, dashboard)
             if self.rollback_mode and self.legacy_dashboard_file != self.dashboard_file:
                 self._write_json_atomic(self.legacy_dashboard_file, dashboard)
-
             self.health_status['last_health_update'] = datetime.now()
 
         except Exception as e:

@@ -24,11 +24,10 @@ Date: 2026-01-08
 import os
 import sys
 import yaml
-import json
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 # Configuration
 SCRIPT_DIR = Path(__file__).resolve().parent

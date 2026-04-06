@@ -27,7 +27,6 @@ Signal types produced:
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional

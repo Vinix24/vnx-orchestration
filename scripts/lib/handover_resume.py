@@ -24,7 +24,6 @@ Resume invariants:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from result_contract import Result, result_error, result_ok

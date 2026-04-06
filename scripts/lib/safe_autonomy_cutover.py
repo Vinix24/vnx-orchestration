@@ -18,11 +18,8 @@ Governance invariants:
 
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +40,6 @@ from provenance_verification import (
     provenance_audit_view,
     verify_batch,
 )
-from receipt_provenance import CHAIN_STATUS_BROKEN, CHAIN_STATUS_COMPLETE
 from runtime_coordination import _append_event, _now_utc
 from trace_token_validator import EnforcementMode, get_enforcement_mode
 

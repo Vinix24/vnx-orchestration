@@ -37,10 +37,8 @@ Governance:
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -66,7 +64,7 @@ from headless_adapter import (
     load_headless_adapter,
 )
 from inbound_inbox import InboundInbox
-from intelligence_selector import IntelligenceSelector, InjectionResult
+from intelligence_selector import IntelligenceSelector
 from recommendation_tracker import RecommendationTracker
 from runtime_coordination import (
     _append_event,

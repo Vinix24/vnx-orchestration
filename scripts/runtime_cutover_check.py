@@ -26,7 +26,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
-from runtime_core import RuntimeCore, runtime_primary_active
+from runtime_core import RuntimeCore
 
 
 # ---------------------------------------------------------------------------

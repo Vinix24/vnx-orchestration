@@ -26,10 +26,8 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -434,6 +432,58 @@ class HeadlessAdapter:
     # Subprocess execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_binary(binary: str, dispatch_id: str, target_id: str,
+                      target_type: str, attempt_id: str) -> Optional[HeadlessExecutionResult]:
+        """Return a failure result if the CLI binary is not found, else None."""
+        import shutil
+        if shutil.which(binary) is not None:
+            return None
+        from exit_classifier import classify_exit
+        classification = classify_exit(exit_code=None, binary_not_found=True)
+        return HeadlessExecutionResult(
+            success=False, dispatch_id=dispatch_id, target_id=target_id,
+            target_type=target_type, attempt_id=attempt_id,
+            failure_reason=f"CLI binary not found in PATH: {binary!r}",
+            failure_class=classification.failure_class,
+            classification_evidence=_evidence_to_dict(classification),
+        )
+
+    @staticmethod
+    def _execute_cli(cmd: List[str], prompt: str, timeout: int):
+        """Run CLI command and return (stdout, stderr, exit_code, duration, timed_out)."""
+        start = time.monotonic()
+        try:
+            proc = subprocess.run(
+                cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
+            )
+            return proc.stdout or "", proc.stderr or "", proc.returncode, time.monotonic() - start, False
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or "" if hasattr(exc, "stdout") and exc.stdout else ""
+            stderr = exc.stderr or "" if hasattr(exc, "stderr") and exc.stderr else ""
+            return stdout, stderr, None, time.monotonic() - start, True
+        except OSError as exc:
+            return "", str(exc), None, time.monotonic() - start, False
+
+    def _write_artifacts(self, dispatch_id, attempt_id, target_type,
+                         started_at, run_id, stdout, stderr, exit_code,
+                         failure_class, success, duration):
+        """Write log and output artifacts, return (log_path, output_artifact_path)."""
+        from log_artifact import write_log_artifact, write_output_artifact
+        effective_run_id = run_id or f"{dispatch_id}_{attempt_id}"
+        log_path = write_log_artifact(
+            artifact_dir=self._artifact_dir, run_id=effective_run_id,
+            dispatch_id=dispatch_id, target_type=target_type,
+            started_at=started_at or _now_utc(), stdout=stdout, stderr=stderr,
+            exit_code=exit_code,
+            failure_class=failure_class if not success else None,
+            duration_seconds=duration,
+        )
+        output_artifact = write_output_artifact(
+            artifact_dir=self._artifact_dir, run_id=effective_run_id, stdout=stdout,
+        )
+        return str(log_path), str(output_artifact) if output_artifact else None
+
     def _run_subprocess(
         self,
         *,
@@ -448,105 +498,33 @@ class HeadlessAdapter:
         started_at: Optional[str] = None,
     ) -> HeadlessExecutionResult:
         """Spawn CLI subprocess with prompt, capture output, classify exit, write artifacts."""
-        import shutil
         from exit_classifier import classify_exit
-        from log_artifact import write_log_artifact, write_output_artifact
 
-        binary_not_found = shutil.which(binary) is None
-        if binary_not_found:
-            classification = classify_exit(
-                exit_code=None,
-                binary_not_found=True,
-            )
-            return HeadlessExecutionResult(
-                success=False,
-                dispatch_id=dispatch_id,
-                target_id=target_id,
-                target_type=target_type,
-                attempt_id=attempt_id,
-                failure_reason=f"CLI binary not found in PATH: {binary!r}",
-                failure_class=classification.failure_class,
-                classification_evidence=_evidence_to_dict(classification),
-            )
+        not_found = self._check_binary(binary, dispatch_id, target_id, target_type, attempt_id)
+        if not_found:
+            return not_found
 
         timeout = headless_timeout()
         output_file = self._output_dir / f"{dispatch_id}.txt"
-
         cmd = [binary] + list(cli_args)
 
         self._emit_event(
-            "headless_subprocess_start",
-            dispatch_id=dispatch_id,
-            metadata={
-                "target_id": target_id,
-                "target_type": target_type,
-                "attempt_id": attempt_id,
-                "binary": binary,
-                "timeout": timeout,
-            },
+            "headless_subprocess_start", dispatch_id=dispatch_id,
+            metadata={"target_id": target_id, "target_type": target_type,
+                       "attempt_id": attempt_id, "binary": binary, "timeout": timeout},
         )
 
-        start = time.monotonic()
-        timed_out = False
-        stdout = ""
-        stderr = ""
-        exit_code = None
+        stdout, stderr, exit_code, duration, timed_out = self._execute_cli(cmd, prompt, timeout)
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            duration = time.monotonic() - start
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
-            exit_code = proc.returncode
-
-        except subprocess.TimeoutExpired as exc:
-            duration = time.monotonic() - start
-            timed_out = True
-            stdout = exc.stdout or "" if hasattr(exc, "stdout") and exc.stdout else ""
-            stderr = exc.stderr or "" if hasattr(exc, "stderr") and exc.stderr else ""
-
-        except OSError as exc:
-            duration = time.monotonic() - start
-            stderr = str(exc)
-
-        # Classify the exit outcome
         classification = classify_exit(
-            exit_code=exit_code,
-            timed_out=timed_out,
-            stderr=stderr,
-            binary_not_found=False,
+            exit_code=exit_code, timed_out=timed_out, stderr=stderr, binary_not_found=False,
         )
         success = classification.failure_class == "SUCCESS"
-
-        # Write output file (backward compatible)
         output_file.write_text(stdout, encoding="utf-8")
 
-        # Write structured log artifact (Section 5.3)
-        effective_run_id = run_id or f"{dispatch_id}_{attempt_id}"
-        log_path = write_log_artifact(
-            artifact_dir=self._artifact_dir,
-            run_id=effective_run_id,
-            dispatch_id=dispatch_id,
-            target_type=target_type,
-            started_at=started_at or _now_utc(),
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=exit_code,
-            failure_class=classification.failure_class if not success else None,
-            duration_seconds=duration,
-        )
-
-        # Write separate output artifact for structured output
-        output_artifact = write_output_artifact(
-            artifact_dir=self._artifact_dir,
-            run_id=effective_run_id,
-            stdout=stdout,
+        log_path, output_artifact_path = self._write_artifacts(
+            dispatch_id, attempt_id, target_type, started_at, run_id,
+            stdout, stderr, exit_code, classification.failure_class, success, duration,
         )
 
         failure_reason = None
@@ -556,26 +534,72 @@ class HeadlessAdapter:
                 failure_reason += f": {stderr[:500]}"
 
         return HeadlessExecutionResult(
-            success=success,
-            dispatch_id=dispatch_id,
-            target_id=target_id,
-            target_type=target_type,
-            attempt_id=attempt_id,
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            duration_seconds=duration,
-            failure_reason=failure_reason,
-            output_path=str(output_file),
+            success=success, dispatch_id=dispatch_id, target_id=target_id,
+            target_type=target_type, attempt_id=attempt_id, exit_code=exit_code,
+            stdout=stdout, stderr=stderr, duration_seconds=duration,
+            failure_reason=failure_reason, output_path=str(output_file),
             failure_class=classification.failure_class,
             classification_evidence=_evidence_to_dict(classification),
-            log_artifact_path=str(log_path),
-            output_artifact_path=str(output_artifact) if output_artifact else None,
+            log_artifact_path=log_path, output_artifact_path=output_artifact_path,
         )
 
     # ------------------------------------------------------------------
     # Outcome recording
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _record_success(conn, result: HeadlessExecutionResult, attempt_id: str, actor: str) -> None:
+        """Record successful execution outcome in dispatch state and events."""
+        transition_dispatch(
+            conn, dispatch_id=result.dispatch_id, to_state="completed", actor=actor,
+            reason="headless execution completed successfully",
+            metadata={
+                "attempt_id": attempt_id, "exit_code": result.exit_code,
+                "duration_seconds": result.duration_seconds, "output_path": result.output_path,
+                "log_artifact_path": result.log_artifact_path,
+                "output_artifact_path": result.output_artifact_path,
+                "failure_class": result.failure_class, "stdout_chars": len(result.stdout),
+            },
+        )
+        _append_event(
+            conn, event_type="headless_execution_completed", entity_type="dispatch",
+            entity_id=result.dispatch_id, from_state="running", to_state="completed",
+            actor=actor, reason="headless subprocess succeeded",
+            metadata={
+                "target_id": result.target_id, "target_type": result.target_type,
+                "exit_code": result.exit_code, "duration_seconds": result.duration_seconds,
+                "output_path": result.output_path, "log_artifact_path": result.log_artifact_path,
+                "output_artifact_path": result.output_artifact_path,
+                "failure_class": result.failure_class,
+            },
+        )
+
+    @staticmethod
+    def _record_failure(conn, result: HeadlessExecutionResult, attempt_id: str, actor: str) -> None:
+        """Record failed execution outcome in dispatch state and events."""
+        transition_dispatch(
+            conn, dispatch_id=result.dispatch_id, to_state="failed_delivery", actor=actor,
+            reason=result.failure_reason or "headless execution failed",
+            metadata={
+                "attempt_id": attempt_id, "exit_code": result.exit_code,
+                "duration_seconds": result.duration_seconds,
+                "failure_reason": result.failure_reason, "failure_class": result.failure_class,
+                "classification_evidence": result.classification_evidence,
+                "log_artifact_path": result.log_artifact_path,
+            },
+        )
+        _append_event(
+            conn, event_type="headless_execution_failed", entity_type="dispatch",
+            entity_id=result.dispatch_id, from_state="running", to_state="failed_delivery",
+            actor=actor, reason=result.failure_reason,
+            metadata={
+                "target_id": result.target_id, "target_type": result.target_type,
+                "exit_code": result.exit_code, "duration_seconds": result.duration_seconds,
+                "failure_class": result.failure_class,
+                "classification_evidence": result.classification_evidence,
+                "log_artifact_path": result.log_artifact_path,
+            },
+        )
 
     def _record_outcome(
         self,
@@ -591,79 +615,9 @@ class HeadlessAdapter:
         """
         with get_connection(self._state_dir) as conn:
             if result.success:
-                transition_dispatch(
-                    conn,
-                    dispatch_id=result.dispatch_id,
-                    to_state="completed",
-                    actor=actor,
-                    reason="headless execution completed successfully",
-                    metadata={
-                        "attempt_id": attempt_id,
-                        "exit_code": result.exit_code,
-                        "duration_seconds": result.duration_seconds,
-                        "output_path": result.output_path,
-                        "log_artifact_path": result.log_artifact_path,
-                        "output_artifact_path": result.output_artifact_path,
-                        "failure_class": result.failure_class,
-                        "stdout_chars": len(result.stdout),
-                    },
-                )
-                _append_event(
-                    conn,
-                    event_type="headless_execution_completed",
-                    entity_type="dispatch",
-                    entity_id=result.dispatch_id,
-                    from_state="running",
-                    to_state="completed",
-                    actor=actor,
-                    reason="headless subprocess succeeded",
-                    metadata={
-                        "target_id": result.target_id,
-                        "target_type": result.target_type,
-                        "exit_code": result.exit_code,
-                        "duration_seconds": result.duration_seconds,
-                        "output_path": result.output_path,
-                        "log_artifact_path": result.log_artifact_path,
-                        "output_artifact_path": result.output_artifact_path,
-                        "failure_class": result.failure_class,
-                    },
-                )
+                self._record_success(conn, result, attempt_id, actor)
             else:
-                transition_dispatch(
-                    conn,
-                    dispatch_id=result.dispatch_id,
-                    to_state="failed_delivery",
-                    actor=actor,
-                    reason=result.failure_reason or "headless execution failed",
-                    metadata={
-                        "attempt_id": attempt_id,
-                        "exit_code": result.exit_code,
-                        "duration_seconds": result.duration_seconds,
-                        "failure_reason": result.failure_reason,
-                        "failure_class": result.failure_class,
-                        "classification_evidence": result.classification_evidence,
-                        "log_artifact_path": result.log_artifact_path,
-                    },
-                )
-                _append_event(
-                    conn,
-                    event_type="headless_execution_failed",
-                    entity_type="dispatch",
-                    entity_id=result.dispatch_id,
-                    from_state="running",
-                    to_state="failed_delivery",
-                    actor=actor,
-                    reason=result.failure_reason,
-                    metadata={
-                        "target_id": result.target_id,
-                        "target_type": result.target_type,
-                        "exit_code": result.exit_code,
-                        "duration_seconds": result.duration_seconds,
-                        "failure_class": result.failure_class,
-                        "classification_evidence": result.classification_evidence,
-                        "log_artifact_path": result.log_artifact_path,
-                    },
-                )
+                self._record_failure(conn, result, attempt_id, actor)
             conn.commit()
 
     # ------------------------------------------------------------------

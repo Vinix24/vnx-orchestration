@@ -65,11 +65,8 @@ class GateRunner:
 
         requested -> executing -> completed|failed
         """
-        timeout = gate_timeout(gate)
-        stall_threshold = gate_stall_threshold(gate)
         binary = GATE_BINARIES.get(gate)
-        routing = os.environ.get("VNX_GEMINI_ROUTING", "oauth")
-        using_vertex = gate == "gemini_review" and routing == "vertex"
+        using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
 
         if not using_vertex:
             if not binary or shutil.which(binary) is None:
@@ -83,43 +80,61 @@ class GateRunner:
                     state_dir=self._state_dir,
                 )
 
+        prompt = self._resolve_prompt(gate, request_payload, using_vertex)
+        if prompt and "prompt" not in request_payload:
+            request_payload["prompt"] = prompt
+
+        self._mark_executing(gate, request_payload, pr_number=pr_number, pr_id=pr_id)
+
+        if using_vertex:
+            return self._run_vertex_path(
+                gate=gate, pr_number=pr_number, pr_id=pr_id,
+                prompt=prompt, request_payload=request_payload, pid=os.getpid(),
+            )
+
+        return self._run_subprocess_path(
+            gate=gate, binary=binary, prompt=prompt,
+            pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+        )
+
+    def _resolve_prompt(
+        self, gate: str, request_payload: Dict[str, Any], using_vertex: bool,
+    ) -> str:
+        """Build or enrich the prompt for the given gate type."""
         prompt = request_payload.get("prompt", "")
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-
-        # Vertex AI path: always append inline file contents even when a contract
-        # prompt is pre-provided. Contract text is preserved; file content appended.
         if using_vertex and gate == "gemini_review" and prompt:
             file_contents = _vtx.collect_file_contents(
-                request_payload, subprocess_run=subprocess.run
+                request_payload, subprocess_run=subprocess.run,
             )
             if file_contents:
                 prompt = prompt + "\n\n" + file_contents
+        return prompt
 
-        if prompt and "prompt" not in request_payload:
-            request_payload["prompt"] = prompt
-
-        # GATE-3: Mark as executing
-        pid = os.getpid()
+    def _mark_executing(
+        self, gate: str, request_payload: Dict[str, Any], *,
+        pr_number: Optional[int], pr_id: str,
+    ) -> None:
+        """GATE-3: Mark request as executing and persist to disk."""
         request_payload["status"] = "executing"
         request_payload["started_at"] = utc_now_iso()
-        request_payload["runner_pid"] = pid
+        request_payload["runner_pid"] = os.getpid()
         _rec.persist_request(
             self._requests_dir, gate, request_payload,
             pr_number=pr_number, pr_id=pr_id,
         )
 
-        if using_vertex:
-            return self._run_vertex_path(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                prompt=prompt, request_payload=request_payload, pid=pid,
-            )
-
+    def _run_subprocess_path(
+        self, *, gate: str, binary: str, prompt: str,
+        pr_number: Optional[int], pr_id: str, request_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute gate via subprocess with stall detection, then record result."""
         result = self._run_with_stall_detection(
             gate=gate, binary=binary, prompt=prompt,
-            timeout=timeout, stall_threshold=stall_threshold,
+            timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
             request_payload=request_payload,
         )
         if result["status"] == "failed":

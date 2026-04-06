@@ -25,10 +25,9 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, List, Optional
 
 from incident_taxonomy import (
     RECOVERY_CONTRACTS,

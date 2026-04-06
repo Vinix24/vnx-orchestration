@@ -11,7 +11,7 @@ Validates FEATURE_PLAN.md documents for:
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Set
 
 try:
     import yaml as _yaml

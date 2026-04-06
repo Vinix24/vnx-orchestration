@@ -26,7 +26,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime

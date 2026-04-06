@@ -101,17 +101,5 @@ vnx_stop_listening_port_processes() {
   return "$stopped"
 }
 
-vnx_any_running_by_fingerprint() {
-  local fingerprint="$1"
-  local pid
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    if kill -0 "$pid" 2>/dev/null && vnx_proc_matches_fingerprint "$pid" "$fingerprint"; then
-      return 0
-    fi
-  done < <(vnx_proc_find_pids_by_fingerprint "$fingerprint")
-  return 1
-}
-
 eval "$__VNX_OPS_PROC_SHELLOPTS"
 unset __VNX_OPS_PROC_SHELLOPTS

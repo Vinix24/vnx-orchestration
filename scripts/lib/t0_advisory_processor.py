@@ -6,11 +6,8 @@ Processes completion receipts with quality advisories and makes dispatch decisio
 
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -208,92 +205,3 @@ def process_completion_receipt(receipt: Dict[str, Any]) -> ProcessedReceipt:
     )
 
 
-def read_receipts_from_file(receipts_file: Path) -> List[Dict[str, Any]]:
-    """Read receipts from NDJSON file.
-
-    Args:
-        receipts_file: Path to receipts NDJSON file
-
-    Returns:
-        List of receipt payloads
-    """
-    receipts = []
-
-    if not receipts_file.exists():
-        return receipts
-
-    try:
-        with open(receipts_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    receipt = json.loads(line)
-                    receipts.append(receipt)
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-
-    return receipts
-
-
-def filter_completion_receipts(
-    receipts: List[Dict[str, Any]],
-    with_advisory: bool = False,
-) -> List[ProcessedReceipt]:
-    """Filter and process completion receipts.
-
-    Args:
-        receipts: List of raw receipts
-        with_advisory: If True, only return receipts with quality advisory
-
-    Returns:
-        List of processed completion receipts
-    """
-    processed = []
-
-    for receipt in receipts:
-        proc = process_completion_receipt(receipt)
-
-        if not proc.is_completion:
-            continue
-
-        if with_advisory and not proc.has_advisory:
-            continue
-
-        processed.append(proc)
-
-    return processed
-
-
-def get_decision_statistics(processed_receipts: List[ProcessedReceipt]) -> Dict[str, int]:
-    """Get statistics on T0 decisions.
-
-    Args:
-        processed_receipts: List of processed receipts
-
-    Returns:
-        Dictionary with decision counts
-    """
-    stats = {
-        "total": len(processed_receipts),
-        "approve": 0,
-        "approve_with_followup": 0,
-        "hold": 0,
-        "unavailable": 0,
-    }
-
-    for proc in processed_receipts:
-        if not proc.advisory:
-            continue
-
-        if proc.advisory.status == "unavailable":
-            stats["unavailable"] += 1
-        else:
-            decision = proc.advisory.recommendation.decision
-            if decision in stats:
-                stats[decision] += 1
-
-    return stats

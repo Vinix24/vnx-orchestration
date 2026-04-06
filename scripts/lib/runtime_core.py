@@ -34,8 +34,8 @@ from typing import Any, Dict, List, Optional
 from dispatch_broker import BrokerError, DispatchBroker, load_broker
 from lease_manager import LeaseManager
 from runtime_coordination import DuplicateTransitionError, InvalidTransitionError, init_schema, get_connection, release_all_leases
-from failure_classifier import classify_failure, FailureClassification
-from runtime_state_reconciler import ZOMBIE_LEASE, GHOST_DISPATCH, RuntimeStateReconciler
+from failure_classifier import classify_failure
+from runtime_state_reconciler import ZOMBIE_LEASE, RuntimeStateReconciler
 from tmux_adapter import TmuxAdapter, load_adapter
 
 _RUNTIME_PRIMARY_FLAG = "VNX_RUNTIME_PRIMARY"
@@ -288,6 +288,28 @@ class RuntimeCore:
     # Terminal lease management (lease_manager)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _detect_zombie_lease(state_dir, terminal_id: str, lease) -> Optional[Dict[str, Any]]:
+        """Detect zombie lease and return result dict if found, else None."""
+        reconciler = RuntimeStateReconciler(state_dir)
+        mismatches = reconciler.reconcile_for_terminal(terminal_id)
+        zombie = next((m for m in mismatches if m.mismatch_type == ZOMBIE_LEASE), None)
+        if zombie is None:
+            return None
+        classification = classify_failure(
+            f"runtime_state_divergence:zombie_lease:{zombie.dispatch_state}"
+        )
+        return {
+            "available": False, "terminal_id": terminal_id,
+            "reason": f"zombie_lease:{lease.dispatch_id}:dispatch_state={zombie.dispatch_state}",
+            "lease_state": lease.state, "dispatch_state": zombie.dispatch_state,
+            "mismatch": ZOMBIE_LEASE, "mismatch_message": zombie.message,
+            "claimed_by": lease.dispatch_id,
+            "failure_class": classification.failure_class,
+            "retryable": classification.retryable,
+            "operator_summary": classification.operator_summary,
+        }
+
     def check_terminal(
         self,
         terminal_id: str,
@@ -312,55 +334,21 @@ class RuntimeCore:
                 return {"available": True, "terminal_id": terminal_id, "reason": "same_dispatch"}
             if self._lease_mgr.is_expired_by_ttl(terminal_id):
                 return {
-                    "available": False,
-                    "terminal_id": terminal_id,
+                    "available": False, "terminal_id": terminal_id,
                     "reason": f"lease_expired_not_cleaned:{lease.dispatch_id}",
                 }
 
-            # PR-2: Detect zombie lease — lease is held but the linked dispatch
-            # has already ended (failed, completed, expired, etc.).  Report the
-            # mismatch explicitly so operators can see the divergence and the
-            # dispatcher can take explicit corrective action rather than being
-            # blocked indefinitely by a lease that should have been released.
-            reconciler = RuntimeStateReconciler(self._lease_mgr.state_dir)
-            mismatches = reconciler.reconcile_for_terminal(terminal_id)
-            zombie = next(
-                (m for m in mismatches if m.mismatch_type == ZOMBIE_LEASE),
-                None,
-            )
-            if zombie:
-                classification = classify_failure(
-                    f"runtime_state_divergence:zombie_lease:{zombie.dispatch_state}"
-                )
-                return {
-                    "available": False,
-                    "terminal_id": terminal_id,
-                    "reason": (
-                        f"zombie_lease:{lease.dispatch_id}:"
-                        f"dispatch_state={zombie.dispatch_state}"
-                    ),
-                    "lease_state": lease.state,
-                    "dispatch_state": zombie.dispatch_state,
-                    "mismatch": ZOMBIE_LEASE,
-                    "mismatch_message": zombie.message,
-                    "claimed_by": lease.dispatch_id,
-                    "failure_class": classification.failure_class,
-                    "retryable": classification.retryable,
-                    "operator_summary": classification.operator_summary,
-                }
+            zombie_result = self._detect_zombie_lease(self._lease_mgr.state_dir, terminal_id, lease)
+            if zombie_result:
+                return zombie_result
 
             return {
-                "available": False,
-                "terminal_id": terminal_id,
-                "reason": f"leased:{lease.dispatch_id}",
-                "claimed_by": lease.dispatch_id,
+                "available": False, "terminal_id": terminal_id,
+                "reason": f"leased:{lease.dispatch_id}", "claimed_by": lease.dispatch_id,
             }
         except Exception as exc:
-            # Fail-closed: DB unavailable means runtime state is ambiguous.
-            # Block dispatch rather than fall through — ambiguity must not permit delivery.
             return {
-                "available": False,
-                "terminal_id": terminal_id,
+                "available": False, "terminal_id": terminal_id,
                 "reason": f"check_error_fail_closed:{exc}",
             }
 
@@ -505,6 +493,70 @@ class RuntimeCore:
     # Compatibility check
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _check_db(state_path: Path) -> Dict[str, Any]:
+        """Validate DB connectivity."""
+        try:
+            init_schema(state_path)
+            return {"ok": True}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _check_broker(state_path: Path, dispatch_path: Path) -> Dict[str, Any]:
+        """Validate broker availability."""
+        try:
+            broker = load_broker(state_path, dispatch_path)
+            return {
+                "ok": broker is not None,
+                "shadow_mode": broker.shadow_mode if broker else None,
+                "reason": "disabled (VNX_BROKER_ENABLED=0)" if broker is None else "ok",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _check_lease_manager(state_path: Path) -> Dict[str, Any]:
+        """Validate lease manager connectivity."""
+        try:
+            mgr = LeaseManager(state_path)
+            leases = mgr.list_all()
+            return {"ok": True, "lease_count": len(leases)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _check_adapter(state_path: Path) -> Dict[str, Any]:
+        """Validate tmux adapter availability."""
+        try:
+            adapter = load_adapter(state_path)
+            return {
+                "ok": True,
+                "primary_path": adapter.primary_path if adapter else None,
+                "reason": "disabled (VNX_TMUX_ADAPTER_ENABLED=0)" if adapter is None else "ok",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _check_receipt_linkage(state_path: Path) -> Dict[str, Any]:
+        """Validate dispatch_id flows through receipts."""
+        try:
+            receipts_path = state_path / "t0_receipts.ndjson"
+            if not receipts_path.exists():
+                return {"ok": True, "reason": "receipts_file_not_found"}
+            lines = [l.strip() for l in receipts_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+            if not lines:
+                return {"ok": True, "reason": "no_receipts_yet"}
+            last = json.loads(lines[-1])
+            has_dispatch_id = (
+                "dispatch_id" in last or "dispatch-id" in last
+                or "dispatch_id" in last.get("metadata", {})
+            )
+            return {"ok": True, "has_dispatch_id": has_dispatch_id, "receipt_count": len(lines)}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     @classmethod
     def check_compatibility(
         cls,
@@ -516,84 +568,22 @@ class RuntimeCore:
         Returns a dict with 'compatible' (bool) and per-component results.
         Used by runtime_cutover_check.py before cutover promotion.
         """
-        results: Dict[str, Dict[str, Any]] = {}
         state_path = Path(state_dir)
         dispatch_path = Path(dispatch_dir)
 
-        # DB connectivity
-        try:
-            init_schema(state_path)
-            results["db"] = {"ok": True}
-        except Exception as exc:
-            results["db"] = {"ok": False, "error": str(exc)}
-
-        # Broker
-        try:
-            broker = load_broker(state_path, dispatch_path)
-            results["broker"] = {
-                "ok": broker is not None,
-                "shadow_mode": broker.shadow_mode if broker else None,
-                "reason": "disabled (VNX_BROKER_ENABLED=0)" if broker is None else "ok",
-            }
-        except Exception as exc:
-            results["broker"] = {"ok": False, "error": str(exc)}
-
-        # Lease manager
-        try:
-            mgr = LeaseManager(state_path)
-            leases = mgr.list_all()
-            results["lease_manager"] = {"ok": True, "lease_count": len(leases)}
-        except Exception as exc:
-            results["lease_manager"] = {"ok": False, "error": str(exc)}
-
-        # Adapter
-        try:
-            adapter = load_adapter(state_path)
-            results["adapter"] = {
+        results = {
+            "db": cls._check_db(state_path),
+            "broker": cls._check_broker(state_path, dispatch_path),
+            "lease_manager": cls._check_lease_manager(state_path),
+            "adapter": cls._check_adapter(state_path),
+            "receipt_linkage": cls._check_receipt_linkage(state_path),
+            "t0_authority": {
                 "ok": True,
-                "primary_path": adapter.primary_path if adapter else None,
-                "reason": "disabled (VNX_TMUX_ADAPTER_ENABLED=0)" if adapter is None else "ok",
-            }
-        except Exception as exc:
-            results["adapter"] = {"ok": False, "error": str(exc)}
-
-        # Receipt linkage: verify dispatch_id flows through receipts
-        try:
-            receipts_path = state_path / "t0_receipts.ndjson"
-            if receipts_path.exists():
-                lines = [
-                    line.strip()
-                    for line in receipts_path.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                ]
-                if lines:
-                    last = json.loads(lines[-1])
-                    has_dispatch_id = (
-                        "dispatch_id" in last
-                        or "dispatch-id" in last
-                        or "dispatch_id" in last.get("metadata", {})
-                    )
-                    results["receipt_linkage"] = {
-                        "ok": True,
-                        "has_dispatch_id": has_dispatch_id,
-                        "receipt_count": len(lines),
-                    }
-                else:
-                    results["receipt_linkage"] = {"ok": True, "reason": "no_receipts_yet"}
-            else:
-                results["receipt_linkage"] = {"ok": True, "reason": "receipts_file_not_found"}
-        except Exception as exc:
-            results["receipt_linkage"] = {"ok": False, "error": str(exc)}
-
-        # Governance: T0 completion authority preserved
-        # The broker advances state to 'accepted' on delivery success,
-        # but 'completed' requires a receipt + T0 review. This is by design.
-        results["t0_authority"] = {
-            "ok": True,
-            "note": (
-                "broker tracks delivery state (queued→accepted), "
-                "completion authority (→completed) remains with receipt-processor + T0"
-            ),
+                "note": (
+                    "broker tracks delivery state (queued->accepted), "
+                    "completion authority (->completed) remains with receipt-processor + T0"
+                ),
+            },
         }
 
         all_ok = all(v.get("ok", False) for v in results.values())
@@ -603,9 +593,7 @@ class RuntimeCore:
             "flags": {
                 "VNX_RUNTIME_PRIMARY": os.environ.get("VNX_RUNTIME_PRIMARY", "1"),
                 "VNX_BROKER_SHADOW": os.environ.get("VNX_BROKER_SHADOW", "0"),
-                "VNX_CANONICAL_LEASE_ACTIVE": os.environ.get(
-                    "VNX_CANONICAL_LEASE_ACTIVE", "1"
-                ),
+                "VNX_CANONICAL_LEASE_ACTIVE": os.environ.get("VNX_CANONICAL_LEASE_ACTIVE", "1"),
                 "VNX_TMUX_ADAPTER_ENABLED": os.environ.get("VNX_TMUX_ADAPTER_ENABLED", "1"),
                 "VNX_ADAPTER_PRIMARY": os.environ.get("VNX_ADAPTER_PRIMARY", "1"),
             },

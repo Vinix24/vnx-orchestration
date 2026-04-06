@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import tempfile
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,7 +37,6 @@ from dispatch_router import (
     HEADLESS_ELIGIBLE_TASK_CLASSES,
     headless_routing_enabled,
 )
-from headless_adapter import HeadlessAdapter, HEADLESS_ELIGIBLE_TASK_CLASSES as HA_ELIGIBLE
 from inbound_inbox import InboundInbox
 from intelligence_selector import (
     IntelligenceSelector,

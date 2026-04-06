@@ -117,60 +117,123 @@ mode_pre_check() {
     return 0
 }
 
+# _force_normal_mode: cycle Tab/Shift+Tab to reset Claude Code to normal mode.
+# Params: target_pane
+_force_normal_mode() {
+    local target_pane="$1"
+    log "V8 MODE_CONTROL: Forcing normal mode first (safety reset)..."
+    # Cycle through modes to ensure we're in normal mode.
+    # Do NOT use C-c — it can kill the CLI process.
+    if ! tmux_send_best_effort "$target_pane" Tab; then log "V8 MODE_CONTROL: best-effort Tab reset failed (continuing)"; fi
+    sleep 0.5
+    if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then log "V8 MODE_CONTROL: best-effort Shift+Tab reset failed (continuing)"; fi
+    sleep 0.5
+    if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then log "V8 MODE_CONTROL: best-effort Shift+Tab cycle failed (continuing)"; fi
+    sleep 0.5
+    if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then log "V8 MODE_CONTROL: best-effort Shift+Tab normalization failed (continuing)"; fi
+    sleep 1
+}
+
+# _clear_terminal_context: send context reset command and verify prompt readiness.
+# Params: target_pane provider
+_clear_terminal_context() {
+    local target_pane="$1" provider="$2"
+
+    local reset_cmd
+    reset_cmd=$(get_context_reset_command "$provider")
+    log "V8 MODE_CONTROL: Clearing context via $reset_cmd ..."
+    # C-u safely clears readline buffer (C-c would kill CLI process)
+    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+    sleep 0.3
+    if ! tmux_send_best_effort "$target_pane" -l "$reset_cmd"; then
+        log_structured_failure "context_reset_failed" "Failed to send context reset command" "pane=$target_pane provider=$provider"
+        return 1
+    fi
+    sleep 1
+    if ! tmux_send_best_effort "$target_pane" Enter; then
+        log_structured_failure "context_reset_submit_failed" "Failed to submit context reset command" "pane=$target_pane provider=$provider"
+        return 1
+    fi
+    case "$provider" in
+        gemini_cli|gemini) sleep 6 ;;
+        codex_cli|codex)   sleep 4 ;;
+        *)                 sleep 3 ;;
+    esac
+    local pane_content
+    pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+    if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
+        log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
+        tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
+        sleep 2
+        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+    fi
+    if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
+        log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
+        sleep 2
+    fi
+}
+
 # reset_terminal_context: force_normal step + clear_context step.
 # Params: target_pane force_normal clear_context provider
 reset_terminal_context() {
     local target_pane="$1" force_normal="$2" clear_context="$3" provider="$4"
 
     if [[ "$force_normal" == "true" && "$provider" == "claude_code" ]]; then
-        log "V8 MODE_CONTROL: Forcing normal mode first (safety reset)..."
-        # Cycle through modes to ensure we're in normal mode.
-        # Do NOT use C-c — it can kill the CLI process.
-        if ! tmux_send_best_effort "$target_pane" Tab; then log "V8 MODE_CONTROL: best-effort Tab reset failed (continuing)"; fi
-        sleep 0.5
-        if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then log "V8 MODE_CONTROL: best-effort Shift+Tab reset failed (continuing)"; fi
-        sleep 0.5
-        if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then log "V8 MODE_CONTROL: best-effort Shift+Tab cycle failed (continuing)"; fi
-        sleep 0.5
-        if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then log "V8 MODE_CONTROL: best-effort Shift+Tab normalization failed (continuing)"; fi
-        sleep 1
+        _force_normal_mode "$target_pane"
     fi
 
     if [[ "$clear_context" == "true" ]]; then
-        local reset_cmd
-        reset_cmd=$(get_context_reset_command "$provider")
-        log "V8 MODE_CONTROL: Clearing context via $reset_cmd ..."
-        # C-u safely clears readline buffer (C-c would kill CLI process)
-        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-        sleep 0.3
-        if ! tmux_send_best_effort "$target_pane" -l "$reset_cmd"; then
-            log_structured_failure "context_reset_failed" "Failed to send context reset command" "pane=$target_pane provider=$provider"
-            return 1
-        fi
-        sleep 1
-        if ! tmux_send_best_effort "$target_pane" Enter; then
-            log_structured_failure "context_reset_submit_failed" "Failed to submit context reset command" "pane=$target_pane provider=$provider"
-            return 1
-        fi
-        case "$provider" in
-            gemini_cli|gemini) sleep 6 ;;
-            codex_cli|codex)   sleep 4 ;;
-            *)                 sleep 3 ;;
-        esac
-        local pane_content
-        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-        if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
-            log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
-            tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
-            sleep 2
-            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-        fi
-        if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
-            log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
-            sleep 2
-        fi
+        _clear_terminal_context "$target_pane" "$provider" || return 1
     fi
     return 0
+}
+
+# _stm_send_switch_command — send /model command via tmux and verify.
+# Params: target_pane model_cmd requires_model requires_model_strength terminal_id dispatch_basename
+_stm_send_switch_command() {
+    local target_pane="$1" model_cmd="$2" requires_model="$3"
+    local requires_model_strength="$4" terminal_id="$5" dispatch_basename="$6"
+
+    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+    sleep 0.3
+
+    local switch_send_ok=true
+    if ! tmux_send_best_effort "$target_pane" -l "/model $model_cmd"; then switch_send_ok=false; fi
+    if [[ "$switch_send_ok" == "true" ]]; then
+        sleep 1
+        if ! tmux_send_best_effort "$target_pane" Enter; then switch_send_ok=false; fi
+    fi
+
+    if [[ "$switch_send_ok" == "false" ]]; then
+        local fail_event
+        if ! fail_event=$(vnx_emit_model_switch_result \
+                "$requires_model" "failed" "" "$requires_model_strength" \
+                "$terminal_id" "$dispatch_basename"); then
+            log "V8 MODEL_ROUTING: $fail_event"
+            log_structured_failure "model_switch_blocked" \
+                "Dispatch blocked — required model switch command could not be sent" \
+                "requested_model=$requires_model terminal=$terminal_id"
+            return 1
+        fi
+        log "V8 MODEL_ROUTING: $fail_event"
+        return 0
+    fi
+
+    sleep 4  # Critical delay for model switch to complete
+    local pane_content switch_result
+    pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
+    switch_result=$(vnx_verify_model_switch_output "$pane_content" "$model_cmd")
+    local result_event
+    if ! result_event=$(vnx_emit_model_switch_result \
+            "$requires_model" "$switch_result" "" "$requires_model_strength" \
+            "$terminal_id" "$dispatch_basename"); then
+        log "V8 MODEL_ROUTING: $result_event"
+        log_structured_failure "model_switch_blocked" \
+            "Dispatch blocked — required model switch could not be verified" \
+            "requested_model=$requires_model switch_result=$switch_result terminal=$terminal_id"
+        return 1
+    fi
+    log "V8 MODEL_ROUTING: $result_event"
 }
 
 # switch_terminal_model: model routing decision, normalization, send switch command, verify.
@@ -197,52 +260,70 @@ switch_terminal_model() {
 
     if [[ "$model_pre_result" == "needs_switch" ]]; then
         local model_cmd="$requires_model"
-        # Normalize: "opus" → "default" selects Opus 4.6 1M context (not 200K)
+        # Normalize: "opus" -> "default" selects Opus 4.6 1M context (not 200K)
         [[ "$model_cmd" == "opus" ]] && model_cmd="default"
-
         log "V8 MODEL_ROUTING: Switching to model: $model_cmd (raw=$requires_model provider=$provider)"
-        # C-u only — C-c would kill CLI process
-        tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-        sleep 0.3
-
-        local switch_send_ok=true
-        if ! tmux_send_best_effort "$target_pane" -l "/model $model_cmd"; then switch_send_ok=false; fi
-        if [[ "$switch_send_ok" == "true" ]]; then
-            sleep 1
-            if ! tmux_send_best_effort "$target_pane" Enter; then switch_send_ok=false; fi
-        fi
-
-        if [[ "$switch_send_ok" == "false" ]]; then
-            local fail_event
-            if ! fail_event=$(vnx_emit_model_switch_result \
-                    "$requires_model" "failed" "" "$requires_model_strength" \
-                    "$terminal_id" "$(basename "$dispatch_file")"); then
-                log "V8 MODEL_ROUTING: $fail_event"
-                log_structured_failure "model_switch_blocked" \
-                    "Dispatch blocked — required model switch command could not be sent" \
-                    "requested_model=$requires_model terminal=$terminal_id"
-                return 1
-            fi
-            log "V8 MODEL_ROUTING: $fail_event"
-        else
-            sleep 4  # Critical delay for model switch to complete
-            local pane_content switch_result
-            pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-            switch_result=$(vnx_verify_model_switch_output "$pane_content" "$model_cmd")
-            local result_event
-            if ! result_event=$(vnx_emit_model_switch_result \
-                    "$requires_model" "$switch_result" "" "$requires_model_strength" \
-                    "$terminal_id" "$(basename "$dispatch_file")"); then
-                log "V8 MODEL_ROUTING: $result_event"
-                log_structured_failure "model_switch_blocked" \
-                    "Dispatch blocked — required model switch could not be verified" \
-                    "requested_model=$requires_model switch_result=$switch_result terminal=$terminal_id"
-                return 1
-            fi
-            log "V8 MODEL_ROUTING: $result_event"
-        fi
+        _stm_send_switch_command "$target_pane" "$model_cmd" "$requires_model" \
+            "$requires_model_strength" "$terminal_id" "$(basename "$dispatch_file")" || return 1
     fi
     return 0
+}
+
+# _activate_non_claude_mode: handle mode activation for non-Claude-Code providers.
+# Params: target_pane mode provider
+_activate_non_claude_mode() {
+    local target_pane="$1" mode="$2" provider="$3"
+
+    if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
+        if [[ "$mode" == "planning" ]]; then
+            log "V8 MODE_CONTROL: Codex planning mode via /plan"
+            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+            sleep 0.3
+            if ! tmux_send_best_effort "$target_pane" -l "/plan"; then
+                log_structured_failure "plan_mode_activation_failed" "Failed to send /plan command" "pane=$target_pane provider=$provider"; return 1
+            fi
+            sleep 1
+            if ! tmux_send_best_effort "$target_pane" Enter; then
+                log_structured_failure "plan_mode_submit_failed" "Failed to submit /plan command" "pane=$target_pane provider=$provider"; return 1
+            fi
+            sleep 2
+        else
+            log "V8 MODE_CONTROL: Codex - skipping unsupported mode: $mode"
+        fi
+    elif [[ "$provider" == "gemini_cli" || "$provider" == "gemini" ]]; then
+        log "V8 MODE_CONTROL: Gemini - no mode toggles available (mode=$mode skipped)"
+    else
+        log "V8 MODE_CONTROL: Unknown provider '$provider' - skipping mode: $mode"
+    fi
+}
+
+# _activate_claude_planning: switch to Opus and toggle plan mode for Claude Code.
+# Params: target_pane
+_activate_claude_planning() {
+    local target_pane="$1"
+
+    log "V8 MODE_CONTROL: Activating PLANNING mode with Opus model..."
+    log "V8: Switching to Opus model for planning mode"
+    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
+    sleep 0.3
+    if ! tmux_send_best_effort "$target_pane" -l "/model opus"; then
+        log_structured_failure "planning_model_switch_failed" "Failed to switch to Opus for planning mode" "pane=$target_pane"; return 1
+    fi
+    sleep 1
+    if ! tmux_send_best_effort "$target_pane" Enter; then
+        log_structured_failure "planning_model_submit_failed" "Failed to submit Opus switch for planning mode" "pane=$target_pane"; return 1
+    fi
+    sleep 4
+    log "V8 MODE_CONTROL: Activating PLAN mode..."
+    if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
+        log_structured_failure "planning_mode_toggle_failed" "Failed first Shift+Tab for planning mode" "pane=$target_pane"; return 1
+    fi
+    sleep 0.5
+    if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
+        log_structured_failure "planning_mode_toggle_failed" "Failed second Shift+Tab for planning mode" "pane=$target_pane"; return 1
+    fi
+    sleep 2
+    log "V8 MODE_CONTROL: Plan mode activated"
 }
 
 # activate_terminal_mode: provider-specific mode handling (planning/thinking/normal).
@@ -251,63 +332,20 @@ activate_terminal_mode() {
     local target_pane="$1" mode="$2" provider="$3"
 
     if [[ "$provider" != "claude_code" ]]; then
-        if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-            if [[ "$mode" == "planning" ]]; then
-                log "V8 MODE_CONTROL: Codex planning mode via /plan"
-                tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-                sleep 0.3
-                if ! tmux_send_best_effort "$target_pane" -l "/plan"; then
-                    log_structured_failure "plan_mode_activation_failed" "Failed to send /plan command" "pane=$target_pane provider=$provider"; return 1
-                fi
-                sleep 1
-                if ! tmux_send_best_effort "$target_pane" Enter; then
-                    log_structured_failure "plan_mode_submit_failed" "Failed to submit /plan command" "pane=$target_pane provider=$provider"; return 1
-                fi
-                sleep 2
-            else
-                log "V8 MODE_CONTROL: Codex - skipping unsupported mode: $mode"
-            fi
-        elif [[ "$provider" == "gemini_cli" || "$provider" == "gemini" ]]; then
-            log "V8 MODE_CONTROL: Gemini - no mode toggles available (mode=$mode skipped)"
-        else
-            log "V8 MODE_CONTROL: Unknown provider '$provider' - skipping mode: $mode"
-        fi
+        _activate_non_claude_mode "$target_pane" "$mode" "$provider" || return 1
         log "V8 MODE_CONTROL: Configuration complete"
         return 0
     fi
 
     case "$mode" in
-        planning)
-            log "V8 MODE_CONTROL: Activating PLANNING mode with Opus model..."
-            log "V8: Switching to Opus model for planning mode"
-            tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-            sleep 0.3
-            if ! tmux_send_best_effort "$target_pane" -l "/model opus"; then
-                log_structured_failure "planning_model_switch_failed" "Failed to switch to Opus for planning mode" "pane=$target_pane"; return 1
-            fi
-            sleep 1
-            if ! tmux_send_best_effort "$target_pane" Enter; then
-                log_structured_failure "planning_model_submit_failed" "Failed to submit Opus switch for planning mode" "pane=$target_pane"; return 1
-            fi
-            sleep 4
-            log "V8 MODE_CONTROL: Activating PLAN mode (⏸)..."
-            if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-                log_structured_failure "planning_mode_toggle_failed" "Failed first Shift+Tab for planning mode" "pane=$target_pane"; return 1
-            fi
-            sleep 0.5
-            if ! tmux_send_best_effort "$target_pane" -l $'\e[Z'; then
-                log_structured_failure "planning_mode_toggle_failed" "Failed second Shift+Tab for planning mode" "pane=$target_pane"; return 1
-            fi
-            sleep 2
-            log "V8 MODE_CONTROL: Plan mode activated - look for ⏸ indicator"
-            ;;
+        planning) _activate_claude_planning "$target_pane" || return 1 ;;
         thinking)
-            log "V8 MODE_CONTROL: Activating THINKING mode (✽)..."
+            log "V8 MODE_CONTROL: Activating THINKING mode..."
             if ! tmux_send_best_effort "$target_pane" Tab; then
                 log_structured_failure "thinking_mode_toggle_failed" "Failed Tab toggle for thinking mode" "pane=$target_pane"; return 1
             fi
             sleep 2
-            log "V8 MODE_CONTROL: Thinking mode activated - look for ✽ indicator"
+            log "V8 MODE_CONTROL: Thinking mode activated"
             ;;
         none|normal) log "V8 MODE_CONTROL: Staying in NORMAL mode" ;;
         *) log "V8 MODE_CONTROL: Unknown mode: $mode (ignoring)" ;;
@@ -328,16 +366,13 @@ configure_terminal_mode() {
     return 0
 }
 
-# deliver_dispatch_to_terminal — input-mode guard, worktree path resolution, tmux delivery.
-# Params: dispatch_file track agent_role dispatch_id target_pane terminal_id
-#         provider complete_prompt skill_command
-# Reads globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID
-deliver_dispatch_to_terminal() {
-    local dispatch_file="$1" track="$2" agent_role="$3" dispatch_id="$4"
-    local target_pane="$5" terminal_id="$6" provider="$7"
-    local complete_prompt="$8" skill_command="$9"
+# _ddt_pre_delivery_checks — input-mode guard and worktree resolution.
+# Modifies complete_prompt (nameref) with worktree prefix if needed.
+# Returns 1 if input mode is blocked (releases lease+claim).
+_ddt_pre_delivery_checks() {
+    local target_pane="$1" terminal_id="$2" dispatch_id="$3" provider="$4"
+    local -n _prompt_ref="$5"
 
-    # IMR-1, IMR-2: Post-lease input-mode guard. Fail-closed on recovery failure.
     if ! check_pane_input_ready "$target_pane" "$terminal_id" "$dispatch_id" "$provider"; then
         log "V8 INPUT_MODE: delivery blocked — unrecoverable pane mode terminal=$terminal_id dispatch=$dispatch_id"
         emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "blocked_input_mode" "dispatch_blocked" "post_input_mode_blocked"
@@ -348,14 +383,13 @@ deliver_dispatch_to_terminal() {
         return 1
     fi
 
-    # Resolve worktree path for this terminal (falls back to PROJECT_ROOT)
     local worktree_path
     worktree_path=$(python3 "$VNX_DIR/scripts/terminal_state_shadow.py" get-worktree "$terminal_id" 2>/dev/null || true)
     worktree_path="${worktree_path:-$PROJECT_ROOT}"
 
     if [ "$worktree_path" != "$PROJECT_ROOT" ] && [ -n "$worktree_path" ]; then
-        complete_prompt="Working-Directory: ${worktree_path}
-${complete_prompt}"
+        _prompt_ref="Working-Directory: ${worktree_path}
+${_prompt_ref}"
         log "V8 WORKTREE: terminal=$terminal_id path=$worktree_path"
         if [[ "$provider" != "codex_cli" && "$provider" != "codex" ]]; then
             if ! tmux_send_best_effort "$target_pane" "cd '${worktree_path}'" Enter; then
@@ -364,77 +398,82 @@ ${complete_prompt}"
             sleep 0.3
         fi
     fi
+}
+
+# _ddt_send_content — load and paste prompt content via tmux with retry.
+# Sets _DDT_FAILED_SUBSTEP on failure.
+# Returns 0 on success, 1 on failure.
+_DDT_FAILED_SUBSTEP=""
+_ddt_send_content() {
+    local target_pane="$1" provider="$2" skill_command="$3" complete_prompt="$4"
+    _DDT_FAILED_SUBSTEP=""
+
+    if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
+        if ! tmux_retry 3 tmux_load_buffer_safe "${skill_command}${complete_prompt}"; then
+            _DDT_FAILED_SUBSTEP="load_buffer"; log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"; return 1
+        fi
+        if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
+            _DDT_FAILED_SUBSTEP="paste_buffer"; log "V8 ERROR: Failed to paste prompt to terminal $target_pane"; return 1
+        fi
+    else
+        if ! tmux_retry 3 tmux_send_best_effort "$target_pane" -l "$skill_command"; then
+            _DDT_FAILED_SUBSTEP="send_skill"; log "V8 ERROR: Failed to send skill command to terminal $target_pane"; return 1
+        fi
+        sleep 0.5
+        if ! tmux_retry 3 tmux_load_buffer_safe "$complete_prompt"; then
+            _DDT_FAILED_SUBSTEP="load_buffer"; log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"; return 1
+        fi
+        if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
+            _DDT_FAILED_SUBSTEP="paste_buffer"; log "V8 ERROR: Failed to paste prompt to terminal $target_pane"; return 1
+        fi
+    fi
+    return 0
+}
+
+# _ddt_handle_failure — log failure, annotate dispatch file, release lease+claim.
+_ddt_handle_failure() {
+    local dispatch_file="$1" dispatch_id="$2" terminal_id="$3" provider="$4" failed_substep="$5"
+
+    local _failure_code="tx_${failed_substep}"
+    if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
+        case "$failed_substep" in
+            load_buffer) _failure_code="tx_load_buffer_codex" ;;
+            paste_buffer) _failure_code="tx_paste_buffer_codex" ;;
+        esac
+    fi
+    log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
+        "substep=$failed_substep dispatch=$dispatch_id terminal=$terminal_id" \
+        "$_failure_code" "$dispatch_id" "$terminal_id" "$provider"
+    printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=%s] tmux delivery failed at substep. Retry is automatic.\n' \
+        "$_failure_code" >> "$dispatch_file"
+    rc_release_on_failure "$dispatch_id" "$_DL_RC_ATTEMPT_ID" "$terminal_id" "$_DL_RC_GENERATION" "delivery_failed:$_failure_code"
+    if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+        log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
+    fi
+}
+
+# deliver_dispatch_to_terminal — input-mode guard, worktree path resolution, tmux delivery.
+# Params: dispatch_file track agent_role dispatch_id target_pane terminal_id
+#         provider complete_prompt skill_command
+# Reads globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID
+deliver_dispatch_to_terminal() {
+    local dispatch_file="$1" track="$2" agent_role="$3" dispatch_id="$4"
+    local target_pane="$5" terminal_id="$6" provider="$7"
+    local complete_prompt="$8" skill_command="$9"
+
+    _ddt_pre_delivery_checks "$target_pane" "$terminal_id" "$dispatch_id" "$provider" complete_prompt || return 1
 
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
 
-    local _delivery_failed=false _failed_substep=""
-
-    if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-        # Codex: single paste-buffer with skill + instruction combined
-        if ! tmux_retry 3 tmux_load_buffer_safe "${skill_command}${complete_prompt}"; then
-            _delivery_failed=true; _failed_substep="load_buffer"
-            log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
-        fi
-        if [ "$_delivery_failed" = false ]; then
-            if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
-                _delivery_failed=true; _failed_substep="paste_buffer"
-                log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-            fi
-        fi
-    else
-        # Claude Code / others: type skill via send-keys, paste instruction separately
-        if ! tmux_retry 3 tmux_send_best_effort "$target_pane" -l "$skill_command"; then
-            _delivery_failed=true; _failed_substep="send_skill"
-            log "V8 ERROR: Failed to send skill command to terminal $target_pane"
-        fi
-        if [ "$_delivery_failed" = false ]; then
-            sleep 0.5
-            if ! tmux_retry 3 tmux_load_buffer_safe "$complete_prompt"; then
-                _delivery_failed=true; _failed_substep="load_buffer"
-                log "V8 ERROR: Failed to load prompt to tmux buffer (3 attempts)"
-            fi
-        fi
-        if [ "$_delivery_failed" = false ]; then
-            if ! tmux_retry 3 tmux paste-buffer -t "$target_pane"; then
-                _delivery_failed=true; _failed_substep="paste_buffer"
-                log "V8 ERROR: Failed to paste prompt to terminal $target_pane"
-            fi
-        fi
-    fi
-
-    if [ "$_delivery_failed" = true ]; then
-        # Map substep to canonical failure code (DFL-LOG-3, Contract 160 Section 3.4)
-        local _failure_code="tx_${_failed_substep}"
-        if [[ "$provider" == "codex_cli" || "$provider" == "codex" ]]; then
-            case "$_failed_substep" in
-                load_buffer) _failure_code="tx_load_buffer_codex" ;;
-                paste_buffer) _failure_code="tx_paste_buffer_codex" ;;
-            esac
-        fi
-        log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
-            "substep=$_failed_substep dispatch=$dispatch_id terminal=$terminal_id" \
-            "$_failure_code" "$dispatch_id" "$terminal_id" "$provider"
-        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=%s] tmux delivery failed at substep. Retry is automatic.\n' \
-            "$_failure_code" >> "$dispatch_file"
-        rc_release_on_failure "$dispatch_id" "$_DL_RC_ATTEMPT_ID" "$terminal_id" "$_DL_RC_GENERATION" "delivery_failed:$_failure_code"
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
-        fi
+    if ! _ddt_send_content "$target_pane" "$provider" "$skill_command" "$complete_prompt"; then
+        _ddt_handle_failure "$dispatch_file" "$dispatch_id" "$terminal_id" "$provider" "$_DDT_FAILED_SUBSTEP"
         return 1
     fi
 
     sleep 1  # Allow content to fully paste and render before Enter
 
     if ! tmux_retry 3 tmux send-keys -t "$target_pane" Enter; then
-        log_structured_failure "delivery_substep_failed" "Delivery substep failed" \
-            "substep=enter dispatch=$dispatch_id terminal=$terminal_id" \
-            "tx_send_enter" "$dispatch_id" "$terminal_id" "$provider"
-        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=tx_send_enter] tmux Enter failed at substep. Retry is automatic.\n' \
-            >> "$dispatch_file"
-        rc_release_on_failure "$dispatch_id" "$_DL_RC_ATTEMPT_ID" "$terminal_id" "$_DL_RC_GENERATION" "delivery_failed:tx_send_enter"
-        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-            log_structured_failure "claim_release_failed" "Failed to release claim after Enter failure" "terminal=$terminal_id dispatch=$dispatch_id"
-        fi
+        _ddt_handle_failure "$dispatch_file" "$dispatch_id" "$terminal_id" "$provider" "enter"
         log "V8 ERROR: Failed to send Enter to terminal $target_pane"
         return 1
     fi

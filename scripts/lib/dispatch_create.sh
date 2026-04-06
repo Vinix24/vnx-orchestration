@@ -4,12 +4,10 @@
 # Requires: $VNX_DIR, $VNX_DATA_DIR, $ACTIVE_DIR set by orchestrator.
 # Requires: dispatch_logging.sh sourced first.
 
-# ===== INSTRUCTION EXTRACTION (V8 Core) =====
+# ===== INSTRUCTION EXTRACTION =====
 
-# Function to extract instruction content from dispatch
 extract_instruction_content() {
     local dispatch_file="$1"
-
     # Extract content between "Instruction:" and "[[DONE]]"
     local content
     content=$(awk '/^Instruction:/{flag=1; next} /^\[\[DONE\]\]/{flag=0} flag' "$dispatch_file")
@@ -17,8 +15,7 @@ extract_instruction_content() {
         echo "$content"
         return 0
     fi
-
-    # Fallback: use everything after YAML frontmatter, excluding [[TARGET:...]] markers.
+    # Fallback: everything after YAML frontmatter, excluding [[TARGET:...]] markers.
     content=$(awk '
         BEGIN { in_frontmatter = 0; saw_frontmatter = 0 }
         /^---$/ {
@@ -28,7 +25,6 @@ extract_instruction_content() {
         in_frontmatter == 1 { next }
         { print }
     ' "$dispatch_file" | sed '/^\[\[TARGET:/d')
-
     if [ -n "$content" ]; then
         echo "$content"
         return 0
@@ -39,8 +35,7 @@ extract_instruction_content() {
 
 extract_context_files() {
     local dispatch_file="$1"
-
-    # Extract Context: line(s) - simpler approach: grab Context line + next non-blank line before Instruction
+    # Extract Context: line(s) with @ references
     local context
     context=$(awk '
         /^Context:/ {
@@ -66,12 +61,10 @@ extract_context_files() {
             if (context) print context
         }
     ' "$dispatch_file" | tr ' ' '\n' | grep '^\[\[@' )
-
     if [ -n "$context" ]; then
         echo "$context"
         return 0
     fi
-
     # Fallback: YAML frontmatter context_files list.
     awk '
         BEGIN { in_frontmatter = 0; saw_frontmatter = 0; in_list = 0 }
@@ -87,10 +80,9 @@ extract_context_files() {
     ' "$dispatch_file"
 }
 
-# ===== RECEIPT GENERATION (from V7) =====
+# ===== RECEIPT GENERATION =====
 
-# _build_receipt_metadata — resolve dispatch and PR identifiers for receipt footer.
-# Outputs: two lines — dispatch_id_for_footer and footer_pr_id.
+# _build_receipt_metadata — outputs two lines: dispatch_id_for_footer, footer_pr_id.
 _build_receipt_metadata() {
     local dispatch_file="$1"
     local dispatch_id="$2"
@@ -106,8 +98,6 @@ _build_receipt_metadata() {
     printf '%s\n%s\n' "${dispatch_id_for_footer:-unknown}" "${footer_pr_id:-unknown}"
 }
 
-# _emit_receipt_template — output the receipt footer heredoc template.
-# Args: dispatch_id_for_footer pr_id track gate
 _emit_receipt_template() {
     local rid="$1" pr="$2" track="$3" gate="$4"
 
@@ -155,7 +145,6 @@ Filename: \`$(date +%Y%m%d-%H%M%S)-${track}-<short-title>.md\`
 RECEIPT_EOF
 }
 
-# Function to generate receipt footer
 generate_receipt_footer() {
     local dispatch_file="$1"
     local track="$2"
@@ -173,9 +162,8 @@ generate_receipt_footer() {
     _emit_receipt_template "$_dispatch_id_for_footer" "$_footer_pr_id" "$track" "$gate"
 }
 
-# ===== SKILL ACTIVATION MAPPING (V8 Core) =====
+# ===== SKILL ACTIVATION MAPPING =====
 
-# Function to map dispatch role to skill name
 map_role_to_skill() {
     local role="$1"
 
@@ -211,16 +199,8 @@ map_role_to_skill() {
     esac
 }
 
-# ===== NEW: prepare_dispatch_payload =====
-# Extracted from dispatch_with_skill_activation lines 1355-1601 (except lease/registration).
-# Performs: target_pane determination, pre-lease input mode probe, instruction_content extraction,
-#           context_files extraction, metadata extraction, receipt_footer generation,
-#           intelligence/context section building, terminal_id/provider resolution,
-#           pr_id extraction, skill_command building, complete_prompt assembly.
-# Params: dispatch_file track agent_role intelligence_data dispatch_id
-# Sets globals: _DP_TARGET_PANE _DP_TERMINAL_ID _DP_PROVIDER _DP_COMPLETE_PROMPT _DP_SKILL_COMMAND
-# Also sets: _DP_PR_ID _DP_GATE _DP_SKILL_NAME _DP_INSTRUCTION_CONTENT
-# Returns 1 if any step blocks.
+# prepare_dispatch_payload — build complete prompt and resolve execution target.
+# Sets _DP_* globals. Returns 1 if any step blocks.
 _DP_TARGET_PANE=""
 _DP_TERMINAL_ID=""
 _DP_PROVIDER=""
@@ -231,28 +211,13 @@ _DP_GATE=""
 _DP_SKILL_NAME=""
 _DP_INSTRUCTION_CONTENT=""
 
-prepare_dispatch_payload() {
-    local dispatch_file="$1"
-    local track="$2"
-    local agent_role="$3"
-    local intelligence_data="${4:-}"
-    local dispatch_id="${5:-}"
+# _pdp_resolve_target — determine target pane with MCP routing and pre-lease probe.
+# Sets _PDP_TARGET_PANE on success. Returns 1 if routing or probe blocks.
+_PDP_TARGET_PANE=""
+_pdp_resolve_target() {
+    local dispatch_file="$1" track="$2" agent_role="$3"
+    _PDP_TARGET_PANE=""
 
-    _DP_TARGET_PANE=""
-    _DP_TERMINAL_ID=""
-    _DP_PROVIDER=""
-    _DP_COMPLETE_PROMPT=""
-    _DP_SKILL_COMMAND=""
-    _DP_PR_ID=""
-    _DP_GATE=""
-    _DP_SKILL_NAME=""
-    _DP_INSTRUCTION_CONTENT=""
-
-    if [ -z "$dispatch_id" ]; then
-        dispatch_id="$(basename "$dispatch_file" .md)"
-    fi
-
-    # Determine target terminal pane (MCP-aware routing)
     local requires_mcp
     requires_mcp=$(vnx_dispatch_extract_requires_mcp "$dispatch_file")
     local target_pane
@@ -263,9 +228,7 @@ prepare_dispatch_payload() {
 
     log "V8 DISPATCH: Routing to terminal $target_pane (Track: $track, Role: $agent_role)"
 
-    # RES-B1 (OI-024): Best-effort pre-lease pane mode check before mode configuration.
-    # If pane is in copy/search mode, skip mode config (which uses send-keys) to avoid
-    # corrupting operator scrollback. No lease is held at this point — safe to return 1.
+    # RES-B1: Best-effort pre-lease pane mode check; skip if in copy/search mode.
     local _pre_probe
     if _pre_probe=$(_input_mode_probe "$target_pane" 2>/dev/null); then
         local _pre_in_mode
@@ -276,8 +239,7 @@ prepare_dispatch_payload() {
         fi
     fi
 
-    # Configure terminal mode (clear, model switch, mode activation)
-    # RES-B2: Use pre_mode_configuration canonical failure code on failure.
+    # RES-B2: Configure terminal mode; canonical failure on error.
     if ! configure_terminal_mode "$target_pane" "$dispatch_file"; then
         log_structured_failure "mode_configuration_failed" "Terminal mode configuration failed" \
             "pane=$target_pane dispatch=$(basename "$dispatch_file")" \
@@ -285,17 +247,21 @@ prepare_dispatch_payload() {
         return 1
     fi
 
-    # CRITICAL: Add delay after mode configuration to ensure commands complete
-    sleep 2
+    sleep 2  # delay after mode configuration
 
-    # Pre-clear: ensure terminal input line is empty before skill activation
-    # NOTE: Do NOT use C-c here — it kills the CLI process, leaving a bare
-    # zsh shell where dispatch content gets executed as shell commands.
-    # C-u alone safely clears the readline input buffer.
+    # Pre-clear input line (C-u only; C-c kills CLI process).
     tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
     sleep 0.5
 
-    # Map role to skill name
+    _PDP_TARGET_PANE="$target_pane"
+    return 0
+}
+
+# _pdp_resolve_skill — validate and resolve skill name from agent role.
+# Outputs skill name on stdout. Returns 1 if skill is invalid.
+_pdp_resolve_skill() {
+    local agent_role="$1" dispatch_file="$2"
+
     local skill_name
     skill_name=$(map_role_to_skill "$agent_role")
     if [ -z "$skill_name" ]; then
@@ -306,7 +272,6 @@ prepare_dispatch_payload() {
         return 1
     fi
 
-    # Validate skill against skills.yaml before dispatching
     if ! python3 "$VNX_DIR/scripts/validate_skill.py" "$skill_name" >/dev/null 2>&1; then
         log "V8 WARNING: Skill '@${skill_name}' not found in skills.yaml (waiting for edit)"
         if ! grep -q "\[SKILL_INVALID\]" "$dispatch_file"; then
@@ -316,56 +281,45 @@ prepare_dispatch_payload() {
     fi
 
     log "V8 SKILL: Activating skill @$skill_name for role $agent_role"
+    echo "$skill_name"
+}
 
-    # Extract instruction content
-    local instruction_content
-    if ! instruction_content=$(extract_instruction_content "$dispatch_file"); then
-        log "V8 ERROR: Failed to extract instruction content"
-        return 1
-    fi
+# _pdp_extract_dispatch_metadata — extract phase, gate, task_id, cmd_id from dispatch.
+# Sets _PDP_GATE. Outputs receipt footer on stdout (may be empty per RES-D3).
+_PDP_GATE=""
+_pdp_extract_dispatch_metadata() {
+    local dispatch_file="$1" track="$2" dispatch_id="$3"
+    _PDP_GATE=""
 
-    if [ -z "$instruction_content" ]; then
-        log "V8 ERROR: No instruction content found in dispatch"
-        return 1
-    fi
-
-    # Extract context files (Workflow + Context lines with @ references)
-    local context_files
-    context_files=$(extract_context_files "$dispatch_file")
-    if [ -n "$context_files" ]; then
-        log "V8 CONTEXT: Extracted context files from dispatch"
-    fi
-
-    # Extract metadata for receipt
-    local phase
+    local phase gate task_id cmd_id
     phase=$(extract_phase "$dispatch_file")
-    local gate
     gate=$(extract_new_gate "$dispatch_file")
-    local task_id
     task_id=$(extract_task_id "$dispatch_file" "$track")
-    local cmd_id
     cmd_id=$(uuidgen 2>/dev/null || echo "$(date +%s)-$$" | sha256sum | cut -c1-16)
 
-    # Fallback to planning if no gate specified
     if [ -z "$gate" ]; then
         log "V8: No gate specified, defaulting to 'planning'"
         gate="planning"
     fi
+    _PDP_GATE="$gate"
 
-    # Generate receipt footer
-    # RES-D3: Receipt footer generation failure is intentionally non-fatal.
+    # RES-D3: receipt footer failure is intentionally non-fatal.
     local receipt_footer
     if ! receipt_footer=$(generate_receipt_footer "$dispatch_file" "$track" "$phase" "$gate" "$task_id" "$cmd_id" "$dispatch_id"); then
         log "V8 WARNING: Failed to generate receipt footer, continuing without (intentionally non-fatal per RES-D3)"
         receipt_footer=""
     fi
+    printf '%s' "$receipt_footer"
+}
 
-    # Format intelligence data if provided
-    local intelligence_section=""
-    if [ -n "$intelligence_data" ]; then
-        # Extract pattern summaries (title + description, max 5 patterns)
-        local pattern_summaries
-        pattern_summaries=$(echo "$intelligence_data" | python3 -c '
+# _pdp_build_intelligence_section — render intelligence data into markdown section.
+# Outputs markdown string on stdout (empty if no data).
+_pdp_build_intelligence_section() {
+    local intelligence_data="$1"
+    [ -n "$intelligence_data" ] || return 0
+
+    local pattern_summaries
+    pattern_summaries=$(echo "$intelligence_data" | python3 -c '
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -383,10 +337,8 @@ try:
 except (json.JSONDecodeError, TypeError) as exc:
     print(f"[NON_CRITICAL] pattern_summary_parse_failed: {exc}", file=sys.stderr)
 ' 2>/dev/null)
-
-        # Extract prevention rules
-        local prevention_summaries
-        prevention_summaries=$(echo "$intelligence_data" | python3 -c '
+    local prevention_summaries
+    prevention_summaries=$(echo "$intelligence_data" | python3 -c '
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -399,37 +351,26 @@ except (json.JSONDecodeError, TypeError) as exc:
     print(f"[NON_CRITICAL] prevention_summary_parse_failed: {exc}", file=sys.stderr)
 ' 2>/dev/null)
 
-        # Combine intelligence sections if they exist
-        if [ -n "$pattern_summaries" ] || [ -n "$prevention_summaries" ]; then
-            intelligence_section="
-
----
-## Intelligence Context
-
-$pattern_summaries$prevention_summaries
-
----
-"
-        fi
+    if [ -n "$pattern_summaries" ] || [ -n "$prevention_summaries" ]; then
+        printf '\n\n---\n## Intelligence Context\n\n%s%s\n\n---\n' \
+            "$pattern_summaries" "$prevention_summaries"
     fi
+}
 
-    # Build context section if files were specified
-    local context_section=""
-    if [ -n "$context_files" ]; then
-        context_section="
+# _pdp_build_context_section — render context files into markdown section.
+# Outputs markdown string on stdout (empty if no context files).
+_pdp_build_context_section() {
+    local context_files="$1"
+    [ -n "$context_files" ] || return 0
+    printf '\n\n---\n## Context Files\n\nRead the following files for context before starting:\n\n%s\n\n---\n' \
+        "$context_files"
+}
 
----
-## Context Files
+# _pdp_resolve_terminal — resolve terminal_id from pane, falling back to track mapping.
+# Outputs terminal_id on stdout. Returns 1 if unresolvable.
+_pdp_resolve_terminal() {
+    local target_pane="$1" track="$2" dispatch_id="$3"
 
-Read the following files for context before starting:
-
-$context_files
-
----
-"
-    fi
-
-    # Resolve terminal_id and provider early (needed for skill command format)
     local terminal_id
     if ! terminal_id="$(get_terminal_from_pane "$target_pane" 2>/dev/null)"; then
         terminal_id=""
@@ -443,40 +384,40 @@ $context_files
         log "V8 LOCK: unable to resolve terminal for track=$track dispatch=$dispatch_id"
         return 1
     fi
+    echo "$terminal_id"
+}
 
-    local provider
-    provider=$(get_terminal_provider "$terminal_id")
+# _pdp_build_skill_command — resolve provider-aware skill invocation prefix and hints.
+# Sets _PDP_SKILL_COMMAND and _PDP_EXTRA_SKILLS_HINT.
+_PDP_SKILL_COMMAND="" _PDP_EXTRA_SKILLS_HINT=""
+_pdp_build_skill_command() {
+    local skill_name="$1" provider="$2"
+    _PDP_SKILL_COMMAND="" _PDP_EXTRA_SKILLS_HINT=""
 
-    # Extract PR-ID early so it can be included in the prompt
-    local pr_id
-    pr_id=$(extract_pr_id "$dispatch_file")
-
-    # BUILD COMPLETE PROMPT: skill activation + context + intelligence + instruction + receipt
-    # V8.1: Hybrid dispatch - skill via send-keys, instruction via paste-buffer
-    # Provider-aware skill invocation:
-    #   Claude Code: /skill-name  (slash command)
-    #   Codex CLI:   $skill-name  (dollar-sign mention)
-    #   Gemini CLI:  @skill-name  (at-sign prefix, also auto-activates on description match)
-    local skill_command
-    local extra_skills_hint
     case "$provider" in
         codex_cli|codex)
-            skill_command="\$${skill_name} "
-            extra_skills_hint="Use additional skills as needed (\$test-engineer, \$reviewer, \$debugger) to deliver production-quality results."
+            _PDP_SKILL_COMMAND="\$${skill_name} "
+            _PDP_EXTRA_SKILLS_HINT="Use additional skills as needed (\$test-engineer, \$reviewer, \$debugger) to deliver production-quality results."
             ;;
         gemini_cli|gemini)
-            skill_command="@${skill_name} "
-            extra_skills_hint="Use additional skills as needed (@test-engineer, @reviewer, @debugger) to deliver production-quality results."
+            _PDP_SKILL_COMMAND="@${skill_name} "
+            _PDP_EXTRA_SKILLS_HINT="Use additional skills as needed (@test-engineer, @reviewer, @debugger) to deliver production-quality results."
             ;;
         *)
-            skill_command="/${skill_name} "
-            extra_skills_hint="Use additional skills as needed (/test-engineer, /reviewer, /debugger) to deliver production-quality results."
+            _PDP_SKILL_COMMAND="/${skill_name} "
+            _PDP_EXTRA_SKILLS_HINT="Use additional skills as needed (/test-engineer, /reviewer, /debugger) to deliver production-quality results."
             ;;
     esac
+    log "V8 SKILL_FORMAT: provider=$provider command='${_PDP_SKILL_COMMAND}'"
+}
 
-    log "V8 SKILL_FORMAT: provider=$provider command='${skill_command}'"
+# _pdp_assemble_prompt — combine all sections into the complete dispatch prompt.
+# Outputs the assembled prompt on stdout.
+_pdp_assemble_prompt() {
+    local pr_id="$1" dispatch_id="$2" track="$3" gate="$4"
+    local extra_skills_hint="$5" context_section="$6" intelligence_section="$7"
+    local instruction_content="$8" receipt_footer="$9"
 
-    # Build dispatch header so workers know what they're working on
     local dispatch_header="## Dispatch Assignment
 | Field | Value |
 |-------|-------|
@@ -486,32 +427,46 @@ $context_files
 | **Gate** | ${gate} |
 "
 
-    local complete_prompt="${dispatch_header}
-Apply your specialized expertise to this task.
+    printf '%s\nApply your specialized expertise to this task.\n\n**Critical Success Factors:**\n- Maintain high code quality standards and best practices\n- Ensure comprehensive test coverage where applicable\n- Follow established project patterns and conventions\n- Validate all changes against requirements\n- Document significant design decisions\n\n%s\n%s%s\n%s\n\n%s' \
+        "$dispatch_header" "$extra_skills_hint" "$context_section" "$intelligence_section" \
+        "$instruction_content" "$receipt_footer"
+}
 
-**Critical Success Factors:**
-- Maintain high code quality standards and best practices
-- Ensure comprehensive test coverage where applicable
-- Follow established project patterns and conventions
-- Validate all changes against requirements
-- Document significant design decisions
+prepare_dispatch_payload() {
+    local dispatch_file="$1" track="$2" agent_role="$3"
+    local intelligence_data="${4:-}" dispatch_id="${5:-}"
+    _DP_TARGET_PANE="" _DP_TERMINAL_ID="" _DP_PROVIDER="" _DP_COMPLETE_PROMPT=""
+    _DP_SKILL_COMMAND="" _DP_PR_ID="" _DP_GATE="" _DP_SKILL_NAME="" _DP_INSTRUCTION_CONTENT=""
+    [ -n "$dispatch_id" ] || dispatch_id="$(basename "$dispatch_file" .md)"
 
-$extra_skills_hint
-$context_section$intelligence_section
-$instruction_content
+    _pdp_resolve_target "$dispatch_file" "$track" "$agent_role" || return 1
+    local target_pane="$_PDP_TARGET_PANE"
+    local skill_name; skill_name=$(_pdp_resolve_skill "$agent_role" "$dispatch_file") || return 1
 
-$receipt_footer"
+    local instruction_content
+    if ! instruction_content=$(extract_instruction_content "$dispatch_file") || [ -z "$instruction_content" ]; then
+        log "V8 ERROR: Failed to extract instruction content"; return 1
+    fi
 
-    # Set output globals
-    _DP_TARGET_PANE="$target_pane"
-    _DP_TERMINAL_ID="$terminal_id"
-    _DP_PROVIDER="$provider"
-    _DP_COMPLETE_PROMPT="$complete_prompt"
-    _DP_SKILL_COMMAND="$skill_command"
-    _DP_PR_ID="$pr_id"
-    _DP_GATE="$gate"
-    _DP_SKILL_NAME="$skill_name"
+    local context_files; context_files=$(extract_context_files "$dispatch_file")
+    [ -z "$context_files" ] || log "V8 CONTEXT: Extracted context files from dispatch"
+
+    local receipt_footer; receipt_footer=$(_pdp_extract_dispatch_metadata "$dispatch_file" "$track" "$dispatch_id")
+    local gate="$_PDP_GATE"
+    local intelligence_section; intelligence_section=$(_pdp_build_intelligence_section "$intelligence_data")
+    local context_section; context_section=$(_pdp_build_context_section "$context_files")
+    local terminal_id; terminal_id=$(_pdp_resolve_terminal "$target_pane" "$track" "$dispatch_id") || return 1
+    local provider; provider=$(get_terminal_provider "$terminal_id")
+    local pr_id; pr_id=$(extract_pr_id "$dispatch_file")
+
+    _pdp_build_skill_command "$skill_name" "$provider"
+    local complete_prompt; complete_prompt=$(_pdp_assemble_prompt "$pr_id" "$dispatch_id" "$track" "$gate" \
+        "$_PDP_EXTRA_SKILLS_HINT" "$context_section" "$intelligence_section" \
+        "$instruction_content" "$receipt_footer")
+
+    _DP_TARGET_PANE="$target_pane" _DP_TERMINAL_ID="$terminal_id" _DP_PROVIDER="$provider"
+    _DP_COMPLETE_PROMPT="$complete_prompt" _DP_SKILL_COMMAND="$_PDP_SKILL_COMMAND"
+    _DP_PR_ID="$pr_id" _DP_GATE="$gate" _DP_SKILL_NAME="$skill_name"
     _DP_INSTRUCTION_CONTENT="$instruction_content"
-
     return 0
 }

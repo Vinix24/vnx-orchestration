@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import re
 import subprocess
 import sys
@@ -41,7 +40,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
-from result_contract import Result, result_ok, result_error, result_exit_code, EXIT_OK, EXIT_VALIDATION, EXIT_IO, EXIT_INTERNAL
+from result_contract import EXIT_OK, EXIT_VALIDATION, EXIT_IO
 from contract_parser import (
     ContractBlock,
     Claim,

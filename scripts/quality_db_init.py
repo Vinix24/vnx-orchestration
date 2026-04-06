@@ -6,7 +6,6 @@ Purpose: Initialize SQLite Quality Intelligence Database from schema
 """
 
 import sqlite3
-import os
 import sys
 from pathlib import Path
 from datetime import datetime

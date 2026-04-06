@@ -51,7 +51,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 # Import source types — used only for type narrowing; no mutation performed.
 from regulated_strict_approval import ApprovalRecord, ClosureRecord

@@ -228,20 +228,6 @@ rc_delivery_success() {
     fi
 }
 
-# Record delivery failure durably (broker: delivering -> failed_delivery).
-rc_delivery_failure() {
-    local dispatch_id="$1" attempt_id="$2" reason="${3:-delivery failed}"
-    _rc_enabled || return 0
-    [[ -n "$attempt_id" ]] || return 0
-
-    if ! _rc_python delivery-failure \
-        --dispatch-id "$dispatch_id" \
-        --attempt-id "$attempt_id" \
-        --reason "$reason" > /dev/null; then
-        log "V8 RUNTIME_CORE: delivery-failure non-fatal failure dispatch=$dispatch_id"
-    fi
-}
-
 # Release canonical lease (leased -> idle).
 # Emits structured audit on success and uses log_structured_failure on error.
 rc_release_lease() {
@@ -266,7 +252,7 @@ rc_release_lease() {
 }
 
 # Release canonical lease and record delivery failure atomically.
-# Preferred over separate rc_delivery_failure + rc_release_lease calls because
+# Preferred over separate delivery-failure + release-lease calls because
 # both operations are performed regardless of individual step failure, and the
 # combined result is captured in a single structured audit entry.
 # Usage: rc_release_on_failure <dispatch_id> <attempt_id> <terminal_id> <generation> [<reason>]
@@ -317,68 +303,52 @@ rc_release_on_failure() {
 
 # ===== END RUNTIME CORE INTEGRATION =====
 
-# acquire_dispatch_lease — canonical check, claim, RC register, canonical acquire.
-# Params: dispatch_file track terminal_id dispatch_id skill_name gate complete_prompt
-# Sets globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID. Returns 1 if any step blocks.
-_DL_RC_GENERATION="" _DL_RC_ATTEMPT_ID=""
+# _adl_check_canonical_lease — validate terminal availability via canonical lease.
+# Returns 1 if blocked, 0 if available.
+_adl_check_canonical_lease() {
+    local terminal_id="$1" dispatch_id="$2"
 
-acquire_dispatch_lease() {
-    local dispatch_file="$1" track="$2" terminal_id="$3" dispatch_id="$4"
-    local skill_name="$5" gate="$6" complete_prompt="$7"
-    _DL_RC_GENERATION="" _DL_RC_ATTEMPT_ID=""
-
-    # Canonical lease check (before legacy lock)
     local _rc_canonical_check
     _rc_canonical_check=$(rc_check_terminal "$terminal_id" "$dispatch_id")
-    if [[ "$_rc_canonical_check" == BLOCK:* ]]; then
-        local _rc_block_reason="${_rc_canonical_check#BLOCK:}"
-        log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_block_reason}"
-        # Detect duplicate delivery: canonical lease held by same dispatch_id prefix
-        if [[ "$_rc_block_reason" == canonical_lease:leased:* ]]; then
-            local _current_holder="${_rc_block_reason#canonical_lease:leased:}"
-            if [[ "$_current_holder" == "$dispatch_id" ]]; then
-                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "duplicate_delivery_prevented"
-            else
-                emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
-            fi
-        else
-            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+    if [[ "$_rc_canonical_check" != BLOCK:* ]]; then
+        return 0
+    fi
+
+    local _rc_block_reason="${_rc_canonical_check#BLOCK:}"
+    log "V8 LOCK: canonical_lease blocked terminal=$terminal_id dispatch=$dispatch_id reason=${_rc_block_reason}"
+    if [[ "$_rc_block_reason" == canonical_lease:leased:* ]]; then
+        local _current_holder="${_rc_block_reason#canonical_lease:leased:}"
+        if [[ "$_current_holder" == "$dispatch_id" ]]; then
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "duplicate_delivery_prevented"
+            return 1
         fi
-        return 1
     fi
+    emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" "$_rc_block_reason" "dispatch_blocked"
+    return 1
+}
 
-    if ! terminal_lock_allows_dispatch "$terminal_id" "$dispatch_id"; then
-        return 1
-    fi
+# _adl_register_and_acquire — RC registration + canonical lease acquire.
+# Sets _DL_RC_GENERATION and _DL_RC_ATTEMPT_ID. Returns 1 on failure (releases claim).
+_adl_register_and_acquire() {
+    local dispatch_id="$1" terminal_id="$2" track="$3" skill_name="$4"
+    local gate="$5" complete_prompt="$6"
 
-    if ! acquire_terminal_claim "$terminal_id" "$dispatch_id"; then
-        return 1
-    fi
-
-    # --- Runtime Core: register dispatch bundle BEFORE canonical lease acquire ---
-    # BOOT-6: registration must precede lease acquire to satisfy FK constraint:
-    #         terminal_leases.dispatch_id REFERENCES dispatches(dispatch_id)
-    # BOOT-7: rc_register() is fail-closed — blocks dispatch before any lease is acquired
-    local _rc_prompt_tmpfile=""
+    # BOOT-6/7: registration must precede lease acquire (FK constraint, fail-closed)
     if _rc_enabled; then
-        _rc_prompt_tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/rc_prompt_${dispatch_id}.txt"
+        local _rc_prompt_tmpfile="$VNX_DISPATCH_PAYLOAD_DIR/rc_prompt_${dispatch_id}.txt"
         mkdir -p "$VNX_DISPATCH_PAYLOAD_DIR"
         printf '%s' "$complete_prompt" > "$_rc_prompt_tmpfile"
         if ! rc_register "$dispatch_id" "$terminal_id" "$track" "$skill_name" "$gate" "$_rc_prompt_tmpfile"; then
             rm -f "$_rc_prompt_tmpfile"
             log "V8 RUNTIME_CORE: registration blocked dispatch — releasing claim terminal=$terminal_id dispatch=$dispatch_id"
             if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
-                log_structured_failure "claim_release_failed" \
-                    "Failed to release claim after registration failure" \
-                    "terminal=$terminal_id dispatch=$dispatch_id"
+                log_structured_failure "claim_release_failed" "Failed to release claim after registration failure" "terminal=$terminal_id dispatch=$dispatch_id"
             fi
             return 1
         fi
         rm -f "$_rc_prompt_tmpfile"
     fi
 
-    # --- Runtime Core: acquire canonical lease alongside terminal_state_shadow ---
-    # Fail-closed: if acquire returns FAIL or non-zero, release claim and block dispatch.
     local _rc_acquire_rc=0
     _DL_RC_GENERATION=$(rc_acquire_lease "$terminal_id" "$dispatch_id") || _rc_acquire_rc=$?
     if [[ "$_rc_acquire_rc" -ne 0 || "$_DL_RC_GENERATION" == "FAIL" ]]; then
@@ -390,18 +360,75 @@ acquire_dispatch_lease() {
         return 1
     fi
 
-    # Record delivery start (queued -> claimed -> delivering) — after lease acquired
     if _rc_enabled; then
         _DL_RC_ATTEMPT_ID=$(rc_delivery_start "$dispatch_id" "$terminal_id")
-        # RES-D1: Log when delivery_start returns empty attempt_id (DFL-2).
         if [[ -z "$_DL_RC_ATTEMPT_ID" ]]; then
             log_structured_failure "delivery_start_no_attempt" \
                 "delivery_start returned empty attempt_id — broker failure record will be lost" \
                 "dispatch=$dispatch_id terminal=$terminal_id"
         fi
     fi
+}
+
+# acquire_dispatch_lease — canonical check, claim, RC register, canonical acquire.
+# Params: dispatch_file track terminal_id dispatch_id skill_name gate complete_prompt
+# Sets globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID. Returns 1 if any step blocks.
+_DL_RC_GENERATION="" _DL_RC_ATTEMPT_ID=""
+
+acquire_dispatch_lease() {
+    local dispatch_file="$1" track="$2" terminal_id="$3" dispatch_id="$4"
+    local skill_name="$5" gate="$6" complete_prompt="$7"
+    _DL_RC_GENERATION="" _DL_RC_ATTEMPT_ID=""
+
+    _adl_check_canonical_lease "$terminal_id" "$dispatch_id" || return 1
+    terminal_lock_allows_dispatch "$terminal_id" "$dispatch_id" || return 1
+    acquire_terminal_claim "$terminal_id" "$dispatch_id" || return 1
+    _adl_register_and_acquire "$dispatch_id" "$terminal_id" "$track" "$skill_name" "$gate" "$complete_prompt" || return 1
 
     return 0
+}
+
+# _fdd_update_progress_state — update progress_state.yaml for the track (non-fatal).
+_fdd_update_progress_state() {
+    local track="$1" gate="$2" dispatch_id="$3"
+
+    if [ ! -f "$VNX_DIR/scripts/update_progress_state.py" ]; then
+        log "V8 PROGRESS_STATE: update_progress_state.py not found (non-fatal)"
+        return 0
+    fi
+    log "V8 PROGRESS_STATE: Updating Track $track gate=$gate, status=working, dispatch_id=$dispatch_id"
+    if python3 "$VNX_DIR/scripts/update_progress_state.py" \
+        --track "$track" --gate "$gate" --status working \
+        --dispatch-id "$dispatch_id" --updated-by dispatcher 2>&1; then
+        log "V8 PROGRESS_STATE: Successfully updated progress_state.yaml for Track $track"
+    else
+        log "V8 PROGRESS_STATE: Failed to update progress_state.yaml (non-fatal)"
+    fi
+}
+
+# _fdd_log_dispatch_metadata — record dispatch metadata to quality_intelligence.db (non-fatal).
+_fdd_log_dispatch_metadata() {
+    local dispatch_file="$1" dispatch_id="$2" terminal_id="$3" track="$4"
+    local agent_role="$5" gate="$6" pr_id="$7" instruction_content="$8"
+    local intelligence_data="$9"
+
+    local _dm_cognition _dm_priority _dm_pattern_count _dm_rule_count _dm_instr_chars
+    _dm_cognition=$(vnx_dispatch_extract_cognition "$dispatch_file" 2>/dev/null || echo "normal")
+    _dm_priority=$(vnx_dispatch_extract_priority "$dispatch_file" 2>/dev/null || echo "P1")
+    _dm_pattern_count=$(echo "$intelligence_data" | grep -o '"pattern_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    _dm_rule_count=$(echo "$intelligence_data" | grep -o '"prevention_rule_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
+    _dm_instr_chars=${#instruction_content}
+    local _dm_target_oi=""
+    _dm_target_oi=$(echo "$instruction_content" | grep -oE 'OI-[0-9]{3,}' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
+    python3 "$VNX_DIR/scripts/log_dispatch_metadata.py" \
+        --dispatch-id "$dispatch_id" --terminal "$terminal_id" --track "$track" \
+        --role "$agent_role" --skill-name "$agent_role" --gate "$gate" \
+        --cognition "$_dm_cognition" --priority "$_dm_priority" --pr-id "${pr_id:-}" \
+        --pattern-count "${_dm_pattern_count:-0}" --prevention-rule-count "${_dm_rule_count:-0}" \
+        --intelligence-json "$intelligence_data" --instruction-char-count "${_dm_instr_chars:-0}" \
+        --target-open-items "${_dm_target_oi:-}" 2>/dev/null || {
+        log "V8 WARNING: Failed to log dispatch metadata (non-fatal)"
+    }
 }
 
 # finalize_dispatch_delivery — broker success, progress state, heartbeat, metadata, move to active.
@@ -415,61 +442,17 @@ finalize_dispatch_delivery() {
     rc_delivery_success "$dispatch_id" "$_DL_RC_ATTEMPT_ID"
     log "V8 DISPATCH: Successfully sent dispatch to terminal $terminal_id"
 
-    local filename; filename=$(basename "$dispatch_file")
+    _fdd_update_progress_state "$track" "$gate" "$dispatch_id"
 
-    if [ -f "$VNX_DIR/scripts/update_progress_state.py" ]; then
-        log "V8 PROGRESS_STATE: Updating Track $track → gate=$gate, status=working, dispatch_id=$dispatch_id"
-
-        if python3 "$VNX_DIR/scripts/update_progress_state.py" \
-            --track "$track" \
-            --gate "$gate" \
-            --status working \
-            --dispatch-id "$dispatch_id" \
-            --updated-by dispatcher 2>&1; then
-            log "V8 PROGRESS_STATE: ✅ Successfully updated progress_state.yaml for Track $track"
-        else
-            log "V8 PROGRESS_STATE: ⚠️  Failed to update progress_state.yaml (non-fatal)"
-        fi
-    else
-        log "V8 PROGRESS_STATE: ⚠️  update_progress_state.py not found (non-fatal)"
-    fi
-
-    # Notify heartbeat ACK monitor (from V7)
     python3 "$VNX_DIR/scripts/notify_dispatch.py" "$dispatch_id" "$terminal_id" "$dispatch_id" "$pr_id" 2>/dev/null || {
         log "V8 WARNING: Failed to notify heartbeat ACK monitor (non-fatal)"
     }
 
-    # Log dispatch metadata to quality_intelligence.db (non-fatal)
-    local _dm_cognition _dm_priority _dm_pattern_count _dm_rule_count _dm_instr_chars
-    _dm_cognition=$(vnx_dispatch_extract_cognition "$dispatch_file" 2>/dev/null || echo "normal")
-    _dm_priority=$(vnx_dispatch_extract_priority "$dispatch_file" 2>/dev/null || echo "P1")
-    _dm_pattern_count=$(echo "$intelligence_data" | grep -o '"pattern_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
-    _dm_rule_count=$(echo "$intelligence_data" | grep -o '"prevention_rule_count":[0-9]*' | grep -o '[0-9]*' || echo "0")
-    _dm_instr_chars=${#instruction_content}
-    # Extract OI-NNN references from dispatch instructions for target tracking
-    local _dm_target_oi=""
-    _dm_target_oi=$(echo "$instruction_content" | grep -oE 'OI-[0-9]{3,}' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
-    python3 "$VNX_DIR/scripts/log_dispatch_metadata.py" \
-        --dispatch-id "$dispatch_id" \
-        --terminal "$terminal_id" \
-        --track "$track" \
-        --role "$agent_role" \
-        --skill-name "$agent_role" \
-        --gate "$gate" \
-        --cognition "$_dm_cognition" \
-        --priority "$_dm_priority" \
-        --pr-id "${pr_id:-}" \
-        --pattern-count "${_dm_pattern_count:-0}" \
-        --prevention-rule-count "${_dm_rule_count:-0}" \
-        --intelligence-json "$intelligence_data" \
-        --instruction-char-count "${_dm_instr_chars:-0}" \
-        --target-open-items "${_dm_target_oi:-}" 2>/dev/null || {
-        log "V8 WARNING: Failed to log dispatch metadata (non-fatal)"
-    }
+    _fdd_log_dispatch_metadata "$dispatch_file" "$dispatch_id" "$terminal_id" "$track" \
+        "$agent_role" "$gate" "$pr_id" "$instruction_content" "$intelligence_data"
 
-    # Move dispatch to active (receipt_processor moves to completed on task_complete)
+    local filename; filename=$(basename "$dispatch_file")
     mv "$dispatch_file" "$ACTIVE_DIR/$filename"
-
     log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
     return 0
 }
