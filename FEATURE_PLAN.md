@@ -1,62 +1,60 @@
-# Feature: Rich Headless Runtime Sessions And Structured Observability
+# Feature: Agent OS Headless Worker Pipeline
 
-**Feature-ID**: Feature 17
+**Feature-ID**: Feature 31-35
 **Status**: Planned
 **Priority**: P1
-**Branch**: `feature/rich-headless-runtime-sessions-and-structured-observability`
-**Risk-Class**: high
+**Branch**: `feature/agent-os-headless-pipeline`
+**Risk-Class**: medium
 **Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
+**Review-Stack**: codex_gate,claude_github_optional
 
 Primary objective:
-Turn the early headless abstraction into a governed runtime path with structured session lifecycle, explicit attempt/session observability, and auditable execution evidence that is richer than plain stdout/stderr capture.
+Transform the proven headless subprocess infrastructure (F28-F29, burn-in 12/12 PASS) into an autonomous worker pipeline where T1 operates as a pure headless backend-developer, dispatches produce receipts, skill context is injected at runtime, and the dashboard provides domain-filtered pipeline visibility.
 
 Execution context:
-- intended follow-on after Feature 16 runtime adapter formalization
-- maps primarily to Roadmap M5b: Richer Headless Runtime Implementations
-- assumes `RuntimeAdapter`, `TmuxAdapter`, and the early headless/local-session boundary already exist and are stable enough to extend
-- assumes Feature 14 chain recovery and Feature 15 context/handover quality have already reduced chain noise enough that richer headless runtime evidence will be actionable
+- builds on merged PRs #179-#184: SubprocessAdapter, EventStore, SSE endpoint, agent stream page, event type normalization, Playwright E2E
+- SubprocessAdapter burn-in validated 12/12 scenarios including parallel dispatch, long-running tasks, model variations, and session resume
+- 101 unit tests cover SubprocessAdapter, StreamEvent parsing, event type normalization, and EventStore
+- billing safety invariant preserved: CLI-only, no Anthropic SDK, no API calls
 
 Execution preconditions:
-- Feature 16 runtime adapter formalization baseline must be merged first
-- both Gemini and Codex headless gates must remain operational on current `main` throughout this feature
-- no provider-disabled or `not_executable` steady-state is acceptable for this feature family
-- Feature 15 bounded context and handover payloads must already exist so headless sessions can consume structured context rather than raw narrative spill
+- all PRs from F28-F29 merged on main (confirmed 2026-04-06)
+- `VNX_ADAPTER_T1=subprocess` environment variable available
+- dashboard runs on localhost:3100 (Next.js) with Python API on localhost:4173
 
 Review gate policy:
-- Gemini headless review is required on every PR in this feature
-- Codex headless final gate is required on every PR in this feature because runtime/session observability defects can silently invalidate future autonomous evidence
-- no PR in this feature may proceed under provider-disabled waiver language for Gemini or Codex
-- every PR in this feature must be opened as a GitHub PR before merge consideration
-- no downstream PR may be promoted until the upstream PR is merged from green GitHub CI on updated `main`
+- Codex gate required on every PR
+- every PR must be opened as a GitHub PR before merge consideration
+- no downstream PR may be promoted until the upstream PR is merged on main
 
 ## Problem Statement
 
-The system now has a runtime adapter boundary, but the headless path is still too thin:
-- headless execution evidence is still dominated by stdout/stderr and terminal end states
-- session and attempt lifecycle is not yet rich enough to support serious unattended operator trust
-- structured event streams for headless workers are not strong enough to support future retrospective learning and policy hardening
-- richer headless execution risks becoming opaque if observability is not designed into the runtime path itself
+The headless subprocess pipeline captures events and streams them to the dashboard, but the pipeline is incomplete:
+- T1 still operates with tmux-era CLAUDE.md instructions
+- no receipts are generated from subprocess execution — T0 has no completion signal
+- the dashboard shows terminal IDs (T1/T2/T3) instead of agent identities and domain context
+- headless workers receive raw instructions without skill-specific context (CLAUDE.md from agent directories)
+- no end-to-end certification proves the full pipeline: dispatch → stream → archive → receipt → gate → dashboard
 
 ## Design Goal
 
-Create a production-grade headless runtime path with explicit session/attempt lifecycle, structured observability, and auditable execution artifacts that can support future chain autonomy, learning loops, and operator trust without pretending every CLI exposes identical internal detail.
+Create an autonomous headless worker pipeline that can execute overnight with full observability, receipt generation, skill context injection, and domain-aware dashboard visibility — all without human intervention.
 
 ## Non-Goals
 
-- no full tmux removal
-- no remote-control channel architecture
-- no broad Business OS rollout
-- no attempt to guarantee universal tool-call capture for providers that do not expose it
-- no automatic policy mutation from learning output in this feature
+- no tmux removal (tmux adapter retained for backward compatibility)
+- no business_light domain activation (governance profile defined but gated)
+- no remote worker execution (local subprocess only)
+- no Anthropic SDK usage (CLI-only invariant)
+- no multi-provider support (Claude Code CLI only)
 
 ## Delivery Discipline
 
-- each PR must have a GitHub PR with clear scope and linked feature name before merge
-- required GitHub Actions checks must be green before human merge
-- dependent PRs must branch from post-merge `main`, not from stale local branches
-- headless observability claims must be backed by retained structured artifacts and certification evidence
-- final certification must update the internal planning progress docs in `docs/internal/plans/`
+- each PR is 150-300 lines and independently deployable
+- each PR must have a GitHub PR before merge
+- conventional commits: `feat|fix|test|refactor(<scope>): <description>`
+- every change verified by existing 101-test suite plus new tests per PR
+- billing safety audit on every PR (no Anthropic SDK imports, no API calls)
 
 ## Dependency Flow
 
@@ -68,222 +66,238 @@ PR-2 -> PR-3
 PR-3 -> PR-4
 ```
 
-## PR-0: Headless Runtime Session Contract And Observability Schema
-**Track**: C
+## PR-0: Headless T1 Backend Developer (F31)
+**Track**: A
 **Priority**: P1
-**Complexity**: Medium
-**Risk**: High
-**Skill**: @architect
-**Requires-Model**: opus
-**Estimated Time**: 2-3 hours
+**Complexity**: Small
+**Risk**: Low
+**Skill**: @backend-developer
+**Requires-Model**: sonnet
 **Dependencies**: []
 
 ### Description
-Define the canonical session/attempt lifecycle, structured event schema, and evidence expectations for richer headless runtime execution.
+Convert T1 from a tmux-era interactive terminal to a pure headless backend-developer agent. Remove skill loading commands, tmux references, and interactive assumptions from T1's CLAUDE.md. Update T0 dispatch instructions for headless T1 delivery.
 
 ### Scope
-- define headless session, attempt, and run identity model
-- define canonical state machine for headless session lifecycle
-- define structured event schema for start, progress, completion, timeout, failure, and attachability signals
-- define evidence classes: raw output, structured event stream, report artifact, and runtime correlation metadata
-- define explicit requirements and limits for tool-call observability based on provider capability
+- rewrite `.claude/terminals/T1/CLAUDE.md` as a pure backend-developer agent identity — no `/skill` commands, no tmux references, no interactive assumptions
+- update `subprocess_dispatch.py` to accept and inject skill CLAUDE.md path into the prompt preamble
+- set `VNX_ADAPTER_T1=subprocess` as the documented default for T1 in CLAUDE.md root instructions
+- update T0 orchestrator instructions in `.claude/terminals/T0/CLAUDE.md` to reference headless T1 dispatch path
+- verify: dispatch a task to T1 via subprocess → events streamed to EventStore → archived on completion
 
 ### Deliverables
-- headless runtime session contract
-- structured observability schema
-- provider-capability matrix for tool-call visibility vs output-only visibility
-- GitHub PR with contract summary and acceptance notes
+- rewritten `.claude/terminals/T1/CLAUDE.md` (pure backend-developer, no tmux)
+- updated T0 dispatch instructions for headless T1
+- `VNX_ADAPTER_T1=subprocess` default documented
+- test: dispatch via subprocess_dispatch.py produces events + archive
+- GitHub PR
 
 ### Success Criteria
-- headless runtime lifecycle is explicit before implementation starts
-- structured observability requirements are locked before runtime changes land
-- provider limitations around tool-call visibility are made explicit instead of hand-waved
-- future learning-loop work has a stable session/attempt evidence model to consume
+- T1 CLAUDE.md contains zero tmux references and zero `/skill` commands
+- a headless dispatch to T1 produces structured events in EventStore
+- events are archived on next dispatch
+- existing 101 tests still pass
+- T0 instructions reference headless T1 path
 
 ### Quality Gate
-`gate_pr0_headless_runtime_session_contract`:
-- [ ] Contract defines headless session, attempt, and run identity model
-- [ ] Contract defines explicit headless session lifecycle states and transitions
-- [ ] Contract defines structured event schema for start, progress, timeout, completion, and failure
-- [ ] Contract defines evidence classes and provider capability limits for tool-call visibility
-- [ ] GitHub PR exists with feature-linked summary and acceptance notes
-- [ ] Required GitHub Actions checks are green before merge
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr0_headless_t1_backend_developer`:
+- [ ] T1 CLAUDE.md rewritten as pure backend-developer identity
+- [ ] Zero tmux references in T1 CLAUDE.md
+- [ ] VNX_ADAPTER_T1=subprocess documented as default
+- [ ] Dispatch to T1 via subprocess produces events in EventStore
+- [ ] Events archived on subsequent dispatch
+- [ ] T0 instructions updated for headless T1
+- [ ] All existing tests pass
+- [ ] GitHub PR exists
 
 ---
 
-## PR-1: LocalSessionAdapter Lifecycle And Attempt Tracking
-**Track**: B
+## PR-1: Subprocess Receipt Integration (F32)
+**Track**: A
 **Priority**: P1
 **Complexity**: Medium
-**Risk**: High
+**Risk**: Medium
 **Skill**: @backend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 3-5 hours
 **Dependencies**: [PR-0]
 
 ### Description
-Implement richer headless session lifecycle and attempt tracking behind the adapter boundary so headless runs are represented as real runtime sessions rather than thin subprocess side-effects.
+After `read_events()` completes (subprocess exits), automatically write a receipt to `t0_receipts.ndjson`. This closes the dispatch lifecycle loop — T0 gets a completion signal from headless workers.
 
 ### Scope
-- implement explicit LocalSessionAdapter session lifecycle against the new contract
-- add attempt tracking and session/run correlation metadata
-- persist lifecycle transitions into canonical runtime state
-- add tests for session creation, attempt rollover, timeout, completion, and abnormal exit handling
+- add receipt generation in `subprocess_adapter.py` after `read_events()` loop completes
+- receipt format: `dispatch_id`, `terminal_id`, `status` (success/failure based on exit code), `event_count`, `session_id`, `source="subprocess"`, `last_event_type`, `timestamp`
+- expose completion status from SubprocessAdapter: exit code, event count, last event type
+- add `subprocess_dispatch.py` integration: call receipt generation after read_events completes
+- write receipt to the standard receipt pipeline path (`$VNX_DATA_DIR/receipts/t0_receipts.ndjson`)
+- tests for success receipt (exit 0, result event), failure receipt (non-zero exit), and edge case (no events)
 
 ### Deliverables
-- LocalSessionAdapter lifecycle implementation
-- attempt/session tracking
-- runtime persistence integration
-- GitHub PR with lifecycle evidence summary
+- receipt generation in `subprocess_adapter.py` or `subprocess_dispatch.py`
+- receipt format spec and implementation
+- completion status exposure (exit code, event count)
+- tests for success + failure + edge case receipts
+- GitHub PR
 
 ### Success Criteria
-- headless runs are represented as explicit sessions and attempts under test
-- runtime truth can distinguish session lifecycle states instead of inferring from final output
-- abnormal exits and retries are correlated to the correct session/attempt identity
-- richer headless runtime no longer depends on ad hoc subprocess interpretation alone
+- every completed subprocess dispatch writes exactly one receipt to t0_receipts.ndjson
+- receipt contains dispatch_id, terminal_id, status, event_count, session_id, source
+- success receipt written when exit code is 0 and last event type is `result`
+- failure receipt written when exit code is non-zero or no result event
+- receipt is parseable by the existing receipt processor
+- all existing tests pass plus new receipt tests
 
 ### Quality Gate
-`gate_pr1_local_session_adapter_lifecycle`:
-- [ ] All LocalSessionAdapter lifecycle tests pass
-- [ ] Headless sessions and attempts are persisted and queryable under test
-- [ ] Timeout, retry, abnormal exit, and completion map to explicit lifecycle states under test
-- [ ] Runtime truth preserves correct session/attempt correlation under test
-- [ ] GitHub PR exists with lifecycle evidence summary
-- [ ] Required GitHub Actions checks are green before merge
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr1_subprocess_receipt_integration`:
+- [ ] Receipt written to t0_receipts.ndjson after subprocess completion
+- [ ] Receipt contains all required fields (dispatch_id, terminal_id, status, event_count, session_id, source)
+- [ ] Success and failure receipts tested
+- [ ] Receipt parseable by existing receipt processor
+- [ ] All existing tests pass
+- [ ] GitHub PR exists
 
 ---
 
-## PR-2: Structured Headless Event Stream And Artifact Correlation
-**Track**: B
+## PR-2: Dashboard Domain Filter (F33)
+**Track**: A
 **Priority**: P1
 **Complexity**: Medium
-**Risk**: High
-**Skill**: @backend-developer
+**Risk**: Low
+**Skill**: @frontend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 3-5 hours
 **Dependencies**: [PR-1]
 
 ### Description
-Add a structured headless runtime event stream and correlate it with session/attempt artifacts so operators and downstream systems can inspect one coherent execution timeline.
+Add domain awareness to the dashboard. The Kanban board gets domain filter tabs (Coding, Content, All). The Agent Stream page replaces terminal selectors (T1/T2/T3) with agent name selectors grouped by domain. The stream is linked to dispatch_id with pipeline progress.
 
 ### Scope
-- emit structured events for session start, subprocess launch, progress heartbeat, completion, timeout, failure, and artifact materialization
-- persist correlation keys linking event stream, runtime state, and artifacts
-- expose event timeline in a stable machine-readable form
-- add tests for correlation integrity and event-stream completeness
+- add `domain` field to KanbanCard TypeScript type in `dashboard/token-dashboard/app/kanban/page.tsx`
+- add `domain` field to the Kanban API response in `dashboard/api_kanban.py` (or equivalent)
+- add sidebar domain filter tabs to Kanban page: Coding, Content, All (default)
+- agent stream page: replace terminal selector (T1/T2/T3) with agent name selector grouped by domain
+- agent names derived from dispatch metadata or EventStore events (e.g., `backend-developer`, `test-engineer`)
+- stream linked to dispatch_id — display current dispatch_id and pipeline step if available
+- agent stream page: show dispatch_id in status bar
 
 ### Deliverables
-- structured headless event stream
-- artifact/session correlation model
-- event-stream validation tests
-- GitHub PR with observability evidence summary
+- `domain` field on KanbanCard type and API
+- domain filter tabs on Kanban page
+- agent name selector on Agent Stream page (grouped by domain)
+- dispatch_id display in stream status bar
+- GitHub PR
 
 ### Success Criteria
-- a headless run can be reconstructed from one coherent event stream under test
-- artifacts and runtime state point to the same session/attempt identity
-- structured observability becomes stronger than raw stdout/stderr capture alone
-- operator and downstream analysis tools gain one stable timeline surface
+- Kanban page shows domain filter tabs that filter cards by domain
+- Agent Stream page shows agent names instead of T1/T2/T3
+- Agent names are grouped by domain (Coding, Content)
+- Current dispatch_id is visible in the stream status bar
+- all existing Playwright E2E tests pass or are updated
+- no regression in existing dashboard functionality
 
 ### Quality Gate
-`gate_pr2_structured_headless_event_stream`:
-- [ ] All structured event stream and correlation tests pass
-- [ ] Session lifecycle events are emitted in canonical order under test
-- [ ] Artifact and runtime-state correlation keys remain consistent under test
-- [ ] Machine-readable headless timeline can be reconstructed under test
-- [ ] GitHub PR exists with observability evidence summary
-- [ ] Required GitHub Actions checks are green before merge
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr2_dashboard_domain_filter`:
+- [ ] Domain filter tabs render on Kanban page
+- [ ] Kanban cards filter by domain selection
+- [ ] Agent Stream shows agent names grouped by domain
+- [ ] Dispatch ID visible in stream status bar
+- [ ] No dashboard regressions
+- [ ] GitHub PR exists
 
 ---
 
-## PR-3: Provider-Aware Tool Visibility And Progress Projections
-**Track**: B
+## PR-3: Skill Context Inlining (F34)
+**Track**: A
 **Priority**: P1
 **Complexity**: Medium
-**Risk**: High
-**Skill**: @architect
+**Risk**: Medium
+**Skill**: @backend-developer
 **Requires-Model**: sonnet
-**Estimated Time**: 2-4 hours
 **Dependencies**: [PR-2]
 
 ### Description
-Add provider-aware visibility rules so VNX records structured tool-call or progress detail when a provider exposes it, while remaining explicit and honest when only coarse output-level observability is available.
+Enable headless workers to receive skill-specific context by reading the agent directory's CLAUDE.md and prepending it to the dispatch instruction. This gives each headless worker a focused agent identity without requiring `/skill` commands.
 
 ### Scope
-- implement provider capability flags for tool-call visibility, structured progress events, and output-only fallback
-- expose these capabilities to runtime/read-model consumers
-- add projections for attachability, progress confidence, and observability quality
-- add tests covering Gemini, Codex, and output-only fallback semantics
+- `subprocess_dispatch.py`: read skill CLAUDE.md from agent directory, prepend to instruction as context preamble
+- agent directory resolution: role name → `.claude/skills/{role}/CLAUDE.md` or `agents/{role}/CLAUDE.md` (check both, prefer `.claude/skills/`)
+- set cwd to agent directory for the `claude -p` subprocess (so CLAUDE.md is auto-loaded by CLI)
+- fallback: if no agent directory exists, dispatch proceeds without skill context (backward compatible)
+- `SubprocessAdapter.deliver()`: accept optional `cwd` parameter for agent directory
+- verify: headless dispatch with agent role produces skill-aware behavior (e.g., backend-developer follows coding conventions)
+- tests: agent dir resolution, CLAUDE.md inlining, cwd override, missing agent dir fallback
 
 ### Deliverables
-- provider-aware observability capability layer
-- progress and observability-quality projections
-- provider capability tests
-- GitHub PR with provider-visibility evidence summary
+- agent directory resolution logic in `subprocess_dispatch.py`
+- CLAUDE.md context inlining (prepend to instruction or set cwd)
+- `SubprocessAdapter.deliver()` cwd parameter
+- tests for resolution, inlining, and fallback
+- GitHub PR
 
 ### Success Criteria
-- VNX stops pretending all providers expose the same internal detail
-- tool visibility and output-only fallback are both explicit and queryable under test
-- operators can tell whether they are seeing rich progress or coarse output-only evidence
-- future learning loops gain cleaner distinctions between runtime weakness and provider limitation
+- headless dispatch with role `backend-developer` resolves to `.claude/skills/backend-developer/CLAUDE.md`
+- CLAUDE.md content is either prepended to instruction or loaded via cwd
+- missing agent directory does not break dispatch (graceful fallback)
+- skill-specific behavior observable in event stream (agent follows skill instructions)
+- all existing tests pass plus new resolution/inlining tests
 
 ### Quality Gate
-`gate_pr3_provider_aware_tool_visibility`:
-- [ ] All provider visibility and fallback tests pass
-- [ ] Structured tool/progress visibility is exposed when supported under test
-- [ ] Output-only fallback remains explicit and honest under test
-- [ ] Observability-quality projection distinguishes provider capability levels under test
-- [ ] GitHub PR exists with provider-visibility evidence summary
-- [ ] Required GitHub Actions checks are green before merge
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr3_skill_context_inlining`:
+- [ ] Agent directory resolution works for `.claude/skills/{role}/`
+- [ ] CLAUDE.md context available to headless worker
+- [ ] Missing agent directory falls back gracefully
+- [ ] Skill-specific behavior verified in event stream
+- [ ] All existing tests pass
+- [ ] GitHub PR exists
 
 ---
 
-## PR-4: Rich Headless Runtime Certification
+## PR-4: End-to-End Validation + Certification (F35)
 **Track**: C
 **Priority**: P1
-**Complexity**: High
-**Risk**: High
+**Complexity**: Large
+**Risk**: Medium
 **Skill**: @quality-engineer
-**Requires-Model**: opus
-**Estimated Time**: 3-6 hours
+**Requires-Model**: sonnet
 **Dependencies**: [PR-3]
 
 ### Description
-Certify that the richer headless runtime path is auditable, provider-aware, and strong enough to support future unattended autonomy and learning-loop work.
+Full pipeline certification: headless dispatch → event stream → archive → receipt → gate → dashboard. Verifies every evidence surface. Closes all open items from F31-F34. Produces a certification report.
 
 ### Scope
-- certify session/attempt lifecycle correctness under success, timeout, and failure scenarios
-- certify event-stream and artifact correlation integrity
-- certify provider-aware observability claims and fallback honesty
-- certify that planning/status docs are updated for the new baseline
+- full pipeline test: dispatch task to headless T1 with skill context → verify events in EventStore → verify archive created → verify receipt in t0_receipts.ndjson → verify dashboard displays events
+- Playwright E2E: navigate to Agent Stream → verify events render with correct types → verify agent name selector → verify dispatch_id in status bar → verify domain filter on Kanban
+- archive integrity: verify all archives from F31-F34 exist and contain valid NDJSON
+- receipt pipeline: verify receipts from F32 are parseable and contain correct metadata
+- billing safety audit: grep codebase for Anthropic SDK imports, API endpoints, OAuth tokens
+- open items sweep: review all open items from F31-F34, close with evidence or escalate
+- certification report: document all evidence surfaces, test results, and open items
 
 ### Deliverables
-- headless runtime certification report
-- retained evidence for session lifecycle and event-stream integrity
-- updated internal planning docs (`CHANGELOG.md`, `PROJECT_STATUS.md`)
-- GitHub PR with certification verdict
+- full pipeline integration test script
+- Playwright E2E tests for domain filter, agent selector, dispatch_id display
+- archive integrity verification
+- receipt pipeline verification
+- billing safety audit results
+- open items closure evidence
+- certification report in `docs/internal/plans/AGENT_OS_CERTIFICATION.md`
+- GitHub PR
 
 ### Success Criteria
-- richer headless runtime behavior is proven with retained evidence
-- provider capability limits are explicit rather than hidden
-- structured observability is good enough to support later learning-loop hardening
-- planning docs reflect the new post-Feature-17 baseline
+- full pipeline runs end-to-end without manual intervention
+- all Playwright E2E tests pass
+- all archives contain valid NDJSON with correct dispatch_ids
+- all receipts contain correct metadata and are parseable
+- billing safety audit passes (zero Anthropic SDK imports, zero API calls)
+- all open items from F31-F34 closed or escalated with evidence
+- certification report documents every evidence surface
 
 ### Quality Gate
-`gate_pr4_rich_headless_runtime_certification`:
-- [ ] Certification covers success, timeout, retry, and failure lifecycle scenarios
-- [ ] Certification proves structured event stream and artifact correlation integrity
-- [ ] Certification proves provider-aware observability and explicit fallback semantics
-- [ ] `docs/internal/plans/CHANGELOG.md` updated with Feature 17 closeout
-- [ ] `docs/internal/plans/PROJECT_STATUS.md` updated with Feature 17 status and next-order recommendation
-- [ ] GitHub PR exists with certification verdict
-- [ ] Required GitHub Actions checks are green before merge
-- [ ] Gemini review receipt and normalized report exist with no unresolved blocking findings
-- [ ] Codex final gate receipt and normalized report exist with no unresolved blocking findings
+`gate_pr4_e2e_certification`:
+- [ ] Full pipeline test passes: dispatch → stream → archive → receipt → dashboard
+- [ ] Playwright E2E tests pass for domain filter, agent selector, dispatch_id
+- [ ] Archive integrity verified (valid NDJSON, correct dispatch_ids)
+- [ ] Receipt pipeline verified (parseable, correct metadata)
+- [ ] Billing safety audit passes
+- [ ] All F31-F34 open items closed or escalated
+- [ ] Certification report written
+- [ ] GitHub PR exists
