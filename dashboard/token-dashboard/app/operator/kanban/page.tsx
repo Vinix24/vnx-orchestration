@@ -96,23 +96,24 @@ function DispatchCard({ card }: { card: KanbanCard }) {
         transition: 'border-color 0.2s ease',
       }}
     >
-      {/* Top row: PR-id + track badge */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      {/* Top row: dispatch ID + track badge */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
         <span
-          data-testid="card-pr-id"
+          data-testid="card-id"
           style={{
-            fontSize: 12,
+            fontSize: 11,
             fontWeight: 700,
             color: 'var(--color-foreground)',
             letterSpacing: '-0.01em',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            maxWidth: 140,
+            flex: 1,
+            minWidth: 0,
           }}
-          title={card.pr_id}
+          title={card.id}
         >
-          {card.pr_id || '—'}
+          {card.id || card.pr_id || '—'}
         </span>
         {track && track !== '—' && (
           <span
@@ -134,7 +135,27 @@ function DispatchCard({ card }: { card: KanbanCard }) {
         )}
       </div>
 
-      {/* Middle: terminal + gate */}
+      {/* Reason / description */}
+      {card.reason && (
+        <p
+          data-testid="card-reason"
+          style={{
+            fontSize: 11,
+            color: 'var(--color-muted)',
+            margin: 0,
+            lineHeight: 1.4,
+            overflow: 'hidden',
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+          }}
+          title={card.reason}
+        >
+          {card.reason}
+        </p>
+      )}
+
+      {/* Meta row: terminal + gate + PR */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         {card.terminal && card.terminal !== '—' && (
           <span
@@ -160,11 +181,27 @@ function DispatchCard({ card }: { card: KanbanCard }) {
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
-              maxWidth: 130,
+              maxWidth: 100,
             }}
             title={card.gate}
           >
             {card.gate}
+          </span>
+        )}
+        {card.pr_id && card.pr_id !== 'none' && card.pr_id !== '—' && (
+          <span
+            data-testid="card-pr-id"
+            style={{
+              fontSize: 10,
+              padding: '2px 7px',
+              borderRadius: 5,
+              background: 'rgba(249,115,22,0.10)',
+              border: '1px solid rgba(249,115,22,0.25)',
+              color: 'var(--color-accent)',
+              fontWeight: 600,
+            }}
+          >
+            {card.pr_id}
           </span>
         )}
       </div>
@@ -264,8 +301,8 @@ function KanbanColumn({
         ) : cards.length === 0 ? (
           <EmptyColumn stage={colKey} />
         ) : (
-          cards.map((card) => (
-            <DispatchCard key={card.id} card={card} />
+          cards.map((card, idx) => (
+            <DispatchCard key={`${card.id}-${idx}`} card={card} />
           ))
         )}
       </div>

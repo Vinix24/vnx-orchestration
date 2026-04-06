@@ -246,6 +246,7 @@ export interface KanbanCard {
   gate: string;
   priority: string;
   status: string;
+  reason?: string;
   stage: string;
   duration_secs: number;
   duration_label: string;

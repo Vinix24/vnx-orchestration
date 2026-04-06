@@ -37,6 +37,7 @@ except ImportError:
 
 FRESH_THRESHOLD = 60
 AGING_THRESHOLD = 300
+REGISTRY_AGING_THRESHOLD = 86400  # 24h — registry files change infrequently
 
 
 @dataclass
@@ -87,8 +88,10 @@ def _staleness(mtime_iso: Optional[str], now: datetime) -> Optional[float]:
         return None
     try:
         ts = datetime.fromisoformat(mtime_iso.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
         return (now - ts).total_seconds()
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return None
 
 
@@ -115,6 +118,8 @@ def _load_yaml(path: Path) -> Optional[Dict[str, Any]]:
 def _compute_freshness(
     sources: Dict[str, Optional[str]],
     now: datetime,
+    *,
+    threshold_overrides: Optional[Dict[str, float]] = None,
 ) -> tuple[float, bool, List[str]]:
     """Compute max staleness and degraded state from source freshness map.
 
@@ -123,6 +128,7 @@ def _compute_freshness(
     max_staleness = 0.0
     degraded = False
     reasons: List[str] = []
+    overrides = threshold_overrides or {}
 
     for name, mtime in sources.items():
         if mtime is None:
@@ -136,7 +142,8 @@ def _compute_freshness(
             continue
         if age > max_staleness:
             max_staleness = age
-        if age > AGING_THRESHOLD:
+        threshold = overrides.get(name, AGING_THRESHOLD)
+        if age > threshold:
             degraded = True
             reasons.append(f"{name}: stale ({age:.0f}s)")
 
@@ -426,7 +433,10 @@ class OpenItemsView:
         oi_path = self.state_dir / "open_items.json"
         oi_mtime = _file_mtime_iso(oi_path)
         sources = {"open_items.json": oi_mtime}
-        staleness, degraded, reasons = _compute_freshness(sources, now)
+        staleness, degraded, reasons = _compute_freshness(
+            sources, now,
+            threshold_overrides={"open_items.json": REGISTRY_AGING_THRESHOLD},
+        )
 
         raw = _load_json(oi_path)
         if raw is None:
@@ -531,7 +541,10 @@ class AggregateOpenItemsView:
             )
 
         _sort_by_severity(all_items)
-        staleness, degraded, fresh_reasons = _compute_freshness(sources, now)
+        oi_overrides = {k: REGISTRY_AGING_THRESHOLD for k in sources if k.endswith("open_items.json")}
+        staleness, degraded, fresh_reasons = _compute_freshness(
+            sources, now, threshold_overrides=oi_overrides,
+        )
         degraded_reasons.extend(fresh_reasons)
 
         total_summary = {
@@ -588,7 +601,13 @@ class SessionView:
             "progress_state.yaml": _file_mtime_iso(progress_path),
             "runtime_coordination.db": _file_mtime_iso(db_path),
         }
-        staleness, degraded, reasons = _compute_freshness(sources, now)
+        staleness, degraded, reasons = _compute_freshness(
+            sources, now,
+            threshold_overrides={
+                "pr_queue_state.json": REGISTRY_AGING_THRESHOLD,
+                "progress_state.yaml": REGISTRY_AGING_THRESHOLD,
+            },
+        )
 
         queue_data = _load_json(queue_path)
         progress_data = _load_yaml(progress_path)
@@ -706,7 +725,10 @@ class ProjectsView:
 
             results.append(entry)
 
-        staleness, degraded, reasons = _compute_freshness(sources, now)
+        staleness, degraded, reasons = _compute_freshness(
+            sources, now,
+            threshold_overrides={"projects.json": REGISTRY_AGING_THRESHOLD},
+        )
 
         return FreshnessEnvelope(
             view="ProjectsView",

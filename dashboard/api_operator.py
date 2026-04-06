@@ -24,7 +24,7 @@ except ImportError:
 
 # Compute paths locally to avoid circular imports with serve_dashboard.
 VNX_DIR = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = VNX_DIR.parents[1]
+PROJECT_ROOT = VNX_DIR
 SCRIPTS_DIR = VNX_DIR / "scripts"
 CANONICAL_STATE_DIR = Path(os.environ.get("VNX_STATE_DIR", str(PROJECT_ROOT / ".vnx-data" / "state")))
 _VNX_DATA_DIR = CANONICAL_STATE_DIR.parent
