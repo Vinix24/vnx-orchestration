@@ -471,7 +471,37 @@ _ddt_handle_failure() {
     fi
 }
 
-# deliver_dispatch_to_terminal — input-mode guard, worktree path resolution, tmux delivery.
+# _ddt_subprocess_delivery — route dispatch via SubprocessAdapter instead of tmux.
+# Params: terminal_id dispatch_id complete_prompt model dispatch_file
+_ddt_subprocess_delivery() {
+    local terminal_id="$1" dispatch_id="$2" complete_prompt="$3" model="$4" dispatch_file="$5"
+
+    log "V8 DISPATCH: subprocess adapter route — terminal=$terminal_id dispatch=$dispatch_id model=$model"
+
+    if ! python3 "$VNX_DIR/scripts/lib/subprocess_dispatch.py" \
+            --terminal-id "$terminal_id" \
+            --instruction "$complete_prompt" \
+            --model "$model" \
+            --dispatch-id "$dispatch_id"; then
+        log_structured_failure "subprocess_delivery_failed" \
+            "SubprocessAdapter delivery failed" \
+            "terminal=$terminal_id dispatch=$dispatch_id"
+        printf '\n\n[DELIVERY_SUBSTEP_FAILED: code=subprocess_delivery_failed] subprocess delivery failed.\n' \
+            >> "$dispatch_file"
+        rc_release_on_failure "$dispatch_id" "$_DL_RC_ATTEMPT_ID" "$terminal_id" "$_DL_RC_GENERATION" "delivery_failed:subprocess_delivery_failed"
+        if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+            log_structured_failure "claim_release_failed" "Failed to release claim after subprocess delivery failure" "terminal=$terminal_id dispatch=$dispatch_id"
+        fi
+        return 1
+    fi
+
+    log "V8 DISPATCH: subprocess delivery succeeded — terminal=$terminal_id dispatch=$dispatch_id"
+    return 0
+}
+
+# deliver_dispatch_to_terminal — input-mode guard, worktree path resolution, delivery.
+# Checks VNX_ADAPTER_T{n} env var: if "subprocess", routes via SubprocessAdapter.
+# Default (tmux or unset): uses existing tmux send-keys delivery.
 # Params: dispatch_file track agent_role dispatch_id target_pane terminal_id
 #         provider complete_prompt skill_command
 # Reads globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID
@@ -480,6 +510,17 @@ deliver_dispatch_to_terminal() {
     local target_pane="$5" terminal_id="$6" provider="$7"
     local complete_prompt="$8" skill_command="$9"
 
+    # Resolve per-terminal adapter: VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
+    local adapter_var="VNX_ADAPTER_${terminal_id}"
+    local adapter_type="${!adapter_var:-tmux}"
+
+    if [[ "$adapter_type" == "subprocess" ]]; then
+        local model="${_CTM_REQUIRES_MODEL:-sonnet}"
+        _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file"
+        return $?
+    fi
+
+    # Default: tmux delivery path
     _ddt_pre_delivery_checks "$target_pane" "$terminal_id" "$dispatch_id" "$provider" complete_prompt || return 1
 
     log "V8 DISPATCH: Activating skill '${skill_command}' + pasting instruction"
