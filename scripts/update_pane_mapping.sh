@@ -14,12 +14,13 @@ PROCESS_LOG="$VNX_LOGS_DIR/process_lifecycle.log"
 mkdir -p "$VNX_LOGS_DIR"
 
 # Determine which session to use
+PROJECT_SESSION="vnx-$(basename "$VNX_DIR")"
 if tmux has-session -t vnx 2>/dev/null; then
     SESSION="vnx"
-elif tmux has-session -t <project> 2>/dev/null; then
-    SESSION="<project>"
+elif tmux has-session -t "$PROJECT_SESSION" 2>/dev/null; then
+    SESSION="$PROJECT_SESSION"
 else
-    echo "ERROR: No vnx or <project> session found"
+    echo "ERROR: No vnx or $PROJECT_SESSION session found"
     exit 1
 fi
 

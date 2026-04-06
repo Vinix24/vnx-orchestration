@@ -702,6 +702,206 @@ def _operator_post_gate_toggle(body: dict, config_path: Path | None = None) -> t
         }, 500
 
 
+# ---------- System Health API ----------
+
+import sqlite3
+from typing import Any
+
+_SYSTEM_HEALTH_DB_TABLES = ("success_patterns", "antipatterns", "prevention_rules", "dispatch_metadata")
+
+
+def _operator_get_system_health() -> dict:
+    """GET /api/operator/system-health -- deep system health check."""
+    now = datetime.now(timezone.utc)
+    components: dict[str, dict] = {}
+
+    # 1. Intelligence DB table population
+    intel_details: dict[str, Any] = {}
+    try:
+        if DB_PATH.exists():
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            total_rows = 0
+            for table in _SYSTEM_HEALTH_DB_TABLES:
+                try:
+                    row = conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()  # noqa: S608
+                    count = row["cnt"] if row else 0
+                except Exception:
+                    count = 0
+                intel_details[table] = count
+                total_rows += count
+            conn.close()
+            status = "healthy" if total_rows > 0 else "dead"
+            if total_rows > 0 and any(intel_details[t] == 0 for t in _SYSTEM_HEALTH_DB_TABLES):
+                status = "degraded"
+        else:
+            status = "dead"
+            intel_details["error"] = "quality_intelligence.db not found"
+    except Exception as exc:
+        status = "dead"
+        intel_details["error"] = str(exc)
+    components["intelligence_db"] = {"status": status, "details": intel_details}
+
+    # 2. Governance digest freshness
+    digest_path = CANONICAL_STATE_DIR / "governance_digest.json"
+    try:
+        if digest_path.exists():
+            mt = digest_path.stat().st_mtime
+            mtime_dt = datetime.fromtimestamp(mt, tz=timezone.utc)
+            age_seconds = (now - mtime_dt).total_seconds()
+            pattern_count_24h = 0
+            try:
+                data = json.loads(digest_path.read_text(encoding="utf-8"))
+                pattern_count_24h = data.get("recurring_pattern_count", 0)
+            except Exception:
+                pass
+            digest_status = "healthy" if age_seconds < 600 else "degraded"
+            components["governance_digest"] = {
+                "status": digest_status,
+                "details": {
+                    "last_updated": mtime_dt.isoformat(),
+                    "age_seconds": round(age_seconds, 1),
+                    "patterns_detected": pattern_count_24h,
+                },
+            }
+        else:
+            components["governance_digest"] = {
+                "status": "dead",
+                "details": {"error": "governance_digest.json not found"},
+            }
+    except Exception as exc:
+        components["governance_digest"] = {"status": "dead", "details": {"error": str(exc)}}
+
+    # 3. Dispatcher health (last successful delivery)
+    try:
+        dispatch_log = CANONICAL_STATE_DIR / "dispatch_events.ndjson"
+        if dispatch_log.exists():
+            last_line = ""
+            with open(dispatch_log, "rb") as f:
+                f.seek(0, 2)
+                pos = f.tell()
+                while pos > 0:
+                    pos -= 1
+                    f.seek(pos)
+                    ch = f.read(1)
+                    if ch == b"\n" and last_line:
+                        break
+                    last_line = ch.decode(errors="replace") + last_line
+            if last_line.strip():
+                try:
+                    evt = json.loads(last_line.strip())
+                    ts = evt.get("timestamp", "")
+                    components["dispatcher"] = {
+                        "status": "healthy",
+                        "details": {"last_event": ts},
+                    }
+                except Exception:
+                    components["dispatcher"] = {
+                        "status": "degraded",
+                        "details": {"error": "unparseable last event"},
+                    }
+            else:
+                components["dispatcher"] = {
+                    "status": "degraded",
+                    "details": {"error": "empty log"},
+                }
+        else:
+            components["dispatcher"] = {
+                "status": "dead",
+                "details": {"error": "dispatch_events.ndjson not found"},
+            }
+    except Exception as exc:
+        components["dispatcher"] = {"status": "dead", "details": {"error": str(exc)}}
+
+    # 4. Receipt processor (pending receipt count)
+    try:
+        if RECEIPTS_PATH.exists():
+            line_count = sum(1 for _ in open(RECEIPTS_PATH, encoding="utf-8"))
+            components["receipt_processor"] = {
+                "status": "healthy",
+                "details": {"total_receipts": line_count},
+            }
+        else:
+            components["receipt_processor"] = {
+                "status": "dead",
+                "details": {"error": "t0_receipts.ndjson not found"},
+            }
+    except Exception as exc:
+        components["receipt_processor"] = {"status": "dead", "details": {"error": str(exc)}}
+
+    # 5. Lease health (stale lease count)
+    try:
+        coord_db = CANONICAL_STATE_DIR / "runtime_coordination.db"
+        if coord_db.exists():
+            conn = sqlite3.connect(str(coord_db))
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM terminal_leases "
+                    "WHERE status = 'active' AND expires_at < ?",
+                    (now.isoformat(),),
+                ).fetchone()
+                stale = row[0] if row else 0
+            except Exception:
+                stale = 0
+            conn.close()
+            lease_status = "healthy" if stale == 0 else "degraded"
+            components["lease_health"] = {
+                "status": lease_status,
+                "details": {"stale_leases": stale},
+            }
+        else:
+            components["lease_health"] = {
+                "status": "degraded",
+                "details": {"error": "runtime_coordination.db not found"},
+            }
+    except Exception as exc:
+        components["lease_health"] = {"status": "degraded", "details": {"error": str(exc)}}
+
+    # 6. Report index
+    try:
+        if REPORTS_DIR.exists():
+            reports = list(REPORTS_DIR.glob("*.md"))
+            total_reports = len(reports)
+            latest_age = None
+            if reports:
+                newest = max(reports, key=lambda p: p.stat().st_mtime)
+                age = (now - datetime.fromtimestamp(newest.stat().st_mtime, tz=timezone.utc)).total_seconds()
+                latest_age = round(age, 1)
+            report_status = "healthy" if total_reports > 0 else "degraded"
+            components["report_index"] = {
+                "status": report_status,
+                "details": {
+                    "total_reports": total_reports,
+                    "latest_report_age_seconds": latest_age,
+                },
+            }
+        else:
+            components["report_index"] = {
+                "status": "dead",
+                "details": {"error": "unified_reports dir not found"},
+            }
+    except Exception as exc:
+        components["report_index"] = {"status": "dead", "details": {"error": str(exc)}}
+
+    # Summary score
+    status_scores = {"healthy": 2, "degraded": 1, "dead": 0}
+    scores = [status_scores.get(c["status"], 0) for c in components.values()]
+    avg_score = sum(scores) / len(scores) if scores else 0
+    if avg_score >= 1.5:
+        overall = "healthy"
+    elif avg_score >= 0.5:
+        overall = "degraded"
+    else:
+        overall = "dead"
+
+    return {
+        "status": overall,
+        "queried_at": now.isoformat(),
+        "components": components,
+        "health_score": round(avg_score / 2.0, 2),
+    }
+
+
 # ---------- Governance Digest API ----------
 
 _DIGEST_STALE_THRESHOLD = 600  # seconds -- digest older than 10 min is degraded
