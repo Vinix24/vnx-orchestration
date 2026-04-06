@@ -98,6 +98,25 @@ mode_pre_check() {
     _CTM_CLEAR_CONTEXT=$(extract_clear_context "$dispatch_file")
     _CTM_REQUIRES_MODEL=$(extract_requires_model "$dispatch_file")
     _CTM_REQUIRES_MODEL_STRENGTH=$(extract_requires_model_strength "$dispatch_file")
+
+    # Fallback: if dispatch has no Requires-Model but panes.json specifies a
+    # model for this terminal, use the panes.json model. This ensures model
+    # switches happen when panes.json is updated (e.g. T2 switched to Opus).
+    if [[ -z "$_CTM_REQUIRES_MODEL" && -n "$_CTM_TERMINAL_ID" && "$_CTM_TERMINAL_ID" != "UNKNOWN" ]]; then
+        local panes_model
+        panes_model=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$STATE_DIR/panes.json'))
+    print(d.get('$_CTM_TERMINAL_ID', {}).get('model', ''))
+except: pass
+" 2>/dev/null)
+        if [[ -n "$panes_model" && "$panes_model" != "sonnet" ]]; then
+            _CTM_REQUIRES_MODEL="$panes_model"
+            _CTM_REQUIRES_MODEL_STRENGTH="advisory"
+            log "V8 MODE_CONTROL: Model inferred from panes.json: $_CTM_REQUIRES_MODEL (terminal=$_CTM_TERMINAL_ID)"
+        fi
+    fi
     _CTM_FORCE_NORMAL=$(extract_force_normal_mode "$dispatch_file")
     _CTM_REQUIRES_PROVIDER=$(extract_requires_provider "$dispatch_file")
     _CTM_REQUIRES_PROVIDER_STRENGTH=$(extract_requires_provider_strength "$dispatch_file")
