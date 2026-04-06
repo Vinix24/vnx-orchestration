@@ -137,6 +137,11 @@ from api_operator import (  # noqa: E402
     _unlock_terminal,
 )
 
+from api_agent_stream import (  # noqa: E402
+    handle_agent_stream,
+    handle_agent_stream_status,
+)
+
 
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
     payload = json.dumps(payload_obj).encode("utf-8")
@@ -250,6 +255,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/system-health":
             _json_response(self, HTTPStatus.OK, _operator_get_system_health())
+            return
+
+        # Agent stream SSE endpoints
+        if path == "/api/agent-stream/status":
+            handle_agent_stream_status(self)
+            return
+
+        if path.startswith("/api/agent-stream/"):
+            terminal = path[len("/api/agent-stream/"):]
+            since = params.get("since", [None])[0]
+            handle_agent_stream(self, terminal, since)
             return
 
         # Return JSON 404 for unrecognised /api/* paths so callers get
