@@ -43,6 +43,12 @@ After any system crash or tmux session restart, before normal orchestration:
      "SELECT COUNT(*) FROM incident_log WHERE resolved_at IS NULL AND severity='blocking';"
    ```
 
+## Email Digest Configuration
+To receive daily operator digests via email, set:
+- `VNX_DIGEST_EMAIL` — recipient email address
+- `VNX_SMTP_PASS` — SMTP password (Gmail app password)
+Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
+
 ## Runtime Policy
 
 - T0 runtime is Claude Opus only.
