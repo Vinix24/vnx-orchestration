@@ -9,10 +9,13 @@ test.describe('API health endpoints', () => {
     expect(typeof body).toBe('object');
   });
 
-  test('GET /api/operator/kanban returns valid JSON array', async ({ request }) => {
+  test('GET /api/operator/kanban returns valid JSON with stages', async ({ request }) => {
     const response = await request.get('/api/operator/kanban');
     expect(response.status()).toBe(200);
     const body = await response.json();
-    expect(Array.isArray(body)).toBe(true);
+    expect(body).toBeDefined();
+    expect(typeof body).toBe('object');
+    expect(body).toHaveProperty('stages');
+    expect(typeof body.total).toBe('number');
   });
 });
