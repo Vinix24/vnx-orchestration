@@ -301,8 +301,8 @@ function KanbanColumn({
         ) : cards.length === 0 ? (
           <EmptyColumn stage={colKey} />
         ) : (
-          cards.map((card) => (
-            <DispatchCard key={card.id} card={card} />
+          cards.map((card, idx) => (
+            <DispatchCard key={`${card.id}-${idx}`} card={card} />
           ))
         )}
       </div>
