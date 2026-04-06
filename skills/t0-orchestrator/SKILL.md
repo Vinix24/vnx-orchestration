@@ -105,7 +105,61 @@ When uncertain, use this sequence:
 3. Keep safety-first default.
 - If ambiguity remains on blocker/warn criteria, do not complete PR.
 
-## 6. Open Items Lifecycle
+## 6. Startup Reconciliation
+
+Run this sequence on every session start. For post-crash starts, run all steps. For normal starts, steps 1 and 3 are sufficient.
+
+### 6.1 Normal Startup
+
+```bash
+python3 scripts/runtime_coordination_init.py
+python3 scripts/reconcile_queue_state.py --json
+```
+
+### 6.2 Post-Crash Startup
+
+```bash
+# Step 1: Validate runtime schema
+python3 scripts/runtime_coordination_init.py
+
+# Step 2: Check for stale leases
+for T in T1 T2 T3; do
+  python3 scripts/runtime_core_cli.py check-terminal --terminal $T --dispatch-id recovery-check
+done
+# If lease_expired_not_cleaned: release via release-on-failure
+
+# Step 3: Reconcile queue truth
+python3 scripts/reconcile_queue_state.py --json
+
+# Step 4: Terminal state reconciliation
+python3 scripts/reconcile_terminal_state.py --no-tmux-probe
+
+# Step 5: Review incident log
+sqlite3 .vnx-data/state/runtime_coordination.db \
+  "SELECT COUNT(*), severity FROM incident_log WHERE resolved_at IS NULL GROUP BY severity;"
+
+# Step 6: Check active and pending dispatches
+ls -la .vnx-data/dispatches/active/ 2>/dev/null
+ls -la .vnx-data/dispatches/pending/ 2>/dev/null
+```
+
+### 6.3 Orphaned Dispatch Handling
+
+If `active/` contains dispatches after crash: read dispatch, check worker state, decide re-dispatch or resume.
+
+```bash
+python3 scripts/reconcile_queue_state.py --json 2>/dev/null | \
+  jq '.prs[] | select(.state == "active") | {pr_id, provenance}'
+```
+
+### 6.4 Recovery Engine
+
+```bash
+python3 scripts/lib/vnx_recover_runtime.py --dry-run   # preview
+python3 scripts/lib/vnx_recover_runtime.py             # execute
+```
+
+## 7. Open Items Lifecycle
 
 ### 6.1 Inspect
 
@@ -146,7 +200,7 @@ python .claude/vnx-system/scripts/open_items_manager.py add \
 
 If CLI signature differs in your branch, use `--help` and map fields accordingly.
 
-## 7. PR Queue Lifecycle
+## 8. PR Queue Lifecycle
 
 ### 7.1 Read state
 
@@ -173,7 +227,7 @@ python .claude/vnx-system/scripts/pr_queue_manager.py complete PR-X
 
 Only after blocker/warn obligations are satisfied.
 
-## 8. Dispatch Guard and Provider Awareness
+## 9. Dispatch Guard and Provider Awareness
 
 Before dispatching:
 
@@ -188,7 +242,25 @@ bash .claude/skills/t0-orchestrator/scripts/provider_capabilities.sh current
 
 See full matrix in `references/provider-matrix.md`.
 
-## 9. Manager Block Quality Standard
+### 9.1 Pre-Dispatch Pane Verification
+
+Before the first dispatch of any session or after a tmux restart:
+
+```bash
+# Verify all terminal panes are reachable
+tmux list-panes -a -F "#{pane_id} #{pane_current_path}"
+
+for T in T0 T1 T2 T3; do
+  tmux list-panes -a -F "#{pane_id} #{pane_current_path}" | \
+    grep "$(pwd)/.claude/terminals/$T" && echo "$T: OK" || echo "$T: MISSING"
+done
+```
+
+**Pane discovery tiers (fallback order):** Cache → panes.json → path-based → interactive.
+Path-based discovery survives tmux restart — always works as long as pane exists.
+If any pane is missing, escalate before dispatching.
+
+## 10. Manager Block Quality Standard
 
 Every dispatch must include:
 
@@ -213,7 +285,7 @@ Validate role names when uncertain:
 python .claude/vnx-system/scripts/validate_skill.py --list
 ```
 
-## 10. Recommended Script Toolbox
+## 11. Recommended Script Toolbox
 
 1. `scripts/queue_status.sh`
 - queue/staging/terminal summary
@@ -233,7 +305,7 @@ python .claude/vnx-system/scripts/validate_skill.py --list
 6. `scripts/intelligence.sh`
 - intelligence read helpers
 
-## 11. Decision Outputs
+## 12. Decision Outputs
 
 When not dispatching, provide explicit status to user:
 
@@ -241,7 +313,7 @@ When not dispatching, provide explicit status to user:
 2. `ESCALATE`: explain ambiguity and propose options.
 3. `PROCEED`: show why criteria are met.
 
-## 12. References
+## 13. References
 
 1. `references/dispatch-patterns.md`
 2. `references/example-workflows.md`
@@ -250,6 +322,47 @@ When not dispatching, provide explicit status to user:
 5. `template.md`
 
 Final rule: if evidence is weak or contradictory, do not approve by default.
+
+---
+
+## 14. Session Resume After Crash
+
+When T0 or a worker terminal crashes and conversation context is lost:
+
+### 14.1 Find the Session ID
+
+```bash
+# Query Claude Code's conversation index
+sqlite3 ~/.claude/conversation-index.db \
+  "SELECT session_id, cwd, last_message \
+   FROM conversations \
+   WHERE cwd LIKE '$(pwd)/.claude/terminals/T%' \
+   ORDER BY last_message DESC LIMIT 5;"
+```
+
+Path containment invariant: `session.cwd` in `<PROJECT_ROOT>/.claude/terminals/T{N}` → session belongs to this worktree.
+
+### 14.2 Resume
+
+```bash
+cd $PROJECT_ROOT/.claude/terminals/<TERMINAL>
+claude --resume <session_id>
+```
+
+Pick the session with the most recent `last_message` if multiple exist.
+
+### 14.3 Worker Resume via Dispatch
+
+Worker terminals (T1/T2/T3) should resume via new dispatch, not manual session resume:
+1. Run startup reconciliation (section 6.2) to assess damage.
+2. Check orphaned dispatches in `active/` (section 6.3).
+3. Re-dispatch to affected worker with remaining task scope.
+
+### 14.4 Limitations
+
+- `--resume` restores **message history only** — not in-flight dispatch context or queued actions.
+- A resumed T0 session is read-only history. Re-run startup reconciliation before new orchestration actions.
+- `--fork-session` creates a new session_id from the old history — use to avoid reattaching to original.
 
 ---
 
