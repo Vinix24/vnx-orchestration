@@ -8,6 +8,7 @@ import json
 import argparse
 import fcntl
 import os
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Literal, Tuple
@@ -487,6 +488,152 @@ def generate_markdown(data: dict, digest: dict):
     with open(MARKDOWN_FILE, 'w') as f:
         f.write('\n'.join(lines))
 
+# ---------------------------------------------------------------------------
+# OI Auto-Close: rescan patterns
+# ---------------------------------------------------------------------------
+
+FILE_SIZE_PATTERN = re.compile(
+    r'file\s+(.+?)\s+exceeds\s+(\d+)\s*L?(?:ines)?',
+    re.IGNORECASE,
+)
+
+FUNC_SIZE_PATTERN = re.compile(
+    r'function\s+(\S+?)(?:\s+in\s+(.+?))?\s+exceeds\s+(\d+)\s*L?(?:ines)?',
+    re.IGNORECASE,
+)
+
+
+def check_violation(item: dict) -> Optional[dict]:
+    """Check if an OI's underlying violation still exists.
+
+    Returns None if the item doesn't match a rescannable pattern.
+    Returns {"resolved": bool, "reason": str} otherwise.
+    """
+    title = item.get("title", "")
+
+    # Category 1: file size
+    m = FILE_SIZE_PATTERN.search(title)
+    if m:
+        return _check_file_size(m.group(1).strip(), int(m.group(2)))
+
+    # Category 2: function size
+    m = FUNC_SIZE_PATTERN.search(title)
+    if m:
+        func_name = m.group(1).strip()
+        file_path = (m.group(2) or "").strip()
+        threshold = int(m.group(3))
+        return _check_function_size(func_name, file_path, threshold)
+
+    return None
+
+
+def _check_file_size(file_path: str, threshold: int) -> dict:
+    """Check if a file still exceeds the line threshold."""
+    resolved_path = (VNX_ROOT / file_path) if not os.path.isabs(file_path) else Path(file_path)
+    if not resolved_path.exists():
+        return {"resolved": True, "reason": "auto-resolved: file no longer exists"}
+
+    try:
+        line_count = sum(1 for _ in resolved_path.open())
+    except OSError:
+        return {"resolved": False, "reason": "unable to read file"}
+
+    if line_count <= threshold:
+        return {"resolved": True, "reason": f"auto-resolved: actual {line_count}L, threshold {threshold}L"}
+    return {"resolved": False, "reason": f"still exceeds: actual {line_count}L, threshold {threshold}L"}
+
+
+def _check_function_size(func_name: str, file_path: str, threshold: int) -> dict:
+    """Check if a function still exceeds the line threshold."""
+    if not file_path:
+        return {"resolved": False, "reason": "no file path in OI title, cannot verify"}
+
+    resolved_path = (VNX_ROOT / file_path) if not os.path.isabs(file_path) else Path(file_path)
+    if not resolved_path.exists():
+        return {"resolved": True, "reason": "auto-resolved: file no longer exists"}
+
+    try:
+        lines = resolved_path.read_text().splitlines()
+    except OSError:
+        return {"resolved": False, "reason": "unable to read file"}
+
+    func_start = None
+    indent = None
+    for i, line in enumerate(lines):
+        if re.match(rf'^(\s*)def\s+{re.escape(func_name)}\s*\(', line):
+            func_start = i
+            indent = len(line) - len(line.lstrip())
+            break
+        if re.match(rf'^(\s*){re.escape(func_name)}\s*\(\)', line):
+            func_start = i
+            indent = len(line) - len(line.lstrip())
+            break
+
+    if func_start is None:
+        return {"resolved": True, "reason": f"auto-resolved: function {func_name} no longer exists in {file_path}"}
+
+    func_end = len(lines)
+    for i in range(func_start + 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        current_indent = len(lines[i]) - len(stripped)
+        if current_indent <= indent and (stripped.startswith('def ') or stripped.startswith('class ')):
+            func_end = i
+            break
+
+    func_length = func_end - func_start
+    if func_length <= threshold:
+        return {"resolved": True, "reason": f"auto-resolved: function {func_name} actual {func_length}L, threshold {threshold}L"}
+    return {"resolved": False, "reason": f"still exceeds: function {func_name} actual {func_length}L, threshold {threshold}L"}
+
+
+def rescan_items(args):
+    """Rescan open items and auto-close resolved violations."""
+    data = load_items()
+    dry_run = getattr(args, 'dry_run', False)
+    closed = []
+
+    for item in data["items"]:
+        if item["status"] != "open":
+            continue
+
+        result = check_violation(item)
+        if result is None:
+            continue
+        if result["resolved"]:
+            if not dry_run:
+                item["status"] = "done"
+                item["closed_reason"] = result["reason"]
+                item["closed_at"] = datetime.now().isoformat()
+                item["updated_at"] = datetime.now().isoformat()
+                item["closed_by"] = "auto-rescan"
+            closed.append({
+                "id": item["id"],
+                "title": item["title"],
+                "reason": result["reason"],
+            })
+
+    if not dry_run and closed:
+        save_items(data)
+        for c in closed:
+            audit_log_entry(
+                "auto_close",
+                item_id=c["id"],
+                reason=c["reason"],
+                source="rescan",
+            )
+
+    prefix = "[DRY RUN] " if dry_run else ""
+    verb = "would be " if dry_run else ""
+    print(f"{prefix}Rescan complete: {len(closed)} items {verb}closed")
+    for c in closed:
+        print(f"  {c['id']}: {c['reason']}")
+
+    if not dry_run:
+        generate_digest()
+
+
 def count_items_closed_by_dispatch(dispatch_id: str) -> int:
     """Count items where closed_by_dispatch_id matches."""
     data = load_items()
@@ -551,6 +698,13 @@ def main():
     digest_parser = subparsers.add_parser('digest', help='Generate digest')
     digest_parser.add_argument('--last', type=int, default=20,
                               help='Include last N closed items')
+    digest_parser.add_argument('--rescan', action='store_true',
+                              help='Run auto-close rescan before generating digest')
+
+    # Rescan command
+    rescan_parser = subparsers.add_parser('rescan', help='Rescan open items and auto-close resolved violations')
+    rescan_parser.add_argument('--dry-run', action='store_true', dest='dry_run',
+                              help='Show what would be closed without closing')
 
     args = parser.parse_args()
 
@@ -574,7 +728,11 @@ def main():
     elif args.command == 'attach-evidence':
         attach_evidence(args)
     elif args.command == 'digest':
+        if getattr(args, 'rescan', False):
+            rescan_items(args)
         generate_digest()
+    elif args.command == 'rescan':
+        rescan_items(args)
 
     return 0
 
