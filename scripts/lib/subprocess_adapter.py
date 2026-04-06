@@ -227,8 +227,88 @@ class SubprocessAdapter:
         )
 
     # ------------------------------------------------------------------
-    # Stream event parsing
+    # Stream event parsing & normalization
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_cli_event(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Normalize a raw CLI stream-json event to dashboard-friendly format.
+
+        The CLI emits types like ``system``, ``assistant``, ``user`` with nested
+        content blocks.  The dashboard expects flat semantic types: ``init``,
+        ``thinking``, ``tool_use``, ``tool_result``, ``text``, ``result``,
+        ``error``.
+
+        A single ``assistant`` event may contain multiple content blocks, so
+        this method can return more than one normalized event.
+
+        Events that are already in dashboard format (e.g. test fixtures) pass
+        through unchanged.
+        """
+        event_type = payload.get("type", "")
+        event_subtype = payload.get("subtype", "")
+
+        # system + init → init
+        if event_type == "system" and event_subtype == "init":
+            return [{"type": "init", "data": {
+                "session_id": payload.get("session_id"),
+                "model": payload.get("model"),
+            }}]
+
+        # assistant → split by content block type
+        if event_type == "assistant":
+            message = payload.get("message", {})
+            content_blocks = message.get("content", [])
+            normalized: List[Dict[str, Any]] = []
+            for block in content_blocks:
+                block_type = block.get("type", "")
+                if block_type == "thinking":
+                    normalized.append({"type": "thinking", "data": {
+                        "thinking": block.get("thinking", ""),
+                    }})
+                elif block_type == "tool_use":
+                    normalized.append({"type": "tool_use", "data": {
+                        "name": block.get("name", ""),
+                        "input": block.get("input", {}),
+                        "id": block.get("id", ""),
+                    }})
+                elif block_type == "text":
+                    normalized.append({"type": "text", "data": {
+                        "text": block.get("text", ""),
+                    }})
+            return normalized
+
+        # user → extract tool_result blocks
+        if event_type == "user":
+            message = payload.get("message", {})
+            content_blocks = message.get("content", [])
+            normalized = []
+            for block in content_blocks:
+                if block.get("type") == "tool_result":
+                    content = block.get("content", "")
+                    if isinstance(content, list):
+                        text_parts = [c.get("text", "") for c in content if isinstance(c, dict)]
+                        content = "\n".join(text_parts)
+                    normalized.append({"type": "tool_result", "data": {
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": content,
+                    }})
+            return normalized
+
+        # result → result (extract useful fields)
+        if event_type == "result":
+            return [{"type": "result", "data": {
+                "text": payload.get("result", ""),
+                "subtype": event_subtype,
+                "session_id": payload.get("session_id"),
+            }}]
+
+        # rate_limit_event → skip (not dashboard-relevant)
+        if event_type == "rate_limit_event":
+            return []
+
+        # Already-normalized events (test fixtures, future formats) — pass through
+        return [{"type": event_type, "data": payload}]
 
     def read_events(self, terminal_id: str) -> Iterator[StreamEvent]:
         """Yield parsed StreamEvents from subprocess stdout line-by-line.
@@ -236,8 +316,9 @@ class SubprocessAdapter:
         Reads until EOF (process exited or pipe closed). Malformed NDJSON lines
         are logged as warnings and skipped — they do not raise.
 
-        The first `init` event's session_id is stored and retrievable via
-        get_session_id().
+        Raw CLI events are normalized to dashboard-friendly types before
+        yielding and persisting.  The first ``init`` event's session_id is
+        stored and retrievable via get_session_id().
         """
         process = self._processes.get(terminal_id)
         if process is None or process.stdout is None:
@@ -257,28 +338,32 @@ class SubprocessAdapter:
                 )
                 continue
 
+            # Extract session_id before normalization (both CLI and test formats)
             event_type = payload.get("type", "")
             event_subtype = payload.get("subtype", "")
             session_id: Optional[str] = payload.get("session_id")
 
-            # CLI sends type="system" subtype="init" for the init event
-            is_init = (event_type == "system" and event_subtype == "init")
+            is_init = (
+                (event_type == "system" and event_subtype == "init")
+                or event_type == "init"
+            )
             if is_init and session_id and terminal_id not in self._session_ids:
                 self._session_ids[terminal_id] = session_id
 
-            event = StreamEvent(
-                type=event_type,
-                data=payload,
-                session_id=session_id,
-            )
+            # Normalize CLI event to dashboard-friendly format
+            normalized_events = self._normalize_cli_event(payload)
 
-            # Persist to event store for SSE streaming
             dispatch_id = self._dispatch_ids.get(terminal_id, "")
             es = self._get_event_store()
-            if es is not None:
-                es.append(terminal_id, payload, dispatch_id=dispatch_id)
 
-            yield event
+            for norm in normalized_events:
+                if es is not None:
+                    es.append(terminal_id, norm, dispatch_id=dispatch_id)
+                yield StreamEvent(
+                    type=norm["type"],
+                    data=norm.get("data", {}),
+                    session_id=session_id if is_init else None,
+                )
 
     def get_session_id(self, terminal_id: str) -> Optional[str]:
         """Return session_id extracted from the init event, or None.
