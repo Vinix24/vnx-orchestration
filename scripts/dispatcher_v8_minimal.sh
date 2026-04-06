@@ -27,8 +27,12 @@ VNX_BROKER_SHADOW="${VNX_BROKER_SHADOW:-0}"
 VNX_CANONICAL_LEASE_ACTIVE="${VNX_CANONICAL_LEASE_ACTIVE:-1}"
 export VNX_RUNTIME_PRIMARY VNX_BROKER_SHADOW VNX_CANONICAL_LEASE_ACTIVE
 
-# Source the singleton enforcer
+# Source the singleton enforcer (save/restore SCRIPT_DIR — singleton chain
+# overwrites it via process_lifecycle.sh which resolves to scripts/lib/)
+_DISPATCHER_SCRIPT_DIR="$SCRIPT_DIR"
 source "$VNX_DIR/scripts/singleton_enforcer.sh"
+SCRIPT_DIR="$_DISPATCHER_SCRIPT_DIR"
+unset _DISPATCHER_SCRIPT_DIR
 
 # Enforce singleton - will exit if another instance is running
 enforce_singleton "dispatcher_v8_minimal"
