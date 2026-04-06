@@ -87,8 +87,10 @@ def _staleness(mtime_iso: Optional[str], now: datetime) -> Optional[float]:
         return None
     try:
         ts = datetime.fromisoformat(mtime_iso.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
         return (now - ts).total_seconds()
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return None
 
 
