@@ -18,8 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from result_contract import Result, result_error, result_ok
-from tmux_adapter import (
+from adapter_types import (
     CAPABILITY_ATTACH,
     CAPABILITY_DELIVER,
     CAPABILITY_HEALTH,
@@ -29,9 +28,10 @@ from tmux_adapter import (
     CAPABILITY_SESSION_HEALTH,
     CAPABILITY_SPAWN,
     CAPABILITY_STOP,
-    TmuxAdapter,
     UnsupportedCapability,
 )
+from result_contract import Result, result_error, result_ok
+from tmux_adapter import TmuxAdapter
 
 
 @dataclass
