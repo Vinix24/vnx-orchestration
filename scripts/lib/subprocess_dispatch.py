@@ -24,6 +24,25 @@ from subprocess_adapter import SubprocessAdapter
 logger = logging.getLogger(__name__)
 
 
+def _inject_skill_context(terminal_id: str, instruction: str) -> str:
+    """Prepend terminal CLAUDE.md content to instruction for context.
+
+    The CLAUDE.md file acts as the agent's skill context when running
+    headless — it replaces the interactive /skill loading that tmux
+    terminals use.
+
+    Returns the instruction unchanged if no CLAUDE.md exists.
+    """
+    claude_md_path = (
+        Path(__file__).resolve().parents[2]
+        / ".claude" / "terminals" / terminal_id / "CLAUDE.md"
+    )
+    if claude_md_path.exists():
+        context = claude_md_path.read_text()
+        return f"{context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+    return instruction
+
+
 def _default_state_dir() -> Path:
     """Resolve VNX state directory from environment."""
     env = os.environ.get("VNX_STATE_DIR", "")
@@ -75,6 +94,9 @@ def deliver_via_subprocess(
 
     Returns True on success, False on failure.
     """
+    # Inject terminal CLAUDE.md as skill context for headless agents
+    instruction = _inject_skill_context(terminal_id, instruction)
+
     adapter = SubprocessAdapter()
     result = adapter.deliver(
         terminal_id,

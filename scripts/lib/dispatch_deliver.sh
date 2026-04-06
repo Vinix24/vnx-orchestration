@@ -511,8 +511,12 @@ deliver_dispatch_to_terminal() {
     local complete_prompt="$8" skill_command="$9"
 
     # Resolve per-terminal adapter: VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
+    # T1 defaults to subprocess (headless backend-developer) since F32.
     local adapter_var="VNX_ADAPTER_${terminal_id}"
     local adapter_type="${!adapter_var:-tmux}"
+    if [[ "$terminal_id" == "T1" && "$adapter_type" == "tmux" && -z "${!adapter_var:-}" ]]; then
+        adapter_type="subprocess"
+    fi
 
     if [[ "$adapter_type" == "subprocess" ]]; then
         local model="${_CTM_REQUIRES_MODEL:-sonnet}"

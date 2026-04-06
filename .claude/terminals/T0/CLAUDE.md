@@ -135,6 +135,17 @@ sqlite3 .vnx-data/state/runtime_coordination.db "SELECT * FROM terminal_leases W
 python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch-id <old-dispatch> --generation <gen> --reason "stale_lease_cleanup"
 ```
 
+## Headless T1 Dispatch
+
+T1 is a headless backend-developer. Dispatch via:
+- Set VNX_ADAPTER_T1=subprocess in the dispatcher environment (default since F32)
+- Or call directly: `python3 scripts/lib/subprocess_dispatch.py --terminal-id T1 --dispatch-id <id> --model sonnet --instruction "<task>"`
+
+T1 dispatches do NOT go through tmux send-keys.
+T1 receipts arrive in t0_receipts.ndjson with source="subprocess".
+T1 events stream to .vnx-data/events/T1.ndjson and are visible via SSE.
+The subprocess automatically loads T1's CLAUDE.md as skill context (injected by subprocess_dispatch.py).
+
 ## Quick Commands
 
 ```bash
