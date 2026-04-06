@@ -53,7 +53,7 @@ class DualStackHTTPServer(ThreadingHTTPServer):
 _SERVER_START_TIME = datetime.now(timezone.utc)
 
 VNX_DIR = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = VNX_DIR.parents[1]
+PROJECT_ROOT = VNX_DIR
 SCRIPTS_DIR = VNX_DIR / "scripts"
 LOGS_DIR = VNX_DIR / "logs"
 CANONICAL_STATE_DIR = Path(os.environ.get("VNX_STATE_DIR", str(PROJECT_ROOT / ".vnx-data" / "state")))

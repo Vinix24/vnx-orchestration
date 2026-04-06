@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Session control', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/operator', { waitUntil: 'networkidle' });
   });
 
   test('main page loads without errors', async ({ page }) => {
@@ -14,25 +14,21 @@ test.describe('Session control', () => {
   });
 
   test('session control buttons are visible', async ({ page }) => {
-    await page.waitForLoadState('networkidle');
-    // Start, Stop, and Attach buttons are present in the operator project cards.
-    // At least one session control action button must be visible.
-    const startBtn = page.getByTestId('btn-start');
-    const stopBtn = page.getByTestId('btn-stop');
-    const attachBtn = page.getByTestId('btn-attach');
+    const anyBtn = page.locator('[data-testid="btn-start"], [data-testid="btn-stop"], [data-testid="btn-attach"]');
+    await expect(anyBtn.first()).toBeVisible({ timeout: 10000 });
 
-    const startCount = await startBtn.count();
-    const stopCount = await stopBtn.count();
-    const attachCount = await attachBtn.count();
+    const startCount = await page.getByTestId('btn-start').count();
+    const stopCount = await page.getByTestId('btn-stop').count();
+    const attachCount = await page.getByTestId('btn-attach').count();
 
     expect(startCount + stopCount + attachCount).toBeGreaterThan(0);
   });
 
   test('start or stop button exists in DOM', async ({ page }) => {
-    await page.waitForLoadState('networkidle');
-    const startOrStop = await page
-      .locator('[data-testid="btn-start"], [data-testid="btn-stop"]')
-      .count();
+    const anyBtn = page.locator('[data-testid="btn-start"], [data-testid="btn-stop"]');
+    await expect(anyBtn.first()).toBeVisible({ timeout: 10000 });
+
+    const startOrStop = await anyBtn.count();
     expect(startOrStop).toBeGreaterThan(0);
   });
 });
