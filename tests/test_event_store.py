@@ -179,6 +179,57 @@ class TestConcurrentWrites:
             assert "sequence" in event
 
 
+class TestArchive:
+    def test_clear_with_archive_creates_archive_file(self, store, tmp_events_dir):
+        store.append("T1", {"type": "init", "data": {}}, dispatch_id="d-100")
+        store.append("T1", {"type": "result", "data": {}}, dispatch_id="d-100")
+        assert store.event_count("T1") == 2
+
+        store.clear("T1", archive_dispatch_id="d-100")
+        assert store.event_count("T1") == 0
+
+        archive_path = tmp_events_dir / "archive" / "T1" / "d-100.ndjson"
+        assert archive_path.exists()
+        lines = [l for l in archive_path.read_text().strip().split("\n") if l]
+        assert len(lines) == 2
+        for line in lines:
+            event = json.loads(line)
+            assert event["dispatch_id"] == "d-100"
+
+    def test_clear_without_archive_does_not_create_archive(self, store, tmp_events_dir):
+        store.append("T1", {"type": "init", "data": {}})
+        store.clear("T1")
+        archive_dir = tmp_events_dir / "archive" / "T1"
+        assert not archive_dir.exists()
+
+    def test_archive_empty_file_returns_none(self, store, tmp_events_dir):
+        # Create empty file
+        path = tmp_events_dir / "T1.ndjson"
+        path.touch()
+        result = store.archive("T1", "d-200")
+        assert result is None
+
+    def test_archive_nonexistent_file_returns_none(self, store):
+        result = store.archive("T1", "d-300")
+        assert result is None
+
+    def test_archive_preserves_content(self, store, tmp_events_dir):
+        for i in range(5):
+            store.append("T1", {"type": "text", "data": {"i": i}}, dispatch_id="d-400")
+        store.clear("T1", archive_dispatch_id="d-400")
+
+        archive_path = tmp_events_dir / "archive" / "T1" / "d-400.ndjson"
+        lines = [l for l in archive_path.read_text().strip().split("\n") if l]
+        assert len(lines) == 5
+        for i, line in enumerate(lines):
+            event = json.loads(line)
+            assert event["sequence"] == i + 1
+
+    def test_archive_dir_property(self, store, tmp_events_dir):
+        expected = tmp_events_dir / "archive" / "T1"
+        assert store.archive_dir("T1") == expected
+
+
 class TestEventCount:
     def test_event_count_zero(self, store):
         assert store.event_count("T1") == 0
