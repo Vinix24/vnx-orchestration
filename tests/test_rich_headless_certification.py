@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from adapter_protocol import RuntimeAdapter, REQUIRED_CAPABILITIES, validate_required_capabilities
+from adapter_types import REQUIRED_CAPABILITIES, RuntimeAdapter, UnsupportedCapability, validate_required_capabilities
 from headless_event_stream import (
     CANONICAL_ORDER,
     TERMINAL_EVENT_TYPES,
@@ -41,7 +41,7 @@ from provider_observability import (
     get_provider_capabilities,
     is_provider_known,
 )
-from tmux_adapter import UnsupportedCapability
+
 
 
 # ===================================================================

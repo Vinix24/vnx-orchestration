@@ -24,13 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from adapter_protocol import (
-    REQUIRED_CAPABILITIES,
-    RuntimeAdapter,
-    validate_required_capabilities,
-)
-from headless_transport_adapter import HEADLESS_CAPABILITIES, HeadlessAdapter
-from tmux_adapter import (
+from adapter_types import (
     CAPABILITY_ATTACH,
     CAPABILITY_DELIVER,
     CAPABILITY_HEALTH,
@@ -40,18 +34,24 @@ from tmux_adapter import (
     CAPABILITY_SESSION_HEALTH,
     CAPABILITY_SPAWN,
     CAPABILITY_STOP,
-    TMUX_CAPABILITIES,
-    TmuxAdapter,
-    UnsupportedCapability,
+    REQUIRED_CAPABILITIES,
+    AttachResult,
+    DeliveryResult,
+    HealthResult,
+    InspectionResult,
+    ObservationResult,
+    RehealResult,
+    RuntimeAdapter,
+    SessionHealthResult,
     SpawnResult,
     StopResult,
-    DeliveryResult,
-    AttachResult,
-    ObservationResult,
-    InspectionResult,
-    HealthResult,
-    SessionHealthResult,
-    RehealResult,
+    UnsupportedCapability,
+    validate_required_capabilities,
+)
+from headless_transport_adapter import HEADLESS_CAPABILITIES, HeadlessAdapter
+from tmux_adapter import (
+    TMUX_CAPABILITIES,
+    TmuxAdapter,
 )
 
 LIB_DIR = Path(__file__).parent.parent / "scripts" / "lib"
