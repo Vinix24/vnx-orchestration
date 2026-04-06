@@ -18,6 +18,8 @@ interface StreamEvent {
 interface TerminalStatus {
   event_count: number;
   last_timestamp: string | null;
+  agent_name?: string;
+  domain?: string;
 }
 
 const EVENT_COLORS: Record<string, string> = {
@@ -285,15 +287,18 @@ export default function AgentStreamPage() {
             {paused ? 'Resume' : 'Pause'}
           </button>
 
-          {/* Terminal selector */}
-          <div style={{ display: 'flex', gap: 4 }}>
+          {/* Agent / Terminal selector */}
+          <div data-testid="agent-selector" style={{ display: 'flex', gap: 4 }}>
             {TERMINALS.map((t) => {
               const active = t === terminal;
               const hasEvents = !!status[t];
+              const ts = status[t];
+              const label = ts?.agent_name || t;
               return (
                 <button
                   key={t}
                   onClick={() => setTerminal(t)}
+                  title={ts?.domain ? `${label} (${ts.domain})` : label}
                   style={{
                     padding: '7px 16px',
                     borderRadius: 8,
@@ -304,9 +309,18 @@ export default function AgentStreamPage() {
                     fontWeight: active ? 600 : 400,
                     color: active ? 'var(--color-accent)' : 'var(--color-muted)',
                     position: 'relative',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 2,
                   }}
                 >
-                  {t}
+                  <span>{label}</span>
+                  {ts?.domain && (
+                    <span style={{ fontSize: 9, opacity: 0.6, textTransform: 'capitalize' }}>
+                      {ts.domain}
+                    </span>
+                  )}
                   {hasEvents && (
                     <span
                       style={{
