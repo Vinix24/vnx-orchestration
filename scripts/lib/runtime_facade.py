@@ -15,6 +15,7 @@ The facade:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,7 @@ from adapter_types import (
     CAPABILITY_SESSION_HEALTH,
     CAPABILITY_SPAWN,
     CAPABILITY_STOP,
+    RuntimeAdapter,
     UnsupportedCapability,
 )
 from result_contract import Result, result_error, result_ok
@@ -47,6 +49,49 @@ class RuntimeOutcome:
 CANONICAL_TERMINALS = ("T0", "T1", "T2", "T3")
 
 
+def _resolve_state_dir() -> str:
+    """Return the VNX state directory from env, falling back to a sensible default."""
+    state_dir = os.environ.get("VNX_STATE_DIR", "")
+    if state_dir:
+        return state_dir
+    # Derive from VNX_DATA_DIR when VNX_STATE_DIR is absent.
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    if data_dir:
+        return str(Path(data_dir) / "state")
+    # Last-resort: repo-relative default (matches vnx_paths.py convention).
+    return str(Path(__file__).parent.parent.parent / ".vnx-data" / "state")
+
+
+def get_adapter(terminal: str) -> RuntimeAdapter:
+    """Factory: select adapter for terminal based on VNX_ADAPTER_{terminal} env var.
+
+    Values: ``tmux`` (default) | ``subprocess``
+
+    The tmux adapter is constructed with the state directory resolved from
+    ``VNX_STATE_DIR`` → ``VNX_DATA_DIR/state`` → repo-relative default.
+
+    Raises:
+        NotImplementedError: when value is ``subprocess`` (placeholder — SubprocessAdapter
+            not yet implemented).
+        ValueError: when value is set to an unrecognised string.
+    """
+    env_key = f"VNX_ADAPTER_{terminal.upper()}"
+    value = os.environ.get(env_key, "tmux").lower()
+    if value == "tmux":
+        return TmuxAdapter(_resolve_state_dir())
+    if value == "subprocess":
+        # SubprocessAdapter does not exist yet; import is deferred so that the
+        # module loads without error on standard paths.
+        raise NotImplementedError(
+            f"SubprocessAdapter is not yet implemented. "
+            f"Set {env_key}=tmux or leave unset."
+        )
+    raise ValueError(
+        f"Unknown adapter value {value!r} for {env_key}. "
+        f"Valid values: tmux, subprocess."
+    )
+
+
 class RuntimeFacade:
     """Adapter-backed runtime boundary for orchestration and dashboard.
 
@@ -55,7 +100,7 @@ class RuntimeFacade:
     owns canonical state (leases, dispatches, receipts).
     """
 
-    def __init__(self, adapter: TmuxAdapter) -> None:
+    def __init__(self, adapter: RuntimeAdapter) -> None:
         self._adapter = adapter
 
     @property

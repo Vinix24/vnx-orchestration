@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from runtime_facade import CANONICAL_TERMINALS, RuntimeFacade, RuntimeOutcome
+from runtime_facade import CANONICAL_TERMINALS, RuntimeFacade, RuntimeOutcome, get_adapter
 from tmux_adapter import TmuxAdapter
 
 
@@ -266,3 +266,39 @@ class TestFacadeStop:
             outcome = f.stop("T9")
             assert outcome.success is True
             assert outcome.details["was_running"] is False
+
+
+# ---------------------------------------------------------------------------
+# 9. get_adapter factory
+# ---------------------------------------------------------------------------
+
+class TestGetAdapterFactory:
+
+    def test_default_selects_tmux_adapter(self, tmp_path: Path) -> None:
+        """No env var set — must return TmuxAdapter."""
+        env = {"VNX_STATE_DIR": str(tmp_path)}
+        # Ensure VNX_ADAPTER_T1 is absent so the default path is exercised.
+        with patch.dict("os.environ", env):
+            with patch.dict("os.environ", {}, clear=False):
+                import os as _os
+                _os.environ.pop("VNX_ADAPTER_T1", None)
+                adapter = get_adapter("T1")
+        assert isinstance(adapter, TmuxAdapter)
+
+    def test_explicit_tmux_selects_tmux_adapter(self, tmp_path: Path) -> None:
+        """VNX_ADAPTER_T1=tmux — must return TmuxAdapter."""
+        with patch.dict("os.environ", {"VNX_ADAPTER_T1": "tmux", "VNX_STATE_DIR": str(tmp_path)}):
+            adapter = get_adapter("T1")
+        assert isinstance(adapter, TmuxAdapter)
+
+    def test_subprocess_raises_not_implemented(self) -> None:
+        """VNX_ADAPTER_T1=subprocess — must raise NotImplementedError (placeholder)."""
+        with patch.dict("os.environ", {"VNX_ADAPTER_T1": "subprocess"}):
+            with pytest.raises(NotImplementedError, match="SubprocessAdapter"):
+                get_adapter("T1")
+
+    def test_invalid_value_raises_value_error(self) -> None:
+        """Unrecognised value raises ValueError with the offending key."""
+        with patch.dict("os.environ", {"VNX_ADAPTER_T1": "docker"}):
+            with pytest.raises(ValueError, match="VNX_ADAPTER_T1"):
+                get_adapter("T1")
