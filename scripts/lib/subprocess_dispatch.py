@@ -24,6 +24,9 @@ def deliver_via_subprocess(
 ) -> bool:
     """Deliver a dispatch instruction to terminal_id via SubprocessAdapter.
 
+    Blocks until the subprocess exits, consuming all stream events.
+    Events are persisted to EventStore via read_events() internally.
+
     Returns True on success, False on failure.
     """
     adapter = SubprocessAdapter()
@@ -33,7 +36,13 @@ def deliver_via_subprocess(
         instruction=instruction,
         model=model,
     )
-    return result.success
+    if not result.success:
+        return False
+    # Consume all events — blocks until subprocess exits.
+    # read_events() internally calls EventStore.append() for each event.
+    for _event in adapter.read_events(terminal_id):
+        pass
+    return True
 
 
 if __name__ == "__main__":
