@@ -2,6 +2,18 @@
 
 All notable changes to VNX are documented here.
 
+## v0.5.2 — Dashboard Agent Stream (Feature 29)
+
+Released: 2026-04-06
+
+Highlights:
+- EventStore NDJSON persistence for agent stream events with atomic append and file locking (PR-1)
+- Open-item auto-close on dispatch completion and SubprocessAdapter integration (PR-1)
+- SSE endpoint `GET /api/agent-stream/{terminal}` for real-time event streaming with `since` reconnection (PR-2)
+- Stream status endpoint `GET /api/agent-stream/status` listing terminals with active event data (PR-2)
+- Dashboard Agent Stream page with terminal selector, color-coded event rendering, auto-scroll, and auto-reconnect (PR-3)
+- Sidebar "Agent Stream" link under Operator section (PR-3)
+
 ## v0.5.1 — Terminal Startup And Session Control (Feature 26)
 
 Released: 2026-04-04
