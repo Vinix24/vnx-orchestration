@@ -81,6 +81,8 @@ class SubprocessAdapter:
         self._configs: Dict[str, Dict[str, Any]] = {}
         # terminal_id -> session_id extracted from init event
         self._session_ids: Dict[str, str] = {}
+        # terminal_id -> dispatch_id from most recent deliver()
+        self._dispatch_ids: Dict[str, str] = {}
         # Lazy-loaded EventStore (optional dependency)
         self._event_store = None
         self._event_store_loaded = False
@@ -173,6 +175,7 @@ class SubprocessAdapter:
             "claude",
             "-p",
             "--output-format", "stream-json",
+            "--verbose",
             "--model", effective_model,
         ]
         if resume_session:
@@ -206,6 +209,7 @@ class SubprocessAdapter:
                     pass
 
         self._processes[terminal_id] = process
+        self._dispatch_ids[terminal_id] = dispatch_id
 
         # Archive previous dispatch events, then clear for new dispatch
         es = self._get_event_store()
@@ -254,10 +258,12 @@ class SubprocessAdapter:
                 continue
 
             event_type = payload.get("type", "")
+            event_subtype = payload.get("subtype", "")
             session_id: Optional[str] = payload.get("session_id")
 
-            # Extract session_id from first init event
-            if event_type == "init" and session_id and terminal_id not in self._session_ids:
+            # CLI sends type="system" subtype="init" for the init event
+            is_init = (event_type == "system" and event_subtype == "init")
+            if is_init and session_id and terminal_id not in self._session_ids:
                 self._session_ids[terminal_id] = session_id
 
             event = StreamEvent(
@@ -267,9 +273,10 @@ class SubprocessAdapter:
             )
 
             # Persist to event store for SSE streaming
+            dispatch_id = self._dispatch_ids.get(terminal_id, "")
             es = self._get_event_store()
             if es is not None:
-                es.append(terminal_id, payload)
+                es.append(terminal_id, payload, dispatch_id=dispatch_id)
 
             yield event
 
