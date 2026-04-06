@@ -323,6 +323,13 @@ gather_dispatch_intelligence() {
     local pattern_count prevention_rules
     pattern_count=$(echo "$_PD_INTEL_RESULT" | grep '"pattern_count":' | grep -o '[0-9]*' | head -1 || echo "0")
     prevention_rules=$(echo "$_PD_INTEL_RESULT" | grep '"prevention_rule_count":' | grep -o '[0-9]*' | head -1 || echo "0")
+
+    if [ "$pattern_count" = "0" ] && [ "$prevention_rules" = "0" ]; then
+        log "V8 WARNING: Intelligence suppressed: 0 candidates available (dispatch=$dispatch_id)"
+        _PD_INTEL_RESULT=""
+        return 0
+    fi
+
     log "V8 INTELLIGENCE: Gathered $pattern_count patterns, $prevention_rules rules → injecting into prompt"
     return 0
 }

@@ -122,6 +122,7 @@ class GovernanceDigestRunner:
             "task_failed": "fail",
             "gate_fail": "fail",
             "gate_failure": "fail",
+            "task_timeout": "fail",
         }
 
         try:
@@ -137,6 +138,28 @@ class GovernanceDigestRunner:
 
                     gate = receipt.get("gate") or receipt.get("gate_id", "")
                     event_type = receipt.get("event_type", "")
+
+                    # Handle review_gate_result events with embedded status
+                    if event_type == "review_gate_result":
+                        if not gate:
+                            continue
+                        embedded_status = receipt.get("status", "")
+                        if embedded_status in ("pass", "passed", "success"):
+                            mapped_status = "pass"
+                        elif embedded_status in ("fail", "failed"):
+                            mapped_status = "fail"
+                        else:
+                            continue
+                        results.append({
+                            "gate_id": gate,
+                            "status": mapped_status,
+                            "feature_id": receipt.get("feature_id", ""),
+                            "pr_id": receipt.get("pr", receipt.get("pr_id", "")),
+                            "dispatch_id": receipt.get("dispatch_id", ""),
+                            "reason": receipt.get("error", receipt.get("reason", receipt.get("summary", ""))),
+                        })
+                        continue
+
                     if not gate or event_type not in gate_event_map:
                         continue
 
@@ -209,6 +232,23 @@ class GovernanceDigestRunner:
                 gate_results=gate_results or None,
                 queue_anomalies=queue_anomalies or None,
             )
+
+            # Persist signals to quality_intelligence.db so intelligence_selector
+            # can query populated tables (bridges governance → DB).
+            try:
+                from intelligence_persist import persist_signals_to_db
+                db_path = self.state_dir / "quality_intelligence.db"
+                if db_path.exists() and signals:
+                    persist_result = persist_signals_to_db(signals, db_path)
+                    logger.info(
+                        "GovernanceDigestRunner: persisted signals to DB "
+                        "(patterns=%d, antipatterns=%d, metadata=%d)",
+                        persist_result["patterns_upserted"],
+                        persist_result["antipatterns_upserted"],
+                        persist_result["metadata_updated"],
+                    )
+            except Exception as exc:
+                logger.warning("GovernanceDigestRunner: signal persistence failed (non-fatal): %s", exc)
 
             digest = build_digest(signals)
 
