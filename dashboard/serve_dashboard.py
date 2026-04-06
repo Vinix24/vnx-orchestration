@@ -111,19 +111,13 @@ DISPATCH_STAGES = ("staging", "pending", "active", "completed", "rejected")
 # compatibility with existing tests.
 
 from api_token_stats import (  # noqa: E402
-    _get_db,
-    _parse_receipts_events,
-    _event_summary,
-    _scan_dispatch_events,
     _query_events,
-    _token_stats_sql,
     _query_token_stats,
     _query_token_sessions,
 )
 
 from api_operator import (  # noqa: E402
     _api_health,
-    _format_duration,
     _jump_terminal,
     _operator_get_gate_config,
     _operator_get_governance_digest,
@@ -136,14 +130,10 @@ from api_operator import (  # noqa: E402
     _operator_get_terminals,
     _operator_post_action,
     _operator_post_gate_toggle,
-    _parse_dispatch_header,
     _query_conversations,
-    _read_gate_config,
     _resume_conversation,
     _scan_dispatches,
-    _scan_receipts,
     _unlock_terminal,
-    _write_gate_config,
 )
 
 

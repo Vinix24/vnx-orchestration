@@ -11,11 +11,10 @@ import time
 import hashlib
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Any
 from functools import wraps
-from dataclasses import dataclass, asdict
-import pickle
+from dataclasses import dataclass
 
 script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir / "lib"))
@@ -464,8 +463,6 @@ class CachedIntelligence:
 
 def benchmark_performance():
     """Benchmark cache performance"""
-    import random
-
     cache = CachedIntelligence()
 
     # Test tasks

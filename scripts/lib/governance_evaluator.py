@@ -19,11 +19,9 @@ All evaluations emit coordination_events with event_type='policy_evaluation'.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from runtime_coordination import _append_event, _now_utc, get_connection

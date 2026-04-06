@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 VERTEX_DEFAULT_REGION = "us-central1"

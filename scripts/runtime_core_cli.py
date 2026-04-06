@@ -49,7 +49,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
-from runtime_core import RuntimeCore, load_runtime_core, runtime_primary_active
+from runtime_core import RuntimeCore, load_runtime_core
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +272,13 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    _add_dispatch_subparsers(sub)
+    _add_lease_subparsers(sub)
+    return parser
 
-    # register
+
+def _add_dispatch_subparsers(sub: "argparse._SubParsersAction") -> None:
+    """Add register, delivery-*, check-terminal, and compat-check subparsers."""
     p = sub.add_parser("register", help="Register dispatch with broker before delivery")
     p.add_argument("--dispatch-id", required=True)
     p.add_argument("--terminal")
@@ -285,40 +290,38 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prompt-file", help="Path to file containing the prompt text")
     p.add_argument("--prompt-text", help="Prompt text inline (use prompt-file for large prompts)")
 
-    # delivery-start
     p = sub.add_parser("delivery-start", help="Claim dispatch and record delivery start")
     p.add_argument("--dispatch-id", required=True)
     p.add_argument("--terminal", required=True)
     p.add_argument("--attempt-number", type=int, default=1)
 
-    # delivery-success
     p = sub.add_parser("delivery-success", help="Record successful delivery")
     p.add_argument("--dispatch-id", required=True)
     p.add_argument("--attempt-id", required=True)
 
-    # delivery-failure
     p = sub.add_parser("delivery-failure", help="Record delivery failure durably")
     p.add_argument("--dispatch-id", required=True)
     p.add_argument("--attempt-id", required=True)
     p.add_argument("--reason", default="delivery failed")
 
-    # check-terminal
     p = sub.add_parser("check-terminal", help="Check terminal availability via canonical lease")
     p.add_argument("--terminal", required=True)
     p.add_argument("--dispatch-id", required=True)
 
-    # acquire-lease
+    sub.add_parser("compat-check", help="Check runtime core compatibility")
+
+
+def _add_lease_subparsers(sub: "argparse._SubParsersAction") -> None:
+    """Add acquire-lease, release-lease, release-on-failure, and chain-closeout subparsers."""
     p = sub.add_parser("acquire-lease", help="Acquire canonical lease for terminal")
     p.add_argument("--terminal", required=True)
     p.add_argument("--dispatch-id", required=True)
     p.add_argument("--lease-seconds", type=int, default=600)
 
-    # release-lease
     p = sub.add_parser("release-lease", help="Release canonical lease")
     p.add_argument("--terminal", required=True)
     p.add_argument("--generation", type=int, required=True)
 
-    # release-on-failure
     p = sub.add_parser(
         "release-on-failure",
         help="Record delivery failure and release canonical lease atomically",
@@ -329,21 +332,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--generation", type=int, required=True)
     p.add_argument("--reason", default="delivery failed")
 
-    # compat-check
-    sub.add_parser("compat-check", help="Check runtime core compatibility")
-
-    # chain-closeout
     p = sub.add_parser(
         "chain-closeout",
         help="Release all terminal leases at chain boundary (BOOT-9 through BOOT-12)",
     )
-    p.add_argument(
-        "--force",
-        action="store_true",
-        help="Proceed even if non-terminal dispatches exist",
-    )
-
-    return parser
+    p.add_argument("--force", action="store_true",
+                    help="Proceed even if non-terminal dispatches exist")
 
 
 def main() -> None:

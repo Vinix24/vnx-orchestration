@@ -14,7 +14,6 @@ import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import json
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))

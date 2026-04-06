@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import hashlib
 import fnmatch
 
 SCRIPT_DIR = Path(__file__).resolve().parent

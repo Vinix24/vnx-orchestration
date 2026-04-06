@@ -77,14 +77,22 @@ class GateResultParserMixin:
         result_file = self._contract_result_path("claude_github_optional", pr_id)
         result_file.write_text(json.dumps(full_payload, indent=2), encoding="utf-8")
 
+        self._emit_claude_github_receipt(
+            receipt, status=status, pr_id=pr_id, branch=branch,
+            summary=summary, contract_hash=contract_hash,
+        )
+        return receipt
+
+    def _emit_claude_github_receipt(
+        self, receipt: "ClaudeGitHubReviewReceipt", *,
+        status: str, pr_id: str, branch: str, summary: str, contract_hash: str,
+    ) -> None:
+        """Emit governance receipt for a Claude GitHub review result."""
+        from review_gate_manager import emit_governance_receipt
         emit_governance_receipt(
             "review_gate_result",
-            status=status,
-            terminal="T0",
-            pr_id=pr_id,
-            branch=branch,
-            gate="claude_github_optional",
-            summary=summary,
+            status=status, terminal="T0", pr_id=pr_id, branch=branch,
+            gate="claude_github_optional", summary=summary,
             advisory_findings=[f.to_dict() for f in receipt.advisory_findings],
             blocking_findings=[f.to_dict() for f in receipt.blocking_findings],
             advisory_count=receipt.advisory_count,
@@ -92,7 +100,6 @@ class GateResultParserMixin:
             contract_hash=contract_hash,
             contributed_evidence=receipt.contributed_evidence(),
         )
-        return receipt
 
     def record_result(
         self,
@@ -135,25 +142,50 @@ class GateResultParserMixin:
             reviewed_at=_utc_now(),
         )
 
+        payload = self._build_result_payload(
+            gate=gate, pr_number=pr_number, pr_id=pr_id, branch=branch,
+            status=status, summary=summary, raw_findings=raw_findings,
+            receipt=receipt, residual_risk=residual_risk or "",
+            effective_contract_hash=effective_contract_hash,
+            effective_report_path=effective_report_path,
+            required_reruns=required_reruns,
+        )
+        self._validate_and_persist_result(payload, status, gate, pr_number)
+        self._emit_result_receipt(
+            payload, receipt, status=status, pr_number=pr_number,
+            pr_id=pr_id or str(pr_number), branch=branch, gate=gate, summary=summary,
+        )
+        return payload
+
+    def _build_result_payload(
+        self, *, gate: str, pr_number: int, pr_id: str, branch: str,
+        status: str, summary: str, raw_findings: List[Dict[str, Any]],
+        receipt: "GeminiReviewReceipt", residual_risk: str,
+        effective_contract_hash: str, effective_report_path: str,
+        required_reruns: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Build the result payload dict from receipt and parameters."""
         payload: Dict[str, Any] = {
-            "gate": gate,
-            "pr_number": pr_number,
-            "pr_id": pr_id or str(pr_number),
-            "branch": branch,
-            "status": status,
-            "summary": summary,
-            "findings": raw_findings,
+            "gate": gate, "pr_number": pr_number,
+            "pr_id": pr_id or str(pr_number), "branch": branch,
+            "status": status, "summary": summary, "findings": raw_findings,
             "advisory_findings": [f.to_dict() for f in receipt.advisory_findings],
             "blocking_findings": [f.to_dict() for f in receipt.blocking_findings],
             "advisory_count": receipt.advisory_count,
             "blocking_count": receipt.blocking_count,
-            "residual_risk": residual_risk or "",
+            "residual_risk": residual_risk,
             "contract_hash": effective_contract_hash,
             "report_path": effective_report_path,
             "required_reruns": list(required_reruns or []),
             "recorded_at": receipt.reviewed_at,
         }
         payload["report_path"] = self._canonical_report_path(payload["report_path"])
+        return payload
+
+    def _validate_and_persist_result(
+        self, payload: Dict[str, Any], status: str, gate: str, pr_number: int,
+    ) -> None:
+        """Validate pass/fail constraints and write result file to disk."""
         if status in {"pass", "fail"}:
             if not payload["contract_hash"]:
                 raise ValueError("contract_hash is required for pass/fail gate results")
@@ -163,15 +195,17 @@ class GateResultParserMixin:
             if not report_file.exists():
                 raise ValueError(f"report_path file does not exist: {payload['report_path']}")
         self._result_path(gate, pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _emit_result_receipt(
+        self, payload: Dict[str, Any], receipt: "GeminiReviewReceipt", *,
+        status: str, pr_number: int, pr_id: str, branch: str, gate: str, summary: str,
+    ) -> None:
+        """Emit governance receipt for the recorded result."""
+        from review_gate_manager import emit_governance_receipt
         emit_governance_receipt(
             "review_gate_result",
-            status=status,
-            terminal="T0",
-            pr_number=pr_number,
-            pr_id=pr_id or str(pr_number),
-            branch=branch,
-            gate=gate,
-            summary=summary,
+            status=status, terminal="T0", pr_number=pr_number,
+            pr_id=pr_id, branch=branch, gate=gate, summary=summary,
             advisory_findings=payload["advisory_findings"],
             blocking_findings=payload["blocking_findings"],
             advisory_count=receipt.advisory_count,
@@ -181,7 +215,6 @@ class GateResultParserMixin:
             report_path=payload["report_path"],
             required_reruns=payload["required_reruns"],
         )
-        return payload
 
     def _classify_unavailable(self, gate: str, binary_name: str) -> tuple:
         """Return (reason_code, reason_detail) for an unavailable gate provider (GATE-4)."""

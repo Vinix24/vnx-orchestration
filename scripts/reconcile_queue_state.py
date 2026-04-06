@@ -22,9 +22,8 @@ import argparse
 import json
 import sys
 import yaml
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 # Resolve lib path
 _SCRIPTS_DIR = Path(__file__).resolve().parent

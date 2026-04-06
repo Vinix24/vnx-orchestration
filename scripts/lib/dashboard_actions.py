@@ -170,6 +170,106 @@ def _create_business_layout(session_name: str) -> Optional[str]:
 # A1: Start Session (§4.2)
 # ---------------------------------------------------------------------------
 
+def _start_session_dry_run(
+    project_path: str,
+    session_name: str,
+    session_active: bool,
+    effective_profile: Optional[str],
+) -> ActionOutcome:
+    """Build dry-run outcome for start_session without executing."""
+    status = "already_active" if session_active else "success"
+    layout = "2x2" if effective_profile == "coding_strict" else (
+        "single" if effective_profile == "business_light" else "vnx_start_fallback"
+    )
+    return ActionOutcome(
+        action="start_session",
+        project=project_path,
+        status=status,
+        message=f"Dry run: session {'already active' if session_active else 'would be started'}",
+        details={
+            "session_name": session_name,
+            "profile": effective_profile,
+            "layout": layout,
+            "dry_run": True,
+        },
+    )
+
+
+def _start_session_profile(
+    project_path: str,
+    session_name: str,
+    effective_profile: str,
+) -> Optional[ActionOutcome]:
+    """Attempt profile-aware tmux session creation. Returns None if profile is unrecognized."""
+    if effective_profile == "coding_strict":
+        error = _create_dev_layout(session_name)
+        if error:
+            return ActionOutcome(
+                action="start_session", project=project_path, status="failed",
+                message=f"Failed to create 2x2 dev layout: {error}",
+                error_code="tmux_layout_error",
+                details={"session_name": session_name, "profile": effective_profile},
+            )
+        return ActionOutcome(
+            action="start_session", project=project_path, status="success",
+            message=f"Session '{session_name}' started with 2x2 dev layout",
+            details={"session_name": session_name, "profile": effective_profile, "layout": "2x2"},
+        )
+
+    if effective_profile == "business_light":
+        error = _create_business_layout(session_name)
+        if error:
+            return ActionOutcome(
+                action="start_session", project=project_path, status="failed",
+                message=f"Failed to create business session: {error}",
+                error_code="tmux_layout_error",
+                details={"session_name": session_name, "profile": effective_profile},
+            )
+        return ActionOutcome(
+            action="start_session", project=project_path, status="success",
+            message=f"Session '{session_name}' started with single terminal",
+            details={"session_name": session_name, "profile": effective_profile, "layout": "single"},
+        )
+
+    return None
+
+
+def _start_session_vnx_fallback(
+    project_path: str,
+    session_name: str,
+    vnx_bin: str,
+) -> ActionOutcome:
+    """Start session via vnx binary as a fallback when profile is unknown."""
+    try:
+        result = subprocess.run(
+            [vnx_bin, "start"], cwd=project_path,
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            return ActionOutcome(
+                action="start_session", project=project_path, status="success",
+                message=f"Session '{session_name}' started successfully",
+                details={"session_name": session_name, "exit_code": 0},
+            )
+        return ActionOutcome(
+            action="start_session", project=project_path, status="failed",
+            message=f"vnx start failed: {result.stderr.strip() or 'unknown error'}",
+            error_code="start_failed",
+            details={"exit_code": result.returncode, "stderr": result.stderr[:500]},
+        )
+    except subprocess.TimeoutExpired:
+        return ActionOutcome(
+            action="start_session", project=project_path, status="degraded",
+            message="vnx start timed out after 120s — session may be partially initialized",
+            error_code="timeout", details={"session_name": session_name},
+        )
+    except OSError as e:
+        return ActionOutcome(
+            action="start_session", project=project_path, status="failed",
+            message=f"Failed to execute vnx: {e}", error_code="exec_error",
+        )
+
+
 def start_session(
     project_path: str,
     *,
@@ -182,8 +282,8 @@ def start_session(
     Profile-aware: detects governance profile and creates the appropriate tmux
     layout without requiring a vnx binary.
 
-      coding_strict  → 2x2 tmux layout (4 panes, one per terminal T0-T3)
-      business_light → single terminal
+      coding_strict  -> 2x2 tmux layout (4 panes, one per terminal T0-T3)
+      business_light -> single terminal
 
     Falls back to `vnx start` when profile cannot be determined.
 
@@ -197,139 +297,42 @@ def start_session(
     proj = Path(project_path)
     if not proj.is_dir():
         return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="failed",
+            action="start_session", project=project_path, status="failed",
             message=f"Project directory does not exist: {project_path}",
             error_code="project_not_found",
         )
 
     session_name = f"vnx-{proj.name}"
     session_active = _tmux_session_exists(session_name)
-
-    # Resolve effective profile
     effective_profile = profile or _detect_profile(proj)
 
     if dry_run:
-        status = "already_active" if session_active else "success"
-        layout = "2x2" if effective_profile == "coding_strict" else (
-            "single" if effective_profile == "business_light" else "vnx_start_fallback"
-        )
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status=status,
-            message=f"Dry run: session {'already active' if session_active else 'would be started'}",
-            details={
-                "session_name": session_name,
-                "profile": effective_profile,
-                "layout": layout,
-                "dry_run": True,
-            },
-        )
+        return _start_session_dry_run(project_path, session_name, session_active, effective_profile)
 
     if session_active:
         return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="already_active",
+            action="start_session", project=project_path, status="already_active",
             message=f"Session '{session_name}' is already active.",
             details={"session_name": session_name, "profile": effective_profile},
         )
 
     # Profile-aware direct tmux path
-    if effective_profile == "coding_strict":
-        error = _create_dev_layout(session_name)
-        if error:
-            return ActionOutcome(
-                action="start_session",
-                project=project_path,
-                status="failed",
-                message=f"Failed to create 2x2 dev layout: {error}",
-                error_code="tmux_layout_error",
-                details={"session_name": session_name, "profile": effective_profile},
-            )
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="success",
-            message=f"Session '{session_name}' started with 2x2 dev layout",
-            details={"session_name": session_name, "profile": effective_profile, "layout": "2x2"},
-        )
-
-    if effective_profile == "business_light":
-        error = _create_business_layout(session_name)
-        if error:
-            return ActionOutcome(
-                action="start_session",
-                project=project_path,
-                status="failed",
-                message=f"Failed to create business session: {error}",
-                error_code="tmux_layout_error",
-                details={"session_name": session_name, "profile": effective_profile},
-            )
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="success",
-            message=f"Session '{session_name}' started with single terminal",
-            details={"session_name": session_name, "profile": effective_profile, "layout": "single"},
-        )
+    if effective_profile:
+        outcome = _start_session_profile(project_path, session_name, effective_profile)
+        if outcome is not None:
+            return outcome
 
     # Fallback: vnx start (profile unknown)
     if vnx_bin is None:
         vnx_bin = _find_vnx_bin(proj)
     if vnx_bin is None:
         return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="failed",
+            action="start_session", project=project_path, status="failed",
             message="Cannot find vnx binary in project or PATH",
             error_code="vnx_not_found",
         )
 
-    try:
-        result = subprocess.run(
-            [vnx_bin, "start"],
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode == 0:
-            return ActionOutcome(
-                action="start_session",
-                project=project_path,
-                status="success",
-                message=f"Session '{session_name}' started successfully",
-                details={"session_name": session_name, "exit_code": 0},
-            )
-        else:
-            return ActionOutcome(
-                action="start_session",
-                project=project_path,
-                status="failed",
-                message=f"vnx start failed: {result.stderr.strip() or 'unknown error'}",
-                error_code="start_failed",
-                details={"exit_code": result.returncode, "stderr": result.stderr[:500]},
-            )
-    except subprocess.TimeoutExpired:
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="degraded",
-            message="vnx start timed out after 120s — session may be partially initialized",
-            error_code="timeout",
-            details={"session_name": session_name},
-        )
-    except OSError as e:
-        return ActionOutcome(
-            action="start_session",
-            project=project_path,
-            status="failed",
-            message=f"Failed to execute vnx: {e}",
-            error_code="exec_error",
-        )
+    return _start_session_vnx_fallback(project_path, session_name, vnx_bin)
 
 
 # ---------------------------------------------------------------------------
@@ -622,46 +625,37 @@ def stop_session(
             details={"session_name": session_name, "dry_run": True},
         )
 
+    return _execute_vnx_stop(vnx_bin, project_path, session_name)
+
+
+def _execute_vnx_stop(vnx_bin: str, project_path: str, session_name: str) -> ActionOutcome:
+    """Run vnx stop subprocess and return the appropriate ActionOutcome."""
     try:
         result = subprocess.run(
-            [vnx_bin, "stop"],
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            timeout=30,
+            [vnx_bin, "stop"], cwd=project_path,
+            capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
             return ActionOutcome(
-                action="stop_session",
-                project=project_path,
-                status="success",
+                action="stop_session", project=project_path, status="success",
                 message=f"Session '{session_name}' stopped",
                 details={"session_name": session_name, "exit_code": 0},
             )
-        else:
-            return ActionOutcome(
-                action="stop_session",
-                project=project_path,
-                status="failed",
-                message=f"vnx stop failed: {result.stderr.strip() or 'unknown error'}",
-                error_code="stop_failed",
-                details={"exit_code": result.returncode},
-            )
+        return ActionOutcome(
+            action="stop_session", project=project_path, status="failed",
+            message=f"vnx stop failed: {result.stderr.strip() or 'unknown error'}",
+            error_code="stop_failed", details={"exit_code": result.returncode},
+        )
     except subprocess.TimeoutExpired:
         return ActionOutcome(
-            action="stop_session",
-            project=project_path,
-            status="degraded",
+            action="stop_session", project=project_path, status="degraded",
             message="vnx stop timed out — session may still be partially running",
             error_code="timeout",
         )
     except OSError as e:
         return ActionOutcome(
-            action="stop_session",
-            project=project_path,
-            status="failed",
-            message=f"Failed to execute vnx: {e}",
-            error_code="exec_error",
+            action="stop_session", project=project_path, status="failed",
+            message=f"Failed to execute vnx: {e}", error_code="exec_error",
         )
 
 

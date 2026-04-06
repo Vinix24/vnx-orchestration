@@ -295,50 +295,5 @@ vnx_proc_acquire_lock() {
   return 1
 }
 
-# Renew heartbeat timestamp for held lock (call periodically from long-running processes)
-vnx_proc_heartbeat_lock() {
-  local name="$1"
-  local lock_dir="$VNX_LOCKS_DIR/${name}.lock"
-  if [ -d "$lock_dir" ]; then
-    date +%s > "$lock_dir/heartbeat"
-  fi
-}
-
-# Write unclean-shutdown marker (call before risky operations)
-vnx_proc_mark_unclean() {
-  local marker="$VNX_LOCKS_DIR/.unclean_shutdown"
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$marker"
-  echo "$$" >> "$marker"
-}
-
-# Check and clear unclean-shutdown marker
-vnx_proc_check_unclean() {
-  local marker="$VNX_LOCKS_DIR/.unclean_shutdown"
-  [ -f "$marker" ]
-}
-
-vnx_proc_clear_unclean() {
-  rm -f "$VNX_LOCKS_DIR/.unclean_shutdown"
-}
-
-# Get lock age in seconds (returns -1 if no lock)
-vnx_proc_lock_age() {
-  local name="$1"
-  local lock_dir="$VNX_LOCKS_DIR/${name}.lock"
-  if [ ! -d "$lock_dir" ]; then
-    echo "-1"
-    return 1
-  fi
-  local lock_ts=0
-  if [ -f "$lock_dir/heartbeat" ]; then
-    lock_ts="$(cat "$lock_dir/heartbeat" 2>/dev/null || echo 0)"
-  elif [ -f "$lock_dir/created_at" ]; then
-    lock_ts="$(cat "$lock_dir/created_at" 2>/dev/null || echo 0)"
-  fi
-  local now_ts
-  now_ts="$(date +%s)"
-  echo $(( now_ts - lock_ts ))
-}
-
 eval "$__VNX_PROC_SHELLOPTS"
 unset __VNX_PROC_SHELLOPTS

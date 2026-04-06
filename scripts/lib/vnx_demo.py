@@ -29,7 +29,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from vnx_mode import VNXMode, check_mode_feature_enabled, _atomic_write_json
 from vnx_paths import resolve_paths

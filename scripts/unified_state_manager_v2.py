@@ -33,8 +33,7 @@ import traceback
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
-from collections import defaultdict
+from typing import Dict, List
 import sys
 
 # Add paths for T0 intelligence aggregator and VNX helpers

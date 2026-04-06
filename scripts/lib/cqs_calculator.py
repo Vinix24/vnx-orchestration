@@ -16,10 +16,9 @@ Scoring components (weighted, 7 total):
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 # Normalize the ~166 unique status values into 5 categories
 STATUS_MAP: Dict[str, str] = {

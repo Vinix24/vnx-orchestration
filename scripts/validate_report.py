@@ -21,7 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from validate_template_tokens import validate_all_templates, TemplateValidationResult
+from validate_template_tokens import validate_all_templates
 
 
 class ReportValidator:
