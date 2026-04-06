@@ -81,6 +81,21 @@ class SubprocessAdapter:
         self._configs: Dict[str, Dict[str, Any]] = {}
         # terminal_id -> session_id extracted from init event
         self._session_ids: Dict[str, str] = {}
+        # Lazy-loaded EventStore (optional dependency)
+        self._event_store = None
+        self._event_store_loaded = False
+
+    def _get_event_store(self):
+        """Lazy-load EventStore. Returns None if not available."""
+        if not self._event_store_loaded:
+            self._event_store_loaded = True
+            try:
+                from event_store import EventStore
+                self._event_store = EventStore()
+                logger.info("subprocess_adapter: EventStore loaded for stream persistence")
+            except ImportError:
+                logger.debug("subprocess_adapter: EventStore not available (optional)")
+        return self._event_store
 
     def adapter_type(self) -> str:
         return "subprocess"
@@ -192,6 +207,11 @@ class SubprocessAdapter:
 
         self._processes[terminal_id] = process
 
+        # Clear event store for new dispatch (per retention policy)
+        es = self._get_event_store()
+        if es is not None:
+            es.clear(terminal_id)
+
         return DeliveryResult(
             success=True,
             terminal_id=terminal_id,
@@ -238,11 +258,18 @@ class SubprocessAdapter:
             if event_type == "init" and session_id and terminal_id not in self._session_ids:
                 self._session_ids[terminal_id] = session_id
 
-            yield StreamEvent(
+            event = StreamEvent(
                 type=event_type,
                 data=payload,
                 session_id=session_id,
             )
+
+            # Persist to event store for SSE streaming
+            es = self._get_event_store()
+            if es is not None:
+                es.append(terminal_id, payload)
+
+            yield event
 
     def get_session_id(self, terminal_id: str) -> Optional[str]:
         """Return session_id extracted from the init event, or None.
