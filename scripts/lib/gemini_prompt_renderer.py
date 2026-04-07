@@ -178,28 +178,26 @@ def _validate_contract(contract: ReviewContract) -> None:
 def render_gemini_prompt(contract: ReviewContract) -> str:
     """Render a deliverable-aware Gemini review prompt from a ReviewContract.
 
-    The rendered prompt includes:
-    - PR metadata (id, title, feature, branch, risk class, merge policy, closure stage)
-    - All deliverables with their category
-    - Non-goals (out-of-scope items the reviewer must not flag)
-    - Changed files to focus the review
-    - Quality gate checks for explicit pass/fail criteria
-    - Declared test evidence (test files, test command)
-    - Pre-computed deterministic findings from static analysis
-    - Structured response schema so Gemini emits parseable JSON with advisory/blocking classification
-
     Raises:
         MissingContractFieldError: when any required field is absent or empty.
     """
     _validate_contract(contract)
 
     lines: List[str] = []
+    _render_metadata_section(contract, lines)
+    _render_deliverables_section(contract, lines)
+    _render_scope_section(contract, lines)
+    _render_evidence_section(contract, lines)
+    _render_findings_section(contract, lines)
+    _render_instructions_section(lines)
 
-    # Header
+    return "\n".join(lines)
+
+
+def _render_metadata_section(contract: ReviewContract, lines: List[str]) -> None:
+    """Render PR header and metadata."""
     lines.append(f"# Gemini Code Review: {contract.pr_id} — {contract.pr_title}")
     lines.append("")
-
-    # PR metadata
     if contract.feature_title:
         lines.append(f"**Feature**: {contract.feature_title}")
     lines.append(f"**Branch**: {contract.branch or '(unset)'}")
@@ -213,7 +211,9 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
         lines.append(f"**Dependencies**: {', '.join(contract.dependencies)}")
     lines.append("")
 
-    # Deliverables — required field, always present after validation
+
+def _render_deliverables_section(contract: ReviewContract, lines: List[str]) -> None:
+    """Render deliverables checklist."""
     lines.append("## Deliverables")
     lines.append("Verify that ALL of the following deliverables are present, correct, and tested:")
     lines.append("")
@@ -221,7 +221,9 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
         lines.append(f"- **[{d.category}]** {d.description}")
     lines.append("")
 
-    # Non-goals
+
+def _render_scope_section(contract: ReviewContract, lines: List[str]) -> None:
+    """Render non-goals and changed/scope files."""
     if contract.non_goals:
         lines.append("## Non-Goals (Out of Scope — Do Not Flag)")
         lines.append(
@@ -233,7 +235,6 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
             lines.append(f"- {ng}")
         lines.append("")
 
-    # Changed files
     if contract.changed_files:
         lines.append("## Changed Files")
         lines.append("Restrict your review to these files:")
@@ -249,7 +250,9 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
             lines.append(f"- `{f}`")
         lines.append("")
 
-    # Quality gate checks
+
+def _render_evidence_section(contract: ReviewContract, lines: List[str]) -> None:
+    """Render quality gate checks and declared test evidence."""
     if contract.quality_gate:
         lines.append("## Quality Gate")
         lines.append(f"Gate ID: `{contract.quality_gate.gate_id}`")
@@ -260,7 +263,6 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
             lines.append(f"- [ ] {check}")
         lines.append("")
 
-    # Declared tests
     if contract.test_evidence:
         te = contract.test_evidence
         lines.append("## Declared Test Evidence")
@@ -280,25 +282,29 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
         )
         lines.append("")
 
-    # Deterministic findings
-    if contract.deterministic_findings:
-        lines.append("## Pre-computed Deterministic Findings")
-        lines.append(
-            "The following findings were produced by static analysis before this review. "
-            "You MUST include each of them in your response classified as advisory or blocking."
-        )
-        lines.append("")
-        for f in contract.deterministic_findings:
-            loc = f" ({f.file_path}:{f.line})" if f.file_path else ""
-            lines.append(f"- **[{f.severity.upper()}]** `{f.source}`: {f.message}{loc}")
-        lines.append("")
 
-    # Response schema and instructions
+def _render_findings_section(contract: ReviewContract, lines: List[str]) -> None:
+    """Render pre-computed deterministic findings from static analysis."""
+    if not contract.deterministic_findings:
+        return
+
+    lines.append("## Pre-computed Deterministic Findings")
+    lines.append(
+        "The following findings were produced by static analysis before this review. "
+        "You MUST include each of them in your response classified as advisory or blocking."
+    )
+    lines.append("")
+    for f in contract.deterministic_findings:
+        loc = f" ({f.file_path}:{f.line})" if f.file_path else ""
+        lines.append(f"- **[{f.severity.upper()}]** `{f.source}`: {f.message}{loc}")
+    lines.append("")
+
+
+def _render_instructions_section(lines: List[str]) -> None:
+    """Render review instructions and JSON response schema."""
     lines.append("## Review Instructions")
     lines.append("")
-    lines.append(
-        "Classify each finding as **blocking** or **advisory**:"
-    )
+    lines.append("Classify each finding as **blocking** or **advisory**:")
     lines.append("")
     lines.append(
         "- **blocking** — must be resolved before merge "
@@ -330,5 +336,3 @@ def render_gemini_prompt(contract: ReviewContract) -> str:
         "If all deliverables are satisfied, quality gate checks pass, and there are "
         'no blocking findings, set `"summary"` to `"LGTM"` and `"findings"` to `[]`.'
     )
-
-    return "\n".join(lines)

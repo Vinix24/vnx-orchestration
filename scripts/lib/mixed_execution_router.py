@@ -234,91 +234,100 @@ class MixedExecutionRouter:
         """Route a dispatch through the mixed execution pipeline.
 
         Steps:
-          1. Check cutover state
-          2. Resolve task class
-          3. Run intelligence injection
-          4. Route via DispatchRouter
-          5. If headless target selected and headless enabled: execute
-          6. Emit evidence trail events
+          1. Check cutover state and resolve task class
+          2. Run intelligence injection
+          3. Route via DispatchRouter (if cutover active)
+          4. Execute headless or return interactive routing decision
 
         Returns MixedRoutingResult with full audit trail.
         """
         config = cutover_config_from_env()
         evidence: List[Dict[str, Any]] = []
 
-        # Step 1: Check cutover state
         cutover_active = config["mixed_execution"]
-        evidence.append({
-            "step": "cutover_check",
-            "config": config,
-            "timestamp": _now_utc(),
-        })
+        evidence.append({"step": "cutover_check", "config": config, "timestamp": _now_utc()})
 
-        # Step 2: Resolve task class
         resolved_class = DispatchRouter.resolve_task_class(
-            skill=skill_name,
-            explicit_task_class=task_class,
+            skill=skill_name, explicit_task_class=task_class,
         )
         evidence.append({
             "step": "task_class_resolution",
-            "resolved": resolved_class,
-            "from_skill": skill_name,
-            "explicit": task_class,
+            "resolved": resolved_class, "from_skill": skill_name, "explicit": task_class,
         })
 
-        # Step 3: Run intelligence injection
-        intelligence_payload = None
-        if config["intelligence_injection"]:
-            intelligence_payload = self._inject_intelligence(
-                dispatch_id=dispatch_id,
-                injection_point=injection_point,
-                task_class=resolved_class,
-                skill_name=skill_name,
-                track=track,
-                gate=gate,
-            )
-            evidence.append({
-                "step": "intelligence_injection",
-                "injection_point": injection_point,
-                "items_injected": len(intelligence_payload.get("items", [])) if intelligence_payload else 0,
-            })
+        intelligence_payload = self._run_intelligence_injection(
+            config, dispatch_id, injection_point, resolved_class, skill_name, track, gate, evidence,
+        )
 
-        # If cutover is not active, return interactive-only decision
         if not cutover_active:
             return MixedRoutingResult(
-                dispatch_id=dispatch_id,
-                task_class=resolved_class,
-                intelligence_payload=intelligence_payload,
-                execution_mode="interactive",
-                cutover_active=False,
-                rollback_available=True,
-                evidence_trail=evidence,
+                dispatch_id=dispatch_id, task_class=resolved_class,
+                intelligence_payload=intelligence_payload, execution_mode="interactive",
+                cutover_active=False, rollback_available=True, evidence_trail=evidence,
             )
 
-        # Step 4: Route via DispatchRouter
+        return self._route_and_execute(
+            dispatch_id=dispatch_id, resolved_class=resolved_class,
+            intelligence_payload=intelligence_payload, terminal_id=terminal_id,
+            target_id_override=target_id_override, channel_origin=channel_origin,
+            actor=actor, config=config, evidence=evidence,
+        )
+
+    def _run_intelligence_injection(
+        self,
+        config: Dict[str, Any],
+        dispatch_id: str,
+        injection_point: str,
+        task_class: str,
+        skill_name: Optional[str],
+        track: Optional[str],
+        gate: Optional[str],
+        evidence: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Run bounded intelligence injection if enabled, appending to evidence trail."""
+        if not config["intelligence_injection"]:
+            return None
+
+        payload = self._inject_intelligence(
+            dispatch_id=dispatch_id, injection_point=injection_point,
+            task_class=task_class, skill_name=skill_name, track=track, gate=gate,
+        )
+        evidence.append({
+            "step": "intelligence_injection",
+            "injection_point": injection_point,
+            "items_injected": len(payload.get("items", [])) if payload else 0,
+        })
+        return payload
+
+    def _route_and_execute(
+        self,
+        *,
+        dispatch_id: str,
+        resolved_class: str,
+        intelligence_payload: Optional[Dict[str, Any]],
+        terminal_id: Optional[str],
+        target_id_override: Optional[str],
+        channel_origin: Optional[str],
+        actor: str,
+        config: Dict[str, Any],
+        evidence: List[Dict[str, Any]],
+    ) -> MixedRoutingResult:
+        """Route via DispatchRouter and execute (headless or interactive)."""
         try:
             routing = self._router.route(
-                dispatch_id=dispatch_id,
-                task_class=resolved_class,
-                terminal_id=terminal_id,
-                target_id_override=target_id_override,
-                channel_origin=channel_origin,
-                actor=actor,
+                dispatch_id=dispatch_id, task_class=resolved_class,
+                terminal_id=terminal_id, target_id_override=target_id_override,
+                channel_origin=channel_origin, actor=actor,
             )
         except RoutingError as exc:
             return MixedRoutingResult(
-                dispatch_id=dispatch_id,
-                task_class=resolved_class,
-                intelligence_payload=intelligence_payload,
-                execution_mode="queued",
-                cutover_active=True,
-                evidence_trail=evidence,
-                error=str(exc),
+                dispatch_id=dispatch_id, task_class=resolved_class,
+                intelligence_payload=intelligence_payload, execution_mode="queued",
+                cutover_active=True, evidence_trail=evidence, error=str(exc),
             )
 
         evidence.append({
-            "step": "routing_decision",
-            "routed": routing.routed,
+            "step": "routing_decision", "routed": routing.routed,
             "target_id": routing.selected_target_id,
             "target_type": routing.selected_target_type,
             "fallback_used": routing.fallback_used,
@@ -326,29 +335,22 @@ class MixedExecutionRouter:
 
         if not routing.routed:
             return MixedRoutingResult(
-                dispatch_id=dispatch_id,
-                task_class=resolved_class,
-                routing_decision=routing,
-                intelligence_payload=intelligence_payload,
-                execution_mode="queued",
-                cutover_active=True,
-                evidence_trail=evidence,
-                error=routing.escalation_reason,
+                dispatch_id=dispatch_id, task_class=resolved_class,
+                routing_decision=routing, intelligence_payload=intelligence_payload,
+                execution_mode="queued", cutover_active=True,
+                evidence_trail=evidence, error=routing.escalation_reason,
             )
 
-        # Step 5: Determine execution mode
         target_type = routing.selected_target_type or ""
-        is_headless_target = target_type in HEADLESS_TARGET_TYPES
+        is_headless = target_type in HEADLESS_TARGET_TYPES and config["headless_enabled"]
+        execution_mode = "headless" if is_headless else "interactive"
 
-        if is_headless_target and config["headless_enabled"]:
-            # Execute headless
+        headless_result = None
+        if is_headless:
             headless_result = self._execute_headless(
-                dispatch_id=dispatch_id,
-                target_id=routing.selected_target_id or "",
-                target_type=target_type,
-                task_class=resolved_class,
-                terminal_id=terminal_id,
-                actor=actor,
+                dispatch_id=dispatch_id, target_id=routing.selected_target_id or "",
+                target_type=target_type, task_class=resolved_class,
+                terminal_id=terminal_id, actor=actor,
             )
             evidence.append({
                 "step": "headless_execution",
@@ -356,42 +358,16 @@ class MixedExecutionRouter:
                 "duration": headless_result.duration_seconds if headless_result else 0,
             })
 
-            self._emit_mixed_routing_event(
-                dispatch_id=dispatch_id,
-                execution_mode="headless",
-                routing=routing,
-                intelligence_payload=intelligence_payload,
-                actor=actor,
-            )
-
-            return MixedRoutingResult(
-                dispatch_id=dispatch_id,
-                task_class=resolved_class,
-                routing_decision=routing,
-                intelligence_payload=intelligence_payload,
-                headless_result=headless_result,
-                execution_mode="headless",
-                cutover_active=True,
-                evidence_trail=evidence,
-            )
-
-        # Interactive execution (default path)
         self._emit_mixed_routing_event(
-            dispatch_id=dispatch_id,
-            execution_mode="interactive",
-            routing=routing,
-            intelligence_payload=intelligence_payload,
-            actor=actor,
+            dispatch_id=dispatch_id, execution_mode=execution_mode,
+            routing=routing, intelligence_payload=intelligence_payload, actor=actor,
         )
 
         return MixedRoutingResult(
-            dispatch_id=dispatch_id,
-            task_class=resolved_class,
-            routing_decision=routing,
-            intelligence_payload=intelligence_payload,
-            execution_mode="interactive",
-            cutover_active=True,
-            evidence_trail=evidence,
+            dispatch_id=dispatch_id, task_class=resolved_class,
+            routing_decision=routing, intelligence_payload=intelligence_payload,
+            headless_result=headless_result, execution_mode=execution_mode,
+            cutover_active=True, evidence_trail=evidence,
         )
 
     # ------------------------------------------------------------------
