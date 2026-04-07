@@ -157,6 +157,7 @@ class SubprocessAdapter:
         instruction: Optional[str] = None,
         model: Optional[str] = None,
         resume_session: Optional[str] = None,
+        cwd: Optional[Any] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -167,6 +168,10 @@ class SubprocessAdapter:
 
         resume_session: if provided, adds --resume <session_id> to the CLI
         command for session continuity.
+
+        cwd: if provided, the subprocess is started in that directory.  Pass
+        the agent's project directory (e.g. agents/{role}/) so the headless
+        process has the right working context.
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
@@ -183,13 +188,16 @@ class SubprocessAdapter:
             cmd.extend(["--resume", resume_session])
         cmd.append(effective_instruction)
 
+        popen_kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "preexec_fn": os.setsid,  # new process group for clean SIGKILL
+        }
+        if cwd is not None:
+            popen_kwargs["cwd"] = str(cwd)
+
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=os.setsid,  # new process group for clean SIGKILL
-            )
+            process = subprocess.Popen(cmd, **popen_kwargs)
         except (FileNotFoundError, OSError) as exc:
             return DeliveryResult(
                 success=False,

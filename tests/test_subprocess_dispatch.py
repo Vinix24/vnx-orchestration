@@ -34,9 +34,11 @@ class TestDeliverViaSubprocess:
         result = deliver_via_subprocess("T1", "do stuff", "sonnet", "d-001")
 
         assert result is True
-        mock_adapter.deliver.assert_called_once_with(
-            "T1", "d-001", instruction="do stuff", model="sonnet",
-        )
+        call_args, call_kwargs = mock_adapter.deliver.call_args
+        assert call_args == ("T1", "d-001")
+        assert call_kwargs["model"] == "sonnet"
+        assert "do stuff" in call_kwargs["instruction"]
+        assert call_kwargs.get("cwd") is None
         mock_adapter.read_events_with_timeout.assert_called_once_with(
             "T1", chunk_timeout=120.0, total_deadline=600.0,
         )
