@@ -24,22 +24,32 @@ from subprocess_adapter import SubprocessAdapter
 logger = logging.getLogger(__name__)
 
 
-def _inject_skill_context(terminal_id: str, instruction: str) -> str:
-    """Prepend terminal CLAUDE.md content to instruction for context.
+def _inject_skill_context(terminal_id: str, instruction: str, role: str | None = None) -> str:
+    """Prepend skill/terminal CLAUDE.md content to instruction for context.
 
-    The CLAUDE.md file acts as the agent's skill context when running
-    headless — it replaces the interactive /skill loading that tmux
-    terminals use.
+    3-tier resolution (first hit wins):
+      1. agents/{role}/CLAUDE.md        — project-level agent override
+      2. .claude/skills/{role}/CLAUDE.md — skill definition
+      3. .claude/terminals/{terminal}/CLAUDE.md — terminal fallback
 
-    Returns the instruction unchanged if no CLAUDE.md exists.
+    Tiers 1 and 2 require role to be provided.  Tier 3 is always attempted
+    when the first two are absent or role is None.
+
+    Returns the instruction unchanged if no CLAUDE.md is found in any tier.
     """
-    claude_md_path = (
-        Path(__file__).resolve().parents[2]
-        / ".claude" / "terminals" / terminal_id / "CLAUDE.md"
-    )
-    if claude_md_path.exists():
-        context = claude_md_path.read_text()
-        return f"{context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+    project_root = Path(__file__).resolve().parents[2]
+
+    candidates: list[Path] = []
+    if role:
+        candidates.append(project_root / "agents" / role / "CLAUDE.md")
+        candidates.append(project_root / ".claude" / "skills" / role / "CLAUDE.md")
+    candidates.append(project_root / ".claude" / "terminals" / terminal_id / "CLAUDE.md")
+
+    for path in candidates:
+        if path.exists():
+            context = path.read_text()
+            return f"{context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+
     return instruction
 
 
@@ -79,6 +89,7 @@ def deliver_via_subprocess(
     model: str,
     dispatch_id: str,
     *,
+    role: str | None = None,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
     chunk_timeout: float = 120.0,
@@ -89,13 +100,24 @@ def deliver_via_subprocess(
     Blocks until the subprocess exits, consuming all stream events.
     Events are persisted to EventStore via read_events_with_timeout() internally.
 
+    If role is provided, _inject_skill_context() resolves the matching
+    CLAUDE.md via 3-tier lookup and SubprocessAdapter uses the agent dir
+    as cwd when available.
+
     If lease_generation is provided, a background heartbeat thread renews the
     lease every heartbeat_interval seconds to prevent TTL expiry during long tasks.
 
     Returns True on success, False on failure.
     """
-    # Inject terminal CLAUDE.md as skill context for headless agents
-    instruction = _inject_skill_context(terminal_id, instruction)
+    # Inject skill/terminal CLAUDE.md as skill context for headless agents
+    instruction = _inject_skill_context(terminal_id, instruction, role=role)
+
+    # Resolve agent cwd: agents/{role}/ dir takes precedence when it exists
+    agent_cwd: Path | None = None
+    if role:
+        candidate = Path(__file__).resolve().parents[2] / "agents" / role
+        if candidate.is_dir():
+            agent_cwd = candidate
 
     adapter = SubprocessAdapter()
     result = adapter.deliver(
@@ -103,6 +125,7 @@ def deliver_via_subprocess(
         dispatch_id,
         instruction=instruction,
         model=model,
+        cwd=agent_cwd,
     )
     if not result.success:
         return False
@@ -186,6 +209,7 @@ def deliver_with_recovery(
     model: str,
     dispatch_id: str,
     *,
+    role: str | None = None,
     max_retries: int = 3,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
@@ -206,6 +230,7 @@ def deliver_with_recovery(
             instruction,
             model,
             dispatch_id,
+            role=role,
             lease_generation=lease_generation,
             heartbeat_interval=heartbeat_interval,
             chunk_timeout=chunk_timeout,
@@ -243,6 +268,7 @@ if __name__ == "__main__":
     parser.add_argument("--instruction", required=True)
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--dispatch-id", required=True)
+    parser.add_argument("--role", default=None, help="Agent role for skill context inlining")
     parser.add_argument("--max-retries", type=int, default=3)
     args = parser.parse_args()
 
@@ -251,6 +277,7 @@ if __name__ == "__main__":
         instruction=args.instruction,
         model=args.model,
         dispatch_id=args.dispatch_id,
+        role=args.role,
         max_retries=args.max_retries,
     )
     sys.exit(0 if ok else 1)
