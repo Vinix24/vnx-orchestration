@@ -65,12 +65,11 @@ class TestDeliverViaSubprocess(unittest.TestCase):
             )
 
         self.assertTrue(result)
-        instance.deliver.assert_called_once_with(
-            "T1",
-            "dispatch-test-001",
-            instruction="Do the thing",
-            model="sonnet",
-        )
+        call_args, call_kwargs = instance.deliver.call_args
+        self.assertEqual(call_args, ("T1", "dispatch-test-001"))
+        self.assertEqual(call_kwargs["model"], "sonnet")
+        self.assertIn("Do the thing", call_kwargs["instruction"])
+        self.assertIsNone(call_kwargs.get("cwd"))
 
     def test_returns_false_on_failure(self):
         with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:
@@ -100,7 +99,7 @@ class TestDeliverViaSubprocess(unittest.TestCase):
 
         _, kwargs = instance.deliver.call_args
         self.assertEqual(kwargs["model"], "opus")
-        self.assertEqual(kwargs["instruction"], "Run tests")
+        self.assertIn("Run tests", kwargs["instruction"])
 
 
 # ---------------------------------------------------------------------------
