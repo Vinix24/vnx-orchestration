@@ -577,7 +577,7 @@ class AutoReport:
     - tags: unified tag set across all three stages
     - quality_checks: deterministic quality advisory results
 
-    The JSON form is written to .vnx-data/state/report_pipeline/{dispatch_id}.json.
+    The JSON form is written to $VNX_STATE_DIR/report_pipeline/{dispatch_id}.json.
     A markdown rendering is written to .vnx-data/unified_reports/ for the receipt
     processor.
     """
@@ -650,7 +650,7 @@ class AutoReport:
 #    ## Open Items        — always present, even when empty
 #
 # 5. JSON SIDECAR:
-#    Written to .vnx-data/state/report_pipeline/{dispatch_id}.json
+#    Written to $VNX_STATE_DIR/report_pipeline/{dispatch_id}.json
 #    Contains the full AutoReport JSON for downstream processing
 #    (intelligence persistence, governance signal extraction).
 #

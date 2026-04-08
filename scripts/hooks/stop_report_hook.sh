@@ -3,7 +3,7 @@
 #
 # Claude Code calls this script when a worker session ends (Stop hook).
 # Receives hook JSON on stdin, writes an extraction trigger file to
-# .vnx-data/state/report_pipeline/ for the next pipeline stage.
+# the report_pipeline state directory for the next pipeline stage.
 #
 # Gate: VNX_AUTO_REPORT=1 must be set; otherwise no-op.
 # Non-blocking: must complete in < 5s.
@@ -118,7 +118,7 @@ if [ -z "$DISPATCH_ID" ]; then
 fi
 
 # ── Write extraction trigger file ─────────────────────────────────────────────
-PIPELINE_DIR="$VNX_DATA/state/report_pipeline"
+PIPELINE_DIR="${VNX_STATE_DIR:-$VNX_DATA/state}/report_pipeline"
 mkdir -p "$PIPELINE_DIR"
 
 TRIGGER_FILE="$PIPELINE_DIR/${DISPATCH_ID}.trigger.json"
