@@ -201,6 +201,16 @@ class HeartbeatACKMonitor:
         thread.start()
         self.polling_threads[dispatch_id] = thread
 
+    def _is_subprocess_terminal(self, terminal: str) -> bool:
+        """Check if terminal uses subprocess adapter (not tmux).
+
+        VNX_ADAPTER_T1=subprocess skips tmux-based monitoring because the
+        subprocess adapter has its own event pipeline and any tmux pane
+        activity reflects the subprocess launcher, not the actual worker.
+        """
+        env_key = f"VNX_ADAPTER_{terminal}"
+        return os.environ.get(env_key, "tmux").lower() == "subprocess"
+
     def _monitor_dispatch(self, dispatch_id: str):
         """Dedicated monitoring thread for a specific dispatch"""
 
@@ -209,6 +219,10 @@ class HeartbeatACKMonitor:
             return
 
         terminal = dispatch_info['terminal']
+
+        if self._is_subprocess_terminal(terminal):
+            logger.debug(f"[MONITOR] Skipping subprocess-adapter terminal {terminal} for {dispatch_id}")
+            return
         sent_time = dispatch_info['sent_time']
         timeout_time = dispatch_info['timeout_time']
 
@@ -454,6 +468,10 @@ class HeartbeatACKMonitor:
 
     def _check_terminal_activity(self, terminal: str, after_time: datetime) -> Optional[Dict]:
         """Check for terminal process activity via tmux"""
+
+        if self._is_subprocess_terminal(terminal):
+            logger.debug(f"Skipping subprocess-adapter terminal {terminal}")
+            return None
 
         try:
             # Get pane info from tmux
