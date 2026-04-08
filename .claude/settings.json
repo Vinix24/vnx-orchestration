@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/stop_report_hook.sh"
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel)/scripts/hooks/stop_report_hook.sh\"'"
           }
         ]
       }
