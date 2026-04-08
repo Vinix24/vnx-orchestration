@@ -674,6 +674,7 @@ MARKDOWN_TEMPLATE = """\
 **Dispatch ID**: {dispatch_id}
 **PR**: {pr_id}
 **Track**: {track}
+**Terminal**: {terminal}
 **Gate**: {gate}
 **Status**: {status}
 **Auto-Generated**: true
@@ -784,6 +785,7 @@ def render_markdown(report: AutoReport) -> str:
         dispatch_id=meta.dispatch_id,
         pr_id=meta.pr_id,
         track=meta.track,
+        terminal=meta.terminal,
         gate=meta.gate,
         status=meta.status,
         summary=summary,
