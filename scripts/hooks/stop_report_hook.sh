@@ -53,27 +53,14 @@ case "$CWD" in
 esac
 
 # ── Resolve project root from cwd ────────────────────────────────────────────
-# Walk up from CWD to find directory containing .vnx-data/
-PROJECT_ROOT=""
-SEARCH_DIR="$CWD"
-for _ in 1 2 3 4 5 6; do
-    if [ -d "$SEARCH_DIR/.vnx-data" ]; then
-        PROJECT_ROOT="$SEARCH_DIR"
-        break
-    fi
-    PARENT="$(dirname "$SEARCH_DIR")"
-    if [ "$PARENT" = "$SEARCH_DIR" ]; then
-        break
-    fi
-    SEARCH_DIR="$PARENT"
-done
-
+# Use git rev-parse to reliably find the repo root — avoids symlink confusion
+# where .vnx-data symlinks in terminal subdirectories mislead the walk-up loop.
+PROJECT_ROOT="$(cd "$CWD" && git rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$PROJECT_ROOT" ]; then
-    # Use VNX_DATA_DIR env var as fallback
     if [ -n "${VNX_DATA_DIR:-}" ]; then
         PROJECT_ROOT="$(dirname "$VNX_DATA_DIR")"
     else
-        printf '{"skipped":true,"skip_reason":"could not resolve project root from cwd"}\n' >&2
+        printf '{"skipped":true,"skip_reason":"could not resolve project root"}\n' >&2
         exit 0
     fi
 fi

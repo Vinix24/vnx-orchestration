@@ -144,6 +144,9 @@ export LEGACY_REPORTS_DIR="${LEGACY_REPORTS_DIR:-$VNX_HOME/unified_reports}"
 # Git-tracked intelligence directory (portable across worktrees).
 export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$VNX_CANONICAL_ROOT/.vnx-intelligence}"
 
+# F37: Auto-Report Pipeline — generates extraction + classification on session stop
+export VNX_AUTO_REPORT="${VNX_AUTO_REPORT:-1}"
+
 # ── Worktree PROJECT_ROOT override ──────────────────────────────
 # When CWD is a git worktree of the same project, override PROJECT_ROOT
 # and re-derive all data paths so each worktree gets its own session.
