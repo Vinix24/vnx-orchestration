@@ -686,7 +686,7 @@ HEALTH_CHECK_INTERVAL=5         # Process health check interval (seconds)
 
 ## Related Documentation
 
-- **VNX_IMPLEMENTATION_ROADMAP.MD** - Implementation roadmap
+- **DOCS_INDEX.md** - Current documentation index
 - **00_VNX_ARCHITECTURE.md** - Complete architecture overview
 - **operations/README.md** - Operational procedures index
 - **T0_ORCHESTRATION_INTELLIGENCE.md** - T0 intelligence system

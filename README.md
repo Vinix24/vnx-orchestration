@@ -243,7 +243,7 @@ All state lives on the filesystem. No database, no cloud dependency.
 
 VNX is **not** a consumer AI chat wrapper, a CI/CD replacement, or a no-code tool. It's an orchestration system for developers who want governance over their AI workflows.
 
-See [Who Should Use VNX](docs/audience_and_use_cases.md) for detailed use cases and audience fit.
+See [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) and [VNX vs Multi-Agent Frameworks](docs/comparisons/vnx_vs_frameworks.md) for positioning and audience-fit tradeoffs.
 
 ## How VNX Compares
 
@@ -264,7 +264,7 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/manifesto/ARCHITECTURE.md) | Glass Box Governance design and data flow |
-| [Productization Contract](docs/productization_contract.md) | User modes, command surface, migration plan |
+| [Productization Contract](docs/contracts/PRODUCTIZATION_CONTRACT.md) | User modes, command surface, migration plan |
 | [Dispatch Guide](docs/DISPATCH_GUIDE.md) | How T0 routes tasks to workers |
 | [Limitations](docs/manifesto/LIMITATIONS.md) | Known constraints and failure modes |
 | [Open Method](docs/manifesto/OPEN_METHOD.md) | Development philosophy |

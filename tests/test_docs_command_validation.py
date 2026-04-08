@@ -174,16 +174,16 @@ class TestReadmeVsModeTiers:
 # ---------------------------------------------------------------------------
 
 class TestProductizationContract:
-    """productization_contract.md mode definitions must match vnx_mode.py."""
+    """PRODUCTIZATION_CONTRACT.md mode definitions must match vnx_mode.py."""
 
     def test_contract_exists(self):
-        contract = REPO_ROOT / "docs" / "productization_contract.md"
-        assert contract.exists(), "productization_contract.md missing"
+        contract = REPO_ROOT / "docs" / "contracts" / "PRODUCTIZATION_CONTRACT.md"
+        assert contract.exists(), "docs/contracts/PRODUCTIZATION_CONTRACT.md missing"
 
     def test_contract_mentions_all_modes(self):
-        contract = REPO_ROOT / "docs" / "productization_contract.md"
+        contract = REPO_ROOT / "docs" / "contracts" / "PRODUCTIZATION_CONTRACT.md"
         if not contract.exists():
-            pytest.skip("productization_contract.md missing")
+            pytest.skip("docs/contracts/PRODUCTIZATION_CONTRACT.md missing")
         text = contract.read_text().lower()
         for mode in VNXMode:
             assert mode.value in text, \

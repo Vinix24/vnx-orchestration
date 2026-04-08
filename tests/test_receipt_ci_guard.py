@@ -13,9 +13,7 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 
 APPROVED_WRITERS = {
     "receipt_processor_v4.sh",
-    "receipt_notifier.sh",
     "report_watcher.sh",
-    "send_single_receipt_to_t0.sh",
     "heartbeat_ack_monitor.py",
 }
 

@@ -1035,7 +1035,7 @@ python .claude/vnx-system/scripts/pr_queue_manager.py promote <dispatch-id>
     └─ NO → Ignore (stays in staging)
 ```
 
-**Reference**: See [README_PR_QUEUE.md](../orchestration/README_PR_QUEUE.md) for complete workflow guide
+**Reference**: See [DISPATCH_GUIDE.md](../DISPATCH_GUIDE.md) for the current workflow guide
 
 ---
 

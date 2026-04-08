@@ -40,7 +40,7 @@ Brief overview of VNX system work completed (2-3 sentences)
 ### Documentation Updates
 - Architecture docs updated
 - Operations docs updated
-- PROJECT_STATUS.md updated
+- Public release docs updated when applicable
 
 ### Open Items
 <!-- List any unfinished work, blockers, or issues discovered -->

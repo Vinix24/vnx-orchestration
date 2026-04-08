@@ -1236,5 +1236,5 @@ Location: `.vnx-data/pids/<name>.meta.json`. Used by `vnx ps` for PPID and start
 
 **Related Documentation**:
 - [System Architecture](../core/00_VNX_ARCHITECTURE.md)
-- [Implementation Roadmap](../roadmap/implementation/VNX_IMPLEMENTATION_ROADMAP.MD)
-- [Intelligence System](../intelligence/README.md)
+- [Dispatch Guide](../DISPATCH_GUIDE.md)
+- [Tag Taxonomy](../intelligence/TAG_TAXONOMY.md)

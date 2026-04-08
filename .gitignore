@@ -27,10 +27,6 @@ docs/archive/
 
 # Internal docs (not for public repo — all internal docs go in docs/internal/)
 docs/internal/
-docs/orchestration/evidence/
-docs/orchestration/archive/
-docs/orchestration/AS-*
-docs/orchestration/AI_*
 docs/roadmap/
 docs/architecture/
 

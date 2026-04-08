@@ -24,7 +24,7 @@ The contract exists so that:
 
 **Relationship to existing contracts**:
 - `HEADLESS_RUN_CONTRACT.md` defines run identity (Section 1), lifecycle states (Section 2), failure taxonomy (Section 4), and basic observability (Section 5). This contract does not replace those — it layers session identity, richer events, evidence classes, and provider awareness on top.
-- `RUNTIME_ADAPTER_CONTRACT.md` defines the adapter interface. This contract defines the observability model that session-aware adapters must emit, not the adapter interface itself.
+- `RUNTIME_ADAPTER_CONTRACT.md` in this directory defines the adapter interface. This contract defines the observability model that session-aware adapters must emit, not the adapter interface itself.
 
 ---
 

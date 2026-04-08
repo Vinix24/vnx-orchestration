@@ -14,7 +14,7 @@ Feature flags (PR-5 defaults — all enabled after cutover):
 
 Rollback:
   Set VNX_RUNTIME_PRIMARY=0 to revert to legacy transport without
-  changing any other component. See docs/runtime_core_rollback.md.
+  changing any other component. See docs/operations/RUNTIME_CORE_ROLLBACK.md.
 
 Governance invariants preserved:
   - T0 completion authority: broker only tracks delivery -> accepted.

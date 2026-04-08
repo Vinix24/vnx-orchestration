@@ -15,7 +15,7 @@ The rollback operation sets VNX_RUNTIME_PRIMARY=0 which causes:
   - load_runtime_core() to return None (no-op)
   - legacy terminal_state_shadow path to remain the sole coordination path
 
-See docs/runtime_core_rollback.md for the full rollback procedure.
+See docs/operations/RUNTIME_CORE_ROLLBACK.md for the full rollback procedure.
 """
 from __future__ import annotations
 
