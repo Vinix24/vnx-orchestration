@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # Any used for sqlite3.Connection in methods
 
 from runtime_coordination import (
     DISPATCH_STATES,
@@ -491,214 +491,236 @@ class RuntimeReconciler:
         threshold_iso = threshold.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
         with get_connection(self._state_dir) as conn:
-            # Dispatches stuck in intermediate states
-            stuck_rows = conn.execute(
-                """
-                SELECT * FROM dispatches
-                WHERE state IN ('claimed', 'delivering', 'accepted', 'running')
-                  AND updated_at < ?
-                ORDER BY updated_at ASC
-                """,
-                (threshold_iso,),
-            ).fetchall()
-
-            for row in stuck_rows:
-                r = dict(row)
-                dispatch_id = r["dispatch_id"]
-                from_state = r["state"]
-                ts = _now_iso()
-
-                # Determine the correct target state based on valid transitions.
-                # - claimed -> expired (claim expired without delivery starting)
-                # - delivering/accepted/running -> timed_out
-                allowed = DISPATCH_TRANSITIONS.get(from_state, frozenset())
-                if "timed_out" in allowed:
-                    target_state = "timed_out"
-                elif "expired" in allowed:
-                    target_state = "expired"
-                else:
-                    # No valid stuck-recovery transition — flag for review
-                    result.needs_review.append(ReconciliationAction(
-                        entity_type="dispatch",
-                        entity_id=dispatch_id,
-                        action="flagged",
-                        from_state=from_state,
-                        to_state=from_state,
-                        reason=(
-                            f"Dispatch stuck in '{from_state}' past threshold "
-                            f"but no valid recovery transition available. "
-                            f"Updated at: {r['updated_at']}"
-                        ),
-                        timestamp=ts,
-                        metadata={"terminal_id": r.get("terminal_id"), "updated_at": r["updated_at"]},
-                    ))
-                    continue
-
-                reason = (
-                    f"Dispatch stuck in '{from_state}': "
-                    f"updated_at={r['updated_at']}, "
-                    f"terminal_id={r.get('terminal_id')}"
-                )
-
-                if not dry_run:
-                    try:
-                        transition_dispatch(
-                            conn,
-                            dispatch_id=dispatch_id,
-                            to_state=target_state,
-                            actor="reconciler",
-                            reason=reason,
-                            metadata={
-                                "reconciler_action": "timeout_stuck_dispatch",
-                                "original_state": from_state,
-                            },
-                        )
-                    except (InvalidTransitionError, KeyError) as exc:
-                        result.errors.append(
-                            f"Failed to transition dispatch {dispatch_id}: {exc}"
-                        )
-                        continue
-
-                action_label = "timed_out" if target_state == "timed_out" else "expired"
-                action = ReconciliationAction(
-                    entity_type="dispatch",
-                    entity_id=dispatch_id,
-                    action=action_label,
-                    from_state=from_state,
-                    to_state=target_state,
-                    reason=reason,
-                    timestamp=ts,
-                    metadata={
-                        "terminal_id": r.get("terminal_id"),
-                        "attempt_count": r.get("attempt_count"),
-                        "updated_at": r["updated_at"],
-                    },
-                )
-                if target_state == "timed_out":
-                    result.timed_out_dispatches.append(action)
-                else:
-                    result.expired_dispatches.append(action)
-
-            # Dispatches in recoverable states (timed_out, failed_delivery)
-            recoverable_rows = conn.execute(
-                """
-                SELECT * FROM dispatches
-                WHERE state IN ('timed_out', 'failed_delivery')
-                ORDER BY updated_at ASC
-                """
-            ).fetchall()
-
-            for row in recoverable_rows:
-                r = dict(row)
-                dispatch_id = r["dispatch_id"]
-                from_state = r["state"]
-                attempt_count = r.get("attempt_count", 0)
-                ts = _now_iso()
-
-                # Exceeded max attempts → expire (terminal state)
-                if attempt_count >= self._config.max_dispatch_attempts:
-                    reason = (
-                        f"Dispatch exceeded max attempts ({attempt_count}/{self._config.max_dispatch_attempts}): "
-                        f"state={from_state}, terminal_id={r.get('terminal_id')}"
-                    )
-
-                    if not dry_run:
-                        try:
-                            transition_dispatch(
-                                conn,
-                                dispatch_id=dispatch_id,
-                                to_state="expired",
-                                actor="reconciler",
-                                reason=reason,
-                                metadata={
-                                    "reconciler_action": "expire_over_attempted",
-                                    "attempt_count": attempt_count,
-                                    "max_attempts": self._config.max_dispatch_attempts,
-                                },
-                            )
-                        except (InvalidTransitionError, KeyError) as exc:
-                            result.errors.append(
-                                f"Failed to expire dispatch {dispatch_id}: {exc}"
-                            )
-                            continue
-
-                    action = ReconciliationAction(
-                        entity_type="dispatch",
-                        entity_id=dispatch_id,
-                        action="expired",
-                        from_state=from_state,
-                        to_state="expired",
-                        reason=reason,
-                        timestamp=ts,
-                        metadata={
-                            "terminal_id": r.get("terminal_id"),
-                            "attempt_count": attempt_count,
-                        },
-                    )
-                    result.expired_dispatches.append(action)
-
-                elif self._config.auto_recover_dispatches:
-                    reason = (
-                        f"Auto-recovered dispatch from '{from_state}': "
-                        f"attempts={attempt_count}/{self._config.max_dispatch_attempts}, "
-                        f"terminal_id={r.get('terminal_id')}"
-                    )
-
-                    if not dry_run:
-                        try:
-                            transition_dispatch(
-                                conn,
-                                dispatch_id=dispatch_id,
-                                to_state="recovered",
-                                actor="reconciler",
-                                reason=reason,
-                                metadata={
-                                    "reconciler_action": "auto_recover",
-                                    "attempt_count": attempt_count,
-                                },
-                            )
-                        except (InvalidTransitionError, KeyError) as exc:
-                            result.errors.append(
-                                f"Failed to recover dispatch {dispatch_id}: {exc}"
-                            )
-                            continue
-
-                    action = ReconciliationAction(
-                        entity_type="dispatch",
-                        entity_id=dispatch_id,
-                        action="recovered",
-                        from_state=from_state,
-                        to_state="recovered",
-                        reason=reason,
-                        timestamp=ts,
-                        metadata={
-                            "terminal_id": r.get("terminal_id"),
-                            "attempt_count": attempt_count,
-                        },
-                    )
-                    result.recovered_dispatches.append(action)
-
-                else:
-                    # Flag for operator review
-                    result.needs_review.append(ReconciliationAction(
-                        entity_type="dispatch",
-                        entity_id=dispatch_id,
-                        action="flagged",
-                        from_state=from_state,
-                        to_state=from_state,
-                        reason=(
-                            f"Dispatch in '{from_state}' with {attempt_count} attempts — "
-                            f"requires operator review (auto_recover_dispatches=False)"
-                        ),
-                        timestamp=ts,
-                        metadata={
-                            "terminal_id": r.get("terminal_id"),
-                            "attempt_count": attempt_count,
-                        },
-                    ))
-
+            self._reconcile_stuck_dispatches(conn, result, dry_run=dry_run, threshold_iso=threshold_iso)
+            self._reconcile_recoverable_dispatches(conn, result, dry_run=dry_run)
             if not dry_run:
                 conn.commit()
+
+    def _reconcile_stuck_dispatches(
+        self,
+        conn: Any,
+        result: ReconciliationResult,
+        *,
+        dry_run: bool,
+        threshold_iso: str,
+    ) -> None:
+        """Handle dispatches stuck in intermediate states past timeout threshold."""
+        stuck_rows = conn.execute(
+            """
+            SELECT * FROM dispatches
+            WHERE state IN ('claimed', 'delivering', 'accepted', 'running')
+              AND updated_at < ?
+            ORDER BY updated_at ASC
+            """,
+            (threshold_iso,),
+        ).fetchall()
+
+        for row in stuck_rows:
+            self._handle_stuck_dispatch(conn, dict(row), result, dry_run=dry_run)
+
+    @staticmethod
+    def _resolve_stuck_target_state(from_state: str) -> Optional[str]:
+        """Return the recovery target state for a stuck dispatch, or None if no valid transition."""
+        allowed = DISPATCH_TRANSITIONS.get(from_state, frozenset())
+        if "timed_out" in allowed:
+            return "timed_out"
+        if "expired" in allowed:
+            return "expired"
+        return None
+
+    def _handle_stuck_dispatch(
+        self,
+        conn: Any,
+        r: Dict[str, Any],
+        result: ReconciliationResult,
+        *,
+        dry_run: bool,
+    ) -> None:
+        """Transition a single stuck dispatch to timed_out/expired or flag for review."""
+        dispatch_id = r["dispatch_id"]
+        from_state = r["state"]
+        ts = _now_iso()
+        target_state = self._resolve_stuck_target_state(from_state)
+
+        if target_state is None:
+            result.needs_review.append(ReconciliationAction(
+                entity_type="dispatch", entity_id=dispatch_id, action="flagged",
+                from_state=from_state, to_state=from_state,
+                reason=f"Dispatch stuck in '{from_state}' past threshold but no valid recovery transition. Updated at: {r['updated_at']}",
+                timestamp=ts,
+                metadata={"terminal_id": r.get("terminal_id"), "updated_at": r["updated_at"]},
+            ))
+            return
+
+        reason = f"Dispatch stuck in '{from_state}': updated_at={r['updated_at']}, terminal_id={r.get('terminal_id')}"
+
+        if not dry_run:
+            try:
+                transition_dispatch(
+                    conn, dispatch_id=dispatch_id, to_state=target_state,
+                    actor="reconciler", reason=reason,
+                    metadata={"reconciler_action": "timeout_stuck_dispatch", "original_state": from_state},
+                )
+            except (InvalidTransitionError, KeyError) as exc:
+                result.errors.append(f"Failed to transition dispatch {dispatch_id}: {exc}")
+                return
+
+        action = ReconciliationAction(
+            entity_type="dispatch", entity_id=dispatch_id,
+            action="timed_out" if target_state == "timed_out" else "expired",
+            from_state=from_state, to_state=target_state, reason=reason, timestamp=ts,
+            metadata={"terminal_id": r.get("terminal_id"), "attempt_count": r.get("attempt_count"), "updated_at": r["updated_at"]},
+        )
+        if target_state == "timed_out":
+            result.timed_out_dispatches.append(action)
+        else:
+            result.expired_dispatches.append(action)
+
+    def _reconcile_recoverable_dispatches(
+        self,
+        conn: Any,
+        result: ReconciliationResult,
+        *,
+        dry_run: bool,
+    ) -> None:
+        """Handle dispatches in recoverable states (timed_out, failed_delivery)."""
+        recoverable_rows = conn.execute(
+            """
+            SELECT * FROM dispatches
+            WHERE state IN ('timed_out', 'failed_delivery')
+            ORDER BY updated_at ASC
+            """
+        ).fetchall()
+
+        for row in recoverable_rows:
+            r = dict(row)
+            attempt_count = r.get("attempt_count", 0)
+
+            if attempt_count >= self._config.max_dispatch_attempts:
+                self._expire_over_attempted(conn, r, result, dry_run=dry_run)
+            elif self._config.auto_recover_dispatches:
+                self._auto_recover_dispatch(conn, r, result, dry_run=dry_run)
+            else:
+                self._flag_dispatch_for_review(r, result)
+
+    def _expire_over_attempted(
+        self,
+        conn: Any,
+        r: Dict[str, Any],
+        result: ReconciliationResult,
+        *,
+        dry_run: bool,
+    ) -> None:
+        """Expire a dispatch that has exceeded max attempt count."""
+        dispatch_id = r["dispatch_id"]
+        from_state = r["state"]
+        attempt_count = r.get("attempt_count", 0)
+        ts = _now_iso()
+        reason = (
+            f"Dispatch exceeded max attempts ({attempt_count}/{self._config.max_dispatch_attempts}): "
+            f"state={from_state}, terminal_id={r.get('terminal_id')}"
+        )
+
+        if not dry_run:
+            try:
+                transition_dispatch(
+                    conn,
+                    dispatch_id=dispatch_id,
+                    to_state="expired",
+                    actor="reconciler",
+                    reason=reason,
+                    metadata={
+                        "reconciler_action": "expire_over_attempted",
+                        "attempt_count": attempt_count,
+                        "max_attempts": self._config.max_dispatch_attempts,
+                    },
+                )
+            except (InvalidTransitionError, KeyError) as exc:
+                result.errors.append(f"Failed to expire dispatch {dispatch_id}: {exc}")
+                return
+
+        result.expired_dispatches.append(ReconciliationAction(
+            entity_type="dispatch",
+            entity_id=dispatch_id,
+            action="expired",
+            from_state=from_state,
+            to_state="expired",
+            reason=reason,
+            timestamp=ts,
+            metadata={"terminal_id": r.get("terminal_id"), "attempt_count": attempt_count},
+        ))
+
+    def _auto_recover_dispatch(
+        self,
+        conn: Any,
+        r: Dict[str, Any],
+        result: ReconciliationResult,
+        *,
+        dry_run: bool,
+    ) -> None:
+        """Auto-recover a dispatch from a recoverable state."""
+        dispatch_id = r["dispatch_id"]
+        from_state = r["state"]
+        attempt_count = r.get("attempt_count", 0)
+        ts = _now_iso()
+        reason = (
+            f"Auto-recovered dispatch from '{from_state}': "
+            f"attempts={attempt_count}/{self._config.max_dispatch_attempts}, "
+            f"terminal_id={r.get('terminal_id')}"
+        )
+
+        if not dry_run:
+            try:
+                transition_dispatch(
+                    conn,
+                    dispatch_id=dispatch_id,
+                    to_state="recovered",
+                    actor="reconciler",
+                    reason=reason,
+                    metadata={
+                        "reconciler_action": "auto_recover",
+                        "attempt_count": attempt_count,
+                    },
+                )
+            except (InvalidTransitionError, KeyError) as exc:
+                result.errors.append(f"Failed to recover dispatch {dispatch_id}: {exc}")
+                return
+
+        result.recovered_dispatches.append(ReconciliationAction(
+            entity_type="dispatch",
+            entity_id=dispatch_id,
+            action="recovered",
+            from_state=from_state,
+            to_state="recovered",
+            reason=reason,
+            timestamp=ts,
+            metadata={"terminal_id": r.get("terminal_id"), "attempt_count": attempt_count},
+        ))
+
+    def _flag_dispatch_for_review(
+        self,
+        r: Dict[str, Any],
+        result: ReconciliationResult,
+    ) -> None:
+        """Flag a recoverable dispatch for operator review."""
+        attempt_count = r.get("attempt_count", 0)
+        from_state = r["state"]
+        result.needs_review.append(ReconciliationAction(
+            entity_type="dispatch",
+            entity_id=r["dispatch_id"],
+            action="flagged",
+            from_state=from_state,
+            to_state=from_state,
+            reason=(
+                f"Dispatch in '{from_state}' with {attempt_count} attempts — "
+                f"requires operator review (auto_recover_dispatches=False)"
+            ),
+            timestamp=_now_iso(),
+            metadata={
+                "terminal_id": r.get("terminal_id"),
+                "attempt_count": attempt_count,
+            },
+        ))
 
 
 # ---------------------------------------------------------------------------
