@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "terminals/T0",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/build_t0_state.py --output .vnx-data/state/t0_state.json 2>/dev/null; exit 0"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
