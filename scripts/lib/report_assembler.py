@@ -423,7 +423,7 @@ def write_report(
     # Short title: first 30 chars of dispatch_id after the datestamp prefix
     # e.g. "20260408-110915-auto-report-assembler-A" → "auto-report-assembler"
     short_title = _short_title_from_dispatch_id(dispatch_id)
-    md_filename = f"{timestamp}-{meta.track}-auto-{short_title}.md"
+    md_filename = f"{timestamp}-{meta.track}-{short_title}.md"
     md_path = unified_dir / md_filename
 
     try:

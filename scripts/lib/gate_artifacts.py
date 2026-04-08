@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from governance_receipts import utc_now_iso
 import gate_recorder
@@ -224,6 +227,31 @@ def materialize_artifacts(
     request_payload["status"] = "completed"
     request_payload["completed_at"] = now
     gate_recorder.persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
+
+    # Write JSON sidecar to report_pipeline/ for intelligence DB ingestion (OI-1066)
+    try:
+        sidecar = {
+            "dispatch_id": f"gate-{gate}-pr-{pr_number}",
+            "gate": gate,
+            "pr_id": pr_id,
+            "pr_number": pr_number,
+            "status": result_payload["status"],
+            "findings": findings,
+            "blocking_findings": blocking,
+            "advisory_findings": advisory,
+            "contract_hash": contract_hash,
+            "report_path": str(report_file),
+            "duration_seconds": duration_seconds,
+            "source": "gate_runner",
+            "recorded_at": now,
+        }
+        sidecar_dir = reports_dir.parent / "state" / "report_pipeline"
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_path = sidecar_dir / f"gate-{gate}-pr-{pr_number or pr_id}.json"
+        sidecar_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+    except Exception as _exc:
+        logger.warning("materialize_artifacts: sidecar write failed: %s", _exc)
+
     return result_payload
 
 
