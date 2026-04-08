@@ -144,6 +144,7 @@ def deliver_via_subprocess(
         )
         heartbeat_thread.start()
 
+    success = False
     try:
         for _event in adapter.read_events_with_timeout(
             terminal_id,
@@ -151,6 +152,7 @@ def deliver_via_subprocess(
             total_deadline=total_deadline,
         ):
             pass
+        success = True
         return True
     except Exception:
         logger.exception("deliver_via_subprocess failed for %s", terminal_id)
@@ -160,6 +162,12 @@ def deliver_via_subprocess(
             heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
+        # Trigger auto-report pipeline on completion (gated by VNX_AUTO_REPORT=1)
+        adapter.trigger_report_pipeline(
+            terminal_id,
+            dispatch_id,
+            cwd=str(agent_cwd) if agent_cwd is not None else None,
+        )
 
 
 def _write_receipt(
