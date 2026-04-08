@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -28,8 +29,12 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_EVENTS_FILE = Path(".vnx-data/events/T0.ndjson")
-DEFAULT_DECISION_LOG = Path(".vnx-data/state/t0_decision_log.jsonl")
+def _vnx_data_dir() -> Path:
+    """Resolve VNX data directory from environment."""
+    return Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+
+DEFAULT_EVENTS_FILE = _vnx_data_dir() / "events" / "T0.ndjson"
+DEFAULT_DECISION_LOG = _vnx_data_dir() / "state" / "t0_decision_log.jsonl"
 
 TEXT_EVENT_TYPES = {"text", "result"}
 
