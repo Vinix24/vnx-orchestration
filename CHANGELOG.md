@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.6.0 — Headless Pipeline + Post-Chain Refactoring (2026-04-07)
+
+### Features
+- **F31**: Headless worker resilience — timeout protection via `select.select()`, lease heartbeat renewal, health monitoring daemon, LLM failure diagnosis
+- **F32**: T1 as headless backend-developer — pure `claude -p` subprocess execution, no tmux dependency
+- **F33**: Dashboard domain filter — agent selector by name, domain filter tabs (Coding/Content/All)
+- **F34**: Skill context inlining — 3-tier CLAUDE.md resolution for headless workers (`agents/{role}` → `.claude/skills/{role}` → `.claude/terminals/{terminal}`)
+- **F35**: End-to-end headless pipeline certification — 10/10 evidence checks PASS, 268 subprocess/headless tests, production-ready verdict
+
+### Refactoring
+- **F36**: Post-chain code housekeeping — 10 oversized modules split across 3 parallel tracks, all under 800-line/70-function thresholds
+- Decision summarizer (`t0_decision_summarizer.py`) — haiku-powered T0 session summary
+- Orchestrator agent directory (`agents/orchestrator/`) — condensed CLAUDE.md for headless T0
+
+### Architecture (planning, not yet implemented)
+- Headless T0 feasibility study — CONDITIONAL GO verdict
+- State architecture for stateless T0 sessions (6.5% token budget)
+- Framework comparison (7 frameworks: LangGraph, CrewAI, OpenAI SDK, AG2, Mastra, Claude SDK, n8n)
+- Governance & intelligence layer architecture (stream-based reporting, tag pipeline, quality checks)
+- Repository housekeeping — internal docs moved to private folder, contracts reorganized
+
+---
+
 All notable changes to VNX are documented here.
 
 ## v0.5.2 — Dashboard Agent Stream (Feature 29)
