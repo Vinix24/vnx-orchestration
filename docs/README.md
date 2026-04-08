@@ -1,7 +1,7 @@
 # VNX Documentation
 
 **Status**: Active
-**Last Updated**: 2026-02-19
+**Last Updated**: 2026-04-08
 **Owner**: VNX Maintainer
 **Purpose**: Describe how VNX documentation is organized and where to find the current source of truth.
 
@@ -14,24 +14,25 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 **Most Used**:
 - Index: `DOCS_INDEX.md`
 - Architecture: `core/00_VNX_ARCHITECTURE.md`
-- PR workflow: `orchestration/README_PR_QUEUE.md`
+- Getting started: `core/00_GETTING_STARTED.md`
+- Dispatch workflow: `DISPATCH_GUIDE.md`
 - Monitoring: `operations/MONITORING_GUIDE.md`
-- Dashboard: `core/00_GETTING_STARTED.md` (launch + URL)
-- Roadmap: `roadmap/implementation/VNX_IMPLEMENTATION_ROADMAP.MD`
+- Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
+- Roadmap: `manifesto/ROADMAP.md`
 
 ## Directory Overview
 
 | Directory | Purpose |
 |-----------|---------|
-| `core/` | System fundamentals, dispatch/receipt formats, permissions |
-| `core/technical/` | Deep technical references (dispatcher, intelligence, state) |
-| `architecture/` | Strategy documents, design decisions, proposals |
-| `operations/` | Monitoring, restart, receipt pipeline, daemon ops |
-| `orchestration/` | PR workflow, T0 guides, skills, progress tracking |
-| `intelligence/` | Intelligence system, tag taxonomy, token optimization |
-| `testing/` | QA system, quality reviewer workflow |
-| `roadmap/` | Project status, implementation roadmap, feature plans |
-| `archive/` | Superseded/historical docs, organized by date |
+| `core/` | System architecture, file formats, technical references, and core contracts |
+| `contracts/` | Feature-level and platform contracts that govern runtime behavior |
+| `operations/` | Monitoring, multi-model usage, receipts, rollback, and runtime operations |
+| `intelligence/` | Public intelligence reference docs such as tag taxonomy and cost tracking |
+| `manifesto/` | Public narrative docs: architecture story, roadmap, limitations, open method |
+| `onboarding/` | New-user orientation and first-run setup guidance |
+| `examples/` | Example orchestration flows for coding, research, and content work |
+| `comparisons/` | Positioning docs that compare VNX to direct CLI use and frameworks |
+| `_archive/` | Historical or superseded docs kept for reference only |
 
 ## Documentation Rules (Source of Truth)
 
@@ -41,13 +42,13 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
   - `**Last Updated**: YYYY-MM-DD`
   - `**Owner**: Team/Role`
   - `**Purpose**: one line`
-- Do not delete content unless it is duplicated in the canonical doc.
+- Private planning, business strategy, and internal research do not live in this repo.
+- Do not delete content unless it is duplicated in the canonical doc or moved to the private BUSINESS workspace.
 - Every active doc must be listed in `DOCS_INDEX.md`.
 
 ## Archive
 
-Historical and superseded docs live in `archive/`.
+Historical and superseded docs live in `_archive/`.
 
-- Each cleanup batch gets its own dated directory: `archive/YYYY-MM-DD-cleanup/`
-- Each batch has an `ARCHIVE_README.md` explaining what was moved and why.
-- Archived docs are tagged `**Status**: Archived`.
+- Archive only docs that still have traceability value.
+- If a document is private rather than merely historical, move it out of the repo instead of archiving it here.

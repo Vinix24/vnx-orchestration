@@ -1,20 +1,20 @@
 # Getting Started (VNX)
 
 **Status**: Active
-**Last Updated**: 2026-02-18
+**Last Updated**: 2026-04-08
 **Owner**: T-MANAGER
 **Purpose**: Quick orientation and links to the current VNX "source of truth" docs.
 
 ---
 
-## Current System Snapshot (2026-02-18)
+## Current System Snapshot
 
-- Architecture: `00_VNX_ARCHITECTURE.md` (V10.0)
-- PR workflow: `../orchestration/README_PR_QUEUE.md`
+- Architecture: `00_VNX_ARCHITECTURE.md`
+- Dispatch workflow: `../DISPATCH_GUIDE.md`
 - Monitoring/ops: `../operations/MONITORING_GUIDE.md`
-- Receipt pipeline: `../operations/RECEIPT_PIPELINE.md` (V8.1)
-- Dispatcher: V8.2 Minimal — see `technical/DISPATCHER_SYSTEM.md`
-- Orchestration index: `../orchestration/ORCHESTRATION_INDEX.md`
+- Receipt pipeline: `../operations/RECEIPT_PIPELINE.md`
+- Runtime rollback: `../operations/RUNTIME_CORE_ROLLBACK.md`
+- Product modes: `../contracts/PRODUCTIZATION_CONTRACT.md`
 
 For full navigation, start at `../DOCS_INDEX.md`.
 
@@ -649,4 +649,4 @@ This is line three
 
 ---
 
-*For architecture details see 00_VNX_ARCHITECTURE.md (V10.0) | For operations see ../operations/README.md*
+*For architecture details see `00_VNX_ARCHITECTURE.md` | For operations see `../operations/README.md`*

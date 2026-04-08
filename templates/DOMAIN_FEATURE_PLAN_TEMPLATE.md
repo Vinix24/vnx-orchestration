@@ -104,7 +104,7 @@
 - each PR must have a GitHub PR with clear scope and linked feature name before merge
 - required GitHub Actions checks must be green before human merge
 - dependent PRs must branch from post-merge `main`, not from stale local branches
-- final certification must update the internal planning progress docs in `docs/internal/plans/`
+- final certification must update the private BUSINESS planning progress docs
 
 ## Dependency Flow
 
@@ -153,8 +153,8 @@ PR-0 -> PR-1
 - [ ] All PRs within 150-300 line constraint
 - [ ] Dependency graph is acyclic
 - [ ] All quality gates have measurable criteria
-- [ ] Final certification PR updates `docs/internal/plans/CHANGELOG.md`
-- [ ] Final certification PR updates `docs/internal/plans/PROJECT_STATUS.md`
+- [ ] Final certification PR updates the private BUSINESS planning changelog
+- [ ] Final certification PR updates the private BUSINESS project status doc
 
 ---
 

@@ -1,3 +1,0 @@
-{"event_type":"context_pressure","terminal":"T1","dispatch_id":"20260221-165539-lead-scoring-engine-A","context_used_pct":48,"context_remaining_pct":52,"phase":"normal","timestamp":"2026-02-21T16:14:07Z"}
-{"event_type":"context_pressure","terminal":"T1","dispatch_id":"20260221-165539-lead-scoring-engine-A","context_used_pct":52,"context_remaining_pct":48,"phase":"warning","timestamp":"2026-02-21T16:16:22Z"}
-{"event_type":"context_pressure","terminal":"T1","dispatch_id":"20260221-165539-lead-scoring-engine-A","context_used_pct":66,"context_remaining_pct":34,"phase":"rotation","timestamp":"2026-02-21T16:18:30Z"}

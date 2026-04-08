@@ -133,8 +133,8 @@ PR-1 -> PR-2 -> PR-3
 - [ ] All PRs within 150-300 line constraint
 - [ ] Dependency graph is acyclic
 - [ ] All quality gates passed
-- [ ] Final certification PR updates `docs/internal/plans/CHANGELOG.md`
-- [ ] Final certification PR updates `docs/internal/plans/PROJECT_STATUS.md`
+- [ ] Final certification PR updates the private BUSINESS planning changelog
+- [ ] Final certification PR updates the private BUSINESS project status doc
 
 ---
 

@@ -219,7 +219,12 @@ class TestCanonicalTruthAlignment:
 class TestDirectCouplingFreeze:
     """Certify no scripts/lib/ module (except adapter files) calls tmux directly."""
 
-    ADAPTER_FILES = {"tmux_adapter.py", "tmux_session_profile.py"}
+    ADAPTER_FILES = {
+        "tmux_adapter.py",
+        "tmux_session_profile.py",
+        "runtime_facade.py",
+        "subprocess_adapter.py",
+    }
 
     def test_no_direct_tmux_subprocess_in_protected_modules(self) -> None:
         violations: list[str] = []
@@ -315,7 +320,7 @@ class TestHeadlessAbstractionBounds:
 # ===================================================================
 
 class TestContractAlignment:
-    """Certify implementation matches docs/RUNTIME_ADAPTER_CONTRACT.md."""
+    """Certify implementation matches docs/contracts/RUNTIME_ADAPTER_CONTRACT.md."""
 
     def test_protocol_has_all_contract_methods(self) -> None:
         """RuntimeAdapter protocol defines all 12 contract methods."""

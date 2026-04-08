@@ -52,7 +52,7 @@ Terminal Output -> Smart Tap -> Dispatcher -> Queue -> Terminal
 After EVERY implementation:
 1. Update architecture docs if system design changed
 2. Update operations docs for new processes
-3. Update PROJECT_STATUS.md with completion
+3. Update the public release docs (`CHANGELOG.md`, `FEATURE_PLAN.md`) with completion when relevant
 4. Archive temporary reports to `archive/{date}/`
 5. Keep DOCS_INDEX.md current
 

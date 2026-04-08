@@ -1,9 +1,0 @@
-{
-  "event_type": "context_rotation_continuation",
-  "terminal": "T1",
-  "dispatch_id": "20260221-165539-lead-scoring-engine-A",
-  "handover_path": ".vnx-data/rotation_handovers/20260221-161830-T1-ROTATION-HANDOVER.md",
-  "skill": "backend-developer",
-  "context_used_pct_at_rotation": 66,
-  "timestamp": "2026-02-21T16:19:14+00:00"
-}

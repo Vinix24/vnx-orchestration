@@ -25,8 +25,7 @@ This reads as “flight control” and also proves multi-provider orchestration 
 
 **Purpose**: Prove "audit trail" is real: receipt connects to a concrete code change.
 
-**Placeholder**:
-- `![Receipt linking agent decision to a git commit](assets/screenshots/s2-chain-of-custody.png)`
+**Status**: Placeholder only. Capture still needed for a future public screenshot pack.
 
 ---
 
@@ -43,8 +42,7 @@ This reads as “flight control” and also proves multi-provider orchestration 
 
 **Purpose**: Prove governance is provider-agnostic (Codex/Gemini can be governed without hooks).
 
-**Placeholder**:
-- `![Worker terminal refuses to proceed without an approved dispatch](assets/screenshots/s4-worker-refusal.png)`
+**Status**: Placeholder only. Capture still needed for a future public screenshot pack.
 
 ---
 
@@ -61,7 +59,6 @@ This reads as “flight control” and also proves multi-provider orchestration 
 
 **Purpose**: Prove T0 behaves like a manager (blocks work until dependencies clear).
 
-**Placeholder**:
-- `![Orchestrator decision screen showing WAIT and reasoning](assets/screenshots/s6-orchestrator-decision.png)`
+**Status**: Placeholder only. Capture still needed for a future public screenshot pack.
 
 **Note**: If you use the recommended split-screen from S1 as your hero, you can reuse that same image for this proof point and skip a separate S6 screenshot.
