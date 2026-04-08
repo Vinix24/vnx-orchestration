@@ -1,8 +1,0 @@
-[17:31:31] Pane resolved: T1 -> %1
-[17:31:31] Starting context rotation for T1
-[17:31:34] Sending /clear to pane %1
-[17:31:35] Waiting for /clear completion...
-[17:31:50] WARNING: Signal file not created after 15s, proceeding with fallback delay
-[17:31:55] Sending continuation prompt
-[17:31:55] Rotation complete for T1
-[17:31:55] Lock released (cleanup)
