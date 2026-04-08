@@ -18,6 +18,8 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -552,6 +554,104 @@ class SubprocessAdapter:
     def reheal(self, terminal_id: str):  # type: ignore[return]
         from adapter_types import RehealResult, UnsupportedCapability
         raise UnsupportedCapability("reheal", adapter_type="subprocess")
+
+    # ------------------------------------------------------------------
+    # Auto-Report Pipeline Trigger
+    # ------------------------------------------------------------------
+
+    def trigger_report_pipeline(
+        self,
+        terminal_id: str,
+        dispatch_id: str,
+        *,
+        cwd: Optional[str] = None,
+        project_root: Optional[str] = None,
+        gate: str = "",
+        track: str = "",
+        pr_id: str = "",
+    ) -> bool:
+        """Write an extraction trigger file for the auto-report pipeline.
+
+        Mirrors the stop_report_hook.sh output so subprocess completions feed
+        the same pipeline as interactive session Stop hook firings.
+
+        Gate: only runs when VNX_AUTO_REPORT=1 is set. Returns True when trigger
+        file is written, False when skipped or on error.
+
+        Non-blocking — does not invoke any subprocess or LLM.
+        """
+        if os.environ.get("VNX_AUTO_REPORT", "0") != "1":
+            return False
+
+        terminal_map = {"T1": "A", "T2": "B", "T3": "C"}
+        if terminal_id not in terminal_map:
+            logger.debug(
+                "trigger_report_pipeline: %s is not a worker terminal, skipping",
+                terminal_id,
+            )
+            return False
+
+        # Resolve project root
+        if project_root is None:
+            vnx_data_env = os.environ.get("VNX_DATA_DIR", "")
+            if vnx_data_env:
+                project_root = str(Path(vnx_data_env).parent)
+            else:
+                # Walk up from this file to find .vnx-data
+                search = Path(__file__).resolve()
+                for _ in range(6):
+                    search = search.parent
+                    if (search / ".vnx-data").is_dir():
+                        project_root = str(search)
+                        break
+
+        if project_root is None:
+            logger.warning(
+                "trigger_report_pipeline: could not resolve project root for %s",
+                terminal_id,
+            )
+            return False
+
+        vnx_data_dir = os.environ.get("VNX_DATA_DIR", str(Path(project_root) / ".vnx-data"))
+        pipeline_dir = Path(vnx_data_dir) / "state" / "report_pipeline"
+        pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+        # Infer track from terminal if not provided
+        effective_track = track or terminal_map.get(terminal_id, "")
+
+        session_id = self._session_ids.get(terminal_id, "")
+        effective_cwd = cwd or str(Path(project_root) / ".claude" / "terminals" / terminal_id)
+
+        trigger = {
+            "trigger_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "dispatch_id": dispatch_id,
+            "terminal": terminal_id,
+            "track": effective_track,
+            "gate": gate,
+            "pr_id": pr_id,
+            "session_id": session_id,
+            "transcript_path": "",
+            "cwd": effective_cwd,
+            "project_root": project_root,
+            "source": "subprocess",
+        }
+
+        trigger_file = pipeline_dir / f"{dispatch_id}.trigger.json"
+        try:
+            trigger_file.write_text(json.dumps(trigger, indent=2))
+            logger.info(
+                "trigger_report_pipeline: wrote trigger for %s → %s",
+                dispatch_id,
+                trigger_file,
+            )
+            return True
+        except OSError as exc:
+            logger.warning(
+                "trigger_report_pipeline: failed to write trigger for %s: %s",
+                dispatch_id,
+                exc,
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Shutdown
