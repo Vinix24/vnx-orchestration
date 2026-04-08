@@ -483,7 +483,7 @@ class TestWriteReport(unittest.TestCase):
 
             self.assertTrue(str(md_path).startswith(str(vnx_data / "unified_reports")))
             self.assertTrue(md_path.name.endswith(".md"))
-            self.assertIn("-auto-", md_path.name)
+            self.assertNotIn("-auto-", md_path.name)  # OI-1064: auto- prefix removed
 
     def test_markdown_contains_required_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
