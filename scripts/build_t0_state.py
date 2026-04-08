@@ -569,7 +569,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         default=str(_STATE_DIR / "t0_state.json"),
-        help="Output path (default: .vnx-data/state/t0_state.json)",
+        help="Output path (default: $VNX_STATE_DIR/t0_state.json)",
     )
     parser.add_argument(
         "--format",
