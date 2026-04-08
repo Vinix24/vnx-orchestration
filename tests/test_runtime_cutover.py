@@ -288,11 +288,11 @@ class TestCanonicalLeaseIntegration(unittest.TestCase):
         self.assertIsNotNone(result.error)
 
     def test_stale_lease_check_does_not_raise(self) -> None:
-        # DB error in check_terminal returns available=True (non-fatal fallback)
+        # DB error in check_terminal must fail closed without raising.
         broken_core = _make_core("/nonexistent/state", "/nonexistent/dispatch")
         result = broken_core.check_terminal("T2", "d-broken")
-        self.assertTrue(result["available"])
-        self.assertIn("check_error_fallback", result["reason"])
+        self.assertFalse(result["available"])
+        self.assertIn("check_error_fail_closed", result["reason"])
 
 
 # ---------------------------------------------------------------------------
@@ -417,8 +417,8 @@ class TestRollbackPath(unittest.TestCase):
         self.assertTrue(rollback_script.exists(), "rollback_runtime_core.py must exist")
 
     def test_rollback_docs_exist(self) -> None:
-        docs = _SCRIPTS_DIR.parent / "docs" / "runtime_core_rollback.md"
-        self.assertTrue(docs.exists(), "docs/runtime_core_rollback.md must exist")
+        docs = _SCRIPTS_DIR.parent / "docs" / "operations" / "RUNTIME_CORE_ROLLBACK.md"
+        self.assertTrue(docs.exists(), "docs/operations/RUNTIME_CORE_ROLLBACK.md must exist")
 
     def test_runtime_core_disabled_when_primary_zero(self) -> None:
         """When VNX_RUNTIME_PRIMARY=0, load_runtime_core returns None (legacy path)."""

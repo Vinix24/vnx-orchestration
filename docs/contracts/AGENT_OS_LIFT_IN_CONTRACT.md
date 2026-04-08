@@ -24,7 +24,7 @@ The contract exists so that:
 **Relationship to existing documents**:
 - `AGENT_OS_STRATEGY.md` defines the strategic vision. This contract makes it implementable.
 - `AGENT_OS_REQUIREMENTS_AND_GUARDRAILS.md` defines hard requirements. This contract maps them to substrate boundaries.
-- `RUNTIME_ADAPTER_CONTRACT.md` defines the runtime transport layer. This contract sits above it, defining the orchestration substrate.
+- `RUNTIME_ADAPTER_CONTRACT.md` in this directory defines the runtime transport layer. This contract sits above it, defining the orchestration substrate.
 
 ---
 

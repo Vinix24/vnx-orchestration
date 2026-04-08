@@ -24,7 +24,6 @@ ledger/storage/*.db
 archive/
 backup_*/
 docs/archive/
-docs/_archive/
 
 # Internal docs (not for public repo — all internal docs go in docs/internal/)
 docs/internal/

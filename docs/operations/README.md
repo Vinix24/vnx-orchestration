@@ -1,7 +1,7 @@
 # Operations
 
 **Status**: Active
-**Last Updated**: 2026-02-05
+**Last Updated**: 2026-04-08
 **Owner**: T-MANAGER
 **Purpose**: Entry point for running, monitoring, and troubleshooting the VNX system.
 
@@ -13,14 +13,17 @@
 - Multi-model guide: `MULTI_MODEL_GUIDE.md`
 - Receipt pipeline: `RECEIPT_PIPELINE.md`
 - Receipt processing flow: `RECEIPT_PROCESSING_FLOW.md`
+- Runtime rollback: `RUNTIME_CORE_ROLLBACK.md`
+- Subprocess adapter flag: `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`
 
-## Not Here (Orchestration)
+## Public Operations Scope
 
-PR queue / dispatch workflows and skills live in `../orchestration/`.
+Dispatch policy, queue behavior, and governance flow are documented in:
 
-- PR workflow: `../orchestration/README_PR_QUEUE.md`
-- Orchestration index: `../orchestration/ORCHESTRATION_INDEX.md`
+- `../DISPATCH_GUIDE.md`
+- `../core/00_VNX_ARCHITECTURE.md`
+- `../contracts/`
 
 ## Archive
 
-Historical operational notes and one-off fix reports are archived under `../archive/`.
+Historical operational notes and one-off fix reports are archived under `../_archive/`.

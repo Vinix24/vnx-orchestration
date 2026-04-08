@@ -266,11 +266,10 @@ cd vnx-orchestration
 ./install.sh /path/to/your/project
 
 # Try the dry-run demo (no LLM needed)
-cd demo/dry-run
-bash replay.sh --fast
+vnx demo --replay governance-pipeline
 ```
 
-The replay walks through a complete 6-PR governance lifecycle with real evidence data — dispatch promotion, parallel execution, quality gates, and blocker resolution — in under 2 minutes.
+The replay walks through a complete governance lifecycle with real evidence data — dispatch promotion, parallel execution, quality gates, and blocker resolution.
 
 → [Full repo](https://github.com/Vinix24/vnx-orchestration)
 → [Architecture docs](https://github.com/Vinix24/vnx-orchestration/blob/main/docs/manifesto/ARCHITECTURE.md)
