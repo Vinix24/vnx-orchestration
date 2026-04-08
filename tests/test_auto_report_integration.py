@@ -589,7 +589,7 @@ class TestEndToEndFixture:
         assert json_path is not None and json_path.exists()
         assert md_path is not None and md_path.exists()
         assert md_path.suffix == ".md"
-        assert "auto-" in md_path.name
+        assert "receipt-processor-integration" in md_path.name
 
     def test_written_markdown_parseable_by_report_parser(self, vnx_env):
         """Written markdown can be parsed by ReportParser (receipt processor)."""
