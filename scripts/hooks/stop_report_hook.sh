@@ -158,9 +158,10 @@ ASSEMBLER_OUTPUT=""
 ASSEMBLER_EXIT=0
 
 if [ -f "$ASSEMBLER" ] && command -v python3 &>/dev/null; then
+    mkdir -p "$VNX_DATA/logs"
     ASSEMBLER_OUTPUT=$(
         VNX_DATA_DIR="$VNX_DATA" \
-        python3 "$ASSEMBLER" "$TRIGGER_FILE" 2>/dev/null
+        python3 "$ASSEMBLER" "$TRIGGER_FILE" 2>>"$VNX_DATA/logs/report_pipeline.log"
     ) || ASSEMBLER_EXIT=$?
 fi
 
