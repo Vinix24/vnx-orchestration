@@ -50,6 +50,7 @@ from auto_report_contract import (
     validate_auto_report,
 )
 from report_extraction import run_extraction
+from report_classifier import classify_report
 
 
 # ─── Assembly Result ──────────────────────────────────────────────────────────
@@ -247,8 +248,8 @@ def assemble(
     # Auto-derived tags
     auto_derived = AutoDerivedTags.from_extraction(extraction)
 
-    # Rule-based classification (haiku is PR-4)
-    classification = HaikuClassification.rule_based(extraction)
+    # Semantic classification: haiku when VNX_HAIKU_CLASSIFY=1, else rule-based
+    classification = classify_report(extraction)
     classified_tags = ClassifiedTags.from_classification(classification)
 
     # Unified tag set
