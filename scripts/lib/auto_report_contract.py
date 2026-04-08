@@ -35,6 +35,28 @@ from typing import Any, Dict, List, Optional
 SCHEMA_VERSION = "1.0.0"
 
 
+# ─── Fallback Policy ─────────────────────────────────────────────────────────
+
+FALLBACK_POLICY = """\
+Auto-report pipeline fallback policy (V1):
+
+- ENABLED: VNX_AUTO_REPORT=1 AND a Stop hook or subprocess trigger fires.
+  The pipeline assembles an AutoReport from git/event extraction + optional
+  haiku classification, and writes JSON + markdown to .vnx-data/.
+
+- PIPELINE FAILURE: If the assembler crashes or writes no output, the worker's
+  manually-written report in unified_reports/ is still processed by
+  receipt_processor_v4.sh unchanged. Auto-report is additive, never a blocker.
+
+- CODEX/GEMINI GATES: Use a separate report path via gate_artifacts.py and
+  write JSON sidecars to $VNX_STATE_DIR/report_pipeline/. Not affected by
+  VNX_AUTO_REPORT.
+
+- DISABLED (VNX_AUTO_REPORT unset or != "1"): Workers must write manual
+  reports to unified_reports/ as before. The pipeline is not invoked.
+"""
+
+
 # ─── Closed Tag Taxonomy ─────────────────────────────────────────────────────
 #
 # V1 taxonomy is CLOSED. No free-form tags. All values must be from these enums.
