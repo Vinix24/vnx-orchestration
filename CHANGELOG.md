@@ -2,6 +2,9 @@
 
 ## v0.6.x — F37 Auto-Report Pipeline (2026-04-08)
 
+### Fixes
+- **fix-2**: Stop hook uses `git rev-parse --show-toplevel` for PROJECT_ROOT — eliminates symlink confusion causing assembler not to be invoked; activate F37 with `VNX_AUTO_REPORT=1` default in `vnx_paths.sh`
+
 ### Features
 - **F37 PR-5**: Receipt processor integration and end-to-end tests — 39 tests covering auto-generated report validation, tag flow integrity, manual report backward compatibility, subprocess trigger path, and end-to-end fixture through `ReportParser`
 - **F37 PR-5**: Fix `render_markdown()` to include `**Terminal**` field required for receipt processor terminal detection
