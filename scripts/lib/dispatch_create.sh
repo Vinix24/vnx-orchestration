@@ -124,16 +124,18 @@ Your report MUST include this metadata block exactly as shown below. The receipt
    - Conventional commit: \`feat|fix|test|refactor(<scope>): <description>\`
    - Include in commit body: \`Dispatch-ID: ${rid}\`
    - Do NOT commit VNX infrastructure or state directories
-2. Then write your report below
+2. If this is a feature or fix: update \`CHANGELOG.md\` with a one-line entry
+3. Then write your report below
 
-## Expected Outputs
+## Expected Outputs (ALL sections REQUIRED)
 
-When completing your task, create a markdown report with:
+When completing your task, create a markdown report with ALL of these sections:
 
 - **Implementation Summary**: What was done, key decisions made
 - **Files Modified**: List of changed/created files with brief descriptions
-- **Testing Evidence**: Test results, validation performed
-- **Open Items**: Issues discovered outside dispatch scope (blocker/warn/info)
+- **Testing Evidence**: Test results with pass counts (e.g. "32 passed in 0.04s")
+- **Commit**: Include the git commit hash (run \`git log --oneline -1\`)
+- **Open Items**: Issues discovered outside dispatch scope — REQUIRED even if empty (write "None")
 
 **Report Format**: Structured markdown with clear sections and evidence-based findings.
 
