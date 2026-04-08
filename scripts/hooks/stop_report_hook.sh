@@ -150,15 +150,42 @@ jq -n \
         source: $source
     }' > "$TRIGGER_FILE"
 
+# ── Invoke report assembler ───────────────────────────────────────────────────
+# Runs report_assembler.py CLI which reads the trigger file, runs extraction,
+# assembles AutoReport JSON + markdown, and writes both to .vnx-data/.
+ASSEMBLER="$PROJECT_ROOT/scripts/lib/report_assembler.py"
+ASSEMBLER_OUTPUT=""
+ASSEMBLER_EXIT=0
+
+if [ -f "$ASSEMBLER" ] && command -v python3 &>/dev/null; then
+    ASSEMBLER_OUTPUT=$(
+        VNX_DATA_DIR="$VNX_DATA" \
+        python3 "$ASSEMBLER" "$TRIGGER_FILE" 2>/dev/null
+    ) || ASSEMBLER_EXIT=$?
+fi
+
 # ── Emit structured output ────────────────────────────────────────────────────
+MD_PATH=""
+JSON_PATH=""
+if [ -n "$ASSEMBLER_OUTPUT" ] && echo "$ASSEMBLER_OUTPUT" | jq -e . &>/dev/null; then
+    MD_PATH=$(echo "$ASSEMBLER_OUTPUT" | jq -r '.md_path // ""')
+    JSON_PATH=$(echo "$ASSEMBLER_OUTPUT" | jq -r '.json_path // ""')
+fi
+
 jq -n \
     --arg dispatch_id "$DISPATCH_ID" \
     --arg terminal "$TERMINAL" \
     --arg trigger_file "$TRIGGER_FILE" \
+    --arg md_path "$MD_PATH" \
+    --arg json_path "$JSON_PATH" \
+    --argjson assembler_exit "$ASSEMBLER_EXIT" \
     '{
         auto_report_path: $trigger_file,
         dispatch_id: $dispatch_id,
         terminal: $terminal,
+        md_path: $md_path,
+        json_path: $json_path,
+        assembler_exit: $assembler_exit,
         skipped: false
     }'
 
