@@ -14,30 +14,34 @@ For the next 4-feature hardening lane, operate in full autonomous mode:
 - after each feature: close -> merge -> verify merge -> create next branch/worktree from post-merge `main`
 - do not end the chain with unresolved chain-created open items
 
-## Crash Recovery Startup
+## Startup State
 
-After any system crash or tmux session restart, before normal orchestration:
+At session start, `.vnx-data/state/t0_state.json` is automatically built by the SessionStart hook.
+Read it for full situational awareness — terminals, queues, tracks, PR progress, open items, recent receipts, git context, and system health.
 
-1. Validate runtime schema: `python3 scripts/runtime_coordination_init.py`
-2. Check stale leases:
-   ```bash
-   for T in T1 T2 T3; do
-     python3 scripts/runtime_core_cli.py check-terminal --terminal $T --dispatch-id recovery-check
-   done
-   ```
-   Release any `lease_expired_not_cleaned` via `release-on-failure`.
-3. Reconcile queue: `python3 scripts/reconcile_queue_state.py --json`
-4. Check for orphaned dispatches (active dispatch without completion receipt):
+```bash
+cat .vnx-data/state/t0_state.json | python3 -m json.tool
+```
+
+For crash recovery or if state appears stale, run the individual repair tools below.
+
+## Crash Recovery (on-demand only)
+
+After any system crash or tmux session restart, if `t0_state.json` shows anomalies:
+
+1. Validate runtime schema (fallback): `python3 scripts/runtime_coordination_init.py`
+2. Repair stale leases: `python3 scripts/reconcile_queue_state.py --repair`
+3. Check for orphaned dispatches (active dispatch without completion receipt):
    ```bash
    ls .vnx-data/dispatches/active/
    ```
    If any exist: read the dispatch, check if worker has uncommitted changes, decide re-dispatch or resume.
-5. Verify pane IDs match live tmux:
+4. Verify pane IDs match live tmux:
    ```bash
    tmux list-panes -a -F "#{pane_id} #{pane_current_path}"
    ```
    Update `.vnx-data/state/panes.json` if pane IDs changed.
-6. Check for unresolved incidents:
+5. Check for unresolved incidents:
    ```bash
    sqlite3 .vnx-data/state/runtime_coordination.db \
      "SELECT COUNT(*) FROM incident_log WHERE resolved_at IS NULL AND severity='blocking';"
@@ -149,17 +153,24 @@ The subprocess automatically loads T1's CLAUDE.md as skill context (injected by 
 ## Quick Commands
 
 ```bash
-python3 scripts/pr_queue_manager.py status
+# Refresh state mid-session
+python3 scripts/build_t0_state.py
+
+# On-demand queue drift repair
+python3 scripts/reconcile_queue_state.py --repair
+
+# Open items (if digest needs refresh)
 python3 scripts/open_items_manager.py digest
+
+# Skill listing
 python3 scripts/validate_skill.py --list
 ```
 
 ## Read-Only State Sources
 
-- `.vnx-data/state/t0_brief.json`
+- `.vnx-data/state/t0_state.json` — **primary** (built by SessionStart hook, refresh with `python3 scripts/build_t0_state.py`)
 - `.vnx-data/state/t0_recommendations.json`
 - `.vnx-data/state/open_items_digest.json`
-- `.vnx-data/state/pr_queue_state.yaml`
 - `.vnx-data/state/review_gates/requests/`
 - `.vnx-data/state/review_gates/results/`
 - `$VNX_DATA_DIR/unified_reports/`
