@@ -1,0 +1,264 @@
+{
+  "name": "chain_lease_cleanup",
+  "level": 2,
+  "mode": "both",
+  "type": "chain",
+  "description": "Three-step stale lease cleanup chain: T1 has expired lease and ghost active work, T0 should WAIT and escalate cleanup. After cleanup (state_delta removes stale lease), T0 dispatches fresh work. T1 receipt arrives and T0 accepts. Mirrors the daemon ghost scenario from real production incidents.",
+  "initial_state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-09T08:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "working",
+        "track": "A",
+        "ready": false,
+        "current_dispatch": "20260408-220000-ghost-dispatch-A",
+        "lease_state": "leased",
+        "lease_expires_at": "2026-04-08T23:00:00+00:00",
+        "claimed_by": "20260408-220000-ghost-dispatch-A"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 1,
+      "active_count": 1,
+      "completed_last_hour": 0,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "blocked",
+        "active_dispatch_id": "20260408-220000-ghost-dispatch-A",
+        "health": "blocked"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 0,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [
+      {
+        "dispatch_id": "20260408-220000-ghost-dispatch-A",
+        "track": "A",
+        "gate": "gate_implementation",
+        "started_at": "2026-04-08T22:00:00+00:00"
+      }
+    ],
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "degraded",
+      "db_initialized": true,
+      "uptime_seconds": 36000
+    }
+  },
+  "steps": [
+    {
+      "step_name": "step_1_stale_lease_detected",
+      "receipt": {
+        "event_type": "system_alert",
+        "timestamp": "2026-04-09T08:05:00+00:00",
+        "terminal": "SYSTEM",
+        "track": null,
+        "type": "HEALTH_CHECK",
+        "gate": null,
+        "status": "warning",
+        "dispatch_id": "stale-lease-event-T2",
+        "report_path": null,
+        "title": "T1 lease expired 9 hours ago \u2014 ghost dispatch detected",
+        "note": "Terminal T1 lease expired at 2026-04-08T23:00:00+00:00. No receipt received. Dispatch 20260408-220000-ghost-dispatch-A presumed dead. T1 is unreachable until lease is cleared.",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 1,
+            "blocking_count": 1,
+            "risk_score": 0.7
+          },
+          "t0_recommendation": {
+            "decision": "hold",
+            "reason": "Stale lease on T1 is blocking track A. Must clean up before dispatching new work.",
+            "suggested_dispatches": [],
+            "open_items": [
+              {
+                "action": "create",
+                "description": "Ghost lease on T1 \u2014 needs manual cleanup via CLI"
+              }
+            ]
+          }
+        },
+        "cqs": null
+      },
+      "state_delta": {},
+      "expected_decision": "ESCALATE",
+      "expected_next_action": "cleanup_stale_lease_on_T1",
+      "expected_reason_hint": "Stale lease on T1 \u2014 escalate for cleanup."
+    },
+    {
+      "step_name": "step_2_lease_cleared_dispatch_fresh",
+      "receipt": {
+        "event_type": "system_event",
+        "timestamp": "2026-04-09T08:15:00+00:00",
+        "terminal": "SYSTEM",
+        "track": null,
+        "type": "LEASE_CLEARED",
+        "gate": null,
+        "status": "success",
+        "dispatch_id": "lease-cleared-T2",
+        "report_path": null,
+        "title": "T1 stale lease released \u2014 terminal now available",
+        "note": "Operator ran: vnx release-lease T1. Lease 20260408-220000-ghost-dispatch-A cleared. T1 ready for new dispatch.",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.05
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "Lease cleared. T1 available. Dispatch pending PR-2 work.",
+            "suggested_dispatches": [
+              {
+                "terminal": "T1",
+                "task": "Implement F39 level-2 chain scenarios"
+              }
+            ],
+            "open_items": []
+          }
+        },
+        "cqs": null
+      },
+      "state_delta": {
+        "terminals": {
+          "T1": {
+            "status": "idle",
+            "ready": true,
+            "current_dispatch": null,
+            "lease_state": "idle",
+            "lease_expires_at": null,
+            "claimed_by": null
+          }
+        },
+        "tracks": {
+          "A": {
+            "status": "idle",
+            "active_dispatch_id": null,
+            "health": "healthy"
+          }
+        },
+        "active_work": [],
+        "queues": {
+          "active_count": 0
+        },
+        "open_items": {
+          "open_count": 0,
+          "blocker_count": 0,
+          "top_blockers": []
+        },
+        "system_health": {
+          "status": "healthy"
+        }
+      },
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_pr2_work_to_T1",
+      "expected_reason_hint": "Lease cleaned, dispatch PR-2 work to T1."
+    },
+    {
+      "step_name": "step_3_fresh_work_complete",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-09T10:30:00+00:00",
+        "terminal": "T1",
+        "track": "A",
+        "type": "F39",
+        "gate": "gate_implementation",
+        "status": "success",
+        "dispatch_id": "20260409-081500-f39-chain-fixtures-A",
+        "report_path": "/repo/.vnx-data/unified_reports/20260409-103000-A-chain-fixtures.md",
+        "title": "F39 level-2 chain scenarios \u2014 5 fixtures created and committed",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.05
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "All 5 chain fixtures delivered. test_replay_level2.py present. Dry-run validates context assembly.",
+            "suggested_dispatches": [],
+            "open_items": []
+          }
+        },
+        "cqs": {
+          "cqs": 91.0,
+          "normalized_status": "success"
+        }
+      },
+      "state_delta": {
+        "terminals": {
+          "T1": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
+        },
+        "pr_progress": {
+          "completed": 1,
+          "completion_pct": 25
+        },
+        "queues": {
+          "pending_count": 0,
+          "active_count": 0,
+          "completed_last_hour": 2
+        }
+      },
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "advance_feature_progress",
+      "expected_reason_hint": "Work done, advance feature progress."
+    }
+  ]
+}

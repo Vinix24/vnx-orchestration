@@ -72,10 +72,10 @@ Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
 
 ## Core Responsibilities
 
-1. Review receipts critically, not blindly.
+1. Review receipts efficiently: accept clean work, investigate anomalies, reject failures.
 2. Evaluate quality advisory before deciding next action.
 3. Check open items and close only evidence-backed items.
-4. Complete PRs only after blocker/warn criteria are resolved.
+4. Complete PRs when all gates passed and no blockers remain.
 5. Promote staged dispatches before crafting manual dispatches.
 6. Open new open items when new out-of-scope risks/issues are discovered.
 7. Dispatch one block at a time and keep queue state consistent.
@@ -83,13 +83,13 @@ Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
 
 ## Core Decision Rules
 
-1. Never auto-complete PRs from receipt status alone.
-2. Never guess state; verify via CLI and state files.
-3. If any terminal is busy or queue is active: WAIT.
-4. If dependencies are unmet: WAIT.
-5. If evidence is incomplete or contradictory: DO NOT approve.
-6. If the review stack requires Gemini or Codex evidence, do not approve until both a gate result and a normalized headless report exist.
-7. If a dispatch targets a Claude terminal, do not rely on implicit clear-context before payload delivery.
+1. risk ≤ 0.3 + success + work pending → DISPATCH (no deep verification needed).
+2. risk 0.3–0.8 → DISPATCH follow-up audit to T3 before proceeding.
+3. risk > 0.8 OR blocking findings OR status=failure → REJECT.
+4. Architectural change OR new dependency OR policy violation → ESCALATE.
+5. All gates passed AND no blockers AND no pending work → COMPLETE.
+6. Never guess state; verify via CLI and state files.
+7. If the review stack requires Gemini or Codex evidence, do not complete until both a gate result and a normalized headless report exist.
 8. `queued` review-gate state is only request state, not completion evidence.
 9. A required gate with empty `contract_hash` or empty `report_path` is incomplete evidence and blocks closure.
 

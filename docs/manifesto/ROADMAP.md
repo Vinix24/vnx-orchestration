@@ -8,11 +8,48 @@
 
 ## How to Read This Roadmap
 
+- `Completed`: Shipped and merged.
 - `Committed`: Actively planned for near-term implementation.
 - `Next`: High-value follow-up after committed scope lands.
 - `Exploring`: Valid experiments, lower priority, or needs more validation.
 
 VNX remains a governance-first system. Features that reduce human oversight are evaluated carefully and are never default behavior.
+
+---
+
+## Recently Completed
+
+### F37: Auto-Report Pipeline
+**Status**: `Completed` — March 2026
+
+Stop hook → deterministic extraction → haiku classification → markdown report. Workers no longer manually assemble reports. `VNX_AUTO_REPORT=1` activates the pipeline.
+
+Key deliverables: `stop_hook.py`, `report_assembler.py`, `haiku_classifier.py`, `VNX_AUTO_REPORT` feature flag.
+
+### F38: Dashboard Unified
+**Status**: `Completed` — April 2026
+
+Single dashboard for coding and business domains. Domain filter tabs, session history browser, agent selector by name, reports browser surface.
+
+Key deliverables: unified dashboard UI, domain tabs, session history, agent name selector.
+
+### F39: Headless T0 Benchmark
+**Status**: `Completed` — April 2026
+
+Decision framework rewrite + gate locks + replay harness. Deterministic pre-filter handles ~70% of decisions without LLM. Benchmark baseline: Level-1 100%, Level-2 73–87%, Level-3 67–78%.
+
+Key deliverables: `t0_decision_framework.py`, `t0_gate_locks.py`, `t0_context_assembler.py`, `t0_replay_harness.py`. Taxonomy simplified to DISPATCH/COMPLETE/WAIT/REJECT/ESCALATE.
+
+---
+
+## Milestones
+
+### Headless T0 Production
+**Status**: `Planned` — Target: Q2 2026
+
+Cutover from interactive T0 to autonomous headless T0 for standard feature chains. Requires benchmark scores above 85% at Level-3, plus 3-Layer Trigger System operational.
+
+Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously across 10 consecutive real feature chains without operator override.
 
 ---
 
@@ -171,6 +208,49 @@ VNX remains a governance-first system. Features that reduce human oversight are 
 - Slash-prefixed dispatches are never sent blindly into a non-normal tmux mode.
 - Recovery vs blocked delivery is explicit and auditable.
 - The `search down` failure mode has a permanent regression test.
+
+---
+
+## Next (After Committed Scope — Governance Hardening Series)
+
+### Gate Locks v2
+**Status**: `Next`
+**Why**: Gate locks currently cover codex/gemini review gates. Extend to CI green status, business compliance gates, and PR approval state.
+
+**Goals**
+- Lock source: pull gate status from GitHub API / CI webhook, not manual file writes.
+- Compound lock support: require multiple gates cleared before COMPLETE is allowed.
+- Lock expiry: time-bounded locks for gates that need periodic re-verification.
+
+### 3-Layer Trigger System
+**Status**: `Next`
+**Why**: Headless T0 currently requires a polling loop. A proper trigger system allows event-driven wakeup with silent periods handled safely.
+
+**Design**
+- Layer 1: File watcher on `unified_reports/` — immediate trigger on new report arrival.
+- Layer 2: Silence watchdog — cron every 10 min, deterministic checks (queue non-empty? receipts pending?).
+- Layer 3: LLM triage — haiku invoked only when anomaly detected (stale dispatch, ambiguous receipt state).
+
+**Why layered**: Layer 1 covers the normal case instantly. Layer 2 catches silent failures without burning LLM tokens. Layer 3 reserves expensive inference for genuine ambiguity.
+
+### F40: Business Agent Integration
+**Status**: `Next`
+**Why**: Replace fragile n8n → SSH → MacBook → claude -p pipeline for VNX Digital workers.
+
+**Goals**
+- SubprocessAdapter on GCP VM for business-domain agents.
+- Business-light governance profile: folder-scoped, review-by-exception.
+- Agent directories: `agents/blog-writer/`, `agents/linkedin-writer/`.
+- 24/7 headless content worker execution.
+
+### Model-Agnostic Dispatch Flow
+**Status**: `Next`
+**Why**: Current dispatch bundles are Claude Code–specific (CLAUDE.md). Multi-provider workers need provider-aware delivery without changing dispatch creation.
+
+**Goals**
+- Tri-file format: `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` auto-generated from canonical dispatch.
+- Converter layer in dispatcher — provider detected from terminal profile, correct file served.
+- No change to T0 dispatch authoring workflow.
 
 ---
 
