@@ -1,0 +1,139 @@
+{
+  "name": "edge_pr_completion_missing_codex_gate",
+  "level": 3,
+  "mode": "both",
+  "description": "Worker reports PR is ready for merge and all human review is done. But the Codex gate result is absent \u2014 there is no codex gate record for this PR in the state. T0 must enforce gate discipline and WAIT rather than approving the merge, even though everything else looks clean.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-09T16:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 0,
+      "active_count": 0,
+      "completed_last_hour": 3,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_pr_merge",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "review_gates": {
+      "PR-2": {
+        "gemini_review": {
+          "status": "pass",
+          "completed_at": "2026-04-09T15:30:00+00:00"
+        },
+        "codex_gate": null,
+        "ci_status": "green"
+      }
+    },
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness",
+        "abc1234 feat(f39): level-2 chain fixtures"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 10800
+    }
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-09T15:55:00+00:00",
+    "terminal": "T3",
+    "track": "C",
+    "type": "REVIEW",
+    "gate": "gate_pr_merge",
+    "status": "success",
+    "dispatch_id": "20260409-150000-pr-review-C",
+    "report_path": "/repo/.vnx-data/unified_reports/20260409-155500-C-pr-review.md",
+    "title": "PR-2 ready for merge \u2014 Gemini review passed, CI green",
+    "note": "Gemini review complete with pass verdict. CI is green. All implementation criteria met. Recommend merge.",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {
+        "warning_count": 0,
+        "blocking_count": 0,
+        "risk_score": 0.05
+      },
+      "t0_recommendation": {
+        "decision": "approve",
+        "reason": "Gemini review passed, CI green, no open items. PR-2 ready to merge.",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
+    },
+    "cqs": {
+      "cqs": 90.0,
+      "normalized_status": "success"
+    }
+  },
+  "quality_advisory": {
+    "decision": "approve",
+    "risk_score": 0.05
+  },
+  "expected": {
+    "decision": "WAIT",
+    "receipt_valid": true,
+    "reason_hint": "PR merge requested but Codex gate result is absent. Cannot complete without gate evidence."
+  }
+}

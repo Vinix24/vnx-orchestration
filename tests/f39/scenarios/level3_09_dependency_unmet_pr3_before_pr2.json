@@ -1,0 +1,161 @@
+{
+  "name": "edge_dependency_unmet_pr3_before_pr2",
+  "level": 3,
+  "mode": "both",
+  "description": "Feature plan states PR-3 depends on PR-2 (must be merged first). PR-2 is in progress but not completed. A request arrives to dispatch PR-3 work. T0 must check the dependency graph and WAIT \u2014 dispatching PR-3 before PR-2 is merged would create a dependency conflict.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-09T14:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 1,
+      "active_count": 0,
+      "completed_last_hour": 1,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false,
+      "dependency_graph": {
+        "PR-1": {
+          "depends_on": [],
+          "status": "merged"
+        },
+        "PR-2": {
+          "depends_on": [
+            "PR-1"
+          ],
+          "status": "in_progress"
+        },
+        "PR-3": {
+          "depends_on": [
+            "PR-2"
+          ],
+          "status": "queued"
+        },
+        "PR-4": {
+          "depends_on": [
+            "PR-3"
+          ],
+          "status": "queued"
+        }
+      }
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "recent_receipts": [
+      {
+        "dispatch_id": "20260409-100000-f39-pr2-A",
+        "terminal": "T1",
+        "processed_at": "2026-04-09T13:30:00+00:00",
+        "decision": "DISPATCH",
+        "title": "F39 PR-2 implementation \u2014 committed, awaiting CI"
+      }
+    ],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness",
+        "abc1234 feat(f39): level-2 chain fixtures"
+      ],
+      "pr2_merged": false,
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 7200
+    }
+  },
+  "receipt": {
+    "event_type": "dispatch_request",
+    "timestamp": "2026-04-09T13:58:00+00:00",
+    "terminal": "T0",
+    "track": null,
+    "type": "ORCHESTRATION",
+    "gate": null,
+    "status": "pending",
+    "dispatch_id": "20260409-135800-f39-pr3-request",
+    "report_path": null,
+    "title": "Request to dispatch PR-3 work \u2014 F39 level-2 chain scenarios",
+    "requested_terminal": "T1",
+    "requested_pr": "PR-3",
+    "note": "T1 is idle and PR-3 is queued. Request to start PR-3 implementation now.",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {
+        "warning_count": 1,
+        "blocking_count": 1,
+        "risk_score": 0.5
+      },
+      "t0_recommendation": {
+        "decision": "hold",
+        "reason": "PR-3 depends on PR-2. PR-2 status is in_progress and pr2_merged is false. Cannot start PR-3 until PR-2 is merged.",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
+    },
+    "cqs": null
+  },
+  "quality_advisory": {
+    "decision": "hold",
+    "risk_score": 0.5
+  },
+  "expected": {
+    "decision": "WAIT",
+    "receipt_valid": false,
+    "reason_hint": "PR-3 depends on PR-2 which is not complete. Dependency unmet \u2014 wait."
+  }
+}

@@ -1,0 +1,272 @@
+{
+  "name": "chain_clean_feature_delivery",
+  "level": 2,
+  "mode": "both",
+  "type": "chain",
+  "description": "Three-step F38 delivery chain: T3 research accepted, T1 implementation accepted and dispatches testing, T2 validation accepted and merges. Mirrors the F38 dashboard unified flow.",
+  "initial_state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-08T16:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 3,
+      "active_count": 0,
+      "completed_last_hour": 0,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": "gate_symlink_research",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F38",
+      "total": 4,
+      "completed": 0,
+      "in_progress": [],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f38-dashboard-unified",
+      "last_5_commits": [
+        "aaa0001 chore: init branch"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 900
+    }
+  },
+  "steps": [
+    {
+      "step_name": "step_1_research_complete",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-08T17:00:00+00:00",
+        "terminal": "T3",
+        "track": "C",
+        "type": "RESEARCH",
+        "gate": "gate_symlink_research",
+        "status": "success",
+        "dispatch_id": "20260408-160000-symlink-research-C",
+        "report_path": "/repo/.vnx-data/unified_reports/20260408-170000-C-symlink-research.md",
+        "title": "Symlink cross-project resolution research \u2014 complete",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.0
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "Research complete, findings ready for implementation",
+            "suggested_dispatches": [
+              {
+                "terminal": "T1",
+                "task": "Implement F38 dashboard based on research findings"
+              }
+            ],
+            "open_items": []
+          }
+        },
+        "cqs": {
+          "cqs": 95.0,
+          "normalized_status": "success"
+        }
+      },
+      "state_delta": {
+        "tracks": {
+          "C": {
+            "status": "idle",
+            "active_dispatch_id": null
+          }
+        },
+        "queues": {
+          "pending_count": 2,
+          "active_count": 0,
+          "completed_last_hour": 1
+        }
+      },
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_implementation_to_T1",
+      "expected_reason_hint": "Research done, dispatch implementation to T1."
+    },
+    {
+      "step_name": "step_2_implementation_complete",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-08T19:30:00+00:00",
+        "terminal": "T1",
+        "track": "A",
+        "type": "F38",
+        "gate": "gate_implementation",
+        "status": "success",
+        "dispatch_id": "20260408-170000-f38-dashboard-A",
+        "report_path": "/repo/.vnx-data/unified_reports/20260408-193000-A-f38-dashboard.md",
+        "title": "F38 unified dashboard \u2014 implementation complete, PR #203 created",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.1
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "Implementation meets all acceptance criteria, PR #203 ready for testing",
+            "suggested_dispatches": [
+              {
+                "terminal": "T2",
+                "task": "Validate F38 dashboard \u2014 integration tests and UI smoke"
+              }
+            ],
+            "open_items": []
+          }
+        },
+        "cqs": {
+          "cqs": 91.0,
+          "normalized_status": "success"
+        }
+      },
+      "state_delta": {
+        "terminals": {
+          "T1": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
+        },
+        "tracks": {
+          "A": {
+            "status": "idle",
+            "active_dispatch_id": null
+          }
+        },
+        "pr_progress": {
+          "completed": 1,
+          "in_progress": [
+            "PR-2"
+          ],
+          "completion_pct": 25
+        },
+        "queues": {
+          "pending_count": 1,
+          "active_count": 0,
+          "completed_last_hour": 2
+        }
+      },
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_validation_to_T2",
+      "expected_reason_hint": "Implementation done, dispatch validation to T2."
+    },
+    {
+      "step_name": "step_3_validation_complete_merge",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-08T21:00:00+00:00",
+        "terminal": "T2",
+        "track": "B",
+        "type": "F38",
+        "gate": "gate_validation",
+        "status": "success",
+        "dispatch_id": "20260408-193000-f38-validation-B",
+        "report_path": "/repo/.vnx-data/unified_reports/20260408-210000-B-f38-validation.md",
+        "title": "F38 dashboard validation \u2014 all tests pass, CI green, PR #203 merge-ready",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.0
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "All validation criteria met. CI green, 100% test pass rate. Safe to merge.",
+            "suggested_dispatches": [],
+            "open_items": []
+          }
+        },
+        "cqs": {
+          "cqs": 97.0,
+          "normalized_status": "success"
+        }
+      },
+      "state_delta": {
+        "terminals": {
+          "T2": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
+        },
+        "tracks": {
+          "B": {
+            "status": "idle",
+            "active_dispatch_id": null
+          }
+        },
+        "pr_progress": {
+          "completed": 2,
+          "in_progress": [],
+          "completion_pct": 50
+        },
+        "queues": {
+          "pending_count": 0,
+          "active_count": 0,
+          "completed_last_hour": 3
+        }
+      },
+      "expected_decision": "COMPLETE",
+      "expected_next_action": "merge_pr_203",
+      "expected_reason_hint": "Validation done, pending_count=0. Merge PR-203."
+    }
+  ]
+}

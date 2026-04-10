@@ -1,0 +1,267 @@
+{
+  "name": "chain_worker_failure_retry",
+  "level": 2,
+  "mode": "both",
+  "type": "chain",
+  "description": "Three-step worker failure and retry chain: T1 receipt rejected (missing deliverables), T0 re-dispatches, T1 second attempt accepted, gate passes and advances to next PR. Tests T0 memory of prior rejection when evaluating the retry.",
+  "initial_state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-09T10:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 0,
+      "active_count": 0,
+      "completed_last_hour": 0,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 0,
+      "in_progress": [],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 600
+    }
+  },
+  "steps": [
+    {
+      "step_name": "step_1_first_attempt_rejected",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-09T09:55:00+00:00",
+        "terminal": "T1",
+        "track": "A",
+        "type": "F39",
+        "gate": "gate_implementation",
+        "status": "success",
+        "dispatch_id": "20260409-090000-f39-level2-fixtures-A-attempt1",
+        "report_path": "/repo/.vnx-data/unified_reports/20260409-095500-A-level2-attempt1.md",
+        "title": "F39 level-2 fixtures \u2014 attempt 1",
+        "note": "Report exists but is 12 bytes. No level2_*.json files found in tests/f39/scenarios/. Declared deliverable missing from git.",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 2,
+            "blocking_count": 2,
+            "risk_score": 0.88
+          },
+          "t0_recommendation": {
+            "decision": "hold",
+            "reason": "Claimed deliverables (5 level-2 scenario fixtures, test_replay_level2.py) not found in repository. Report is nearly empty. Cannot accept.",
+            "suggested_dispatches": [
+              {
+                "terminal": "T1",
+                "task": "Re-implement F39 level-2 fixtures \u2014 previous attempt left no artifacts"
+              }
+            ],
+            "open_items": [
+              {
+                "action": "create",
+                "description": "Level-2 fixtures missing from commit \u2014 re-dispatch required"
+              }
+            ]
+          }
+        },
+        "cqs": {
+          "cqs": 28.0,
+          "normalized_status": "failure"
+        }
+      },
+      "state_delta": {
+        "open_items": {
+          "open_count": 1,
+          "blocker_count": 1,
+          "top_blockers": [
+            {
+              "id": "OI-002",
+              "severity": "blocker",
+              "description": "F39 level-2 fixtures missing \u2014 re-dispatch required"
+            }
+          ]
+        }
+      },
+      "expected_decision": "REJECT",
+      "expected_next_action": "re_dispatch_to_T1",
+      "expected_reason_hint": "Deliverables missing in attempt 1. Re-dispatch to T1."
+    },
+    {
+      "step_name": "step_2_retry_accepted",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-09T11:30:00+00:00",
+        "terminal": "T1",
+        "track": "A",
+        "type": "F39",
+        "gate": "gate_implementation",
+        "status": "success",
+        "dispatch_id": "20260409-100000-f39-level2-fixtures-A-attempt2",
+        "report_path": "/repo/.vnx-data/unified_reports/20260409-113000-A-level2-attempt2.md",
+        "title": "F39 level-2 chain fixtures \u2014 5 scenarios + test runner complete",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.05
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "All 5 level-2 chain fixtures present. test_replay_level2.py committed. Dry-run passes all scenarios.",
+            "suggested_dispatches": [
+              {
+                "terminal": "T2",
+                "task": "Validate F39 level-2 fixtures with dry-run and lint"
+              }
+            ],
+            "open_items": [
+              {
+                "action": "close",
+                "id": "OI-002",
+                "reason": "Level-2 fixtures delivered in retry attempt"
+              }
+            ]
+          }
+        },
+        "cqs": {
+          "cqs": 90.0,
+          "normalized_status": "success"
+        }
+      },
+      "state_delta": {
+        "terminals": {
+          "T1": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
+        },
+        "open_items": {
+          "open_count": 0,
+          "blocker_count": 0,
+          "top_blockers": []
+        },
+        "queues": {
+          "completed_last_hour": 1
+        }
+      },
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_validation_to_T2",
+      "expected_reason_hint": "Attempt 2 succeeded, dispatch validation to T2."
+    },
+    {
+      "step_name": "step_3_validation_gate_passes",
+      "receipt": {
+        "event_type": "task_complete",
+        "timestamp": "2026-04-09T12:00:00+00:00",
+        "terminal": "T2",
+        "track": "B",
+        "type": "VALIDATION",
+        "gate": "gate_validation",
+        "status": "success",
+        "dispatch_id": "20260409-113000-f39-validation-B",
+        "report_path": "/repo/.vnx-data/unified_reports/20260409-120000-B-f39-validation.md",
+        "title": "F39 level-2 validation \u2014 dry-run passes, fixtures valid, lint clean",
+        "quality_advisory": {
+          "version": "1.0",
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.0
+          },
+          "t0_recommendation": {
+            "decision": "approve",
+            "reason": "All fixtures parse correctly. Dry-run shows correct prompts assembled. Lint passes.",
+            "suggested_dispatches": [],
+            "open_items": []
+          }
+        },
+        "cqs": {
+          "cqs": 95.0,
+          "normalized_status": "success"
+        }
+      },
+      "state_delta": {
+        "terminals": {
+          "T2": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
+        },
+        "pr_progress": {
+          "completed": 1,
+          "completion_pct": 25
+        },
+        "queues": {
+          "pending_count": 0,
+          "active_count": 0,
+          "completed_last_hour": 2
+        }
+      },
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "advance_to_pr2",
+      "expected_reason_hint": "Validation done, advance to PR-2."
+    }
+  ]
+}

@@ -1,0 +1,134 @@
+{
+  "name": "edge_contradictory_gate_evidence",
+  "level": 3,
+  "mode": "both",
+  "description": "Gate JSON result says 'pass' but the human-readable report section explicitly states 'BLOCKING FINDING: type errors unresolved'. T0 must cross-reference both sources and REJECT. The easy path is to trust the structured JSON \u2014 the correct path is to read the report text.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-09T14:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 0,
+      "active_count": 0,
+      "completed_last_hour": 2,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 7200
+    }
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-09T13:55:00+00:00",
+    "terminal": "T3",
+    "track": "C",
+    "type": "CODE_REVIEW",
+    "gate": "gate_code_review",
+    "status": "success",
+    "dispatch_id": "20260409-130000-code-review-C",
+    "report_path": "/repo/.vnx-data/unified_reports/headless/20260409-135500-C-code-review.md",
+    "title": "Code review \u2014 F39 PR-2",
+    "gate_result": {
+      "verdict": "pass",
+      "structured_findings": [],
+      "blocking_findings": [],
+      "score": 85
+    },
+    "report_excerpt": "## Findings\n\nBLOCKING FINDING: The replay_harness.py imports `context_assembler` but this module is not installed in the project virtual environment. Running `python3 scripts/f39/replay_harness.py` raises ImportError. This is a blocking issue that must be resolved before merge.\n\nAdditionally, tests/f39/test_replay_level2.py references `run_chain_replay` which does not exist in the current harness \u2014 the function signature is missing from the codebase.",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {
+        "warning_count": 0,
+        "blocking_count": 0,
+        "risk_score": 0.1
+      },
+      "t0_recommendation": {
+        "decision": "approve",
+        "reason": "Gate structured result shows pass. Score 85.",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
+    },
+    "cqs": {
+      "cqs": 72.0,
+      "normalized_status": "success"
+    }
+  },
+  "quality_advisory": {
+    "decision": "approve",
+    "risk_score": 0.1
+  },
+  "expected": {
+    "decision": "REJECT",
+    "receipt_valid": false,
+    "reason_hint": "Gate JSON says pass but report says BLOCKING FINDING. Evidence contradicts \u2014 reject."
+  }
+}
