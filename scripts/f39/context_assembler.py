@@ -3,7 +3,7 @@
 
 Usage:
     python3 scripts/f39/context_assembler.py \\
-        --state .vnx-data/state/t0_state.json \\
+        --state $VNX_STATE_DIR/t0_state.json \\
         --receipt <json-string-or-file> \\
         [--feature-plan FEATURE_PLAN.md] \\
         [--output prompt.txt]

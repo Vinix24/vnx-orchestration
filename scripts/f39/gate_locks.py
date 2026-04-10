@@ -1,6 +1,6 @@
 """Gate lock file management for F39 headless T0.
 
-Lock files live at .vnx-data/state/gate_locks/
+Lock files live at $VNX_STATE_DIR/gate_locks/
 Format: {pr_id}.{gate_name}.lock  (e.g. PR-204.codex.lock)
 
 A lock file's presence means the gate is pending.
