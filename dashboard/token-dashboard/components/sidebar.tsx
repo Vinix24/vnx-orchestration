@@ -3,15 +3,17 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban, ShieldAlert, Activity } from 'lucide-react';
+import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban, ShieldAlert, Activity, FileText } from 'lucide-react';
 
-const DOMAINS = ['All', 'Coding', 'Content', 'Marketing', 'Research'] as const;
+const DOMAINS = ['All', 'Coding', 'Analytics'] as const;
+type Domain = typeof DOMAINS[number];
 
 const OPERATOR_NAV = [
   { href: '/operator', label: 'Control Surface', icon: Radio },
   { href: '/operator/open-items', label: 'Open Items', icon: AlertTriangle },
   { href: '/operator/kanban', label: 'Kanban Board', icon: Kanban },
   { href: '/operator/governance', label: 'Governance', icon: ShieldAlert },
+  { href: '/operator/reports', label: 'Reports', icon: FileText },
   { href: '/agent-stream', label: 'Agent Stream', icon: Activity },
 ];
 
@@ -24,11 +26,19 @@ const NAV_ITEMS = [
   { href: '/usage', label: 'Usage & Costs', icon: DollarSign },
 ];
 
+function showOperator(domain: Domain | undefined): boolean {
+  return !domain || domain === 'All' || domain === 'Coding';
+}
+
+function showAnalytics(domain: Domain | undefined): boolean {
+  return !domain || domain === 'All' || domain === 'Analytics';
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const activeDomain = searchParams.get('domain') ?? undefined;
+  const activeDomain = (searchParams.get('domain') ?? undefined) as Domain | undefined;
 
   function setDomain(domain: string | undefined) {
     const params = new URLSearchParams(searchParams.toString());
@@ -95,7 +105,7 @@ export default function Sidebar() {
           }}
         >
           {DOMAINS.map((d) => {
-            const value = d === 'All' ? undefined : d.toLowerCase();
+            const value = d === 'All' ? undefined : d;
             const isActive = activeDomain === value;
             return (
               <button
@@ -123,111 +133,119 @@ export default function Sidebar() {
         <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', margin: '0 14px 8px' }} />
 
         {/* Operator section */}
-        <div style={{ marginBottom: 4, marginTop: 2 }}>
-          <p
-            style={{
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: '0.08em',
-              color: 'rgba(249, 115, 22, 0.7)',
-              textTransform: 'uppercase',
-              padding: '4px 14px 6px',
-            }}
-          >
-            Operator
-          </p>
-          {OPERATOR_NAV.map(({ href, label, icon: Icon }) => {
-            const isActive = pathname === href;
-            return (
-              <Link
-                key={href}
-                href={href}
-                className="flex items-center gap-3 text-sm transition-all"
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: 10,
-                  backgroundColor: isActive ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
-                  color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
-                  fontWeight: isActive ? 600 : 400,
-                  position: 'relative',
-                  textDecoration: 'none',
-                }}
-              >
-                {isActive && (
-                  <div
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: '50%',
-                      transform: 'translateY(-50%)',
-                      width: 3,
-                      height: 20,
-                      borderRadius: '0 3px 3px 0',
-                      background: 'linear-gradient(180deg, #f97316, #fb923c)',
-                      boxShadow: '0 0 8px rgba(249, 115, 22, 0.4)',
-                    }}
-                  />
-                )}
-                <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
-                <span>{label}</span>
-              </Link>
-            );
-          })}
-        </div>
-
-        {/* Divider */}
-        <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', margin: '4px 14px 8px' }} />
-
-        {/* Analytics section */}
-        <p
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: '0.08em',
-            color: 'rgba(244, 244, 249, 0.35)',
-            textTransform: 'uppercase',
-            padding: '4px 14px 6px',
-          }}
-        >
-          Analytics
-        </p>
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
-          const isActive = pathname === href;
-          return (
-            <Link
-              key={href}
-              href={href}
-              className="flex items-center gap-3 text-sm transition-all"
+        {showOperator(activeDomain) && (
+          <div style={{ marginBottom: 4, marginTop: 2 }}>
+            <p
               style={{
-                padding: '10px 14px',
-                borderRadius: 10,
-                backgroundColor: isActive ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
-                color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
-                fontWeight: isActive ? 600 : 400,
-                position: 'relative',
-                textDecoration: 'none',
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                color: 'rgba(249, 115, 22, 0.7)',
+                textTransform: 'uppercase',
+                padding: '4px 14px 6px',
               }}
             >
-              {isActive && (
-                <div
+              Operator
+            </p>
+            {OPERATOR_NAV.map(({ href, label, icon: Icon }) => {
+              const isActive = pathname === href;
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  className="flex items-center gap-3 text-sm transition-all"
                   style={{
-                    position: 'absolute',
-                    left: 0,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    width: 3,
-                    height: 20,
-                    borderRadius: '0 3px 3px 0',
-                    background: 'linear-gradient(180deg, #f97316, #fb923c)',
-                    boxShadow: '0 0 8px rgba(249, 115, 22, 0.4)',
+                    padding: '10px 14px',
+                    borderRadius: 10,
+                    backgroundColor: isActive ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
+                    color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
+                    fontWeight: isActive ? 600 : 400,
+                    position: 'relative',
+                    textDecoration: 'none',
                   }}
-                />
-              )}
-              <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
-              <span>{label}</span>
-            </Link>
-          );
-        })}
+                >
+                  {isActive && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: 0,
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        width: 3,
+                        height: 20,
+                        borderRadius: '0 3px 3px 0',
+                        background: 'linear-gradient(180deg, #f97316, #fb923c)',
+                        boxShadow: '0 0 8px rgba(249, 115, 22, 0.4)',
+                      }}
+                    />
+                  )}
+                  <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
+                  <span>{label}</span>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Divider — only when both sections visible */}
+        {showOperator(activeDomain) && showAnalytics(activeDomain) && (
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', margin: '4px 14px 8px' }} />
+        )}
+
+        {/* Analytics section */}
+        {showAnalytics(activeDomain) && (
+          <>
+            <p
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                color: 'rgba(244, 244, 249, 0.35)',
+                textTransform: 'uppercase',
+                padding: '4px 14px 6px',
+              }}
+            >
+              Analytics
+            </p>
+            {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+              const isActive = pathname === href;
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  className="flex items-center gap-3 text-sm transition-all"
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: 10,
+                    backgroundColor: isActive ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
+                    color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
+                    fontWeight: isActive ? 600 : 400,
+                    position: 'relative',
+                    textDecoration: 'none',
+                  }}
+                >
+                  {isActive && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: 0,
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        width: 3,
+                        height: 20,
+                        borderRadius: '0 3px 3px 0',
+                        background: 'linear-gradient(180deg, #f97316, #fb923c)',
+                        boxShadow: '0 0 8px rgba(249, 115, 22, 0.4)',
+                      }}
+                    />
+                  )}
+                  <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
+                  <span>{label}</span>
+                </Link>
+              );
+            })}
+          </>
+        )}
       </nav>
 
       {/* Footer */}

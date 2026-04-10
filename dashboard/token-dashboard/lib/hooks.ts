@@ -9,12 +9,16 @@ import {
   fetchKanban,
   fetchGateConfig,
   fetchGovernanceDigest,
+  fetchReports,
+  fetchReportContent,
+  fetchAgents,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope,
+  ReportsEnvelope, AgentsEnvelope,
 } from './types';
 
 export function useTokenStats(
@@ -139,5 +143,36 @@ export function useGovernanceDigest() {
     'operator-governance-digest',
     fetchGovernanceDigest,
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 15000 }
+  );
+}
+
+export function useReports(params?: { limit?: number; offset?: number; terminal?: string; track?: string }) {
+  const key = [
+    'operator-reports',
+    String(params?.limit ?? 50),
+    String(params?.offset ?? 0),
+    params?.terminal ?? '',
+    params?.track ?? '',
+  ];
+  return useSWR<ReportsEnvelope>(
+    key,
+    () => fetchReports(params),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useReportContent(filename: string | null) {
+  return useSWR<string>(
+    filename ? ['operator-report-content', filename] : null,
+    () => fetchReportContent(filename!),
+    { revalidateOnFocus: false, dedupingInterval: 60000 }
+  );
+}
+
+export function useAgents() {
+  return useSWR<AgentsEnvelope>(
+    'operator-agents',
+    fetchAgents,
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
   );
 }

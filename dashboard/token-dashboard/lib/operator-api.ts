@@ -11,6 +11,8 @@ import type {
   GateToggleRequest,
   GateToggleResponse,
   GovernanceDigestEnvelope,
+  ReportsEnvelope,
+  AgentsEnvelope,
 } from './types';
 
 const BASE = '/api/operator';
@@ -109,4 +111,29 @@ export function postGateToggle(req: GateToggleRequest): Promise<GateToggleRespon
 
 export function fetchGovernanceDigest(): Promise<GovernanceDigestEnvelope> {
   return get(`${BASE}/governance-digest`);
+}
+
+export function fetchReports(params?: {
+  limit?: number;
+  offset?: number;
+  terminal?: string;
+  track?: string;
+}): Promise<ReportsEnvelope> {
+  const p: Record<string, string> = {};
+  if (params?.limit !== undefined) p.limit = String(params.limit);
+  if (params?.offset !== undefined) p.offset = String(params.offset);
+  if (params?.terminal) p.terminal = params.terminal;
+  if (params?.track) p.track = params.track;
+  return get(`${BASE}/reports`, Object.keys(p).length ? p : undefined);
+}
+
+export function fetchReportContent(filename: string): Promise<string> {
+  return fetch(`${BASE}/reports/${encodeURIComponent(filename)}`).then(res => {
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.text();
+  });
+}
+
+export function fetchAgents(): Promise<AgentsEnvelope> {
+  return get(`${BASE}/agents`);
 }
