@@ -1,0 +1,50 @@
+{
+  "name": "research_receipt_no_code_changes",
+  "level": 1,
+  "description": "Research-only dispatch completed by T2 with no code changes. Receipt is valid, risk=0. T0 should ACCEPT and not need follow-up work.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-08T17:30:00+00:00",
+    "terminals": {
+      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+    },
+    "queues": {"pending_count": 1, "active_count": 0, "completed_last_hour": 1, "conflict_count": 0},
+    "tracks": {
+      "A": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "B": {"current_gate": "gate_research", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+    },
+    "pr_progress": {"feature_name": "research", "total": 2, "completed": 0, "in_progress": [], "completion_pct": 0, "has_blocking_drift": false},
+    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {"branch": "main", "last_5_commits": ["abc1234 chore: baseline"], "uncommitted_changes": false},
+    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 1800}
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-08T17:25:59+00:00",
+    "terminal": "T2",
+    "track": "B",
+    "type": "RESEARCH",
+    "gate": "gate_research",
+    "status": "success",
+    "dispatch_id": "20260408-192000-symlink-test-file-symlink-B",
+    "report_path": "/repo/.vnx-data/unified_reports/20260408-172559-B-symlink-test.md",
+    "title": "Symlink file-level test research",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+      "t0_recommendation": {"decision": "approve", "reason": "No changed files detected", "suggested_dispatches": [], "open_items": []}
+    },
+    "cqs": {"cqs": 85.0, "normalized_status": "success"}
+  },
+  "quality_advisory": {"decision": "approve", "risk_score": 0.0},
+  "expected": {
+    "decision": "ACCEPT",
+    "receipt_accepted": true,
+    "should_dispatch": false
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "name": "duplicate_receipt_same_dispatch_id",
+  "level": 1,
+  "description": "A receipt arrives for a dispatch_id that is already in completed/ (already processed). T0 should IGNORE the duplicate.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-08T20:30:00+00:00",
+    "terminals": {
+      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+    },
+    "queues": {"pending_count": 1, "active_count": 0, "completed_last_hour": 5, "conflict_count": 0},
+    "tracks": {
+      "A": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "B": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+    },
+    "pr_progress": {"feature_name": "F38", "total": 4, "completed": 2, "in_progress": [], "completion_pct": 50, "has_blocking_drift": false},
+    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "active_work": [],
+    "recent_receipts": [
+      {"terminal": "T2", "status": "success", "event_type": "task_complete", "dispatch_id": "20260408-203000-daemon-compat-haiku-B", "timestamp": "2026-04-08T18:21:53+00:00", "gate": "gate_fix"}
+    ],
+    "git_context": {"branch": "feat/f38-dashboard-unified", "last_5_commits": ["eec15e6 feat(api): add reports endpoints"], "uncommitted_changes": false},
+    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 1200}
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-08T20:28:00+00:00",
+    "terminal": "T2",
+    "track": "B",
+    "type": "FIX",
+    "gate": "gate_fix",
+    "status": "success",
+    "dispatch_id": "20260408-203000-daemon-compat-haiku-B",
+    "report_path": "/repo/.vnx-data/unified_reports/20260408-202009-B-daemon-compat-haiku.md",
+    "title": "Daemon Ghost Detection + Haiku Activation (duplicate)",
+    "note": "This is a duplicate of a receipt already processed at 18:21:53",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+      "t0_recommendation": {"decision": "approve", "reason": "No changed files detected", "suggested_dispatches": [], "open_items": []}
+    },
+    "cqs": {"cqs": 75.83, "normalized_status": "success"}
+  },
+  "quality_advisory": {"decision": "approve", "risk_score": 0.0},
+  "expected": {
+    "decision": "IGNORE",
+    "receipt_accepted": false
+  }
+}

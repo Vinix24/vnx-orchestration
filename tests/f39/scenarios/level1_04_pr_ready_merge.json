@@ -1,0 +1,51 @@
+{
+  "name": "pr_ready_ci_green_merge",
+  "level": 1,
+  "description": "Final receipt in a PR chain: all gates passed, CI is green, no open items. T0 should ACCEPT and trigger merge.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-08T20:20:00+00:00",
+    "terminals": {
+      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+    },
+    "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 4, "conflict_count": 0},
+    "tracks": {
+      "A": {"current_gate": "gate_pr_merge", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "B": {"current_gate": "gate_pr_merge", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+    },
+    "pr_progress": {"feature_name": "fix/daemon-compat-haiku", "total": 2, "completed": 2, "in_progress": [], "completion_pct": 100, "has_blocking_drift": false},
+    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {"branch": "fix/daemon-compat-haiku", "last_5_commits": ["2e143df fix(daemon): ghost detection + haiku activation"], "uncommitted_changes": false},
+    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 9000}
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-08T18:21:53+00:00",
+    "terminal": "T2",
+    "track": "B",
+    "type": "FIX",
+    "gate": "gate_fix",
+    "status": "success",
+    "dispatch_id": "20260408-203000-daemon-compat-haiku-B",
+    "report_path": "/repo/.vnx-data/unified_reports/20260408-202009-B-daemon-compat-haiku.md",
+    "title": "Daemon Ghost Detection + Haiku Activation",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+      "t0_recommendation": {"decision": "approve", "reason": "All fixes applied, no blocking items", "suggested_dispatches": [], "open_items": []}
+    },
+    "cqs": {"cqs": 75.83, "normalized_status": "success"},
+    "provenance": {"branch": "fix/daemon-compat-haiku", "git_ref": "2e143dff42395eef19342ac577927466364ff4b0", "is_dirty": false}
+  },
+  "quality_advisory": {"decision": "approve", "risk_score": 0.0},
+  "expected": {
+    "decision": "ACCEPT",
+    "receipt_accepted": true,
+    "should_dispatch": false
+  }
+}

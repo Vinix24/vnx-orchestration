@@ -1,0 +1,51 @@
+{
+  "name": "clean_receipt_accept_dispatch_next",
+  "level": 1,
+  "description": "Clean task_complete receipt with risk:0, all criteria met. T0 should ACCEPT and DISPATCH the next unit of work.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-08T18:00:00+00:00",
+    "terminals": {
+      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+    },
+    "queues": {"pending_count": 2, "active_count": 0, "completed_last_hour": 3, "conflict_count": 0},
+    "tracks": {
+      "A": {"current_gate": "gate_implementation", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "B": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
+      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+    },
+    "pr_progress": {"feature_name": "F38", "total": 4, "completed": 1, "in_progress": [], "completion_pct": 25, "has_blocking_drift": false},
+    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {"branch": "feat/f38-dashboard-unified", "last_5_commits": ["eec15e6 feat(api): add reports endpoints"], "uncommitted_changes": false},
+    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 3600}
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "event": "task_complete",
+    "timestamp": "2026-04-08T17:44:18+00:00",
+    "terminal": "T3",
+    "track": "C",
+    "type": "RESEARCH",
+    "gate": "gate_symlink_research",
+    "status": "success",
+    "dispatch_id": "20260408-192000-symlink-research-C",
+    "report_path": "/repo/.vnx-data/unified_reports/20260408-174418-C-symlink-research.md",
+    "title": "Symlink cross-project resolution research",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+      "t0_recommendation": {"decision": "approve", "reason": "Research complete, no code changes", "suggested_dispatches": [], "open_items": []}
+    },
+    "cqs": {"cqs": 92.0, "normalized_status": "success"}
+  },
+  "quality_advisory": {"decision": "approve", "risk_score": 0.0},
+  "expected": {
+    "decision": "ACCEPT",
+    "receipt_accepted": true,
+    "should_dispatch": true
+  }
+}

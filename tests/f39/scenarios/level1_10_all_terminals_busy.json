@@ -1,0 +1,83 @@
+{
+  "name": "all_terminals_busy_wait",
+  "level": 1,
+  "description": "A receipt has been accepted but T0 cannot dispatch the next work because all worker terminals are busy with active leases. T0 should WAIT.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-09T11:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "working",
+        "track": "A",
+        "ready": false,
+        "current_dispatch": "20260409-100000-f39-context-assembler-A",
+        "lease_state": "leased",
+        "claimed_by": "20260409-100000-f39-context-assembler-A",
+        "lease_expires_at": "2026-04-09T11:30:00+00:00"
+      },
+      "T2": {
+        "status": "working",
+        "track": "B",
+        "ready": false,
+        "current_dispatch": "20260409-100000-f39-test-scenarios-B",
+        "lease_state": "leased",
+        "claimed_by": "20260409-100000-f39-test-scenarios-B",
+        "lease_expires_at": "2026-04-09T11:30:00+00:00"
+      },
+      "T3": {
+        "status": "working",
+        "track": "C",
+        "ready": false,
+        "current_dispatch": "20260409-100000-f39-review-C",
+        "lease_state": "leased",
+        "claimed_by": "20260409-100000-f39-review-C",
+        "lease_expires_at": "2026-04-09T11:30:00+00:00"
+      }
+    },
+    "queues": {"pending_count": 2, "active_count": 3, "completed_last_hour": 1, "conflict_count": 0},
+    "tracks": {
+      "A": {"current_gate": "gate_implementation", "status": "working", "active_dispatch_id": "20260409-100000-f39-context-assembler-A", "health": "healthy"},
+      "B": {"current_gate": "gate_test", "status": "working", "active_dispatch_id": "20260409-100000-f39-test-scenarios-B", "health": "healthy"},
+      "C": {"current_gate": "gate_review", "status": "working", "active_dispatch_id": "20260409-100000-f39-review-C", "health": "healthy"}
+    },
+    "pr_progress": {"feature_name": "F39", "total": 4, "completed": 0, "in_progress": ["PR-1", "PR-2", "PR-3"], "completion_pct": 0, "has_blocking_drift": false},
+    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "active_work": [
+      {"dispatch_id": "20260409-100000-f39-context-assembler-A", "track": "A", "gate": "gate_implementation", "started_at": "2026-04-09T10:00:00+00:00"},
+      {"dispatch_id": "20260409-100000-f39-test-scenarios-B", "track": "B", "gate": "gate_test", "started_at": "2026-04-09T10:00:00+00:00"},
+      {"dispatch_id": "20260409-100000-f39-review-C", "track": "C", "gate": "gate_review", "started_at": "2026-04-09T10:00:00+00:00"}
+    ],
+    "recent_receipts": [],
+    "git_context": {"branch": "feat/f39-headless-t0-benchmark", "last_5_commits": ["eec15e6 feat(api): add reports endpoints"], "uncommitted_changes": false},
+    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 3600}
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-09T10:55:00+00:00",
+    "terminal": "T0",
+    "track": null,
+    "type": "ORCHESTRATION",
+    "gate": "gate_planning",
+    "status": "success",
+    "dispatch_id": "20260409-095000-f39-planning-T0",
+    "report_path": null,
+    "title": "F39 feature planning complete",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+      "t0_recommendation": {
+        "decision": "approve",
+        "reason": "Planning receipt acknowledged; all worker terminals currently busy — next dispatch must wait",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
+    },
+    "cqs": {"cqs": 90.0, "normalized_status": "success"}
+  },
+  "quality_advisory": {"decision": "approve", "risk_score": 0.0},
+  "expected": {
+    "decision": "WAIT",
+    "receipt_accepted": true,
+    "should_dispatch": false
+  }
+}
