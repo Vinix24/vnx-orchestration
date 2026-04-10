@@ -1,6 +1,7 @@
 {
   "name": "receipt_accepted_ci_failure_follow_up",
   "level": 1,
+  "mode": "both",
   "description": "Receipt is valid and accepted, but CI checks failed on the PR. T0 should DISPATCH a fix to the responsible terminal.",
   "state": {
     "schema_version": "2.0",

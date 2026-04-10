@@ -1,6 +1,7 @@
 {
   "name": "chain_ci_failure_recovery",
   "level": 2,
+  "mode": "both",
   "type": "chain",
   "description": "Three-step CI failure recovery chain: T1 implementation accepted but CI fails, T0 dispatches fix, T1 fix receipt accepted with CI now green, T2 validates and merges. Mirrors the PR #200 mypy failure recovery flow.",
   "initial_state": {

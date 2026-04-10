@@ -1,6 +1,7 @@
 {
   "name": "edge_receipt_unknown_terminal",
   "level": 3,
+  "mode": "interactive_only",
   "description": "A receipt arrives claiming to be from terminal T5. VNX only has T1/T2/T3. T0 must treat this as a ghost receipt and WAIT.",
   "state": {
     "schema_version": "2.0",

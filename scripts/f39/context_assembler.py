@@ -63,6 +63,14 @@ Process the receipt above. Apply these 5 rules in order:
    *(why: when nothing remains to dispatch, close the PR)*
    **EXCEPTION:** If any review gate (codex_gate, gemini_review, ci_status) is absent (null) or in status "requested"/"queued", → WAIT instead of COMPLETE. Gate discipline is mandatory.
 
+**HARD CONSTRAINTS (enforced by code before you are invoked):**
+- Required review gates must be completed — if any are pending, you will not be called
+- Ghost/duplicate receipts are auto-rejected before reaching you
+- Terminal availability is auto-checked
+
+Your job is soft decisions only: quality judgment, risk assessment, next task planning.
+You will never be asked to handle these hard constraints — they are pre-filtered.
+
 Output ONLY a valid JSON object (no markdown, no prose before or after):
 {_DECISION_SCHEMA}
 """

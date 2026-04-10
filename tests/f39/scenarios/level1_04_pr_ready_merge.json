@@ -1,6 +1,7 @@
 {
   "name": "pr_ready_ci_green_merge",
   "level": 1,
+  "mode": "both",
   "description": "Final receipt in a PR chain: all gates passed, CI is green, no open items. T0 should COMPLETE and trigger PR merge.",
   "state": {
     "schema_version": "2.0",

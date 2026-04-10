@@ -1,6 +1,7 @@
 {
   "name": "clean_receipt_dispatch_next",
   "level": 1,
+  "mode": "both",
   "description": "Clean task_complete receipt with risk:0, all criteria met. T0 should DISPATCH the next unit of work.",
   "state": {
     "schema_version": "2.0",

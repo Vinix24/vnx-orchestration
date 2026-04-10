@@ -1,6 +1,7 @@
 {
   "name": "duplicate_receipt_same_dispatch_id",
   "level": 1,
+  "mode": "both",
   "description": "A receipt arrives for a dispatch_id that is already in recent_receipts (already processed). T0 should WAIT \u2014 duplicate, no action.",
   "state": {
     "schema_version": "2.0",

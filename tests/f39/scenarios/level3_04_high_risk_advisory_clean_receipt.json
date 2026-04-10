@@ -1,6 +1,7 @@
 {
   "name": "edge_high_risk_advisory_clean_receipt",
   "level": 3,
+  "mode": "both",
   "description": "Receipt looks clean on the surface \u2014 worker reports success, CQS is 88, no errors mentioned. But the quality advisory has risk_score:0.9, which is extremely high. T0 must respect the advisory over the surface appearance and ESCALATE for human review rather than blindly accepting.",
   "state": {
     "schema_version": "2.0",

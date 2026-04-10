@@ -1,6 +1,7 @@
 {
   "name": "edge_contradictory_gate_evidence",
   "level": 3,
+  "mode": "both",
   "description": "Gate JSON result says 'pass' but the human-readable report section explicitly states 'BLOCKING FINDING: type errors unresolved'. T0 must cross-reference both sources and REJECT. The easy path is to trust the structured JSON \u2014 the correct path is to read the report text.",
   "state": {
     "schema_version": "2.0",

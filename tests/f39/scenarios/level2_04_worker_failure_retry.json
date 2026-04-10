@@ -1,6 +1,7 @@
 {
   "name": "chain_worker_failure_retry",
   "level": 2,
+  "mode": "both",
   "type": "chain",
   "description": "Three-step worker failure and retry chain: T1 receipt rejected (missing deliverables), T0 re-dispatches, T1 second attempt accepted, gate passes and advances to next PR. Tests T0 memory of prior rejection when evaluating the retry.",
   "initial_state": {

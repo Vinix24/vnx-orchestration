@@ -1,6 +1,7 @@
 {
   "name": "all_terminals_busy_wait",
   "level": 1,
+  "mode": "both",
   "description": "A receipt has been accepted but T0 cannot dispatch the next work because all worker terminals are busy with active leases. T0 should WAIT.",
   "state": {
     "schema_version": "2.0",

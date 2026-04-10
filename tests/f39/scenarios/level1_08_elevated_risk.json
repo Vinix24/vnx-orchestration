@@ -1,6 +1,7 @@
 {
   "name": "receipt_quality_hold_elevated_risk",
   "level": 1,
+  "mode": "both",
   "description": "Receipt status=success but quality advisory is hold with risk_score=0.6. T0 should perform careful review and likely dispatch a follow-up.",
   "state": {
     "schema_version": "2.0",

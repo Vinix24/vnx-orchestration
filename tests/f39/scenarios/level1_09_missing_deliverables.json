@@ -1,6 +1,7 @@
 {
   "name": "receipt_missing_deliverables",
   "level": 1,
+  "mode": "both",
   "description": "Receipt claims success but the report file is empty and key deliverables are missing from the commit. T0 should REJECT the receipt and re-dispatch.",
   "state": {
     "schema_version": "2.0",

@@ -1,6 +1,7 @@
 {
   "name": "edge_expired_lease_active_claim",
   "level": 3,
+  "mode": "both",
   "description": "A new dispatch needs to go to T2. But T2 has an expired lease (lease_expires_at is in the past) and an active claim from an old dispatch. T0 must detect this conflict and WAIT rather than dispatch \u2014 sending a new dispatch to a terminal with a claimed lease causes double-assignment.",
   "state": {
     "schema_version": "2.0",

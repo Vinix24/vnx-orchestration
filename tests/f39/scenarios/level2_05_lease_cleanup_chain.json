@@ -1,6 +1,7 @@
 {
   "name": "chain_lease_cleanup",
   "level": 2,
+  "mode": "both",
   "type": "chain",
   "description": "Three-step stale lease cleanup chain: T1 has expired lease and ghost active work, T0 should WAIT and escalate cleanup. After cleanup (state_delta removes stale lease), T0 dispatches fresh work. T1 receipt arrives and T0 accepts. Mirrors the daemon ghost scenario from real production incidents.",
   "initial_state": {

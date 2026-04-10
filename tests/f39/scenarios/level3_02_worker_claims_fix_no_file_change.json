@@ -1,6 +1,7 @@
 {
   "name": "edge_worker_claims_fix_no_file_change",
   "level": 3,
+  "mode": "both",
   "description": "Worker claims to have fixed a bug and committed the fix, but the git log in state shows no new commits since the dispatch was created \u2014 the file was not actually modified. T0 must not trust the worker's self-report and must REJECT.",
   "state": {
     "schema_version": "2.0",

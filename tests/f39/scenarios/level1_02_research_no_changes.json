@@ -1,6 +1,7 @@
 {
   "name": "research_receipt_no_code_changes",
   "level": 1,
+  "mode": "both",
   "description": "Research-only dispatch completed by T2 with no code changes. Receipt is valid, risk=0. T0 should DISPATCH next pending work.",
   "state": {
     "schema_version": "2.0",

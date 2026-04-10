@@ -358,6 +358,19 @@ def _code_prefilter(receipt: dict[str, Any], state: dict[str, Any]) -> str | Non
     if terminals and all(not t.get("ready", False) for t in terminals.values()):
         return "WAIT"
 
+    # Hard gate lock check — required gates must be completed before COMPLETE or DISPATCH
+    # Uses flat review_gates structure: {gate_name: {required: bool, status: str}}
+    flat_gates = state.get("review_gates", {})
+    pending_required_gates = [
+        gate_name
+        for gate_name, gate_data in flat_gates.items()
+        if isinstance(gate_data, dict)
+        and gate_data.get("required", False)
+        and gate_data.get("status", "") not in ("completed", "passed", "pass")
+    ]
+    if pending_required_gates:
+        return "WAIT"  # Hard block — no LLM can override required gates
+
     # Rule 7: Feature complete — but only when all required review gates have results
     pr = state.get("pr_progress", {})
     oi = state.get("open_items", {})
@@ -751,18 +764,45 @@ def run_chain_replay(
 # Batch runners
 # ---------------------------------------------------------------------------
 
+def _fixture_matches_mode(fixture_path: Path, mode_filter: str | None) -> bool:
+    """Return True if the fixture's mode field is compatible with mode_filter.
+
+    mode_filter=None → all fixtures pass.
+    mode_filter="headless" → fixtures with mode "headless_only" or "both" pass.
+    mode_filter="interactive" → fixtures with mode "interactive_only" or "both" pass.
+    """
+    if mode_filter is None:
+        return True
+    try:
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+        fixture_mode = data.get("mode", "both")
+    except Exception:
+        return True  # Unknown mode — include by default
+    if mode_filter == "headless":
+        return fixture_mode in ("headless_only", "both")
+    if mode_filter == "interactive":
+        return fixture_mode in ("interactive_only", "both")
+    return True
+
+
 def run_all_replays(
     level: int = 1,
     model: str = "sonnet",
     dry_run: bool = False,
     timeout_seconds: int = 120,
+    mode_filter: str | None = None,
 ) -> list[ReplayResult]:
-    """Run all single-step scenario fixtures for the given level (1 or 3)."""
+    """Run all single-step scenario fixtures for the given level (1 or 3).
+
+    mode_filter: None (all), "headless", or "interactive".
+    """
     pattern = f"level{level}_*.json"
-    fixtures = sorted(_SCENARIOS_DIR.glob(pattern))
+    all_fixtures = sorted(_SCENARIOS_DIR.glob(pattern))
+    fixtures = [f for f in all_fixtures if _fixture_matches_mode(f, mode_filter)]
 
     if not fixtures:
-        print(f"[replay] No fixtures found matching {_SCENARIOS_DIR}/{pattern}", file=sys.stderr)
+        label = f"level={level}, mode={mode_filter or 'all'}"
+        print(f"[replay] No fixtures found for {label}", file=sys.stderr)
         return []
 
     results: list[ReplayResult] = []
@@ -786,13 +826,18 @@ def run_all_chain_replays(
     model: str = "sonnet",
     dry_run: bool = False,
     timeout_seconds: int = 120,
+    mode_filter: str | None = None,
 ) -> list[ChainReplayResult]:
-    """Run all level-2 chain scenario fixtures."""
+    """Run all level-2 chain scenario fixtures.
+
+    mode_filter: None (all), "headless", or "interactive".
+    """
     pattern = "level2_*.json"
-    fixtures = sorted(_SCENARIOS_DIR.glob(pattern))
+    all_fixtures = sorted(_SCENARIOS_DIR.glob(pattern))
+    fixtures = [f for f in all_fixtures if _fixture_matches_mode(f, mode_filter)]
 
     if not fixtures:
-        print(f"[chain] No fixtures found matching {_SCENARIOS_DIR}/{pattern}", file=sys.stderr)
+        print(f"[chain] No fixtures found for mode={mode_filter or 'all'}", file=sys.stderr)
         return []
 
     results: list[ChainReplayResult] = []
@@ -861,6 +906,12 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print prompt only, no LLM call")
     parser.add_argument("--timeout", type=int, default=120, help="Per-scenario timeout (seconds)")
     parser.add_argument("--json", action="store_true", dest="output_json", help="Output results as JSON")
+    parser.add_argument(
+        "--mode",
+        choices=["headless", "interactive"],
+        default=None,
+        help="Filter fixtures by mode: headless (headless_only+both), interactive (interactive_only+both). Default: all.",
+    )
     args = parser.parse_args()
 
     any_failure = False
@@ -877,6 +928,7 @@ def main() -> int:
                     model=args.model,
                     dry_run=args.dry_run,
                     timeout_seconds=args.timeout,
+                    mode_filter=args.mode,
                 )
                 all_chain_results.extend(chain_results)
             else:
@@ -885,6 +937,7 @@ def main() -> int:
                     model=args.model,
                     dry_run=args.dry_run,
                     timeout_seconds=args.timeout,
+                    mode_filter=args.mode,
                 )
                 all_single_results[lvl] = single_results
 

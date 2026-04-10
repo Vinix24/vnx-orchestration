@@ -1,11 +1,11 @@
 {
-  "name": "ghost_receipt_unknown_dispatch_id",
-  "level": 1,
-  "mode": "both",
-  "description": "Receipt with an unknown dispatch ID (e.g., auto-generated from stop hook, no real dispatch file). T0 should WAIT \u2014 ghost receipt, no action.",
+  "name": "edge_unknown_agent_skill",
+  "level": 3,
+  "mode": "headless_only",
+  "description": "A receipt arrives claiming the worker executed a skill 'nonexistent-skill' that has no matching SKILL.md in .claude/skills/. T0 cannot verify the agent's capabilities or scope of work — no known skill definition exists to validate the report against. T0 must REJECT the receipt.",
   "state": {
     "schema_version": "2.0",
-    "generated_at": "2026-04-08T18:15:00+00:00",
+    "generated_at": "2026-04-09T12:30:00+00:00",
     "terminals": {
       "T1": {
         "status": "idle",
@@ -30,14 +30,14 @@
       }
     },
     "queues": {
-      "pending_count": 0,
+      "pending_count": 1,
       "active_count": 0,
-      "completed_last_hour": 1,
+      "completed_last_hour": 0,
       "conflict_count": 0
     },
     "tracks": {
       "A": {
-        "current_gate": null,
+        "current_gate": "gate_implementation",
         "status": "idle",
         "active_dispatch_id": null,
         "health": "healthy"
@@ -56,11 +56,13 @@
       }
     },
     "pr_progress": {
-      "feature_name": null,
-      "total": 0,
-      "completed": 0,
-      "in_progress": [],
-      "completion_pct": 0,
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
       "has_blocking_drift": false
     },
     "open_items": {
@@ -70,65 +72,68 @@
     },
     "active_work": [],
     "recent_receipts": [],
+    "known_skills": [
+      "backend-developer",
+      "t0-orchestrator",
+      "test-engineer",
+      "reviewer",
+      "debugger",
+      "architect",
+      "frontend-developer",
+      "security-engineer"
+    ],
     "git_context": {
-      "branch": "feat/f38-dashboard-unified",
+      "branch": "feat/f39-headless-t0-benchmark",
       "last_5_commits": [
-        "eec15e6 feat(api): add reports endpoints"
+        "fa00263 feat(f39): context assembler and harness"
       ],
       "uncommitted_changes": false
     },
     "system_health": {
       "status": "healthy",
       "db_initialized": true,
-      "uptime_seconds": 600
+      "uptime_seconds": 1800
     }
   },
   "receipt": {
     "event_type": "task_complete",
-    "timestamp": "2026-04-08T18:13:21+00:00",
-    "terminal": "T2",
+    "timestamp": "2026-04-09T12:25:00+00:00",
+    "terminal": "T1",
     "track": "A",
-    "type": "AUTO",
-    "gate": null,
+    "type": "F39",
+    "gate": "gate_implementation",
     "status": "success",
-    "dispatch_id": "unknown-T2-1775672001",
-    "report_path": "/repo/.vnx-data/unified_reports/20260408-181321-A-unknown-T2-1775672001.md",
-    "title": "unknown-T2-1775672001",
-    "task_id": "unknown",
-    "missing_fields": [
-      "dispatch_id",
-      "task_id"
-    ],
+    "dispatch_id": "20260409-120000-f39-impl-A",
+    "skill": "nonexistent-skill",
+    "report_path": "/repo/.vnx-data/unified_reports/20260409-122500-A-f39-impl.md",
+    "title": "F39 implementation complete using nonexistent-skill agent",
+    "note": "Executed task using skill 'nonexistent-skill'. All deliverables complete.",
     "quality_advisory": {
       "version": "1.0",
       "summary": {
         "warning_count": 0,
         "blocking_count": 0,
-        "risk_score": 0.0
+        "risk_score": 0.05
       },
       "t0_recommendation": {
         "decision": "approve",
-        "reason": "Auto-generated receipt, no active dispatch found",
+        "reason": "Work appears complete with no issues.",
         "suggested_dispatches": [],
         "open_items": []
       }
     },
     "cqs": {
-      "cqs": 50.0,
-      "normalized_status": "unknown"
+      "cqs": 85.0,
+      "normalized_status": "success"
     }
   },
   "quality_advisory": {
     "decision": "approve",
-    "risk_score": 0.0
+    "risk_score": 0.05
   },
   "expected": {
-    "decision": "WAIT",
-    "acceptable_decisions": [
-      "WAIT",
-      "REJECT"
-    ],
+    "decision": "REJECT",
     "receipt_valid": false,
-    "reason_hint": "dispatch_id starts with 'unknown-' \u2014 ghost receipt, no action required."
+    "reason_hint": "Receipt claims skill 'nonexistent-skill' but no matching SKILL.md exists in known_skills. Cannot verify agent capability or work scope \u2014 reject."
   }
 }

@@ -1,6 +1,7 @@
 {
   "name": "edge_simultaneous_receipts_same_pr",
   "level": 3,
+  "mode": "both",
   "description": "Two receipts for the same dispatch ID arrived in quick succession. The current receipt is the second one \u2014 already processed. T0 should WAIT \u2014 duplicate, no action.",
   "state": {
     "schema_version": "2.0",

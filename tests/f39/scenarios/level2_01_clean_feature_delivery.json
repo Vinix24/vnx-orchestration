@@ -1,6 +1,7 @@
 {
   "name": "chain_clean_feature_delivery",
   "level": 2,
+  "mode": "both",
   "type": "chain",
   "description": "Three-step F38 delivery chain: T3 research accepted, T1 implementation accepted and dispatches testing, T2 validation accepted and merges. Mirrors the F38 dashboard unified flow.",
   "initial_state": {

@@ -1,6 +1,7 @@
 {
   "name": "chain_research_batch",
   "level": 2,
+  "mode": "both",
   "type": "chain",
   "description": "Three-step parallel research batch: T3 completes part 1 of research (accepted), T2 completes part 2 (accepted), T0 combines findings and dispatches implementation to T1. Mirrors symlink cross-project research pattern.",
   "initial_state": {

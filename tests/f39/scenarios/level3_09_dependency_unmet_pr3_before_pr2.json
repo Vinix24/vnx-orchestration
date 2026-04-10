@@ -1,6 +1,7 @@
 {
   "name": "edge_dependency_unmet_pr3_before_pr2",
   "level": 3,
+  "mode": "both",
   "description": "Feature plan states PR-3 depends on PR-2 (must be merged first). PR-2 is in progress but not completed. A request arrives to dispatch PR-3 work. T0 must check the dependency graph and WAIT \u2014 dispatching PR-3 before PR-2 is merged would create a dependency conflict.",
   "state": {
     "schema_version": "2.0",
