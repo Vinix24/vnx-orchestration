@@ -345,7 +345,7 @@ def _code_prefilter(receipt: dict[str, Any], state: dict[str, Any]) -> str | Non
     dispatch_id = receipt.get("dispatch_id", "")
 
     # Rule 1: Ghost receipt
-    if dispatch_id.startswith("unknown-") or not dispatch_id:
+    if not dispatch_id or dispatch_id.startswith("unknown-"):
         return "WAIT"
 
     # Rule 2: Duplicate receipt
