@@ -119,12 +119,15 @@ from api_token_stats import (  # noqa: E402
 from api_operator import (  # noqa: E402
     _api_health,
     _jump_terminal,
+    _operator_get_agents,
     _operator_get_gate_config,
     _operator_get_governance_digest,
     _operator_get_kanban,
     _operator_get_open_items,
     _operator_get_open_items_aggregate,
     _operator_get_projects,
+    _operator_get_report_content,
+    _operator_get_reports,
     _operator_get_session,
     _operator_get_system_health,
     _operator_get_terminal,
@@ -255,6 +258,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/system-health":
             _json_response(self, HTTPStatus.OK, _operator_get_system_health())
+            return
+
+        if path == "/api/operator/reports":
+            _json_response(self, HTTPStatus.OK, _operator_get_reports(params))
+            return
+
+        if path.startswith("/api/operator/reports/"):
+            filename = path[len("/api/operator/reports/"):]
+            result = _operator_get_report_content(filename)
+            if result is None:
+                _json_response(self, HTTPStatus.NOT_FOUND, {"error": "not_found", "filename": filename})
+            else:
+                _json_response(self, HTTPStatus.OK, result)
+            return
+
+        if path == "/api/operator/agents":
+            _json_response(self, HTTPStatus.OK, _operator_get_agents())
             return
 
         # Agent stream SSE endpoints

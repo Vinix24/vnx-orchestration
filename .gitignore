@@ -14,6 +14,7 @@ receipts/
 queue/
 reports/
 !demo/dry-run/evidence/reports/
+!dashboard/token-dashboard/app/operator/reports/
 orchestration/
 
 # Database runtime files (generated locally by init scripts)

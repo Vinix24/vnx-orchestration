@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.x — F38 Dashboard Unified (2026-04-10)
+
+### Features
+- **F38 PR-2**: Dashboard frontend — session history browser (`/operator/reports`), agent selector component, domain filter tabs (Coding/Analytics), Reports sidebar nav link, SWR hooks and types for reports and agents
+
 ## v0.6.x — F37 Auto-Report Pipeline (2026-04-08)
 
 ### Fixes
