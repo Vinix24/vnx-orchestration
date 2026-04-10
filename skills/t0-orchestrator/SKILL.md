@@ -42,35 +42,45 @@ Run this loop each orchestration cycle.
    2. DISPATCH one manager block
    3. ESCALATE
 
-## 3. Critical Behaviors T0 Must Enforce
+## 3. Decision Framework
 
-1. Be critical on worker output.
-- Do not accept vague claims.
-- Require evidence and scope alignment.
-- Reject or follow up on missing deliverables.
+Apply this 8-step decision tree in order. The first matching rule wins.
 
-1b. Verify worker claims against code.
-- NEVER close open items based solely on receipt status or worker self-reporting.
-- Spot-check at least 3 specific claims per receipt using Grep/Read tools.
-- Verification checklist:
-  a. Claimed file was actually modified: `git log --oneline -1 -- <file>`
-  b. Specific fix is present in code: Grep for the change
-  c. Old problem pattern no longer exists: Grep for old pattern = 0 matches
-- If verification fails on ANY claim: reject receipt, do not close items, re-dispatch with specific failure evidence.
+```
+1. GHOST CHECK     → receipt.dispatch_id starts with "unknown-" or is empty → WAIT
+2. DUPLICATE CHECK → dispatch_id already in recent_receipts                  → WAIT
+3. REJECTION GATE  → status=failure OR risk > 0.8 OR blocking findings       → REJECT
+4. ESCALATION GATE → architectural change OR new dependency OR policy         → ESCALATE
+5. INVESTIGATION   → risk 0.3–0.8 OR advisory=hold                           → DISPATCH follow-up to T3
+6. TERMINAL CHECK  → all terminals busy (none ready)                         → WAIT
+7. COMPLETION CHECK → completion_pct=100 AND no blockers AND no pending      → COMPLETE
+8. DEFAULT         → receipt valid AND work pending                           → DISPATCH
+```
+
+**Efficiency rule**: Be efficient — accept clean work, investigate anomalies, reject failures.
+- Fast path: risk ≤ 0.3 + success + no blockers → skip deep verification, go directly to DISPATCH.
+- Verification (spot-check 3 claims) only when risk > 0.3.
+- If status=failure or blocking findings → REJECT immediately, do not look for reasons to approve.
+
+**Verification (when risk > 0.3 only)**:
+- Claimed file modified: `git log --oneline -1 -- <file>`
+- Fix present in code: Grep for the change
+- Old problem gone: Grep for old pattern = 0 matches
 - Test pass counts are acceptable evidence (automated, not self-reported).
-- Code change descriptions are NOT acceptable evidence without code verification.
 
-2. Open-items governance.
+## 3b. Operational Behaviors
+
+1. Open-items governance.
 - Always check open items before PR completion.
 - Close only evidence-backed items.
 - If new out-of-scope risk appears, create a new open item.
 
-3. Staging-first dispatch policy.
+2. Staging-first dispatch policy.
 - Prefer promoting staged dispatches.
 - Create manual dispatch only if no suitable staged dispatch exists.
 - If manual dispatch introduces new obligations, create open item(s).
 
-4. Queue discipline.
+3. Queue discipline.
 - One dispatch block at a time.
 - No dispatch while queue/active state is unsafe.
 
@@ -320,8 +330,6 @@ When not dispatching, provide explicit status to user:
 3. `references/provider-matrix.md`
 4. `references/feature-plan.md`
 5. `template.md`
-
-Final rule: if evidence is weak or contradictory, do not approve by default.
 
 ---
 

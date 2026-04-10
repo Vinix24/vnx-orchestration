@@ -27,12 +27,12 @@ _DEFAULT_STATE = _REPO_ROOT / ".vnx-data" / "state" / "t0_state.json"
 
 # JSON decision schema T0 must emit
 _DECISION_SCHEMA = """{
-  "decision": "WAIT" | "DISPATCH" | "ESCALATE" | "ACCEPT" | "REJECT" | "IGNORE",
-  "reason": "<concise explanation of why>",
-  "receipt_accepted": true | false,
-  "claims_to_verify": ["<specific claim to spot-check>", ...],
-  "next_action": "<description of the next concrete step>",
+  "decision": "DISPATCH" | "COMPLETE" | "WAIT" | "REJECT" | "ESCALATE",
+  "reason": "<concise explanation>",
+  "receipt_valid": true | false,
+  "next_action": "<concrete next step>",
   "dispatch_target": "T1" | "T2" | "T3" | null,
+  "dispatch_task": "<what the target should do>" | null,
   "open_items_action": [
     {"id": "<OI-xxx or 'new'>", "action": "close" | "defer" | "create" | "wontfix", "reason": "<...>"}
   ]
@@ -42,15 +42,22 @@ _OUTPUT_INSTRUCTION = f"""\
 ---
 ## Your Task
 
-Process the receipt above according to your orchestrator skill instructions.
+Process the receipt above. Apply these 5 rules in order:
 
-Decision guidance:
-- ACCEPT: receipt is valid, all claims verified, work meets criteria — proceed
-- REJECT: receipt is invalid or claims are unverifiable — re-dispatch
-- DISPATCH: dispatch the next unit of work to a worker terminal
-- WAIT: no action yet — more information needed or terminals are busy
-- ESCALATE: human intervention required — chain-breaking blocker
-- IGNORE: receipt is a ghost/duplicate — no action required
+1. **risk ≤ 0.3 + success + work pending** → DISPATCH next task
+   *(why: clean work should proceed without delay)*
+
+2. **risk 0.3–0.8** → DISPATCH follow-up audit to T3
+   *(why: elevated risk needs a second look before proceeding)*
+
+3. **risk > 0.8 OR blocking findings OR status=failure** → REJECT
+   *(why: hard failures must be re-dispatched, not carried forward)*
+
+4. **architectural change OR new dependency OR policy violation** → ESCALATE
+   *(why: these require human judgment, not autonomous decisions)*
+
+5. **default with no pending work OR all gates passed** → COMPLETE
+   *(why: when nothing remains to dispatch, close the PR)*
 
 Output ONLY a valid JSON object (no markdown, no prose before or after):
 {_DECISION_SCHEMA}

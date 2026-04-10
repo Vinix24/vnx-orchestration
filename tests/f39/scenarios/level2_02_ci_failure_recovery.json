@@ -7,22 +7,81 @@
     "schema_version": "2.0",
     "generated_at": "2026-04-08T19:00:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
     },
-    "queues": {"pending_count": 1, "active_count": 0, "completed_last_hour": 1, "conflict_count": 0},
+    "queues": {
+      "pending_count": 1,
+      "active_count": 0,
+      "completed_last_hour": 1,
+      "conflict_count": 0
+    },
     "tracks": {
-      "A": {"current_gate": "gate_implementation", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": "F37", "total": 3, "completed": 1, "in_progress": [], "completion_pct": 33, "has_blocking_drift": false},
-    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "pr_progress": {
+      "feature_name": "F37",
+      "total": 3,
+      "completed": 1,
+      "in_progress": [],
+      "completion_pct": 33,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
     "active_work": [],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f37-unified-state", "last_5_commits": ["3b9f9b5 feat(state): unified T0 state builder"], "uncommitted_changes": false},
-    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 3600}
+    "git_context": {
+      "branch": "feat/f37-unified-state",
+      "last_5_commits": [
+        "3b9f9b5 feat(state): unified T0 state builder"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 3600
+    }
   },
   "steps": [
     {
@@ -37,29 +96,57 @@
         "status": "success",
         "dispatch_id": "20260408-185000-state-builder-A",
         "report_path": "/repo/.vnx-data/unified_reports/20260408-195500-A-state-builder.md",
-        "title": "Unified T0 state builder — PR #200, CI failing (mypy)",
+        "title": "Unified T0 state builder \u2014 PR #200, CI failing (mypy)",
         "quality_advisory": {
           "version": "1.0",
-          "summary": {"warning_count": 1, "blocking_count": 1, "risk_score": 0.35},
+          "summary": {
+            "warning_count": 1,
+            "blocking_count": 1,
+            "risk_score": 0.35
+          },
           "t0_recommendation": {
             "decision": "hold",
             "reason": "Implementation complete but CI mypy check failing on build_t0_state.py. Must be fixed before merge.",
-            "suggested_dispatches": [{"terminal": "T1", "task": "Fix mypy type errors in scripts/build_t0_state.py — CI blocking PR #200"}],
-            "open_items": [{"action": "create", "description": "CI mypy failure on PR #200 — blocking merge"}]
+            "suggested_dispatches": [
+              {
+                "terminal": "T1",
+                "task": "Fix mypy type errors in scripts/build_t0_state.py \u2014 CI blocking PR #200"
+              }
+            ],
+            "open_items": [
+              {
+                "action": "create",
+                "description": "CI mypy failure on PR #200 \u2014 blocking merge"
+              }
+            ]
           }
         },
-        "cqs": {"cqs": 68.0, "normalized_status": "partial"}
+        "cqs": {
+          "cqs": 68.0,
+          "normalized_status": "partial"
+        }
       },
       "state_delta": {
         "open_items": {
           "open_count": 1,
           "blocker_count": 1,
-          "top_blockers": [{"id": "OI-001", "severity": "blocker", "description": "CI mypy failure on PR #200"}]
+          "top_blockers": [
+            {
+              "id": "OI-001",
+              "severity": "blocker",
+              "description": "CI mypy failure on PR #200"
+            }
+          ]
         },
-        "queues": {"pending_count": 1, "active_count": 0, "completed_last_hour": 2}
+        "queues": {
+          "pending_count": 1,
+          "active_count": 0,
+          "completed_last_hour": 2
+        }
       },
-      "expected_decision": "ACCEPT",
-      "expected_next_action": "dispatch_mypy_fix_to_T1"
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_mypy_fix_to_T1",
+      "expected_reason_hint": "CI failure acknowledged, dispatch mypy fix to T1."
     },
     {
       "step_name": "step_2_fix_accepted_ci_green",
@@ -73,28 +160,59 @@
         "status": "success",
         "dispatch_id": "20260408-200000-mypy-fix-A",
         "report_path": "/repo/.vnx-data/unified_reports/20260408-203000-A-mypy-fix.md",
-        "title": "Fix mypy errors in build_t0_state.py — CI now green on PR #200",
+        "title": "Fix mypy errors in build_t0_state.py \u2014 CI now green on PR #200",
         "quality_advisory": {
           "version": "1.0",
-          "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.05},
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.05
+          },
           "t0_recommendation": {
             "decision": "approve",
             "reason": "Mypy errors resolved. CI green. PR #200 ready for merge validation.",
-            "suggested_dispatches": [{"terminal": "T2", "task": "Run merge validation on PR #200"}],
-            "open_items": [{"action": "close", "id": "OI-001", "reason": "Mypy fix committed and CI green"}]
+            "suggested_dispatches": [
+              {
+                "terminal": "T2",
+                "task": "Run merge validation on PR #200"
+              }
+            ],
+            "open_items": [
+              {
+                "action": "close",
+                "id": "OI-001",
+                "reason": "Mypy fix committed and CI green"
+              }
+            ]
           }
         },
-        "cqs": {"cqs": 93.0, "normalized_status": "success"}
+        "cqs": {
+          "cqs": 93.0,
+          "normalized_status": "success"
+        }
       },
       "state_delta": {
         "terminals": {
-          "T1": {"status": "idle", "current_dispatch": null, "lease_state": "idle"}
+          "T1": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
         },
-        "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
-        "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 3}
+        "open_items": {
+          "open_count": 0,
+          "blocker_count": 0,
+          "top_blockers": []
+        },
+        "queues": {
+          "pending_count": 0,
+          "active_count": 0,
+          "completed_last_hour": 3
+        }
       },
-      "expected_decision": "ACCEPT",
-      "expected_next_action": "dispatch_merge_validation_to_T2"
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_merge_validation_to_T2",
+      "expected_reason_hint": "Fix done, dispatch merge validation to T2."
     },
     {
       "step_name": "step_3_merge_validation_complete",
@@ -108,10 +226,14 @@
         "status": "success",
         "dispatch_id": "20260408-203000-merge-validation-B",
         "report_path": "/repo/.vnx-data/unified_reports/20260408-211500-B-merge-validation.md",
-        "title": "PR #200 merge validation — all checks green, safe to merge",
+        "title": "PR #200 merge validation \u2014 all checks green, safe to merge",
         "quality_advisory": {
           "version": "1.0",
-          "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.0
+          },
           "t0_recommendation": {
             "decision": "approve",
             "reason": "All merge criteria satisfied. CI green, type checks pass, no open blockers.",
@@ -119,17 +241,32 @@
             "open_items": []
           }
         },
-        "cqs": {"cqs": 98.0, "normalized_status": "success"}
+        "cqs": {
+          "cqs": 98.0,
+          "normalized_status": "success"
+        }
       },
       "state_delta": {
         "terminals": {
-          "T2": {"status": "idle", "current_dispatch": null, "lease_state": "idle"}
+          "T2": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
         },
-        "pr_progress": {"completed": 2, "completion_pct": 66},
-        "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 4}
+        "pr_progress": {
+          "completed": 2,
+          "completion_pct": 66
+        },
+        "queues": {
+          "pending_count": 0,
+          "active_count": 0,
+          "completed_last_hour": 4
+        }
       },
-      "expected_decision": "ACCEPT",
-      "expected_next_action": "merge_pr_200"
+      "expected_decision": "COMPLETE",
+      "expected_next_action": "merge_pr_200",
+      "expected_reason_hint": "Merge validation passed, pending_count=0. Merge PR-200."
     }
   ]
 }

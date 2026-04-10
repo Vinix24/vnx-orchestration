@@ -1,27 +1,89 @@
 {
   "name": "edge_out_of_scope_risk_introduced",
   "level": 3,
-  "description": "Worker completed the assigned task correctly (ACCEPT), but in doing so introduced a new risk outside the dispatch scope — the implementation adds a new dependency on an external API that wasn't in the original plan. T0 should ACCEPT the work but also create a new open item to track the scope drift.",
+  "description": "Worker completed the assigned task correctly, but introduced a new dependency outside dispatch scope. T0 should DISPATCH with a new open item for scope drift.",
   "state": {
     "schema_version": "2.0",
     "generated_at": "2026-04-09T17:00:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
     },
-    "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 2, "conflict_count": 0},
+    "queues": {
+      "pending_count": 0,
+      "active_count": 0,
+      "completed_last_hour": 2,
+      "conflict_count": 0
+    },
     "tracks": {
-      "A": {"current_gate": "gate_implementation", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": "F39", "total": 4, "completed": 1, "in_progress": ["PR-2"], "completion_pct": 25, "has_blocking_drift": false},
-    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
     "active_work": [],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f39-headless-t0-benchmark", "last_5_commits": ["fa00263 feat(f39): context assembler and harness", "def5678 feat(f39): level-3 edge case fixtures"], "uncommitted_changes": false},
-    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 7200}
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness",
+        "def5678 feat(f39): level-3 edge case fixtures"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 7200
+    }
   },
   "receipt": {
     "event_type": "task_complete",
@@ -33,26 +95,43 @@
     "status": "success",
     "dispatch_id": "20260409-160000-f39-level3-A",
     "report_path": "/repo/.vnx-data/unified_reports/20260409-165500-A-f39-level3.md",
-    "title": "F39 level-3 edge case fixtures — 9 scenarios complete",
-    "note": "All 9 level-3 fixtures created. To make scenario 6 more realistic, I added a requests library call to fetch real Codex API responses during fixture generation. This adds requests>=2.31 as a new dependency. The dependency is used only in tests — not in production code.",
+    "title": "F39 level-3 edge case fixtures \u2014 9 scenarios complete",
+    "note": "All 9 level-3 fixtures created. To make scenario 6 more realistic, I added a requests library call to fetch real Codex API responses during fixture generation. This adds requests>=2.31 as a new dependency. The dependency is used only in tests \u2014 not in production code.",
     "quality_advisory": {
       "version": "1.0",
-      "summary": {"warning_count": 1, "blocking_count": 0, "risk_score": 0.2},
+      "summary": {
+        "warning_count": 1,
+        "blocking_count": 0,
+        "risk_score": 0.2
+      },
       "t0_recommendation": {
         "decision": "approve",
         "reason": "Deliverables complete and verified. New dependency (requests) is test-only and low risk, but was not in original dispatch scope.",
         "suggested_dispatches": [],
         "open_items": [
-          {"action": "create", "description": "Scope drift: requests library added as test dependency — not in original F39 dispatch scope. Evaluate if acceptable."}
+          {
+            "action": "create",
+            "description": "Scope drift: requests library added as test dependency \u2014 not in original F39 dispatch scope. Evaluate if acceptable."
+          }
         ]
       }
     },
-    "cqs": {"cqs": 85.0, "normalized_status": "success"}
+    "cqs": {
+      "cqs": 85.0,
+      "normalized_status": "success"
+    }
   },
-  "quality_advisory": {"decision": "approve", "risk_score": 0.2},
+  "quality_advisory": {
+    "decision": "approve",
+    "risk_score": 0.2
+  },
   "expected": {
-    "decision": "ACCEPT",
-    "receipt_accepted": true,
-    "reason_hint": "Work meets criteria — ACCEPT. But scope drift (new dependency) must be tracked as a new open item."
+    "decision": "DISPATCH",
+    "acceptable_decisions": [
+      "DISPATCH",
+      "ESCALATE"
+    ],
+    "receipt_valid": true,
+    "reason_hint": "Work complete (risk=0.2). New dependency = scope drift \u2192 create OI and dispatch next. Or ESCALATE if policy violation."
   }
 }

@@ -1,12 +1,18 @@
 {
   "name": "edge_expired_lease_active_claim",
   "level": 3,
-  "description": "A new dispatch needs to go to T2. But T2 has an expired lease (lease_expires_at is in the past) and an active claim from an old dispatch. T0 must detect this conflict and WAIT rather than dispatch — sending a new dispatch to a terminal with a claimed lease causes double-assignment.",
+  "description": "A new dispatch needs to go to T2. But T2 has an expired lease (lease_expires_at is in the past) and an active claim from an old dispatch. T0 must detect this conflict and WAIT rather than dispatch \u2014 sending a new dispatch to a terminal with a claimed lease causes double-assignment.",
   "state": {
     "schema_version": "2.0",
     "generated_at": "2026-04-09T09:00:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
       "T2": {
         "status": "working",
         "track": "B",
@@ -16,22 +22,76 @@
         "lease_expires_at": "2026-04-08T20:00:00+00:00",
         "claimed_by": "20260408-180000-old-validation-B"
       },
-      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
     },
-    "queues": {"pending_count": 1, "active_count": 1, "completed_last_hour": 0, "conflict_count": 1},
+    "queues": {
+      "pending_count": 1,
+      "active_count": 1,
+      "completed_last_hour": 0,
+      "conflict_count": 1
+    },
     "tracks": {
-      "A": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": "gate_validation", "status": "blocked", "active_dispatch_id": "20260408-180000-old-validation-B", "health": "blocked"},
-      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+      "A": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": "gate_validation",
+        "status": "blocked",
+        "active_dispatch_id": "20260408-180000-old-validation-B",
+        "health": "blocked"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": "F39", "total": 4, "completed": 1, "in_progress": ["PR-2"], "completion_pct": 25, "has_blocking_drift": false},
-    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
     "active_work": [
-      {"dispatch_id": "20260408-180000-old-validation-B", "track": "B", "gate": "gate_validation", "started_at": "2026-04-08T18:00:00+00:00"}
+      {
+        "dispatch_id": "20260408-180000-old-validation-B",
+        "track": "B",
+        "gate": "gate_validation",
+        "started_at": "2026-04-08T18:00:00+00:00"
+      }
     ],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f39-headless-t0-benchmark", "last_5_commits": ["fa00263 feat(f39): context assembler and harness"], "uncommitted_changes": false},
-    "system_health": {"status": "degraded", "db_initialized": true, "uptime_seconds": 54000}
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "degraded",
+      "db_initialized": true,
+      "uptime_seconds": 54000
+    }
   },
   "receipt": {
     "event_type": "dispatch_request",
@@ -43,11 +103,15 @@
     "status": "pending",
     "dispatch_id": "20260409-090000-f39-validation-request",
     "report_path": null,
-    "title": "Request to dispatch validation work to T2 — F39 PR-2 test suite",
+    "title": "Request to dispatch validation work to T2 \u2014 F39 PR-2 test suite",
     "requested_terminal": "T2",
     "quality_advisory": {
       "version": "1.0",
-      "summary": {"warning_count": 1, "blocking_count": 0, "risk_score": 0.4},
+      "summary": {
+        "warning_count": 1,
+        "blocking_count": 0,
+        "risk_score": 0.4
+      },
       "t0_recommendation": {
         "decision": "hold",
         "reason": "T2 lease is expired but terminal is still claimed. Cannot dispatch until lease conflict is resolved.",
@@ -57,10 +121,13 @@
     },
     "cqs": null
   },
-  "quality_advisory": {"decision": "hold", "risk_score": 0.4},
+  "quality_advisory": {
+    "decision": "hold",
+    "risk_score": 0.4
+  },
   "expected": {
     "decision": "WAIT",
-    "receipt_accepted": false,
-    "reason_hint": "T2 has an expired lease with an active claim — must clean up before dispatching to avoid double-assignment"
+    "receipt_valid": false,
+    "reason_hint": "T2 has expired lease with active claim. Cannot dispatch \u2014 wait for lease resolution."
   }
 }

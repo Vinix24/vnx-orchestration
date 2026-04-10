@@ -1,27 +1,88 @@
 {
   "name": "edge_high_risk_advisory_clean_receipt",
   "level": 3,
-  "description": "Receipt looks clean on the surface — worker reports success, CQS is 88, no errors mentioned. But the quality advisory has risk_score:0.9, which is extremely high. T0 must respect the advisory over the surface appearance and ESCALATE for human review rather than blindly accepting.",
+  "description": "Receipt looks clean on the surface \u2014 worker reports success, CQS is 88, no errors mentioned. But the quality advisory has risk_score:0.9, which is extremely high. T0 must respect the advisory over the surface appearance and ESCALATE for human review rather than blindly accepting.",
   "state": {
     "schema_version": "2.0",
     "generated_at": "2026-04-09T15:00:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
     },
-    "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 1, "conflict_count": 0},
+    "queues": {
+      "pending_count": 0,
+      "active_count": 0,
+      "completed_last_hour": 1,
+      "conflict_count": 0
+    },
     "tracks": {
-      "A": {"current_gate": "gate_implementation", "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": "F39", "total": 4, "completed": 1, "in_progress": ["PR-2"], "completion_pct": 25, "has_blocking_drift": false},
-    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-2"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
     "active_work": [],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f39-headless-t0-benchmark", "last_5_commits": ["fa00263 feat(f39): context assembler and harness"], "uncommitted_changes": false},
-    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 3600}
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 3600
+    }
   },
   "receipt": {
     "event_type": "task_complete",
@@ -33,7 +94,7 @@
     "status": "success",
     "dispatch_id": "20260409-140000-f39-level2-A",
     "report_path": "/repo/.vnx-data/unified_reports/20260409-145500-A-f39-level2.md",
-    "title": "F39 level-2 chain fixtures — complete",
+    "title": "F39 level-2 chain fixtures \u2014 complete",
     "quality_advisory": {
       "version": "1.0",
       "summary": {
@@ -46,17 +107,29 @@
         "reason": "High risk detected: harness modifies subprocess PATH environment in a way that could affect other processes. SQL injection risk in fixture loader if user controls fixture path. Needs security review before acceptance.",
         "suggested_dispatches": [],
         "open_items": [
-          {"action": "create", "description": "Security review required: subprocess PATH modification and fixture path injection risk"},
-          {"action": "create", "description": "Blocking: SQL-like path traversal possible in fixture loader"}
+          {
+            "action": "create",
+            "description": "Security review required: subprocess PATH modification and fixture path injection risk"
+          },
+          {
+            "action": "create",
+            "description": "Blocking: SQL-like path traversal possible in fixture loader"
+          }
         ]
       }
     },
-    "cqs": {"cqs": 88.0, "normalized_status": "success"}
+    "cqs": {
+      "cqs": 88.0,
+      "normalized_status": "success"
+    }
   },
-  "quality_advisory": {"decision": "hold", "risk_score": 0.9},
+  "quality_advisory": {
+    "decision": "hold",
+    "risk_score": 0.9
+  },
   "expected": {
     "decision": "ESCALATE",
-    "receipt_accepted": false,
-    "reason_hint": "Quality advisory risk_score:0.9 with blocking_count:2 overrides clean surface appearance — human review required"
+    "receipt_valid": true,
+    "reason_hint": "risk_score=0.95 despite clean surface. Advisory=hold with risk>0.8 \u2014 escalate."
   }
 }

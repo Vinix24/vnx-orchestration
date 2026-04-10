@@ -1,12 +1,18 @@
 {
   "name": "receipt_with_stale_terminal_lease",
   "level": 1,
-  "description": "Receipt is valid but terminal T2's lease is expired (lease_expires_at in the past). T0 should ACCEPT the receipt and clean up the stale lease.",
+  "description": "Receipt is valid but terminal T2's lease is expired. T0 should DISPATCH to a ready terminal (T1 or T3) while noting the stale lease.",
   "state": {
     "schema_version": "2.0",
     "generated_at": "2026-04-08T20:00:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
       "T2": {
         "status": "working",
         "track": "B",
@@ -16,20 +22,76 @@
         "lease_expires_at": "2026-04-08T17:00:00+00:00",
         "claimed_by": "20260408-190000-stale-dispatch-B"
       },
-      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
     },
-    "queues": {"pending_count": 1, "active_count": 1, "completed_last_hour": 2, "conflict_count": 0},
+    "queues": {
+      "pending_count": 1,
+      "active_count": 1,
+      "completed_last_hour": 2,
+      "conflict_count": 0
+    },
     "tracks": {
-      "A": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": "gate_fix", "status": "working", "active_dispatch_id": "20260408-190000-stale-dispatch-B", "health": "blocked"},
-      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+      "A": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": "gate_fix",
+        "status": "working",
+        "active_dispatch_id": "20260408-190000-stale-dispatch-B",
+        "health": "blocked"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": "F38", "total": 4, "completed": 1, "in_progress": ["PR-1"], "completion_pct": 25, "has_blocking_drift": false},
-    "open_items": {"open_count": 1, "blocker_count": 0, "top_blockers": []},
-    "active_work": [{"dispatch_id": "20260408-190000-stale-dispatch-B", "track": "B", "gate": "gate_fix", "started_at": "2026-04-08T17:00:00+00:00"}],
+    "pr_progress": {
+      "feature_name": "F38",
+      "total": 4,
+      "completed": 1,
+      "in_progress": [
+        "PR-1"
+      ],
+      "completion_pct": 25,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 1,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [
+      {
+        "dispatch_id": "20260408-190000-stale-dispatch-B",
+        "track": "B",
+        "gate": "gate_fix",
+        "started_at": "2026-04-08T17:00:00+00:00"
+      }
+    ],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f38-dashboard-unified", "last_5_commits": ["eec15e6 feat(api): add reports endpoints"], "uncommitted_changes": false},
-    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 10800}
+    "git_context": {
+      "branch": "feat/f38-dashboard-unified",
+      "last_5_commits": [
+        "eec15e6 feat(api): add reports endpoints"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 10800
+    }
   },
   "receipt": {
     "event_type": "task_complete",
@@ -44,16 +106,31 @@
     "title": "Fix: stale lease scenario",
     "quality_advisory": {
       "version": "1.0",
-      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.05},
-      "t0_recommendation": {"decision": "approve", "reason": "Work complete; terminal lease was stale and should be released", "suggested_dispatches": [], "open_items": []}
+      "summary": {
+        "warning_count": 0,
+        "blocking_count": 0,
+        "risk_score": 0.05
+      },
+      "t0_recommendation": {
+        "decision": "approve",
+        "reason": "Work complete; terminal lease was stale and should be released",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
     },
-    "cqs": {"cqs": 80.0, "normalized_status": "success"}
+    "cqs": {
+      "cqs": 80.0,
+      "normalized_status": "success"
+    }
   },
-  "quality_advisory": {"decision": "approve", "risk_score": 0.05},
+  "quality_advisory": {
+    "decision": "approve",
+    "risk_score": 0.05
+  },
   "expected": {
-    "decision": "ACCEPT",
-    "receipt_accepted": true,
-    "should_cleanup_lease": true,
-    "_note": "Model may say REJECT due to stale lease concern; ACCEPT is preferred since work is valid and lease cleanup is the right action"
+    "decision": "DISPATCH",
+    "receipt_valid": true,
+    "dispatch_target": "T1",
+    "reason_hint": "Receipt valid. T2 lease expired but T1 is ready. Dispatch to T1."
   }
 }

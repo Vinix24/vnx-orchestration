@@ -7,25 +7,96 @@
     "schema_version": "2.0",
     "generated_at": "2026-04-09T09:00:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T2": {"status": "working", "track": "B", "ready": false, "current_dispatch": "20260409-085000-research-part2-B", "lease_state": "leased"},
-      "T3": {"status": "working", "track": "C", "ready": false, "current_dispatch": "20260409-085000-research-part1-C", "lease_state": "leased"}
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "working",
+        "track": "B",
+        "ready": false,
+        "current_dispatch": "20260409-085000-research-part2-B",
+        "lease_state": "leased"
+      },
+      "T3": {
+        "status": "working",
+        "track": "C",
+        "ready": false,
+        "current_dispatch": "20260409-085000-research-part1-C",
+        "lease_state": "leased"
+      }
     },
-    "queues": {"pending_count": 0, "active_count": 2, "completed_last_hour": 0, "conflict_count": 0},
+    "queues": {
+      "pending_count": 0,
+      "active_count": 2,
+      "completed_last_hour": 0,
+      "conflict_count": 0
+    },
     "tracks": {
-      "A": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": "gate_research", "status": "working", "active_dispatch_id": "20260409-085000-research-part2-B", "health": "healthy"},
-      "C": {"current_gate": "gate_research", "status": "working", "active_dispatch_id": "20260409-085000-research-part1-C", "health": "healthy"}
+      "A": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": "gate_research",
+        "status": "working",
+        "active_dispatch_id": "20260409-085000-research-part2-B",
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": "gate_research",
+        "status": "working",
+        "active_dispatch_id": "20260409-085000-research-part1-C",
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": "F39", "total": 4, "completed": 0, "in_progress": ["PR-0"], "completion_pct": 0, "has_blocking_drift": false},
-    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 0,
+      "in_progress": [
+        "PR-0"
+      ],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
     "active_work": [
-      {"dispatch_id": "20260409-085000-research-part1-C", "track": "C", "gate": "gate_research", "started_at": "2026-04-09T08:50:00+00:00"},
-      {"dispatch_id": "20260409-085000-research-part2-B", "track": "B", "gate": "gate_research", "started_at": "2026-04-09T08:50:00+00:00"}
+      {
+        "dispatch_id": "20260409-085000-research-part1-C",
+        "track": "C",
+        "gate": "gate_research",
+        "started_at": "2026-04-09T08:50:00+00:00"
+      },
+      {
+        "dispatch_id": "20260409-085000-research-part2-B",
+        "track": "B",
+        "gate": "gate_research",
+        "started_at": "2026-04-09T08:50:00+00:00"
+      }
     ],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f39-headless-t0-benchmark", "last_5_commits": ["fa00263 feat(f39): context assembler and harness"], "uncommitted_changes": false},
-    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 1800}
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "fa00263 feat(f39): context assembler and harness"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 1800
+    }
   },
   "steps": [
     {
@@ -40,10 +111,14 @@
         "status": "success",
         "dispatch_id": "20260409-085000-research-part1-C",
         "report_path": "/repo/.vnx-data/unified_reports/20260409-094500-C-research-part1.md",
-        "title": "F39 research part 1 — headless T0 evaluation approaches",
+        "title": "F39 research part 1 \u2014 headless T0 evaluation approaches",
         "quality_advisory": {
           "version": "1.0",
-          "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.0
+          },
           "t0_recommendation": {
             "decision": "approve",
             "reason": "Part 1 findings complete. Awaiting part 2 before dispatching implementation.",
@@ -51,22 +126,42 @@
             "open_items": []
           }
         },
-        "cqs": {"cqs": 88.0, "normalized_status": "success"}
+        "cqs": {
+          "cqs": 88.0,
+          "normalized_status": "success"
+        }
       },
       "state_delta": {
         "terminals": {
-          "T3": {"status": "idle", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+          "T3": {
+            "status": "idle",
+            "ready": true,
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
         },
         "tracks": {
-          "C": {"status": "idle", "active_dispatch_id": null}
+          "C": {
+            "status": "idle",
+            "active_dispatch_id": null
+          }
         },
         "active_work": [
-          {"dispatch_id": "20260409-085000-research-part2-B", "track": "B", "gate": "gate_research", "started_at": "2026-04-09T08:50:00+00:00"}
+          {
+            "dispatch_id": "20260409-085000-research-part2-B",
+            "track": "B",
+            "gate": "gate_research",
+            "started_at": "2026-04-09T08:50:00+00:00"
+          }
         ],
-        "queues": {"active_count": 1, "completed_last_hour": 1}
+        "queues": {
+          "active_count": 1,
+          "completed_last_hour": 1
+        }
       },
-      "expected_decision": "ACCEPT",
-      "expected_next_action": "wait_for_part2_or_dispatch_when_ready"
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "wait_for_part2_or_dispatch_when_ready",
+      "expected_reason_hint": "Part 1 done, dispatch part 2 or next pending work."
     },
     {
       "step_name": "step_2_t2_research_complete",
@@ -80,31 +175,55 @@
         "status": "success",
         "dispatch_id": "20260409-085000-research-part2-B",
         "report_path": "/repo/.vnx-data/unified_reports/20260409-100000-B-research-part2.md",
-        "title": "F39 research part 2 — benchmark fixtures and scoring methodology",
+        "title": "F39 research part 2 \u2014 benchmark fixtures and scoring methodology",
         "quality_advisory": {
           "version": "1.0",
-          "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.0
+          },
           "t0_recommendation": {
             "decision": "approve",
             "reason": "Part 2 complete. Both research tracks finished. Ready to dispatch implementation.",
-            "suggested_dispatches": [{"terminal": "T1", "task": "Implement F39 replay harness using combined research findings"}],
+            "suggested_dispatches": [
+              {
+                "terminal": "T1",
+                "task": "Implement F39 replay harness using combined research findings"
+              }
+            ],
             "open_items": []
           }
         },
-        "cqs": {"cqs": 90.0, "normalized_status": "success"}
+        "cqs": {
+          "cqs": 90.0,
+          "normalized_status": "success"
+        }
       },
       "state_delta": {
         "terminals": {
-          "T2": {"status": "idle", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+          "T2": {
+            "status": "idle",
+            "ready": true,
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
         },
         "tracks": {
-          "B": {"status": "idle", "active_dispatch_id": null}
+          "B": {
+            "status": "idle",
+            "active_dispatch_id": null
+          }
         },
         "active_work": [],
-        "queues": {"active_count": 0, "completed_last_hour": 2}
+        "queues": {
+          "active_count": 0,
+          "completed_last_hour": 2
+        }
       },
-      "expected_decision": "ACCEPT",
-      "expected_next_action": "dispatch_implementation_to_T1"
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "dispatch_implementation_to_T1",
+      "expected_reason_hint": "Part 2 done, dispatch implementation to T1."
     },
     {
       "step_name": "step_3_implementation_dispatched_confirmed",
@@ -118,10 +237,14 @@
         "status": "success",
         "dispatch_id": "20260409-100000-f39-harness-A",
         "report_path": "/repo/.vnx-data/unified_reports/20260409-123000-A-f39-harness.md",
-        "title": "F39 replay harness — context assembler + replay runner complete",
+        "title": "F39 replay harness \u2014 context assembler + replay runner complete",
         "quality_advisory": {
           "version": "1.0",
-          "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.1},
+          "summary": {
+            "warning_count": 0,
+            "blocking_count": 0,
+            "risk_score": 0.1
+          },
           "t0_recommendation": {
             "decision": "approve",
             "reason": "All deliverables present and committed. Research findings incorporated.",
@@ -129,20 +252,38 @@
             "open_items": []
           }
         },
-        "cqs": {"cqs": 92.0, "normalized_status": "success"}
+        "cqs": {
+          "cqs": 92.0,
+          "normalized_status": "success"
+        }
       },
       "state_delta": {
         "terminals": {
-          "T1": {"status": "idle", "current_dispatch": null, "lease_state": "idle"}
+          "T1": {
+            "status": "idle",
+            "current_dispatch": null,
+            "lease_state": "idle"
+          }
         },
         "tracks": {
-          "A": {"status": "idle", "active_dispatch_id": null}
+          "A": {
+            "status": "idle",
+            "active_dispatch_id": null
+          }
         },
-        "pr_progress": {"completed": 1, "completion_pct": 25},
-        "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 3}
+        "pr_progress": {
+          "completed": 1,
+          "completion_pct": 25
+        },
+        "queues": {
+          "pending_count": 0,
+          "active_count": 0,
+          "completed_last_hour": 3
+        }
       },
-      "expected_decision": "ACCEPT",
-      "expected_next_action": "advance_to_next_pr"
+      "expected_decision": "DISPATCH",
+      "expected_next_action": "advance_to_next_pr",
+      "expected_reason_hint": "Implementation done, advance to next PR."
     }
   ]
 }

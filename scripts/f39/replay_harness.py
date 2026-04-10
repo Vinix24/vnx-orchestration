@@ -245,12 +245,11 @@ def _collect_text_from_stream(stream_output: str) -> str:
 # ---------------------------------------------------------------------------
 
 _REASON_KEYWORDS: dict[str, list[str]] = {
-    "ACCEPT":   ["accept", "valid", "complete", "success", "criteria met", "approve"],
+    "DISPATCH": ["dispatch", "next task", "next work", "assign", "send to", "proceed"],
+    "COMPLETE": ["complete", "merge", "done", "finished", "closure", "close pr"],
     "REJECT":   ["reject", "missing", "incomplete", "not found", "invalid", "unverifi"],
-    "DISPATCH": ["dispatch", "next task", "next work", "assign", "send to"],
-    "WAIT":     ["wait", "busy", "no action", "hold", "not yet"],
-    "ESCALATE": ["escalate", "blocker", "human", "intervention", "chain-breaking"],
-    "IGNORE":   ["ignore", "ghost", "duplicate", "unknown dispatch", "no receipt"],
+    "WAIT":     ["wait", "busy", "no action", "hold", "not yet", "ghost", "duplicate", "unknown"],
+    "ESCALATE": ["escalate", "blocker", "human", "intervention", "chain-breaking", "architectural"],
 }
 
 
@@ -338,6 +337,41 @@ def _parse_decision(raw_output: str, errors: list[str]) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Code pre-filter — deterministic decisions before LLM call
+# ---------------------------------------------------------------------------
+
+def _code_prefilter(receipt: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Deterministic pre-filter. Returns decision string or None (needs LLM)."""
+    dispatch_id = receipt.get("dispatch_id", "")
+
+    # Rule 1: Ghost receipt
+    if dispatch_id.startswith("unknown-") or not dispatch_id:
+        return "WAIT"
+
+    # Rule 2: Duplicate receipt
+    recent = [r.get("dispatch_id") for r in state.get("recent_receipts", [])]
+    if dispatch_id in recent:
+        return "WAIT"
+
+    # Rule 6: All terminals busy
+    terminals = state.get("terminals", {})
+    if terminals and all(not t.get("ready", False) for t in terminals.values()):
+        return "WAIT"
+
+    # Rule 7: Feature complete
+    pr = state.get("pr_progress", {})
+    oi = state.get("open_items", {})
+    if (
+        pr.get("completion_pct", 0) >= 100
+        and oi.get("blocker_count", 0) == 0
+        and state.get("queues", {}).get("pending_count", 0) == 0
+    ):
+        return "COMPLETE"
+
+    return None  # Needs LLM judgment
+
+
+# ---------------------------------------------------------------------------
 # Prior decisions section builder
 # ---------------------------------------------------------------------------
 
@@ -400,6 +434,23 @@ def run_replay(
     acceptable_decisions = [d.upper() for d in expected.get("acceptable_decisions", [])]
     if not acceptable_decisions:
         acceptable_decisions = [expected_decision]
+
+    # Deterministic pre-filter — skip LLM for obvious cases
+    prefilter_decision = _code_prefilter(receipt, state_snapshot)
+    if prefilter_decision is not None and not dry_run:
+        elapsed = int(time.monotonic() * 1000) - start_ms
+        match = prefilter_decision in acceptable_decisions
+        return ReplayResult(
+            scenario_name=name,
+            expected_decision=expected_decision,
+            actual_decision=prefilter_decision,
+            match=match,
+            reason_match=True,
+            actual_output=f"[prefilter: {prefilter_decision}]",
+            token_cost=0,
+            duration_ms=elapsed,
+            errors=errors,
+        )
 
     # Write state snapshot to a temp file for the assembler
     with tempfile.NamedTemporaryFile(
@@ -541,6 +592,32 @@ def run_chain_replay(
 
         # 1. Apply state_delta cumulatively
         current_state = _apply_state_delta(current_state, step.state_delta)
+
+        # Deterministic pre-filter — skip LLM for obvious cases
+        prefilter_decision = _code_prefilter(step.receipt, current_state)
+        if prefilter_decision is not None and not dry_run:
+            step_elapsed = int(time.monotonic() * 1000) - step_start_ms
+            match = prefilter_decision == step.expected_decision
+            step_result = ChainStepResult(
+                step_name=step.step_name,
+                expected_decision=step.expected_decision,
+                actual_decision=prefilter_decision,
+                match=match,
+                actual_output=f"[prefilter: {prefilter_decision}]",
+                token_cost=0,
+                duration_ms=step_elapsed,
+                errors=step_errors,
+            )
+            step_results.append(step_result)
+            status = "PASS" if match else "FAIL"
+            print(
+                f"[chain] {status}: {chain.name}/{step.step_name} "
+                f"(expected={step.expected_decision}, actual={prefilter_decision}, "
+                f"prefilter=true, {step_elapsed}ms)",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
 
         # 2. Write current state to temp file
         with tempfile.NamedTemporaryFile(

@@ -1,27 +1,86 @@
 {
   "name": "ghost_receipt_unknown_dispatch_id",
   "level": 1,
-  "description": "Receipt with an unknown dispatch ID (e.g., auto-generated from stop hook, no real dispatch file). T0 should IGNORE this ghost receipt.",
+  "description": "Receipt with an unknown dispatch ID (e.g., auto-generated from stop hook, no real dispatch file). T0 should WAIT \u2014 ghost receipt, no action.",
   "state": {
     "schema_version": "2.0",
     "generated_at": "2026-04-08T18:15:00+00:00",
     "terminals": {
-      "T1": {"status": "idle", "track": "A", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T2": {"status": "idle", "track": "B", "ready": true, "current_dispatch": null, "lease_state": "idle"},
-      "T3": {"status": "idle", "track": "C", "ready": true, "current_dispatch": null, "lease_state": "idle"}
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
     },
-    "queues": {"pending_count": 0, "active_count": 0, "completed_last_hour": 1, "conflict_count": 0},
+    "queues": {
+      "pending_count": 0,
+      "active_count": 0,
+      "completed_last_hour": 1,
+      "conflict_count": 0
+    },
     "tracks": {
-      "A": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "B": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"},
-      "C": {"current_gate": null, "status": "idle", "active_dispatch_id": null, "health": "healthy"}
+      "A": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
     },
-    "pr_progress": {"feature_name": null, "total": 0, "completed": 0, "in_progress": [], "completion_pct": 0, "has_blocking_drift": false},
-    "open_items": {"open_count": 0, "blocker_count": 0, "top_blockers": []},
+    "pr_progress": {
+      "feature_name": null,
+      "total": 0,
+      "completed": 0,
+      "in_progress": [],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
     "active_work": [],
     "recent_receipts": [],
-    "git_context": {"branch": "feat/f38-dashboard-unified", "last_5_commits": ["eec15e6 feat(api): add reports endpoints"], "uncommitted_changes": false},
-    "system_health": {"status": "healthy", "db_initialized": true, "uptime_seconds": 600}
+    "git_context": {
+      "branch": "feat/f38-dashboard-unified",
+      "last_5_commits": [
+        "eec15e6 feat(api): add reports endpoints"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 600
+    }
   },
   "receipt": {
     "event_type": "task_complete",
@@ -35,18 +94,40 @@
     "report_path": "/repo/.vnx-data/unified_reports/20260408-181321-A-unknown-T2-1775672001.md",
     "title": "unknown-T2-1775672001",
     "task_id": "unknown",
-    "missing_fields": ["dispatch_id", "task_id"],
+    "missing_fields": [
+      "dispatch_id",
+      "task_id"
+    ],
     "quality_advisory": {
       "version": "1.0",
-      "summary": {"warning_count": 0, "blocking_count": 0, "risk_score": 0.0},
-      "t0_recommendation": {"decision": "approve", "reason": "Auto-generated receipt, no active dispatch found", "suggested_dispatches": [], "open_items": []}
+      "summary": {
+        "warning_count": 0,
+        "blocking_count": 0,
+        "risk_score": 0.0
+      },
+      "t0_recommendation": {
+        "decision": "approve",
+        "reason": "Auto-generated receipt, no active dispatch found",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
     },
-    "cqs": {"cqs": 50.0, "normalized_status": "unknown"}
+    "cqs": {
+      "cqs": 50.0,
+      "normalized_status": "unknown"
+    }
   },
-  "quality_advisory": {"decision": "approve", "risk_score": 0.0},
+  "quality_advisory": {
+    "decision": "approve",
+    "risk_score": 0.0
+  },
   "expected": {
-    "decision": "IGNORE",
-    "acceptable_decisions": ["IGNORE", "REJECT"],
-    "receipt_accepted": false
+    "decision": "WAIT",
+    "acceptable_decisions": [
+      "WAIT",
+      "REJECT"
+    ],
+    "receipt_valid": false,
+    "reason_hint": "dispatch_id starts with 'unknown-' \u2014 ghost receipt, no action required."
   }
 }
