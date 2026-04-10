@@ -1346,8 +1346,7 @@ cp /tmp/test_intelligence.md $VNX_HOME/dispatches/pending/
 ### Files Reference
 
 **Core Scripts**:
-- `dispatcher_v7_compilation.sh` (2,248 lines) - Main dispatcher
-- `smart_tap_v7_json_translator.sh` (611 lines) - Manager block capture
+- `dispatcher_v8_minimal.sh` - Main dispatcher (V8 native skills)
 - `pane_manager_v2.sh` (~300 lines) - Pane discovery system
 - `singleton_enforcer.sh` - Process singleton enforcement
 - `gather_intelligence.py` - Intelligence pattern gathering

@@ -40,8 +40,8 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 - Canonical block hashing and dedup tracking.
 - Validation before queueing.
 
-**Representative implementation**
-- `.claude/vnx-system/scripts/smart_tap_v7_json_translator.sh`
+**Representative implementation** (removed in housekeeping/system-cleanup)
+- `scripts/smart_tap_v7_json_translator.sh` — superseded by pending/ dispatch flow
 
 **Outcome**
 - More deterministic dispatch ingestion and fewer accidental replays.
@@ -57,9 +57,9 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 - Consolidated status model around canonical state + reconciliation.
 - Explicit active dispatch ownership in state transitions.
 
-**Representative implementation**
-- `.claude/vnx-system/scripts/sync_progress_state_from_receipts.py`
-- `.claude/vnx-system/scripts/lib/terminal_state_reconciler.py`
+**Representative implementation** (removed in housekeeping/system-cleanup)
+- `scripts/sync_progress_state_from_receipts.py` — replaced by runtime_core state machine
+- `scripts/lib/terminal_state_reconciler.py` — replaced by runtime_reconciler.py
 
 **Outcome**
 - Dashboard and orchestration decisions align better with actual runtime behavior.
@@ -95,7 +95,7 @@ This timeline is a concise reconstruction of the technical evolution, without pr
 
 **Representative implementation**
 - `.claude/vnx-system/scripts/dispatcher_v8_minimal.sh`
-- `.claude/vnx-system/scripts/generate_t0_brief.sh`
+- `scripts/generate_t0_brief.sh` (removed — replaced by build_t0_state.py)
 - `.claude/vnx-system/scripts/lib/quality_advisory.py`
 
 **Outcome**
@@ -184,7 +184,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 **Representative implementations**
 - `scripts/lib/subprocess_adapter.py`
 - `scripts/lib/subprocess_dispatch.py`
-- `scripts/lib/event_store.py`
+- `scripts/lib/event_store.py` (removed — functionality merged into subprocess_adapter)
 - `scripts/lib/heartbeat_monitor.py`
 
 **Outcome**

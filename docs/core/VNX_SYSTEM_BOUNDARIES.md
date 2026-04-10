@@ -17,11 +17,10 @@ Project = Specific implementation using VNX
 ```
 vnx-system/
 ├── scripts/                      # All orchestration scripts
-│   ├── dispatcher_v7_compilation.sh
-│   ├── smart_tap_with_editor_multi.sh
-│   ├── receipt_notifier.sh
+│   ├── dispatcher_v8_minimal.sh
+│   ├── receipt_processor_v4.sh
 │   ├── gather_intelligence.py
-│   ├── unified_state_manager_v2.py
+│   ├── gate_runner.py
 │   └── [all other orchestration scripts]
 ├── schemas/                      # Data structure definitions
 ├── config/                       # System configuration templates
