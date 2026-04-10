@@ -1,0 +1,127 @@
+{
+  "name": "dependency_blocked_wait",
+  "level": 1,
+  "mode": "both",
+  "description": "PR-3 cannot proceed because PR-2 has not been merged yet. pr_progress.blocked contains PR-2. T0 should WAIT — deterministic dependency block, no LLM judgment needed.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-10T10:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 1,
+      "active_count": 0,
+      "completed_last_hour": 1,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 0,
+      "in_progress": ["PR-2"],
+      "blocked": ["PR-2"],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "a65a05e feat(f39): gate locks and fixture mode tagging"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 1800
+    }
+  },
+  "receipt": {
+    "event_type": "task_complete",
+    "timestamp": "2026-04-10T09:55:00+00:00",
+    "terminal": "T1",
+    "track": "A",
+    "type": "F39",
+    "gate": "gate_implementation",
+    "status": "success",
+    "dispatch_id": "20260410-090000-f39-pr3-prep-A",
+    "report_path": "/repo/.vnx-data/unified_reports/20260410-095500-A-pr3-prep.md",
+    "title": "PR-3 preparation complete — waiting on PR-2 merge",
+    "note": "PR-3 branch is ready but depends on PR-2 being merged first. Cannot proceed until PR-2 lands on main.",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {
+        "warning_count": 0,
+        "blocking_count": 0,
+        "risk_score": 0.1
+      },
+      "t0_recommendation": {
+        "decision": "hold",
+        "reason": "Dependency on PR-2 unmet. Wait for PR-2 to merge before advancing PR-3.",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
+    },
+    "cqs": {
+      "cqs": 88.0,
+      "normalized_status": "success"
+    }
+  },
+  "quality_advisory": {
+    "decision": "hold",
+    "risk_score": 0.1
+  },
+  "expected": {
+    "decision": "WAIT",
+    "receipt_valid": true,
+    "reason_hint": "pr_progress.blocked=[PR-2]. Deterministic dependency block — WAIT until PR-2 merges."
+  }
+}

@@ -63,13 +63,20 @@ Process the receipt above. Apply these 5 rules in order:
    *(why: when nothing remains to dispatch, close the PR)*
    **EXCEPTION:** If any review gate (codex_gate, gemini_review, ci_status) is absent (null) or in status "requested"/"queued", → WAIT instead of COMPLETE. Gate discipline is mandatory.
 
-**HARD CONSTRAINTS (enforced by code before you are invoked):**
-- Required review gates must be completed — if any are pending, you will not be called
-- Ghost/duplicate receipts are auto-rejected before reaching you
-- Terminal availability is auto-checked
+**HARD CONSTRAINTS (enforced by code before you are invoked — you will never see these):**
+- Ghost/duplicate receipts → WAIT (auto-handled)
+- Required review gates not complete → WAIT (hard block)
+- All terminals busy → WAIT (auto-checked)
+- Unmet PR dependencies (pr_progress.blocked non-empty) → WAIT (auto-blocked)
+- Worker failure with retry budget remaining (retry_count < 3) → DISPATCH (auto-retry)
+- CI failure in receipt (ci_status=failure + ci_failure_check) → DISPATCH (auto-fix)
+- Feature complete (100% + no blockers + all gates passed) → COMPLETE (auto-detected)
 
-Your job is soft decisions only: quality judgment, risk assessment, next task planning.
-You will never be asked to handle these hard constraints — they are pre-filtered.
+**You handle ONLY soft decisions:**
+1. Quality judgment: "Is the work good enough to proceed?"
+2. Escalation: "Does a human need to see this?"
+3. Planning: "What task should be dispatched next?"
+4. Scope: "Did the worker do something unexpected?"
 
 Output ONLY a valid JSON object (no markdown, no prose before or after):
 {_DECISION_SCHEMA}

@@ -1,0 +1,125 @@
+{
+  "name": "worker_failure_auto_retry",
+  "level": 1,
+  "mode": "both",
+  "description": "Worker reports failure on first attempt (retry_count=1, still within 3-attempt budget). T0 should DISPATCH the same task for retry — this is deterministic, no LLM judgment needed.",
+  "state": {
+    "schema_version": "2.0",
+    "generated_at": "2026-04-10T08:00:00+00:00",
+    "terminals": {
+      "T1": {
+        "status": "idle",
+        "track": "A",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T2": {
+        "status": "idle",
+        "track": "B",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      },
+      "T3": {
+        "status": "idle",
+        "track": "C",
+        "ready": true,
+        "current_dispatch": null,
+        "lease_state": "idle"
+      }
+    },
+    "queues": {
+      "pending_count": 1,
+      "active_count": 0,
+      "completed_last_hour": 0,
+      "conflict_count": 0
+    },
+    "tracks": {
+      "A": {
+        "current_gate": "gate_implementation",
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "B": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      },
+      "C": {
+        "current_gate": null,
+        "status": "idle",
+        "active_dispatch_id": null,
+        "health": "healthy"
+      }
+    },
+    "pr_progress": {
+      "feature_name": "F39",
+      "total": 4,
+      "completed": 0,
+      "in_progress": ["PR-1"],
+      "blocked": [],
+      "completion_pct": 0,
+      "has_blocking_drift": false
+    },
+    "open_items": {
+      "open_count": 0,
+      "blocker_count": 0,
+      "top_blockers": []
+    },
+    "active_work": [],
+    "recent_receipts": [],
+    "git_context": {
+      "branch": "feat/f39-headless-t0-benchmark",
+      "last_5_commits": [
+        "a65a05e feat(f39): gate locks and fixture mode tagging"
+      ],
+      "uncommitted_changes": false
+    },
+    "system_health": {
+      "status": "healthy",
+      "db_initialized": true,
+      "uptime_seconds": 900
+    }
+  },
+  "receipt": {
+    "event_type": "task_failed",
+    "timestamp": "2026-04-10T07:55:00+00:00",
+    "terminal": "T1",
+    "track": "A",
+    "type": "F39",
+    "gate": "gate_implementation",
+    "status": "failure",
+    "retry_count": 1,
+    "dispatch_id": "20260410-070000-f39-impl-A-attempt1",
+    "report_path": null,
+    "title": "F39 implementation attempt 1 failed",
+    "note": "Tool execution error — claude CLI exited non-zero. No changes made.",
+    "quality_advisory": {
+      "version": "1.0",
+      "summary": {
+        "warning_count": 0,
+        "blocking_count": 1,
+        "risk_score": 0.5
+      },
+      "t0_recommendation": {
+        "decision": "hold",
+        "reason": "Worker failed. Retry dispatch within budget.",
+        "suggested_dispatches": [],
+        "open_items": []
+      }
+    },
+    "cqs": null
+  },
+  "quality_advisory": {
+    "decision": "hold",
+    "risk_score": 0.5
+  },
+  "expected": {
+    "decision": "DISPATCH",
+    "receipt_valid": true,
+    "reason_hint": "status=failure, retry_count=1 < 3. Deterministic auto-retry — dispatch same task again."
+  }
+}

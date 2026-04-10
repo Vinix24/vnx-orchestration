@@ -395,6 +395,23 @@ def _code_prefilter(receipt: dict[str, Any], state: dict[str, Any]) -> str | Non
 
         return "COMPLETE"
 
+    # Check 9: Dependency block — unmet PR dependencies prevent progress
+    pr_progress = state.get("pr_progress", {})
+    if pr_progress.get("blocked", []):
+        return "WAIT"  # Hard block — dependent PRs not yet merged
+
+    # Check 7: Worker failure auto-retry within budget
+    if receipt.get("status") == "failure" and receipt.get("retry_count", 0) < 3:
+        return "DISPATCH"  # Re-dispatch same task within retry budget
+
+    # Check 10: CI failure detected in receipt — auto-dispatch fix task
+    if (
+        receipt.get("status") == "success"
+        and receipt.get("ci_status") == "failure"
+        and receipt.get("ci_failure_check")
+    ):
+        return "DISPATCH"  # CI fix task needed
+
     # Don't fast-path if receipt claims file changes but state has no git evidence
     files_claimed = receipt.get("files_modified") or (
         receipt.get("provenance", {}).get("diff_summary", {}).get("files_changed", 0)
