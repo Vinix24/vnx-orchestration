@@ -358,7 +358,7 @@ def _code_prefilter(receipt: dict[str, Any], state: dict[str, Any]) -> str | Non
     if terminals and all(not t.get("ready", False) for t in terminals.values()):
         return "WAIT"
 
-    # Rule 7: Feature complete
+    # Rule 7: Feature complete — but only when all required review gates have results
     pr = state.get("pr_progress", {})
     oi = state.get("open_items", {})
     if (
@@ -366,7 +366,29 @@ def _code_prefilter(receipt: dict[str, Any], state: dict[str, Any]) -> str | Non
         and oi.get("blocker_count", 0) == 0
         and state.get("queues", {}).get("pending_count", 0) == 0
     ):
+        # Check for incomplete review gates (any gate null, "requested", or "queued")
+        review_gates = state.get("review_gates", {})
+        pending_gates = []
+        for pr_gates in review_gates.values():
+            if not isinstance(pr_gates, dict):
+                continue
+            for gate_val in pr_gates.values():
+                if gate_val is None:
+                    pending_gates.append(gate_val)
+                elif isinstance(gate_val, dict) and gate_val.get("status") in ("requested", "queued"):
+                    pending_gates.append(gate_val)
+        if pending_gates:
+            return None  # Has pending gates — let LLM decide WAIT
+
         return "COMPLETE"
+
+    # Don't fast-path if receipt claims file changes but state has no git evidence
+    files_claimed = receipt.get("files_modified") or (
+        receipt.get("provenance", {}).get("diff_summary", {}).get("files_changed", 0)
+    )
+    git_evidence = receipt.get("provenance", {}).get("git_ref")
+    if files_claimed and not git_evidence:
+        return None  # Needs LLM verification — unverified file claims
 
     return None  # Needs LLM judgment
 

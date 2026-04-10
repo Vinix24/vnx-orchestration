@@ -46,18 +46,22 @@ Process the receipt above. Apply these 5 rules in order:
 
 1. **risk ≤ 0.3 + success + work pending** → DISPATCH next task
    *(why: clean work should proceed without delay)*
+   **EXCEPTION:** If the receipt claims specific file changes (note mentions file edits/commits, or files_modified is non-empty), you MUST verify at least one claim against git_context before dispatching — even at risk 0. If the git log shows no matching new commit, the claim is unverified → REJECT instead.
 
 2. **risk 0.3–0.8** → DISPATCH follow-up audit to T3
    *(why: elevated risk needs a second look before proceeding)*
 
-3. **risk > 0.8 OR blocking findings OR status=failure** → REJECT
-   *(why: hard failures must be re-dispatched, not carried forward)*
+3a. **risk > 0.8 AND (status=failure OR blocking_count > 0)** → REJECT
+    *(why: hard failures must be re-dispatched, not carried forward)*
+3b. **risk > 0.8 AND status=success** → ESCALATE (contradictory signals)
+    *(why: clean surface + high risk advisory is a contradiction — human judgment needed)*
 
 4. **architectural change OR new dependency OR policy violation** → ESCALATE
    *(why: these require human judgment, not autonomous decisions)*
 
-5. **default with no pending work OR all gates passed** → COMPLETE
+5. **default with no pending work AND all required review gates have results** → COMPLETE
    *(why: when nothing remains to dispatch, close the PR)*
+   **EXCEPTION:** If any review gate (codex_gate, gemini_review, ci_status) is absent (null) or in status "requested"/"queued", → WAIT instead of COMPLETE. Gate discipline is mandatory.
 
 Output ONLY a valid JSON object (no markdown, no prose before or after):
 {_DECISION_SCHEMA}

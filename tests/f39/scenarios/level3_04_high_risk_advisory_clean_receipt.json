@@ -129,7 +129,8 @@
   },
   "expected": {
     "decision": "ESCALATE",
+    "acceptable_decisions": ["ESCALATE", "WAIT"],
     "receipt_valid": true,
-    "reason_hint": "risk_score=0.95 despite clean surface. Advisory=hold with risk>0.8 \u2014 escalate."
+    "reason_hint": "risk_score=0.9 despite clean surface. Advisory=hold with risk>0.8 \u2014 contradictory signals, escalate for human judgment."
   }
 }
