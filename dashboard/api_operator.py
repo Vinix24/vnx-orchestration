@@ -950,3 +950,203 @@ def _operator_get_governance_digest(digest_path: Path | None = None) -> dict:
         "degraded_reasons": degraded_reasons,
         "data": data or {},
     }
+
+
+# ---------- Session History / Reports API ----------
+
+# Filename pattern: YYYYMMDD-HHMMSS-{TRACK}-{slug}.md
+# Track-to-terminal mapping (inverse of TERMINAL_TRACK_MAP)
+_TRACK_TO_TERMINAL = {v: k for k, v in TERMINAL_TRACK_MAP.items()}
+# HEADLESS track maps to T0
+_TRACK_TO_TERMINAL["HEADLESS"] = "T0"
+
+
+def _parse_report_filename(filename: str) -> dict:
+    """Parse metadata from a unified report filename."""
+    stem = filename
+    if stem.endswith(".md"):
+        stem = stem[:-3]
+    parts = stem.split("-", 3)
+    result: dict = {
+        "filename": filename,
+        "timestamp": None,
+        "track": None,
+        "terminal": None,
+        "slug": None,
+    }
+    if len(parts) >= 3:
+        date_part = parts[0]   # YYYYMMDD
+        time_part = parts[1]   # HHMMSS
+        track_part = parts[2]  # track or "HEADLESS"
+        slug_part = parts[3] if len(parts) > 3 else ""
+
+        result["track"] = track_part
+        result["terminal"] = _TRACK_TO_TERMINAL.get(track_part)
+        result["slug"] = slug_part
+
+        try:
+            dt = datetime.strptime(f"{date_part}{time_part}", "%Y%m%d%H%M%S")
+            result["timestamp"] = dt.replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            pass
+
+    return result
+
+
+def _parse_report_metadata(path: Path) -> dict:
+    """Read first 20 lines of a report file to extract embedded metadata."""
+    meta: dict = {
+        "dispatch_id": None,
+        "pr_id": None,
+        "status": None,
+        "gate": None,
+        "title": None,
+        "auto_generated": False,
+    }
+    try:
+        lines = []
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= 20:
+                    break
+                lines.append(line.rstrip())
+
+        for line in lines:
+            if line.startswith("# "):
+                meta["title"] = line[2:].strip()
+            elif line.startswith("**Dispatch ID**:"):
+                meta["dispatch_id"] = line.split(":", 1)[1].strip()
+            elif line.startswith("**PR**:"):
+                meta["pr_id"] = line.split(":", 1)[1].strip()
+            elif line.startswith("**Status**:"):
+                meta["status"] = line.split(":", 1)[1].strip()
+            elif line.startswith("**Gate**:"):
+                meta["gate"] = line.split(":", 1)[1].strip()
+
+        # Auto-generated reports typically have dispatch_id embedded
+        meta["auto_generated"] = meta["dispatch_id"] is not None
+
+    except OSError:
+        pass
+
+    return meta
+
+
+def _operator_get_reports(params: dict[str, list[str]]) -> dict:
+    """GET /api/operator/reports?limit=50&offset=0&terminal=T1&track=A"""
+    reports_dir = _VNX_DATA_DIR / "unified_reports"
+
+    limit = int((params.get("limit") or ["50"])[0])
+    offset = int((params.get("offset") or ["0"])[0])
+    terminal_filter = (params.get("terminal") or [None])[0]
+    track_filter = (params.get("track") or [None])[0]
+
+    if not reports_dir.exists():
+        return {"reports": [], "total": 0, "limit": limit, "offset": offset}
+
+    # Collect all .md files sorted by mtime descending
+    all_files = sorted(
+        reports_dir.glob("*.md"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    # Build report objects with parsed metadata
+    reports = []
+    for path in all_files:
+        parsed = _parse_report_filename(path.name)
+        meta = _parse_report_metadata(path)
+
+        # Apply filters before slicing
+        if terminal_filter and parsed.get("terminal") != terminal_filter:
+            continue
+        if track_filter and parsed.get("track") != track_filter:
+            continue
+
+        report = {**parsed, **meta}
+        reports.append(report)
+
+    total = len(reports)
+    page = reports[offset: offset + limit]
+
+    return {"reports": page, "total": total, "limit": limit, "offset": offset}
+
+
+def _operator_get_report_content(filename: str) -> dict | None:
+    """Return full markdown content for a specific report file, or None if not found."""
+    # Sanitise: only allow plain filenames (no path traversal)
+    safe_name = Path(filename).name
+    if safe_name != filename:
+        return None
+
+    reports_dir = _VNX_DATA_DIR / "unified_reports"
+    path = reports_dir / safe_name
+
+    if not path.exists() or not path.is_file():
+        return None
+
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return {
+            "filename": safe_name,
+            "content": content,
+            "size_bytes": path.stat().st_size,
+        }
+    except OSError:
+        return None
+
+
+# ---------- Agent Name Mapping API ----------
+
+_TERMINAL_AGENT_DEFAULTS = {
+    "T0": {"name": "Orchestrator", "role": "t0-orchestrator", "track": None},
+    "T1": {"name": "Backend Developer", "role": "backend-developer", "track": "A"},
+    "T2": {"name": "Test Engineer", "role": "test-engineer", "track": "B"},
+    "T3": {"name": "Architect", "role": "architect", "track": "C"},
+}
+
+
+def _operator_get_agents() -> dict:
+    """GET /api/operator/agents — terminal ID to agent name/role mapping."""
+    agents = []
+
+    for terminal_id in ("T0", "T1", "T2", "T3"):
+        defaults = _TERMINAL_AGENT_DEFAULTS[terminal_id]
+
+        # Resolve adapter from environment (VNX_ADAPTER_T1, etc.)
+        adapter_env_key = f"VNX_ADAPTER_{terminal_id}"
+        adapter = os.environ.get(adapter_env_key, "tmux")
+
+        # Attempt to infer actual role from the most recent active dispatch for this terminal
+        role = defaults["role"]
+        name = defaults["name"]
+
+        active_dispatch_dir = DISPATCHES_DIR / "active"
+        if active_dispatch_dir.exists():
+            for dispatch_file in sorted(
+                active_dispatch_dir.glob("*.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            ):
+                try:
+                    text = dispatch_file.read_text(encoding="utf-8", errors="replace")
+                    header = _parse_dispatch_header(text)
+                    if header.get("terminal") == terminal_id:
+                        if header.get("role"):
+                            role = header["role"]
+                            # Convert role slug to display name
+                            name = role.replace("-", " ").title()
+                        break
+                except Exception:
+                    pass
+
+        entry: dict = {
+            "terminal": terminal_id,
+            "name": name,
+            "role": role,
+            "track": defaults["track"],
+            "adapter": adapter,
+        }
+        agents.append(entry)
+
+    return {"agents": agents}
