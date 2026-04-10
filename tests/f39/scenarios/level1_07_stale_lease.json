@@ -53,6 +53,7 @@
   "expected": {
     "decision": "ACCEPT",
     "receipt_accepted": true,
-    "should_cleanup_lease": true
+    "should_cleanup_lease": true,
+    "_note": "Model may say REJECT due to stale lease concern; ACCEPT is preferred since work is valid and lease cleanup is the right action"
   }
 }

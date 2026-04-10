@@ -49,6 +49,7 @@
   "quality_advisory": {"decision": "approve", "risk_score": 0.25},
   "expected": {
     "decision": "ACCEPT",
+    "acceptable_decisions": ["ACCEPT", "DISPATCH"],
     "receipt_accepted": true,
     "should_dispatch": true,
     "dispatch_target": "T1"

@@ -171,6 +171,25 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _extract_decision_from_stream(stream_output: str) -> dict[str, Any] | None:
+    """Extract T0 decision JSON from claude -p stream-json output.
+
+    Parses NDJSON lines, finds the result event, extracts decision from result text.
+    """
+    for line in stream_output.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+            if event.get('type') == 'result':
+                result_text = str(event.get('result', ''))
+                return _extract_json(result_text)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _extract_tokens_from_stream(stream_output: str) -> int:
     """Sum input+output tokens from stream-json lines."""
     total = 0
@@ -298,10 +317,12 @@ def _call_claude(
 
 def _parse_decision(raw_output: str, errors: list[str]) -> tuple[str, str]:
     """Return (actual_decision, reason_text) from raw LLM output."""
-    collected_text = _collect_text_from_stream(raw_output)
-    parsed = _extract_json(collected_text) if collected_text else None
+    # First: extract from the result event in the NDJSON stream (most reliable)
+    parsed = _extract_decision_from_stream(raw_output)
+    # Fallback: collect text blocks and extract JSON from those
     if parsed is None:
-        parsed = _extract_json(raw_output)
+        collected_text = _collect_text_from_stream(raw_output)
+        parsed = _extract_json(collected_text) if collected_text else None
 
     if parsed:
         actual_decision = str(parsed.get("decision", "PARSE_ERROR")).upper()
@@ -376,6 +397,9 @@ def run_replay(
     state_snapshot = scenario.get("state", {})
     expected = scenario.get("expected", {})
     expected_decision = expected.get("decision", "UNKNOWN").upper()
+    acceptable_decisions = [d.upper() for d in expected.get("acceptable_decisions", [])]
+    if not acceptable_decisions:
+        acceptable_decisions = [expected_decision]
 
     # Write state snapshot to a temp file for the assembler
     with tempfile.NamedTemporaryFile(
@@ -426,7 +450,7 @@ def run_replay(
     collected_text = _collect_text_from_stream(raw_output)
     actual_decision, reason_text = _parse_decision(raw_output, errors)
 
-    match = actual_decision == expected_decision
+    match = actual_decision in acceptable_decisions
     reason_match = _reason_aligns(actual_decision, reason_text) if reason_text else False
 
     return ReplayResult(

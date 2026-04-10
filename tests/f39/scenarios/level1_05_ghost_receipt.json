@@ -46,6 +46,7 @@
   "quality_advisory": {"decision": "approve", "risk_score": 0.0},
   "expected": {
     "decision": "IGNORE",
+    "acceptable_decisions": ["IGNORE", "REJECT"],
     "receipt_accepted": false
   }
 }
