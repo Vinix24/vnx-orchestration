@@ -314,3 +314,38 @@ export interface GovernanceDigestEnvelope {
   degraded_reasons: string[];
   data: GovernanceDigestData;
 }
+
+// ===== Reports & Agents Types =====
+
+export interface Report {
+  filename: string;
+  timestamp: string;
+  track: string;
+  terminal: string;
+  dispatch_id: string;
+  pr_id: string;
+  status: string;
+  title: string;
+  auto_generated: boolean;
+  slug: string;
+}
+
+export interface ReportsEnvelope {
+  reports: Report[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface Agent {
+  terminal: string;
+  name: string;
+  role: string;
+  track: string | null;
+  adapter: string;
+}
+
+export interface AgentsEnvelope {
+  agents: Agent[];
+  total: number;
+}
