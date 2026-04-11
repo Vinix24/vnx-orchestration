@@ -25,6 +25,76 @@ from headless_context_tracker import HeadlessContextTracker
 logger = logging.getLogger(__name__)
 
 
+def _detect_pending_handover(terminal_id: str, handover_dir: Path) -> Path | None:
+    """Find most recent unprocessed handover for terminal_id.
+
+    Scans handover_dir for files matching *{terminal_id}*ROTATION-HANDOVER*.md
+    that do NOT have a .processed suffix. Returns most recent by mtime, or None.
+    """
+    if not handover_dir.exists():
+        return None
+
+    candidates = [
+        p for p in handover_dir.glob(f"*{terminal_id}*ROTATION-HANDOVER*.md")
+        if not p.name.endswith(".processed")
+    ]
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _build_continuation_prompt(handover_path: Path, original_instruction: str) -> str:
+    """Wrap instruction with handover context for seamless continuation.
+
+    Reads the handover markdown and prepends:
+    - "CONTINUATION: Resumed after context rotation."
+    - Completed work section from handover
+    - Remaining tasks section from handover
+    - Then the original instruction
+    """
+    handover_text = handover_path.read_text()
+
+    # Extract ## Status and ## Remaining Tasks sections from handover markdown
+    completed_section = ""
+    remaining_section = ""
+
+    lines = handover_text.splitlines()
+    current_section: str | None = None
+    section_lines: list[str] = []
+
+    for line in lines:
+        if line.startswith("## Status"):
+            if current_section == "status":
+                completed_section = "\n".join(section_lines).strip()
+            current_section = "status"
+            section_lines = []
+        elif line.startswith("## Remaining Tasks"):
+            if current_section == "status":
+                completed_section = "\n".join(section_lines).strip()
+            current_section = "remaining"
+            section_lines = []
+        elif line.startswith("## ") and current_section == "remaining":
+            remaining_section = "\n".join(section_lines).strip()
+            current_section = None
+            section_lines = []
+        else:
+            section_lines.append(line)
+
+    if current_section == "status":
+        completed_section = "\n".join(section_lines).strip()
+    elif current_section == "remaining":
+        remaining_section = "\n".join(section_lines).strip()
+
+    header = (
+        "CONTINUATION: Resumed after context rotation.\n\n"
+        f"## Completed Work (from handover)\n{completed_section}\n\n"
+        f"## Remaining Tasks (from handover)\n{remaining_section}\n\n"
+        "---\n\n"
+    )
+    return header + original_instruction
+
+
 def _inject_skill_context(terminal_id: str, instruction: str, role: str | None = None) -> str:
     """Prepend skill/terminal CLAUDE.md content to instruction for context.
 
@@ -134,6 +204,17 @@ def deliver_via_subprocess(
 
     Returns True on success, False on failure.
     """
+    # Detect pending handover and wrap instruction for seamless continuation
+    project_root = Path(__file__).resolve().parents[2]
+    handover_dir = project_root / ".vnx-data" / "rotation_handovers"
+    pending_handover = _detect_pending_handover(terminal_id, handover_dir)
+    if pending_handover is not None:
+        logger.info(
+            "deliver_via_subprocess: pending handover found for %s: %s",
+            terminal_id, pending_handover,
+        )
+        instruction = _build_continuation_prompt(pending_handover, instruction)
+
     # Inject skill/terminal CLAUDE.md as skill context for headless agents
     instruction = _inject_skill_context(terminal_id, instruction, role=role)
 
@@ -213,6 +294,20 @@ def deliver_via_subprocess(
     if tracker.should_rotate:
         _write_rotation_handover(terminal_id, dispatch_id, tracker)
         return False
+
+    # Mark handover as processed after successful delivery (not rotation)
+    if success and pending_handover is not None and pending_handover.exists():
+        processed_path = pending_handover.with_suffix(pending_handover.suffix + ".processed")
+        try:
+            pending_handover.rename(processed_path)
+            logger.info(
+                "deliver_via_subprocess: handover marked processed: %s",
+                processed_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "deliver_via_subprocess: failed to mark handover processed: %s", exc
+            )
 
     return success
 
