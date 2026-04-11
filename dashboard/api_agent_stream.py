@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from http import HTTPStatus
@@ -95,6 +96,10 @@ def handle_agent_stream_archive_list(handler: "BaseHTTPRequestHandler", terminal
         _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": f"Invalid terminal: {terminal}"})
         return
 
+    if not re.match(r'^[a-zA-Z0-9_-]+$', terminal):
+        _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": "Invalid terminal"})
+        return
+
     archive_dir = _store.archive_dir(terminal)
     if not archive_dir.exists():
         _send_json(handler, HTTPStatus.OK, [])
@@ -117,6 +122,14 @@ def handle_agent_stream_archive(
     """Return all events for a specific archived dispatch."""
     if terminal not in VALID_TERMINALS:
         _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": f"Invalid terminal: {terminal}"})
+        return
+
+    if not re.match(r'^[a-zA-Z0-9_-]+$', terminal):
+        _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": "Invalid terminal"})
+        return
+
+    if not re.match(r'^[a-zA-Z0-9_-]+$', dispatch_id):
+        _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": "Invalid dispatch_id"})
         return
 
     archive_file = _store.archive_dir(terminal) / f"{dispatch_id}.ndjson"
