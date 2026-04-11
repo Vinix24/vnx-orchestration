@@ -154,6 +154,16 @@ def trigger_headless_t0(
         _LOG.error("context_assembler failed: %s", exc)
         return
 
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+    try:
+        from decision_parser import parse_decision  # noqa: PLC0415
+        from decision_executor import execute_decision, reset_cycle_counter  # noqa: PLC0415
+    except ImportError as exc:
+        _LOG.error("Cannot import decision_parser/executor: %s", exc)
+        return
+
+    reset_cycle_counter()
+
     try:
         result = subprocess.run(
             ["claude", "-p", "--output-format", "stream-json", "--verbose", prompt],
@@ -165,7 +175,20 @@ def trigger_headless_t0(
         if result.returncode != 0:
             _LOG.warning("claude exited %d: %s", result.returncode, result.stderr[:200])
         else:
-            _LOG.info("Headless T0 completed (reason=%s)", reason)
+            raw_stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
+            decision_type, parsed = parse_decision(raw_stdout)
+            _LOG.info("T0 decision: %s", decision_type)
+            if parsed and not dry_run:
+                status = execute_decision(parsed, reason, state_dir=state_dir)
+                _LOG.info("Decision executed: %s", status)
+            elif parsed and dry_run:
+                _LOG.info(
+                    "[dry-run] Would execute: %s → %s",
+                    decision_type,
+                    parsed.get("dispatch_target", "N/A"),
+                )
+            else:
+                _LOG.info("Headless T0 completed (reason=%s, no parsed decision)", reason)
     except subprocess.TimeoutExpired:
         _LOG.error("Headless T0 timed out after %ds (reason=%s)", _T0_TIMEOUT, reason)
     except FileNotFoundError:

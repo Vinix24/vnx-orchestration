@@ -142,6 +142,8 @@ from api_operator import (  # noqa: E402
 
 from api_agent_stream import (  # noqa: E402
     handle_agent_stream,
+    handle_agent_stream_archive,
+    handle_agent_stream_archive_list,
     handle_agent_stream_status,
 )
 
@@ -281,6 +283,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if path == "/api/agent-stream/status":
             handle_agent_stream_status(self)
             return
+
+        if path.startswith("/api/agent-stream/") and path.endswith("/archives"):
+            terminal = path[len("/api/agent-stream/"):-len("/archives")]
+            handle_agent_stream_archive_list(self, terminal)
+            return
+
+        _ARCHIVE_PREFIX = "/api/agent-stream/"
+        _ARCHIVE_INFIX = "/archive/"
+        if path.startswith(_ARCHIVE_PREFIX) and _ARCHIVE_INFIX in path:
+            rest = path[len(_ARCHIVE_PREFIX):]
+            if _ARCHIVE_INFIX in rest:
+                terminal, dispatch_id = rest.split(_ARCHIVE_INFIX, 1)
+                handle_agent_stream_archive(self, terminal, dispatch_id)
+                return
 
         if path.startswith("/api/agent-stream/"):
             terminal = path[len("/api/agent-stream/"):]
