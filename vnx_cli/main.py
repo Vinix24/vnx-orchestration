@@ -6,6 +6,8 @@ import sys
 from vnx_cli import __version__
 from vnx_cli.commands.init_cmd import vnx_init
 from vnx_cli.commands.doctor import vnx_doctor
+from vnx_cli.commands.status import vnx_status
+from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,29 +50,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_doctor.set_defaults(func=vnx_doctor)
 
-    # status (stub — wired up in later PRs)
+    # status
     p_status = subparsers.add_parser(
         "status", help="Show current dispatch and agent status"
     )
-    p_status.set_defaults(func=_stub_status)
-
-    # dispatch-agent (stub — wired up in later PRs)
-    p_dispatch = subparsers.add_parser(
-        "dispatch-agent", help="Send a dispatch to an agent terminal"
+    p_status.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Emit results as JSON instead of human-readable text"
     )
-    p_dispatch.set_defaults(func=_stub_dispatch)
+    p_status.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="Project directory to inspect (default: current dir)",
+    )
+    p_status.set_defaults(func=vnx_status)
+
+    # dispatch-agent
+    p_dispatch = subparsers.add_parser(
+        "dispatch-agent", help="Send a dispatch to a named agent terminal"
+    )
+    p_dispatch.add_argument(
+        "--agent", required=True, metavar="NAME",
+        help="Agent name (must match a directory under agents/)",
+    )
+    p_dispatch.add_argument(
+        "--instruction", required=True, metavar="TEXT",
+        help="Dispatch instruction to send to the agent",
+    )
+    p_dispatch.add_argument(
+        "--model", default="sonnet", metavar="MODEL",
+        help="Model alias to use (default: sonnet)",
+    )
+    p_dispatch.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="Project directory (default: current dir)",
+    )
+    p_dispatch.set_defaults(func=vnx_dispatch_agent)
 
     return parser
-
-
-def _stub_status(args: argparse.Namespace) -> int:
-    print("vnx status: not yet implemented — coming in a future PR.")
-    return 0
-
-
-def _stub_dispatch(args: argparse.Namespace) -> int:
-    print("vnx dispatch-agent: not yet implemented — coming in a future PR.")
-    return 0
 
 
 def main() -> None:
