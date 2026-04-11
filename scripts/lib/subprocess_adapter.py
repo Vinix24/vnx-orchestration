@@ -181,6 +181,7 @@ class SubprocessAdapter:
 
         cmd = [
             "claude",
+            "--dangerously-skip-permissions",
             "-p",
             "--output-format", "stream-json",
             "--verbose",

@@ -40,10 +40,31 @@ Usage (business folder scope with subfolder):
 
 from __future__ import annotations
 
+import os
 import os.path
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import FrozenSet, List, Optional
+
+# ---------------------------------------------------------------------------
+# Delegation to governance_profiles (thin wrapper)
+# ---------------------------------------------------------------------------
+# governance_profiles is the canonical source for profile config.
+# folder_scope re-exports resolve_profile and load_scope_config for backward
+# compat, and uses them internally to map ScopeType from config rather than
+# from a hardcoded enum.
+try:
+    _lib_dir = os.path.dirname(os.path.abspath(__file__))
+    if _lib_dir not in sys.path:
+        sys.path.insert(0, _lib_dir)
+    from governance_profiles import (  # noqa: F401  (re-export)
+        resolve_profile,
+        load_scope_config,
+    )
+    _GOVERNANCE_PROFILES_AVAILABLE = True
+except ImportError:
+    _GOVERNANCE_PROFILES_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------

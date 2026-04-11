@@ -1,0 +1,31 @@
+# VNX Governance Profiles
+# Defines review profiles and folder-scope mappings.
+# Built-in profiles (default, light, minimal) are always available and can be overridden here.
+
+profiles:
+  default:
+    review_mode: full
+    required_gates: [codex_gate, gemini_review, ci]
+    max_pr_lines: 300
+    auto_merge: false
+
+  light:
+    review_mode: exception_only
+    required_gates: [ci]
+    max_pr_lines: 500
+    auto_merge: false
+
+  minimal:
+    review_mode: none
+    required_gates: []
+    max_pr_lines: 1000
+    auto_merge: true
+
+# Map glob patterns to profile names.
+# Patterns are evaluated in order; first match wins.
+# Use "*" as a catch-all fallback.
+scopes:
+  "agents/*": light
+  "scripts/": default
+  "dashboard/": default
+  "*": default
