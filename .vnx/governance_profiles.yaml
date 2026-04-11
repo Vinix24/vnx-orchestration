@@ -25,6 +25,9 @@ profiles:
 # Patterns are evaluated in order; first match wins.
 # Use "*" as a catch-all fallback.
 scopes:
+  "agents/blog-writer": light
+  "agents/linkedin-writer": light
+  "agents/research-analyst": light
   "agents/*": light
   "scripts/": default
   "dashboard/": default
