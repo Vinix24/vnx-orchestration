@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
+from headless_context_tracker import HeadlessContextTracker
 
 logger = logging.getLogger(__name__)
 
@@ -171,16 +172,20 @@ def deliver_via_subprocess(
         )
         heartbeat_thread.start()
 
+    tracker = HeadlessContextTracker()
+    state_dir = _default_state_dir()
+
     success = False
     try:
         for _event in adapter.read_events_with_timeout(
             terminal_id,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
+            context_tracker=tracker,
+            state_dir=state_dir,
         ):
             pass
         success = True
-        return True
     except Exception:
         logger.exception("deliver_via_subprocess failed for %s", terminal_id)
         return False
@@ -202,6 +207,46 @@ def deliver_via_subprocess(
             dispatch_id,
             cwd=str(agent_cwd) if agent_cwd is not None else None,
         )
+
+    # Handle context rotation: write handover markdown and return False so
+    # deliver_with_recovery treats this as a graceful stop, not a failure.
+    if tracker.should_rotate:
+        _write_rotation_handover(terminal_id, dispatch_id, tracker)
+        return False
+
+    return success
+
+
+def _write_rotation_handover(
+    terminal_id: str,
+    dispatch_id: str,
+    tracker: "HeadlessContextTracker",
+) -> None:
+    """Write a rotation handover markdown file to .vnx-data/rotation_handovers/."""
+    project_root = Path(__file__).resolve().parents[2]
+    handover_dir = project_root / ".vnx-data" / "rotation_handovers"
+    try:
+        handover_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"{timestamp}-{terminal_id}-ROTATION-HANDOVER.md"
+        snapshot = tracker.snapshot()
+        content = (
+            f"# {terminal_id} Context Rotation Handover\n"
+            f"**Timestamp**: {timestamp}\n"
+            f"**Context Used**: {snapshot['context_used_pct']}%\n"
+            f"**Dispatch-ID**: {dispatch_id}\n"
+            "## Status\n"
+            "in-progress\n"
+            "## Remaining Tasks\n"
+            "[continuation needed]\n"
+        )
+        (handover_dir / filename).write_text(content)
+        logger.info(
+            "_write_rotation_handover: handover written to %s",
+            handover_dir / filename,
+        )
+    except Exception as exc:
+        logger.warning("_write_rotation_handover: failed to write handover: %s", exc)
 
 
 def _write_receipt(
