@@ -68,7 +68,7 @@ A **projected surface** is a derived view. It is computed from one or more canon
 | **P-3** | `progress_state.yaml` | `.vnx-data/state/` | C-4 (receipts), C-3 (dispatch filesystem) | `update_progress_state.py`, `receipt_processor` | Must update within 5s of receipt arrival |
 | **P-4** | `PR_QUEUE.md` | Project root | P-2 (`pr_queue_state.json`) | Queue regeneration scripts | Same as P-2 |
 | **P-5** | `dashboard_status.json` | `.vnx-data/state/` | P-1, P-2, P-3 (all projections) | Dashboard generators | Advisory — no staleness contract |
-| **P-6** | `t0_brief.json` | `.vnx-data/state/` | P-2, P-3, C-3, C-4 | `generate_t0_brief.sh` | Advisory — refreshed on demand |
+| **P-6** | `t0_brief.json` | `.vnx-data/state/` | P-2, P-3, C-3, C-4 | `build_t0_state.py` | Advisory — refreshed on demand |
 
 ### 2.3 Derivation Graph
 

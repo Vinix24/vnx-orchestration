@@ -234,7 +234,6 @@ stop_all() {
     # receipt_notifier.sh removed - replaced by receipt_processor_v4.sh (Phase 1B/1C)
     # ack_dispatcher_v2 is deprecated
     # stop_process "ack_dispatcher" "ack_dispatcher_v2.sh"
-    stop_process "dispatch_ack_watcher" "dispatch_ack_watcher.sh"
     stop_process "heartbeat_ack_monitor" "heartbeat_ack_monitor.py"
     stop_process "queue_watcher" "queue_popup_watcher.sh"
     stop_process "dashboard" "generate_valid_dashboard.sh"

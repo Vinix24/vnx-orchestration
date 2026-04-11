@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-03-28
+**Last Updated**: 2026-04-10
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -132,7 +132,7 @@ VNX uses **one feature worktree per feature/fix** as the standard development mo
 
 ### Attention Model (`terminal_state.json`)
 
-Each terminal entry carries three attention fields computed by `canonical_state_views.py`:
+Each terminal entry carries three attention fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -165,22 +165,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ## Core Components
 
-### 1. Smart Tap V7 (`smart_tap_v7_json_translator.sh`)
-
-**Purpose**: Capture manager blocks and auto-translate JSON ↔ Markdown
-
-**Functionality**:
-- Monitors T0 output for `MANAGER:` blocks
-- Auto-detects JSON vs Markdown format
-- Translates JSON → Markdown for human review
-- Creates dual storage: `.md` + `.json` files
-- Average translation time: 25ms
-
-**Files Created**:
-- `dispatches/queue/{timestamp}-{track}.md` - Human-readable
-- `dispatches/queue/.json/{timestamp}-{track}.json` - Machine-readable
-
-### 2. Dispatcher V8 (`dispatcher_v8_minimal.sh`)
+### 1. Dispatcher V8 (`dispatcher_v8_minimal.sh`)
 
 **Purpose**: Native skill activation and instruction routing (V8.2 - Current Production)
 
@@ -213,7 +198,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Full prompt generation (1500+ tokens)
 - See `core/technical/DISPATCHER_SYSTEM.md` for V7.3 reference
 
-### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`) — Current
+### 3. Heartbeat ACK Monitor (`heartbeat_ack_monitor.py`)
 
 **Purpose**: Acknowledgment receipt processing and timeout management
 
@@ -222,7 +207,6 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Tracks acknowledgment timestamps
 - Manages timeout detection
 - Updates dispatch status
-- Replaces legacy `ack_dispatcher_v2.sh` + `dispatch_ack_watcher.sh`
 
 ### 4. Receipt Processor V4 (`receipt_processor_v4.sh`) - Primary
 
@@ -285,17 +269,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 **Output**: `state/t0_intelligence.ndjson` (rolling window, last 1000 events)
 
-### 9. Unified State Manager (`unified_state_manager_v2.py`)
-
-**Purpose**: Real-time state consolidation
-
-**Functionality**:
-- Consolidates dispatches, receipts, terminal status
-- Updates every 5 seconds
-- Writes to `state/unified_state.ndjson`
-- Powers intelligence aggregator
-
-### 10. VNX Supervisor (`vnx_supervisor_simple.sh`)
+### 9. VNX Supervisor (`vnx_supervisor_simple.sh`)
 
 **Purpose**: Process health monitoring and auto-restart
 
@@ -307,13 +281,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
 
-### 12. T0 Brief Generator (`generate_t0_brief.sh`)
-
-**Purpose**: Build a <2KB “single glance” JSON snapshot for T0 decision-making.
-
-**Output**:
-- `state/t0_brief.json` (authoritative)
-- `state/t0_brief.md` (human view)
+### 11. Dashboard Generator (`generate_valid_dashboard.sh`)
 
 **Purpose**: Real-time system metrics visualization
 
@@ -326,16 +294,6 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 **Output**: `state/dashboard_status.json`
 
-### 13. Queue Popup Watcher (`queue_popup_watcher.sh`)
-
-**Purpose**: Automatic popup for new dispatches
-
-**Functionality**:
-- Monitors queue directory
-- Auto-opens Neovim with dispatch
-- Human review and approval workflow
-- Moves approved dispatches to active/
-
 ---
 
 ## Data Flow
@@ -347,26 +305,20 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 │                  ORCHESTRATION LOOP V8.2                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  1. T0 Creates Dispatch (JSON/Markdown)                         │
-│     └─► MANAGER: {...} block or Markdown template               │
+│  1. T0 Creates Dispatch                                         │
+│     └─► Writes dispatch to dispatches/pending/                  │
 │                                                                  │
-│  2. Smart Tap Captures & Translates                             │
-│     ├─► Detects format (JSON vs MD)                            │
-│     ├─► Translates JSON → Markdown (25ms)                       │
-│     └─► Writes: queue/{id}-{track}.md + .json/{id}.json        │
+│  2. Human Promotes Dispatch                                      │
+│     ├─► Operator reviews pending dispatch                       │
+│     └─► Moves to dispatches/active/ (approval gate)             │
 │                                                                  │
-│  3. Queue Popup Watcher Opens Editor                            │
-│     ├─► Human reviews Markdown dispatch                         │
-│     ├─► Approves by saving and closing                          │
-│     └─► Moves to active/ directory                              │
-│                                                                  │
-│  4. Dispatcher V8 Routes to Terminal                            │
+│  3. Dispatcher V8 Routes to Terminal                            │
 │     ├─► Maps role to native skill (@skill_name)               │
 │     ├─► Gathers intelligence patterns (maintained)             │
 │     ├─► Extracts instruction content                           │
 │     ├─► Sends: skill activation + instruction + receipt        │
 │     ├─► ~200 tokens total (87% reduction from V7)              │
-│     └─► Routes to track-specific terminal                       │
+│     └─► Routes via tmux or subprocess adapter                   │
 │                                                                  │
 │  5. Worker Terminal Receives Task                               │
 │     ├─► Loads compiled prompt                                   │
@@ -563,12 +515,9 @@ Terminal status is determined by receipt-based activity detection.
 
 **Core Processes** (managed by supervisor):
 - `dispatcher.pid` — `dispatcher_v8_minimal.sh`
-- `smart_tap.pid` — `smart_tap_v7_json_translator.sh`
 - `receipt_processor.pid` — `receipt_processor_v4.sh`
 - `heartbeat_ack_monitor.pid` — `heartbeat_ack_monitor.py`
-- `queue_watcher.pid` — `queue_popup_watcher.sh`
 - `dashboard.pid` — `generate_valid_dashboard.sh`
-- `state_manager.pid` — `unified_state_manager_v2.py`
 - `intelligence_daemon.pid` — `intelligence_daemon.py`
 - `recommendations_engine.pid` — `recommendations_engine_daemon.sh`
 - `vnx_supervisor.pid` — self
@@ -592,25 +541,16 @@ ps -axo pid=,command= | grep -F "$VNX_KILL_SCOPE" | grep -F "$fingerprint" | ...
 
 **Purpose**: Comprehensive process cleanup on `vnx stop` or `vnx start` (restart).
 
-**Fingerprints killed** (18 process types):
-- `smart_tap_v7_json_translator.sh`
+**Fingerprints killed** (active process types):
 - `dispatcher_v8_minimal.sh`
 - `receipt_processor_v4.sh`
-- `receipt_notifier.sh`
-- `queue_popup_watcher.sh`
-- `generate_t0_brief.sh`
 - `generate_t0_recommendations.py`
 - `generate_valid_dashboard.sh`
 - `vnx_supervisor_simple.sh`
 - `t0_intelligence_aggregator.py`
 - `intelligence_daemon.py`
-- `unified_state_manager_v2.py`
 - `heartbeat_ack_monitor.py`
-- `dispatch_ack_watcher.sh`
-- `ack_dispatcher_v2.sh`
 - `report_watcher.sh`
-- `report_watcher_shadow.sh`
-- `update_pane_mapping.sh`
 
 Also cleans orphan `fswatch` processes watching `.vnx-data/`.
 
@@ -791,29 +731,22 @@ project-root/
 ├── .claude/vnx-system/              # VNX system code (git-tracked)
 │   ├── bin/vnx                      # CLI entry point
 │   ├── scripts/                     # Active orchestration scripts
-│   │   ├── smart_tap_v7_json_translator.sh
 │   │   ├── dispatcher_v8_minimal.sh    # V8 native skills dispatcher
-│   │   ├── receipt_processor_v4.sh     # + adoption tracking (PR-0)
-│   │   ├── receipt_notifier.sh         # Legacy/fallback
+│   │   ├── receipt_processor_v4.sh     # Receipt processing + T0 delivery
 │   │   ├── report_parser.py
 │   │   ├── append_receipt.py           # Receipt + quality sidecar writer
-│   │   ├── quality_advisory.py         # File size/complexity analysis
-│   │   ├── generate_t0_brief.sh
 │   │   ├── generate_t0_recommendations.py
-│   │   ├── queue_popup_watcher.sh
 │   │   ├── vnx_supervisor_simple.sh
 │   │   ├── pr_queue_manager.py         # PR queue + staging workflow
-│   │   ├── gather_intelligence.py      # + record_pattern_offer/adoption (PR-0)
-│   │   ├── learning_loop.py            # + adoption signal reads, pending_rules queue (PR-0)
-│   │   ├── tag_intelligence.py         # Pairwise/triple tag subsets (PR-3)
-│   │   ├── build_t0_quality_digest.py  # 3-section NDJSON digest (PR-4)
-│   │   ├── conversation_analyzer.py    # Session analytics pipeline (PR-1)
-│   │   ├── check_intelligence_health.py # Includes session count (PR-1)
-│   │   ├── nightly_intelligence_pipeline.sh  # Consolidated 4-phase nightly (PR-4)
-│   │   ├── userpromptsubmit_intelligence_inject_v5.sh   # T0 injection
-│   │   ├── userpromptsubmit_worker_intelligence_inject.sh # T1-T3 injection (PR-2)
+│   │   ├── gather_intelligence.py      # Intelligence aggregation
+│   │   ├── learning_loop.py            # Adoption signals, pending_rules queue
+│   │   ├── tag_intelligence.py         # Pairwise/triple tag subsets
+│   │   ├── build_t0_quality_digest.py  # 3-section NDJSON digest
+│   │   ├── check_intelligence_health.py # Intelligence health check
+│   │   ├── gate_runner.py              # Deterministic gate execution
+│   │   ├── review_gate_manager.py      # Review-gate policy execution
 │   │   ├── commands/                   # Extracted CLI command files
-│   │   │   ├── jump.sh                 # vnx jump <terminal> | --attention (dashboard)
+│   │   │   ├── jump.sh                 # vnx jump <terminal> | --attention
 │   │   │   ├── start.sh
 │   │   │   ├── stop.sh
 │   │   │   ├── doctor.sh
@@ -821,11 +754,14 @@ project-root/
 │   │   │   ├── merge_preflight.sh
 │   │   │   ├── finish_worktree.sh
 │   │   │   ├── recover.sh
-│   │   │   └── regen_settings.sh
+│   │   │   └── headless.sh
 │   │   └── lib/                        # Shared libraries
 │   │       ├── vnx_paths.sh            # Path resolver (cross-project guard)
 │   │       ├── process_lifecycle.sh    # PID-safe process control
-│   │       └── canonical_state_views.py # Sole state projection layer (A-2)
+│   │       ├── runtime_core.py         # Runtime state machine core
+│   │       ├── dispatch_router.py      # Dispatch routing logic
+│   │       ├── subprocess_adapter.py   # Headless subprocess delivery
+│   │       └── subprocess_dispatch.py  # Subprocess dispatch orchestration
 │   │
 │   ├── skills/                      # 18 native skills
 │   │   ├── skills.yaml              # Skill registry
@@ -1010,7 +946,7 @@ python .claude/vnx-system/scripts/pr_queue_manager.py promote <dispatch-id>
 
 ### Notification System
 - **Staging**: Batch-generated PR dispatches (no popup)
-- **Queue**: Promoted dispatches (popup trigger via `queue_popup_watcher.sh`)
+- **Queue**: Promoted dispatches (operator-driven promotion)
 - **Seen Cache**: `state/staging_seen.json` prevents duplicate notifications
 
 ### T0 Decision Tree
@@ -1140,7 +1076,7 @@ The VNX operator dashboard is a read-only projection over `.vnx-data/state/`. No
 **Stack**:
 - Frontend: `dashboard/index.html` — vanilla HTML/JS with Alpine.js/htmx (no build step)
 - Backend: `dashboard/serve_dashboard.py` — Python stdlib HTTP server (port 4173)
-- State source: `.vnx-data/state/` files via `canonical_state_views.py` (A-2)
+- State source: `.vnx-data/state/` files
 - Polling: 5-second auto-refresh
 
 ### Design Constraints (Hard Rules)
@@ -1149,7 +1085,6 @@ The VNX operator dashboard is a read-only projection over `.vnx-data/state/`. No
 - No AI assistant that executes VNX commands (G-D4)
 - No new build toolchain (A-4)
 - `serve_dashboard.py` is the only HTTP server (A-5)
-- `canonical_state_views.py` is the sole state projection layer (A-2)
 
 ### UI Components
 

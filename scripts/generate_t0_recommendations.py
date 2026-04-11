@@ -725,9 +725,6 @@ class RecommendationEngine:
         with open(RECOMMENDATIONS_FILE, 'w') as f:
             json.dump(output, f, indent=2)
 
-        # Also save active conflicts separately for reference
-        with open(ACTIVE_CONFLICTS_FILE, 'w') as f:
-            json.dump(self.active_conflicts, f, indent=2)
 
     def run(self):
         """Main execution flow"""

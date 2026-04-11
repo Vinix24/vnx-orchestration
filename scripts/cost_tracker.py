@@ -619,9 +619,6 @@ def main() -> int:
     receipts, invalid_lines = _load_receipts(receipts_path)
     metrics = build_metrics(receipts, invalid_lines, state_dir, receipts_path)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
     if args.human:
         print(format_human(metrics))
     else:

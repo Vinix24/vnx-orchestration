@@ -865,46 +865,6 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
                 except Exception as exc:
                     _emit("WARN", "quality_oi_item_failed", error=str(exc))
 
-        # ALWAYS write sidecar for receipt processor T0 notification.
-        # T0 needs this to make governance decisions — even "all clean" is signal.
-        try:
-            paths = ensure_env()
-            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
-            sidecar_path = state_dir / "last_quality_summary.json"
-            decision = str(rec.get("decision", "approve"))
-            reason = str(rec.get("reason", ""))
-
-            # Build findings list from advisory checks for T0 visibility.
-            # Each finding: {severity, file, message} — max 10 to keep sidecar lean.
-            findings = []
-            for chk in (advisory.get("checks") or []):
-                sev = chk.get("severity", "info")
-                if sev in ("warning", "blocking"):
-                    findings.append({
-                        "severity": sev,
-                        "file": Path(chk.get("file", "")).name,
-                        "symbol": chk.get("symbol") or None,
-                        "message": chk.get("message", ""),
-                    })
-                if len(findings) >= 10:
-                    break
-
-            sidecar = {
-                "dispatch_id": dispatch_id,
-                "decision": decision,
-                "reason": reason,
-                "counts": counts,
-                "new_item_ids": new_ids,
-                "total_items": len(open_items),
-                "new_items": len(new_ids),
-                "risk_score": advisory.get("summary", {}).get("risk_score", 0),
-                "findings": findings,
-                "timestamp": _utc_now_iso(),
-            }
-            with sidecar_path.open("w", encoding="utf-8") as f:
-                json.dump(sidecar, f, separators=(",", ":"), sort_keys=True)
-        except Exception as exc:
-            _emit("WARN", "quality_sidecar_write_failed", error=str(exc))
 
         return len(new_ids)
 

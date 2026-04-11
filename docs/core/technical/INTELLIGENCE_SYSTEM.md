@@ -1069,7 +1069,7 @@ Replaces self-reported terminal status with objective, calculated quality scores
 
 **Version**: 1.1 (2026-03-07)
 **Schema**: 8.2.0-cqs-advisory-oi
-**Files**: `cqs_calculator.py`, `governance_aggregator.py`, `governance_weekly_report.py`, `open_items_manager.py`
+**Files**: `cqs_calculator.py`, `governance_aggregator.py`, `open_items_manager.py`
 **Full Reference**: `docs/intelligence/GOVERNANCE_MEASUREMENT.md`
 
 ### Why This Exists
@@ -1166,7 +1166,7 @@ spc_alerts (alert_type, metric, scope, observed, limit, severity)
 
 - **Receipt-time**: CQS computed in `append_receipt.py` and `receipt_processor_v4.sh` (C3b)
 - **Nightly**: Phase 2.5 in `conversation_analyzer_nightly.sh`
-- **Weekly**: `governance_weekly_report.py` -> `docs/governance/week_YYYY_WW.md`
+- **Weekly**: governance reports generated via nightly pipeline
 
 ---
 

@@ -235,21 +235,9 @@ class GovernanceDigestRunner:
 
             digest = build_digest(signals)
 
-            output: Dict = {
-                "runner_version": self.RUNNER_VERSION,
-                "state_dir": str(self.state_dir),
-                "interval_seconds": self.interval,
-                "source_records": {
-                    "gate_results": len(gate_results),
-                    "queue_anomalies": len(queue_anomalies),
-                },
-                **digest.to_dict(),
-            }
-
-            self._write_json_atomic(output)
             self.last_run = datetime.now()
             logger.info(
-                "GovernanceDigestRunner: digest written (%d signals, %d recurring patterns)",
+                "GovernanceDigestRunner: processed %d signals, %d recurring patterns",
                 len(signals),
                 len(digest.recurring_patterns),
             )
