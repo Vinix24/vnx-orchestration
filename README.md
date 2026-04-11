@@ -10,7 +10,7 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-Current release: `v0.8.0`
+Current release: `v0.9.0`
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
 ## The Problem
@@ -315,7 +315,7 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 Active development. Priorities shift based on real usage patterns.
 
-- **Headless A/B testing** — run interactive and autonomous side-by-side on the same feature, compare output quality
+- **Headless A/B testing** — run interactive and autonomous side-by-side on the same feature, compare output quality (completed — see [results](docs/research/HEADLESS_AB_TEST_RESULTS.md))
 - **Governance profiles** — configurable review depth per folder/project: full, light, minimal (landed in v0.8.0)
 - **Context rotation package** — extract the automatic context window management as a standalone installable package
 - **Multi-channel operator input** — Slack, WhatsApp, and webhook triggers alongside tmux terminal control
