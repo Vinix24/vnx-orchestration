@@ -89,7 +89,55 @@ def handle_agent_stream_status(handler: BaseHTTPRequestHandler) -> None:
     _send_json(handler, HTTPStatus.OK, {"terminals": terminals})
 
 
-def _send_json(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload: dict) -> None:
+def handle_agent_stream_archive_list(handler: "BaseHTTPRequestHandler", terminal: str) -> None:
+    """List all archived dispatch IDs for a terminal."""
+    if terminal not in VALID_TERMINALS:
+        _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": f"Invalid terminal: {terminal}"})
+        return
+
+    archive_dir = _store.archive_dir(terminal)
+    if not archive_dir.exists():
+        _send_json(handler, HTTPStatus.OK, [])
+        return
+
+    entries = []
+    for f in sorted(archive_dir.glob("*.ndjson")):
+        stat = f.stat()
+        entries.append({
+            "dispatch_id": f.stem,
+            "file_size": stat.st_size,
+            "modified_at": stat.st_mtime,
+        })
+    _send_json(handler, HTTPStatus.OK, entries)
+
+
+def handle_agent_stream_archive(
+    handler: "BaseHTTPRequestHandler", terminal: str, dispatch_id: str
+) -> None:
+    """Return all events for a specific archived dispatch."""
+    if terminal not in VALID_TERMINALS:
+        _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": f"Invalid terminal: {terminal}"})
+        return
+
+    archive_file = _store.archive_dir(terminal) / f"{dispatch_id}.ndjson"
+    if not archive_file.exists():
+        _send_json(handler, HTTPStatus.NOT_FOUND, {"error": f"Archive not found: {dispatch_id}"})
+        return
+
+    events = []
+    with open(archive_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    _send_json(handler, HTTPStatus.OK, events)
+
+
+def _send_json(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload) -> None:
     body = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
