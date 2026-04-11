@@ -30,7 +30,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +43,13 @@ _SCENARIOS_DIR = _REPO_ROOT / "tests" / "f39" / "scenarios"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from context_assembler import assemble_t0_context, _DEFAULT_STATE, _DEFAULT_FEATURE_PLAN, _DEFAULT_SKILL, _DEFAULT_CLAUDE_MD  # noqa: E402
+
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+from decision_parser import (  # noqa: E402
+    extract_json as _extract_json,
+    extract_decision_from_stream as _extract_decision_from_stream,
+    collect_text_from_stream as _collect_text_from_stream,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -144,50 +150,8 @@ class ChainReplayResult:
 
 # ---------------------------------------------------------------------------
 # JSON extraction from LLM output
+# (imported from scripts/lib/decision_parser — see import block above)
 # ---------------------------------------------------------------------------
-
-def _extract_json(text: str) -> dict[str, Any] | None:
-    """Extract the first valid JSON object from LLM output.
-
-    The model may wrap the object in ```json ... ``` or emit it bare.
-    """
-    # Try: bare JSON object starting with {
-    for match in re.finditer(r"\{", text):
-        start = match.start()
-        # Greedily expand to find matching close brace
-        depth = 0
-        for i, ch in enumerate(text[start:], start):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = text[start: i + 1]
-                    try:
-                        return json.loads(candidate)
-                    except json.JSONDecodeError:
-                        break  # Try next {
-
-    return None
-
-
-def _extract_decision_from_stream(stream_output: str) -> dict[str, Any] | None:
-    """Extract T0 decision JSON from claude -p stream-json output.
-
-    Parses NDJSON lines, finds the result event, extracts decision from result text.
-    """
-    for line in stream_output.split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-            if event.get('type') == 'result':
-                result_text = str(event.get('result', ''))
-                return _extract_json(result_text)
-        except json.JSONDecodeError:
-            continue
-    return None
 
 
 def _extract_tokens_from_stream(stream_output: str) -> int:
@@ -212,32 +176,7 @@ def _extract_tokens_from_stream(stream_output: str) -> int:
     return total
 
 
-def _collect_text_from_stream(stream_output: str) -> str:
-    """Collect all text content blocks from stream-json output."""
-    parts: list[str] = []
-    for line in stream_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            # Plain text line — accumulate in case output-format isn't stream-json
-            parts.append(line)
-            continue
-        # stream-json content_block_delta
-        delta = obj.get("delta") or {}
-        if delta.get("type") == "text_delta":
-            parts.append(delta.get("text", ""))
-        # Plain assistant message
-        content = obj.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-        elif isinstance(content, str):
-            parts.append(content)
-    return "".join(parts)
+# _collect_text_from_stream imported from scripts/lib/decision_parser above.
 
 
 # ---------------------------------------------------------------------------
