@@ -202,40 +202,12 @@ cat .claude/vnx-system/state/dashboard_status.json | jq '._pr_registry'
 
 ```bash
 # Check critical processes individually
-pgrep -f smart_tap_v7_json_translator && echo "✓ Smart Tap V7" || echo "✗ Smart Tap"
-pgrep -f dispatcher_v7_compilation && echo "✓ Dispatcher V7" || echo "✗ Dispatcher"
+pgrep -f dispatcher_v8_minimal && echo "✓ Dispatcher V8" || echo "✗ Dispatcher"
 pgrep -f receipt_processor_v4 && echo "✓ Receipt Processor V4" || echo "✗ Receipt Processor"
-pgrep -f ack_dispatcher_v2 && echo "✓ ACK Dispatcher V2" || echo "✗ ACK Dispatcher"
-pgrep -f queue_popup_watcher && echo "✓ Queue Watcher" || echo "✗ Queue Watcher"
-pgrep -f unified_state_manager_v2 && echo "✓ State Manager V2" || echo "✗ State Manager"
+pgrep -f heartbeat_ack_monitor && echo "✓ Heartbeat Monitor" || echo "✗ Heartbeat Monitor"
 pgrep -f vnx_supervisor_simple && echo "✓ Supervisor" || echo "✗ Supervisor"
 pgrep -f generate_valid_dashboard && echo "✓ Dashboard" || echo "✗ Dashboard"
-```
-
-### Configuration Validation
-
-```bash
-# CRITICAL: Validate Smart Tap capture window
-grep "capture-pane.*-S" .claude/vnx-system/scripts/smart_tap_v7_json_translator.sh
-# Must show: -S -100 (NOT -S -50)
-
-# Validate queue popup mode
-head -3 .claude/vnx-system/scripts/queue_popup_watcher.sh
-# Should show: "Enhanced non-intrusive notifications"
-
-# Quick validation script
-echo "=== Configuration Validation ==="
-if grep -q "\-S \-100" .claude/vnx-system/scripts/smart_tap_v7_json_translator.sh; then
-    echo "✓ Smart Tap: Capture window correct (-S -100)"
-else
-    echo "❌ Smart Tap: Capture window too small"
-fi
-
-if grep -q "Enhanced non-intrusive" .claude/vnx-system/scripts/queue_popup_watcher.sh; then
-    echo "✓ Queue Watcher: Non-intrusive mode"
-else
-    echo "❌ Queue Watcher: Auto-popup mode (interrupts typing)"
-fi
+pgrep -f intelligence_daemon && echo "✓ Intelligence Daemon" || echo "✗ Intelligence Daemon"
 ```
 
 ### Singleton Enforcement Validation
@@ -718,50 +690,12 @@ ps aux | grep smart_tap | grep -v grep
 
 **Solution**:
 ```bash
-# STEP 1: Kill ALL Smart Tap processes
-pgrep -f smart_tap | xargs kill -9
+# Kill and restart dispatcher
+pkill -f dispatcher_v8_minimal
+cd .claude/vnx-system && ./scripts/dispatcher_v8_minimal.sh &
 
-# STEP 2: Clear locks
-rm -rf /tmp/vnx-locks/smart_tap*.lock*
-
-# STEP 3: Verify singleton enforcer
-grep -q "atomic lock" .claude/vnx-system/scripts/singleton_enforcer.sh && \
-  echo "✓ Enforcer OK" || echo "✗ Enforcer needs update"
-
-# STEP 4: Restart properly
-cd .claude/vnx-system && ./scripts/smart_tap_v7_json_translator.sh &
-
-# STEP 5: Verify single instance
-sleep 3 && pgrep -f smart_tap | wc -l  # Must be 1
-```
-
-### Issue: Manager Block Not Captured
-
-**Symptoms**:
-- T0 creates manager block but Smart Tap misses it
-- [[DONE]] markers cut off
-
-**Diagnosis**:
-```bash
-# Check capture window size
-grep "capture-pane.*-S" .claude/vnx-system/scripts/smart_tap_v7_json_translator.sh
-# Must show: -S -100
-
-# Check Smart Tap is running
-pgrep -f smart_tap || echo "Smart Tap not running!"
-```
-
-**Solution**:
-```bash
-# Fix capture window if wrong
-sed -i '' 's/-S -50/-S -100/g' .claude/vnx-system/scripts/smart_tap_v7_json_translator.sh
-
-# Restart Smart Tap
-pkill -f smart_tap
-cd .claude/vnx-system && ./scripts/smart_tap_v7_json_translator.sh &
-
-# Manual capture test
-tmux capture-pane -t %0 -p -S -100 | grep -A20 "\[\[TARGET:"
+# Verify single instance
+sleep 3 && pgrep -f dispatcher_v8_minimal | wc -l  # Must be 1
 ```
 
 ### Issue: Receipts Not Appearing in T0
@@ -797,30 +731,22 @@ tmux list-panes -aF '#{pane_id}' | grep $(jq -r '.t0.pane_id' .claude/vnx-system
 grep "Receipt delivered to T0" .claude/vnx-system/logs/receipt_processor_v4.log | tail -10
 ```
 
-### Issue: Popup System Not Working
+### Issue: Dispatches Not Being Delivered
 
 **Symptoms**:
-- No automatic popups when T0 creates blocks
-- Manual Ctrl+G works
+- Dispatch promoted to active/ but worker doesn't receive it
 
 **Diagnosis**:
 ```bash
-# Check queue watcher status
-cat .claude/vnx-system/state/dashboard_status.json | jq '.processes.queue_watcher'
+# Check dispatcher is running
+pgrep -f dispatcher_v8_minimal || echo "Dispatcher not running!"
 
-# Check for auto-popup mode (should be non-intrusive)
-grep -q "Enhanced non-intrusive" .claude/vnx-system/scripts/queue_popup_watcher.sh || \
-  echo "⚠️ Auto-popup mode enabled (will interrupt)"
-```
+# Check pending/active dispatches
+ls -la .vnx-data/dispatches/pending/
+ls -la .vnx-data/dispatches/active/
 
-**Solution**:
-```bash
-# Restart queue watcher
-cd .claude/vnx-system && ./scripts/queue_popup_watcher.sh &
-
-# Verify dispatch workflow
-ls -la .claude/vnx-system/dispatches/queue/
-ls -la .claude/vnx-system/dispatches/pending/
+# Check for lease conflicts
+python3 scripts/lib/lease_manager.py --status
 ```
 
 ### Issue: Terminal Permissions Prompting

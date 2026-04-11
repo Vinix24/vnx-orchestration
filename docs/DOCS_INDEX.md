@@ -20,6 +20,7 @@
 | Document | Path | Description |
 |----------|------|-------------|
 | Core Architecture | `docs/core/00_VNX_ARCHITECTURE.md` | Complete system architecture and data flow |
+| Scripts Index | `docs/SCRIPTS_INDEX.md` | Active script surface map |
 | Core Contracts | `docs/core/` | Operational contracts and technical references |
 | System Contracts | `docs/contracts/` | Feature-level and platform contracts |
 | Receipt Operations | `docs/operations/RECEIPT_PIPELINE.md` | Receipt generation, processing, and delivery |

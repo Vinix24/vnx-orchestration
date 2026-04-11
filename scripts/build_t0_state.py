@@ -297,6 +297,43 @@ def _build_open_items(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Quality digest (reads t0_quality_digest.json)
+# ---------------------------------------------------------------------------
+
+def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
+    digest_path = state_dir / "t0_quality_digest.json"
+    if not digest_path.exists():
+        return {
+            "operational_defects": 0,
+            "prompt_tuning_items": 0,
+            "governance_health_items": 0,
+            "total_items": 0,
+            "critical_high_count": 0,
+            "generated_at": None,
+        }
+    data = _safe_json(digest_path)
+    if not data:
+        return {
+            "operational_defects": 0,
+            "prompt_tuning_items": 0,
+            "governance_health_items": 0,
+            "total_items": 0,
+            "critical_high_count": 0,
+            "generated_at": None,
+        }
+    summary = data.get("summary") or {}
+    sections = summary.get("sections") or {}
+    return {
+        "operational_defects": int(sections.get("operational_defects") or 0),
+        "prompt_tuning_items": int(sections.get("prompt_config_tuning") or 0),
+        "governance_health_items": int(sections.get("governance_health") or 0),
+        "total_items": int(summary.get("total_recommendations") or 0),
+        "critical_high_count": int(summary.get("critical_or_high_count") or 0),
+        "generated_at": data.get("run_at"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Active work (scans dispatches/active/)
 # ---------------------------------------------------------------------------
 
@@ -459,6 +496,7 @@ def build_t0_state(
     tracks = _build_tracks(state_dir)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     open_items = _build_open_items(state_dir)
+    quality_digest = _build_quality_digest(state_dir)
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
     git_context = _build_git_context()
@@ -474,6 +512,7 @@ def build_t0_state(
         "tracks": tracks,
         "pr_progress": pr_progress,
         "open_items": open_items,
+        "quality_digest": quality_digest,
         "active_work": active_work,
         "recent_receipts": recent_receipts,
         "git_context": git_context,

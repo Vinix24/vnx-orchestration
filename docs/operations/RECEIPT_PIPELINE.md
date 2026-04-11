@@ -496,7 +496,7 @@ tail .claude/vnx-system/state/t0_receipts.ndjson
 ```
 
 **Fix**:
-- Ensure unified_state_manager_v2.py is running
+- Ensure heartbeat_ack_monitor.py is running
 - Check terminal conversation logs are being written
 - Verify /ack_states directories exist for all terminals
 

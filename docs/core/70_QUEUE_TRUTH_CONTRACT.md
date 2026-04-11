@@ -264,9 +264,9 @@ The receipt processor generates receipts from unified reports. It does not need 
 
 Runtime coordination manages dispatch leases and state transitions via SQLite. This contract does not replace or duplicate that layer. Runtime coordination answers "is this dispatch still alive?" while queue truth answers "what state is this PR in?" They are complementary.
 
-### 6.5 t0_brief.json and generate_t0_brief.sh
+### 6.5 t0_brief.json and build_t0_state.py
 
-The T0 brief is a consumer of queue state. After reconciliation, the brief should reflect reconciled truth. PR-2 will ensure the brief generation path uses reconciled state when available.
+The T0 brief is a consumer of queue state. After reconciliation, the brief should reflect reconciled truth. The state builder uses reconciled state when available.
 
 ---
 

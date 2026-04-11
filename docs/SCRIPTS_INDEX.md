@@ -1,7 +1,7 @@
 # VNX Scripts Index
 
 **Status**: Active  
-**Last Updated**: 2026-04-08  
+**Last Updated**: 2026-04-10  
 **Owner**: VNX Maintainer  
 **Purpose**: High-level map of the active script surface in this repository.
 
@@ -38,7 +38,6 @@ Core dispatch/runtime orchestration:
 - `scripts/dispatcher_v8_minimal.sh` — main dispatch delivery entrypoint
 - `scripts/pr_queue_manager.py` — queue and promotion management
 - `scripts/open_items_manager.py` — open-item creation, digestion, and rescan flow
-- `scripts/dispatch_lifecycle_tracker.py` — lifecycle event tracking
 - `scripts/runtime_core_cli.py` — runtime-core operator tooling
 - `scripts/runtime_cutover_check.py` — runtime-core certification/validation checks
 - `scripts/rollback_runtime_core.py` — runtime-core rollback helper
@@ -52,7 +51,6 @@ Key implementation modules:
 - `scripts/lib/lease_manager.py`
 - `scripts/lib/runtime_reconciler.py`
 - `scripts/lib/tmux_adapter.py`
-- `scripts/lib/local_session_adapter.py`
 - `scripts/lib/subprocess_adapter.py`
 - `scripts/lib/subprocess_dispatch.py`
 
@@ -65,7 +63,6 @@ These scripts process worker outputs into auditable receipts:
 - `scripts/report_watcher.sh` — watch reports and trigger receipt processing
 - `scripts/receipt_processor_v4.sh` — receipt processing and T0 delivery pipeline
 - `scripts/heartbeat_ack_monitor.py` — receipt/ACK confirmation monitoring
-- `scripts/report_miner.py` — extract learnings and reusable signals from reports
 
 Related docs:
 
@@ -99,7 +96,6 @@ Common operational/support scripts:
 - `scripts/generate_valid_dashboard.sh` — dashboard launcher and validator
 - `scripts/check_intelligence_health.py` — health check for intelligence surfaces
 - `scripts/cleanup_auto.sh` — cleanup automation
-- `scripts/session_gc.py` — garbage collection for old session artifacts
 - `scripts/setup_daily_cleanup_cron.sh` — scheduled cleanup helper
 - `scripts/send_digest_email.py` — digest email delivery
 
@@ -109,7 +105,6 @@ Important shared library areas:
 
 - `scripts/lib/vnx_paths.sh` and `scripts/lib/vnx_paths.py` — canonical path resolution
 - `scripts/lib/process_lifecycle.sh` — PID and process lifecycle helpers
-- `scripts/lib/dashboard_read_model.py` — dashboard projection layer
 - `scripts/lib/gate_*.py` — gate execution, parsing, recording, and artifacts
 - `scripts/lib/headless_*.py` — headless runtime, stream, and registry support
 
