@@ -10,7 +10,7 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-Current release: `v0.5.0`
+Current release: `v0.8.0`
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
 ## The Problem
@@ -310,6 +310,20 @@ See [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) and [VNX vs Mul
 | **Automated multi-provider review** | Built-in (Codex + Gemini triple gate) | None built-in | Not typically included |
 
 Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) | [VNX vs Multi-Agent Frameworks](docs/comparisons/vnx_vs_frameworks.md)
+
+## Roadmap
+
+Active development. Priorities shift based on real usage patterns.
+
+- **Headless A/B testing** — run interactive and autonomous side-by-side on the same feature, compare output quality
+- **Governance profiles** — configurable review depth per folder/project: full, light, minimal (landed in v0.8.0)
+- **Context rotation package** — extract the automatic context window management as a standalone installable package
+- **Multi-channel operator input** — Slack, WhatsApp, and webhook triggers alongside tmux terminal control
+- **Dynamic worker pools** — scale headless workers based on queue depth and API budget
+- **Model-agnostic adapter layer** — unified dispatch interface across Claude, Codex, Gemini, Kimi, and future CLI providers
+- **Business agent templates** — pre-built agent configurations for content creation, research, and analysis workflows
+
+See [CHANGELOG.md](CHANGELOG.md) for what shipped recently.
 
 ## Architecture & Docs
 

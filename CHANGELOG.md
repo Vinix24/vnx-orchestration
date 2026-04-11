@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.8.0 — Headless Intelligence & Governance Profiles (2026-04-11)
+
+### Features
+- **F39**: Headless T0 benchmark — decision framework with deterministic pre-filter (Level-1: 100%, Level-2: 73-87%, Level-3: 67-78%), context assembler, replay harness, file-based gate locks (#204)
+- **F41**: Intelligence pipeline activation — governance aggregator backfill (722 metrics, 58 SPC control limits), nightly pipeline scheduling via launchd, quality digest with real SPC data (#206)
+- **F41**: 3-layer headless trigger system — file watcher on unified_reports, silence watchdog (10-min stale lease/dispatch detection), optional haiku LLM triage, 366 LOC (#206)
+- **Headless dispatch writer** — programmatic dispatch creation for autonomous T0 orchestration (#207)
+- **Governance profiles** — config-driven review profiles (default/light/minimal) replacing hardcoded business/coding split, configurable via `.vnx/governance_profiles.yaml` (#207)
+
+### Fixes
+- **Subprocess adapter**: Add `--dangerously-skip-permissions` for headless `claude -p` write/edit capability (#207)
+- **Receipt processor**: Replace 10-minute time cutoff with watermark-based processing; update watermark after sweep, not per-file (#206)
+- **CI**: Replace hardcoded absolute paths in launchd plists with install-time placeholders (#206)
+- **Receipt processor**: Handle `on_moved` events for atomic file delivery (#206)
+
+### Docs
+- README: Add headless workers, multi-provider review gates, and mission control dashboard sections (#208)
+
+### Housekeeping
+- System cleanup: blocker fixes, ~25K LOC dead code removed, doc updates (#205)
+- Unified T0 state builder replacing 8+ startup scripts (#200)
+
 ## v0.7.x — F38 Dashboard Unified (2026-04-10)
 
 ### Features
