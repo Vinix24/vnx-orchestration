@@ -315,7 +315,7 @@ Google's answer to the multi-agent framework space. Uses a sliding-window compac
 | **Append-only audit trail** | ✗ | Partial¹ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (NDJSON ledger)** |
 | **Deterministic quality gates** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (lint/size/secrets)** |
 | **Human approval gates** | ✗ | Partial² | ✗ | ✗ | ✗ | Partial³ | ✗ | ✗ | **✓ (staging → promote)** |
-| **Context rotation/window mgmt** | ✗ | ✗ | ✗ | Isolated only | ✗ | **✓ (SOTA LongMemEval)** | ✗ | ✗ | Partial⁴ |
+| **Context rotation/window mgmt** | ✗ | ✗ | ✗ | Isolated only | ✗ | **✓ (SOTA LongMemEval)** | ✗ | ✗ | **✓ interactive / Partial headless⁴** |
 | **LLM provider agnostic** | ✓ | ✓ | ✓ | ✗ (Claude-only) | ✓ (multi-agent backend) | ✓ | Partial⁵ | ✓ | **✓ (watcher pattern)** |
 | **Headless / autonomous execution** | ✓ | ✓ | ✓ | ✓ | ✗ (TUI-driven) | ✓ | ✓ | ✓ | **✓ (subprocess adapter)** |
 | **A/B testing of agent output** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓⁶** |
@@ -333,7 +333,7 @@ Google's answer to the multi-agent framework space. Uses a sliding-window compac
 ¹ LangGraph state checkpoints are recovery-oriented, not governance-oriented. No cryptographic provenance or per-decision attribution.  
 ² LangGraph's `interrupt()` is a developer primitive, not a system-enforced gate. It requires explicit implementation per workflow.  
 ³ Mastra can suspend workflows for human input, but this is a workflow design choice, not a default governance posture.  
-⁴ VNX context reset is provider-dependent (`/new` for Claude Code, `/clear` for Gemini). Not automatic.  
+⁴ VNX has automatic context rotation in interactive mode: `hooks/vnx_context_monitor.sh` (PreToolUse) monitors `remaining_pct`, blocks tool calls at 65% pressure, and triggers handover. `hooks/vnx_handover_detector.sh` (PostToolUse) detects the ROTATION-HANDOVER.md write, then `hooks/vnx_rotate.sh` sends /clear and injects a continuation prompt with skill recovery. This is production-validated (9 months). **Limitation**: hooks are Claude Code interactive–only. Headless (`claude -p`) workers do not yet benefit from this. **Gap, not architectural barrier**: `task_progress` events in stream-json output contain `usage.total_tokens`, so context pressure can be calculated for headless workers — the implementation does not yet exist.  
 ⁵ OpenAI Agents SDK is designed for OpenAI models. Other providers accessible via unofficial LiteLLM bridge.  
 ⁶ VNX A/B test infrastructure (F40 + F42) validated headless vs. interactive execution at production complexity. Results: 4% LOC delta, identical file structures, 0 human interventions required in either track. Pipeline is battle-tested for these two features; extended production burn-in is the next step.  
 ⁷ VNX setup complexity as of v0.9.0 (April 2026): headless mode reduces setup to clone → create agent folders with CLAUDE.md + config.yaml → dispatch. No tmux grid configuration required for workers. Historical complexity (v0.1–v0.8.x) was High — tmux layout, shell configuration, terminal setup all required. Headless mode is new (2 weeks as of April 2026) and not yet production-proven at scale.
@@ -384,7 +384,7 @@ VNX has configurable review depth per agent domain. A coding terminal runs throu
 
 **LangGraph**: The graph model gives precise control over complex conditional workflows. State persistence across nodes, with automatic crash recovery, is more sophisticated than VNX's ledger-based recovery. The checkpoint system is battle-tested in regulated industries. VNX's state management is simpler and less granular.
 
-**Mastra**: Observational Memory (94.87% LongMemEval) is genuinely state-of-the-art context management. VNX relies on provider-level context reset commands (`/new`, `/clear`) and does not implement automatic compression. For long-running workflows where context quality matters, Mastra is ahead.
+**Mastra**: Observational Memory (94.87% LongMemEval) is genuinely state-of-the-art context management in terms of long-context compression. VNX's context rotation approach is architecturally different: rather than compressing, it performs a clean handover — writing a structured ROTATION-HANDOVER.md artifact, clearing the context window, and injecting a skill-recovery continuation prompt. This is automatic in interactive mode (production-validated, 9 months). For headless workers, Mastra is ahead: VNX headless context rotation is not yet implemented (though the token data is available in stream-json to build it).
 
 **Microsoft Agent Framework**: Enterprise integrations (Azure, Teams, Semantic Kernel, OTel tracing) are mature and supported. For organizations in the Microsoft ecosystem, MAF provides production guarantees that VNX — a local prototype — cannot match.
 
@@ -394,7 +394,7 @@ VNX has configurable review depth per agent domain. A coding terminal runs throu
 
 **Claude Squad**: Lowest setup friction of any tool in this comparison for parallel Claude Code sessions. Binary install, TUI up in minutes, multi-agent provider support out of the box. For developers who want parallel sessions without governance overhead, Claude Squad is the right tool. VNX headless mode is now more competitive on setup, but Claude Squad remains faster to a first working session.
 
-**Context window rotation**: All frameworks evaluated either isolate context per agent or implement summarization. VNX does neither automatically — context rotation is manual and provider-dependent. This is the most significant technical gap in the VNX stack.
+**Context window rotation (headless)**: VNX has the most sophisticated context rotation of any framework evaluated for interactive mode — automatic handover with skill recovery, production-validated over 9 months. The gap is specifically in headless (`claude -p`) workers, where PreToolUse hooks do not fire. This is an implementation gap, not an architectural one: stream-json `task_progress` events expose `usage.total_tokens`, making headless context pressure tracking buildable. Until implemented, headless workers still require manual context management.
 
 ---
 
@@ -453,13 +453,13 @@ As of v0.9.0 (April 2026), VNX supports fully headless worker execution via `cla
 **What remains honestly limited:**
 
 - **Headless mode is 2 weeks old as of April 2026** and not yet battle-tested at scale or in extended production use. The A/B tests are rigorous but represent 2 features across 1 operator. Extended burn-in across more features and longer run times is the required next step before claiming production readiness for headless execution.
-- **Context management is still manual.** VNX does not implement automatic context compression or rotation. Mastra's Observational Memory is objectively more sophisticated for long-running agent workflows.
+- **Headless context rotation is not yet implemented.** VNX has automatic context rotation in interactive mode (hooks-based handover + skill recovery, 9 months production). For headless `claude -p` workers, this does not yet exist. The token data is available in stream-json output (`usage.total_tokens` in `task_progress` events) — this is an implementation gap, not an architectural barrier. Mastra's Observational Memory remains ahead for long-context compression specifically.
 - **Bash/Python prototype.** The codebase is approximately 60% bash and 40% Python — reflecting organic growth from tmux `send-keys` scripts. A production deployment would benefit from a typed, testable rewrite (Rust or Go for critical paths).
-- **T0 is Claude-dependent.** The orchestrator (T0) has only been tested with Claude Opus via Claude Code. The hook system enforcing T0 write isolation is Claude Code–specific. Using a different model as T0 is untested.
+- **T0 requires a frontier model — Claude Opus tested, others possible.** The orchestrator (T0) has been validated with Claude Opus via Claude Code. The hook system enforcing T0 write isolation is Claude Code–specific for interactive mode, but headless mode reduces hook dependency. From F39 benchmark testing: Haiku is inadequate for orchestration decisions (too imprecise); Sonnet is adequate for workers but insufficient for T0-level judgment; Opus is required for T0 decisions. This hierarchy likely applies across providers — the constraint is instruction-following quality at frontier level, not Claude exclusivity. Codex's strict instruction-following would be a positive signal for worker roles. T0 with GPT-5 or Gemini 2.5 Pro is untested but architecturally plausible.
 - **Single-repository only.** VNX does not support multi-repository orchestration. All agents work within a single repo context.
-- **No distributed deployment.** VNX uses the local filesystem as a message bus. It is not designed for teams working across machines or cloud environments.
+- **Distributed deployment is untested, not architecturally impossible.** VNX's message bus is filesystem-based (NDJSON, JSON, SQLite). Any cloud storage that presents as a POSIX filesystem (NFS, EFS, GCS FUSE, SMB) makes it distributed immediately — no code changes required. The constraint is that this has not been tested in cloud environments, not that it cannot work. A shared-filesystem cloud deployment is a configuration and validation task, not a rewrite.
 - **No community.** Every other framework in this comparison has thousands of GitHub stars, active Discord communities, and third-party tutorials. VNX has documentation and a public repo.
-- **Telegram-only external gateway.** The current trigger path for the autonomous decision loop runs exclusively via Telegram → Claude Code. This is a single-channel dependency that limits accessibility for operators without Telegram configured.
+- **Telegram is the only external gateway.** The current trigger path for the autonomous decision loop runs via Telegram → Claude Code. There are no Slack, WhatsApp, or webhook gateways. Multi-channel gateway support is a roadmap item, not a current capability.
 
 ---
 
@@ -469,7 +469,7 @@ As of v0.9.0 (April 2026), VNX supports fully headless worker execution via `cla
 |-----------|--------------|--------------|
 | Time to first working agent | CrewAI, OpenAI SDK, Claude Squad | v0.8.x and earlier: Weakest (tmux required). v0.9.0+: Medium — headless mode reduces to clone → folder → dispatch. Headless not yet production-proven at scale. |
 | Production scale | CrewAI (12M daily executions) | Prototype only |
-| Context management | Mastra (LongMemEval SOTA) | Manual, provider-dependent |
+| Context management | Mastra (LongMemEval SOTA) | Interactive: automatic handover+recovery (production, 9mo). Headless: not yet implemented (implementation gap, not architectural). |
 | Governance / audit trail | **VNX** | Unique — no competitor close |
 | Human approval gates | **VNX** | Unique — system-enforced, not developer-implemented |
 | Deterministic quality gates | **VNX** | Unique — tool-based, LLM-invisible |
@@ -480,7 +480,7 @@ As of v0.9.0 (April 2026), VNX supports fully headless worker execution via `cla
 | Pre-filter (LLM-bypass) | **VNX** | Unique — 70% of decisions without LLM |
 | Parallel session management | Claude Squad | VNX headless is functional; Claude Squad is faster to start |
 
-**The honest summary**: Every other framework in this analysis was built to maximize what agents can do. VNX was built to maximize what humans can audit, approve, and control. These are different design philosophies, and they produce different tradeoffs. If you need a system running in production today at scale, use CrewAI or LangGraph. If you want parallel Claude Code sessions with minimal overhead, Claude Squad is the lowest-friction option in this comparison. If you need an engineering team where every agent action is audited, approved, and gated — VNX now offers both interactive and headless execution modes. The headless path (v0.9.0, April 2026) brings setup closer to peer tools: clone, configure agent folders, dispatch — no tmux grid required. But be clear-eyed: headless mode is two weeks old as of this writing, validated on 2 features, and requires extended production burn-in before it can be recommended at scale. The governance properties — append-only ledger, LLM-invisible gate locks, orchestrator write isolation, deterministic quality gates — remain VNX's unique contribution to this field and are not replicated by any other framework evaluated here.
+**The honest summary**: Every other framework in this analysis was built to maximize what agents can do. VNX was built to maximize what humans can audit, approve, and control. These are different design philosophies, and they produce different tradeoffs. If you need a system running in production today at scale, use CrewAI or LangGraph. If you want parallel Claude Code sessions with minimal overhead, Claude Squad is the lowest-friction option in this comparison. If you need an engineering team where every agent action is audited, approved, and gated — VNX now offers both interactive and headless execution modes. The headless path (v0.9.0, April 2026) brings setup closer to peer tools: clone, configure agent folders, dispatch — no tmux grid required. But be clear-eyed: headless mode is two weeks old as of this writing, validated on 2 features, and requires extended production burn-in before it can be recommended at scale. On context management: VNX has the most sophisticated automatic context rotation of any framework evaluated for interactive sessions (hooks-based handover with skill recovery, 9 months production-validated). The gap is headless workers specifically — an implementation task, not an architectural redesign. On distributed deployment: the filesystem-based architecture is cloud-portable via POSIX-compatible shared storage; it is untested there, not impossible. The governance properties — append-only ledger, LLM-invisible gate locks, orchestrator write isolation, deterministic quality gates — remain VNX's unique contribution to this field and are not replicated by any other framework evaluated here.
 
 ---
 
