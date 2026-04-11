@@ -27,8 +27,7 @@ fi
 
 # Copy plist, substituting the actual script path
 echo "Installing plist to $PLIST_DEST"
-sed "s|/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/scripts/nightly_intelligence_pipeline.sh|$PIPELINE_SCRIPT|g" \
-    "$PLIST_SRC" > "$PLIST_DEST"
+sed "s|__VNX_PIPELINE_SCRIPT__|$PIPELINE_SCRIPT|g" "$PLIST_SRC" > "$PLIST_DEST"
 
 # Unload any existing version before reloading
 launchctl unload "$PLIST_DEST" 2>/dev/null || true

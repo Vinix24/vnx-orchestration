@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/scripts/nightly_intelligence_pipeline.sh</string>
+    <string>__VNX_PIPELINE_SCRIPT__</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>

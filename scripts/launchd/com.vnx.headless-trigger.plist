@@ -6,13 +6,13 @@
   <key>Label</key><string>com.vnx.headless-trigger</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.venv/bin/python3</string>
-    <string>/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/scripts/headless_trigger.py</string>
+    <string>__VNX_PYTHON__</string>
+    <string>__VNX_TRIGGER_SCRIPT__</string>
   </array>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>/tmp/vnx-headless-trigger.log</string>
   <key>StandardErrorPath</key><string>/tmp/vnx-headless-trigger.err</string>
-  <key>WorkingDirectory</key><string>/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt</string>
+  <key>WorkingDirectory</key><string>__VNX_PROJECT_ROOT__</string>
 </dict>
 </plist>
