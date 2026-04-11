@@ -108,6 +108,67 @@ def _load_agent_profile(config_path: Path) -> str:
     return "default"
 
 
+def _detect_pending_handover(terminal_id: str, handover_dir: Path) -> Path | None:
+    """Find most recent unprocessed handover for terminal_id.
+
+    Scans handover_dir for files matching *{terminal_id}*ROTATION-HANDOVER*.md
+    that do NOT have a .processed suffix. Returns most recent by mtime, or None.
+    """
+    if not handover_dir.is_dir():
+        return None
+
+    candidates = [
+        p for p in handover_dir.iterdir()
+        if terminal_id in p.name
+        and "ROTATION-HANDOVER" in p.name
+        and p.name.endswith(".md")
+        and not p.name.endswith(".processed")
+    ]
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _build_continuation_prompt(handover_path: Path, original_instruction: str) -> str:
+    """Wrap instruction with handover context for seamless continuation.
+
+    Reads the handover markdown and prepends:
+    - "CONTINUATION: Resumed after context rotation."
+    - Completed work section from handover (if present)
+    - Remaining tasks section from handover
+    - Then the original instruction
+    """
+    text = handover_path.read_text()
+
+    # Extract section content by scanning line-by-line
+    sections: dict[str, list[str]] = {}
+    current_section: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current_section = line[3:].strip()
+            sections[current_section] = []
+        elif current_section is not None:
+            sections[current_section].append(line)
+
+    def _section_text(name: str) -> str:
+        lines = sections.get(name, [])
+        return "\n".join(lines).strip()
+
+    parts = ["CONTINUATION: Resumed after context rotation.\n"]
+
+    completed = _section_text("Completed Work")
+    if completed:
+        parts.append(f"### Completed Work\n{completed}\n")
+
+    remaining = _section_text("Remaining Tasks")
+    if remaining:
+        parts.append(f"### Remaining Tasks\n{remaining}\n")
+
+    parts.append(original_instruction)
+    return "\n".join(parts)
+
+
 def _write_rotation_handover(
     terminal_id: str,
     dispatch_id: str,
@@ -171,6 +232,13 @@ def deliver_via_subprocess(
 
     Returns True on success, False on failure.
     """
+    # Detect and apply pending handover before skill context injection
+    handover_dir = Path(__file__).resolve().parents[2] / ".vnx-data" / "rotation_handovers"
+    pending_handover = _detect_pending_handover(terminal_id, handover_dir)
+    if pending_handover is not None:
+        logger.info("Pending handover found for %s: %s", terminal_id, pending_handover)
+        instruction = _build_continuation_prompt(pending_handover, instruction)
+
     # Inject skill/terminal CLAUDE.md as skill context for headless agents
     instruction = _inject_skill_context(terminal_id, instruction, role=role)
 
@@ -225,6 +293,14 @@ def deliver_via_subprocess(
         success = not rotation_occurred
         if rotation_occurred:
             _write_rotation_handover(terminal_id, dispatch_id, context_tracker)
+        elif success and pending_handover is not None:
+            # Mark handover as processed after successful (non-rotation) delivery
+            processed_path = pending_handover.with_suffix(".md.processed")
+            try:
+                pending_handover.rename(processed_path)
+                logger.info("Handover marked processed: %s", processed_path)
+            except Exception as _exc:
+                logger.warning("Failed to mark handover processed %s: %s", pending_handover, _exc)
         return success
     except Exception:
         logger.exception("deliver_via_subprocess failed for %s", terminal_id)

@@ -252,3 +252,118 @@ def test_write_rotation_handover_real(tmp_path):
     text = result.read_text()
     assert "# T3 Context Rotation Handover" in text
     assert "**Context Used**: 75.0%" in text
+
+
+# ---------------------------------------------------------------------------
+# F43 PR-2: Handover detection + continuation prompt tests
+# ---------------------------------------------------------------------------
+
+
+def test_detect_pending_handover_finds_file(tmp_path):
+    """Creates a handover file, verifies detection."""
+    from subprocess_dispatch import _detect_pending_handover
+
+    handover_dir = tmp_path / "rotation_handovers"
+    handover_dir.mkdir()
+
+    terminal_id = "T1"
+    handover_file = handover_dir / f"20260411T120000Z-{terminal_id}-ROTATION-HANDOVER.md"
+    handover_file.write_text("# T1 Context Rotation Handover\n## Remaining Tasks\ndo stuff\n")
+
+    result = _detect_pending_handover(terminal_id, handover_dir)
+    assert result == handover_file
+
+
+def test_detect_pending_handover_ignores_processed(tmp_path):
+    """Processed handovers are skipped."""
+    from subprocess_dispatch import _detect_pending_handover
+
+    handover_dir = tmp_path / "rotation_handovers"
+    handover_dir.mkdir()
+
+    terminal_id = "T2"
+    # Write only a .processed file
+    processed_file = handover_dir / f"20260411T120000Z-{terminal_id}-ROTATION-HANDOVER.md.processed"
+    processed_file.write_text("# processed\n")
+
+    result = _detect_pending_handover(terminal_id, handover_dir)
+    assert result is None
+
+
+def test_build_continuation_prompt_includes_handover(tmp_path):
+    """Continuation prompt contains handover content + original instruction."""
+    from subprocess_dispatch import _build_continuation_prompt
+
+    handover_file = tmp_path / "T1-ROTATION-HANDOVER.md"
+    handover_file.write_text(
+        "# T1 Context Rotation Handover\n"
+        "## Completed Work\nWrote auth module\n"
+        "## Remaining Tasks\nWrite tests\nAdd logging\n"
+    )
+
+    original = "Now complete the remaining work."
+    prompt = _build_continuation_prompt(handover_file, original)
+
+    assert "CONTINUATION: Resumed after context rotation." in prompt
+    assert "Wrote auth module" in prompt
+    assert "Write tests" in prompt
+    assert "Add logging" in prompt
+    assert original in prompt
+
+
+def test_handover_marked_processed_after_delivery(tmp_path, monkeypatch):
+    """After successful delivery, handover gets .processed suffix."""
+    import subprocess_dispatch as sd
+    from unittest.mock import MagicMock
+
+    handover_dir = tmp_path / "rotation_handovers"
+    handover_dir.mkdir()
+
+    terminal_id = "T1"
+    handover_file = handover_dir / f"20260411T120000Z-{terminal_id}-ROTATION-HANDOVER.md"
+    handover_file.write_text(
+        "# T1 Context Rotation Handover\n"
+        "## Remaining Tasks\n[continuation needed]\n"
+    )
+
+    # Patch Path resolution so handover_dir points to tmp_path
+    real_path_cls = sd.Path
+
+    def fake_path(arg):
+        p = real_path_cls(arg)
+        return p
+
+    monkeypatch.setattr(sd, "Path", real_path_cls)
+
+    # Stub out SubprocessAdapter and HeadlessContextTracker
+    mock_adapter = MagicMock()
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_adapter.deliver.return_value = mock_result
+    mock_adapter.read_events_with_timeout.return_value = iter([])
+    mock_adapter._get_event_store.return_value = None
+    mock_adapter.trigger_report_pipeline.return_value = None
+
+    mock_tracker = MagicMock()
+    mock_tracker.should_rotate = False
+
+    monkeypatch.setattr(sd, "SubprocessAdapter", lambda: mock_adapter)
+    monkeypatch.setattr(sd, "HeadlessContextTracker", lambda: mock_tracker)
+
+    # Patch _detect_pending_handover to return our temp handover file
+    monkeypatch.setattr(sd, "_detect_pending_handover", lambda tid, hdir: handover_file)
+    # Patch _inject_skill_context to be a no-op
+    monkeypatch.setattr(sd, "_inject_skill_context", lambda tid, instr, role=None: instr)
+    # Patch _resolve_agent_cwd to return None
+    monkeypatch.setattr(sd, "_resolve_agent_cwd", lambda role: None)
+
+    sd.deliver_via_subprocess(
+        terminal_id=terminal_id,
+        instruction="Resume work.",
+        model="sonnet",
+        dispatch_id="DISP-test",
+    )
+
+    processed_path = handover_file.with_suffix(".md.processed")
+    assert processed_path.exists(), "Handover was not renamed to .processed"
+    assert not handover_file.exists(), "Original handover still exists after processing"
