@@ -475,14 +475,6 @@ append_and_track_receipt() {
     echo "$report_hash" >> "$PROCESSED_HASHES"
     extract_timestamp "$report_path" > "$LAST_PROCESSED"
 
-    # Update watermark to the processed report's mtime so monitor mode
-    # skips anything older on the next sweep.
-    local processed_mtime
-    processed_mtime=$(stat -c %Y "$report_path" 2>/dev/null || stat -f %m "$report_path" 2>/dev/null)
-    if [ -n "$processed_mtime" ]; then
-        echo "$processed_mtime" > "$WATERMARK_FILE"
-    fi
-
     if [ -f "$SCRIPTS_DIR/extract_open_items.py" ]; then
         if ! python3 "$SCRIPTS_DIR/extract_open_items.py" --report "$report_path" 2>&1 | tee -a "$PROCESSING_LOG"; then
             log "WARN" "Failed to extract open items from: $report_name (non-fatal)"
@@ -1051,6 +1043,7 @@ process_pending_reports() {
     log "INFO" "Processing $queue_count pending reports..."
 
     # Process with rate limiting
+    local MAX_PROCESSED_MTIME=0
     for report in "${pending_reports[@]}"; do
         # Rate limiting check
         if [ "$processed_count" -ge "$RATE_LIMIT" ]; then
@@ -1061,11 +1054,22 @@ process_pending_reports() {
 
         if process_single_report "$report"; then
             ((processed_count++))
+            local _mtime
+            _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
+            if [ -n "$_mtime" ] && [ "$_mtime" -gt "$MAX_PROCESSED_MTIME" ]; then
+                MAX_PROCESSED_MTIME=$_mtime
+            fi
         fi
 
         # Small delay between reports
         sleep 0.5
     done
+
+    # Update watermark once with the highest mtime seen this sweep so that
+    # non-chronological processing order cannot cause older files to be skipped.
+    if [ "$MAX_PROCESSED_MTIME" -gt 0 ]; then
+        echo "$MAX_PROCESSED_MTIME" > "$WATERMARK_FILE"
+    fi
 
     log "INFO" "Processed $processed_count reports successfully"
 }
@@ -1082,10 +1086,21 @@ _poll_new_reports() {
     [ "$_retry_cycles" -lt 1 ] && _retry_cycles=1
     local _cycle=0
     while true; do
+        local _poll_max_mtime=0
         for report in "$UNIFIED_REPORTS"/*.md; do
             [ -f "$report" ] || continue
-            should_process_report "$report" && process_single_report "$report"
+            if should_process_report "$report" && process_single_report "$report"; then
+                local _mtime
+                _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
+                if [ -n "$_mtime" ] && [ "$_mtime" -gt "$_poll_max_mtime" ]; then
+                    _poll_max_mtime=$_mtime
+                fi
+            fi
         done
+        # Update watermark once after the full sweep with the maximum mtime seen.
+        if [ "$_poll_max_mtime" -gt 0 ]; then
+            echo "$_poll_max_mtime" > "$WATERMARK_FILE"
+        fi
         _cycle=$(( _cycle + 1 ))
         if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
             _retry_pending_receipts

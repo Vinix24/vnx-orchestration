@@ -297,6 +297,15 @@ class ReportWatcher(FileSystemEventHandler):
     def on_created(self, event: Any) -> None:
         if event.is_directory or not str(event.src_path).endswith(".md"):
             return
+        self._handle_new_report()
+
+    def on_moved(self, event: Any) -> None:
+        # Reports delivered via atomic rename (tmp → final) appear as move events.
+        if event.is_directory or not str(event.dest_path).endswith(".md"):
+            return
+        self._handle_new_report()
+
+    def _handle_new_report(self) -> None:
         # Scan ALL unprocessed .md files (idempotency watermark — T3 requirement)
         new_files = [
             str(p) for p in self.watch_dir.rglob("*.md")
