@@ -1,51 +1,61 @@
-# VNX Feature Plan
+# F40 Feature Plan — Business Agent Integration
 
-**Last Updated**: 2026-04-10
-**Status**: Active
-**Completed**: F1-F39 (see CHANGELOG.md)
+**Created**: 2026-04-11
+**Status**: Completed
+**Branch**: feat/f40-interactive (Track A) | feat/f40-headless (Track B)
+**Goal**: Create reusable business agent templates with light governance profile
 
 ---
 
-## Next Features
+## PR-1: Agent Directory Structure + CLAUDE.md Templates
+**Track**: A (T1 backend-developer)
+**Estimated LOC**: ~150
+**Status**: Completed
 
-### F37: Auto-Report Pipeline
-**Priority**: P1 | **Status**: Completed (March 2026, PR #196, #197, #201)
+Create agent directories with CLAUDE.md skill files:
+- `agents/blog-writer/CLAUDE.md` — content creation agent that writes blog posts from topic/brief
+- `agents/linkedin-writer/CLAUDE.md` — LinkedIn post agent with tone/format constraints
+- `agents/research-analyst/CLAUDE.md` — research agent that gathers and summarizes information
+- Each CLAUDE.md defines: role, capabilities, output format, quality criteria, report template
+- Each agent dir gets a `config.yaml` with governance profile override (`light`)
 
-Stop hook + deterministic extraction + haiku classification → auto-assembled markdown report. Workers no longer manually assemble reports.
+**Success criteria**:
+- [x] 3 agent directories exist under `agents/`
+- [x] Each has a CLAUDE.md with clear role definition and constraints
+- [x] Each has a config.yaml pointing to `light` governance profile
+- [x] Subprocess adapter resolves agent dirs correctly (agents/{role}/ cwd)
 
-- Stop hook with provider-agnostic execution (`hooks/stop_hook.py`)
-- Deterministic extraction: git diff, commit hash, pytest output parsing
-- Haiku classification: content type, quality score, risk level
-- `VNX_AUTO_REPORT=1` feature flag (off by default)
-- Auto-assembled report replaces manual unified reports
+## PR-2: Agent Dispatch Routing + Integration Tests
+**Track**: A (T1 backend-developer)
+**Estimated LOC**: ~200
+**Status**: Completed
 
-### F38: Dashboard Unified
-**Priority**: P1 | **Status**: Completed (April 2026, PR #203)
+Wire agent directories into the dispatch system:
+- Update `subprocess_dispatch.py` to detect agent config.yaml and apply governance profile
+- Add `--agent` flag to dispatch CLI: `vnx dispatch --agent blog-writer --instruction "Write about X"`
+- Integration test: dispatch to blog-writer agent, verify it runs with light profile
+- Integration test: dispatch to research-analyst, verify isolation (can't access coding files)
+- Update `folder_scope.py` to enforce agent isolation via governance_profiles.yaml scopes
 
-Single dashboard for coding and business domains.
+**Success criteria**:
+- [x] `vnx dispatch --agent blog-writer` works end-to-end
+- [x] Agent runs with light governance profile (exception-only review)
+- [x] Agent output lands in correct unified_reports/ location
+- [x] Folder scope isolation prevents cross-scope access
+- [x] Integration tests pass
 
-- Domain filter tabs (Coding, Business, All)
-- Session history browser (view past dispatch outputs)
-- Agent selector by name instead of terminal ID
-- Reports browser surfaces auto-assembled reports in UI
+## PR-3: End-to-End Demonstration + Documentation
+**Track**: A (T1 backend-developer)
+**Estimated LOC**: ~100
+**Status**: Completed
 
-### F39: Headless T0 Benchmark
-**Priority**: P2 | **Status**: Completed (April 2026, PR-9 in progress)
+- Run each agent on a real task and capture the output
+- Add `docs/guides/AGENT_CREATION_GUIDE.md` — how to create custom agents
+- Update FEATURE_PLAN.md status to completed
+- Verify all receipts, reports, and governance records are complete
 
-Decision framework rewrite + gate locks + replay harness. Deterministic pre-filter handles ~70% of decisions. Taxonomy simplified to DISPATCH/COMPLETE/WAIT/REJECT/ESCALATE.
-
-- Context assembler: 8 state files → ~5K token snapshot (`scripts/lib/t0_context_assembler.py`)
-- Replay harness: 3-level fixture corpus (`scripts/benchmark/t0_replay_harness.py`)
-- Gate locks: file-based, LLM-bypass-proof (`scripts/lib/t0_gate_locks.py`)
-- Benchmark scores: Level-1 100%, Level-2 73–87%, Level-3 67–78%
-- `--mode benchmark` CLI flag for fixture-tagged runs
-
-### F40: Business Agent Integration
-**Priority**: P2 | **Status**: Planned
-
-SubprocessAdapter on GCP VM for VNX Digital workers.
-
-- Replace fragile n8n → SSH → MacBook → claude -p pipeline
-- Business-light governance profile activation (folder-scoped, review-by-exception)
-- Agent directories: agents/blog-writer/, agents/linkedin-writer/
-- 24/7 headless content worker execution
+**Success criteria**:
+- [x] Agent creation guide exists (`docs/guides/AGENT_CREATION_GUIDE.md`)
+- [x] All 3 agents verified: CLAUDE.md + config.yaml present
+- [x] Governance profiles resolve correctly (light, exception_only, gates=[ci])
+- [x] FEATURE_PLAN.md updated to completed
