@@ -48,18 +48,51 @@ def main() -> None:
     )
 
     # status subcommand
-    subparsers.add_parser(
+    status_parser = subparsers.add_parser(
         "status",
-        help="show current dispatch and terminal status",
+        help="show current dispatch and agent status",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit results as JSON",
+    )
+    status_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to inspect (default: current directory)",
     )
 
     # dispatch-agent subcommand
     dispatch_parser = subparsers.add_parser(
         "dispatch-agent",
-        help="dispatch a task to a specific agent terminal",
+        help="dispatch a task to a named agent",
     )
-    dispatch_parser.add_argument("terminal", help="target terminal (e.g. T1, T2, T3)")
-    dispatch_parser.add_argument("task_file", help="path to dispatch instruction file")
+    dispatch_parser.add_argument(
+        "--agent",
+        required=True,
+        metavar="NAME",
+        help="agent name (must have agents/<NAME>/CLAUDE.md)",
+    )
+    dispatch_parser.add_argument(
+        "--instruction",
+        required=True,
+        metavar="TEXT",
+        help="instruction text to send to the agent",
+    )
+    dispatch_parser.add_argument(
+        "--model",
+        default="sonnet",
+        metavar="MODEL",
+        help="model to use (default: sonnet)",
+    )
+    dispatch_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory (default: current directory)",
+    )
 
     args = parser.parse_args()
 
@@ -72,12 +105,12 @@ def main() -> None:
         sys.exit(vnx_doctor(args))
 
     elif args.command == "status":
-        print("vnx status: not yet implemented")
-        sys.exit(0)
+        from vnx_cli.commands.status import vnx_status
+        sys.exit(vnx_status(args))
 
     elif args.command == "dispatch-agent":
-        print("vnx dispatch-agent: not yet implemented")
-        sys.exit(0)
+        from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
+        sys.exit(vnx_dispatch_agent(args))
 
     else:
         parser.print_help()
