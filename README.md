@@ -72,6 +72,24 @@ vnx demo --dashboard                  # Dashboard with sample data
 
 Demo mode uses temp directories — nothing touches your project.
 
+### Headless Mode — Fully autonomous execution
+
+All terminals (T0-T3) can run as `claude -p` subprocesses instead of interactive tmux sessions. In headless mode, the T0 orchestrator makes dispatch, review, and merge decisions autonomously — no human in the loop between steps.
+
+Headless workers are triggered by file watchers (new reports arriving in the unified_reports directory), silence watchdogs (detecting stale state), and optional LLM triage. Configure which terminals go headless per-run using environment variables:
+
+```bash
+# Run T1 as headless worker
+VNX_ADAPTER_T1=subprocess vnx start
+
+# Full headless mode (all terminals)
+python3 scripts/headless_trigger.py --watch-dir .vnx-data/unified_reports/
+```
+
+The same governance applies regardless of mode. Receipts, quality gates, and provenance records are generated identically whether a worker is interactive or headless. Headless does not mean ungoverned.
+
+Typical use cases: overnight feature execution, CI/CD integration, shadow testing of new agent configurations.
+
 ## How It Works
 
 ### 1. Dispatch — The orchestrator assigns tasks
@@ -95,6 +113,22 @@ vnx cost-report    # API spend per agent, per task type
 Quality gates are deterministic, not LLM-based. The agent proposes, the gate validates: file size limits, test coverage thresholds, open blocker counts. Verdicts: `APPROVE`, `HOLD`, or `ESCALATE`. The LLM never judges its own work.
 
 ![VNX quality advisory showing automated code quality checks and gate verdicts](docs/images/vnx-quality-advisory.png)
+
+### Multi-Provider Code Review
+
+Every PR goes through automated review from multiple AI providers before merge is allowed.
+
+- **Codex gate** (OpenAI gpt-5.2-codex) — finds bugs, data loss risks, and security issues
+- **Gemini review** (Google gemini-2.5-flash) — architecture, patterns, and trade-off analysis
+
+Both run headlessly via CLI (`codex --dangerously-bypass-approvals-and-sandbox`, `gemini`). Each produces a structured JSON verdict: `pass`, `fail`, or `blocked`, with severity-rated findings attached.
+
+The triple gate policy is enforced deterministically: codex pass + gemini pass + CI green → merge allowed. Gate locks are file-based, not LLM-based — the orchestrator cannot bypass them by reasoning its way around them.
+
+```bash
+vnx gate-check --pr 206          # Run all required gates
+vnx gate-check --pr 206 --gate codex_gate   # Run specific gate
+```
 
 ### 5. Rotate — Context fills up? No problem
 
@@ -212,6 +246,23 @@ vnx suggest accept 1,3,5   # Approve specific edits
 vnx suggest apply          # Apply to target files
 ```
 
+## Mission Control Dashboard
+
+A real-time operator dashboard runs locally at `localhost:3100` (Next.js frontend) with an API server at `localhost:4173`. No cloud dependency — the dashboard reads directly from `.vnx-data/` filesystem state.
+
+What it shows:
+
+- **Terminal status cards** — which agent is doing what, context pressure level, last heartbeat timestamp
+- **Reports browser** — auto-assembled worker reports organized by domain (coding, business), browsable without digging through files
+- **Dispatch queue** — pending, active, and completed dispatches with full provenance chain visible
+- **Quality metrics** — first-pass yield, rework rate, SPC control charts, and governance health indicators
+- **Agent selector** — pick agents by name rather than terminal ID when routing work
+
+```bash
+vnx dashboard          # Launch at localhost:3100
+vnx dashboard --api    # API server only (localhost:4173)
+```
+
 ## Project Structure
 
 ```
@@ -256,6 +307,7 @@ See [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) and [VNX vs Mul
 | **Context rotation** | Automatic handover | Manual /clear | Not typically handled |
 | **LLM-agnostic** | Yes (Claude, Codex, Gemini, Kimi) | Claude only | Varies by framework |
 | **Setup complexity** | `git clone` + `vnx init` | `npm install` | pip install + code integration |
+| **Automated multi-provider review** | Built-in (Codex + Gemini triple gate) | None built-in | Not typically included |
 
 Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) | [VNX vs Multi-Agent Frameworks](docs/comparisons/vnx_vs_frameworks.md)
 
