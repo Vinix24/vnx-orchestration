@@ -63,8 +63,8 @@ _CLAUDE_MD_TEMPLATE = textwrap.dedent("""\
 
 _VNX_DATA_SUBDIRS = [
     "dispatches/pending",
-    "dispatches/staging",
-    "dispatches/done",
+    "dispatches/active",
+    "dispatches/completed",
     "receipts",
     "unified_reports",
     "unified_reports/headless",
