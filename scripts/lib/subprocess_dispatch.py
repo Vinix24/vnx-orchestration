@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
+from headless_context_tracker import HeadlessContextTracker
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,43 @@ def _load_agent_profile(config_path: Path) -> str:
     return "default"
 
 
+def _write_rotation_handover(
+    terminal_id: str,
+    dispatch_id: str,
+    tracker: "HeadlessContextTracker",
+) -> Path:
+    """Write a markdown rotation handover file to .vnx-data/rotation_handovers/.
+
+    Returns the path written.
+    """
+    rotation_dir = (
+        Path(__file__).resolve().parents[2] / ".vnx-data" / "rotation_handovers"
+    )
+    rotation_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"{timestamp}-{terminal_id}-ROTATION-HANDOVER.md"
+    handover_path = rotation_dir / filename
+
+    snapshot = tracker.snapshot()
+    content = (
+        f"# {terminal_id} Context Rotation Handover\n"
+        f"**Timestamp**: {datetime.now(timezone.utc).isoformat()}\n"
+        f"**Context Used**: {snapshot['context_used_pct']}%\n"
+        f"**Dispatch-ID**: {dispatch_id}\n"
+        f"## Status\n"
+        f"in-progress\n"
+        f"## Remaining Tasks\n"
+        f"[continuation needed]\n"
+    )
+    handover_path.write_text(content)
+    logger.info(
+        "Rotation handover written: %s (%.1f%% context used)",
+        handover_path, snapshot["context_used_pct"],
+    )
+    return handover_path
+
+
 def deliver_via_subprocess(
     terminal_id: str,
     instruction: str,
@@ -171,16 +209,23 @@ def deliver_via_subprocess(
         )
         heartbeat_thread.start()
 
+    context_tracker = HeadlessContextTracker()
+    rotation_occurred = False
     success = False
     try:
         for _event in adapter.read_events_with_timeout(
             terminal_id,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
+            context_tracker=context_tracker,
         ):
             pass
-        success = True
-        return True
+        # Determine if loop ended due to rotation or normal completion
+        rotation_occurred = context_tracker.should_rotate
+        success = not rotation_occurred
+        if rotation_occurred:
+            _write_rotation_handover(terminal_id, dispatch_id, context_tracker)
+        return success
     except Exception:
         logger.exception("deliver_via_subprocess failed for %s", terminal_id)
         return False

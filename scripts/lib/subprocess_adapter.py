@@ -319,6 +319,16 @@ class SubprocessAdapter:
         if event_type == "rate_limit_event":
             return []
 
+        # task_progress → context window usage snapshot
+        if event_type == "task_progress" or (
+            event_type == "system" and event_subtype == "task_progress"
+        ):
+            usage = payload.get("usage", {})
+            return [{"type": "task_progress", "data": {
+                "total_tokens": usage.get("total_tokens") if isinstance(usage, dict) else None,
+                "subtype": event_subtype,
+            }}]
+
         # Already-normalized events (test fixtures, future formats) — pass through
         return [{"type": event_type, "data": payload}]
 
@@ -382,6 +392,7 @@ class SubprocessAdapter:
         terminal_id: str,
         chunk_timeout: float = 120.0,
         total_deadline: float = 600.0,
+        context_tracker: Optional[Any] = None,
     ) -> Iterator[StreamEvent]:
         """Like read_events() but with timeout protection.
 
@@ -446,6 +457,10 @@ class SubprocessAdapter:
             if is_init and session_id and terminal_id not in self._session_ids:
                 self._session_ids[terminal_id] = session_id
 
+            # Update context tracker with raw payload (before normalization)
+            if context_tracker is not None:
+                context_tracker.update(payload)
+
             # Normalize and yield
             normalized_events = self._normalize_cli_event(payload)
             dispatch_id = self._dispatch_ids.get(terminal_id, "")
@@ -459,6 +474,29 @@ class SubprocessAdapter:
                     data=norm.get("data", {}),
                     session_id=session_id if is_init else None,
                 )
+
+            # Rotation check: stop subprocess if context threshold exceeded
+            if context_tracker is not None and context_tracker.should_rotate:
+                logger.warning(
+                    "read_events_with_timeout: context rotation triggered for %s "
+                    "(%.1f%% of %d tokens used)",
+                    terminal_id,
+                    context_tracker.context_used_pct,
+                    context_tracker.model_context_limit,
+                )
+                snapshot = context_tracker.snapshot()
+                state_dir = Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
+                state_dir.mkdir(parents=True, exist_ok=True)
+                context_window_path = state_dir / f"context_window_{terminal_id}.json"
+                try:
+                    import json as _json
+                    context_window_path.write_text(
+                        _json.dumps({"terminal_id": terminal_id, **snapshot}, indent=2)
+                    )
+                except Exception as _exc:
+                    logger.warning("Failed to write context_window json for %s: %s", terminal_id, _exc)
+                self.stop(terminal_id)
+                break
 
     def get_session_id(self, terminal_id: str) -> Optional[str]:
         """Return session_id extracted from the init event, or None.
