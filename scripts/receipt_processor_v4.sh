@@ -37,6 +37,7 @@ PROCESSED_HASHES="$STATE_DIR/processed_receipts.txt"
 PROCESSING_LOG="$STATE_DIR/receipt_processing.log"
 FLOOD_LOCKFILE="$STATE_DIR/receipt_flood.lock"
 RECEIPT_FILE="$STATE_DIR/t0_receipts.ndjson"
+WATERMARK_FILE="$STATE_DIR/receipt_processor_watermark"
 PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 
 # Outbox directories for guaranteed receipt delivery (outbox pattern)
@@ -175,16 +176,23 @@ should_process_report() {
     # Calculate cutoff time in seconds since epoch
     local cutoff_seconds
     if [ "$MODE" = "monitor" ]; then
-        # Monitor mode: Process files created in last 10 minutes.
-        # Wider window ensures the 30-second sweep catches reports that
-        # fswatch silently dropped (macOS FSEvents can miss rapid writes).
-        cutoff_seconds=$(($(date +%s) - 600))
+        # Monitor mode: use watermark-based processing.
+        # Only process reports newer than the last successfully processed report's mtime.
+        # On first run (no watermark), fall back to 24 hours to avoid replaying history.
+        if [ -f "$WATERMARK_FILE" ]; then
+            cutoff_seconds=$(cat "$WATERMARK_FILE" 2>/dev/null)
+            if ! [[ "$cutoff_seconds" =~ ^[0-9]+$ ]]; then
+                cutoff_seconds=$(($(date +%s) - 86400))
+            fi
+        else
+            cutoff_seconds=$(($(date +%s) - 86400))
+        fi
     else
         # Catchup/manual mode: Process files from last N hours
         cutoff_seconds=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
     fi
 
-    # Check if file is too old based on actual creation time
+    # Check if file is too old based on actual modification time
     if [ "$file_mtime" -lt "$cutoff_seconds" ]; then
         local age_minutes=$(( ($(date +%s) - file_mtime) / 60 ))
         log "DEBUG" "Report too old: $report_name (age: ${age_minutes}m)"
@@ -466,6 +474,14 @@ append_and_track_receipt() {
     local report_hash=$(_sha256 "$report_path")
     echo "$report_hash" >> "$PROCESSED_HASHES"
     extract_timestamp "$report_path" > "$LAST_PROCESSED"
+
+    # Update watermark to the processed report's mtime so monitor mode
+    # skips anything older on the next sweep.
+    local processed_mtime
+    processed_mtime=$(stat -c %Y "$report_path" 2>/dev/null || stat -f %m "$report_path" 2>/dev/null)
+    if [ -n "$processed_mtime" ]; then
+        echo "$processed_mtime" > "$WATERMARK_FILE"
+    fi
 
     if [ -f "$SCRIPTS_DIR/extract_open_items.py" ]; then
         if ! python3 "$SCRIPTS_DIR/extract_open_items.py" --report "$report_path" 2>&1 | tee -a "$PROCESSING_LOG"; then
