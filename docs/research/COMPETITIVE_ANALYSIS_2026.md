@@ -126,11 +126,56 @@ Anthropic's native multi-agent capability in Claude Code. Introduced with Claude
 
 **Key differentiator**: Zero setup overhead for Claude Code users. The mailbox system for peer-to-peer agent communication is architecturally novel. Anthropic used it internally to raise code review coverage from 16% to 54%.
 
-**Claude Squad** (separate): A terminal app by smtg-ai that manages multiple independent Claude Code (and Codex, Gemini, Amp) instances in separate workspaces. Not an official Anthropic product. Provides session isolation but not governance.
+**Claude Squad** (separate): A terminal TUI app by smtg-ai that manages multiple independent Claude Code (and other AI agent) instances in separate git worktrees. Not an official Anthropic product. See Section 5 for a full profile.
 
 ---
 
-### 5. Mastra
+### 5. Claude Squad
+
+**Status**: Active — v1.0+ (latest release: March 2026)  
+**GitHub Stars**: ~5,600 (April 2026)  
+**GitHub**: [smtg-ai/claude-squad](https://github.com/smtg-ai/claude-squad)  
+**Language**: Go  
+**License**: AGPL-3.0
+
+Claude Squad is a terminal UI (TUI) application — not a framework — that manages multiple AI coding agent sessions running in parallel. Each session gets its own tmux window and git worktree, providing hard workspace isolation between concurrent tasks. Supported agent backends: Claude Code, Codex, Aider, OpenCode, and Amp.
+
+This is the closest existing tool to VNX in surface-level behavior (managing multiple Claude Code instances), but the design philosophy is fundamentally different: Claude Squad is a **productivity multiplier for humans**; VNX is a **governance system for auditable agent execution**.
+
+**Architecture**: tmux for session persistence (agents keep running even if the TUI is closed) + git worktrees so each session works on its own isolated branch. One TUI pane displays all active sessions with status, output preview, and diff scrolling. No message bus, no dispatch protocol, no shared state between agents.
+
+**Governance model**: None. Claude Squad is a session manager, not a governance system. There are no dispatch contracts, no receipts, no quality gates, no human approval flows. The user manually inspects output and decides what to merge.
+
+**Agent isolation**: Strong workspace isolation via git worktrees — each agent works on a separate branch with zero cross-contamination. No protocol isolation: agents have no defined roles, dispatch contracts, or quality checkpoints.
+
+**Context window management**: Not addressed. Each agent session is an independent instance of the underlying tool (Claude Code, Codex, etc.). Context management follows that tool's own behavior.
+
+**LLM agnostic**: Yes — any terminal-based AI coding agent is supported. Provider independence is a first-class feature.
+
+**Setup complexity**: Very Low. Install via `brew install claude-squad` or the install script. Run `cs` to launch. Claude Squad manages tmux internally; the user does not configure tmux manually.
+
+**Key differentiator**: Lowest barrier to parallel agent sessions. Excellent for developers who want to parallelize tasks across multiple Claude Code instances without any governance overhead.
+
+**Direct comparison with VNX headless mode** (as of v0.9.0, April 2026):
+
+| Dimension | Claude Squad | VNX (headless mode) |
+|-----------|-------------|---------------------|
+| Execution model | tmux sessions (persistent) | `claude -p` subprocesses |
+| Worker isolation | Git worktree per session | Git worktree per worktree |
+| Governance | None | Full (dispatch/receipt/gate) |
+| Audit trail | None | Append-only NDJSON ledger |
+| Quality gates | None | Deterministic (gitleaks, radon, size) |
+| Human approval | Manual merge decision | Staged dispatch promotion |
+| Setup | Binary install, ~2 min | Clone + agent folders, ~10 min |
+| Autonomous operation | Not designed for it | Native autonomous loop (T0 → workers) |
+| Provider support | Multi (Claude, Codex, Aider, Amp) | Claude (T0); multi via watcher pattern |
+| Observability | TUI session view | Local dashboard + NDJSON ledger |
+
+The gap that remains between Claude Squad and VNX headless mode is not setup complexity (both are now accessible) — it is the presence or absence of a governance layer. Claude Squad gives you parallel sessions. VNX gives you auditable parallel sessions with deterministic quality enforcement.
+
+---
+
+### 6. Mastra
 
 **Status**: Active — v1.0 released January 2026  
 **GitHub Stars**: ~22,000+  
@@ -158,7 +203,7 @@ From the team behind Gatsby (Kyle Mathews), Mastra is a TypeScript-first AI agen
 
 ---
 
-### 6. OpenAI Agents SDK (formerly Swarm)
+### 7. OpenAI Agents SDK (formerly Swarm)
 
 **Status**: Active — production SDK (Swarm is archived)  
 **Version**: Active maintenance, latest release April 9, 2026  
@@ -189,7 +234,7 @@ The Agents SDK is a lightweight, production-ready framework with a small set of 
 
 ---
 
-### 7. Agency Swarm
+### 8. Agency Swarm
 
 **Status**: Active  
 **GitHub**: [VRSEN/agency-swarm](https://github.com/VRSEN/agency-swarm)  
@@ -208,7 +253,7 @@ Agency Swarm layers structured orchestration on top of the OpenAI Agents SDK, mo
 
 ---
 
-### 8. MetaGPT
+### 9. MetaGPT
 
 **Status**: Active — research-production hybrid  
 **GitHub Stars**: 50,000+ (one of the most-starred AI repos of 2023-24)  
@@ -229,7 +274,7 @@ MetaGPT encodes human organizational workflows (SOPs — Standard Operating Proc
 
 ---
 
-### 9. Swarms (kyegomez)
+### 10. Swarms (kyegomez)
 
 **Status**: Active — enterprise-positioned  
 **GitHub**: [kyegomez/swarms](https://github.com/kyegomez/swarms)  
@@ -248,7 +293,7 @@ Swarms targets enterprise-scale agent orchestration across millions of agents. S
 
 ---
 
-### 10. Google ADK (Agent Development Kit)
+### 11. Google ADK (Agent Development Kit)
 
 **Status**: Active  
 **Language**: Python  
@@ -264,24 +309,24 @@ Google's answer to the multi-agent framework space. Uses a sliding-window compac
 
 ## Feature Comparison Matrix
 
-| Feature | CrewAI | LangGraph | AutoGen / MAF | Claude Agent Teams | Mastra | OpenAI SDK | MetaGPT | **VNX** |
-|---------|--------|-----------|---------------|--------------------|--------|------------|---------|---------|
-| **Multi-agent coordination** | ✓ (Crews + Flows) | ✓ (graph) | ✓ (event-driven) | ✓ (mailbox) | ✓ (supervisor) | ✓ (handoffs) | ✓ (SOPs) | ✓ (dispatch + receipts) |
-| **Append-only audit trail** | ✗ | Partial¹ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (NDJSON ledger)** |
-| **Deterministic quality gates** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (lint/size/secrets)** |
-| **Human approval gates** | ✗ | Partial² | ✗ | ✗ | Partial³ | ✗ | ✗ | **✓ (staging → promote)** |
-| **Context rotation/window mgmt** | ✗ | ✗ | ✗ | Isolated only | **✓ (SOTA LongMemEval)** | ✗ | ✗ | Partial⁴ |
-| **LLM provider agnostic** | ✓ | ✓ | ✓ | ✗ (Claude-only) | ✓ | Partial⁵ | ✓ | **✓ (watcher pattern)** |
-| **Headless / autonomous execution** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (subprocess adapter)** |
-| **A/B testing of agent output** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | Partial⁶ |
-| **Governance profiles (configurable review depth)** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (coding-full / business-light)** |
-| **Business agent templates** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (blog-writer, linkedin-writer)** |
-| **Dashboard / monitoring** | ✓ (CrewAI platform) | ✓ (LangSmith) | ✓ (OTel) | ✗ | ✓ (built-in) | ✓ (OTel) | ✗ | **✓ (local dashboard)** |
-| **File-based (no cloud dependency)** | ✗ | Partial | ✗ | ✗ | ✗ | ✗ | ✗ | **✓** |
-| **Setup complexity** | Low | Medium | Medium | Very Low | Low | Low | Medium | High⁷ |
-| **Pre-filter (rule-based, no LLM)** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (handles ~70% of decisions)** |
-| **Orchestrator write isolation** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (T0 cannot write files)** |
-| **Ledger replay / crash recovery** | ✗ | ✓ (checkpoints) | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (append-only ledger)** |
+| Feature | CrewAI | LangGraph | AutoGen / MAF | Claude Agent Teams | **Claude Squad** | Mastra | OpenAI SDK | MetaGPT | **VNX** |
+|---------|--------|-----------|---------------|--------------------|------------------|--------|------------|---------|---------|
+| **Multi-agent coordination** | ✓ (Crews + Flows) | ✓ (graph) | ✓ (event-driven) | ✓ (mailbox) | ✓ (parallel sessions) | ✓ (supervisor) | ✓ (handoffs) | ✓ (SOPs) | ✓ (dispatch + receipts) |
+| **Append-only audit trail** | ✗ | Partial¹ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (NDJSON ledger)** |
+| **Deterministic quality gates** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (lint/size/secrets)** |
+| **Human approval gates** | ✗ | Partial² | ✗ | ✗ | ✗ | Partial³ | ✗ | ✗ | **✓ (staging → promote)** |
+| **Context rotation/window mgmt** | ✗ | ✗ | ✗ | Isolated only | ✗ | **✓ (SOTA LongMemEval)** | ✗ | ✗ | Partial⁴ |
+| **LLM provider agnostic** | ✓ | ✓ | ✓ | ✗ (Claude-only) | ✓ (multi-agent backend) | ✓ | Partial⁵ | ✓ | **✓ (watcher pattern)** |
+| **Headless / autonomous execution** | ✓ | ✓ | ✓ | ✓ | ✗ (TUI-driven) | ✓ | ✓ | ✓ | **✓ (subprocess adapter)** |
+| **A/B testing of agent output** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓⁶** |
+| **Governance profiles (configurable review depth)** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (coding-full / business-light)** |
+| **Business agent templates** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (blog-writer, linkedin-writer)** |
+| **Dashboard / monitoring** | ✓ (CrewAI platform) | ✓ (LangSmith) | ✓ (OTel) | ✗ | Partial (TUI view) | ✓ (built-in) | ✓ (OTel) | ✗ | **✓ (local dashboard)** |
+| **File-based (no cloud dependency)** | ✗ | Partial | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | **✓** |
+| **Setup complexity** | Low | Medium | Medium | Very Low | **Very Low** | Low | Low | Medium | Medium⁷ |
+| **Pre-filter (rule-based, no LLM)** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (handles ~70% of decisions)** |
+| **Orchestrator write isolation** | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (T0 cannot write files)** |
+| **Ledger replay / crash recovery** | ✗ | ✓ (checkpoints) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **✓ (append-only ledger)** |
 
 **Notes**:
 
@@ -290,8 +335,8 @@ Google's answer to the multi-agent framework space. Uses a sliding-window compac
 ³ Mastra can suspend workflows for human input, but this is a workflow design choice, not a default governance posture.  
 ⁴ VNX context reset is provider-dependent (`/new` for Claude Code, `/clear` for Gemini). Not automatic.  
 ⁵ OpenAI Agents SDK is designed for OpenAI models. Other providers accessible via unofficial LiteLLM bridge.  
-⁶ VNX has headless A/B test infrastructure (F42) but the full A/B comparison pipeline is not yet production-validated.  
-⁷ VNX requires tmux, shell configuration, terminal layout setup. Not a `pip install` experience.
+⁶ VNX A/B test infrastructure (F40 + F42) validated headless vs. interactive execution at production complexity. Results: 4% LOC delta, identical file structures, 0 human interventions required in either track. Pipeline is battle-tested for these two features; extended production burn-in is the next step.  
+⁷ VNX setup complexity as of v0.9.0 (April 2026): headless mode reduces setup to clone → create agent folders with CLAUDE.md + config.yaml → dispatch. No tmux grid configuration required for workers. Historical complexity (v0.1–v0.8.x) was High — tmux layout, shell configuration, terminal setup all required. Headless mode is new (2 weeks as of April 2026) and not yet production-proven at scale.
 
 ---
 
@@ -335,7 +380,7 @@ VNX has configurable review depth per agent domain. A coding terminal runs throu
 
 ### What other frameworks do better than VNX
 
-**CrewAI**: Zero-to-working is hours, not days. Intuitive mental model. 12M daily executions proves production scale. VNX requires tmux setup, terminal configuration, and understanding of the dispatch/receipt contract before anything runs. This gap is real.
+**CrewAI**: Zero-to-working is hours, not days. Intuitive mental model. 12M daily executions proves production scale. As of v0.9.0, VNX's headless mode reduces setup significantly — but the dispatch/receipt contract still has a learning curve that `pip install crewai` does not. The gap has narrowed but has not closed.
 
 **LangGraph**: The graph model gives precise control over complex conditional workflows. State persistence across nodes, with automatic crash recovery, is more sophisticated than VNX's ledger-based recovery. The checkpoint system is battle-tested in regulated industries. VNX's state management is simpler and less granular.
 
@@ -346,6 +391,8 @@ VNX has configurable review depth per agent domain. A coding terminal runs throu
 **OpenAI Agents SDK**: Clean, documented handoff model. 4,900+ dependent projects. Maintained by OpenAI with backward compatibility commitments. VNX has no stability guarantees; it evolves based on one practitioner's daily-use experience.
 
 **Claude Code Agent Teams**: Zero setup for Claude Code users. The peer-to-peer mailbox system is a genuine innovation in agent communication that VNX does not have — VNX enforces all coordination to flow through T0. Agent Teams allows direct lateral communication.
+
+**Claude Squad**: Lowest setup friction of any tool in this comparison for parallel Claude Code sessions. Binary install, TUI up in minutes, multi-agent provider support out of the box. For developers who want parallel sessions without governance overhead, Claude Squad is the right tool. VNX headless mode is now more competitive on setup, but Claude Squad remains faster to a first working session.
 
 **Context window rotation**: All frameworks evaluated either isolate context per agent or implement summarization. VNX does neither automatically — context rotation is manual and provider-dependent. This is the most significant technical gap in the VNX stack.
 
@@ -362,7 +409,7 @@ VNX's moat is not a single feature — it is the **combination of governance pro
 
 These properties are hard to replicate because they require **choosing governance over autonomy** at every architectural decision point. Most frameworks made the opposite choice — maximize what agents can do autonomously. VNX made the opposite choice: maximize what humans can see, audit, and control.
 
-That said: moat also implies friction. The same properties that make VNX trustworthy make it harder to set up and operate than every other framework in this comparison.
+That said: moat also implies friction. The same properties that make VNX trustworthy make it harder to set up and operate than every other framework in this comparison — though the gap has narrowed materially with headless mode.
 
 ---
 
@@ -390,21 +437,29 @@ As model diversity grows (OpenAI, Anthropic, Gemini, Kimi, local models), teams 
 
 This analysis would not be credible without acknowledging what VNX is not:
 
-**It is a prototype, not a product.** VNX is validated by six months of daily use on a local 4-terminal system processing 1,466+ dispatches. It has not been tested at scale, in distributed environments, or by anyone other than its author.
+**It is a prototype, not a product.** VNX is validated by nine months of daily use on a local 4-terminal system processing 1,466+ dispatches. It has not been tested at scale, in distributed environments, or by anyone other than its author.
 
-**Setup is demanding.** VNX requires tmux, shell configuration, terminal layout, and understanding of the dispatch/receipt contract. Compare this to `pip install crewai` and a 20-line Python file. The gap is not small.
+**[HISTORICAL — v0.1 through v0.8.x] Setup was demanding.** For the first nine months of development, VNX required tmux, shell configuration, terminal layout, and understanding of the dispatch/receipt contract before anything ran. Compare this to `pip install crewai` and a 20-line Python file, or `brew install claude-squad`. The gap was not small. This remains the correct characterization for anyone running on pre-v0.9.0.
 
-**Context management is manual.** VNX does not implement automatic context compression or rotation. Mastra's Observational Memory is objectively more sophisticated for long-running agent workflows.
+### Post-Headless Update (April 2026)
 
-**Bash/Python prototype.** The codebase is approximately 60% bash and 40% Python — reflecting organic growth from tmux `send-keys` scripts. A production deployment would benefit from a typed, testable rewrite (Rust or Go for critical paths).
+As of v0.9.0 (April 2026), VNX supports fully headless worker execution via `claude -p` subprocesses. This changes the setup story materially:
 
-**T0 is Claude-dependent.** The orchestrator (T0) has only been tested with Claude Opus via Claude Code. The hook system enforcing T0 write isolation is Claude Code–specific. Using a different model as T0 is untested.
+- **tmux is no longer required for workers.** T1/T2/T3 can run as pure `claude -p` subprocesses. tmux is only needed if you want to observe T0 interactively — and even that is optional.
+- **Setup is now**: clone repo → create agent folders with CLAUDE.md + config.yaml → dispatch. No tmux grid configuration required.
+- **The autonomous decision loop is closed**: `trigger_headless_t0()` → decision_parser → decision_executor → `write_dispatch()` → subprocess worker → report → trigger. Full autonomous execution without human intervention per cycle.
+- **A/B testing validated the approach**: F40 and F42 tests showed headless execution produces functionally equivalent output to interactive sessions — 4% LOC delta, identical file structures, 0 human interventions required in either track across features of moderate-to-high complexity.
 
-**Single-repository only.** VNX does not support multi-repository orchestration. All agents work within a single repo context.
+**What remains honestly limited:**
 
-**No distributed deployment.** VNX uses the local filesystem as a message bus. It is not designed for teams working across machines or cloud environments.
-
-**No community.** Every other framework in this comparison has thousands of GitHub stars, active Discord communities, and third-party tutorials. VNX has documentation and a public repo.
+- **Headless mode is 2 weeks old as of April 2026** and not yet battle-tested at scale or in extended production use. The A/B tests are rigorous but represent 2 features across 1 operator. Extended burn-in across more features and longer run times is the required next step before claiming production readiness for headless execution.
+- **Context management is still manual.** VNX does not implement automatic context compression or rotation. Mastra's Observational Memory is objectively more sophisticated for long-running agent workflows.
+- **Bash/Python prototype.** The codebase is approximately 60% bash and 40% Python — reflecting organic growth from tmux `send-keys` scripts. A production deployment would benefit from a typed, testable rewrite (Rust or Go for critical paths).
+- **T0 is Claude-dependent.** The orchestrator (T0) has only been tested with Claude Opus via Claude Code. The hook system enforcing T0 write isolation is Claude Code–specific. Using a different model as T0 is untested.
+- **Single-repository only.** VNX does not support multi-repository orchestration. All agents work within a single repo context.
+- **No distributed deployment.** VNX uses the local filesystem as a message bus. It is not designed for teams working across machines or cloud environments.
+- **No community.** Every other framework in this comparison has thousands of GitHub stars, active Discord communities, and third-party tutorials. VNX has documentation and a public repo.
+- **Telegram-only external gateway.** The current trigger path for the autonomous decision loop runs exclusively via Telegram → Claude Code. This is a single-channel dependency that limits accessibility for operators without Telegram configured.
 
 ---
 
@@ -412,7 +467,7 @@ This analysis would not be credible without acknowledging what VNX is not:
 
 | Dimension | Best-in-class | VNX Position |
 |-----------|--------------|--------------|
-| Time to first working agent | CrewAI, OpenAI SDK | Weakest — high setup cost |
+| Time to first working agent | CrewAI, OpenAI SDK, Claude Squad | v0.8.x and earlier: Weakest (tmux required). v0.9.0+: Medium — headless mode reduces to clone → folder → dispatch. Headless not yet production-proven at scale. |
 | Production scale | CrewAI (12M daily executions) | Prototype only |
 | Context management | Mastra (LongMemEval SOTA) | Manual, provider-dependent |
 | Governance / audit trail | **VNX** | Unique — no competitor close |
@@ -423,8 +478,9 @@ This analysis would not be credible without acknowledging what VNX is not:
 | Enterprise readiness | Microsoft Agent Framework | VNX not enterprise-ready |
 | Community / ecosystem | CrewAI, LangGraph | VNX has none |
 | Pre-filter (LLM-bypass) | **VNX** | Unique — 70% of decisions without LLM |
+| Parallel session management | Claude Squad | VNX headless is functional; Claude Squad is faster to start |
 
-**The honest summary**: Every other framework in this analysis was built to maximize what agents can do. VNX was built to maximize what humans can audit, approve, and control. These are different design philosophies, and they produce different tradeoffs. If you need a system running in production today at scale, use CrewAI or LangGraph. If you need an engineering team where every agent action is audited, approved, and gated — and you are willing to pay the setup cost — VNX is the only architecture in this field that takes that requirement seriously at the framework level.
+**The honest summary**: Every other framework in this analysis was built to maximize what agents can do. VNX was built to maximize what humans can audit, approve, and control. These are different design philosophies, and they produce different tradeoffs. If you need a system running in production today at scale, use CrewAI or LangGraph. If you want parallel Claude Code sessions with minimal overhead, Claude Squad is the lowest-friction option in this comparison. If you need an engineering team where every agent action is audited, approved, and gated — VNX now offers both interactive and headless execution modes. The headless path (v0.9.0, April 2026) brings setup closer to peer tools: clone, configure agent folders, dispatch — no tmux grid required. But be clear-eyed: headless mode is two weeks old as of this writing, validated on 2 features, and requires extended production burn-in before it can be recommended at scale. The governance properties — append-only ledger, LLM-invisible gate locks, orchestrator write isolation, deterministic quality gates — remain VNX's unique contribution to this field and are not replicated by any other framework evaluated here.
 
 ---
 
@@ -442,6 +498,7 @@ This analysis would not be credible without acknowledging what VNX is not:
 - [Claude Code Agent Teams — code.claude.com](https://code.claude.com/docs/en/agent-teams)
 - [Claude Code Multi-Agent 2026 — Shipyard](https://shipyard.build/blog/claude-code-multi-agent/)
 - [Claude Squad GitHub — smtg-ai/claude-squad](https://github.com/smtg-ai/claude-squad)
+- [Claude Squad Deep Dive — AI Stacks 2026](https://nathan-norman.vercel.app/ai-stacks/claude-squad)
 - [Mastra GitHub — mastra-ai/mastra](https://github.com/mastra-ai/mastra)
 - [Mastra Complete Guide 2026 — generative.inc](https://www.generative.inc/mastra-ai-the-complete-guide-to-the-typescript-agent-framework-2026)
 - [Mastra Changelog March 2026 — mastra.ai](https://mastra.ai/blog/changelog-2026-03-17)
@@ -461,8 +518,9 @@ This analysis would not be credible without acknowledging what VNX is not:
 - [VNX Governance Architecture — docs/manifesto/GOVERNANCE_ARCHITECTURE.md](../manifesto/GOVERNANCE_ARCHITECTURE.md)
 - [VNX Limitations — docs/manifesto/LIMITATIONS.md](../manifesto/LIMITATIONS.md)
 - [VNX Roadmap — docs/manifesto/ROADMAP.md](../manifesto/ROADMAP.md)
+- [VNX Headless A/B Test Results — docs/research/HEADLESS_AB_TEST_RESULTS.md](HEADLESS_AB_TEST_RESULTS.md)
 
 ---
 
-*Last updated: April 2026*  
+*Last updated: April 11, 2026*  
 *Framework data is current as of April 11, 2026. Star counts and version numbers change rapidly in this space.*
