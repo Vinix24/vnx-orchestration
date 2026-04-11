@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
+
+### Features
+- **F42 PR-1**: Restore EventStore from git history + dashboard archive endpoints for historical dispatch event retrieval
+- **F42 PR-2**: Headless T0 decision loop — decision parser extracted from replay harness, decision executor with 5 decision types and loop guards, trigger wiring for closed autonomous loop
+- **A/B Test**: First systematic comparison of interactive vs headless execution across F40 (moderate) and F42 (complex) — published results in docs/research/
+
+### Research
+- Published headless A/B test results: docs/research/HEADLESS_AB_TEST_RESULTS.md
+- Finding: headless produces functionally equivalent output with ~4% less LOC and ~18% fewer tests
+- Conclusion: execution mode does not determine quality — instruction quality does
+
 ## v0.8.0 — Headless Intelligence & Governance Profiles (2026-04-11)
 
 ### Features
