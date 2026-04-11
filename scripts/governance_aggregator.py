@@ -504,12 +504,50 @@ def store_alerts(conn: sqlite3.Connection, alerts: List[Dict[str, Any]]) -> None
 # ---------------------------------------------------------------------------
 
 
+def seed_historical_periods(
+    conn: sqlite3.Connection, days: int, dry_run: bool = False
+) -> int:
+    """Compute per-day governance metrics for the last N days to seed SPC baselines.
+
+    Each day is inserted as its own period_start == period_end row so that
+    update_control_limits() sees >= 3 data points per metric and can compute
+    Shewhart control limits.
+    """
+    total = 0
+    today = date.today()
+    for offset in range(days, 0, -1):
+        day = today - timedelta(days=offset)
+        # Skip if we already have metrics for this day to avoid duplicate rows.
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM governance_metrics WHERE period_start = ? AND period_end = ?",
+            (str(day), str(day)),
+        ).fetchone()[0]
+        if existing:
+            continue
+        metrics = compute_metrics(conn, day, day)
+        if not metrics:
+            continue
+        if dry_run:
+            print(f"  [dry-run] {day}: {len(metrics)} metrics")
+        else:
+            store_metrics(conn, metrics)
+        total += len(metrics)
+    return total
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nightly governance metrics aggregator")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing to DB")
     parser.add_argument("--backfill", action="store_true", help="Backfill CQS for existing dispatches")
     parser.add_argument("--baseline-days", type=int, default=30, help="SPC baseline window in days")
     parser.add_argument("--period-days", type=int, default=1, help="Aggregation period in days")
+    parser.add_argument(
+        "--seed-historical",
+        type=int,
+        metavar="DAYS",
+        default=0,
+        help="Seed per-day governance_metrics rows for the last N days to bootstrap SPC baselines",
+    )
     args = parser.parse_args()
 
     paths = ensure_env()
@@ -528,6 +566,11 @@ def main() -> int:
     if args.backfill:
         count = backfill_cqs(conn, db_path, dry_run=args.dry_run)
         print(f"Backfilled CQS for {count} dispatches")
+
+    # Seed historical per-day rows to bootstrap SPC baselines if requested
+    if args.seed_historical > 0:
+        seeded = seed_historical_periods(conn, args.seed_historical, dry_run=args.dry_run)
+        print(f"Seeded {seeded} historical governance metric rows over {args.seed_historical} days")
 
     # Compute metrics for the period
     period_end = date.today() - timedelta(days=1)  # yesterday
