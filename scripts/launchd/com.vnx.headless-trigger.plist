@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.headless-trigger</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VNX_PYTHON__</string>
+    <string>__VNX_TRIGGER_SCRIPT__</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/tmp/vnx-headless-trigger.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-headless-trigger.err</string>
+  <key>WorkingDirectory</key><string>__VNX_PROJECT_ROOT__</string>
+</dict>
+</plist>

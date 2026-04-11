@@ -37,6 +37,7 @@ PROCESSED_HASHES="$STATE_DIR/processed_receipts.txt"
 PROCESSING_LOG="$STATE_DIR/receipt_processing.log"
 FLOOD_LOCKFILE="$STATE_DIR/receipt_flood.lock"
 RECEIPT_FILE="$STATE_DIR/t0_receipts.ndjson"
+WATERMARK_FILE="$STATE_DIR/receipt_processor_watermark"
 PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 
 # Outbox directories for guaranteed receipt delivery (outbox pattern)
@@ -175,16 +176,23 @@ should_process_report() {
     # Calculate cutoff time in seconds since epoch
     local cutoff_seconds
     if [ "$MODE" = "monitor" ]; then
-        # Monitor mode: Process files created in last 10 minutes.
-        # Wider window ensures the 30-second sweep catches reports that
-        # fswatch silently dropped (macOS FSEvents can miss rapid writes).
-        cutoff_seconds=$(($(date +%s) - 600))
+        # Monitor mode: use watermark-based processing.
+        # Only process reports newer than the last successfully processed report's mtime.
+        # On first run (no watermark), fall back to 24 hours to avoid replaying history.
+        if [ -f "$WATERMARK_FILE" ]; then
+            cutoff_seconds=$(cat "$WATERMARK_FILE" 2>/dev/null)
+            if ! [[ "$cutoff_seconds" =~ ^[0-9]+$ ]]; then
+                cutoff_seconds=$(($(date +%s) - 86400))
+            fi
+        else
+            cutoff_seconds=$(($(date +%s) - 86400))
+        fi
     else
         # Catchup/manual mode: Process files from last N hours
         cutoff_seconds=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
     fi
 
-    # Check if file is too old based on actual creation time
+    # Check if file is too old based on actual modification time
     if [ "$file_mtime" -lt "$cutoff_seconds" ]; then
         local age_minutes=$(( ($(date +%s) - file_mtime) / 60 ))
         log "DEBUG" "Report too old: $report_name (age: ${age_minutes}m)"
@@ -1035,6 +1043,7 @@ process_pending_reports() {
     log "INFO" "Processing $queue_count pending reports..."
 
     # Process with rate limiting
+    local MAX_PROCESSED_MTIME=0
     for report in "${pending_reports[@]}"; do
         # Rate limiting check
         if [ "$processed_count" -ge "$RATE_LIMIT" ]; then
@@ -1045,11 +1054,22 @@ process_pending_reports() {
 
         if process_single_report "$report"; then
             ((processed_count++))
+            local _mtime
+            _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
+            if [ -n "$_mtime" ] && [ "$_mtime" -gt "$MAX_PROCESSED_MTIME" ]; then
+                MAX_PROCESSED_MTIME=$_mtime
+            fi
         fi
 
         # Small delay between reports
         sleep 0.5
     done
+
+    # Update watermark once with the highest mtime seen this sweep so that
+    # non-chronological processing order cannot cause older files to be skipped.
+    if [ "$MAX_PROCESSED_MTIME" -gt 0 ]; then
+        echo "$MAX_PROCESSED_MTIME" > "$WATERMARK_FILE"
+    fi
 
     log "INFO" "Processed $processed_count reports successfully"
 }
@@ -1066,10 +1086,21 @@ _poll_new_reports() {
     [ "$_retry_cycles" -lt 1 ] && _retry_cycles=1
     local _cycle=0
     while true; do
+        local _poll_max_mtime=0
         for report in "$UNIFIED_REPORTS"/*.md; do
             [ -f "$report" ] || continue
-            should_process_report "$report" && process_single_report "$report"
+            if should_process_report "$report" && process_single_report "$report"; then
+                local _mtime
+                _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
+                if [ -n "$_mtime" ] && [ "$_mtime" -gt "$_poll_max_mtime" ]; then
+                    _poll_max_mtime=$_mtime
+                fi
+            fi
         done
+        # Update watermark once after the full sweep with the maximum mtime seen.
+        if [ "$_poll_max_mtime" -gt 0 ]; then
+            echo "$_poll_max_mtime" > "$WATERMARK_FILE"
+        fi
         _cycle=$(( _cycle + 1 ))
         if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
             _retry_pending_receipts
