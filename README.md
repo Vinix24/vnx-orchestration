@@ -43,6 +43,8 @@ vnx status        # See your healthy state
 
 Starter mode gives you scoped dispatches, structured receipts, and a full audit trail — without the multi-terminal setup. When you're ready for parallel agents, upgrade with `vnx init --operator`.
 
+**New to VNX?** Start with the [5-Minute Quickstart](docs/QUICKSTART.md).
+
 ### Operator Mode — Full multi-agent orchestration
 
 Four-terminal tmux grid, multiple AI providers, parallel tracks, quality gates, worktrees, and dashboard.
