@@ -1,0 +1,10 @@
+governance_profile: light
+isolation:
+  scope_type: business_folder
+  allowed_paths:
+    - "agents/blog-writer/"
+    - ".vnx-data/unified_reports/"
+  denied_paths:
+    - "scripts/"
+    - "dashboard/"
+    - ".claude/"

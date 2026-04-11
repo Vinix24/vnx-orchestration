@@ -83,6 +83,30 @@ def _heartbeat_loop(
             logger.warning("Heartbeat renewal failed for %s: %s", terminal_id, e)
 
 
+def _resolve_agent_cwd(role: str | None) -> Path | None:
+    """Return agents/{role}/ as Path if the directory exists, else None."""
+    if not role:
+        return None
+    candidate = Path(__file__).resolve().parents[2] / "agents" / role
+    return candidate if candidate.is_dir() else None
+
+
+def _load_agent_profile(config_path: Path) -> str:
+    """Load governance_profile from agent config.yaml.
+
+    Uses a simple line-scan so no yaml dependency is required.
+    Returns 'default' when the key is absent or the file cannot be read.
+    """
+    try:
+        for line in config_path.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("governance_profile:"):
+                return line.split(":", 1)[1].strip()
+    except Exception as _exc:
+        logger.warning("Failed to read agent config %s: %s", config_path, _exc)
+    return "default"
+
+
 def deliver_via_subprocess(
     terminal_id: str,
     instruction: str,
@@ -113,11 +137,14 @@ def deliver_via_subprocess(
     instruction = _inject_skill_context(terminal_id, instruction, role=role)
 
     # Resolve agent cwd: agents/{role}/ dir takes precedence when it exists
-    agent_cwd: Path | None = None
-    if role:
-        candidate = Path(__file__).resolve().parents[2] / "agents" / role
-        if candidate.is_dir():
-            agent_cwd = candidate
+    agent_cwd = _resolve_agent_cwd(role)
+
+    # Load and log governance profile from agent config.yaml
+    if agent_cwd is not None:
+        config_path = agent_cwd / "config.yaml"
+        if config_path.exists():
+            profile = _load_agent_profile(config_path)
+            logger.info("Agent %s using governance profile: %s", role, profile)
 
     adapter = SubprocessAdapter()
     result = adapter.deliver(
