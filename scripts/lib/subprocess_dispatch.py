@@ -25,6 +25,59 @@ from subprocess_adapter import SubprocessAdapter
 logger = logging.getLogger(__name__)
 
 
+def _inject_permission_profile(terminal_id: str, role: str | None, instruction: str) -> str:
+    """Prepend permission preamble to instruction if a profile exists for role.
+
+    Resolves the terminal's expected role from terminal_assignments when role
+    is None.  Logs a warning on role/terminal mismatch.  Returns instruction
+    unchanged when no profile is found or worker_permissions cannot be loaded.
+    """
+    try:
+        from worker_permissions import (
+            load_permissions,
+            generate_permission_preamble,
+            validate_dispatch_permissions,
+        )
+    except ImportError:
+        logger.debug("_inject_permission_profile: worker_permissions not available, skipping")
+        return instruction
+
+    # Resolve effective role from terminal assignment when caller didn't specify one
+    effective_role = role
+    if not effective_role:
+        try:
+            import yaml
+            yaml_path = Path(__file__).resolve().parents[2] / ".vnx" / "worker_permissions.yaml"
+            data = yaml.safe_load(yaml_path.read_text()) or {}
+            effective_role = data.get("terminal_assignments", {}).get(terminal_id)
+        except Exception as exc:
+            logger.debug("_inject_permission_profile: could not resolve role for %s: %s", terminal_id, exc)
+
+    if not effective_role:
+        return instruction
+
+    # Validate role/terminal assignment
+    warnings = validate_dispatch_permissions(
+        {"terminal": terminal_id, "role": effective_role}
+    )
+    for w in warnings:
+        logger.warning(w)
+
+    profile = load_permissions(effective_role)
+    if not profile.allowed_tools and not profile.denied_tools and not profile.bash_deny_patterns:
+        logger.debug("_inject_permission_profile: empty profile for role '%s', skipping preamble", effective_role)
+        return instruction
+
+    preamble = generate_permission_preamble(profile)
+    logger.info(
+        "Permission profile applied: terminal=%s role=%s allowed=%s denied=%s",
+        terminal_id, effective_role,
+        profile.allowed_tools,
+        profile.denied_tools,
+    )
+    return f"{preamble}\n---\n\n{instruction}"
+
+
 def _inject_skill_context(terminal_id: str, instruction: str, role: str | None = None) -> str:
     """Prepend skill/terminal CLAUDE.md content to instruction for context.
 
@@ -136,6 +189,9 @@ def deliver_via_subprocess(
     """
     # Inject skill/terminal CLAUDE.md as skill context for headless agents
     instruction = _inject_skill_context(terminal_id, instruction, role=role)
+
+    # Inject per-terminal permission profile preamble
+    instruction = _inject_permission_profile(terminal_id, role, instruction)
 
     # Resolve agent cwd: agents/{role}/ dir takes precedence when it exists
     agent_cwd = _resolve_agent_cwd(role)
