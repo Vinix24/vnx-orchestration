@@ -1,0 +1,98 @@
+version: 1
+mode: standard  # strict | standard | relaxed | off
+
+# Enforcement levels:
+#   0 = off       — check disabled
+#   1 = advisory  — logs warning, never blocks
+#   2 = soft_mandatory — blocks unless VNX_OVERRIDE_<CHECK_NAME> env var is set
+#   3 = hard_mandatory — always blocks; cannot be overridden
+
+checks:
+  gate_before_next_feature:
+    level: 3
+    description: "Previous feature gates must pass before next feature dispatch"
+
+  codex_gate_required:
+    level: 2
+    description: "Codex gate result must exist with non-empty contract_hash"
+    scope: [scripts/, dashboard/, .github/]
+
+  gemini_review_required:
+    level: 2
+    description: "Gemini review gate result must exist"
+    scope: [scripts/, dashboard/]
+
+  ci_green_required:
+    level: 3
+    description: "All CI checks on the PR must be passing"
+
+  max_pr_lines:
+    level: 1
+    description: "PR diff must not exceed line threshold"
+    threshold: 300
+
+  pr_must_exist_before_next_dispatch:
+    level: 2
+    description: "A GitHub PR must exist for the current branch before next dispatch"
+
+  receipt_must_have_commit:
+    level: 2
+    description: "At least one commit must exist since the last dispatch timestamp"
+
+  tests_must_pass:
+    level: 3
+    description: "pytest collection must succeed (fast collection-only check)"
+
+  no_blocking_open_items:
+    level: 3
+    description: "open_items_digest.json must have blocker_count == 0"
+
+  dead_code_check:
+    level: 1
+    description: "vulture reports no 100%-confidence dead code in scripts/"
+
+  decision_audit_trail:
+    level: 3
+    description: "governance_audit.ndjson must exist with at least one recent entry"
+
+presets:
+  strict:
+    gate_before_next_feature: 3
+    codex_gate_required: 3
+    gemini_review_required: 3
+    ci_green_required: 3
+    pr_must_exist_before_next_dispatch: 3
+    receipt_must_have_commit: 3
+    tests_must_pass: 3
+    no_blocking_open_items: 3
+    decision_audit_trail: 3
+    max_pr_lines: 2
+    dead_code_check: 2
+
+  standard: {}  # uses check defaults above
+
+  relaxed:
+    gate_before_next_feature: 1
+    codex_gate_required: 1
+    gemini_review_required: 1
+    ci_green_required: 3
+    pr_must_exist_before_next_dispatch: 1
+    receipt_must_have_commit: 1
+    tests_must_pass: 2
+    no_blocking_open_items: 2
+    decision_audit_trail: 1
+    max_pr_lines: 0
+    dead_code_check: 0
+
+  off:
+    gate_before_next_feature: 0
+    codex_gate_required: 0
+    gemini_review_required: 0
+    ci_green_required: 0
+    max_pr_lines: 0
+    pr_must_exist_before_next_dispatch: 0
+    receipt_must_have_commit: 0
+    tests_must_pass: 0
+    no_blocking_open_items: 0
+    dead_code_check: 0
+    decision_audit_trail: 0

@@ -205,7 +205,7 @@ class GateRunner:
 
     @staticmethod
     def _build_codex_prompt(request_payload: Dict[str, Any]) -> str:
-        return _vtx.build_codex_prompt(request_payload)
+        return _vtx.build_codex_prompt(request_payload, subprocess_run=subprocess.run)
 
     # Subprocess execution — stays here so tests can patch gate_runner.subprocess.Popen,
     # gate_runner.os.read, gate_runner.select.select, gate_runner.os.getpgid
