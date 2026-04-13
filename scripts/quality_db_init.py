@@ -323,6 +323,23 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated dispatch_metadata: added target_open_items, open_items_created, open_items_resolved columns')
 
+        # Migration: add temporal validity columns (F54 bi-temporal pattern lifecycle)
+        for _tbl in ("success_patterns", "antipatterns", "prevention_rules"):
+            cursor.execute(f"PRAGMA table_info({_tbl})")
+            _tbl_cols = {row[1] for row in cursor.fetchall()}
+            if "valid_from" not in _tbl_cols:
+                cursor.execute(
+                    f"ALTER TABLE {_tbl} ADD COLUMN valid_from DATETIME DEFAULT CURRENT_TIMESTAMP"
+                )
+                conn.commit()
+                log('INFO', f'Migrated {_tbl}: added valid_from column')
+            if "valid_until" not in _tbl_cols:
+                cursor.execute(
+                    f"ALTER TABLE {_tbl} ADD COLUMN valid_until DATETIME DEFAULT NULL"
+                )
+                conn.commit()
+                log('INFO', f'Migrated {_tbl}: added valid_until column')
+
         log('SUCCESS', 'Database schema initialized successfully')
 
         # Close connection

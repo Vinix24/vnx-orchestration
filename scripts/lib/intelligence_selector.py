@@ -493,6 +493,7 @@ class IntelligenceSelector:
                 SELECT id, title, description, category, confidence_score,
                        usage_count, source_dispatch_ids, first_seen, last_used
                 FROM success_patterns
+                WHERE (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY confidence_score DESC
                 LIMIT 20
                 """,
@@ -551,6 +552,7 @@ class IntelligenceSelector:
                        occurrence_count, first_seen, last_seen
                 FROM antipatterns
                 WHERE occurrence_count >= 1
+                  AND (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY
                     CASE severity
                         WHEN 'critical' THEN 4
@@ -606,6 +608,7 @@ class IntelligenceSelector:
                 SELECT id, tag_combination, rule_type, description,
                        recommendation, confidence, triggered_count, last_triggered
                 FROM prevention_rules
+                WHERE (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY confidence DESC
                 LIMIT 10
                 """,

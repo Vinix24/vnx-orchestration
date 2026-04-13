@@ -472,13 +472,13 @@ class LearningLoop:
                         self.conn.execute(
                             "INSERT INTO success_patterns "
                             "(pattern_type, category, title, description, pattern_data, "
-                            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used, valid_from) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             ("approach", category, title,
                              f"Learning loop pattern: {metric.pattern_title}",
                              json.dumps({"source": "learning_loop", "pattern_id": pattern_id}),
                              min(metric.confidence, 1.0), metric.used_count,
-                             "[]", now, now),
+                             "[]", now, now, now),
                         )
                     patterns_written += 1
 
@@ -515,13 +515,13 @@ class LearningLoop:
                         "INSERT INTO antipatterns "
                         "(pattern_type, category, title, description, pattern_data, "
                         " why_problematic, severity, occurrence_count, "
-                        " source_dispatch_ids, first_seen, last_seen) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        " source_dispatch_ids, first_seen, last_seen, valid_from) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         ("approach", category, title,
                          f"Error seen {len(failures)} times: {error_key}",
                          json.dumps({"source": "learning_loop", "terminals": list({f['terminal'] for f in failures})}),
                          error_key, severity, len(failures),
-                         "[]", now, now),
+                         "[]", now, now, now),
                     )
                 antipatterns_written += 1
 
@@ -741,6 +741,41 @@ class LearningLoop:
         import hashlib
         return hashlib.sha1(pattern_id.encode("utf-8")).hexdigest()
 
+    def _supersede_stale_patterns(self) -> int:
+        """Set valid_until on low-confidence patterns older than 30 days (F54).
+
+        Applies to:
+          - success_patterns (confidence_score < 0.3)
+          - prevention_rules  (confidence < 0.3)
+        Antipatterns have no numeric confidence column and are skipped.
+        """
+        now = datetime.now().isoformat()
+        total = 0
+        try:
+            cur = self.conn.execute(
+                "UPDATE success_patterns SET valid_until = ? "
+                "WHERE confidence_score < 0.3 "
+                "AND valid_from < datetime('now', '-30 days') "
+                "AND valid_until IS NULL",
+                (now,),
+            )
+            total += cur.rowcount
+
+            cur = self.conn.execute(
+                "UPDATE prevention_rules SET valid_until = ? "
+                "WHERE confidence < 0.3 "
+                "AND valid_from < datetime('now', '-30 days') "
+                "AND valid_until IS NULL",
+                (now,),
+            )
+            total += cur.rowcount
+
+            self.conn.commit()
+            print(f"  Superseded {total} low-confidence patterns older than 30 days")
+        except Exception as e:
+            print(f"❌ Error superseding stale patterns: {e}")
+        return total
+
     def daily_learning_cycle(self):
         """Run the complete daily learning cycle"""
         print(f"\n🔄 Starting Daily Learning Cycle at {datetime.now().isoformat()}")
@@ -784,6 +819,12 @@ class LearningLoop:
         print("\n🔗 Step 5.5: Bridging patterns to intelligence DB...")
         self.persist_to_intelligence_db()
         self.ingest_approved_rules()
+
+        # 5.6 Supersede low-confidence stale patterns (F54 temporal lifecycle)
+        print("\n🗑️ Step 5.6: Superseding expired low-confidence patterns...")
+        superseded = self._supersede_stale_patterns()
+        if superseded:
+            print(f"  ✓ Superseded {superseded} stale patterns")
 
         # 6. Generate report
         print("\n📈 Step 6: Generating learning report...")
