@@ -161,6 +161,10 @@ from api_intelligence import (  # noqa: E402
     _intelligence_get_weekly_digest,
     _intelligence_generate_weekly_digest,
     _intelligence_get_learning_summary,
+    _governance_get_enforcement,
+    _governance_get_overrides,
+    _governance_get_audit,
+    _governance_get_config,
 )
 
 
@@ -352,6 +356,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/intelligence/learning-summary":
             payload, status_int = _intelligence_get_learning_summary()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        # Governance API
+        if path == "/api/governance/enforcement":
+            _json_response(self, HTTPStatus.OK, _governance_get_enforcement(params))
+            return
+
+        if path == "/api/governance/overrides":
+            _json_response(self, HTTPStatus.OK, _governance_get_overrides(params))
+            return
+
+        if path == "/api/governance/audit":
+            _json_response(self, HTTPStatus.OK, _governance_get_audit(params))
+            return
+
+        if path == "/api/governance/config":
+            payload, status_int = _governance_get_config()
             _json_response(self, HTTPStatus(status_int), payload)
             return
 

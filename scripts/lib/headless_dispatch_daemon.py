@@ -439,6 +439,15 @@ class DispatchDaemon:
                 "reason": "governance_blocked",
                 "blocked_checks": blocked_checks,
             })
+            try:
+                from governance_audit import log_dispatch_decision  # noqa: PLC0415
+                log_dispatch_decision(
+                    action="blocked",
+                    dispatch_id=dispatch_id,
+                    reasoning=f"Governance checks failed: {', '.join(blocked_checks)}",
+                )
+            except Exception:
+                pass  # audit must never block dispatch flow
             self._processed.discard(dispatch_id)   # retry next cycle when gates pass
             return
 

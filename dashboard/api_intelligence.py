@@ -627,6 +627,129 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
     }, 200
 
 
+# ---------------------------------------------------------------------------
+# /api/governance/* — Governance audit trail endpoints
+# ---------------------------------------------------------------------------
+
+def _governance_scripts_lib() -> str:
+    """Return scripts/lib path for lazy governance_audit import."""
+    return str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
+
+
+def _import_governance_audit():
+    """Lazy-import governance_audit from scripts/lib. Returns module or None."""
+    lib = _governance_scripts_lib()
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    try:
+        import governance_audit  # noqa: PLC0415
+        return governance_audit
+    except ImportError:
+        return None
+
+
+def _governance_get_enforcement(params: dict) -> dict:
+    """GET /api/governance/enforcement — recent enforcement check results."""
+    try:
+        raw_limit = (params.get("limit") or [None])[0]
+        limit = max(1, min(int(raw_limit), 500)) if raw_limit else 50
+    except (ValueError, TypeError):
+        limit = 50
+
+    mod = _import_governance_audit()
+    entries = mod.get_recent(limit) if mod else []
+
+    checks = [
+        {
+            "timestamp": e.get("timestamp", ""),
+            "check_name": e.get("check_name", ""),
+            "level": e.get("level"),
+            "passed": e.get("passed"),
+            "message": e.get("message", ""),
+        }
+        for e in entries
+        if e.get("event_type", "enforcement_check") == "enforcement_check"
+    ]
+    return {"checks": checks}
+
+
+def _governance_get_overrides(params: dict) -> dict:
+    """GET /api/governance/overrides — overrides in last 7 days."""
+    try:
+        raw_days = (params.get("days") or [None])[0]
+        days = max(1, min(int(raw_days), 90)) if raw_days else 7
+    except (ValueError, TypeError):
+        days = 7
+
+    mod = _import_governance_audit()
+    entries = mod.get_overrides(days) if mod else []
+
+    overrides = [
+        {
+            "timestamp": e.get("timestamp", ""),
+            "check_name": e.get("check_name", ""),
+            "override_reason": e.get("override", ""),
+            "operator": e.get("operator") or "",
+        }
+        for e in entries
+    ]
+    return {"overrides": overrides}
+
+
+def _governance_get_audit(params: dict) -> dict:
+    """GET /api/governance/audit — full audit trail (paginated)."""
+    try:
+        raw_limit = (params.get("limit") or [None])[0]
+        limit = max(1, min(int(raw_limit), 500)) if raw_limit else 50
+    except (ValueError, TypeError):
+        limit = 50
+
+    try:
+        raw_offset = (params.get("offset") or [None])[0]
+        offset = max(0, int(raw_offset)) if raw_offset else 0
+    except (ValueError, TypeError):
+        offset = 0
+
+    mod = _import_governance_audit()
+    # get_recent returns newest-first; for pagination we need all entries
+    all_entries = mod.get_recent(limit=10000) if mod else []
+
+    total = len(all_entries)
+    page = all_entries[offset: offset + limit]
+    return {"entries": page, "total": total}
+
+
+def _governance_get_config() -> tuple[dict, int]:
+    """GET /api/governance/config — current enforcement config and check levels."""
+    lib = _governance_scripts_lib()
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+
+    try:
+        from governance_enforcer import GovernanceEnforcer, DEFAULT_CONFIG_PATH  # noqa: PLC0415
+    except ImportError as exc:
+        return {"error": f"governance_enforcer not available: {exc}"}, 500
+
+    if not DEFAULT_CONFIG_PATH.exists():
+        return {"error": f"governance_enforcement.yaml not found at {DEFAULT_CONFIG_PATH}"}, 404
+
+    try:
+        enforcer = GovernanceEnforcer()
+        enforcer.load_config(DEFAULT_CONFIG_PATH)
+    except Exception as exc:
+        return {"error": f"failed to load governance config: {exc}"}, 500
+
+    checks = [
+        {
+            "name": cfg.name,
+            "level": cfg.level,
+            "description": cfg.description,
+        }
+        for cfg in enforcer._checks.values()
+    ]
+    return {"mode": enforcer._mode, "checks": checks}, 200
+
+
 def _intelligence_get_transcript(session_id: str) -> tuple[dict, int]:
     """Return messages for a session from conversation-index.db.
 

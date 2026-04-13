@@ -281,12 +281,27 @@ def trigger_gates_if_feature_complete(feature_id: str, state_dir: Path) -> Dict[
     triggered_gates: List[str] = []
     failed_gates: List[str] = []
 
+    try:
+        from governance_audit import log_gate_result as _log_gate_result  # noqa: PLC0415
+    except ImportError:
+        _log_gate_result = None  # type: ignore[assignment]
+
     for gate_name in gates:
         ok = _trigger_gate(pr_number, branch, gate_name)
         if ok:
             triggered_gates.append(gate_name)
         else:
             failed_gates.append(gate_name)
+        if _log_gate_result is not None:
+            try:
+                _log_gate_result(
+                    gate=gate_name,
+                    pr_number=pr_number,
+                    status="triggered" if ok else "failed",
+                    findings_count=0,
+                )
+            except Exception:
+                pass  # audit must never block gate trigger flow
 
     # 6. Log event
     event: Dict[str, Any] = {

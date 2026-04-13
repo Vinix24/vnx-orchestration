@@ -33,6 +33,11 @@ try:
 except ImportError:
     yaml = None  # type: ignore[assignment]
 
+try:
+    from governance_audit import log_enforcement as _log_enforcement_audit
+except ImportError:  # pragma: no cover — audit module optional at import time
+    _log_enforcement_audit = None  # type: ignore[assignment]
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -224,6 +229,20 @@ class GovernanceEnforcer:
                 result.passed = True
                 result.overridden_by = override_reason
                 result.message = f"[OVERRIDDEN] {result.message} (reason: {override_reason})"
+
+        # Audit every enforcement decision
+        if _log_enforcement_audit is not None:
+            try:
+                _log_enforcement_audit(
+                    check_name=result.check_name,
+                    level=result.level,
+                    result=result.passed,
+                    context=context,
+                    override=result.overridden_by,
+                    message=result.message,
+                )
+            except Exception:
+                pass  # audit must never block enforcement
 
         return result
 
