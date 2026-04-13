@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -204,6 +205,44 @@ def deliver_via_subprocess(
         )
 
 
+def _check_commit_since(dispatch_start_ts: str) -> bool:
+    """Return True if no commits are found since dispatch_start_ts (commit_missing).
+
+    Uses GovernanceEnforcer.check("receipt_must_have_commit") when available.
+    Falls back to a direct git log check when the enforcer cannot be loaded.
+    Never raises.
+    """
+    try:
+        from governance_enforcer import GovernanceEnforcer, DEFAULT_CONFIG_PATH  # noqa: PLC0415
+        enforcer = GovernanceEnforcer()
+        if DEFAULT_CONFIG_PATH.exists():
+            enforcer.load_config(DEFAULT_CONFIG_PATH)
+        result = enforcer.check(
+            "receipt_must_have_commit",
+            {"dispatch_timestamp": dispatch_start_ts},
+        )
+        if not result.passed:
+            logger.warning("receipt_must_have_commit: %s", result.message)
+            return True
+        return False
+    except Exception as exc:
+        logger.debug("commit check (enforcer path) failed: %s — using git directly", exc)
+
+    # Direct fallback
+    try:
+        proc = subprocess.run(
+            ["git", "log", "--oneline", f"--since={dispatch_start_ts}", "-5"],
+            capture_output=True, text=True, timeout=10,
+        )
+        commits = [l for l in proc.stdout.splitlines() if l.strip()]
+        if not commits:
+            logger.warning("receipt_must_have_commit: no commits found since %s", dispatch_start_ts)
+            return True
+    except Exception as exc:
+        logger.debug("git log fallback failed: %s", exc)
+    return False
+
+
 def _write_receipt(
     dispatch_id: str,
     terminal_id: str,
@@ -213,6 +252,7 @@ def _write_receipt(
     session_id: str | None = None,
     attempt: int | None = None,
     failure_reason: str | None = None,
+    commit_missing: bool = False,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -232,6 +272,8 @@ def _write_receipt(
         receipt["attempt"] = attempt
     if failure_reason:
         receipt["failure_reason"] = failure_reason
+    if commit_missing:
+        receipt["commit_missing"] = True
 
     receipt_path = _default_state_dir() / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +308,7 @@ def deliver_with_recovery(
 
     Returns True on success, False on failure.
     """
+    dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     for attempt in range(max_retries + 1):
         success = deliver_via_subprocess(
             terminal_id,
@@ -279,9 +322,11 @@ def deliver_with_recovery(
             total_deadline=total_deadline,
         )
         if success:
+            commit_missing = _check_commit_since(dispatch_start_ts)
             _write_receipt(
                 dispatch_id, terminal_id, "done",
                 attempt=attempt,
+                commit_missing=commit_missing,
             )
             return True
 

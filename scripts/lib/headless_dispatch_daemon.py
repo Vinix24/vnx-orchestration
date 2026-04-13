@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +71,11 @@ class DispatchMeta:
     raw_instruction: str       # full .md body
 
 
-_TARGET_RE = re.compile(r"\[\[TARGET:(T\d+)\]\]")
-_TRACK_RE  = re.compile(r"^Track:\s*(\S+)", re.MULTILINE)
-_ROLE_RE   = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
-_GATE_RE   = re.compile(r"^Gate:\s*(\S+)", re.MULTILINE)
+_TARGET_RE  = re.compile(r"\[\[TARGET:(T\d+)\]\]")
+_TRACK_RE   = re.compile(r"^Track:\s*(\S+)", re.MULTILINE)
+_ROLE_RE    = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
+_GATE_RE    = re.compile(r"^Gate:\s*(\S+)", re.MULTILINE)
+_FEATURE_RE = re.compile(r"^Feature:\s*(F\d+)", re.MULTILINE)
 
 
 def parse_dispatch_metadata(path: Path) -> Optional[DispatchMeta]:
@@ -98,6 +99,99 @@ def parse_dispatch_metadata(path: Path) -> Optional[DispatchMeta]:
         gate=(_m.group(1) if (_m := _GATE_RE.search(text)) else None),
         raw_instruction=text,
     )
+
+
+# ---------------------------------------------------------------------------
+# Governance pre-dispatch helpers
+# ---------------------------------------------------------------------------
+
+def _extract_feature_from_dispatch(path: Path) -> Optional[str]:
+    """Parse 'Feature: F<N>' from dispatch header; return 'F<N>' or None."""
+    try:
+        text = path.read_text(encoding="utf-8")
+        m = _FEATURE_RE.search(text)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def _get_current_branch() -> str:
+    """Return current git branch name, or empty string on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _find_previous_pr_number(gate_results_dir: Path) -> Optional[int]:
+    """Return the highest PR number found in gate results dir, or None."""
+    if not gate_results_dir.exists():
+        return None
+    pr_numbers: List[int] = []
+    for f in gate_results_dir.glob("pr-*.json"):
+        m = re.match(r"pr-(\d+)-", f.name)
+        if m:
+            pr_numbers.append(int(m.group(1)))
+    return max(pr_numbers) if pr_numbers else None
+
+
+def _run_governance_pre_check(
+    meta: DispatchMeta,
+    dispatch_path: Path,
+    data_dir: Path,
+) -> tuple:
+    """Run governance pre-dispatch checks.
+
+    Returns (is_blocked: bool, blocked_check_names: List[str]).
+    Never raises — governance errors are logged and treated as non-blocking.
+    """
+    try:
+        scripts_lib = _repo_root() / "scripts" / "lib"
+        sys.path.insert(0, str(scripts_lib))
+        from governance_enforcer import GovernanceEnforcer, DEFAULT_CONFIG_PATH  # noqa: PLC0415
+    except ImportError as exc:
+        logger.warning("GovernanceEnforcer import failed: %s — skipping pre-check", exc)
+        return False, []
+
+    if not DEFAULT_CONFIG_PATH.exists():
+        logger.debug("governance_enforcement.yaml not found — skipping pre-check")
+        return False, []
+
+    mode = os.environ.get("VNX_GOVERNANCE_MODE", "") or None
+    enforcer = GovernanceEnforcer()
+    try:
+        enforcer.load_config(DEFAULT_CONFIG_PATH, mode_override=mode)
+    except Exception as exc:
+        logger.warning("Failed to load governance config: %s — skipping pre-check", exc)
+        return False, []
+
+    gate_results_dir = data_dir / "state" / "review_gates" / "results"
+    context: Dict[str, Any] = {
+        "branch": _get_current_branch(),
+        "feature": _extract_feature_from_dispatch(dispatch_path) or "",
+        "dispatch_id": meta.dispatch_id,
+    }
+    pr_number = _find_previous_pr_number(gate_results_dir)
+    if pr_number is not None:
+        context["pr_number"] = pr_number
+
+    results = [
+        enforcer.check("gate_before_next_feature", context),
+        enforcer.check("pr_must_exist_before_next_dispatch", context),
+    ]
+
+    # Log advisory warnings without blocking
+    for r in results:
+        if not r.passed and r.level == 1:
+            logger.warning("Governance advisory [%s]: %s", r.check_name, r.message)
+
+    is_blocked = enforcer.is_blocked(results) or enforcer.has_soft_failures(results)
+    blocked_checks = [r.check_name for r in results if not r.passed and r.level >= 2]
+    return is_blocked, blocked_checks
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +422,24 @@ class DispatchDaemon:
                 "Terminal %s is not headless (VNX_ADAPTER_%s != subprocess) — skipping %s",
                 terminal, terminal, dispatch_id,
             )
+            return
+
+        # Governance pre-dispatch gate check
+        is_blocked, blocked_checks = _run_governance_pre_check(meta, path, self.data_dir)
+        if is_blocked:
+            logger.warning(
+                "Dispatch %s BLOCKED by governance checks: %s — deferring",
+                dispatch_id, blocked_checks,
+            )
+            _write_audit(self.data_dir, {
+                "timestamp": _now_utc(),
+                "dispatch_id": dispatch_id,
+                "terminal": terminal,
+                "gate": meta.gate,
+                "reason": "governance_blocked",
+                "blocked_checks": blocked_checks,
+            })
+            self._processed.discard(dispatch_id)   # retry next cycle when gates pass
             return
 
         # Check availability

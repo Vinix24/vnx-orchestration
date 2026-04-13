@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import signal
 import sys
@@ -361,6 +362,93 @@ class HeadlessOrchestrator:
     # Internal loops
     # ------------------------------------------------------------------
 
+    def _check_feature_completion_and_trigger(self, event: LoopEvent) -> None:
+        """After a receipt event: check if feature is complete and auto-trigger gates."""
+        if self.dry_run:
+            return
+        ctx = _flatten_context(event.context)
+        dispatch_id = ctx.get("latest_dispatch_id", "")
+        if not dispatch_id:
+            return
+
+        # Derive feature_id from dispatch_id (e.g. "f51-pr2-..." → "F51")
+        m = re.search(r"f(\d+)-pr", dispatch_id, re.IGNORECASE)
+        if not m:
+            return
+        feature_id = f"F{m.group(1)}"
+
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+            from auto_gate_trigger import trigger_gates_if_feature_complete  # noqa: PLC0415
+            result = trigger_gates_if_feature_complete(feature_id, self.state_dir)
+        except Exception as exc:
+            logger.warning("auto_gate_trigger check failed: %s", exc)
+            return
+
+        if result.get("triggered"):
+            _log_loop_event(self.data_dir, {
+                "timestamp": _now_utc(),
+                "event_type": "auto_gate_triggered",
+                "feature_id": feature_id,
+                "pr_number": result.get("pr_number"),
+                "gates": result.get("gates", []),
+                "gates_failed": result.get("gates_failed", []),
+            })
+            logger.info(
+                "Auto-gate triggered for %s PR #%s: %s",
+                feature_id, result.get("pr_number"), result.get("gates"),
+            )
+
+    def _check_all_gates_passed(self, event: LoopEvent) -> None:
+        """When a gate event arrives, check if all required gates have passed."""
+        ctx = _flatten_context(event.context)
+        latest_event = ctx.get("latest_event", "")
+        if "gate" not in latest_event.lower():
+            return
+
+        # Derive dispatch context
+        dispatch_id = ctx.get("latest_dispatch_id", "")
+        m = re.search(r"f(\d+)-pr", dispatch_id, re.IGNORECASE)
+        if not m:
+            return
+        feature_id = f"F{m.group(1)}"
+
+        # Check gate results directory for evidence that required gates passed
+        gate_results_dir = self.state_dir / "review_gates" / "results"
+        if not gate_results_dir.exists():
+            return
+
+        result_files = list(gate_results_dir.glob("pr-*.json"))
+        if not result_files:
+            return
+
+        # Determine highest PR number from results
+        pr_numbers: List[int] = []
+        for f in result_files:
+            m2 = re.match(r"pr-(\d+)-", f.name)
+            if m2:
+                pr_numbers.append(int(m2.group(1)))
+        if not pr_numbers:
+            return
+
+        latest_pr = max(pr_numbers)
+        pr_files = [f for f in result_files if f.name.startswith(f"pr-{latest_pr}-")]
+        gate_names_present = {f.name.split(f"pr-{latest_pr}-")[1].replace(".json", "") for f in pr_files}
+
+        required = {"codex_gate", "gemini_review"}
+        if required.issubset(gate_names_present):
+            _log_loop_event(self.data_dir, {
+                "timestamp": _now_utc(),
+                "event_type": "feature_gates_complete",
+                "feature_id": feature_id,
+                "pr_number": latest_pr,
+                "gate_names": sorted(gate_names_present),
+            })
+            logger.info(
+                "All required gates passed for %s PR #%d — next feature dispatch unblocked",
+                feature_id, latest_pr,
+            )
+
     def _decision_loop(self) -> None:
         """Read events from bus, route through DecisionRouter, log decisions."""
         while not self._shutdown.is_set():
@@ -399,6 +487,14 @@ class HeadlessOrchestrator:
                     "Decision [%s] reason=%s action=%s confidence=%.2f",
                     result.backend_used, event.reason, result.action, result.confidence,
                 )
+
+                # Check feature completion after every receipt event
+                if event.reason == "receipt" and not self.dry_run:
+                    try:
+                        self._check_feature_completion_and_trigger(event)
+                        self._check_all_gates_passed(event)
+                    except Exception as exc:
+                        logger.warning("Feature completion check error: %s", exc)
 
                 if result.action in ("re_dispatch", "analyze_failure") and not self.dry_run:
                     # Signal T0 via trigger mechanism
