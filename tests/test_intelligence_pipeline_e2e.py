@@ -331,6 +331,115 @@ class TestApprovedRulesIngest:
         assert count == 1  # No duplicate
 
 
+class TestPipelineIntegrity:
+    """Additional integration tests verifying pipeline data-contract behavior."""
+
+    def test_persist_updates_existing_pattern(self, test_env):
+        """Running persist twice should UPDATE the row, not INSERT a duplicate."""
+        env, db_path, state_dir, _ = test_env
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO pattern_usage "
+            "(pattern_id, pattern_title, pattern_hash, used_count, confidence, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("update-test", "Updateable Pattern", "upd123",
+             3, 0.8, datetime.now().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+        # First persist — creates the row
+        loop = _make_loop(env)
+        loop.persist_to_intelligence_db()
+
+        conn = sqlite3.connect(str(db_path))
+        count_after_first = conn.execute(
+            "SELECT COUNT(*) FROM success_patterns WHERE title = 'Updateable Pattern'"
+        ).fetchone()[0]
+        conn.close()
+        assert count_after_first == 1
+
+        # Increase used_count then run a fresh loop — must UPDATE not INSERT again
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE pattern_usage SET used_count = 7, updated_at = ? WHERE pattern_id = ?",
+            (datetime.now().isoformat(), "update-test"),
+        )
+        conn.commit()
+        conn.close()
+
+        loop2 = _make_loop(env)
+        loop2.persist_to_intelligence_db()
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt, MAX(usage_count) as max_usage "
+            "FROM success_patterns WHERE title = 'Updateable Pattern'"
+        ).fetchone()
+        conn.close()
+
+        assert row[0] == 1, "Expected exactly 1 row (UPDATE path, not duplicate INSERT)"
+        assert row[1] == 7, f"Expected updated usage_count=7, got {row[1]}"
+
+    def test_failure_pattern_requires_min_occurrences(self, test_env):
+        """A single unique failure should NOT produce an antipattern; 2+ occurrences required."""
+        env, db_path, state_dir, receipts_dir = test_env
+
+        # Write exactly one receipt with a unique error
+        receipt = json.dumps({
+            "outcome": "error",
+            "terminal": "T1",
+            "agent": "backend-developer",
+            "task_description": "Single failure test",
+            "terminal_response": "Error: unique_failure_xyz789_single",
+            "timestamp": datetime.now().isoformat(),
+        })
+        (receipts_dir / "single_failure.ndjson").write_text(receipt + "\n")
+
+        loop = _make_loop(env)
+        loop.persist_to_intelligence_db()
+
+        conn = sqlite3.connect(str(db_path))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM antipatterns WHERE pattern_data LIKE '%learning_loop%'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert count == 0, "Single occurrence must NOT produce an antipattern (requires 2+)"
+
+    def test_confidence_capped_at_one(self, test_env):
+        """A pattern with confidence > 1.0 in pattern_usage is stored as 1.0 in success_patterns."""
+        env, db_path, state_dir, _ = test_env
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO pattern_usage "
+            "(pattern_id, pattern_title, pattern_hash, used_count, confidence, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("cap-test", "High Confidence Pattern", "cap123",
+             5, 1.5, datetime.now().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+        loop = _make_loop(env)
+        loop.persist_to_intelligence_db()
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT confidence_score FROM success_patterns "
+            "WHERE title = 'High Confidence Pattern'"
+        ).fetchone()
+        conn.close()
+
+        assert row is not None, "Pattern should have been persisted"
+        assert row["confidence_score"] == 1.0, (
+            f"confidence_score must be capped at 1.0, got {row['confidence_score']}"
+        )
+
+
 class TestSelectorReadsLearningLoopPatterns:
     """Test that intelligence_selector can read patterns written by learning_loop."""
 
