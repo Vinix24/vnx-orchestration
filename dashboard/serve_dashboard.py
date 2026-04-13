@@ -147,6 +147,14 @@ from api_agent_stream import (  # noqa: E402
     handle_agent_stream_status,
 )
 
+from api_intelligence import (  # noqa: E402
+    _intelligence_get_patterns,
+    _intelligence_get_injections,
+    _intelligence_get_classifications,
+    _intelligence_get_dispatch_outcomes,
+    _intelligence_get_transcript,
+)
+
 
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
     payload = json.dumps(payload_obj).encode("utf-8")
@@ -302,6 +310,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             terminal = path[len("/api/agent-stream/"):]
             since = params.get("since", [None])[0]
             handle_agent_stream(self, terminal, since)
+            return
+
+        # Intelligence API
+        if path == "/api/intelligence/patterns":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_patterns(params))
+            return
+
+        if path == "/api/intelligence/injections":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_injections(params))
+            return
+
+        if path == "/api/intelligence/classifications":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_classifications(params))
+            return
+
+        if path == "/api/intelligence/dispatch-outcomes":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_dispatch_outcomes(params))
+            return
+
+        if path.startswith("/api/conversations/") and path.endswith("/transcript"):
+            session_id = path[len("/api/conversations/"):-len("/transcript")]
+            payload, status_int = _intelligence_get_transcript(session_id)
+            _json_response(self, HTTPStatus(status_int), payload)
             return
 
         # Return JSON 404 for unrecognised /api/* paths so callers get
