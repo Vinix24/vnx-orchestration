@@ -362,6 +362,31 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Dispatch insights (from DispatchParameterTracker)
+# ---------------------------------------------------------------------------
+
+def _build_dispatch_insights() -> Dict[str, Any]:
+    """Return top 5 dispatch insights when >= 20 experiments exist."""
+    _empty: Dict[str, Any] = {"available": False, "insights": [], "experiment_count": 0}
+    try:
+        from dispatch_parameter_tracker import DispatchParameterTracker
+        tracker = DispatchParameterTracker(state_dir=_STATE_DIR)
+        stats = tracker.stats()
+        if not stats.get("insights_available"):
+            return {**_empty, "experiment_count": stats.get("completed", 0)}
+        top = tracker.top_insights_for_t0(n=5)
+        return {
+            "available": True,
+            "insights": top,
+            "experiment_count": stats.get("completed", 0),
+            "avg_cqs": stats.get("avg_cqs"),
+            "success_rate": stats.get("success_rate"),
+        }
+    except Exception:
+        return _empty
+
+
+# ---------------------------------------------------------------------------
 # Active work (scans dispatches/active/)
 # ---------------------------------------------------------------------------
 
@@ -526,6 +551,7 @@ def build_t0_state(
     feature_state = _build_feature_state()
     open_items = _build_open_items(state_dir)
     quality_digest = _build_quality_digest(state_dir)
+    dispatch_insights = _build_dispatch_insights()
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
     git_context = _build_git_context()
@@ -543,6 +569,7 @@ def build_t0_state(
         "feature_state": feature_state,
         "open_items": open_items,
         "quality_digest": quality_digest,
+        "dispatch_insights": dispatch_insights,
         "active_work": active_work,
         "recent_receipts": recent_receipts,
         "git_context": git_context,

@@ -461,6 +461,82 @@ def _write_receipt(
     return receipt_path
 
 
+def _capture_dispatch_parameters(
+    dispatch_id: str,
+    instruction: str,
+    terminal_id: str,
+    model: str,
+    role: str | None,
+    repo_map: str | None,
+) -> None:
+    """Capture DispatchParameters to dispatch_tracker.db. Never raises."""
+    try:
+        from dispatch_parameter_tracker import (
+            DispatchParameterTracker,
+            extract_parameters,
+        )
+        params = extract_parameters(
+            instruction=instruction,
+            terminal_id=terminal_id,
+            model=model,
+            role=role,
+            repo_map=repo_map,
+        )
+        tracker = DispatchParameterTracker()
+        tracker.capture_parameters(dispatch_id, params)
+        logger.debug(
+            "Parameter capture: dispatch=%s chars=%d ctx=%d role=%s",
+            dispatch_id,
+            params.instruction_char_count,
+            params.context_item_count,
+            params.role,
+        )
+    except Exception as exc:
+        logger.debug("Parameter capture failed for %s: %s", dispatch_id, exc)
+
+
+def _capture_dispatch_outcome(
+    dispatch_id: str,
+    success: bool,
+    start_ts: str,
+    committed: bool,
+) -> None:
+    """Capture DispatchOutcome after completion. Never raises."""
+    try:
+        from dispatch_parameter_tracker import (
+            DispatchParameterTracker,
+            DispatchOutcome,
+            _count_lines_changed,
+            _lookup_cqs,
+        )
+
+        # Compute completion minutes
+        try:
+            start_dt = datetime.fromisoformat(start_ts)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            elapsed = (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0
+        except Exception:
+            elapsed = 0.0
+
+        outcome = DispatchOutcome(
+            cqs=_lookup_cqs(dispatch_id),
+            success=success,
+            completion_minutes=round(elapsed, 2),
+            test_count=0,        # not reliably parseable here
+            committed=committed,
+            lines_changed=_count_lines_changed(start_ts),
+        )
+        tracker = DispatchParameterTracker()
+        tracker.capture_outcome(dispatch_id, outcome)
+        logger.debug(
+            "Outcome capture: dispatch=%s success=%s mins=%.1f cqs=%s",
+            dispatch_id, success, elapsed, outcome.cqs,
+        )
+    except Exception as exc:
+        logger.debug("Outcome capture failed for %s: %s", dispatch_id, exc)
+
+
 def deliver_with_recovery(
     terminal_id: str,
     instruction: str,
@@ -468,6 +544,7 @@ def deliver_with_recovery(
     dispatch_id: str,
     *,
     role: str | None = None,
+    repo_map: str | None = None,
     max_retries: int = 3,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
@@ -485,10 +562,21 @@ def deliver_with_recovery(
     auto_commit: if True (default), auto-commit uncommitted changes on success,
                  auto-stash on failure.  Pass False to disable.
     gate: gate tag used in the auto-commit message (e.g. "f52-pr3").
+    repo_map: optional repo map string, forwarded to parameter tracker only.
 
     Returns True on success, False on failure.
     """
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
+
+    # Capture dispatch parameters before execution
+    _capture_dispatch_parameters(
+        dispatch_id=dispatch_id,
+        instruction=instruction,
+        terminal_id=terminal_id,
+        model=model,
+        role=role,
+        repo_map=repo_map,
+    )
 
     # Create health monitor for this dispatch
     monitor = WorkerHealthMonitor(terminal_id, dispatch_id)
@@ -523,6 +611,14 @@ def deliver_with_recovery(
                 commit_missing=commit_missing,
                 committed=committed,
             )
+
+            # Capture outcome after receipt is written
+            _capture_dispatch_outcome(
+                dispatch_id=dispatch_id,
+                success=True,
+                start_ts=dispatch_start_ts,
+                committed=committed,
+            )
             return True
 
         if attempt < max_retries:
@@ -541,6 +637,14 @@ def deliver_with_recovery(
                 dispatch_id, terminal_id, "failed",
                 attempt=attempt,
                 failure_reason=f"Exhausted {max_retries} retries",
+            )
+
+            # Capture failed outcome
+            _capture_dispatch_outcome(
+                dispatch_id=dispatch_id,
+                success=False,
+                start_ts=dispatch_start_ts,
+                committed=False,
             )
 
     return False
