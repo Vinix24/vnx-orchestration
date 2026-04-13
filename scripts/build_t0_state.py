@@ -234,6 +234,34 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Feature state (via FeatureStateMachine)
+# ---------------------------------------------------------------------------
+
+def _build_feature_state() -> Dict[str, Any]:
+    """Parse FEATURE_PLAN.md and return structured feature state for T0 context."""
+    _empty: Dict[str, Any] = {
+        "feature_name": None,
+        "current_pr": None,
+        "next_task": None,
+        "assigned_track": None,
+        "assigned_role": None,
+        "completion_pct": 0,
+        "total_prs": 0,
+        "completed_prs": 0,
+        "status": "planned",
+    }
+    feature_plan = _PROJECT_ROOT / "FEATURE_PLAN.md"
+    if not feature_plan.exists():
+        return _empty
+    try:
+        from feature_state_machine import parse_feature_plan
+        state = parse_feature_plan(feature_plan)
+        return state.as_dict()
+    except Exception:
+        return _empty
+
+
+# ---------------------------------------------------------------------------
 # PR progress (via QueueReconciler)
 # ---------------------------------------------------------------------------
 
@@ -495,6 +523,7 @@ def build_t0_state(
     queues = _build_queues(dispatch_dir, state_dir)
     tracks = _build_tracks(state_dir)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
+    feature_state = _build_feature_state()
     open_items = _build_open_items(state_dir)
     quality_digest = _build_quality_digest(state_dir)
     active_work = _build_active_work(dispatch_dir)
@@ -511,6 +540,7 @@ def build_t0_state(
         "queues": queues,
         "tracks": tracks,
         "pr_progress": pr_progress,
+        "feature_state": feature_state,
         "open_items": open_items,
         "quality_digest": quality_digest,
         "active_work": active_work,
