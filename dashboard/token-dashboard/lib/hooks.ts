@@ -16,6 +16,9 @@ import {
   fetchIntelligenceInjections,
   fetchIntelligenceClassifications,
   fetchIntelligenceDispatchOutcomes,
+  fetchProposals,
+  fetchConfidenceTrends,
+  fetchWeeklyDigest,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse, TranscriptResponse,
@@ -24,6 +27,7 @@ import type {
   GateConfigResponse, GovernanceDigestEnvelope,
   ReportsEnvelope, AgentsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
+  ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
 } from './types';
 
 export function useTokenStats(
@@ -221,5 +225,31 @@ export function useIntelligenceDispatchOutcomes() {
     'intelligence-dispatch-outcomes',
     () => fetchIntelligenceDispatchOutcomes(),
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+// ===== Self-Improvement Hooks =====
+
+export function useProposals() {
+  return useSWR<ProposalsResponse>(
+    'intelligence-proposals',
+    () => fetchProposals(),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useConfidenceTrends() {
+  return useSWR<ConfidenceTrendsResponse>(
+    'intelligence-confidence-trends',
+    () => fetchConfidenceTrends(),
+    { refreshInterval: 120000, revalidateOnFocus: true, dedupingInterval: 30000 }
+  );
+}
+
+export function useWeeklyDigest() {
+  return useSWR<WeeklyDigest>(
+    'intelligence-weekly-digest',
+    () => fetchWeeklyDigest(),
+    { refreshInterval: 300000, revalidateOnFocus: true, dedupingInterval: 60000 }
   );
 }

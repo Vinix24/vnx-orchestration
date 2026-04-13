@@ -372,6 +372,66 @@ export interface DispatchOutcomesResponse {
   outcomes: DispatchOutcome[];
 }
 
+// ===== Self-Improvement Types =====
+
+export interface Proposal {
+  id: number;
+  category: string;
+  proposed_change: string;
+  evidence: string;
+  confidence: number;
+  status: 'pending' | 'accepted' | 'rejected' | string;
+  suggested_at: string;
+}
+
+export interface ProposalsResponse {
+  proposals: Proposal[];
+}
+
+export interface ConfidenceTrend {
+  date: string;
+  avg_success_confidence: number | null;
+  avg_antipattern_severity: number | null;
+  pattern_count: number;
+}
+
+export interface ConfidenceTrendsResponse {
+  trends: ConfidenceTrend[];
+}
+
+export interface WeeklyDigestPeriod {
+  start: string;
+  end: string;
+  days: number;
+}
+
+export interface WeeklyDigestMetrics {
+  patterns_learned: number;
+  top_patterns: Array<{ title: string; confidence: number }>;
+  antipatterns_active: number;
+  top_antipatterns: Array<{ title: string; severity: string }>;
+  avg_success_confidence: number | null;
+  dispatch_outcomes: { total: number; success: number; failure: number; unknown: number };
+  pending_suggestions: number;
+  accepted_suggestions: number;
+}
+
+export interface WeeklyDigest {
+  generated_at: string;
+  period: WeeklyDigestPeriod;
+  metrics: WeeklyDigestMetrics;
+  narrative: string;
+}
+
+export interface ProposalActionResponse {
+  ok?: boolean;
+  id?: number;
+  status?: string;
+  applied?: number;
+  errors?: string[];
+  error?: string;
+}
+
 // ===== Transcript Types =====
 
 export interface TranscriptMessage {

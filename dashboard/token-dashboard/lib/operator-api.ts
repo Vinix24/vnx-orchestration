@@ -17,6 +17,10 @@ import type {
   InjectionsResponse,
   ClassificationsResponse,
   DispatchOutcomesResponse,
+  ProposalsResponse,
+  ConfidenceTrendsResponse,
+  WeeklyDigest,
+  ProposalActionResponse,
 } from './types';
 
 const BASE = '/api/operator';
@@ -158,4 +162,34 @@ export function fetchIntelligenceClassifications(limit = 100): Promise<Classific
 
 export function fetchIntelligenceDispatchOutcomes(limit = 200): Promise<DispatchOutcomesResponse> {
   return get('/api/intelligence/dispatch-outcomes', { limit: String(limit) });
+}
+
+// ===== Self-Improvement API =====
+
+export function fetchProposals(): Promise<ProposalsResponse> {
+  return get('/api/intelligence/proposals');
+}
+
+export function acceptProposal(id: number): Promise<ProposalActionResponse> {
+  return post(`/api/intelligence/proposals/${id}/accept`, {});
+}
+
+export function rejectProposal(id: number, reason: string): Promise<ProposalActionResponse> {
+  return post(`/api/intelligence/proposals/${id}/reject`, { reason });
+}
+
+export function applyProposals(): Promise<ProposalActionResponse> {
+  return post('/api/intelligence/proposals/apply', {});
+}
+
+export function fetchConfidenceTrends(): Promise<ConfidenceTrendsResponse> {
+  return get('/api/intelligence/confidence-trends');
+}
+
+export function fetchWeeklyDigest(): Promise<WeeklyDigest> {
+  return get('/api/intelligence/weekly-digest');
+}
+
+export function generateWeeklyDigest(): Promise<ProposalActionResponse> {
+  return post('/api/intelligence/weekly-digest/generate', { dry_run: false });
 }
