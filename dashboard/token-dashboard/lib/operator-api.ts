@@ -13,6 +13,10 @@ import type {
   GovernanceDigestEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
+  PatternsResponse,
+  InjectionsResponse,
+  ClassificationsResponse,
+  DispatchOutcomesResponse,
 } from './types';
 
 const BASE = '/api/operator';
@@ -136,4 +140,22 @@ export function fetchReportContent(filename: string): Promise<string> {
 
 export function fetchAgents(): Promise<AgentsEnvelope> {
   return get(`${BASE}/agents`);
+}
+
+// ===== Intelligence API =====
+
+export function fetchIntelligencePatterns(limit = 50): Promise<PatternsResponse> {
+  return get('/api/intelligence/patterns', { limit: String(limit) });
+}
+
+export function fetchIntelligenceInjections(limit = 50): Promise<InjectionsResponse> {
+  return get('/api/intelligence/injections', { limit: String(limit) });
+}
+
+export function fetchIntelligenceClassifications(limit = 100): Promise<ClassificationsResponse> {
+  return get('/api/intelligence/classifications', { limit: String(limit) });
+}
+
+export function fetchIntelligenceDispatchOutcomes(limit = 200): Promise<DispatchOutcomesResponse> {
+  return get('/api/intelligence/dispatch-outcomes', { limit: String(limit) });
 }

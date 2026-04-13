@@ -315,6 +315,63 @@ export interface GovernanceDigestEnvelope {
   data: GovernanceDigestData;
 }
 
+// ===== Intelligence Types =====
+
+export interface SuccessPattern {
+  title: string;
+  confidence: number;
+  category: string;
+  used_count: number;
+  last_seen: string;
+}
+
+export interface Antipattern {
+  title: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | string;
+  occurrence_count: number;
+  last_seen: string;
+}
+
+export interface PatternsResponse {
+  success_patterns: SuccessPattern[];
+  antipatterns: Antipattern[];
+}
+
+export interface InjectionEvent {
+  timestamp: string;
+  dispatch_id: string;
+  items_injected: number;
+  items_suppressed: number;
+}
+
+export interface InjectionsResponse {
+  injections: InjectionEvent[];
+}
+
+export interface ClassificationRecord {
+  report_file: string;
+  quality_score: string;
+  content_type: string;
+  complexity: string;
+  summary: string;
+}
+
+export interface ClassificationsResponse {
+  classifications: ClassificationRecord[];
+}
+
+export interface DispatchOutcome {
+  dispatch_id: string;
+  terminal: string;
+  track: string;
+  status: string;
+  timestamp: string;
+}
+
+export interface DispatchOutcomesResponse {
+  outcomes: DispatchOutcome[];
+}
+
 // ===== Reports & Agents Types =====
 
 export interface Report {

@@ -12,6 +12,10 @@ import {
   fetchReports,
   fetchReportContent,
   fetchAgents,
+  fetchIntelligencePatterns,
+  fetchIntelligenceInjections,
+  fetchIntelligenceClassifications,
+  fetchIntelligenceDispatchOutcomes,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
@@ -19,6 +23,7 @@ import type {
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope,
   ReportsEnvelope, AgentsEnvelope,
+  PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
 } from './types';
 
 export function useTokenStats(
@@ -173,6 +178,40 @@ export function useAgents() {
   return useSWR<AgentsEnvelope>(
     'operator-agents',
     fetchAgents,
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+// ===== Intelligence Hooks =====
+
+export function useIntelligencePatterns() {
+  return useSWR<PatternsResponse>(
+    'intelligence-patterns',
+    () => fetchIntelligencePatterns(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useIntelligenceInjections() {
+  return useSWR<InjectionsResponse>(
+    'intelligence-injections',
+    () => fetchIntelligenceInjections(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useIntelligenceClassifications() {
+  return useSWR<ClassificationsResponse>(
+    'intelligence-classifications',
+    () => fetchIntelligenceClassifications(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useIntelligenceDispatchOutcomes() {
+  return useSWR<DispatchOutcomesResponse>(
+    'intelligence-dispatch-outcomes',
+    () => fetchIntelligenceDispatchOutcomes(),
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
   );
 }
