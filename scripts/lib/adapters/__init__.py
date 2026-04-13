@@ -48,7 +48,11 @@ def resolve_adapter(terminal_id: str) -> ProviderAdapter:
         from adapters.codex_adapter import CodexAdapter  # noqa: PLC0415
         return CodexAdapter(terminal_id)
 
+    if provider == "ollama":
+        from adapters.ollama_adapter import OllamaAdapter  # noqa: PLC0415
+        return OllamaAdapter(terminal_id)
+
     raise ValueError(
         f"Unknown provider '{provider}' for terminal {terminal_id}. "
-        f"Set VNX_PROVIDER_{terminal_id}=claude|gemini|codex or leave unset for default."
+        f"Set VNX_PROVIDER_{terminal_id}=claude|gemini|codex|ollama or leave unset for default."
     )

@@ -295,19 +295,75 @@ def _move_dispatch(src: Path, dest_dir: Path) -> Path:
 # Delivery
 # ---------------------------------------------------------------------------
 
-def _dispatch_requires_code(meta: DispatchMeta) -> bool:
-    """Return True when the dispatch track/role implies code-writing capability.
+def _classify_dispatch(meta: DispatchMeta) -> set:
+    """Return the set of Capabilities required to handle this dispatch.
 
-    Track A (backend-developer, frontend-architect, etc.) writes code.
-    Track B (test-engineer) writes tests — still requires CODE.
-    Track C (code-reviewer, security-engineer) only reviews — no CODE needed.
+    Track A (backend-developer, frontend-developer, frontend-architect) → CODE
+    Track B (test-engineer) → CODE
+    Track C (reviewer, architect, code-reviewer, security-engineer) → REVIEW
+    Gate field containing "review" or "gate" → adds REVIEW
+
+    Defaults to {CODE} when no role/track hints are present.
     """
-    review_only_roles = {"code-reviewer", "security-engineer", "quality-engineer"}
-    if meta.role and meta.role in review_only_roles:
-        return False
-    if meta.track and meta.track.upper() == "C":
-        return False
-    return True
+    scripts_lib = _repo_root() / "scripts" / "lib"
+    sys.path.insert(0, str(scripts_lib))
+    from provider_adapter import Capability  # noqa: PLC0415
+
+    code_roles = {
+        "backend-developer", "frontend-developer", "frontend-architect",
+        "backend-architect", "test-engineer", "python-expert",
+    }
+    review_roles = {
+        "reviewer", "architect", "code-reviewer",
+        "security-engineer", "quality-engineer",
+    }
+
+    role = (meta.role or "").lower()
+    track = (meta.track or "").upper()
+    gate  = (meta.gate  or "").lower()
+
+    if role in review_roles or track == "C":
+        caps: set = {Capability.REVIEW}
+    elif role in code_roles or track in ("A", "B"):
+        caps = {Capability.CODE}
+    else:
+        caps = {Capability.CODE}
+
+    if "review" in gate or "gate" in gate:
+        caps.add(Capability.REVIEW)
+
+    return caps
+
+
+def _find_capable_terminal(
+    required: set,
+    state_dir: Path,
+    exclude: Optional[set] = None,
+) -> Optional[str]:
+    """Find the first idle headless terminal whose adapter supports all required Capabilities.
+
+    Iterates T1–T3 in order.  Skips non-headless, leased, or excluded terminals.
+    Returns the terminal ID string (e.g. 'T2') or None if no match.
+    """
+    scripts_lib = _repo_root() / "scripts" / "lib"
+    sys.path.insert(0, str(scripts_lib))
+
+    exclude = exclude or set()
+    for terminal_id in ("T1", "T2", "T3"):
+        if terminal_id in exclude:
+            continue
+        if not _is_terminal_headless(terminal_id):
+            continue
+        if not _is_terminal_available(terminal_id, state_dir):
+            continue
+        try:
+            from adapters import resolve_adapter  # noqa: PLC0415
+            adapter = resolve_adapter(terminal_id)
+            if required.issubset(adapter.capabilities()):
+                return terminal_id
+        except (ValueError, ImportError) as exc:
+            logger.debug("Cannot resolve adapter for %s: %s", terminal_id, exc)
+    return None
 
 
 def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
@@ -328,20 +384,33 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
     # Attempt adapter-layer delivery
     try:
         from adapters import resolve_adapter  # noqa: PLC0415
-        from provider_adapter import Capability  # noqa: PLC0415
 
-        adapter = resolve_adapter(meta.target_terminal)
+        terminal = meta.target_terminal
+        adapter  = resolve_adapter(terminal)
 
-        # Capability gate: skip delivery when provider can't write code
-        if _dispatch_requires_code(meta) and not adapter.supports(Capability.CODE):
-            logger.warning(
-                "Terminal %s (%s) cannot write code — dispatch %s skipped",
-                meta.target_terminal, adapter.name(), meta.dispatch_id,
+        # Capability gate: find alternative terminal when provider lacks required caps
+        required_caps = _classify_dispatch(meta)
+        if not required_caps.issubset(adapter.capabilities()):
+            alt = _find_capable_terminal(required_caps, state_dir, exclude={terminal})
+            if alt is None:
+                logger.warning(
+                    "No capable terminal for %s (required=%s, %s lacks them) — dispatch %s skipped",
+                    terminal,
+                    {c.value for c in required_caps},
+                    adapter.name(),
+                    meta.dispatch_id,
+                )
+                return False
+            logger.info(
+                "Rerouting %s from %s (%s) to %s (required=%s)",
+                meta.dispatch_id, terminal, adapter.name(), alt,
+                {c.value for c in required_caps},
             )
-            return False
+            terminal = alt
+            adapter  = resolve_adapter(terminal)
 
         context = {
-            "terminal_id": meta.target_terminal,
+            "terminal_id": terminal,
             "dispatch_id": meta.dispatch_id,
             "model": model,
             "role": meta.role,

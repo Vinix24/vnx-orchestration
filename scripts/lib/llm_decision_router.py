@@ -21,8 +21,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,7 +165,7 @@ def _parse_llm_response(raw: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Ollama backend
+# Ollama backend (delegates to OllamaAdapter)
 # ---------------------------------------------------------------------------
 
 def _decide_ollama(
@@ -177,53 +175,67 @@ def _decide_ollama(
     host: str,
     timeout: int,
 ) -> DecisionResult:
-    prompt = _build_prompt(context, question)
-    payload = json.dumps({
-        "model": model,
-        "prompt": _DECISION_PROMPT_SYSTEM + "\n\n" + prompt,
-        "stream": False,
-    }).encode("utf-8")
+    """Route Ollama decisions via OllamaAdapter (single HTTP configuration point)."""
+    # OllamaAdapter reads host/model from env vars; override them for this call
+    # by temporarily setting them so the adapter picks them up.
+    prev_host  = os.environ.get("VNX_OLLAMA_HOST")
+    prev_model = os.environ.get("VNX_OLLAMA_MODEL")
+    os.environ["VNX_OLLAMA_HOST"]  = host
+    os.environ["VNX_OLLAMA_MODEL"] = model
+    try:
+        return _call_ollama_adapter(context, question, timeout)
+    finally:
+        if prev_host is None:
+            os.environ.pop("VNX_OLLAMA_HOST", None)
+        else:
+            os.environ["VNX_OLLAMA_HOST"] = prev_host
+        if prev_model is None:
+            os.environ.pop("VNX_OLLAMA_MODEL", None)
+        else:
+            os.environ["VNX_OLLAMA_MODEL"] = prev_model
 
-    url = host.rstrip("/") + "/api/generate"
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+
+def _call_ollama_adapter(
+    context: Dict[str, Any],
+    question: str,
+    timeout: int,
+) -> DecisionResult:
+    """Execute a decision via OllamaAdapter and map result to DecisionResult."""
+    adapters_path = Path(__file__).resolve().parent
+    sys.path.insert(0, str(adapters_path))
+    from adapters.ollama_adapter import OllamaAdapter  # noqa: PLC0415
+
+    adapter = OllamaAdapter("__decision__")
+    prompt = _DECISION_PROMPT_SYSTEM + "\n\n" + _build_prompt(context, question)
 
     t0 = time.monotonic()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-        latency_ms = int((time.monotonic() - t0) * 1000)
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        logger.warning("Ollama request failed (%s) — falling back to dry-run", exc)
+    adapter_result = adapter.execute(
+        prompt,
+        {"capability": "decision", "timeout": timeout},
+    )
+    latency_ms = int((time.monotonic() - t0) * 1000)
+
+    if adapter_result.status != "done":
+        logger.warning(
+            "OllamaAdapter returned %s (%s) — falling back to dry-run",
+            adapter_result.status, adapter_result.output,
+        )
         result = _rule_based_decision(context, question)
-        result.backend_used = "dry-run(ollama-timeout)"
+        result.backend_used = f"dry-run(ollama-{adapter_result.output})"
         return result
 
-    parsed_body = _parse_llm_response(body)
-    if parsed_body is None or "action" not in parsed_body:
-        # body is the raw Ollama wrapper {"response": "<json>"}; extract .response
-        try:
-            wrapper = json.loads(body)
-            raw_response = wrapper.get("response", "")
-        except json.JSONDecodeError:
-            raw_response = body
-        parsed_body = _parse_llm_response(raw_response)
-
-    if parsed_body is None or "action" not in parsed_body:
+    parsed = _parse_llm_response(adapter_result.output)
+    if parsed is None or "action" not in parsed:
         logger.warning("Ollama returned unparseable response — falling back to dry-run")
         result = _rule_based_decision(context, question)
         result.backend_used = "dry-run(ollama-parse-error)"
         return result
 
     return DecisionResult(
-        action=str(parsed_body.get("action", "skip")),
-        reasoning=str(parsed_body.get("reasoning", "")),
-        confidence=float(parsed_body.get("confidence", 0.5)),
-        backend_used=f"ollama:{model}",
+        action=str(parsed.get("action", "skip")),
+        reasoning=str(parsed.get("reasoning", "")),
+        confidence=float(parsed.get("confidence", 0.5)),
+        backend_used=f"ollama:{adapter._model}",
         latency_ms=latency_ms,
     )
 
