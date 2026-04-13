@@ -190,6 +190,91 @@ def _update_dispatch_outcome(
     return cur.rowcount
 
 
+def update_confidence_from_outcome(
+    db_path: Path,
+    dispatch_id: str,
+    terminal: str,
+    status: str,
+) -> Dict[str, int]:
+    """Update pattern confidence scores based on dispatch outcome.
+
+    On success: boost confidence by 0.05 (cap 1.0) for patterns linked to this
+    dispatch, and increment their used_count.
+    On failure: decay confidence by 0.1 (floor 0.0) for patterns linked to this
+    dispatch.
+
+    Linkage is via success_patterns.source_dispatch_ids (JSON array).
+    A confidence_events row is written for audit/learning-summary queries.
+
+    Args:
+        db_path:     Path to quality_intelligence.db.
+        dispatch_id: Dispatch identifier.
+        terminal:    Terminal that ran the dispatch (T1/T2/T3).
+        status:      'success' or 'failure'.
+
+    Returns:
+        Dict with boosted/decayed counts.
+    """
+    if not db_path.exists():
+        return {"boosted": 0, "decayed": 0}
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc).isoformat()
+    boosted = 0
+    decayed = 0
+
+    try:
+        rows = conn.execute(
+            "SELECT id, confidence_score, usage_count FROM success_patterns "
+            "WHERE source_dispatch_ids LIKE ?",
+            (f"%{dispatch_id}%",),
+        ).fetchall()
+
+        is_success = status == "success"
+        delta = 0.05 if is_success else -0.1
+
+        for row in rows:
+            old_conf = float(row["confidence_score"] or 0.0)
+            new_conf = max(0.0, min(1.0, old_conf + delta))
+            if is_success:
+                new_usage = (row["usage_count"] or 0) + 1
+                conn.execute(
+                    "UPDATE success_patterns SET confidence_score = ?, "
+                    "usage_count = ?, last_used = ? WHERE id = ?",
+                    (new_conf, new_usage, now, row["id"]),
+                )
+                boosted += 1
+            else:
+                conn.execute(
+                    "UPDATE success_patterns SET confidence_score = ? WHERE id = ?",
+                    (new_conf, row["id"]),
+                )
+                decayed += 1
+
+        # Record a confidence_events audit row (best-effort — table may not exist yet)
+        net_change = round((boosted * 0.05) + (decayed * -0.1), 4)
+        try:
+            conn.execute(
+                "INSERT INTO confidence_events "
+                "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
+                " confidence_change, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (dispatch_id, terminal, status, boosted, decayed, net_change, now),
+            )
+        except sqlite3.OperationalError:
+            pass  # Table not yet migrated in older DBs
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return {"boosted": boosted, "decayed": decayed}
+
+
 def _append_to_json_list(existing_json: Optional[str], new_item: str) -> str:
     """Append new_item to a JSON array string, deduplicating."""
     items: list = []

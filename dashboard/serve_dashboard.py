@@ -159,6 +159,8 @@ from api_intelligence import (  # noqa: E402
     _intelligence_apply_proposals,
     _intelligence_get_confidence_trends,
     _intelligence_get_weekly_digest,
+    _intelligence_generate_weekly_digest,
+    _intelligence_get_learning_summary,
 )
 
 
@@ -348,6 +350,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus(status_int), payload)
             return
 
+        if path == "/api/intelligence/learning-summary":
+            payload, status_int = _intelligence_get_learning_summary()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
         if path.startswith("/api/conversations/") and path.endswith("/transcript"):
             session_id = path[len("/api/conversations/"):-len("/transcript")]
             payload, status_int = _intelligence_get_transcript(session_id)
@@ -471,6 +478,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except json.JSONDecodeError:
                 body_data = {}
             result, status_int = _intelligence_reject_proposal(proposal_id, body_data)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path == "/api/intelligence/weekly-digest/generate":
+            result, status_int = _intelligence_generate_weekly_digest()
             _json_response(self, HTTPStatus(status_int), result)
             return
 

@@ -291,6 +291,28 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated: created governance_metrics, spc_control_limits, spc_alerts tables')
 
+        # Migration: add confidence_events table if missing (F50-PR3 feedback loop)
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='confidence_events'")
+        if not cursor.fetchone():
+            cursor.executescript("""
+                CREATE TABLE IF NOT EXISTS confidence_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dispatch_id TEXT NOT NULL,
+                    terminal TEXT,
+                    outcome TEXT NOT NULL,
+                    patterns_boosted INTEGER DEFAULT 0,
+                    patterns_decayed INTEGER DEFAULT 0,
+                    confidence_change REAL NOT NULL,
+                    occurred_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conf_events_dispatch
+                    ON confidence_events (dispatch_id);
+                CREATE INDEX IF NOT EXISTS idx_conf_events_occurred
+                    ON confidence_events (occurred_at DESC);
+            """)
+            conn.commit()
+            log('INFO', 'Migrated: added confidence_events table')
+
         # Migration: add CQS enhancement columns (T0 advisory + OI delta) if missing
         cursor.execute("PRAGMA table_info(dispatch_metadata)")
         dm_cols_v2 = {row[1] for row in cursor.fetchall()}
@@ -342,7 +364,8 @@ def verify_database_structure() -> bool:
             'dispatch_metadata',
             'governance_metrics',
             'spc_control_limits',
-            'spc_alerts'
+            'spc_alerts',
+            'confidence_events'
         ]
 
         # Expected views

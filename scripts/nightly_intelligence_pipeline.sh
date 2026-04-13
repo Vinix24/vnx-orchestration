@@ -165,6 +165,9 @@ log_msg "Health check: session_analytics rows=${SESSION_COUNT}"
 # ── Phase 4: Learning cycle ───────────────────────────────────────────────────
 run_phase "4-learning-cycle" python3 "$SCRIPT_DIR/learning_loop.py" run
 
+# ── Phase 4b: Weekly digest ───────────────────────────────────────────────────
+run_phase "4b-weekly-digest" python3 "$SCRIPT_DIR/weekly_digest.py"
+
 # ── Phase 5: Mark stale pending edits ────────────────────────────────────────
 run_phase "5-stale-edits" python3 "$SCRIPT_DIR/tag_intelligence.py" stale
 

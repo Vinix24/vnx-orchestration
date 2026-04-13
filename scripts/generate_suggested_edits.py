@@ -281,6 +281,43 @@ def generate_onetime_suggestions() -> List[dict]:
     return suggestions
 
 
+def generate_prevention_rule_suggestions(conn: sqlite3.Connection) -> List[dict]:
+    """Generate prevention_rules suggestions from recurring antipatterns.
+
+    Qualifies antipatterns with occurrence_count >= 3.  Each generates a
+    suggestion with category='prevention_rules' so the human reviewer can
+    decide whether to codify the rule in a .claude/rules/*.md file.
+    """
+    suggestions = []
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            "SELECT id, title, occurrence_count FROM antipatterns "
+            "WHERE occurrence_count >= 3 "
+            "ORDER BY occurrence_count DESC "
+            "LIMIT 20"
+        )
+    except sqlite3.OperationalError:
+        return suggestions
+
+    for row in cur.fetchall():
+        ap_id, title, count = row[0], row[1] or "", int(row[2] or 0)
+        confidence = min(count * 0.1, 0.9)
+        suggestions.append({
+            "category": "prevention_rules",
+            "target": ".claude/rules/antipatterns.md",
+            "section": "## Prevention Rules",
+            "action": "append",
+            "proposed_change": f"Add rule: {title}",
+            "content": f"Add rule: {title}",
+            "evidence": f"Occurred {count} times",
+            "confidence": round(confidence, 2),
+        })
+
+    return suggestions
+
+
 def generate_digest_section(edits: list) -> str:
     """Generate the digest markdown section for pending edits."""
     if not edits:
@@ -346,6 +383,7 @@ def main():
     all_suggestions = []
     all_suggestions.extend(generate_memory_suggestions(conn, since))
     all_suggestions.extend(generate_rule_suggestions(conn, since))
+    all_suggestions.extend(generate_prevention_rule_suggestions(conn))
     all_suggestions.extend(generate_onetime_suggestions())
     conn.close()
 
