@@ -295,20 +295,73 @@ def _move_dispatch(src: Path, dest_dir: Path) -> Path:
 # Delivery
 # ---------------------------------------------------------------------------
 
+def _dispatch_requires_code(meta: DispatchMeta) -> bool:
+    """Return True when the dispatch track/role implies code-writing capability.
+
+    Track A (backend-developer, frontend-architect, etc.) writes code.
+    Track B (test-engineer) writes tests — still requires CODE.
+    Track C (code-reviewer, security-engineer) only reviews — no CODE needed.
+    """
+    review_only_roles = {"code-reviewer", "security-engineer", "quality-engineer"}
+    if meta.role and meta.role in review_only_roles:
+        return False
+    if meta.track and meta.track.upper() == "C":
+        return False
+    return True
+
+
 def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
-    """Invoke deliver_with_recovery from subprocess_dispatch for this dispatch.
+    """Deliver dispatch via the ProviderAdapter layer.
+
+    Resolves the adapter for the target terminal via resolve_adapter(), checks
+    that the adapter supports the required capabilities, then delegates to
+    adapter.execute().  Falls back to direct subprocess_dispatch when the
+    adapter layer cannot be imported.
 
     Returns True on success, False on failure.
     """
     scripts_lib = _repo_root() / "scripts" / "lib"
     sys.path.insert(0, str(scripts_lib))
+
+    model = os.environ.get("VNX_DISPATCH_MODEL", "sonnet")
+
+    # Attempt adapter-layer delivery
+    try:
+        from adapters import resolve_adapter  # noqa: PLC0415
+        from provider_adapter import Capability  # noqa: PLC0415
+
+        adapter = resolve_adapter(meta.target_terminal)
+
+        # Capability gate: skip delivery when provider can't write code
+        if _dispatch_requires_code(meta) and not adapter.supports(Capability.CODE):
+            logger.warning(
+                "Terminal %s (%s) cannot write code — dispatch %s skipped",
+                meta.target_terminal, adapter.name(), meta.dispatch_id,
+            )
+            return False
+
+        context = {
+            "terminal_id": meta.target_terminal,
+            "dispatch_id": meta.dispatch_id,
+            "model": model,
+            "role": meta.role,
+            "gate": meta.gate or "",
+            "max_retries": 1,
+        }
+        result = adapter.execute(meta.raw_instruction, context)
+        return result.status == "done"
+
+    except ImportError as exc:
+        logger.warning(
+            "adapter layer unavailable (%s) — falling back to subprocess_dispatch", exc
+        )
+
+    # Fallback: direct subprocess_dispatch (backward-compatible)
     try:
         from subprocess_dispatch import deliver_with_recovery  # noqa: PLC0415
     except ImportError as exc:
         logger.error("Cannot import subprocess_dispatch: %s", exc)
         return False
-
-    model = os.environ.get("VNX_DISPATCH_MODEL", "sonnet")
 
     try:
         return deliver_with_recovery(
