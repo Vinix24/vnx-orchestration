@@ -169,6 +169,7 @@ def deliver_via_subprocess(
     dispatch_id: str,
     *,
     role: str | None = None,
+    repo_map: str | None = None,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
     chunk_timeout: float = 120.0,
@@ -184,6 +185,11 @@ def deliver_via_subprocess(
     CLAUDE.md via 3-tier lookup and SubprocessAdapter uses the agent dir
     as cwd when available.
 
+    If repo_map is provided (pre-formatted repo map string), it is appended
+    to the instruction before skill context injection.  This is the direct-
+    caller path; dispatches routed through DispatchDaemon receive repo maps
+    via DispatchEnricher instead.
+
     If lease_generation is provided, a background heartbeat thread renews the
     lease every heartbeat_interval seconds to prevent TTL expiry during long tasks.
 
@@ -191,6 +197,10 @@ def deliver_via_subprocess(
 
     Returns True on success, False on failure.
     """
+    # Append repo map to instruction before skill context wrapping
+    if repo_map:
+        instruction = instruction + f"\n\n{repo_map}"
+
     # Inject skill/terminal CLAUDE.md as skill context for headless agents
     instruction = _inject_skill_context(terminal_id, instruction, role=role)
 

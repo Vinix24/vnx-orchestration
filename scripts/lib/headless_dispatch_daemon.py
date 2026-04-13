@@ -459,10 +459,11 @@ class DispatchDaemon:
       3. Check: is terminal headless AND available?
       4. Acquire lease
       5. Move pending/ → active/
-      6. Deliver via subprocess_dispatch
-      7. Move active/ → completed/  (or dead_letter/ on failure)
-      8. Release lease
-      9. Write audit record
+      6. Enrich dispatch instruction (repo map, future layers)
+      7. Deliver via subprocess_dispatch
+      8. Move active/ → completed/  (or dead_letter/ on failure)
+      9. Release lease
+     10. Write audit record
     """
 
     def __init__(
@@ -470,10 +471,12 @@ class DispatchDaemon:
         data_dir: Optional[Path] = None,
         state_dir: Optional[Path] = None,
         poll_interval: float = _POLL_INTERVAL,
+        no_repo_map: bool = False,
     ) -> None:
         self.data_dir = data_dir or _default_data_dir()
         self.state_dir = state_dir or _default_state_dir()
         self.poll_interval = poll_interval
+        self.no_repo_map = no_repo_map
         self.pending_dir = self.data_dir / "dispatches" / "pending"
         self.active_dir  = self.data_dir / "dispatches" / "active"
         self.completed_dir = self.data_dir / "dispatches" / "completed"
@@ -595,6 +598,23 @@ class DispatchDaemon:
             self._processed.discard(dispatch_id)
             return
 
+        # Enrich dispatch instruction before delivery (repo map + future layers)
+        try:
+            from dispatch_enricher import DispatchEnricher  # noqa: PLC0415
+            enricher = DispatchEnricher()
+            meta.raw_instruction = enricher.enrich(
+                meta.raw_instruction,
+                {
+                    "role": meta.role,
+                    "track": meta.track,
+                    "gate": meta.gate,
+                    "no_repo_map": self.no_repo_map,
+                    "project_root": str(_repo_root()),
+                },
+            )
+        except Exception as exc:
+            logger.warning("Dispatch enrichment failed: %s — delivering unenriched", exc)
+
         logger.info("Delivering %s → %s (role=%s gate=%s)", dispatch_id, terminal, meta.role, meta.gate)
 
         start_ts = time.monotonic()
@@ -654,6 +674,10 @@ def main() -> int:
     parser.add_argument("--state-dir", default=None, help="VNX_STATE_DIR override")
     parser.add_argument("--poll-interval", type=float, default=_POLL_INTERVAL)
     parser.add_argument("--once", action="store_true", help="Single scan then exit")
+    parser.add_argument(
+        "--no-repo-map", action="store_true", dest="no_repo_map",
+        help="Skip repo map injection for all dispatches (e.g. research/review batches)",
+    )
     args = parser.parse_args()
 
     data_dir  = Path(args.data_dir)  if args.data_dir  else None
@@ -663,6 +687,7 @@ def main() -> int:
         data_dir=data_dir,
         state_dir=state_dir,
         poll_interval=args.poll_interval,
+        no_repo_map=args.no_repo_map,
     )
 
     if args.once:
