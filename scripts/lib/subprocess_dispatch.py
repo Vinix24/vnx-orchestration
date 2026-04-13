@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
+from worker_health_monitor import WorkerHealthMonitor, HealthStatus, SLOW_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,7 @@ def deliver_via_subprocess(
     heartbeat_interval: float = 300.0,
     chunk_timeout: float = 120.0,
     total_deadline: float = 600.0,
+    health_monitor: "WorkerHealthMonitor | None" = None,
 ) -> bool:
     """Deliver a dispatch instruction to terminal_id via SubprocessAdapter.
 
@@ -184,6 +186,8 @@ def deliver_via_subprocess(
 
     If lease_generation is provided, a background heartbeat thread renews the
     lease every heartbeat_interval seconds to prevent TTL expiry during long tasks.
+
+    If health_monitor is provided, each streamed event is fed into it.
 
     Returns True on success, False on failure.
     """
@@ -229,13 +233,23 @@ def deliver_via_subprocess(
         heartbeat_thread.start()
 
     success = False
+    _last_stuck_log_time = 0.0
     try:
         for _event in adapter.read_events_with_timeout(
             terminal_id,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
         ):
-            pass
+            if health_monitor is not None:
+                health_monitor.update(_event)
+                # Log stuck warning at most once per SLOW_THRESHOLD window
+                import time as _time
+                _now = _time.monotonic()
+                if _now - _last_stuck_log_time >= SLOW_THRESHOLD:
+                    h = health_monitor.health_status()
+                    if h.status == HealthStatus.STUCK:
+                        health_monitor.log_stuck_event()
+                        _last_stuck_log_time = _now
         success = True
         return True
     except Exception:
@@ -299,6 +313,97 @@ def _check_commit_since(dispatch_start_ts: str) -> bool:
     return False
 
 
+def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> bool:
+    """Stage and commit any uncommitted changes after a successful dispatch.
+
+    Returns True if a commit was made, False otherwise.
+    Never raises — all exceptions are logged and swallowed.
+    """
+    try:
+        # Check for uncommitted changes
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
+        if not dirty_lines:
+            logger.debug("auto_commit: working tree clean for dispatch %s", dispatch_id)
+            return False
+
+        # Stage all changes (respects .gitignore — excludes .vnx-data/, .venv/, etc.)
+        add_proc = subprocess.run(
+            ["git", "add", "-A"],
+            capture_output=True, text=True, timeout=15,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        if add_proc.returncode != 0:
+            logger.warning("auto_commit: git add failed for %s: %s", dispatch_id, add_proc.stderr)
+            return False
+
+        gate_tag = gate or dispatch_id[:12]
+        commit_msg = f"feat({gate_tag}): auto-commit from headless worker {terminal_id}"
+        commit_proc = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            capture_output=True, text=True, timeout=30,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        if commit_proc.returncode == 0:
+            logger.info(
+                "Auto-committed uncommitted changes from dispatch %s (terminal=%s)",
+                dispatch_id, terminal_id,
+            )
+            return True
+        else:
+            logger.warning(
+                "auto_commit: git commit failed for %s: %s",
+                dispatch_id, commit_proc.stderr,
+            )
+            return False
+    except Exception as exc:
+        logger.warning("auto_commit: unexpected error for dispatch %s: %s", dispatch_id, exc)
+        return False
+
+
+def _auto_stash_changes(dispatch_id: str, terminal_id: str) -> bool:
+    """Stash uncommitted changes after a failed dispatch (preserves but does not commit).
+
+    Returns True if a stash was created, False otherwise.
+    Never raises — all exceptions are logged and swallowed.
+    """
+    try:
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
+        if not dirty_lines:
+            return False
+
+        stash_name = f"vnx-auto-stash-{dispatch_id}"
+        stash_proc = subprocess.run(
+            ["git", "stash", "save", stash_name],
+            capture_output=True, text=True, timeout=30,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        if stash_proc.returncode == 0:
+            logger.info(
+                "Stashed uncommitted changes from failed dispatch %s (terminal=%s, stash=%s)",
+                dispatch_id, terminal_id, stash_name,
+            )
+            return True
+        else:
+            logger.warning(
+                "auto_stash: git stash failed for %s: %s",
+                dispatch_id, stash_proc.stderr,
+            )
+            return False
+    except Exception as exc:
+        logger.warning("auto_stash: unexpected error for dispatch %s: %s", dispatch_id, exc)
+        return False
+
+
 def _write_receipt(
     dispatch_id: str,
     terminal_id: str,
@@ -309,6 +414,7 @@ def _write_receipt(
     attempt: int | None = None,
     failure_reason: str | None = None,
     commit_missing: bool = False,
+    committed: bool = False,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -330,6 +436,8 @@ def _write_receipt(
         receipt["failure_reason"] = failure_reason
     if commit_missing:
         receipt["commit_missing"] = True
+    if committed:
+        receipt["committed"] = True
 
     receipt_path = _default_state_dir() / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +463,8 @@ def deliver_with_recovery(
     heartbeat_interval: float = 300.0,
     chunk_timeout: float = 120.0,
     total_deadline: float = 600.0,
+    auto_commit: bool = True,
+    gate: str = "",
 ) -> bool:
     """Deliver with automatic retry on failure.
 
@@ -362,9 +472,17 @@ def deliver_with_recovery(
     On final failure (budget exhausted), writes a receipt with status="failed".
     Retries use exponential backoff: 30s, 60s, 120s.
 
+    auto_commit: if True (default), auto-commit uncommitted changes on success,
+                 auto-stash on failure.  Pass False to disable.
+    gate: gate tag used in the auto-commit message (e.g. "f52-pr3").
+
     Returns True on success, False on failure.
     """
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
+
+    # Create health monitor for this dispatch
+    monitor = WorkerHealthMonitor(terminal_id, dispatch_id)
+
     for attempt in range(max_retries + 1):
         success = deliver_via_subprocess(
             terminal_id,
@@ -376,13 +494,24 @@ def deliver_with_recovery(
             heartbeat_interval=heartbeat_interval,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
+            health_monitor=monitor,
         )
         if success:
+            monitor.mark_completed()
             commit_missing = _check_commit_since(dispatch_start_ts)
+
+            # Post-dispatch commit enforcement
+            committed = False
+            if auto_commit and commit_missing:
+                committed = _auto_commit_changes(dispatch_id, terminal_id, gate=gate)
+                if committed:
+                    commit_missing = False
+
             _write_receipt(
                 dispatch_id, terminal_id, "done",
                 attempt=attempt,
                 commit_missing=commit_missing,
+                committed=committed,
             )
             return True
 
@@ -394,6 +523,10 @@ def deliver_with_recovery(
             )
             time.sleep(backoff)
         else:
+            monitor.mark_completed()
+            # Stash uncommitted changes from failed dispatch
+            if auto_commit:
+                _auto_stash_changes(dispatch_id, terminal_id)
             _write_receipt(
                 dispatch_id, terminal_id, "failed",
                 attempt=attempt,
@@ -413,6 +546,9 @@ if __name__ == "__main__":
     parser.add_argument("--dispatch-id", required=True)
     parser.add_argument("--role", default=None, help="Agent role for skill context inlining")
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--no-auto-commit", action="store_true",
+                        help="Disable auto-commit of uncommitted changes after dispatch")
+    parser.add_argument("--gate", default="", help="Gate tag for auto-commit message")
     args = parser.parse_args()
 
     ok = deliver_with_recovery(
@@ -422,5 +558,7 @@ if __name__ == "__main__":
         dispatch_id=args.dispatch_id,
         role=args.role,
         max_retries=args.max_retries,
+        auto_commit=not args.no_auto_commit,
+        gate=args.gate,
     )
     sys.exit(0 if ok else 1)

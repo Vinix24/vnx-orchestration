@@ -189,6 +189,64 @@ for r in results:
   printf '\n'
 }
 
+_s_print_workers() {
+  _s_header "Worker Health"
+  local health_file="${VNX_DATA_DIR}/events/worker_health.json"
+  if [ ! -f "$health_file" ]; then
+    printf '  (no worker health data — no active subprocess dispatches)\n\n'
+    return
+  fi
+
+  python3 -c "
+import json, sys
+
+health_file = '$health_file'
+try:
+    data = json.load(open(health_file))
+except Exception as e:
+    print(f'  (could not read worker_health.json: {e})')
+    sys.exit(0)
+
+if not data:
+    print('  (all workers idle)')
+    sys.exit(0)
+
+# ANSI color codes (used directly since tput is not available inside python3 -c)
+GREEN  = '\033[32m'
+YELLOW = '\033[33m'
+RED    = '\033[31m'
+DIM    = '\033[2m'
+RESET  = '\033[0m'
+BOLD   = '\033[1m'
+
+STATUS_COLOR = {
+    'active':    GREEN,
+    'slow':      YELLOW,
+    'stuck':     RED,
+    'completed': DIM,
+    'idle':      DIM,
+}
+
+fmt = '  {:<4} {:<12} {:<10} {:<8} {:<20} {}'
+print(fmt.format('ID', 'Status', 'Events', 'Elapsed', 'Last Tool', 'Progress'))
+print('  ' + '-'*64)
+
+for terminal_id in sorted(data.keys()):
+    w = data[terminal_id]
+    status = w.get('status', 'idle')
+    color = STATUS_COLOR.get(status, DIM)
+    status_str = f'{color}{status:<10}{RESET}'
+    events = str(w.get('events', 0))
+    elapsed = w.get('elapsed', '?')
+    last_tool = str(w.get('last_tool', ''))[:19]
+    progress = w.get('estimated_progress', 0.0)
+    bar_filled = int(progress * 10)
+    bar = '[' + '#' * bar_filled + '.' * (10 - bar_filled) + f'] {int(progress*100)}%'
+    print(fmt.format(terminal_id, status_str, events, elapsed, last_tool, bar))
+print()
+"
+}
+
 _s_print_summary() {
   _s_header "VNX Status"
   local state
@@ -220,6 +278,7 @@ cmd_status() {
       --terminals)  mode="terminals" ;;
       --dispatches) mode="dispatches" ;;
       --gates)      mode="gates" ;;
+      --workers)    mode="workers" ;;
       --json)       json_out=1 ;;
       -h|--help)
         cat <<HELP
@@ -231,6 +290,7 @@ Options:
   --terminals   Show only terminal health
   --dispatches  Show only dispatch queue
   --gates       Show only gate results
+  --workers     Show live worker health (subprocess dispatches)
   --json        Output raw t0_state.json as machine-readable JSON
   -h, --help    Show this help
 
@@ -238,6 +298,7 @@ Examples:
   vnx status
   vnx status --terminals
   vnx status --gates
+  vnx status --workers
   vnx status --json
 HELP
         return 0 ;;
@@ -278,5 +339,6 @@ HELP
     terminals)  _s_print_terminals ;;
     dispatches) _s_print_dispatches ;;
     gates)      _s_print_gates ;;
+    workers)    _s_print_workers ;;
   esac
 }
