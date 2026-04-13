@@ -1,10 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { RefreshCw, ChevronDown, ChevronRight, FileText } from 'lucide-react';
+import Link from 'next/link';
+import { RefreshCw, ChevronDown, ChevronRight, FileText, ExternalLink } from 'lucide-react';
 import { useReports, useReportContent, useProjects } from '@/lib/hooks';
 import AgentSelector from '@/components/operator/agent-selector';
 import FreshnessBadge from '@/components/operator/freshness-badge';
+import BreadcrumbNav from '@/components/operator/breadcrumb-nav';
 import type { Report } from '@/lib/types';
 
 const TRACK_COLORS: Record<string, { color: string; bg: string; border: string }> = {
@@ -243,8 +245,48 @@ function ReportRow({ report }: { report: Report }) {
         </span>
       </button>
 
-      {/* Expanded markdown content */}
-      {expanded && <ReportContentPanel filename={report.filename} />}
+      {/* Expanded: view-transcript link + markdown content */}
+      {expanded && (
+        <>
+          <div
+            style={{
+              padding: '8px 16px',
+              borderTop: '1px solid rgba(255,255,255,0.06)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+            }}
+          >
+            <BreadcrumbNav
+              items={[
+                { label: 'Reports', href: '/operator/reports' },
+                { label: report.dispatch_id || report.filename },
+              ]}
+            />
+            <Link
+              href="/conversations"
+              style={{
+                marginLeft: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+                fontSize: 11,
+                color: '#6B8AE6',
+                textDecoration: 'none',
+                padding: '3px 10px',
+                borderRadius: 6,
+                background: 'rgba(107,138,230,0.08)',
+                border: '1px solid rgba(107,138,230,0.25)',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <ExternalLink size={11} />
+              View Transcript
+            </Link>
+          </div>
+          <ReportContentPanel filename={report.filename} />
+        </>
+      )}
     </div>
   );
 }
@@ -281,6 +323,8 @@ export default function ReportsPage() {
 
   return (
     <div>
+      <BreadcrumbNav items={[{ label: 'Operator', href: '/operator' }, { label: 'Reports' }]} />
+
       {/* Page header */}
       <div className="flex items-center justify-between" style={{ marginBottom: 24 }}>
         <div className="flex items-center gap-3">

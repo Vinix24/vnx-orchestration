@@ -372,6 +372,18 @@ export interface DispatchOutcomesResponse {
   outcomes: DispatchOutcome[];
 }
 
+// ===== Transcript Types =====
+
+export interface TranscriptMessage {
+  role: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface TranscriptResponse {
+  messages: TranscriptMessage[];
+}
+
 // ===== Reports & Agents Types =====
 
 export interface Report {

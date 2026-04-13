@@ -1,5 +1,5 @@
 import useSWR from 'swr';
-import { fetchTokenStats, fetchSessions, fetchConversations } from './api';
+import { fetchTokenStats, fetchSessions, fetchConversations, fetchTranscript } from './api';
 import {
   fetchProjects,
   fetchOperatorSession,
@@ -18,7 +18,7 @@ import {
   fetchIntelligenceDispatchOutcomes,
 } from './operator-api';
 import type {
-  TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
+  TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse, TranscriptResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope,
@@ -77,6 +77,14 @@ export function useConversations(
       revalidateOnFocus: false,
       dedupingInterval: 15000,
     }
+  );
+}
+
+export function useTranscript(sessionId: string | null) {
+  return useSWR<TranscriptResponse>(
+    sessionId ? ['transcript', sessionId] : null,
+    () => fetchTranscript(sessionId!),
+    { revalidateOnFocus: false, dedupingInterval: 60000 }
   );
 }
 
