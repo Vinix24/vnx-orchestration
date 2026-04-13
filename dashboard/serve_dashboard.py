@@ -153,6 +153,12 @@ from api_intelligence import (  # noqa: E402
     _intelligence_get_classifications,
     _intelligence_get_dispatch_outcomes,
     _intelligence_get_transcript,
+    _intelligence_get_proposals,
+    _intelligence_accept_proposal,
+    _intelligence_reject_proposal,
+    _intelligence_apply_proposals,
+    _intelligence_get_confidence_trends,
+    _intelligence_get_weekly_digest,
 )
 
 
@@ -329,6 +335,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, _intelligence_get_dispatch_outcomes(params))
             return
 
+        if path == "/api/intelligence/proposals":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_proposals(params))
+            return
+
+        if path == "/api/intelligence/confidence-trends":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_confidence_trends(params))
+            return
+
+        if path == "/api/intelligence/weekly-digest":
+            payload, status_int = _intelligence_get_weekly_digest()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
         if path.startswith("/api/conversations/") and path.endswith("/transcript"):
             session_id = path[len("/api/conversations/"):-len("/transcript")]
             payload, status_int = _intelligence_get_transcript(session_id)
@@ -428,6 +447,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return
             result, status_int = _operator_post_action(_OPERATOR_ACTIONS[parsed_path], body_data)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        # Proposals: accept / reject / apply
+        if parsed_path == "/api/intelligence/proposals/apply":
+            result, status_int = _intelligence_apply_proposals()
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path.startswith("/api/intelligence/proposals/") and parsed_path.endswith("/accept"):
+            proposal_id = parsed_path[len("/api/intelligence/proposals/"):-len("/accept")]
+            result, status_int = _intelligence_accept_proposal(proposal_id)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path.startswith("/api/intelligence/proposals/") and parsed_path.endswith("/reject"):
+            proposal_id = parsed_path[len("/api/intelligence/proposals/"):-len("/reject")]
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body_bytes = self.rfile.read(length) if length else b"{}"
+            try:
+                body_data = json.loads(body_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                body_data = {}
+            result, status_int = _intelligence_reject_proposal(proposal_id, body_data)
             _json_response(self, HTTPStatus(status_int), result)
             return
 

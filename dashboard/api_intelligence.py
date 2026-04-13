@@ -1,8 +1,9 @@
 """Intelligence data API handlers.
 
-Covers: patterns, injections, classifications, dispatch outcomes, transcripts.
+Covers: patterns, injections, classifications, dispatch outcomes, transcripts,
+proposals (accept/reject/apply), confidence trends, weekly digest.
 Follows the api_token_stats / api_operator module pattern — handler functions
-imported into serve_dashboard.py and wired in DashboardHandler.do_GET.
+imported into serve_dashboard.py and wired in DashboardHandler.do_GET/do_POST.
 """
 
 from __future__ import annotations
@@ -10,7 +11,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+_UTC = timezone.utc
 
 
 def _sd():
@@ -270,6 +276,251 @@ def _intelligence_get_dispatch_outcomes(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 _CONV_DB_PATH = Path.home() / ".claude" / "conversation-index.db"
+
+# ---------------------------------------------------------------------------
+# Shared helpers for proposal / digest endpoints
+# ---------------------------------------------------------------------------
+
+def _state_dir() -> Path:
+    """Return the VNX state directory (parent of quality_intelligence.db)."""
+    return _sd().DB_PATH.parent
+
+
+def _scripts_dir() -> Path:
+    """Return the scripts/ directory relative to this module's location."""
+    return Path(__file__).resolve().parent.parent / "scripts"
+
+
+def _load_pending_edits() -> dict:
+    path = _state_dir() / "pending_edits.json"
+    if not path.exists():
+        return {"generated_at": "", "edits": []}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"generated_at": "", "edits": []}
+
+
+def _save_pending_edits(data: dict) -> None:
+    path = _state_dir() / "pending_edits.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# /api/intelligence/proposals  (GET)
+# ---------------------------------------------------------------------------
+
+def _intelligence_get_proposals(params: dict) -> dict:
+    """Return proposals from pending_edits.json."""
+    data = _load_pending_edits()
+    proposals = []
+    for edit in data.get("edits", []):
+        proposals.append({
+            "id": edit.get("id"),
+            "category": edit.get("category", ""),
+            "proposed_change": edit.get("content", ""),
+            "evidence": edit.get("evidence", ""),
+            "confidence": edit.get("confidence", 0.0),
+            "status": edit.get("status", "pending"),
+            "suggested_at": edit.get("suggested_at", ""),
+        })
+    return {"proposals": proposals}
+
+
+# ---------------------------------------------------------------------------
+# /api/intelligence/proposals/<id>/accept  (POST)
+# ---------------------------------------------------------------------------
+
+def _intelligence_accept_proposal(proposal_id: str) -> tuple[dict, int]:
+    """Mark a proposal as accepted."""
+    try:
+        pid = int(proposal_id)
+    except (ValueError, TypeError):
+        return {"error": "invalid proposal id"}, 400
+
+    data = _load_pending_edits()
+    edits = data.get("edits", [])
+    matched = False
+    for edit in edits:
+        if edit.get("id") == pid and edit.get("status") == "pending":
+            edit["status"] = "accepted"
+            edit["accepted_at"] = datetime.now(tz=_UTC).isoformat().replace("+00:00", "Z")
+            matched = True
+            break
+
+    if not matched:
+        return {"error": f"proposal {pid} not found or not pending"}, 404
+
+    _save_pending_edits(data)
+    return {"ok": True, "id": pid, "status": "accepted"}, 200
+
+
+# ---------------------------------------------------------------------------
+# /api/intelligence/proposals/<id>/reject  (POST)
+# ---------------------------------------------------------------------------
+
+def _intelligence_reject_proposal(proposal_id: str, body: dict) -> tuple[dict, int]:
+    """Mark a proposal as rejected."""
+    try:
+        pid = int(proposal_id)
+    except (ValueError, TypeError):
+        return {"error": "invalid proposal id"}, 400
+
+    reason = body.get("reason", "")
+
+    data = _load_pending_edits()
+    edits = data.get("edits", [])
+    matched = False
+    for edit in edits:
+        if edit.get("id") == pid and edit.get("status") in ("pending", "accepted"):
+            edit["status"] = "rejected"
+            edit["rejected_at"] = datetime.now(tz=_UTC).isoformat().replace("+00:00", "Z")
+            if reason:
+                edit["reject_reason"] = reason
+            matched = True
+            break
+
+    if not matched:
+        return {"error": f"proposal {pid} not found or already rejected"}, 404
+
+    _save_pending_edits(data)
+    return {"ok": True, "id": pid, "status": "rejected"}, 200
+
+
+# ---------------------------------------------------------------------------
+# /api/intelligence/proposals/apply  (POST)
+# ---------------------------------------------------------------------------
+
+def _intelligence_apply_proposals() -> tuple[dict, int]:
+    """Trigger apply_suggested_edits.py apply for accepted proposals."""
+    script = _scripts_dir() / "apply_suggested_edits.py"
+    if not script.exists():
+        return {"error": f"apply_suggested_edits.py not found at {script}"}, 500
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "apply"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": "apply timed out"}, 500
+    except OSError as exc:
+        return {"error": f"subprocess error: {exc}"}, 500
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+
+    # Parse "Applied: N | Failed: M" from stdout
+    applied = 0
+    errors: list[str] = []
+    m_applied = re.search(r"Applied:\s*(\d+)", stdout)
+    m_failed = re.search(r"Failed:\s*(\d+)", stdout)
+    if m_applied:
+        applied = int(m_applied.group(1))
+    failed_count = int(m_failed.group(1)) if m_failed else 0
+
+    if proc.returncode != 0 or failed_count > 0:
+        if stderr.strip():
+            errors.append(stderr.strip()[:500])
+        if failed_count > 0:
+            errors.append(f"{failed_count} edit(s) failed to apply")
+
+    return {"applied": applied, "errors": errors}, 200
+
+
+# ---------------------------------------------------------------------------
+# /api/intelligence/confidence-trends  (GET)
+# ---------------------------------------------------------------------------
+
+_SEVERITY_SCORE = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
+
+
+def _intelligence_get_confidence_trends(params: dict) -> dict:
+    """Return time-series confidence data grouped by date."""
+    sd = _sd()
+    db_path: Path = sd.DB_PATH
+    trends: list[dict] = []
+
+    if not db_path.exists():
+        return {"trends": trends}
+
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+
+        # Collect success pattern confidence by date
+        success_by_date: dict[str, list[float]] = {}
+        try:
+            rows = con.execute(
+                """
+                SELECT SUBSTR(last_used, 1, 10) AS day, confidence_score
+                FROM success_patterns
+                WHERE last_used IS NOT NULL AND last_used != ''
+                ORDER BY day
+                """
+            ).fetchall()
+            for row in rows:
+                day = row["day"]
+                if day:
+                    success_by_date.setdefault(day, []).append(float(row["confidence_score"] or 0.0))
+        except sqlite3.OperationalError:
+            pass
+
+        # Collect antipattern severity by date
+        anti_by_date: dict[str, list[float]] = {}
+        try:
+            rows = con.execute(
+                """
+                SELECT SUBSTR(last_seen, 1, 10) AS day, severity
+                FROM antipatterns
+                WHERE last_seen IS NOT NULL AND last_seen != ''
+                ORDER BY day
+                """
+            ).fetchall()
+            for row in rows:
+                day = row["day"]
+                if day:
+                    score = _SEVERITY_SCORE.get((row["severity"] or "medium").lower(), 0.5)
+                    anti_by_date.setdefault(day, []).append(score)
+        except sqlite3.OperationalError:
+            pass
+
+        con.close()
+    except Exception:
+        return {"trends": trends}
+
+    all_days = sorted(set(list(success_by_date.keys()) + list(anti_by_date.keys())))
+    for day in all_days:
+        s_vals = success_by_date.get(day, [])
+        a_vals = anti_by_date.get(day, [])
+        trends.append({
+            "date": day,
+            "avg_success_confidence": round(sum(s_vals) / len(s_vals), 4) if s_vals else None,
+            "avg_antipattern_severity": round(sum(a_vals) / len(a_vals), 4) if a_vals else None,
+            "pattern_count": len(s_vals) + len(a_vals),
+        })
+
+    return {"trends": trends}
+
+
+# ---------------------------------------------------------------------------
+# /api/intelligence/weekly-digest  (GET)
+# ---------------------------------------------------------------------------
+
+def _intelligence_get_weekly_digest() -> tuple[dict, int]:
+    """Return the latest weekly_digest.json from state dir."""
+    digest_path = _state_dir() / "weekly_digest.json"
+    if not digest_path.exists():
+        return {"error": "weekly_digest.json not found — run scripts/weekly_digest.py to generate"}, 404
+
+    try:
+        data = json.loads(digest_path.read_text(encoding="utf-8"))
+        return data, 200
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"error": f"failed to read weekly digest: {exc}"}, 500
 
 
 def _intelligence_get_transcript(session_id: str) -> tuple[dict, int]:
