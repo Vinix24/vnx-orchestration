@@ -40,7 +40,15 @@ def resolve_adapter(terminal_id: str) -> ProviderAdapter:
         from adapters.claude_adapter import ClaudeAdapter  # noqa: PLC0415
         return ClaudeAdapter(terminal_id)
 
+    if provider == "gemini":
+        from adapters.gemini_adapter import GeminiAdapter  # noqa: PLC0415
+        return GeminiAdapter(terminal_id)
+
+    if provider == "codex":
+        from adapters.codex_adapter import CodexAdapter  # noqa: PLC0415
+        return CodexAdapter(terminal_id)
+
     raise ValueError(
         f"Unknown provider '{provider}' for terminal {terminal_id}. "
-        f"Set VNX_PROVIDER_{terminal_id}=claude or leave unset for default."
+        f"Set VNX_PROVIDER_{terminal_id}=claude|gemini|codex or leave unset for default."
     )
