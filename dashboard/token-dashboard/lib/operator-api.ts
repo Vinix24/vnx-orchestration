@@ -21,6 +21,10 @@ import type {
   ConfidenceTrendsResponse,
   WeeklyDigest,
   ProposalActionResponse,
+  DispatchesResponse,
+  DispatchDetailResponse,
+  DispatchEventsResponse,
+  DispatchResultResponse,
 } from './types';
 
 const BASE = '/api/operator';
@@ -192,4 +196,32 @@ export function fetchWeeklyDigest(): Promise<WeeklyDigest> {
 
 export function generateWeeklyDigest(): Promise<ProposalActionResponse> {
   return post('/api/intelligence/weekly-digest/generate', { dry_run: false });
+}
+
+// ===== Dispatch Viewer API =====
+
+export function fetchDispatches(params?: {
+  terminal?: string;
+  role?: string;
+  status?: string;
+  limit?: number;
+}): Promise<DispatchesResponse> {
+  const p: Record<string, string> = {};
+  if (params?.terminal) p.terminal = params.terminal;
+  if (params?.role) p.role = params.role;
+  if (params?.status) p.status = params.status;
+  if (params?.limit !== undefined) p.limit = String(params.limit);
+  return get('/api/dispatches', Object.keys(p).length ? p : undefined);
+}
+
+export function fetchDispatchDetail(id: string): Promise<DispatchDetailResponse> {
+  return get(`/api/dispatches/${encodeURIComponent(id)}`);
+}
+
+export function fetchDispatchEvents(id: string): Promise<DispatchEventsResponse> {
+  return get(`/api/dispatches/${encodeURIComponent(id)}/events`);
+}
+
+export function fetchDispatchResult(id: string): Promise<DispatchResultResponse> {
+  return get(`/api/dispatches/${encodeURIComponent(id)}/result`);
 }

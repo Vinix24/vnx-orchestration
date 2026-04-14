@@ -19,6 +19,10 @@ import {
   fetchProposals,
   fetchConfidenceTrends,
   fetchWeeklyDigest,
+  fetchDispatches,
+  fetchDispatchDetail,
+  fetchDispatchEvents,
+  fetchDispatchResult,
 } from './operator-api';
 import type {
   TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse, TranscriptResponse,
@@ -28,6 +32,7 @@ import type {
   ReportsEnvelope, AgentsEnvelope,
   PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
   ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
+  DispatchesResponse, DispatchDetailResponse, DispatchEventsResponse, DispatchResultResponse,
 } from './types';
 
 export function useTokenStats(
@@ -251,5 +256,51 @@ export function useWeeklyDigest() {
     'intelligence-weekly-digest',
     () => fetchWeeklyDigest(),
     { refreshInterval: 300000, revalidateOnFocus: true, dedupingInterval: 60000 }
+  );
+}
+
+// ===== Dispatch Viewer Hooks =====
+
+export function useDispatches(params?: {
+  terminal?: string;
+  role?: string;
+  status?: string;
+  limit?: number;
+}) {
+  const key = [
+    'dispatches',
+    params?.terminal ?? '',
+    params?.role ?? '',
+    params?.status ?? '',
+    String(params?.limit ?? 100),
+  ];
+  return useSWR<DispatchesResponse>(
+    key,
+    () => fetchDispatches(params),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useDispatchDetail(id: string | null) {
+  return useSWR<DispatchDetailResponse>(
+    id ? ['dispatch-detail', id] : null,
+    () => fetchDispatchDetail(id!),
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
+  );
+}
+
+export function useDispatchEvents(id: string | null) {
+  return useSWR<DispatchEventsResponse>(
+    id ? ['dispatch-events', id] : null,
+    () => fetchDispatchEvents(id!),
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
+  );
+}
+
+export function useDispatchResult(id: string | null) {
+  return useSWR<DispatchResultResponse>(
+    id ? ['dispatch-result', id] : null,
+    () => fetchDispatchResult(id!),
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
   );
 }

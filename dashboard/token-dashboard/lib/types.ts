@@ -432,6 +432,79 @@ export interface ProposalActionResponse {
   error?: string;
 }
 
+// ===== Dispatch Viewer Types =====
+
+export interface DispatchSummary {
+  dispatch_id: string;
+  terminal: string;
+  role: string;
+  gate: string;
+  pr: string | null;
+  status: string;
+  timestamp: string;
+  duration_secs: number | null;
+  track: string | null;
+}
+
+export interface DispatchDetail {
+  dispatch_id: string;
+  terminal: string;
+  role: string;
+  gate: string;
+  pr: string | null;
+  model: string | null;
+  track: string | null;
+  instruction: string;
+  intelligence_patterns: string[];
+  repo_map: string[];
+}
+
+export interface DispatchEvent {
+  offset_secs: number;
+  tool: string;
+  target: string;
+  input?: string;
+  output?: string;
+  has_error: boolean;
+  timestamp?: string;
+}
+
+export interface DispatchResult {
+  status: string;
+  cqs_score: number | null;
+  cqs_components: Record<string, number>;
+  commit_before: string | null;
+  commit_after: string | null;
+  files_changed: number | null;
+  lines_added: number | null;
+  lines_removed: number | null;
+  test_pass: number | null;
+  test_fail: number | null;
+  report_markdown: string | null;
+  exploration_depth: number | null;
+  rework_count: number | null;
+  duration_secs: number | null;
+  baseline_secs: number | null;
+}
+
+export interface DispatchesResponse {
+  dispatches: DispatchSummary[];
+  total: number;
+}
+
+export interface DispatchDetailResponse {
+  dispatch: DispatchDetail;
+}
+
+export interface DispatchEventsResponse {
+  events: DispatchEvent[];
+  is_live: boolean;
+}
+
+export interface DispatchResultResponse {
+  result: DispatchResult;
+}
+
 // ===== Transcript Types =====
 
 export interface TranscriptMessage {
