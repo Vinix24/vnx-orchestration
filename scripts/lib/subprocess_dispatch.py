@@ -391,13 +391,14 @@ def deliver_via_subprocess(
             heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
-        # Archive events for this dispatch before the next dispatch clears them
+        # Archive events for this dispatch and clear the live file immediately so
+        # the next dispatch starts with an empty file (guarantees 100% archival).
         event_store = adapter._get_event_store()
         if event_store is not None:
             try:
-                event_store.archive(terminal_id, dispatch_id)
+                event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)
             except Exception as _exc:
-                logger.debug("deliver_via_subprocess: event archive failed: %s", _exc)
+                logger.debug("deliver_via_subprocess: event archive+clear failed: %s", _exc)
         # Trigger auto-report pipeline on completion (gated by VNX_AUTO_REPORT=1)
         adapter.trigger_report_pipeline(
             terminal_id,

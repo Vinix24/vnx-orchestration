@@ -572,13 +572,14 @@ class LearningLoop:
                 ).fetchone()
 
                 if not existing:
+                    source_dispatch_id = rule.get("source_dispatch_id") or None
                     self.conn.execute(
                         "INSERT INTO prevention_rules "
                         "(tag_combination, rule_type, description, recommendation, "
-                        " confidence, created_at, triggered_count) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        " confidence, created_at, triggered_count, source_dispatch_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (tag_combo, "failure_prevention", description,
-                         recommendation, confidence, now, 0),
+                         recommendation, confidence, now, 0, source_dispatch_id),
                     )
                     ingested_count += 1
 

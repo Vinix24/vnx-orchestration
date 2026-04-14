@@ -74,17 +74,24 @@ def log_enforcement(
     context: dict,
     override: Optional[str] = None,
     message: str = "",
+    dispatch_id: Optional[str] = None,
 ) -> None:
     """Append a governance enforcement decision to the audit trail.
 
     Args:
-        check_name: Name of the governance check (e.g. "gate_before_next_feature").
-        level:      Enforcement level (0=off, 1=advisory, 2=soft_mandatory, 3=hard_mandatory).
-        result:     True if check passed.
-        context:    Context dict passed to the check (used for hash + field extraction).
-        override:   Override reason string if a soft-mandatory check was bypassed.
-        message:    Human-readable outcome message from the check.
+        check_name:  Name of the governance check (e.g. "gate_before_next_feature").
+        level:       Enforcement level (0=off, 1=advisory, 2=soft_mandatory, 3=hard_mandatory).
+        result:      True if check passed.
+        context:     Context dict passed to the check (used for hash + field extraction).
+        override:    Override reason string if a soft-mandatory check was bypassed.
+        message:     Human-readable outcome message from the check.
+        dispatch_id: Dispatch that triggered this enforcement check (for traceability).
     """
+    effective_dispatch_id = (
+        dispatch_id
+        or context.get("dispatch_id")
+        or None
+    )
     _append({
         "timestamp": _now_utc(),
         "event_type": "enforcement_check",
@@ -97,6 +104,7 @@ def log_enforcement(
         "operator": os.environ.get("VNX_OPERATOR") or None,
         "feature": context.get("feature") or None,
         "pr_number": context.get("pr_number") or None,
+        "dispatch_id": effective_dispatch_id,
     })
 
 

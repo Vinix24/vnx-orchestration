@@ -323,6 +323,32 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated dispatch_metadata: added target_open_items, open_items_created, open_items_resolved columns')
 
+        # Migration: add dispatch_id to pattern_usage for dispatch-scoped traceability
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pattern_usage'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(pattern_usage)")
+            pu_cols = {row[1] for row in cursor.fetchall()}
+            if "dispatch_id" not in pu_cols:
+                cursor.execute(
+                    "ALTER TABLE pattern_usage ADD COLUMN dispatch_id TEXT DEFAULT NULL"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pattern_usage_dispatch_id "
+                    "ON pattern_usage (dispatch_id)"
+                )
+                conn.commit()
+                log('INFO', 'Migrated pattern_usage: added dispatch_id column + index')
+
+        # Migration: add source_dispatch_id to prevention_rules for audit linkage
+        cursor.execute("PRAGMA table_info(prevention_rules)")
+        pr_cols = {row[1] for row in cursor.fetchall()}
+        if "source_dispatch_id" not in pr_cols:
+            cursor.execute(
+                "ALTER TABLE prevention_rules ADD COLUMN source_dispatch_id TEXT DEFAULT NULL"
+            )
+            conn.commit()
+            log('INFO', 'Migrated prevention_rules: added source_dispatch_id column')
+
         # Migration: add temporal validity columns (F54 bi-temporal pattern lifecycle)
         for _tbl in ("success_patterns", "antipatterns", "prevention_rules"):
             cursor.execute(f"PRAGMA table_info({_tbl})")

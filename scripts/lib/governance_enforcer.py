@@ -240,6 +240,7 @@ class GovernanceEnforcer:
                     context=context,
                     override=result.overridden_by,
                     message=result.message,
+                    dispatch_id=context.get("dispatch_id"),
                 )
             except Exception:
                 pass  # audit must never block enforcement
