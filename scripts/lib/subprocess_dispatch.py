@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -119,6 +121,106 @@ def _default_state_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent / ".vnx-data" / "state"
 
 
+class _SubprocessResult(NamedTuple):
+    """Return value from deliver_via_subprocess() carrying stats back to the caller."""
+    success: bool
+    session_id: str | None
+    event_count: int
+    manifest_path: str | None
+
+
+def _get_commit_hash() -> str:
+    """Return current HEAD commit hash, or empty string on failure."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        return proc.stdout.strip()
+    except Exception as exc:
+        logger.debug("_get_commit_hash failed: %s", exc)
+        return ""
+
+
+def _get_current_branch() -> str:
+    """Return current branch name, or empty string on failure."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        return proc.stdout.strip()
+    except Exception as exc:
+        logger.debug("_get_current_branch failed: %s", exc)
+        return ""
+
+
+def _dispatch_manifest_dir(stage: str, dispatch_id: str) -> Path:
+    """Resolve .vnx-data/dispatches/<stage>/<dispatch_id>/ for manifest storage."""
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    if data_dir:
+        return Path(data_dir) / "dispatches" / stage / dispatch_id
+    return Path(__file__).resolve().parents[2] / ".vnx-data" / "dispatches" / stage / dispatch_id
+
+
+def _write_manifest(
+    dispatch_id: str,
+    terminal_id: str,
+    model: str,
+    role: str | None,
+    instruction: str,
+    commit_hash_before: str,
+    branch: str,
+) -> str | None:
+    """Write manifest.json to .vnx-data/dispatches/active/<dispatch_id>/.
+
+    Returns the manifest path as a string, or None on failure.
+    """
+    manifest_dir = _dispatch_manifest_dir("active", dispatch_id)
+    try:
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "dispatch_id": dispatch_id,
+            "commit_hash_before": commit_hash_before,
+            "branch": branch,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "terminal": terminal_id,
+            "model": model,
+            "role": role,
+            "instruction_chars": len(instruction),
+        }
+        manifest_path = manifest_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        logger.info("Manifest written: %s", manifest_path)
+        return str(manifest_path)
+    except Exception as exc:
+        logger.warning("_write_manifest failed for %s: %s", dispatch_id, exc)
+        return None
+
+
+def _promote_manifest(dispatch_id: str) -> str | None:
+    """Copy manifest from active/ to completed/ after dispatch finishes.
+
+    Returns the completed manifest path as a string, or None on failure.
+    """
+    src_dir = _dispatch_manifest_dir("active", dispatch_id)
+    dst_dir = _dispatch_manifest_dir("completed", dispatch_id)
+    src = src_dir / "manifest.json"
+    if not src.exists():
+        return None
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / "manifest.json"
+        shutil.copy2(src, dst)
+        logger.info("Manifest promoted: %s -> %s", src, dst)
+        return str(dst)
+    except Exception as exc:
+        logger.warning("_promote_manifest failed for %s: %s", dispatch_id, exc)
+        return None
+
+
 def _heartbeat_loop(
     terminal_id: str,
     dispatch_id: str,
@@ -175,7 +277,8 @@ def deliver_via_subprocess(
     chunk_timeout: float = 120.0,
     total_deadline: float = 600.0,
     health_monitor: "WorkerHealthMonitor | None" = None,
-) -> bool:
+    commit_hash_before: str = "",
+) -> "_SubprocessResult":
     """Deliver a dispatch instruction to terminal_id via SubprocessAdapter.
 
     Blocks until the subprocess exits, consuming all stream events.
@@ -195,7 +298,7 @@ def deliver_via_subprocess(
 
     If health_monitor is provided, each streamed event is fed into it.
 
-    Returns True on success, False on failure.
+    Returns _SubprocessResult(success, session_id, event_count, manifest_path).
     """
     # Append repo map to instruction before skill context wrapping
     if repo_map:
@@ -217,6 +320,17 @@ def deliver_via_subprocess(
             profile = _load_agent_profile(config_path)
             logger.info("Agent %s using governance profile: %s", role, profile)
 
+    # Write dispatch manifest before launching subprocess
+    manifest_path = _write_manifest(
+        dispatch_id=dispatch_id,
+        terminal_id=terminal_id,
+        model=model,
+        role=role,
+        instruction=instruction,
+        commit_hash_before=commit_hash_before,
+        branch=_get_current_branch(),
+    )
+
     adapter = SubprocessAdapter()
     result = adapter.deliver(
         terminal_id,
@@ -226,7 +340,7 @@ def deliver_via_subprocess(
         cwd=agent_cwd,
     )
     if not result.success:
-        return False
+        return _SubprocessResult(success=False, session_id=None, event_count=0, manifest_path=manifest_path)
 
     # Start heartbeat thread if lease generation is known
     heartbeat_stop: threading.Event | None = None
@@ -242,7 +356,7 @@ def deliver_via_subprocess(
         )
         heartbeat_thread.start()
 
-    success = False
+    event_count = 0
     _last_stuck_log_time = 0.0
     try:
         for _event in adapter.read_events_with_timeout(
@@ -250,6 +364,7 @@ def deliver_via_subprocess(
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
         ):
+            event_count += 1
             if health_monitor is not None:
                 health_monitor.update(_event)
                 # Log stuck warning at most once per SLOW_THRESHOLD window
@@ -260,11 +375,17 @@ def deliver_via_subprocess(
                     if h.status == HealthStatus.STUCK:
                         health_monitor.log_stuck_event()
                         _last_stuck_log_time = _now
-        success = True
-        return True
+        session_id = adapter.get_session_id(terminal_id)
+        completed_manifest = _promote_manifest(dispatch_id)
+        return _SubprocessResult(
+            success=True,
+            session_id=session_id,
+            event_count=event_count,
+            manifest_path=completed_manifest or manifest_path,
+        )
     except Exception:
         logger.exception("deliver_via_subprocess failed for %s", terminal_id)
-        return False
+        return _SubprocessResult(success=False, session_id=None, event_count=event_count, manifest_path=manifest_path)
     finally:
         if heartbeat_stop is not None:
             heartbeat_stop.set()
@@ -352,7 +473,10 @@ def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> 
             return False
 
         gate_tag = gate or dispatch_id[:12]
-        commit_msg = f"feat({gate_tag}): auto-commit from headless worker {terminal_id}"
+        commit_msg = (
+            f"feat({gate_tag}): auto-commit from headless worker {terminal_id}\n\n"
+            f"Dispatch-ID: {dispatch_id}"
+        )
         commit_proc = subprocess.run(
             ["git", "commit", "-m", commit_msg],
             capture_output=True, text=True, timeout=30,
@@ -425,6 +549,9 @@ def _write_receipt(
     failure_reason: str | None = None,
     commit_missing: bool = False,
     committed: bool = False,
+    commit_hash_before: str = "",
+    commit_hash_after: str = "",
+    manifest_path: str | None = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -440,14 +567,22 @@ def _write_receipt(
         "session_id": session_id,
         "source": "subprocess",
     }
+    if commit_hash_before:
+        receipt["commit_hash_before"] = commit_hash_before
+    if commit_hash_after:
+        receipt["commit_hash_after"] = commit_hash_after
+    if commit_hash_before and commit_hash_after:
+        receipt["committed"] = committed or (commit_hash_before != commit_hash_after)
+    elif committed:
+        receipt["committed"] = True
+    if manifest_path:
+        receipt["manifest_path"] = manifest_path
     if attempt is not None:
         receipt["attempt"] = attempt
     if failure_reason:
         receipt["failure_reason"] = failure_reason
     if commit_missing:
         receipt["commit_missing"] = True
-    if committed:
-        receipt["committed"] = True
 
     receipt_path = _default_state_dir() / "t0_receipts.ndjson"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -567,6 +702,7 @@ def deliver_with_recovery(
     Returns True on success, False on failure.
     """
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
+    commit_hash_before = _get_commit_hash()
 
     # Capture dispatch parameters before execution
     _capture_dispatch_parameters(
@@ -582,7 +718,7 @@ def deliver_with_recovery(
     monitor = WorkerHealthMonitor(terminal_id, dispatch_id)
 
     for attempt in range(max_retries + 1):
-        success = deliver_via_subprocess(
+        sub_result = deliver_via_subprocess(
             terminal_id,
             instruction,
             model,
@@ -593,23 +729,31 @@ def deliver_with_recovery(
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
             health_monitor=monitor,
+            commit_hash_before=commit_hash_before,
         )
-        if success:
+        if sub_result.success:
             monitor.mark_completed()
+            commit_hash_after = _get_commit_hash()
             commit_missing = _check_commit_since(dispatch_start_ts)
 
             # Post-dispatch commit enforcement
-            committed = False
-            if auto_commit and commit_missing:
+            committed = commit_hash_before != commit_hash_after
+            if auto_commit and commit_missing and not committed:
                 committed = _auto_commit_changes(dispatch_id, terminal_id, gate=gate)
                 if committed:
                     commit_missing = False
+                    commit_hash_after = _get_commit_hash()
 
             _write_receipt(
                 dispatch_id, terminal_id, "done",
+                event_count=sub_result.event_count,
+                session_id=sub_result.session_id,
                 attempt=attempt,
                 commit_missing=commit_missing,
                 committed=committed,
+                commit_hash_before=commit_hash_before,
+                commit_hash_after=commit_hash_after,
+                manifest_path=sub_result.manifest_path,
             )
 
             # Capture outcome after receipt is written
@@ -635,8 +779,12 @@ def deliver_with_recovery(
                 _auto_stash_changes(dispatch_id, terminal_id)
             _write_receipt(
                 dispatch_id, terminal_id, "failed",
+                event_count=sub_result.event_count,
+                session_id=sub_result.session_id,
                 attempt=attempt,
                 failure_reason=f"Exhausted {max_retries} retries",
+                commit_hash_before=commit_hash_before,
+                manifest_path=sub_result.manifest_path,
             )
 
             # Capture failed outcome
