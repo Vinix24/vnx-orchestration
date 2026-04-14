@@ -350,15 +350,21 @@ def initialize_database() -> bool:
             log('INFO', 'Migrated prevention_rules: added source_dispatch_id column')
 
         # Migration: add temporal validity columns (F54 bi-temporal pattern lifecycle)
+        # Note: SQLite ALTER TABLE does not support non-constant defaults (e.g. CURRENT_TIMESTAMP).
+        # Add with DEFAULT NULL, then backfill valid_from for existing rows.
         for _tbl in ("success_patterns", "antipatterns", "prevention_rules"):
             cursor.execute(f"PRAGMA table_info({_tbl})")
             _tbl_cols = {row[1] for row in cursor.fetchall()}
             if "valid_from" not in _tbl_cols:
                 cursor.execute(
-                    f"ALTER TABLE {_tbl} ADD COLUMN valid_from DATETIME DEFAULT CURRENT_TIMESTAMP"
+                    f"ALTER TABLE {_tbl} ADD COLUMN valid_from DATETIME DEFAULT NULL"
+                )
+                # Backfill existing rows so valid_from is not null
+                cursor.execute(
+                    f"UPDATE {_tbl} SET valid_from = datetime('now') WHERE valid_from IS NULL"
                 )
                 conn.commit()
-                log('INFO', f'Migrated {_tbl}: added valid_from column')
+                log('INFO', f'Migrated {_tbl}: added valid_from column + backfilled existing rows')
             if "valid_until" not in _tbl_cols:
                 cursor.execute(
                     f"ALTER TABLE {_tbl} ADD COLUMN valid_until DATETIME DEFAULT NULL"
