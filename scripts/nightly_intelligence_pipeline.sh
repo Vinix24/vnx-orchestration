@@ -162,6 +162,13 @@ PY
 )"
 log_msg "Health check: session_analytics rows=${SESSION_COUNT}"
 
+# ── Phase 2b: Behavioral analysis ────────────────────────────────────────────
+# Runs after session-dispatch linkage, before learning cycle.
+run_phase "2b-event-analyze" python3 "$SCRIPT_DIR/lib/event_analyzer.py" \
+    --all --output "$VNX_STATE_DIR/dispatch_behaviors.json"
+run_phase "2c-pattern-extract" python3 "$SCRIPT_DIR/lib/pattern_extractor.py" \
+    --input "$VNX_STATE_DIR/dispatch_behaviors.json"
+
 # ── Phase 4: Learning cycle ───────────────────────────────────────────────────
 run_phase "4-learning-cycle" python3 "$SCRIPT_DIR/learning_loop.py" run
 

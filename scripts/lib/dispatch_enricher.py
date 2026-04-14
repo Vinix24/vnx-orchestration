@@ -12,11 +12,14 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 _SCRIPTS_LIB = Path(__file__).parent
 if str(_SCRIPTS_LIB) not in sys.path:
@@ -148,11 +151,207 @@ class DispatchEnricher:
         # ------------------------------------------------------------------
         # Placeholder: no-op until F56 implements dispatch memory retrieval.
 
+        # ------------------------------------------------------------------
+        # Layer 4: File affinity suggestions (from behavioral analysis)
+        # ------------------------------------------------------------------
+        target_files_for_enrichment = extract_target_files(instruction, metadata)
+        if target_files_for_enrichment and not metadata.get("no_repo_map", False):
+            try:
+                affinity_section = self._build_file_affinity_section(target_files_for_enrichment)
+                if affinity_section:
+                    enriched = enriched + f"\n\n{affinity_section}"
+            except Exception as exc:
+                logger.warning("Layer 4 file affinity injection failed: %s — skipping", exc)
+
+        # ------------------------------------------------------------------
+        # Layer 5: Duration baseline (from behavioral analysis)
+        # ------------------------------------------------------------------
+        role = (metadata.get("role") or "").lower()
+        if role and role not in _REVIEW_ROLES:
+            try:
+                duration_section = self._build_duration_baseline_section(role)
+                if duration_section:
+                    enriched = enriched + f"\n\n{duration_section}"
+            except Exception as exc:
+                logger.warning("Layer 5 duration baseline injection failed: %s — skipping", exc)
+
+        # ------------------------------------------------------------------
+        # Layer 6: Behavioral prevention rules
+        # ------------------------------------------------------------------
+        try:
+            prevention_section = self._build_prevention_rules_section()
+            if prevention_section:
+                enriched = enriched + f"\n\n{prevention_section}"
+        except Exception as exc:
+            logger.warning("Layer 6 prevention rules injection failed: %s — skipping", exc)
+
         return enriched
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _intelligence_db_path() -> Optional[Path]:
+        """Return quality_intelligence.db path or None if not found."""
+        state_dir = os.environ.get("VNX_STATE_DIR", "")
+        if state_dir:
+            p = Path(state_dir) / "quality_intelligence.db"
+            if p.exists():
+                return p
+        # Fallback: repo-relative
+        here = Path(__file__).resolve()
+        candidate = here.parent.parent.parent / ".vnx-data" / "state" / "quality_intelligence.db"
+        return candidate if candidate.exists() else None
+
+    def _build_file_affinity_section(self, target_files: List[str]) -> str:
+        """Query success_patterns for file affinity pairs overlapping target_files.
+
+        Returns formatted markdown section or empty string.
+        """
+        db_path = self._intelligence_db_path()
+        if not db_path:
+            return ""
+
+        target_set = set(target_files)
+        suggestions: List[str] = []
+
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                SELECT pattern_data FROM success_patterns
+                WHERE category='behavior_analysis' AND title LIKE 'Files%co-occur%'
+                ORDER BY confidence_score DESC
+                LIMIT 100
+                """
+            ).fetchall()
+            con.close()
+        except Exception:
+            return ""
+
+        seen_suggestions: set = set()
+        for row in rows:
+            try:
+                data = json.loads(row["pattern_data"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            files = data.get("files") or []
+            if len(files) != 2:
+                continue
+            a, b = files[0], files[1]
+            # If one file in the pair overlaps with target_files, suggest the other
+            if a in target_set and b not in target_set and b not in seen_suggestions:
+                suggestions.append(
+                    f"- `{b}` (co-occurs with `{a}`, rate {data.get('co_occurrence', 0):.0%})"
+                )
+                seen_suggestions.add(b)
+            elif b in target_set and a not in target_set and a not in seen_suggestions:
+                suggestions.append(
+                    f"- `{a}` (co-occurs with `{b}`, rate {data.get('co_occurrence', 0):.0%})"
+                )
+                seen_suggestions.add(a)
+
+        if not suggestions:
+            return ""
+
+        return (
+            "### Suggested Additional Context Files\n"
+            "Files frequently modified together with your target files:\n"
+            + "\n".join(suggestions[:10])
+        )
+
+    def _build_duration_baseline_section(self, role: str) -> str:
+        """Query success_patterns for duration baseline matching this role.
+
+        Returns formatted markdown section or empty string.
+        """
+        db_path = self._intelligence_db_path()
+        if not db_path:
+            return ""
+
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                """
+                SELECT pattern_data FROM success_patterns
+                WHERE category='behavior_analysis'
+                  AND title LIKE 'Expected duration:%'
+                  AND pattern_data LIKE ?
+                LIMIT 1
+                """,
+                (f"%{role}%",),
+            ).fetchone()
+            con.close()
+        except Exception:
+            return ""
+
+        if not row:
+            return ""
+
+        try:
+            data = json.loads(row["pattern_data"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return ""
+
+        count = data.get("count", 0)
+        avg_s = data.get("avg_seconds", 0)
+        avg_min = round(avg_s / 60, 1) if avg_s else 0
+        if not count or not avg_min:
+            return ""
+
+        return (
+            f"### Expected Duration\n"
+            f"Based on {count} previous dispatches: ~{avg_min} minutes for {role} tasks"
+        )
+
+    def _build_prevention_rules_section(self) -> str:
+        """Query prevention_rules with source='behavior_analysis'.
+
+        Returns formatted markdown section or empty string.
+        """
+        db_path = self._intelligence_db_path()
+        if not db_path:
+            return ""
+
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            con.row_factory = sqlite3.Row
+            # Check if source column exists
+            col_names = {row[1] for row in con.execute("PRAGMA table_info(prevention_rules)").fetchall()}
+            if "source" not in col_names:
+                con.close()
+                return ""
+            rows = con.execute(
+                """
+                SELECT description, recommendation FROM prevention_rules
+                WHERE source='behavior_analysis'
+                ORDER BY triggered_count DESC
+                LIMIT 10
+                """
+            ).fetchall()
+            con.close()
+        except Exception:
+            return ""
+
+        if not rows:
+            return ""
+
+        lines = []
+        for row in rows:
+            rec = (row["recommendation"] or "").strip()
+            if rec:
+                lines.append(f"- {rec}")
+
+        if not lines:
+            return ""
+
+        return (
+            "### Prevention Rules (from behavioral analysis)\n"
+            + "\n".join(lines)
+        )
 
     def _should_add_repo_map(self, metadata: Dict) -> bool:
         """Return True when this dispatch should receive a repo map.

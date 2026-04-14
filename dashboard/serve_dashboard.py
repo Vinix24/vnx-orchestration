@@ -165,6 +165,11 @@ from api_intelligence import (  # noqa: E402
     _governance_get_overrides,
     _governance_get_audit,
     _governance_get_config,
+    _intelligence_get_behavioral_summary,
+    _dispatch_get_detail,
+    _dispatch_get_events,
+    _dispatch_get_result,
+    handle_events_stream,
 )
 
 
@@ -238,6 +243,32 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
                 return
             _json_response(self, HTTPStatus.OK, result)
+            return
+
+        if path.startswith("/api/dispatches/"):
+            rest = path[len("/api/dispatches/"):]
+            # /api/dispatches/<id>/events
+            if rest.endswith("/events"):
+                dispatch_id = rest[:-len("/events")]
+                payload, status_int = _dispatch_get_events(dispatch_id)
+                _json_response(self, HTTPStatus(status_int), payload)
+                return
+            # /api/dispatches/<id>/result
+            if rest.endswith("/result"):
+                dispatch_id = rest[:-len("/result")]
+                payload, status_int = _dispatch_get_result(dispatch_id)
+                _json_response(self, HTTPStatus(status_int), payload)
+                return
+            # /api/dispatches/<id>
+            dispatch_id = rest
+            payload, status_int = _dispatch_get_detail(dispatch_id)
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        # Events SSE stream — /api/events/stream?terminal=T1
+        if path == "/api/events/stream":
+            terminal = params.get("terminal", [None])[0] or ""
+            handle_events_stream(self, terminal)
             return
 
         # Operator Dashboard API
@@ -356,6 +387,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/intelligence/learning-summary":
             payload, status_int = _intelligence_get_learning_summary()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        if path == "/api/intelligence/behavioral":
+            payload, status_int = _intelligence_get_behavioral_summary()
             _json_response(self, HTTPStatus(status_int), payload)
             return
 
