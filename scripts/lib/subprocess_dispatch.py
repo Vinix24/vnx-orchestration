@@ -81,19 +81,62 @@ def _inject_permission_profile(terminal_id: str, role: str | None, instruction: 
     return f"{preamble}\n---\n\n{instruction}"
 
 
-def _inject_skill_context(terminal_id: str, instruction: str, role: str | None = None) -> str:
-    """Prepend skill/terminal CLAUDE.md content to instruction for context.
+def _inject_skill_context(
+    terminal_id: str,
+    instruction: str,
+    role: str | None = None,
+    dispatch_metadata: "dict | None" = None,
+) -> str:
+    """Compose layered user message context for headless dispatch.
 
-    3-tier resolution (first hit wins):
+    Uses PromptAssembler (3-layer architecture) when available, with fallback
+    to the legacy 3-tier CLAUDE.md resolution for backward compatibility.
+
+    Layer architecture (PromptAssembler path):
+      Layer 1 — Base worker context (universal rules, report format)
+      Layer 2 — Role context (capabilities, permissions for the role)
+      Layer 3 — Dispatch payload (passed through as instruction)
+
+    Legacy fallback (3-tier CLAUDE.md resolution):
       1. agents/{role}/CLAUDE.md        — project-level agent override
       2. .claude/skills/{role}/CLAUDE.md — skill definition
       3. .claude/terminals/{terminal}/CLAUDE.md — terminal fallback
 
-    Tiers 1 and 2 require role to be provided.  Tier 3 is always attempted
-    when the first two are absent or role is None.
+    Args:
+        terminal_id:       Terminal identifier (e.g. "T1").
+        instruction:       Raw dispatch instruction text.
+        role:              Agent role (e.g. "backend-developer").
+        dispatch_metadata: Optional metadata dict forwarded to PromptAssembler
+                           for L3 enrichments (dispatch_id, gate, pr, track, model,
+                           intelligence, historical).  Merged with terminal+role.
 
-    Returns the instruction unchanged if no CLAUDE.md is found in any tier.
+    Returns the full pipe_input string ready for `claude -p`.
     """
+    try:
+        from prompt_assembler import PromptAssembler  # noqa: PLC0415
+        assembler = PromptAssembler()
+        meta = dict(dispatch_metadata or {})
+        meta.setdefault("role", role or "")
+        meta.setdefault("terminal", terminal_id)
+        assembled = assembler.assemble(
+            dispatch_metadata=meta,
+            instruction=instruction,
+        )
+        logger.info(
+            "_inject_skill_context: assembler path — role=%s L1=%d L2=%d L3=%d chars",
+            assembled.metadata.get("role"),
+            assembled.metadata.get("layer1_chars", 0),
+            assembled.metadata.get("layer2_chars", 0),
+            assembled.metadata.get("layer3_chars", 0),
+        )
+        return assembled.to_pipe_input()
+    except Exception as exc:
+        logger.warning(
+            "_inject_skill_context: PromptAssembler failed (%s) — falling back to legacy CLAUDE.md resolution",
+            exc,
+        )
+
+    # Legacy fallback: 3-tier CLAUDE.md resolution
     project_root = Path(__file__).resolve().parents[2]
 
     candidates: list[Path] = []
@@ -304,8 +347,16 @@ def deliver_via_subprocess(
     if repo_map:
         instruction = instruction + f"\n\n{repo_map}"
 
-    # Inject skill/terminal CLAUDE.md as skill context for headless agents
-    instruction = _inject_skill_context(terminal_id, instruction, role=role)
+    # Compose layered user message (L1 base + L2 role + L3 dispatch payload)
+    instruction = _inject_skill_context(
+        terminal_id,
+        instruction,
+        role=role,
+        dispatch_metadata={
+            "dispatch_id": dispatch_id,
+            "model": model,
+        },
+    )
 
     # Inject per-terminal permission profile preamble
     instruction = _inject_permission_profile(terminal_id, role, instruction)

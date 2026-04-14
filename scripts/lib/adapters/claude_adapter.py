@@ -121,7 +121,12 @@ class ClaudeAdapter(ProviderAdapter):
         chunk_timeout = float(context.get("chunk_timeout", 120.0))
         total_deadline = float(context.get("total_deadline", 600.0))
 
-        full_instruction = _inject_skill_context(terminal_id, instruction, role=role)
+        full_instruction = _inject_skill_context(
+            terminal_id,
+            instruction,
+            role=role,
+            dispatch_metadata={"dispatch_id": dispatch_id, "model": model},
+        )
         full_instruction = _inject_permission_profile(terminal_id, role, full_instruction)
         agent_cwd = _resolve_agent_cwd(role)
 
