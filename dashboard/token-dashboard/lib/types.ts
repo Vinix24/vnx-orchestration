@@ -315,6 +315,208 @@ export interface GovernanceDigestEnvelope {
   data: GovernanceDigestData;
 }
 
+// ===== Intelligence Types =====
+
+export interface SuccessPattern {
+  title: string;
+  confidence: number;
+  category: string;
+  used_count: number;
+  last_seen: string;
+}
+
+export interface Antipattern {
+  title: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | string;
+  occurrence_count: number;
+  last_seen: string;
+}
+
+export interface PatternsResponse {
+  success_patterns: SuccessPattern[];
+  antipatterns: Antipattern[];
+}
+
+export interface InjectionEvent {
+  timestamp: string;
+  dispatch_id: string;
+  items_injected: number;
+  items_suppressed: number;
+}
+
+export interface InjectionsResponse {
+  injections: InjectionEvent[];
+}
+
+export interface ClassificationRecord {
+  report_file: string;
+  quality_score: string;
+  content_type: string;
+  complexity: string;
+  summary: string;
+}
+
+export interface ClassificationsResponse {
+  classifications: ClassificationRecord[];
+}
+
+export interface DispatchOutcome {
+  dispatch_id: string;
+  terminal: string;
+  track: string;
+  status: string;
+  timestamp: string;
+}
+
+export interface DispatchOutcomesResponse {
+  outcomes: DispatchOutcome[];
+}
+
+// ===== Self-Improvement Types =====
+
+export interface Proposal {
+  id: number;
+  category: string;
+  proposed_change: string;
+  evidence: string;
+  confidence: number;
+  status: 'pending' | 'accepted' | 'rejected' | string;
+  suggested_at: string;
+}
+
+export interface ProposalsResponse {
+  proposals: Proposal[];
+}
+
+export interface ConfidenceTrend {
+  date: string;
+  avg_success_confidence: number | null;
+  avg_antipattern_severity: number | null;
+  pattern_count: number;
+}
+
+export interface ConfidenceTrendsResponse {
+  trends: ConfidenceTrend[];
+}
+
+export interface WeeklyDigestPeriod {
+  start: string;
+  end: string;
+  days: number;
+}
+
+export interface WeeklyDigestMetrics {
+  patterns_learned: number;
+  top_patterns: Array<{ title: string; confidence: number }>;
+  antipatterns_active: number;
+  top_antipatterns: Array<{ title: string; severity: string }>;
+  avg_success_confidence: number | null;
+  dispatch_outcomes: { total: number; success: number; failure: number; unknown: number };
+  pending_suggestions: number;
+  accepted_suggestions: number;
+}
+
+export interface WeeklyDigest {
+  generated_at: string;
+  period: WeeklyDigestPeriod;
+  metrics: WeeklyDigestMetrics;
+  narrative: string;
+}
+
+export interface ProposalActionResponse {
+  ok?: boolean;
+  id?: number;
+  status?: string;
+  applied?: number;
+  errors?: string[];
+  error?: string;
+}
+
+// ===== Dispatch Viewer Types =====
+
+export interface DispatchSummary {
+  dispatch_id: string;
+  terminal: string;
+  role: string;
+  gate: string;
+  pr: string | null;
+  status: string;
+  timestamp: string;
+  duration_secs: number | null;
+  track: string | null;
+}
+
+export interface DispatchDetail {
+  dispatch_id: string;
+  terminal: string;
+  role: string;
+  gate: string;
+  pr: string | null;
+  model: string | null;
+  track: string | null;
+  instruction: string;
+  intelligence_patterns: string[];
+  repo_map: string[];
+}
+
+export interface DispatchEvent {
+  offset_secs: number;
+  tool: string;
+  target: string;
+  input?: string;
+  output?: string;
+  has_error: boolean;
+  timestamp?: string;
+}
+
+export interface DispatchResult {
+  status: string;
+  cqs_score: number | null;
+  cqs_components: Record<string, number>;
+  commit_before: string | null;
+  commit_after: string | null;
+  files_changed: number | null;
+  lines_added: number | null;
+  lines_removed: number | null;
+  test_pass: number | null;
+  test_fail: number | null;
+  report_markdown: string | null;
+  exploration_depth: number | null;
+  rework_count: number | null;
+  duration_secs: number | null;
+  baseline_secs: number | null;
+}
+
+export interface DispatchesResponse {
+  dispatches: DispatchSummary[];
+  total: number;
+}
+
+export interface DispatchDetailResponse {
+  dispatch: DispatchDetail;
+}
+
+export interface DispatchEventsResponse {
+  events: DispatchEvent[];
+  is_live: boolean;
+}
+
+export interface DispatchResultResponse {
+  result: DispatchResult;
+}
+
+// ===== Transcript Types =====
+
+export interface TranscriptMessage {
+  role: string;
+  content: string;
+  timestamp: string;
+}
+
+export interface TranscriptResponse {
+  messages: TranscriptMessage[];
+}
+
 // ===== Reports & Agents Types =====
 
 export interface Report {

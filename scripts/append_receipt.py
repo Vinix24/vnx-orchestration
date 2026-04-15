@@ -939,7 +939,41 @@ def append_receipt_payload(
         created_count = _register_quality_open_items(receipt)
         receipt["open_items_created"] = created_count
 
+        # Best-effort: update pattern confidence from dispatch outcome
+        _update_confidence_from_receipt(receipt)
+
     return result
+
+
+def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
+    """Wire dispatch outcome into pattern confidence scores (best-effort)."""
+    try:
+        event_type = str(receipt.get("event_type") or receipt.get("status") or "")
+        if event_type not in ("task_complete", "task_failed"):
+            return
+
+        dispatch_id = str(receipt.get("dispatch_id") or "")
+        terminal = str(receipt.get("terminal") or "")
+        if not dispatch_id:
+            return
+
+        outcome = "success" if event_type == "task_complete" else "failure"
+
+        state_dir = Path(SCRIPT_DIR).parent / ".vnx-data" / "state"
+        # Try canonical env path first
+        env_state = os.environ.get("VNX_STATE_DIR", "")
+        if env_state:
+            state_dir = Path(env_state)
+
+        db_path = state_dir / "quality_intelligence.db"
+        if not db_path.exists():
+            return
+
+        sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+        from intelligence_persist import update_confidence_from_outcome
+        update_confidence_from_outcome(db_path, dispatch_id, terminal, outcome)
+    except Exception as exc:
+        _emit("WARN", "confidence_update_failed", error=str(exc))
 
 
 def _parse_input(receipt_json: Optional[str], receipt_file: Optional[str]) -> Dict[str, Any]:

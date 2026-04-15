@@ -13,6 +13,18 @@ import type {
   GovernanceDigestEnvelope,
   ReportsEnvelope,
   AgentsEnvelope,
+  PatternsResponse,
+  InjectionsResponse,
+  ClassificationsResponse,
+  DispatchOutcomesResponse,
+  ProposalsResponse,
+  ConfidenceTrendsResponse,
+  WeeklyDigest,
+  ProposalActionResponse,
+  DispatchesResponse,
+  DispatchDetailResponse,
+  DispatchEventsResponse,
+  DispatchResultResponse,
 } from './types';
 
 const BASE = '/api/operator';
@@ -136,4 +148,80 @@ export function fetchReportContent(filename: string): Promise<string> {
 
 export function fetchAgents(): Promise<AgentsEnvelope> {
   return get(`${BASE}/agents`);
+}
+
+// ===== Intelligence API =====
+
+export function fetchIntelligencePatterns(limit = 50): Promise<PatternsResponse> {
+  return get('/api/intelligence/patterns', { limit: String(limit) });
+}
+
+export function fetchIntelligenceInjections(limit = 50): Promise<InjectionsResponse> {
+  return get('/api/intelligence/injections', { limit: String(limit) });
+}
+
+export function fetchIntelligenceClassifications(limit = 100): Promise<ClassificationsResponse> {
+  return get('/api/intelligence/classifications', { limit: String(limit) });
+}
+
+export function fetchIntelligenceDispatchOutcomes(limit = 200): Promise<DispatchOutcomesResponse> {
+  return get('/api/intelligence/dispatch-outcomes', { limit: String(limit) });
+}
+
+// ===== Self-Improvement API =====
+
+export function fetchProposals(): Promise<ProposalsResponse> {
+  return get('/api/intelligence/proposals');
+}
+
+export function acceptProposal(id: number): Promise<ProposalActionResponse> {
+  return post(`/api/intelligence/proposals/${id}/accept`, {});
+}
+
+export function rejectProposal(id: number, reason: string): Promise<ProposalActionResponse> {
+  return post(`/api/intelligence/proposals/${id}/reject`, { reason });
+}
+
+export function applyProposals(): Promise<ProposalActionResponse> {
+  return post('/api/intelligence/proposals/apply', {});
+}
+
+export function fetchConfidenceTrends(): Promise<ConfidenceTrendsResponse> {
+  return get('/api/intelligence/confidence-trends');
+}
+
+export function fetchWeeklyDigest(): Promise<WeeklyDigest> {
+  return get('/api/intelligence/weekly-digest');
+}
+
+export function generateWeeklyDigest(): Promise<ProposalActionResponse> {
+  return post('/api/intelligence/weekly-digest/generate', { dry_run: false });
+}
+
+// ===== Dispatch Viewer API =====
+
+export function fetchDispatches(params?: {
+  terminal?: string;
+  role?: string;
+  status?: string;
+  limit?: number;
+}): Promise<DispatchesResponse> {
+  const p: Record<string, string> = {};
+  if (params?.terminal) p.terminal = params.terminal;
+  if (params?.role) p.role = params.role;
+  if (params?.status) p.status = params.status;
+  if (params?.limit !== undefined) p.limit = String(params.limit);
+  return get('/api/dispatches', Object.keys(p).length ? p : undefined);
+}
+
+export function fetchDispatchDetail(id: string): Promise<DispatchDetailResponse> {
+  return get(`/api/dispatches/${encodeURIComponent(id)}`);
+}
+
+export function fetchDispatchEvents(id: string): Promise<DispatchEventsResponse> {
+  return get(`/api/dispatches/${encodeURIComponent(id)}/events`);
+}
+
+export function fetchDispatchResult(id: string): Promise<DispatchResultResponse> {
+  return get(`/api/dispatches/${encodeURIComponent(id)}/result`);
 }

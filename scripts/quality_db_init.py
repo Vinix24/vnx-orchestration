@@ -291,6 +291,28 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated: created governance_metrics, spc_control_limits, spc_alerts tables')
 
+        # Migration: add confidence_events table if missing (F50-PR3 feedback loop)
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='confidence_events'")
+        if not cursor.fetchone():
+            cursor.executescript("""
+                CREATE TABLE IF NOT EXISTS confidence_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dispatch_id TEXT NOT NULL,
+                    terminal TEXT,
+                    outcome TEXT NOT NULL,
+                    patterns_boosted INTEGER DEFAULT 0,
+                    patterns_decayed INTEGER DEFAULT 0,
+                    confidence_change REAL NOT NULL,
+                    occurred_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_conf_events_dispatch
+                    ON confidence_events (dispatch_id);
+                CREATE INDEX IF NOT EXISTS idx_conf_events_occurred
+                    ON confidence_events (occurred_at DESC);
+            """)
+            conn.commit()
+            log('INFO', 'Migrated: added confidence_events table')
+
         # Migration: add CQS enhancement columns (T0 advisory + OI delta) if missing
         cursor.execute("PRAGMA table_info(dispatch_metadata)")
         dm_cols_v2 = {row[1] for row in cursor.fetchall()}
@@ -300,6 +322,55 @@ def initialize_database() -> bool:
             cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN open_items_resolved INTEGER DEFAULT 0")
             conn.commit()
             log('INFO', 'Migrated dispatch_metadata: added target_open_items, open_items_created, open_items_resolved columns')
+
+        # Migration: add dispatch_id to pattern_usage for dispatch-scoped traceability
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pattern_usage'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(pattern_usage)")
+            pu_cols = {row[1] for row in cursor.fetchall()}
+            if "dispatch_id" not in pu_cols:
+                cursor.execute(
+                    "ALTER TABLE pattern_usage ADD COLUMN dispatch_id TEXT DEFAULT NULL"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pattern_usage_dispatch_id "
+                    "ON pattern_usage (dispatch_id)"
+                )
+                conn.commit()
+                log('INFO', 'Migrated pattern_usage: added dispatch_id column + index')
+
+        # Migration: add source_dispatch_id to prevention_rules for audit linkage
+        cursor.execute("PRAGMA table_info(prevention_rules)")
+        pr_cols = {row[1] for row in cursor.fetchall()}
+        if "source_dispatch_id" not in pr_cols:
+            cursor.execute(
+                "ALTER TABLE prevention_rules ADD COLUMN source_dispatch_id TEXT DEFAULT NULL"
+            )
+            conn.commit()
+            log('INFO', 'Migrated prevention_rules: added source_dispatch_id column')
+
+        # Migration: add temporal validity columns (F54 bi-temporal pattern lifecycle)
+        # Note: SQLite ALTER TABLE does not support non-constant defaults (e.g. CURRENT_TIMESTAMP).
+        # Add with DEFAULT NULL, then backfill valid_from for existing rows.
+        for _tbl in ("success_patterns", "antipatterns", "prevention_rules"):
+            cursor.execute(f"PRAGMA table_info({_tbl})")
+            _tbl_cols = {row[1] for row in cursor.fetchall()}
+            if "valid_from" not in _tbl_cols:
+                cursor.execute(
+                    f"ALTER TABLE {_tbl} ADD COLUMN valid_from DATETIME DEFAULT NULL"
+                )
+                # Backfill existing rows so valid_from is not null
+                cursor.execute(
+                    f"UPDATE {_tbl} SET valid_from = datetime('now') WHERE valid_from IS NULL"
+                )
+                conn.commit()
+                log('INFO', f'Migrated {_tbl}: added valid_from column + backfilled existing rows')
+            if "valid_until" not in _tbl_cols:
+                cursor.execute(
+                    f"ALTER TABLE {_tbl} ADD COLUMN valid_until DATETIME DEFAULT NULL"
+                )
+                conn.commit()
+                log('INFO', f'Migrated {_tbl}: added valid_until column')
 
         log('SUCCESS', 'Database schema initialized successfully')
 
@@ -342,7 +413,8 @@ def verify_database_structure() -> bool:
             'dispatch_metadata',
             'governance_metrics',
             'spc_control_limits',
-            'spc_alerts'
+            'spc_alerts',
+            'confidence_events'
         ]
 
         # Expected views

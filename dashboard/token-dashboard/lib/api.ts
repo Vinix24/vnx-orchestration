@@ -1,4 +1,4 @@
-import type { TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse } from './types';
+import type { TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse, TranscriptResponse } from './types';
 
 const BASE_URL = '/api/token-stats';
 
@@ -51,6 +51,14 @@ export async function fetchConversations(
   const res = await fetch(`/api/conversations?${params.toString()}`);
   if (!res.ok) {
     throw new Error(`Failed to fetch conversations: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function fetchTranscript(sessionId: string): Promise<TranscriptResponse> {
+  const res = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}/transcript`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch transcript: ${res.status} ${res.statusText}`);
   }
   return res.json();
 }

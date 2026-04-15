@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban, ShieldAlert, Activity, FileText } from 'lucide-react';
+import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban, ShieldAlert, Activity, FileText, Brain, Lightbulb, ClipboardList } from 'lucide-react';
 
 const DOMAINS = ['All', 'Coding', 'Analytics'] as const;
 type Domain = typeof DOMAINS[number];
@@ -13,6 +13,9 @@ const OPERATOR_NAV = [
   { href: '/operator/open-items', label: 'Open Items', icon: AlertTriangle },
   { href: '/operator/kanban', label: 'Kanban Board', icon: Kanban },
   { href: '/operator/governance', label: 'Governance', icon: ShieldAlert },
+  { href: '/operator/intelligence', label: 'Intelligence', icon: Brain },
+  { href: '/operator/dispatches', label: 'Dispatches', icon: ClipboardList },
+  { href: '/operator/improvements', label: 'Improvements', icon: Lightbulb },
   { href: '/operator/reports', label: 'Reports', icon: FileText },
   { href: '/agent-stream', label: 'Agent Stream', icon: Activity },
 ];

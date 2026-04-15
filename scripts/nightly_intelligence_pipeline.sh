@@ -162,8 +162,21 @@ PY
 )"
 log_msg "Health check: session_analytics rows=${SESSION_COUNT}"
 
+# ── Phase 2b: Behavioral analysis ────────────────────────────────────────────
+# Runs after session-dispatch linkage, before learning cycle.
+run_phase "2b-event-analyze" python3 "$SCRIPT_DIR/lib/event_analyzer.py" \
+    --all --output "$VNX_STATE_DIR/dispatch_behaviors.json"
+run_phase "2c-pattern-extract" python3 "$SCRIPT_DIR/lib/pattern_extractor.py" \
+    --input "$VNX_STATE_DIR/dispatch_behaviors.json"
+
 # ── Phase 4: Learning cycle ───────────────────────────────────────────────────
 run_phase "4-learning-cycle" python3 "$SCRIPT_DIR/learning_loop.py" run
+
+# ── Phase 4a: Memory consolidation (extract patterns from dispatch history) ───
+run_phase "4a-memory-consolidation" python3 "$SCRIPT_DIR/memory_consolidator.py" --days 7
+
+# ── Phase 4b: Weekly digest ───────────────────────────────────────────────────
+run_phase "4b-weekly-digest" python3 "$SCRIPT_DIR/weekly_digest.py"
 
 # ── Phase 5: Mark stale pending edits ────────────────────────────────────────
 run_phase "5-stale-edits" python3 "$SCRIPT_DIR/tag_intelligence.py" stale
