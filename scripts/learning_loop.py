@@ -433,6 +433,174 @@ class LearningLoop:
         except Exception as e:
             print(f"❌ Error queuing prevention rules: {e}")
 
+    def persist_to_intelligence_db(self):
+        """Persist high-confidence patterns and failure data to intelligence DB tables.
+
+        Bridges the gap between pattern_usage (learning loop internal) and
+        success_patterns/antipatterns (intelligence_selector reads).
+
+        - Patterns with used_count > 0 and confidence >= 0.6 → success_patterns
+        - Failure patterns with occurrence >= 2 → antipatterns
+        """
+        now = datetime.now().isoformat()
+        patterns_written = 0
+        antipatterns_written = 0
+
+        try:
+            # Write high-confidence used patterns to success_patterns
+            for pattern_id, metric in self.pattern_metrics.items():
+                if metric.used_count > 0 and metric.confidence >= 0.6:
+                    title = metric.pattern_title[:120]
+                    # Use empty string category so intelligence_selector scope
+                    # matching treats these as universal (empty scope = matches all)
+                    category = ""
+
+                    existing = self.conn.execute(
+                        "SELECT id, usage_count FROM success_patterns "
+                        "WHERE title = ? AND pattern_data LIKE '%learning_loop%'",
+                        (title,),
+                    ).fetchone()
+
+                    if existing:
+                        row = dict(existing)
+                        self.conn.execute(
+                            "UPDATE success_patterns SET usage_count = ?, "
+                            "confidence_score = ?, last_used = ? WHERE id = ?",
+                            (metric.used_count, min(metric.confidence, 1.0), now, row["id"]),
+                        )
+                    else:
+                        self.conn.execute(
+                            "INSERT INTO success_patterns "
+                            "(pattern_type, category, title, description, pattern_data, "
+                            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used, valid_from) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            ("approach", category, title,
+                             f"Learning loop pattern: {metric.pattern_title}",
+                             json.dumps({"source": "learning_loop", "pattern_id": pattern_id}),
+                             min(metric.confidence, 1.0), metric.used_count,
+                             "[]", now, now, now),
+                        )
+                    patterns_written += 1
+
+            # Write failure patterns with occurrence >= 2 to antipatterns
+            failure_patterns = self.extract_failure_patterns()
+            failure_groups = defaultdict(list)
+            for failure in failure_patterns:
+                key = failure['error'][:80]
+                failure_groups[key].append(failure)
+
+            for error_key, failures in failure_groups.items():
+                if len(failures) < 2:
+                    continue
+                title = f"Recurring failure: {error_key}"[:120]
+                category = ""
+
+                existing = self.conn.execute(
+                    "SELECT id, occurrence_count FROM antipatterns "
+                    "WHERE title = ? AND pattern_data LIKE '%learning_loop%'",
+                    (title,),
+                ).fetchone()
+
+                severity = "high" if len(failures) >= 5 else "medium"
+
+                if existing:
+                    row = dict(existing)
+                    self.conn.execute(
+                        "UPDATE antipatterns SET occurrence_count = ?, "
+                        "severity = ?, last_seen = ? WHERE id = ?",
+                        (len(failures), severity, now, row["id"]),
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO antipatterns "
+                        "(pattern_type, category, title, description, pattern_data, "
+                        " why_problematic, severity, occurrence_count, "
+                        " source_dispatch_ids, first_seen, last_seen, valid_from) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("approach", category, title,
+                         f"Error seen {len(failures)} times: {error_key}",
+                         json.dumps({"source": "learning_loop", "terminals": list({f['terminal'] for f in failures})}),
+                         error_key, severity, len(failures),
+                         "[]", now, now, now),
+                    )
+                antipatterns_written += 1
+
+            self.conn.commit()
+            print(f"💾 Persisted to intelligence DB: {patterns_written} success patterns, {antipatterns_written} antipatterns")
+
+        except Exception as e:
+            print(f"❌ Error persisting to intelligence DB: {e}")
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+
+    def ingest_approved_rules(self):
+        """Ingest operator-approved prevention rules from pending_rules.json into DB.
+
+        Respects G-L1: only rules with status == "approved" are inserted.
+        After ingestion, status is updated to "ingested" in the JSON file.
+        """
+        try:
+            paths = ensure_env()
+            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
+            pending_path = state_dir / "pending_rules.json"
+
+            if not pending_path.exists():
+                return
+
+            data = json.loads(pending_path.read_text(encoding="utf-8"))
+            rules = data.get("pending_rules", [])
+
+            approved = [r for r in rules if r.get("status") == "approved"]
+            if not approved:
+                return
+
+            now = datetime.now().isoformat()
+            ingested_count = 0
+
+            for rule in approved:
+                tag_combo = rule.get("terminal_constraint", "any")
+                description = rule.get("pattern", "")[:200]
+                recommendation = rule.get("prevention", "")[:500]
+                confidence = rule.get("confidence", 0.5)
+
+                # Check for duplicate
+                existing = self.conn.execute(
+                    "SELECT id FROM prevention_rules WHERE description = ? AND tag_combination = ?",
+                    (description, tag_combo),
+                ).fetchone()
+
+                if not existing:
+                    source_dispatch_id = rule.get("source_dispatch_id") or None
+                    self.conn.execute(
+                        "INSERT INTO prevention_rules "
+                        "(tag_combination, rule_type, description, recommendation, "
+                        " confidence, created_at, triggered_count, source_dispatch_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (tag_combo, "failure_prevention", description,
+                         recommendation, confidence, now, 0, source_dispatch_id),
+                    )
+                    ingested_count += 1
+
+                # Mark as ingested in JSON
+                rule["status"] = "ingested"
+                rule["ingested_at"] = now
+
+            self.conn.commit()
+
+            # Write back updated JSON
+            pending_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            if ingested_count:
+                print(f"✅ Ingested {ingested_count} approved prevention rules into DB")
+
+        except Exception as e:
+            print(f"❌ Error ingesting approved rules: {e}")
+
     def archive_unused_patterns(self, threshold_days: int = 30):
         """Queue unused low-confidence patterns for operator confirmation (G-L4: no auto-archival).
 
@@ -574,6 +742,41 @@ class LearningLoop:
         import hashlib
         return hashlib.sha1(pattern_id.encode("utf-8")).hexdigest()
 
+    def _supersede_stale_patterns(self) -> int:
+        """Set valid_until on low-confidence patterns older than 30 days (F54).
+
+        Applies to:
+          - success_patterns (confidence_score < 0.3)
+          - prevention_rules  (confidence < 0.3)
+        Antipatterns have no numeric confidence column and are skipped.
+        """
+        now = datetime.now().isoformat()
+        total = 0
+        try:
+            cur = self.conn.execute(
+                "UPDATE success_patterns SET valid_until = ? "
+                "WHERE confidence_score < 0.3 "
+                "AND valid_from < datetime('now', '-30 days') "
+                "AND valid_until IS NULL",
+                (now,),
+            )
+            total += cur.rowcount
+
+            cur = self.conn.execute(
+                "UPDATE prevention_rules SET valid_until = ? "
+                "WHERE confidence < 0.3 "
+                "AND valid_from < datetime('now', '-30 days') "
+                "AND valid_until IS NULL",
+                (now,),
+            )
+            total += cur.rowcount
+
+            self.conn.commit()
+            print(f"  Superseded {total} low-confidence patterns older than 30 days")
+        except Exception as e:
+            print(f"❌ Error superseding stale patterns: {e}")
+        return total
+
     def daily_learning_cycle(self):
         """Run the complete daily learning cycle"""
         print(f"\n🔄 Starting Daily Learning Cycle at {datetime.now().isoformat()}")
@@ -612,6 +815,17 @@ class LearningLoop:
         # 5. Save updated metrics
         print("\n💾 Step 5: Saving pattern metrics...")
         self.save_pattern_metrics()
+
+        # 5.5 Persist high-confidence patterns and failures to intelligence DB
+        print("\n🔗 Step 5.5: Bridging patterns to intelligence DB...")
+        self.persist_to_intelligence_db()
+        self.ingest_approved_rules()
+
+        # 5.6 Supersede low-confidence stale patterns (F54 temporal lifecycle)
+        print("\n🗑️ Step 5.6: Superseding expired low-confidence patterns...")
+        superseded = self._supersede_stale_patterns()
+        if superseded:
+            print(f"  ✓ Superseded {superseded} stale patterns")
 
         # 6. Generate report
         print("\n📈 Step 6: Generating learning report...")

@@ -168,12 +168,28 @@ Gate commands (pre-merge verification):
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
 Process commands (visibility and control):
-  status             Show session, terminals, queue, and open-item summary
+  status             Show terminal health, dispatch queue, and gate results
+  status --terminals   Just terminal health
+  status --dispatches  Just dispatch queue
+  status --gates       Just gate results
+  status --json        Machine-readable JSON output
   ps [--json]        Show PID, parent PID, uptime, and health for VNX processes
   cleanup [--dry-run]  Remove orphan PIDs and stale locks
   restart <process>  Restart a managed VNX process
   jump <terminal>    Switch tmux focus to T0/T1/T2/T3 pane
   jump --attention   Jump to highest-priority terminal needing attention
+
+Dispatch commands (one-liner delivery):
+  dispatch <file.md>              Auto-detect terminal and deliver dispatch
+  dispatch <file.md> --terminal T1  Override terminal
+  dispatch <file.md> --model opus   Override model
+  dispatch <file.md> --dry-run      Preview without delivering
+
+Gate commands (pre-merge verification):
+  gate <pr>                Run all required gates (from governance_enforcement.yaml)
+  gate <pr> --only codex   Run only the Codex gate
+  gate <pr> --only gemini  Run only the Gemini review gate
+  gate <pr> --status       Show gate results without running
 
 Runtime commands:
   recover            Recover from unclean shutdown or stale state
@@ -1840,11 +1856,17 @@ main() {
     gate-check)
       python3 "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
       ;;
+    dispatch)
+      cmd_dispatch "$@"
+      ;;
+    gate)
+      cmd_gate "$@"
+      ;;
     roadmap)
       cmd_roadmap "$@"
       ;;
     status)
-      python3 "$VNX_HOME/scripts/vnx_process_ux.py" status "$@"
+      cmd_status "$@"
       ;;
     ps)
       python3 "$VNX_HOME/scripts/vnx_process_ux.py" ps "$@"

@@ -850,6 +850,9 @@ class ConversationAnalyzer:
                      f"err={flags.has_error_recovery} ctx={flags.has_context_reset} "
                      f"refactor={flags.has_large_refactor} test={flags.has_test_cycle}")
 
+        # Bridge Phase 2 findings into intelligence DB (success_patterns / antipatterns)
+        self.bridge_session_to_intelligence(metrics, flags)
+
         # Phase 3: Deep analysis (selective)
         deep_result = None
         suggestions = []
@@ -874,6 +877,172 @@ class ConversationAnalyzer:
             "cache_creation_tokens": metrics.cache_creation_tokens,
         }
         return row, suggestions
+
+    def bridge_session_to_intelligence(self, metrics: SessionMetrics,
+                                       flags: SessionFlags):
+        """Bridge Phase 2 heuristic findings into intelligence DB tables.
+
+        Writes session-derived signals to success_patterns and antipatterns so
+        that intelligence_selector.py can inject them into future dispatches.
+        Uses empty category for universal scope matching (same convention as
+        learning_loop.py:persist_to_intelligence_db).
+
+        Also bridges high-priority improvement_suggestions (status='new') into
+        antipatterns so operator-visible suggestions reach the selector.
+        """
+        now = datetime.now().isoformat()
+        patterns_written = 0
+        antipatterns_written = 0
+
+        try:
+            # ------------------------------------------------------------------
+            # Success patterns from session flags
+            # ------------------------------------------------------------------
+            if flags.has_test_cycle:
+                title = "Test-driven workflow detected"
+                existing = self.conn.execute(
+                    "SELECT id, usage_count FROM success_patterns "
+                    "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
+                    (title,),
+                ).fetchone()
+                if existing:
+                    row = dict(existing)
+                    self.conn.execute(
+                        "UPDATE success_patterns SET usage_count = ?, last_used = ? "
+                        "WHERE id = ?",
+                        (row["usage_count"] + 1, now, row["id"]),
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO success_patterns "
+                        "(pattern_type, category, title, description, pattern_data, "
+                        " confidence_score, usage_count, source_dispatch_ids, "
+                        " first_seen, last_used) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("approach", "", title,
+                         "Session contained test-run/edit cycles indicating test-driven workflow",
+                         json.dumps({"source": "session_analysis"}),
+                         0.7, 1, "[]", now, now),
+                    )
+                patterns_written += 1
+
+            # ------------------------------------------------------------------
+            # Antipatterns from session flags
+            # ------------------------------------------------------------------
+            if flags.primary_activity == "debugging" and metrics.duration_minutes > 30:
+                title = "Extended debugging session"
+                existing = self.conn.execute(
+                    "SELECT id, occurrence_count FROM antipatterns "
+                    "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
+                    (title,),
+                ).fetchone()
+                if existing:
+                    row = dict(existing)
+                    self.conn.execute(
+                        "UPDATE antipatterns SET occurrence_count = ?, last_seen = ? "
+                        "WHERE id = ?",
+                        (row["occurrence_count"] + 1, now, row["id"]),
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO antipatterns "
+                        "(pattern_type, category, title, description, pattern_data, "
+                        " why_problematic, severity, occurrence_count, "
+                        " source_dispatch_ids, first_seen, last_seen) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("approach", "", title,
+                         f"Session spent {metrics.duration_minutes:.0f} minutes primarily debugging",
+                         json.dumps({"source": "session_analysis"}),
+                         "Prolonged debugging may indicate unclear problem definition or insufficient tests",
+                         "medium", 1, "[]", now, now),
+                    )
+                antipatterns_written += 1
+
+            if flags.has_error_recovery:
+                title = "Error recovery required"
+                existing = self.conn.execute(
+                    "SELECT id, occurrence_count FROM antipatterns "
+                    "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
+                    (title,),
+                ).fetchone()
+                if existing:
+                    row = dict(existing)
+                    self.conn.execute(
+                        "UPDATE antipatterns SET occurrence_count = ?, last_seen = ? "
+                        "WHERE id = ?",
+                        (row["occurrence_count"] + 1, now, row["id"]),
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO antipatterns "
+                        "(pattern_type, category, title, description, pattern_data, "
+                        " why_problematic, severity, occurrence_count, "
+                        " source_dispatch_ids, first_seen, last_seen) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("approach", "", title,
+                         "Session required error recovery (repeated error signals detected)",
+                         json.dumps({"source": "session_analysis"}),
+                         "Repeated errors suggest unclear instructions or environmental issues",
+                         "low", 1, "[]", now, now),
+                    )
+                antipatterns_written += 1
+
+            # ------------------------------------------------------------------
+            # Bridge high-priority improvement_suggestions → antipatterns
+            # ------------------------------------------------------------------
+            _priority_to_severity = {"critical": "critical", "high": "high"}
+            suggestion_rows = self.conn.execute(
+                "SELECT id, category, component, suggested_improvement, priority "
+                "FROM improvement_suggestions "
+                "WHERE priority IN ('critical', 'high') AND status = 'new'",
+            ).fetchall()
+
+            for sg_row in suggestion_rows:
+                sg = dict(sg_row)
+                component = sg.get("component") or "unknown"
+                improvement = sg.get("suggested_improvement", "")
+                raw_title = f"[{sg['priority'].upper()}] {component}: {improvement}"
+                title = raw_title[:120]
+                severity = _priority_to_severity.get(sg["priority"], "high")
+
+                existing = self.conn.execute(
+                    "SELECT id, occurrence_count FROM antipatterns "
+                    "WHERE title = ? AND pattern_data LIKE '%session_analysis%'",
+                    (title,),
+                ).fetchone()
+                if existing:
+                    ex = dict(existing)
+                    self.conn.execute(
+                        "UPDATE antipatterns SET occurrence_count = ?, severity = ?, "
+                        "last_seen = ? WHERE id = ?",
+                        (ex["occurrence_count"] + 1, severity, now, ex["id"]),
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO antipatterns "
+                        "(pattern_type, category, title, description, pattern_data, "
+                        " why_problematic, severity, occurrence_count, "
+                        " source_dispatch_ids, first_seen, last_seen) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        ("suggestion", "", title,
+                         improvement,
+                         json.dumps({"source": "session_analysis",
+                                     "suggestion_id": sg["id"]}),
+                         f"Priority {sg['priority']} improvement suggestion",
+                         severity, 1, "[]", now, now),
+                    )
+                antipatterns_written += 1
+
+            self.conn.commit()
+            log("INFO", f"  Bridge→intelligence: {patterns_written} success_patterns, "
+                        f"{antipatterns_written} antipatterns")
+
+        except Exception as e:
+            log("WARNING", f"  bridge_session_to_intelligence failed: {e}")
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
                        deep_result: Optional[dict]):

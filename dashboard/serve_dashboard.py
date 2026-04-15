@@ -147,6 +147,31 @@ from api_agent_stream import (  # noqa: E402
     handle_agent_stream_status,
 )
 
+from api_intelligence import (  # noqa: E402
+    _intelligence_get_patterns,
+    _intelligence_get_injections,
+    _intelligence_get_classifications,
+    _intelligence_get_dispatch_outcomes,
+    _intelligence_get_transcript,
+    _intelligence_get_proposals,
+    _intelligence_accept_proposal,
+    _intelligence_reject_proposal,
+    _intelligence_apply_proposals,
+    _intelligence_get_confidence_trends,
+    _intelligence_get_weekly_digest,
+    _intelligence_generate_weekly_digest,
+    _intelligence_get_learning_summary,
+    _governance_get_enforcement,
+    _governance_get_overrides,
+    _governance_get_audit,
+    _governance_get_config,
+    _intelligence_get_behavioral_summary,
+    _dispatch_get_detail,
+    _dispatch_get_events,
+    _dispatch_get_result,
+    handle_events_stream,
+)
+
 
 def _json_response(handler: "DashboardHandler", status: HTTPStatus, payload_obj: dict) -> None:
     payload = json.dumps(payload_obj).encode("utf-8")
@@ -218,6 +243,32 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
                 return
             _json_response(self, HTTPStatus.OK, result)
+            return
+
+        if path.startswith("/api/dispatches/"):
+            rest = path[len("/api/dispatches/"):]
+            # /api/dispatches/<id>/events
+            if rest.endswith("/events"):
+                dispatch_id = rest[:-len("/events")]
+                payload, status_int = _dispatch_get_events(dispatch_id)
+                _json_response(self, HTTPStatus(status_int), payload)
+                return
+            # /api/dispatches/<id>/result
+            if rest.endswith("/result"):
+                dispatch_id = rest[:-len("/result")]
+                payload, status_int = _dispatch_get_result(dispatch_id)
+                _json_response(self, HTTPStatus(status_int), payload)
+                return
+            # /api/dispatches/<id>
+            dispatch_id = rest
+            payload, status_int = _dispatch_get_detail(dispatch_id)
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        # Events SSE stream — /api/events/stream?terminal=T1
+        if path == "/api/events/stream":
+            terminal = params.get("terminal", [None])[0] or ""
+            handle_events_stream(self, terminal)
             return
 
         # Operator Dashboard API
@@ -302,6 +353,70 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             terminal = path[len("/api/agent-stream/"):]
             since = params.get("since", [None])[0]
             handle_agent_stream(self, terminal, since)
+            return
+
+        # Intelligence API
+        if path == "/api/intelligence/patterns":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_patterns(params))
+            return
+
+        if path == "/api/intelligence/injections":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_injections(params))
+            return
+
+        if path == "/api/intelligence/classifications":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_classifications(params))
+            return
+
+        if path == "/api/intelligence/dispatch-outcomes":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_dispatch_outcomes(params))
+            return
+
+        if path == "/api/intelligence/proposals":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_proposals(params))
+            return
+
+        if path == "/api/intelligence/confidence-trends":
+            _json_response(self, HTTPStatus.OK, _intelligence_get_confidence_trends(params))
+            return
+
+        if path == "/api/intelligence/weekly-digest":
+            payload, status_int = _intelligence_get_weekly_digest()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        if path == "/api/intelligence/learning-summary":
+            payload, status_int = _intelligence_get_learning_summary()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        if path == "/api/intelligence/behavioral":
+            payload, status_int = _intelligence_get_behavioral_summary()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        # Governance API
+        if path == "/api/governance/enforcement":
+            _json_response(self, HTTPStatus.OK, _governance_get_enforcement(params))
+            return
+
+        if path == "/api/governance/overrides":
+            _json_response(self, HTTPStatus.OK, _governance_get_overrides(params))
+            return
+
+        if path == "/api/governance/audit":
+            _json_response(self, HTTPStatus.OK, _governance_get_audit(params))
+            return
+
+        if path == "/api/governance/config":
+            payload, status_int = _governance_get_config()
+            _json_response(self, HTTPStatus(status_int), payload)
+            return
+
+        if path.startswith("/api/conversations/") and path.endswith("/transcript"):
+            session_id = path[len("/api/conversations/"):-len("/transcript")]
+            payload, status_int = _intelligence_get_transcript(session_id)
+            _json_response(self, HTTPStatus(status_int), payload)
             return
 
         # Return JSON 404 for unrecognised /api/* paths so callers get
@@ -397,6 +512,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
                 return
             result, status_int = _operator_post_action(_OPERATOR_ACTIONS[parsed_path], body_data)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        # Proposals: accept / reject / apply
+        if parsed_path == "/api/intelligence/proposals/apply":
+            result, status_int = _intelligence_apply_proposals()
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path.startswith("/api/intelligence/proposals/") and parsed_path.endswith("/accept"):
+            proposal_id = parsed_path[len("/api/intelligence/proposals/"):-len("/accept")]
+            result, status_int = _intelligence_accept_proposal(proposal_id)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path.startswith("/api/intelligence/proposals/") and parsed_path.endswith("/reject"):
+            proposal_id = parsed_path[len("/api/intelligence/proposals/"):-len("/reject")]
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body_bytes = self.rfile.read(length) if length else b"{}"
+            try:
+                body_data = json.loads(body_bytes.decode("utf-8"))
+            except json.JSONDecodeError:
+                body_data = {}
+            result, status_int = _intelligence_reject_proposal(proposal_id, body_data)
+            _json_response(self, HTTPStatus(status_int), result)
+            return
+
+        if parsed_path == "/api/intelligence/weekly-digest/generate":
+            result, status_int = _intelligence_generate_weekly_digest()
             _json_response(self, HTTPStatus(status_int), result)
             return
 

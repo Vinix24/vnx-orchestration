@@ -307,6 +307,126 @@ def silence_watchdog(
 
 
 # ---------------------------------------------------------------------------
+# Layer 0: Receipt watcher — triggers T0 on new receipts + refreshes state
+# ---------------------------------------------------------------------------
+
+def _refresh_t0_state(state_dir: Path) -> bool:
+    """Rebuild t0_state.json atomically. Returns True on success."""
+    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+    try:
+        from build_t0_state import build_t0_state, _write_atomic
+        # Resolve dispatch dir from env or default
+        dispatch_dir = Path(os.environ.get("VNX_DISPATCH_DIR", str(state_dir.parent / "dispatches")))
+        state = build_t0_state(state_dir, dispatch_dir)
+        _write_atomic(state_dir / "t0_state.json", state)
+        _LOG.info("Layer 0: t0_state.json refreshed (%.2fs build)", state.get("_build_seconds", 0))
+        return True
+    except Exception as exc:
+        _LOG.error("Layer 0: failed to refresh t0_state.json: %s", exc)
+        return False
+
+
+class ReceiptWatcher:
+    """Layer 0: tail-reads t0_receipts.ndjson and triggers T0 on new receipts.
+
+    On each new receipt line:
+      1. Refreshes t0_state.json via build_t0_state
+      2. Triggers headless T0 with receipt context
+    """
+
+    # Receipt event types that warrant a T0 trigger
+    ACTIONABLE_EVENTS = frozenset({
+        "subprocess_completion", "task_complete", "gate_pass", "gate_fail",
+        "quality_gate_verification", "dispatch_complete", "dispatch_failure",
+    })
+
+    def __init__(
+        self,
+        state_dir: Path,
+        trigger_state: TriggerState,
+        dry_run: bool,
+        poll_interval: float = 2.0,
+    ) -> None:
+        self.state_dir = state_dir
+        self.trigger_state = trigger_state
+        self.dry_run = dry_run
+        self.poll_interval = poll_interval
+        self.receipts_path = state_dir / "t0_receipts.ndjson"
+        self._file_pos: int = 0
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Seed file position and start polling thread."""
+        if self.receipts_path.exists():
+            self._file_pos = self.receipts_path.stat().st_size
+        _LOG.info("Layer 0: receipt watcher started (pos=%d, path=%s)", self._file_pos, self.receipts_path)
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def _poll_loop(self) -> None:
+        while not self.trigger_state.shutdown_event.is_set():
+            try:
+                self._check_new_lines()
+            except Exception as exc:
+                _LOG.debug("Layer 0 poll error: %s", exc)
+            self.trigger_state.shutdown_event.wait(timeout=self.poll_interval)
+
+    def _check_new_lines(self) -> None:
+        if not self.receipts_path.exists():
+            return
+
+        current_size = self.receipts_path.stat().st_size
+        if current_size <= self._file_pos:
+            return
+
+        try:
+            with open(self.receipts_path, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(self._file_pos)
+                new_data = f.read()
+                self._file_pos = f.tell()
+        except Exception as exc:
+            _LOG.debug("Layer 0 read error: %s", exc)
+            return
+
+        new_lines = [line.strip() for line in new_data.splitlines() if line.strip()]
+        if not new_lines:
+            return
+
+        actionable_receipts = []
+        for line in new_lines:
+            try:
+                receipt = json.loads(line)
+                event_type = receipt.get("event_type") or receipt.get("event", "")
+                if event_type in self.ACTIONABLE_EVENTS:
+                    actionable_receipts.append(receipt)
+            except json.JSONDecodeError:
+                continue
+
+        if not actionable_receipts:
+            return
+
+        _LOG.info("Layer 0: %d new actionable receipt(s)", len(actionable_receipts))
+
+        # Refresh state before triggering T0
+        _refresh_t0_state(self.state_dir)
+
+        # Trigger T0 with latest receipt as context
+        latest = actionable_receipts[-1]
+        trigger_headless_t0(
+            reason="receipt",
+            context={
+                "receipt_count": len(actionable_receipts),
+                "latest_event": latest.get("event_type") or latest.get("event"),
+                "latest_dispatch_id": latest.get("dispatch_id"),
+                "latest_terminal": latest.get("terminal"),
+            },
+            state_dir=self.state_dir,
+            dry_run=self.dry_run,
+            trigger_state=self.trigger_state,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Layer 1: File watcher
 # ---------------------------------------------------------------------------
 
@@ -370,6 +490,10 @@ def main() -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     _LOG.info("headless_trigger starting (watch=%s state=%s dry_run=%s)", watch_dir, state_dir, args.dry_run)
+
+    # Layer 0: Receipt watcher — triggers T0 on new receipts
+    receipt_watcher = ReceiptWatcher(state_dir, trigger_state, args.dry_run)
+    receipt_watcher.start()
 
     # Seed processed-files set so we don't re-trigger on existing reports at startup
     for p in watch_dir.rglob("*.md"):

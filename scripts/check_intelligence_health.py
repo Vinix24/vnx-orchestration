@@ -164,6 +164,79 @@ def _collect_receipt_coverage(receipts_file: Path, warnings: List[str]) -> Tuple
     return receipts_with_intelligence, total_receipts, receipts_with_patterns, coverage
 
 
+def check_pipeline_connected(db_path: Path) -> Dict[str, object]:
+    """Check if the learning-loop → intelligence-selector pipeline is populated.
+
+    Counts rows in the three tables that intelligence_selector reads and optionally
+    probes the selector to confirm it would actually return items for a test dispatch.
+
+    Returns:
+        {
+            "connected": bool,        # True when patterns exist and selector returns items
+            "success_patterns": int,
+            "antipatterns": int,
+            "prevention_rules": int,
+        }
+    """
+    result: Dict[str, object] = {
+        "connected": False,
+        "success_patterns": 0,
+        "antipatterns": 0,
+        "prevention_rules": 0,
+    }
+
+    if not db_path.exists():
+        return result
+
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(db_path))
+        result["success_patterns"] = conn.execute(
+            "SELECT COUNT(*) FROM success_patterns"
+        ).fetchone()[0]
+        result["antipatterns"] = conn.execute(
+            "SELECT COUNT(*) FROM antipatterns"
+        ).fetchone()[0]
+        result["prevention_rules"] = conn.execute(
+            "SELECT COUNT(*) FROM prevention_rules"
+        ).fetchone()[0]
+        conn.close()
+    except Exception:
+        return result
+
+    patterns_exist = (
+        result["success_patterns"] > 0
+        or result["antipatterns"] > 0
+        or result["prevention_rules"] > 0
+    )
+
+    if not patterns_exist:
+        return result
+
+    # Probe the selector to verify it would return at least one item
+    try:
+        _lib_dir = Path(__file__).resolve().parent / "lib"
+        if str(_lib_dir) not in sys.path:
+            sys.path.insert(0, str(_lib_dir))
+        from intelligence_selector import IntelligenceSelector
+
+        selector = IntelligenceSelector(quality_db_path=db_path)
+        try:
+            sel_result = selector.select(
+                dispatch_id="health-check-probe",
+                injection_point="dispatch_create",
+                skill_name="backend-developer",
+            )
+            result["connected"] = sel_result.items_injected > 0
+        finally:
+            selector.close()
+    except Exception:
+        # Selector unavailable — fall back to "patterns exist" heuristic
+        result["connected"] = patterns_exist
+
+    return result
+
+
 def _collect_database_info(intel_db: Path) -> Tuple[bool, float]:
     db_exists = intel_db.exists()
     if not db_exists:
@@ -284,10 +357,17 @@ def check_health(human: bool = False) -> int:
     health["intelligence_coverage"] = f"{intel_coverage:.1f}%"
     health["receipts_with_patterns"] = recent_receipts_with_intel
 
-    db_exists, db_size_mb = _collect_database_info(state_dir / "quality_intelligence.db")
+    intel_db = state_dir / "quality_intelligence.db"
+    db_exists, db_size_mb = _collect_database_info(intel_db)
     health["database_exists"] = db_exists
     health["database_size_mb"] = db_size_mb
-    health["session_analytics_count"] = _collect_session_count(state_dir / "quality_intelligence.db", warnings)
+    health["session_analytics_count"] = _collect_session_count(intel_db, warnings)
+
+    pipeline = check_pipeline_connected(intel_db)
+    health["pipeline_connected"] = pipeline["connected"]
+    health["pipeline_success_patterns"] = pipeline["success_patterns"]
+    health["pipeline_antipatterns"] = pipeline["antipatterns"]
+    health["pipeline_prevention_rules"] = pipeline["prevention_rules"]
 
     usage_tracking, recent_usage = _collect_usage_tracking(state_dir / "pattern_usage.ndjson", warnings)
     health["usage_tracking_active"] = usage_tracking
@@ -312,6 +392,12 @@ def check_health(human: bool = False) -> int:
         emit_human(f"Patterns available: {health.get('pattern_count', 0)}")
         emit_human(f"Session analytics rows: {health.get('session_analytics_count', 0)}")
         emit_human(f"Intelligence coverage: {health.get('intelligence_coverage')}")
+        emit_human(f"Pipeline connected: {pipeline['connected']}")
+        emit_human(
+            f"  success_patterns={pipeline['success_patterns']}  "
+            f"antipatterns={pipeline['antipatterns']}  "
+            f"prevention_rules={pipeline['prevention_rules']}"
+        )
         if recommendations:
             emit_human("\nRecommendations:")
             for rec in recommendations:

@@ -1,5 +1,5 @@
 import useSWR from 'swr';
-import { fetchTokenStats, fetchSessions, fetchConversations } from './api';
+import { fetchTokenStats, fetchSessions, fetchConversations, fetchTranscript } from './api';
 import {
   fetchProjects,
   fetchOperatorSession,
@@ -12,13 +12,27 @@ import {
   fetchReports,
   fetchReportContent,
   fetchAgents,
+  fetchIntelligencePatterns,
+  fetchIntelligenceInjections,
+  fetchIntelligenceClassifications,
+  fetchIntelligenceDispatchOutcomes,
+  fetchProposals,
+  fetchConfidenceTrends,
+  fetchWeeklyDigest,
+  fetchDispatches,
+  fetchDispatchDetail,
+  fetchDispatchEvents,
+  fetchDispatchResult,
 } from './operator-api';
 import type {
-  TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse,
+  TokenStats, SessionDetail, GroupBy, SortOrder, ConversationsResponse, TranscriptResponse,
   ProjectsEnvelope, SessionEnvelope, TerminalsEnvelope,
   OpenItemsEnvelope, AggregateOpenItemsEnvelope, KanbanEnvelope,
   GateConfigResponse, GovernanceDigestEnvelope,
   ReportsEnvelope, AgentsEnvelope,
+  PatternsResponse, InjectionsResponse, ClassificationsResponse, DispatchOutcomesResponse,
+  ProposalsResponse, ConfidenceTrendsResponse, WeeklyDigest,
+  DispatchesResponse, DispatchDetailResponse, DispatchEventsResponse, DispatchResultResponse,
 } from './types';
 
 export function useTokenStats(
@@ -72,6 +86,14 @@ export function useConversations(
       revalidateOnFocus: false,
       dedupingInterval: 15000,
     }
+  );
+}
+
+export function useTranscript(sessionId: string | null) {
+  return useSWR<TranscriptResponse>(
+    sessionId ? ['transcript', sessionId] : null,
+    () => fetchTranscript(sessionId!),
+    { revalidateOnFocus: false, dedupingInterval: 60000 }
   );
 }
 
@@ -174,5 +196,111 @@ export function useAgents() {
     'operator-agents',
     fetchAgents,
     { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+// ===== Intelligence Hooks =====
+
+export function useIntelligencePatterns() {
+  return useSWR<PatternsResponse>(
+    'intelligence-patterns',
+    () => fetchIntelligencePatterns(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useIntelligenceInjections() {
+  return useSWR<InjectionsResponse>(
+    'intelligence-injections',
+    () => fetchIntelligenceInjections(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useIntelligenceClassifications() {
+  return useSWR<ClassificationsResponse>(
+    'intelligence-classifications',
+    () => fetchIntelligenceClassifications(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+export function useIntelligenceDispatchOutcomes() {
+  return useSWR<DispatchOutcomesResponse>(
+    'intelligence-dispatch-outcomes',
+    () => fetchIntelligenceDispatchOutcomes(),
+    { refreshInterval: 60000, revalidateOnFocus: true, dedupingInterval: 20000 }
+  );
+}
+
+// ===== Self-Improvement Hooks =====
+
+export function useProposals() {
+  return useSWR<ProposalsResponse>(
+    'intelligence-proposals',
+    () => fetchProposals(),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useConfidenceTrends() {
+  return useSWR<ConfidenceTrendsResponse>(
+    'intelligence-confidence-trends',
+    () => fetchConfidenceTrends(),
+    { refreshInterval: 120000, revalidateOnFocus: true, dedupingInterval: 30000 }
+  );
+}
+
+export function useWeeklyDigest() {
+  return useSWR<WeeklyDigest>(
+    'intelligence-weekly-digest',
+    () => fetchWeeklyDigest(),
+    { refreshInterval: 300000, revalidateOnFocus: true, dedupingInterval: 60000 }
+  );
+}
+
+// ===== Dispatch Viewer Hooks =====
+
+export function useDispatches(params?: {
+  terminal?: string;
+  role?: string;
+  status?: string;
+  limit?: number;
+}) {
+  const key = [
+    'dispatches',
+    params?.terminal ?? '',
+    params?.role ?? '',
+    params?.status ?? '',
+    String(params?.limit ?? 100),
+  ];
+  return useSWR<DispatchesResponse>(
+    key,
+    () => fetchDispatches(params),
+    { refreshInterval: 30000, revalidateOnFocus: true, dedupingInterval: 10000 }
+  );
+}
+
+export function useDispatchDetail(id: string | null) {
+  return useSWR<DispatchDetailResponse>(
+    id ? ['dispatch-detail', id] : null,
+    () => fetchDispatchDetail(id!),
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
+  );
+}
+
+export function useDispatchEvents(id: string | null) {
+  return useSWR<DispatchEventsResponse>(
+    id ? ['dispatch-events', id] : null,
+    () => fetchDispatchEvents(id!),
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
+  );
+}
+
+export function useDispatchResult(id: string | null) {
+  return useSWR<DispatchResultResponse>(
+    id ? ['dispatch-result', id] : null,
+    () => fetchDispatchResult(id!),
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
   );
 }

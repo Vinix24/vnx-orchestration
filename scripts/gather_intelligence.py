@@ -642,7 +642,8 @@ class T0IntelligenceGatherer:
 
     def _finalize_patterns(self, patterns: List[Dict], keywords: List[str],
                           preferred_tags: Optional[List[str]], task_paths: Optional[List[str]],
-                          gate: Optional[str], limit: int) -> List[Dict]:
+                          gate: Optional[str], limit: int,
+                          dispatch_id: Optional[str] = None) -> List[Dict]:
         """Common pattern finalization logic"""
         # Hard filters to avoid low-value injections
         preferred_tags = [t.lower() for t in (preferred_tags or [])]
@@ -673,7 +674,7 @@ class T0IntelligenceGatherer:
                 pattern['code'] = code
 
         # Register offered patterns in pattern_usage for feedback loop tracking
-        self._register_offered_patterns(patterns)
+        self._register_offered_patterns(patterns, dispatch_id=dispatch_id)
 
         # Verify pattern freshness via citation commit hashes
         for pattern in patterns:
@@ -730,11 +731,12 @@ class T0IntelligenceGatherer:
             return filtered[:limit]
         return filtered[:1]
 
-    def _register_offered_patterns(self, patterns: List[Dict]):
+    def _register_offered_patterns(self, patterns: List[Dict], dispatch_id: Optional[str] = None):
         """Register offered patterns in pattern_usage table for feedback loop tracking.
 
         Called at dispatch time so the learning loop can later detect which patterns
-        were offered but never used (ignored).
+        were offered but never used (ignored).  dispatch_id links the offer to a
+        specific dispatch for traceability.
         """
         if not self.quality_db:
             return
@@ -748,16 +750,18 @@ class T0IntelligenceGatherer:
             try:
                 self.quality_db.execute('''
                     INSERT INTO pattern_usage
-                        (pattern_id, pattern_title, pattern_hash, last_offered, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (pattern_id, pattern_title, pattern_hash, last_offered, created_at, updated_at, dispatch_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(pattern_id) DO UPDATE SET
                         last_offered = excluded.last_offered,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        dispatch_id = excluded.dispatch_id
                 ''', (
                     pattern_hash,
                     str(pattern.get('title', ''))[:200],
                     pattern_hash,
-                    now, now, now
+                    now, now, now,
+                    dispatch_id or None,
                 ))
             except Exception:
                 pass
@@ -926,7 +930,8 @@ class T0IntelligenceGatherer:
         limit: int = 5,
         gate: Optional[str] = None,
         task_paths: Optional[List[str]] = None,
-        preferred_tags: Optional[List[str]] = None
+        preferred_tags: Optional[List[str]] = None,
+        dispatch_id: Optional[str] = None,
     ) -> List[Dict]:
         """Query relevant code patterns from 1,143 available patterns"""
         if not self.quality_db:
@@ -955,7 +960,7 @@ class T0IntelligenceGatherer:
             if task_paths and len(task_paths) <= 3:  # Specific file references
                 patterns_from_paths = self._search_specific_paths(task_paths, keywords, limit)
                 if len(patterns_from_paths) >= 2:  # Found enough relevant patterns
-                    return self._finalize_patterns(patterns_from_paths, keywords, preferred_tags, task_paths, gate, limit)
+                    return self._finalize_patterns(patterns_from_paths, keywords, preferred_tags, task_paths, gate, limit, dispatch_id=dispatch_id)
 
             if not keywords:
                 # If no keywords, return high-quality general patterns
@@ -1046,7 +1051,7 @@ class T0IntelligenceGatherer:
                             patterns.append(pattern)
 
             # Finalize patterns with scoring and filtering
-            return self._finalize_patterns(patterns, keywords, preferred_tags, task_paths, gate, limit)
+            return self._finalize_patterns(patterns, keywords, preferred_tags, task_paths, gate, limit, dispatch_id=dispatch_id)
 
         except Exception as e:
             print(f"⚠️ Warning: Pattern query failed: {e}")

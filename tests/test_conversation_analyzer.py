@@ -930,5 +930,224 @@ class TestApplySuggestedEdits:
             assert "- first pattern" in text
 
 
+def _create_intelligence_schema(conn: sqlite3.Connection):
+    """Add intelligence tables (success_patterns, antipatterns) to an in-memory DB."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS success_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_type TEXT NOT NULL DEFAULT 'approach',
+            category TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            description TEXT,
+            pattern_data TEXT,
+            confidence_score REAL DEFAULT 0.5,
+            usage_count INTEGER DEFAULT 0,
+            source_dispatch_ids TEXT DEFAULT '[]',
+            first_seen DATETIME,
+            last_used DATETIME
+        );
+        CREATE TABLE IF NOT EXISTS antipatterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_type TEXT NOT NULL DEFAULT 'approach',
+            category TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            description TEXT,
+            pattern_data TEXT,
+            why_problematic TEXT,
+            severity TEXT DEFAULT 'medium',
+            occurrence_count INTEGER DEFAULT 0,
+            better_alternative TEXT,
+            source_dispatch_ids TEXT DEFAULT '[]',
+            first_seen DATETIME,
+            last_seen DATETIME
+        );
+    """)
+
+
+def _make_analyzer_with_intel_db() -> ConversationAnalyzer:
+    """Create a ConversationAnalyzer wired to an in-memory DB with all tables."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _create_schema(conn)
+    _create_intelligence_schema(conn)
+
+    import tempfile
+    analyzer = ConversationAnalyzer(Path(tempfile.mktemp(suffix=".db")))
+    analyzer.conn = conn
+    return analyzer
+
+
+# ---------------------------------------------------------------------------
+# Bridge: intelligence DB integration
+# ---------------------------------------------------------------------------
+
+class TestBridgeSessionToIntelligence:
+    """Tests for ConversationAnalyzer.bridge_session_to_intelligence()."""
+
+    def test_test_cycle_writes_success_pattern(self):
+        """has_test_cycle=True must insert a row into success_patterns."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics()
+        flags = SessionFlags(has_test_cycle=True)
+
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        rows = analyzer.conn.execute(
+            "SELECT title, pattern_data, category FROM success_patterns"
+        ).fetchall()
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["title"] == "Test-driven workflow detected"
+        assert "session_analysis" in row["pattern_data"]
+        assert row["category"] == ""  # universal scope
+
+    def test_test_cycle_upserts_on_repeat(self):
+        """Repeated calls increment usage_count instead of inserting duplicates."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics()
+        flags = SessionFlags(has_test_cycle=True)
+
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        rows = analyzer.conn.execute(
+            "SELECT usage_count FROM success_patterns "
+            "WHERE title = 'Test-driven workflow detected'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert dict(rows[0])["usage_count"] == 2
+
+    def test_debugging_long_session_writes_antipattern(self):
+        """primary_activity=debugging + duration>30 must insert an antipattern."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(duration_minutes=45.0)
+        flags = SessionFlags(primary_activity="debugging")
+
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        rows = analyzer.conn.execute(
+            "SELECT title, severity, category FROM antipatterns"
+        ).fetchall()
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["title"] == "Extended debugging session"
+        assert row["severity"] == "medium"
+        assert row["category"] == ""
+
+    def test_debugging_short_session_skipped(self):
+        """Debugging under 30 min must not create an antipattern."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(duration_minutes=15.0)
+        flags = SessionFlags(primary_activity="debugging")
+
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        count = analyzer.conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]
+        assert count == 0
+
+    def test_error_recovery_writes_low_severity_antipattern(self):
+        """has_error_recovery=True must insert an antipattern with severity=low."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics()
+        flags = SessionFlags(has_error_recovery=True)
+
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        rows = analyzer.conn.execute(
+            "SELECT title, severity FROM antipatterns"
+        ).fetchall()
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert row["title"] == "Error recovery required"
+        assert row["severity"] == "low"
+
+    def test_improvement_suggestion_bridged_as_antipattern(self):
+        """High-priority improvement_suggestions with status='new' must become antipatterns."""
+        analyzer = _make_analyzer_with_intel_db()
+        # Seed a high-priority suggestion
+        analyzer.conn.execute(
+            "INSERT INTO improvement_suggestions "
+            "(session_id, category, component, current_behavior, suggested_improvement, "
+            " priority, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("s1", "workflow", "dispatcher_v8", "slow delivery",
+             "batch dispatch creation", "high", "new"),
+        )
+        analyzer.conn.commit()
+
+        metrics = SessionMetrics()
+        flags = SessionFlags()
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        rows = analyzer.conn.execute(
+            "SELECT title, severity FROM antipatterns "
+            "WHERE pattern_data LIKE '%session_analysis%'"
+        ).fetchall()
+        assert len(rows) == 1
+        row = dict(rows[0])
+        assert "HIGH" in row["title"]
+        assert row["severity"] == "high"
+
+    def test_medium_priority_suggestion_not_bridged(self):
+        """Medium-priority suggestions must not be bridged (only critical/high)."""
+        analyzer = _make_analyzer_with_intel_db()
+        analyzer.conn.execute(
+            "INSERT INTO improvement_suggestions "
+            "(session_id, category, component, current_behavior, suggested_improvement, "
+            " priority, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("s2", "workflow", "comp", "current", "improvement", "medium", "new"),
+        )
+        analyzer.conn.commit()
+
+        analyzer.bridge_session_to_intelligence(SessionMetrics(), SessionFlags())
+
+        count = analyzer.conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]
+        assert count == 0
+
+    def test_no_flags_writes_nothing(self):
+        """Default SessionFlags (all False) must produce no DB rows."""
+        analyzer = _make_analyzer_with_intel_db()
+        analyzer.bridge_session_to_intelligence(SessionMetrics(), SessionFlags())
+
+        sp = analyzer.conn.execute("SELECT COUNT(*) FROM success_patterns").fetchone()[0]
+        ap = analyzer.conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]
+        assert sp == 0
+        assert ap == 0
+
+    def test_pattern_data_source_tag(self):
+        """All rows written by the bridge must have pattern_data containing 'session_analysis'."""
+        analyzer = _make_analyzer_with_intel_db()
+        metrics = SessionMetrics(duration_minutes=60.0)
+        flags = SessionFlags(
+            has_test_cycle=True,
+            has_error_recovery=True,
+            primary_activity="debugging",
+        )
+        analyzer.bridge_session_to_intelligence(metrics, flags)
+
+        for table in ("success_patterns", "antipatterns"):
+            rows = analyzer.conn.execute(
+                f"SELECT pattern_data FROM {table}"
+            ).fetchall()
+            for row in rows:
+                assert "session_analysis" in (dict(row)["pattern_data"] or ""), \
+                    f"{table} row missing session_analysis tag"
+
+    def test_already_acted_on_suggestion_not_bridged(self):
+        """Suggestions with status != 'new' must not be bridged."""
+        analyzer = _make_analyzer_with_intel_db()
+        analyzer.conn.execute(
+            "INSERT INTO improvement_suggestions "
+            "(session_id, category, component, current_behavior, suggested_improvement, "
+            " priority, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("s3", "workflow", "comp", "current", "improvement", "critical", "acted_on"),
+        )
+        analyzer.conn.commit()
+
+        analyzer.bridge_session_to_intelligence(SessionMetrics(), SessionFlags())
+
+        count = analyzer.conn.execute("SELECT COUNT(*) FROM antipatterns").fetchone()[0]
+        assert count == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

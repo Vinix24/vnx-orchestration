@@ -83,3 +83,4 @@ tests/*_ISSUE.md
 # Project-specific integration tests (not part of generic VNX)
 tests/test_carina_*.py
 claudedocs/
+.vnx-intelligence/

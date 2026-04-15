@@ -58,7 +58,8 @@ def _setup_quality_db(db_path: Path) -> sqlite3.Connection:
             success_rate REAL DEFAULT 0.0, usage_count INTEGER DEFAULT 0,
             avg_completion_time INTEGER, confidence_score REAL DEFAULT 0.0,
             source_dispatch_ids TEXT, source_receipts TEXT,
-            first_seen DATETIME, last_used DATETIME
+            first_seen DATETIME, last_used DATETIME,
+            valid_from DATETIME DEFAULT NULL, valid_until DATETIME DEFAULT NULL
         );
         CREATE TABLE IF NOT EXISTS antipatterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,14 +67,16 @@ def _setup_quality_db(db_path: Path) -> sqlite3.Connection:
             pattern_data TEXT, problem_example TEXT, why_problematic TEXT,
             better_alternative TEXT, occurrence_count INTEGER DEFAULT 0,
             avg_resolution_time INTEGER, severity TEXT DEFAULT 'medium',
-            source_dispatch_ids TEXT, first_seen DATETIME, last_seen DATETIME
+            source_dispatch_ids TEXT, first_seen DATETIME, last_seen DATETIME,
+            valid_from DATETIME DEFAULT NULL, valid_until DATETIME DEFAULT NULL
         );
         CREATE TABLE IF NOT EXISTS prevention_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tag_combination TEXT, rule_type TEXT, description TEXT,
             recommendation TEXT, confidence REAL DEFAULT 0.0,
             created_at TEXT, triggered_count INTEGER DEFAULT 0,
-            last_triggered TEXT
+            last_triggered TEXT,
+            valid_from DATETIME DEFAULT NULL, valid_until DATETIME DEFAULT NULL
         );
         CREATE TABLE IF NOT EXISTS dispatch_metadata (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

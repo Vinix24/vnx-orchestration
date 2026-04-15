@@ -173,16 +173,29 @@ def collect_file_contents(
     return _inline_file_contents(files, max_bytes)
 
 
-def build_codex_prompt(request_payload: Dict[str, Any]) -> str:
-    """Build a review prompt for codex gate when no prompt is present."""
-    files = request_payload.get("changed_files", [])
+def build_codex_prompt(
+    request_payload: Dict[str, Any],
+    *,
+    subprocess_run: Callable,
+) -> str:
+    """Build a headless review prompt for codex gate with inline file contents.
+
+    Inlines file contents instead of asking Codex to fetch the PR via GitHub API.
+    Falls back to git diff main..HEAD when changed_files list is empty.
+    """
     branch = request_payload.get("branch", "")
     risk = request_payload.get("risk_class", "medium")
-    pr = request_payload.get("pr_number", "")
+    max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
+
+    files = _gather_changed_files(
+        request_payload.get("changed_files", []), subprocess_run
+    )
+    file_contents = _inline_file_contents(files, max_bytes)
+
     return (
-        f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
-        f"Changed files: {', '.join(files)}\n"
-        "Read each file and provide a structured code review with findings.\n\n"
+        f"Review the following code changes on branch {branch} (risk: {risk}).\n\n"
+        f"{file_contents}\n\n"
+        "Perform a thorough code review of the file contents above.\n\n"
         "Respond with a structured JSON verdict only:\n"
         "```json\n"
         "{\n"

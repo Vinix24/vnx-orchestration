@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useCallback } from 'react';
+import { MessageSquare, X } from 'lucide-react';
 import { useConversations } from '@/lib/hooks';
 import ConversationTimeline from '@/components/conversation-timeline';
+import TranscriptViewer from '@/components/transcript-viewer';
 import type { SortOrder, ConversationSession } from '@/lib/types';
 
 const ALL_TERMINALS = new Set(['T0', 'T1', 'T2', 'T3']);
@@ -10,6 +12,7 @@ const ALL_TERMINALS = new Set(['T0', 'T1', 'T2', 'T3']);
 export default function ConversationsPage() {
   const [sortOrder, setSortOrder] = useState<SortOrder>('DESC');
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
   const [terminals, setTerminals] = useState<Set<string>>(new Set(ALL_TERMINALS));
 
   const { data, error, isLoading } = useConversations(sortOrder);
@@ -19,7 +22,19 @@ export default function ConversationsPage() {
   }, []);
 
   const handleSelectSession = useCallback((id: string) => {
-    setSelectedSessionId((prev) => (prev === id ? null : id));
+    setSelectedSessionId((prev) => {
+      if (prev === id) {
+        setShowTranscript(false);
+        return null;
+      }
+      setShowTranscript(false);
+      return id;
+    });
+  }, []);
+
+  const handleClosePanel = useCallback(() => {
+    setSelectedSessionId(null);
+    setShowTranscript(false);
   }, []);
 
   const selected = data?.sessions.find((s) => s.session_id === selectedSessionId) ?? null;
@@ -75,19 +90,36 @@ export default function ConversationsPage() {
             />
           </div>
 
-          {/* Detail panel */}
+          {/* Detail / Transcript panel */}
           {selected && (
             <div
               className="glass-card animate-in-fast"
               style={{
-                width: 340,
-                padding: 20,
+                width: showTranscript ? 520 : 340,
                 flexShrink: 0,
                 position: 'sticky',
                 top: 32,
+                transition: 'width 0.2s ease',
+                overflow: 'hidden',
+                maxHeight: 'calc(100vh - 64px)',
+                display: 'flex',
+                flexDirection: 'column',
               }}
             >
-              <SessionDetailPanel session={selected} />
+              {showTranscript ? (
+                <TranscriptViewer
+                  session={selected}
+                  onClose={() => setShowTranscript(false)}
+                />
+              ) : (
+                <div style={{ padding: 20 }}>
+                  <SessionDetailPanel
+                    session={selected}
+                    onClose={handleClosePanel}
+                    onViewTranscript={() => setShowTranscript(true)}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -96,7 +128,15 @@ export default function ConversationsPage() {
   );
 }
 
-function SessionDetailPanel({ session }: { session: ConversationSession }) {
+function SessionDetailPanel({
+  session,
+  onClose,
+  onViewTranscript,
+}: {
+  session: ConversationSession;
+  onClose: () => void;
+  onViewTranscript: () => void;
+}) {
   const terminalColors: Record<string, string> = {
     T0: '#6B8AE6',
     T1: '#50fa7b',
@@ -124,10 +164,27 @@ function SessionDetailPanel({ session }: { session: ConversationSession }) {
         )}
         <h3
           className="text-sm font-semibold truncate"
-          style={{ color: 'var(--color-foreground)' }}
+          style={{ color: 'var(--color-foreground)', flex: 1 }}
         >
           {session.title || 'Untitled session'}
         </h3>
+        <button
+          onClick={onClose}
+          aria-label="Close panel"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            color: 'var(--color-muted)',
+            padding: 4,
+            borderRadius: 4,
+            display: 'flex',
+            alignItems: 'center',
+            flexShrink: 0,
+          }}
+        >
+          <X size={14} />
+        </button>
       </div>
 
       <div className="flex flex-col gap-3">
@@ -147,6 +204,36 @@ function SessionDetailPanel({ session }: { session: ConversationSession }) {
         <DetailRow label="Project" value={session.project_path} mono />
         <DetailRow label="CWD" value={session.cwd} mono />
       </div>
+
+      <button
+        onClick={onViewTranscript}
+        style={{
+          marginTop: 20,
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 6,
+          padding: '9px 14px',
+          borderRadius: 8,
+          background: 'rgba(107,138,230,0.1)',
+          border: '1px solid rgba(107,138,230,0.3)',
+          color: '#6B8AE6',
+          fontSize: 13,
+          fontWeight: 500,
+          cursor: 'pointer',
+          transition: 'background 0.15s',
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.background = 'rgba(107,138,230,0.18)';
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLButtonElement).style.background = 'rgba(107,138,230,0.1)';
+        }}
+      >
+        <MessageSquare size={14} />
+        View Transcript
+      </button>
     </div>
   );
 }

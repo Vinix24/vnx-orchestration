@@ -414,7 +414,11 @@ class IntelligenceSelector:
         result: InjectionResult,
         coord_state_dir: Optional[Path] = None,
     ) -> None:
-        """Record injection decision in the intelligence_injections audit table."""
+        """Record injection decision in the intelligence_injections audit table.
+
+        Also writes per-item rows to pattern_usage in quality_intelligence.db so
+        the feedback loop can look up which patterns were offered for a dispatch.
+        """
         state_dir = coord_state_dir or self._coord_state_dir
         if state_dir is None:
             return
@@ -451,6 +455,50 @@ class IntelligenceSelector:
                     ),
                 )
                 conn.commit()
+        except Exception:
+            pass
+
+        # Write per-item pattern_usage rows so feedback loop can query by dispatch_id
+        if result.items and self._quality_db_path is not None and self._quality_db_path.exists():
+            self._record_pattern_usage(result)
+
+    def _record_pattern_usage(self, result: InjectionResult) -> None:
+        """Write one pattern_usage row per injected item so feedback can find them later.
+
+        Uses item_id as pattern_id, item title as pattern_title, and dispatch_id
+        from result.  Only writes for proven_pattern items (sourced from
+        success_patterns); other item classes are noted with a class prefix title.
+        """
+        db = self._get_quality_db()
+        if db is None:
+            return
+        now = _now_utc()
+        try:
+            for item in result.items:
+                db.execute(
+                    """
+                    INSERT INTO pattern_usage
+                        (pattern_id, pattern_title, pattern_hash, used_count,
+                         ignored_count, success_count, failure_count,
+                         last_offered, confidence, created_at, updated_at, dispatch_id)
+                    VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pattern_id) DO UPDATE SET
+                        last_offered = excluded.last_offered,
+                        updated_at   = excluded.updated_at,
+                        dispatch_id  = excluded.dispatch_id
+                    """,
+                    (
+                        item.item_id,
+                        item.title[:255],
+                        item.item_id,   # hash = item_id for injected items
+                        now,
+                        item.confidence,
+                        now,
+                        now,
+                        result.dispatch_id,
+                    ),
+                )
+            db.commit()
         except Exception:
             pass
 
@@ -493,6 +541,7 @@ class IntelligenceSelector:
                 SELECT id, title, description, category, confidence_score,
                        usage_count, source_dispatch_ids, first_seen, last_used
                 FROM success_patterns
+                WHERE (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY confidence_score DESC
                 LIMIT 20
                 """,
@@ -551,6 +600,7 @@ class IntelligenceSelector:
                        occurrence_count, first_seen, last_seen
                 FROM antipatterns
                 WHERE occurrence_count >= 1
+                  AND (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY
                     CASE severity
                         WHEN 'critical' THEN 4
@@ -606,6 +656,7 @@ class IntelligenceSelector:
                 SELECT id, tag_combination, rule_type, description,
                        recommendation, confidence, triggered_count, last_triggered
                 FROM prevention_rules
+                WHERE (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY confidence DESC
                 LIMIT 10
                 """,
