@@ -79,7 +79,7 @@ def test_capture_parameters(tracker, state_dir):
     params = _make_params(role="architect", instruction_char_count=2500)
     tracker.capture_parameters("dispatch-001", params)
 
-    db_path = state_dir / "dispatch_tracker.db"
+    db_path = state_dir / "quality_intelligence.db"  # unified DB (was dispatch_tracker.db)
     assert db_path.exists()
 
     conn = sqlite3.connect(str(db_path))
@@ -109,7 +109,7 @@ def test_capture_parameters_upsert(tracker, state_dir):
     tracker.capture_parameters("dispatch-002", _make_params(role="backend-developer"))
     tracker.capture_parameters("dispatch-002", _make_params(role="test-engineer"))
 
-    db_path = state_dir / "dispatch_tracker.db"
+    db_path = state_dir / "quality_intelligence.db"  # unified DB (was dispatch_tracker.db)
     conn = sqlite3.connect(str(db_path))
     count = conn.execute(
         "SELECT COUNT(*) FROM dispatch_experiments WHERE dispatch_id = ?",
@@ -136,7 +136,7 @@ def test_capture_outcome(tracker, state_dir):
     outcome = _make_outcome(cqs=82.0, success=True, committed=True, lines_changed=200)
     tracker.capture_outcome("dispatch-003", outcome)
 
-    db_path = state_dir / "dispatch_tracker.db"
+    db_path = state_dir / "quality_intelligence.db"  # unified DB (was dispatch_tracker.db)
     conn = sqlite3.connect(str(db_path))
     row = conn.execute(
         "SELECT success, cqs, committed, lines_changed FROM dispatch_experiments WHERE dispatch_id = ?",

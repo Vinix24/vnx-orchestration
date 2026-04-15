@@ -61,9 +61,12 @@ def _open_qi(timeout: int = 30) -> sqlite3.Connection:
 
 
 def _open_tracker(timeout: int = 30) -> sqlite3.Connection:
-    """Open or create dispatch_tracker.db with dispatch_experiments table."""
-    TRACKER_DB.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(TRACKER_DB), timeout=timeout)
+    """Open quality_intelligence.db ensuring dispatch_experiments table exists.
+
+    dispatch_experiments was previously in dispatch_tracker.db; unified here.
+    """
+    QI_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(QI_DB), timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS dispatch_experiments (
@@ -932,15 +935,86 @@ def _count_table(conn: sqlite3.Connection, table: str, where: str = "") -> int:
         return -1
 
 
+def backfill_retroactive_feedback(dry_run: bool = False) -> dict:
+    """Apply retroactive confidence updates for 181 dispatches with intelligence_json.
+
+    For each dispatch in dispatch_metadata that has intelligence_json and a known
+    outcome, calls update_confidence_from_outcome() to boost or decay success_patterns
+    confidence scores.  This is the actionable path since historical intelligence_json
+    uses an older format with empty offered_pattern_hashes.
+
+    Returns dict with counts.
+    """
+    print("[step-feedback] Applying retroactive confidence updates (181 intel dispatches)...")
+
+    qi_conn = _open_qi()
+
+    dispatches = qi_conn.execute(
+        """
+        SELECT dispatch_id, terminal, outcome_status
+        FROM dispatch_metadata
+        WHERE intelligence_json IS NOT NULL
+          AND outcome_status IS NOT NULL
+          AND outcome_status IN ('success', 'done', 'completed',
+                                  'failure', 'fail', 'failed', 'blocked')
+        """
+    ).fetchall()
+    qi_conn.close()
+
+    print(f"[step-feedback] Dispatches with intelligence + known outcome: {len(dispatches)}")
+
+    if dry_run:
+        return {"dispatches_eligible": len(dispatches), "dry_run": True}
+
+    success_statuses = {"success", "done", "completed"}
+    failure_statuses = {"failure", "fail", "failed", "blocked"}
+
+    sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+    try:
+        from intelligence_persist import update_confidence_from_outcome as _upcf
+    except ImportError as e:
+        print(f"[step-feedback] Could not import intelligence_persist: {e}", file=sys.stderr)
+        return {"dispatches_eligible": len(dispatches), "error": str(e)}
+
+    boosted_total = 0
+    decayed_total = 0
+    processed = 0
+
+    for row in dispatches:
+        dispatch_id = row["dispatch_id"]
+        terminal = row["terminal"] or "unknown"
+        status_raw = (row["outcome_status"] or "").lower()
+
+        if status_raw in success_statuses:
+            outcome = "success"
+        elif status_raw in failure_statuses:
+            outcome = "failure"
+        else:
+            continue
+
+        result = _upcf(QI_DB, dispatch_id, terminal, outcome)
+        boosted_total += result.get("boosted", 0)
+        decayed_total += result.get("decayed", 0)
+        processed += 1
+
+    print(f"[step-feedback] Processed {processed} dispatches: "
+          f"boosted {boosted_total} patterns, decayed {decayed_total} patterns")
+    return {
+        "dispatches_processed": processed,
+        "patterns_boosted": boosted_total,
+        "patterns_decayed": decayed_total,
+    }
+
+
 def build_verification_report(karpathy_insights: list[str]) -> dict:
     """Query DB tables and return verification summary."""
     report: dict = {}
 
-    # dispatch_experiments (tracker DB)
-    if TRACKER_DB.exists():
-        tc = sqlite3.connect(str(TRACKER_DB))
-        report["dispatch_experiments"] = _count_table(tc, "dispatch_experiments")
-        tc.close()
+    # dispatch_experiments now in quality_intelligence.db (unified)
+    if QI_DB.exists():
+        qc_check = sqlite3.connect(str(QI_DB))
+        report["dispatch_experiments"] = _count_table(qc_check, "dispatch_experiments")
+        qc_check.close()
     else:
         report["dispatch_experiments"] = 0
 
@@ -1052,6 +1126,7 @@ STEPS = {
     "patterns": run_pattern_extractor,
     "memory": run_memory_consolidator,
     "feedback": simulate_feedback_loop,
+    "retro-feedback": backfill_retroactive_feedback,
     "karpathy": run_karpathy_analysis,
 }
 
@@ -1066,7 +1141,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--step", choices=list(STEPS.keys()),
-        help="Run only a specific step",
+        help="Run only a specific step (experiments|events|patterns|memory|feedback|retro-feedback|karpathy)",
     )
     args = parser.parse_args()
 
@@ -1078,7 +1153,7 @@ def main() -> None:
 
     if args.step:
         fn = STEPS[args.step]
-        result = fn(dry_run=args.dry_run) if args.step not in ("karpathy",) else fn()
+        result = fn() if args.step == "karpathy" else fn(dry_run=args.dry_run)
         step_results[args.step] = result
         if not args.dry_run and args.step == "karpathy":
             insights = result if isinstance(result, list) else []
@@ -1110,6 +1185,10 @@ def main() -> None:
     # Step 5: feedback loop simulation
     feedback_result = simulate_feedback_loop(dry_run=args.dry_run)
     step_results["Step 5: feedback_loop"] = feedback_result
+
+    # Step 5b: retroactive feedback from intelligence_injections
+    retro_result = backfill_retroactive_feedback(dry_run=args.dry_run)
+    step_results["Step 5b: retro_feedback"] = retro_result
 
     # Step 6: Karpathy analysis
     karpathy_insights = run_karpathy_analysis()

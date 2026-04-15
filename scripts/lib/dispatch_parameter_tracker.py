@@ -38,7 +38,7 @@ try:
 except Exception:
     _STATE_DIR = Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
 
-DB_PATH = _STATE_DIR / "dispatch_tracker.db"
+DB_PATH = _STATE_DIR / "quality_intelligence.db"  # unified DB (was dispatch_tracker.db)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -96,7 +96,7 @@ class Insight:
 def _get_db_path(state_dir: Optional[Path] = None) -> Path:
     base = state_dir or _STATE_DIR
     base.mkdir(parents=True, exist_ok=True)
-    return base / "dispatch_tracker.db"
+    return base / "quality_intelligence.db"
 
 
 @contextmanager

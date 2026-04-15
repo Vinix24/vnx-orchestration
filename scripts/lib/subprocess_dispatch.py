@@ -724,6 +724,97 @@ def _capture_dispatch_outcome(
         logger.debug("Outcome capture failed for %s: %s", dispatch_id, exc)
 
 
+def _update_pattern_confidence(
+    dispatch_id: str,
+    status: str,
+    db_path: "Path",
+) -> int:
+    """Update confidence for patterns that were injected in this dispatch.
+
+    Looks up pattern_usage rows where dispatch_id matches, then:
+    - success: boosts success_patterns.confidence_score + 0.05 (cap 1.0) and
+               increments pattern_usage.success_count + used_count
+    - failure: decays success_patterns.confidence_score - 0.10 (floor 0.0) and
+               increments pattern_usage.failure_count + used_count
+
+    Linkage is by title: pattern_usage.pattern_title → success_patterns.title.
+    Returns count of pattern_usage rows updated.  Never raises.
+    """
+    import sqlite3 as _sqlite3
+    from datetime import datetime as _dt, timezone as _tz
+
+    if not db_path.exists():
+        return 0
+
+    is_success = (status == "success")
+    now = _dt.now(_tz.utc).isoformat()
+    updated = 0
+
+    try:
+        conn = _sqlite3.connect(str(db_path))
+        conn.row_factory = _sqlite3.Row
+
+        injected = conn.execute(
+            "SELECT pattern_id, pattern_title FROM pattern_usage WHERE dispatch_id = ?",
+            (dispatch_id,),
+        ).fetchall()
+
+        for row in injected:
+            pattern_id = row["pattern_id"]
+            title = row["pattern_title"]
+
+            if is_success:
+                conn.execute(
+                    """
+                    UPDATE success_patterns
+                    SET confidence_score = MIN(confidence_score + 0.05, 1.0),
+                        usage_count      = usage_count + 1,
+                        last_used        = ?
+                    WHERE title = ?
+                    """,
+                    (now, title),
+                )
+                conn.execute(
+                    """
+                    UPDATE pattern_usage
+                    SET used_count    = used_count + 1,
+                        success_count = success_count + 1,
+                        last_used     = ?,
+                        updated_at    = ?
+                    WHERE dispatch_id = ? AND pattern_id = ?
+                    """,
+                    (now, now, dispatch_id, pattern_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE success_patterns
+                    SET confidence_score = MAX(confidence_score - 0.10, 0.0)
+                    WHERE title = ?
+                    """,
+                    (title,),
+                )
+                conn.execute(
+                    """
+                    UPDATE pattern_usage
+                    SET used_count     = used_count + 1,
+                        failure_count  = failure_count + 1,
+                        last_used      = ?,
+                        updated_at     = ?
+                    WHERE dispatch_id = ? AND pattern_id = ?
+                    """,
+                    (now, now, dispatch_id, pattern_id),
+                )
+            updated += 1
+
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.debug("_update_pattern_confidence failed for %s: %s", dispatch_id, exc)
+
+    return updated
+
+
 def deliver_with_recovery(
     terminal_id: str,
     instruction: str,
@@ -808,6 +899,18 @@ def deliver_with_recovery(
                 manifest_path=sub_result.manifest_path,
             )
 
+            # Feedback loop: boost pattern confidence for successful dispatch
+            _quality_db = _default_state_dir() / "quality_intelligence.db"
+            _patt_updated = _update_pattern_confidence(dispatch_id, "success", _quality_db)
+            logger.debug(
+                "Feedback boost: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
+            )
+            try:
+                from intelligence_persist import update_confidence_from_outcome as _upcf
+                _upcf(_quality_db, dispatch_id, terminal_id, "success")
+            except Exception as _exc:
+                logger.debug("update_confidence_from_outcome(success) failed: %s", _exc)
+
             # Capture outcome after receipt is written
             _capture_dispatch_outcome(
                 dispatch_id=dispatch_id,
@@ -838,6 +941,18 @@ def deliver_with_recovery(
                 commit_hash_before=commit_hash_before,
                 manifest_path=sub_result.manifest_path,
             )
+
+            # Feedback loop: decay pattern confidence for failed dispatch
+            _quality_db = _default_state_dir() / "quality_intelligence.db"
+            _patt_updated = _update_pattern_confidence(dispatch_id, "failure", _quality_db)
+            logger.debug(
+                "Feedback decay: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
+            )
+            try:
+                from intelligence_persist import update_confidence_from_outcome as _upcf
+                _upcf(_quality_db, dispatch_id, terminal_id, "failure")
+            except Exception as _exc:
+                logger.debug("update_confidence_from_outcome(failure) failed: %s", _exc)
 
             # Capture failed outcome
             _capture_dispatch_outcome(
