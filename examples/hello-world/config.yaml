@@ -1,0 +1,7 @@
+governance_profile: minimal
+description: "Demonstration agent for the VNX quickstart guide"
+isolation:
+  scope_type: example
+  allowed_paths:
+    - "examples/hello-world/"
+    - ".vnx-data/unified_reports/"

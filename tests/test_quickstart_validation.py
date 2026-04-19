@@ -235,3 +235,35 @@ class TestFullQuickstart:
         rc, out, err = _run([str(vnx_bin), "doctor"], cwd=target)
         assert rc in (0, 1), f"Doctor crashed after double-init: {err}"
         assert "FAIL] tool: Required" not in out
+
+
+# ---------------------------------------------------------------------------
+# F45: Quickstart doc + hello-world example agent validation
+# ---------------------------------------------------------------------------
+
+def test_quickstart_doc_exists():
+    """docs/QUICKSTART.md exists."""
+    assert (VNX_REPO / "docs" / "QUICKSTART.md").is_file()
+
+
+def test_hello_world_agent_structure():
+    """examples/hello-world/ has CLAUDE.md and config.yaml."""
+    base = VNX_REPO / "examples" / "hello-world"
+    assert (base / "CLAUDE.md").is_file()
+    assert (base / "config.yaml").is_file()
+
+
+def test_hello_world_config_has_governance_profile():
+    """config.yaml contains governance_profile field."""
+    import yaml
+    config_path = VNX_REPO / "examples" / "hello-world" / "config.yaml"
+    with open(config_path) as f:
+        data = yaml.safe_load(f)
+    assert "governance_profile" in data
+
+
+def test_quickstart_has_all_steps():
+    """QUICKSTART.md contains Step 1 through Step 6."""
+    content = (VNX_REPO / "docs" / "QUICKSTART.md").read_text()
+    for step in range(1, 7):
+        assert f"## Step {step}:" in content, f"Missing Step {step} in QUICKSTART.md"
