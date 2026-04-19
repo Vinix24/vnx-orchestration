@@ -207,14 +207,14 @@ def trigger_gates_if_feature_complete(feature_id: str, state_dir: Path) -> Dict[
 
     Args:
         feature_id: Feature identifier, e.g. "F51".
-        state_dir:  VNX state directory (e.g. .vnx-data/state/).
+        state_dir:  VNX state directory (resolved via VNX_STATE_DIR).
 
     Returns:
         dict with keys:
           triggered (bool), pr_number (int|None), gates (List[str]),
           reason (str|None) — populated when triggered=False.
     """
-    data_dir = state_dir.parent  # state_dir is <data_dir>/state/
+    data_dir = state_dir.parent  # state_dir is VNX_DATA_DIR/state
 
     # 1. Locate FEATURE_PLAN.md
     feature_plan = _find_feature_plan(state_dir)
