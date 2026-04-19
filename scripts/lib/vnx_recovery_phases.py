@@ -372,8 +372,8 @@ def _phase_dispatch_reconciliation(
 ) -> None:
     """Reconcile dispatches: use RuntimeReconciler for stuck/timed-out dispatches."""
     config = ReconcilerConfig(
-        auto_recover_expired_leases=False,  # Already handled in lease phase
-        auto_recover_dispatches=False,       # Flag for review, don't auto-recover
+        auto_recover_expired_leases=True,  # 2026-04-19: enabled after 60h freeze — see postmortem
+        auto_recover_dispatches=True,       # 2026-04-19: enabled after 60h freeze — see postmortem
         dispatch_stuck_seconds=300,          # 5 minutes
     )
     reconciler = RuntimeReconciler(state_dir, config=config)
@@ -407,6 +407,16 @@ def _phase_dispatch_reconciliation(
             outcome="applied" if not dry_run else "skipped",
             detail=action.reason,
         ))
+
+    for action in result.recovered_dispatches:
+        report.actions.append(RecoveryAction(
+            phase="dispatch",
+            action="auto_recovered",
+            target=action.entity_id,
+            outcome="applied" if not dry_run else "skipped",
+            detail=action.reason,
+        ))
+        report.dispatches_reconciled += 1
 
     for action in result.needs_review:
         report.escalation_items.append({
