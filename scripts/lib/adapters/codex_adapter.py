@@ -30,7 +30,10 @@ from vertex_ai_runner import collect_file_contents
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gpt-5.2-codex"
+# Model: empty string = use codex CLI config.toml default (currently gpt-5.3-codex).
+# 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
+# ChatGPT-account auth rejects older explicit model flags.
+_DEFAULT_MODEL = ""
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_STALL_THRESHOLD = 60
 
@@ -75,7 +78,11 @@ class CodexAdapter(ProviderAdapter):
         changed_files = context.get("changed_files", [])
         prompt = self._build_prompt(instruction, changed_files)
 
-        cmd = ["codex", "exec", "--json", "-c", f'model="{model}"']
+        # Only override model if explicitly set; empty string = let codex use
+        # its own config.toml default.
+        cmd = ["codex", "exec", "--json"]
+        if model:
+            cmd += ["-c", f'model="{model}"']
         t0 = time.monotonic()
         try:
             proc = subprocess.Popen(
