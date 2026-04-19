@@ -2,7 +2,7 @@
 """Weekly Digest — Aggregate last 7 days of system intelligence.
 
 Reads from quality_intelligence.db, t0_receipts.ndjson, and pending_edits.json.
-Generates a narrative summary and writes state/weekly_digest.json.
+Generates a narrative summary and writes weekly_digest.json under VNX_STATE_DIR.
 
 CLI: python3 scripts/weekly_digest.py [--days 7] [--dry-run]
 """

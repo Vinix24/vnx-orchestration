@@ -8,7 +8,7 @@ Reads the JSON output of event_analyzer.py --all --output and produces:
   3. Common-error prevention_rules
 
 Usage:
-    python3 scripts/lib/pattern_extractor.py --input .vnx-data/state/dispatch_behaviors.json
+    python3 scripts/lib/pattern_extractor.py --input "$VNX_STATE_DIR/dispatch_behaviors.json"
     python3 scripts/lib/pattern_extractor.py --input behaviors.json --db /path/to/db
 """
 

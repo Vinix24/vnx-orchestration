@@ -7,7 +7,7 @@ Usage:
     python3 scripts/lib/event_analyzer.py --dispatch 20260414-090200-f58-pr3-layered-prompt-A
     python3 scripts/lib/event_analyzer.py --all
     python3 scripts/lib/event_analyzer.py --summary
-    python3 scripts/lib/event_analyzer.py --all --output .vnx-data/state/dispatch_behaviors.json
+    python3 scripts/lib/event_analyzer.py --all --output "$VNX_STATE_DIR/dispatch_behaviors.json"
 """
 
 from __future__ import annotations
