@@ -300,8 +300,8 @@ class TestDispatchReconciliation:
         dispatch_actions = [a for a in report.actions if a.phase == "dispatch"]
         assert any("timeout" in a.action for a in dispatch_actions)
 
-    def test_stuck_dispatch_flagged_for_review(self, state_dir):
-        """Dispatches in recoverable state should be flagged for operator review."""
+    def test_stuck_dispatch_auto_recovered(self, state_dir):
+        """Dispatches in recoverable state should be auto-recovered (postmortem §4.4)."""
         with get_connection(state_dir) as conn:
             _insert_dispatch(
                 conn, "d-failed", state="failed_delivery",
@@ -309,11 +309,12 @@ class TestDispatchReconciliation:
             )
 
         report = run_recovery(state_dir)
-        # Should appear in escalation items (needs review)
+        # Should be auto-recovered, not flagged for manual review
         assert any(
-            e.get("dispatch_id") == "d-failed"
-            for e in report.escalation_items
+            a.action == "auto_recovered" and a.target == "d-failed"
+            for a in report.actions
         )
+        assert report.dispatches_reconciled >= 1
 
 
 # ---------------------------------------------------------------------------

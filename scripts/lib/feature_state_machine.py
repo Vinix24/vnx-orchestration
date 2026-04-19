@@ -256,7 +256,7 @@ def get_next_dispatchable(state_dir: Path) -> Optional[Dict[str, Any]]:
     if no task is ready (all completed, or required terminal is busy/leased).
     """
     # Locate FEATURE_PLAN.md relative to state_dir
-    # state_dir is typically $PROJECT_ROOT/.vnx-data/state/
+    # state_dir is typically $VNX_STATE_DIR
     # Walk up to find FEATURE_PLAN.md
     feature_plan: Optional[Path] = None
     candidate = state_dir
