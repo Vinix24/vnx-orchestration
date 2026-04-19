@@ -69,7 +69,13 @@ class CodexAdapter(ProviderAdapter):
         Builds prompt from instruction + inline file contents from
         context["changed_files"], invokes the codex CLI, and parses NDJSON.
         """
-        model = os.environ.get("VNX_CODEX_MODEL", _DEFAULT_MODEL)
+        # Env precedence mirrors gate_runner._build_gate_cmd and
+        # GateRequestHandlerMixin._request_codex: HEADLESS_MODEL > MODEL.
+        model = (
+            os.environ.get("VNX_CODEX_HEADLESS_MODEL")
+            or os.environ.get("VNX_CODEX_MODEL")
+            or _DEFAULT_MODEL
+        )
         timeout = int(os.environ.get("VNX_CODEX_TIMEOUT", str(_DEFAULT_TIMEOUT)))
         stall_threshold = int(
             os.environ.get("VNX_CODEX_STALL_THRESHOLD", str(_DEFAULT_STALL_THRESHOLD))
