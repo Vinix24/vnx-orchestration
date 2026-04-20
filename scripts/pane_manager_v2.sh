@@ -48,8 +48,10 @@ discover_pane_by_title() {
             head -1)
     fi
 
-    # Fallback: search all sessions
-    if [ -z "$pane_id" ]; then
+    # Fallback: search all sessions — ONLY when PROJECT_ROOT is unset.
+    # Cross-project fallback caused receipts to leak to other projects' T0
+    # panes when the own tmux session had no matching pane (e.g. T0-less workers).
+    if [ -z "$pane_id" ] && [ -z "${PROJECT_ROOT:-}" ]; then
         pane_id=$(tmux list-panes -a -F "#{pane_id} #{pane_title}" 2>/dev/null | \
             grep -E "(T${terminal#T}|${terminal})" | \
             awk '{print $1}' | \
@@ -185,22 +187,39 @@ get_pane_id_smart() {
             local cached_pane=$(cat "$cache_file")
             # Verify pane still exists
             if tmux list-panes -a -F "#{pane_id}" 2>/dev/null | grep -q "^${cached_pane}$"; then
-                # If an attached-session pane exists for this terminal path, prefer it.
-                # This avoids routing to stale panes in detached duplicate sessions.
-                local attached_preferred=""
+                # Invalidate cache if the cached pane's cwd does not belong to PROJECT_ROOT.
+                # Prevents stale cross-project cache entries from a prior unscoped fallback.
                 if [ -n "${PROJECT_ROOT:-}" ]; then
-                    local terminal_path="${PROJECT_ROOT}/.claude/terminals/${terminal}"
-                    attached_preferred=$(tmux list-panes -a -F "#{pane_id} #{session_attached} #{pane_current_path}" 2>/dev/null | \
-                        awk -v p="$terminal_path" '$2=="1" && $3==p {print $1; exit}')
+                    local cached_path
+                    cached_path=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
+                        awk -v p="$cached_pane" '$1==p {print $2; exit}')
+                    case "$cached_path" in
+                        "${PROJECT_ROOT}"/*) : ;;
+                        *)
+                            _pm_log "Cached pane $cached_pane path ($cached_path) outside PROJECT_ROOT; invalidating"
+                            rm -f "$cache_file"
+                            cached_pane=""
+                            ;;
+                    esac
                 fi
-                if [ -n "$attached_preferred" ] && [ "$attached_preferred" != "$cached_pane" ]; then
-                    _pm_log "Cached pane $cached_pane for $terminal is stale; using attached pane $attached_preferred"
-                    echo "$attached_preferred" > "$cache_file"
-                    echo "$attached_preferred"
+                if [ -n "$cached_pane" ]; then
+                    # If an attached-session pane exists for this terminal path, prefer it.
+                    # This avoids routing to stale panes in detached duplicate sessions.
+                    local attached_preferred=""
+                    if [ -n "${PROJECT_ROOT:-}" ]; then
+                        local terminal_path="${PROJECT_ROOT}/.claude/terminals/${terminal}"
+                        attached_preferred=$(tmux list-panes -a -F "#{pane_id} #{session_attached} #{pane_current_path}" 2>/dev/null | \
+                            awk -v p="$terminal_path" '$2=="1" && $3==p {print $1; exit}')
+                    fi
+                    if [ -n "$attached_preferred" ] && [ "$attached_preferred" != "$cached_pane" ]; then
+                        _pm_log "Cached pane $cached_pane for $terminal is stale; using attached pane $attached_preferred"
+                        echo "$attached_preferred" > "$cache_file"
+                        echo "$attached_preferred"
+                        return 0
+                    fi
+                    echo "$cached_pane"
                     return 0
                 fi
-                echo "$cached_pane"
-                return 0
             else
                 _pm_log "Cached pane $cached_pane no longer exists, rediscovering..."
                 rm -f "$cache_file"
