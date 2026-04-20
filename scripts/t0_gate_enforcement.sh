@@ -3,8 +3,11 @@
 # Usage: bash scripts/t0_gate_enforcement.sh --pr <num> --branch <branch> --review-stack <stack> --risk-class <risk> --changed-files <files>
 set -euo pipefail
 
-export VNX_STATE_DIR="${VNX_STATE_DIR:-.vnx-data/state}"
-export VNX_DATA_DIR="${VNX_DATA_DIR:-.vnx-data}"
+source "$(dirname "${BASH_SOURCE[0]}")/lib/vnx_resolve_root.sh"
+vnx_resolve_project_root "${BASH_SOURCE[0]:-$0}"
+vnx_resolve_data_dir
+vnx_resolve_state_dir
+vnx_resolve_dispatch_dir
 export VNX_CODEX_HEADLESS_ENABLED=1
 export VNX_GEMINI_REVIEW_ENABLED=1
 
