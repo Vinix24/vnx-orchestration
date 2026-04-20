@@ -216,6 +216,50 @@ class TestResolveStateDirAndDispatchDir:
         assert result == (repo / ".vnx-data" / "dispatches").resolve()
 
 
+class TestDeprecationWarningRegression:
+    def test_env_fallback_emits_deprecation_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """VNX_CANONICAL_ROOT fallback must emit DeprecationWarning (regression for #225)."""
+        non_git = tmp_path / "notarepo_reg"
+        non_git.mkdir()
+        fake_root = tmp_path / "fake_root_reg"
+        fake_root.mkdir()
+
+        monkeypatch.chdir(non_git)
+        monkeypatch.setenv("VNX_CANONICAL_ROOT", str(fake_root))
+        monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = resolve_project_root(caller_file=None)
+
+        assert result == fake_root.resolve()
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert len(dep_warnings) == 1
+        assert "VNX_CANONICAL_ROOT" in str(dep_warnings[0].message)
+
+    def test_explicit_env_override_no_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """VNX_DATA_DIR_EXPLICIT=1 must suppress all DeprecationWarnings (regression for #225)."""
+        override_dir = tmp_path / "explicit_data"
+        override_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(override_dir))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.delenv("VNX_CANONICAL_ROOT", raising=False)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = resolve_data_dir(caller_file=None)
+
+        assert result == override_dir.resolve()
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert len(dep_warnings) == 0, f"Expected no DeprecationWarnings, got: {dep_warnings}"
+
+
 class TestWorktreeIsolation:
     def test_resolve_worktree_isolation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Two git worktrees of the same repo each return their own worktree root."""
