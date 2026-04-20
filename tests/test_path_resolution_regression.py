@@ -36,7 +36,7 @@ def _clean_env(monkeypatch, keys=None):
     """Remove all VNX env vars so tests start clean."""
     keys = keys or [
         "VNX_HOME", "VNX_BIN", "VNX_EXECUTABLE", "PROJECT_ROOT",
-        "VNX_DATA_DIR", "VNX_STATE_DIR", "VNX_DISPATCH_DIR",
+        "VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR", "VNX_DISPATCH_DIR",
         "VNX_LOGS_DIR", "VNX_PIDS_DIR", "VNX_LOCKS_DIR",
         "VNX_REPORTS_DIR", "VNX_DB_DIR", "VNX_SKILLS_DIR",
         "VNX_CANONICAL_ROOT", "VNX_INTELLIGENCE_DIR",
@@ -106,6 +106,7 @@ class TestEnvOverrides:
         fake_data = tmp_path / "custom-data"
         fake_data.mkdir()
         monkeypatch.setenv("VNX_DATA_DIR", str(fake_data))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
         paths = vnx_paths.resolve_paths()
         assert paths["VNX_DATA_DIR"] == str(fake_data.resolve())
 
@@ -212,6 +213,7 @@ class TestWorktreeIsolation:
         wt_data = tmp_path / "worktree-feature" / ".vnx-data"
         wt_data.mkdir(parents=True)
         monkeypatch.setenv("VNX_DATA_DIR", str(wt_data))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
         paths = vnx_paths.resolve_paths()
         assert paths["VNX_DATA_DIR"] == str(wt_data.resolve())
         # Derived dirs should be under the worktree data dir
@@ -222,6 +224,7 @@ class TestWorktreeIsolation:
         custom_data = tmp_path / "custom-data"
         custom_data.mkdir()
         monkeypatch.setenv("VNX_DATA_DIR", str(custom_data))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
         paths = vnx_paths.resolve_paths()
         for key in ["VNX_STATE_DIR", "VNX_DISPATCH_DIR", "VNX_LOGS_DIR",
                      "VNX_PIDS_DIR", "VNX_LOCKS_DIR", "VNX_REPORTS_DIR", "VNX_DB_DIR"]:

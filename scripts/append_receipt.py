@@ -22,6 +22,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 try:
     from vnx_paths import ensure_env
+    from project_root import resolve_state_dir
     from quality_advisory import generate_quality_advisory, get_changed_files
     from terminal_snapshot import collect_terminal_snapshot
     from cqs_calculator import calculate_cqs
@@ -350,7 +351,7 @@ def _resolve_session_id(receipt: Dict[str, Any]) -> str:
             return value
 
     # Priority 2: Per-terminal current_session file (DETERMINISTIC)
-    state_dir = Path(os.environ.get("VNX_STATE_DIR", Path.home() / ".claude" / "vnx-system"))
+    state_dir = resolve_state_dir(__file__)
     current_session_file = state_dir / f"current_session_{terminal}"
     if current_session_file.exists():
         try:
@@ -959,11 +960,7 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
 
         outcome = "success" if event_type == "task_complete" else "failure"
 
-        state_dir = Path(SCRIPT_DIR).parent / ".vnx-data" / "state"
-        # Try canonical env path first
-        env_state = os.environ.get("VNX_STATE_DIR", "")
-        if env_state:
-            state_dir = Path(env_state)
+        state_dir = resolve_state_dir(__file__)
 
         db_path = state_dir / "quality_intelligence.db"
         if not db_path.exists():
