@@ -783,13 +783,22 @@ _deliver_receipt_to_t0_pane() {
     local receipt_json="$1"
     local terminal="$2"
 
+    local dispatch_id="${_rf_dispatch_id:-no-id}"
+
+    # Ghost-receipt filter: skip pastes for stop-hook triggers without real dispatch context.
+    # Prevents flooding T0 pane when long-running sessions emit interim Stop events.
+    case "$dispatch_id" in
+        unknown-*|no-id)
+            log "INFO" "Skipping ghost receipt paste: dispatch_id=$dispatch_id"
+            return 0
+            ;;
+    esac
+
     local t0_pane=$(get_pane_id_smart "T0" 2>/dev/null)
     if [ -z "$t0_pane" ]; then
         log "ERROR" "Could not find T0 pane - get_pane_id_smart returned empty"
         return 1
     fi
-
-    local dispatch_id="${_rf_dispatch_id:-no-id}"
     local report_path="${_rf_report_path:-no-report}"
 
     # Determine next action based on status
