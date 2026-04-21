@@ -860,7 +860,9 @@ def _run_production_mode() -> int:
     logger.info("=" * 60)
 
     # Start socket server to receive dispatch notifications from dispatcher
-    socket_path = '/tmp/heartbeat_ack_monitor.sock'
+    # Project-scoped socket to prevent cross-project receipt contamination
+    project_name = os.path.basename(monitor.project_root) if hasattr(monitor, 'project_root') else 'default'
+    socket_path = f'/tmp/heartbeat_ack_monitor_{project_name}.sock'
     monitor.start_socket_server(socket_path)
 
     logger.info(f"[READY] ACK monitor ready to receive dispatches via {socket_path}")
