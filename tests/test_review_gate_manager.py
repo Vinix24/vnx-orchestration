@@ -193,3 +193,81 @@ def test_record_result_rejects_pass_without_report_path_or_request(review_env, m
             summary="No blocking findings",
             contract_hash="hash-999",
         )
+
+
+def test_changed_files_auto_computed_from_branch(review_env, monkeypatch):
+    """When --changed-files is empty and --branch is set, git diff is invoked."""
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+
+    captured_changed_files: list = []
+
+    def fake_request_reviews(self, pr_number, branch, review_stack, risk_class, changed_files, mode):
+        captured_changed_files.extend(changed_files)
+        return {"requested": []}
+
+    git_calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        git_calls.append(cmd)
+
+        class FakeProc:
+            returncode = 0
+            stdout = "scripts/foo.py\nscripts/bar.py\n"
+
+        return FakeProc()
+
+    monkeypatch.setattr(rgm.ReviewGateManager, "request_reviews", fake_request_reviews)
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run)
+
+    argv = [
+        "request",
+        "--pr", "99",
+        "--branch", "feature/auto-scope",
+        "--changed-files", "",
+    ]
+    rgm.main(argv)
+
+    assert any("git" in str(c) for c in git_calls), "git diff should have been called"
+    assert "scripts/foo.py" in captured_changed_files
+    assert "scripts/bar.py" in captured_changed_files
+
+
+def test_changed_files_override_preserves_explicit(review_env, monkeypatch):
+    """When --changed-files is provided, no auto-compute git call is made."""
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+
+    captured_changed_files: list = []
+
+    def fake_request_reviews(self, pr_number, branch, review_stack, risk_class, changed_files, mode):
+        captured_changed_files.extend(changed_files)
+        return {"requested": []}
+
+    git_calls: list = []
+
+    def fake_run(cmd, **kwargs):
+        git_calls.append(cmd)
+
+        class FakeProc:
+            returncode = 0
+            stdout = "should/not/appear.py\n"
+
+        return FakeProc()
+
+    monkeypatch.setattr(rgm.ReviewGateManager, "request_reviews", fake_request_reviews)
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run)
+
+    argv = [
+        "request",
+        "--pr", "100",
+        "--branch", "feature/explicit-files",
+        "--changed-files", "a.py,b.py",
+    ]
+    rgm.main(argv)
+
+    diff_calls = [c for c in git_calls if "diff" in c and "--name-only" in c]
+    assert len(diff_calls) == 0, "git diff --name-only should NOT be called when --changed-files is explicit"
+    assert "a.py" in captured_changed_files
+    assert "b.py" in captured_changed_files
+    assert "should/not/appear.py" not in captured_changed_files
