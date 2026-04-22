@@ -13,6 +13,7 @@
 - **F36 Wave B PR-2**: T0 escalations log (`t0_escalations_log.py`) — passive JSONL writer for escalation records with dual adapter hooks: `decision_executor._handle_escalate()` emits executor-source records; `governance_escalation.transition_escalation()` emits governance-source records with full entity/trigger data; batch-replay CLI with inode-based cursor tracking
 - **F36 Wave B PR-1**: `VNX_ADAPTER_T0=subprocess` cutover flag — `is_headless_t0()` added to receipt processor; T0 snapshot annotated with `adapter/headless` fields when headless; `dispatch_deliver.sh` documents explicit T0 subprocess support; `heartbeat_ack_monitor` docstring updated for T0 coverage
 ### Fixes
+- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
 - **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
