@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Security
+- **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
+
 ### Features
 - **W0 PR-4**: `vnx snapshot/restore/quiesce-check` — CLI tools for project-state backup and migration readiness: tarball + SQL dump of `.vnx-data/`, fail-safe restore with overwrite guard, and read-only quiesce verification across 4 conditions (active dispatches, held leases, in-flight gates, uncommitted changes)
 - **W0 PR-1**: `scripts/dispatcher_supervisor.sh` — dedicated auto-restart supervisor for `dispatcher_v8_minimal.sh` with exponential backoff (2s→60s), stale singleton lock cleanup before each restart, SIGTERM-safe child shutdown, and `status` subcommand

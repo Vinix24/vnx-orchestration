@@ -180,3 +180,113 @@ def test_quiesce_check_gate_with_result_is_ok(fake_project: Path):
     (res_dir / "pr-42-codex.json").write_text('{"result":"pass"}')
     rc = do_quiesce_check(str(fake_project))
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Security: path traversal + symlink hardening (W0 PR4 security fix)
+# ---------------------------------------------------------------------------
+
+
+def _make_tarball_with_traversal(path: Path) -> None:
+    """Create a tarball with a path-traversal member alongside .vnx-data."""
+    import io
+
+    with tarfile.open(path, "w:gz") as tf:
+        # Legitimate .vnx-data directory entry (passes the initial root check)
+        di = tarfile.TarInfo(name=".vnx-data")
+        di.type = tarfile.DIRTYPE
+        tf.addfile(di)
+
+        # Malicious path-traversal member
+        ti = tarfile.TarInfo(name=".vnx-data/../../evil.txt")
+        payload = b"pwned"
+        ti.size = len(payload)
+        tf.addfile(ti, io.BytesIO(payload))
+
+
+def _make_tarball_with_abs_symlink(path: Path) -> None:
+    """Create a tarball with a member that is a symlink pointing to an absolute path."""
+    with tarfile.open(path, "w:gz") as tf:
+        di = tarfile.TarInfo(name=".vnx-data")
+        di.type = tarfile.DIRTYPE
+        tf.addfile(di)
+
+        li = tarfile.TarInfo(name=".vnx-data/evil-link")
+        li.type = tarfile.SYMTYPE
+        li.linkname = "/etc/passwd"
+        tf.addfile(li)
+
+
+def test_restore_rejects_path_traversal(tmp_path: Path):
+    """Tarball with a path-traversal member is rejected — no file written outside target."""
+    tarball = tmp_path / "traversal.tar.gz"
+    _make_tarball_with_traversal(tarball)
+
+    target = tmp_path / "restore-target"
+    target.mkdir()
+
+    rc = do_restore(str(tarball), str(target), force=True)
+    assert rc == 1, "path-traversal tarball must be rejected"
+    assert not (tmp_path / "evil.txt").exists(), "traversal payload must not land outside target"
+
+
+def test_restore_rejects_absolute_symlink(tmp_path: Path):
+    """Tarball with an absolute symlink member is rejected by filter='data'."""
+    tarball = tmp_path / "abs-symlink.tar.gz"
+    _make_tarball_with_abs_symlink(tarball)
+
+    target = tmp_path / "restore-target"
+    target.mkdir()
+
+    rc = do_restore(str(tarball), str(target), force=True)
+    assert rc == 1, "absolute-symlink tarball must be rejected"
+
+
+def test_snapshot_excludes_absolute_symlink(fake_project: Path, snapshot_dir: Path):
+    """Absolute symlink in .vnx-data is excluded from snapshot archive."""
+    link = fake_project / ".vnx-data" / "state" / "abs-link"
+    link.symlink_to("/etc/passwd")
+
+    rc = do_snapshot(str(fake_project))
+    assert rc == 0
+
+    tarball = next(snapshot_dir.glob("*.tar.gz"))
+    with tarfile.open(tarball, "r:gz") as tf:
+        names = tf.getnames()
+    assert not any("abs-link" in n for n in names), (
+        "absolute symlink must be excluded from snapshot"
+    )
+
+
+def test_snapshot_excludes_escaping_relative_symlink(fake_project: Path, snapshot_dir: Path):
+    """Relative symlink in .vnx-data that escapes .vnx-data is excluded from snapshot."""
+    link = fake_project / ".vnx-data" / "state" / "escape-link"
+    link.symlink_to("../../outside-secret.txt")
+
+    rc = do_snapshot(str(fake_project))
+    assert rc == 0
+
+    tarball = next(snapshot_dir.glob("*.tar.gz"))
+    with tarfile.open(tarball, "r:gz") as tf:
+        names = tf.getnames()
+    assert not any("escape-link" in n for n in names), (
+        "escaping relative symlink must be excluded from snapshot"
+    )
+
+
+def test_snapshot_keeps_safe_relative_symlink(fake_project: Path, snapshot_dir: Path):
+    """Relative symlink that stays within .vnx-data is preserved in snapshot."""
+    target_file = fake_project / ".vnx-data" / "state" / "real.ndjson"
+    target_file.write_text("data\n")
+    link = fake_project / ".vnx-data" / "state" / "safe-link"
+    link.symlink_to("real.ndjson")
+
+    rc = do_snapshot(str(fake_project))
+    assert rc == 0
+
+    tarball = next(snapshot_dir.glob("*.tar.gz"))
+    with tarfile.open(tarball, "r:gz") as tf:
+        names = tf.getnames()
+    assert any("safe-link" in n for n in names), (
+        "safe intra-.vnx-data symlink must be included in snapshot"
+    )

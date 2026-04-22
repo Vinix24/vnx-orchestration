@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import subprocess
 import sys
 import tarfile
 import time
-import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +35,36 @@ def _tarball_stem(tarball: Path) -> str:
     return tarball.stem
 
 
+def _make_snapshot_filter(project: Path, vnx_data: Path):
+    """Return a tarfile filter that omits symlinks escaping .vnx-data."""
+    vnx_data_real = str(vnx_data.resolve())
+    vnx_data_prefix = vnx_data_real + os.sep
+
+    def _filter(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        if not (tarinfo.issym() or tarinfo.islnk()):
+            return tarinfo
+        link = tarinfo.linkname
+        if not link:
+            return tarinfo
+        if Path(link).is_absolute():
+            print(
+                f"  [skip] absolute symlink omitted from snapshot: {tarinfo.name} -> {link}",
+                file=sys.stderr,
+            )
+            return None
+        member_dir = os.path.normpath(str(project / os.path.dirname(tarinfo.name)))
+        candidate = os.path.normpath(os.path.join(member_dir, link))
+        if candidate != vnx_data_real and not candidate.startswith(vnx_data_prefix):
+            print(
+                f"  [skip] escaping symlink omitted from snapshot: {tarinfo.name} -> {link}",
+                file=sys.stderr,
+            )
+            return None
+        return tarinfo
+
+    return _filter
+
+
 # ---------------------------------------------------------------------------
 # snapshot
 # ---------------------------------------------------------------------------
@@ -52,7 +82,7 @@ def do_snapshot(project_path: str) -> int:
     tarball = out_dir / f"{slug}-{ts}.tar.gz"
 
     with tarfile.open(tarball, "w:gz") as tf:
-        tf.add(vnx_data, arcname=".vnx-data")
+        tf.add(vnx_data, arcname=".vnx-data", filter=_make_snapshot_filter(project, vnx_data))
     print(f"snapshot: {tarball}")
 
     db_path = vnx_data / "state" / "runtime_coordination.db"
@@ -113,10 +143,12 @@ def do_restore(tarball_str: str, target_str: str | None, force: bool) -> int:
         import shutil
         shutil.rmtree(existing)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    try:
         with tarfile.open(tarball, "r:gz") as tf:
-            tf.extractall(str(target))
+            tf.extractall(target, filter="data")
+    except tarfile.FilterError as exc:
+        print(f"ERROR: tarball rejected — unsafe member: {exc}", file=sys.stderr)
+        return 1
     print(f"restored: {existing}")
 
     # Offer to restore companion SQL dump
