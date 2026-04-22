@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 def notify_dispatch(dispatch_id: str, terminal: str, task_id: str, pr_id: str = ''):
     """Send dispatch notification to heartbeat monitor via Unix socket"""
 
-    socket_path = '/tmp/heartbeat_ack_monitor.sock'
+    # Project-scoped socket to prevent cross-project receipt contamination
+    import os
+    project_root = os.environ.get('PROJECT_ROOT', os.getcwd())
+    project_name = os.path.basename(project_root)
+    socket_path = f'/tmp/heartbeat_ack_monitor_{project_name}.sock'
 
     message = {
         'action': 'track_dispatch',
