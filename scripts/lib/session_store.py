@@ -5,7 +5,7 @@ Persists the Claude session_id captured from ``--output-format stream-json`` ini
 events so subsequent dispatches can pass ``--resume <session_id>`` and skip the
 cold-start latency of a fresh session.
 
-Storage: .vnx-data/state/subprocess_sessions.json (JSON, atomic write).
+Storage: ``subprocess_sessions.json`` in VNX state dir (resolved via vnx_paths).
 Activation: gated by ``VNX_SESSION_RESUME=1`` — callers must check before loading.
 
 BILLING SAFETY: No Anthropic SDK. Pure file I/O.
