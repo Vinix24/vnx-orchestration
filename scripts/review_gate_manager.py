@@ -132,23 +132,27 @@ def _parse_changed_files(value: str) -> List[str]:
 
 
 def _compute_changed_files(branch: str) -> List[str]:
-    """Auto-compute changed files by diffing branch against origin/main or main."""
+    """Auto-compute changed files by diffing branch against origin/main or main.
+
+    Raises ValueError when both bases fail — callers must handle or pass --changed-files explicitly.
+    """
+    last_err = None
     for base in ("origin/main", "main"):
         try:
             proc = subprocess.run(
                 ["git", "diff", "--name-only", f"{base}...{branch}"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=10, check=True,
             )
-            if proc.returncode == 0:
-                files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
-                print(
-                    f"review_gate_manager: auto-computed {len(files)} changed files from {base}",
-                    file=sys.stderr,
-                )
-                return files
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    return []
+            return [f.strip() for f in proc.stdout.splitlines() if f.strip()]
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            last_err = e
+    print(
+        f"review_gate_manager: WARNING git diff failed for {branch!r} "
+        f"against origin/main/main — reviewers will lack scope context. "
+        f"Pass --changed-files explicitly to proceed. ({last_err})",
+        file=sys.stderr,
+    )
+    raise ValueError(f"cannot auto-compute changed_files for branch {branch!r}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -204,7 +208,11 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
     """Handle request-and-execute subcommand."""
     changed_files = _parse_changed_files(args.changed_files)
     if not changed_files and args.branch:
-        changed_files = _compute_changed_files(args.branch)
+        try:
+            changed_files = _compute_changed_files(args.branch)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
     result = manager.request_and_execute(
         pr_number=args.pr,
         branch=args.branch,
@@ -256,7 +264,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "request":
         changed_files = _parse_changed_files(args.changed_files)
         if not changed_files and args.branch:
-            changed_files = _compute_changed_files(args.branch)
+            try:
+                changed_files = _compute_changed_files(args.branch)
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
         result = manager.request_reviews(
             pr_number=args.pr,
             branch=args.branch,

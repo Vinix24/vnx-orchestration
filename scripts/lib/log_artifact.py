@@ -17,12 +17,16 @@ import re
 from pathlib import Path
 from typing import Optional
 
+_SAFE_RUN_ID = re.compile(r'^[A-Za-z0-9_\-.]+$')
 
-def _safe_filename(run_id: str) -> str:
-    """Return a filesystem-safe name component — no path separators or dot-dot sequences."""
-    safe = re.sub(r"[^a-zA-Z0-9\-_.]", "_", run_id)
-    safe = re.sub(r"\.{2,}", "_", safe)
-    return safe
+
+def _assert_safe_run_id(run_id: str) -> str:
+    """Validate run_id is filesystem-safe — raises ValueError if not."""
+    if not run_id or not _SAFE_RUN_ID.match(run_id) or ".." in run_id:
+        raise ValueError(
+            f"invalid run_id: {run_id!r} (must match [A-Za-z0-9_\\-.]+ and not contain ..)"
+        )
+    return run_id
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +99,7 @@ def write_log_artifact(
         status=status,
     )
 
-    log_path = artifact_dir / f"{_safe_filename(run_id)}.log"
+    log_path = artifact_dir / f"{_assert_safe_run_id(run_id)}.log"
     log_path.write_text(content, encoding="utf-8")
     return log_path
 
@@ -120,6 +124,6 @@ def write_output_artifact(
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = artifact_dir / f"{_safe_filename(run_id)}.out"
+    out_path = artifact_dir / f"{_assert_safe_run_id(run_id)}.out"
     out_path.write_text(stdout, encoding="utf-8")
     return out_path
