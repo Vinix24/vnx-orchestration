@@ -429,6 +429,35 @@ class TestProcessEventsFile:
         assert written == 1
         assert json.loads(log_file.read_text().strip())["action"] == "wait"
 
+    def test_partial_trailing_line_not_skipped(self, tmp_path):
+        events_file = tmp_path / "t0_decisions.ndjson"
+        log_file = tmp_path / "log.jsonl"
+        cursor_file = tmp_path / "cursor.json"
+
+        N = 3
+        valid_lines = [
+            json.dumps(DISPATCH_EVENT),
+            json.dumps(WAIT_EVENT),
+            json.dumps(REJECT_EVENT),
+        ]
+        # Partial last line — incomplete JSON, no trailing newline
+        partial = '{"event_type": "t0_escalate", "reason": "partial'
+        events_file.write_text("\n".join(valid_lines) + "\n" + partial)
+
+        written = process_events_file(events_file, log_file, cursor_file)
+        assert written == N, f"Expected {N} records written, got {written}"
+        cursor_val = load_cursor(cursor_file)
+        assert cursor_val == N, f"Cursor should stop at {N} (not past partial), got {cursor_val}"
+
+        # Complete the partial line by appending and re-run
+        with open(events_file, "a", encoding="utf-8") as f:
+            f.write('", "timestamp": "2026-04-22T10:39:00+00:00"}\n')
+
+        written2 = process_events_file(events_file, log_file, cursor_file)
+        assert written2 == 1, f"Expected 1 new record after completing partial, got {written2}"
+        cursor_val2 = load_cursor(cursor_file)
+        assert cursor_val2 == N + 1, f"Cursor should be {N + 1}, got {cursor_val2}"
+
 
 # ---------------------------------------------------------------------------
 # process_events_file — cursor staleness recovery

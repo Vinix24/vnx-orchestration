@@ -309,21 +309,27 @@ def process_events_file(
     unprocessed = all_lines[cursor:]
 
     written = 0
-    new_cursor = cursor
+    parsed_count = 0
 
-    for raw_line in unprocessed:
-        new_cursor += 1
+    for idx, raw_line in enumerate(unprocessed):
         raw_line = raw_line.strip()
         if not raw_line:
+            parsed_count += 1
             continue
         try:
             event = json.loads(raw_line)
         except json.JSONDecodeError:
-            logger.warning("t0_decision_log: skipping malformed line at position %d", new_cursor)
+            is_last = idx == len(unprocessed) - 1
+            if is_last:
+                # Partial trailing write — do not advance cursor past it; retry next invocation.
+                break
+            logger.warning("t0_decision_log: malformed line skipped at position %d", cursor + idx)
+            parsed_count += 1
             continue
 
         record = record_from_executor_event(event)
         if record is None:
+            parsed_count += 1
             continue
 
         if dry_run:
@@ -332,6 +338,9 @@ def process_events_file(
             write_decision(record, log_file)
 
         written += 1
+        parsed_count += 1
+
+    new_cursor = cursor + parsed_count
 
     if not dry_run and new_cursor > cursor:
         _save_cursor_state(cursor_file, new_cursor, current_inode)
