@@ -1,0 +1,10 @@
+{
+  "dispatch_id": "fixture-research-001",
+  "task_class": "research_structured",
+  "terminal_id": "T1",
+  "prompt": "Summarize the architecture of the VNX headless observability system, focusing on the run registry, exit classification, and artifact writing layers.",
+  "metadata": {
+    "source": "burn_in_fixture",
+    "scenario": "research_structured_baseline"
+  }
+}
