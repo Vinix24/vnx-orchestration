@@ -4,6 +4,7 @@
 
 ### Features
 - **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
+- **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 
