@@ -13,6 +13,8 @@ BILLING SAFETY: No Anthropic SDK. Pure file I/O.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -59,6 +61,35 @@ class SessionStore:
     def _path(self) -> Path:
         base = self._state_dir if self._state_dir is not None else _default_state_dir()
         return base / SESSIONS_FILENAME
+
+    @contextlib.contextmanager
+    def _flock(self, exclusive: bool = True):
+        """Acquire flock on a sentinel lock file to serialize access across
+        concurrent dispatcher/worker processes. Non-fatal on failure."""
+        lock_path = self._path().parent / (SESSIONS_FILENAME + ".lock")
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.debug("SessionStore._flock: mkdir failed: %s", exc)
+            yield
+            return
+        lock_fd = None
+        try:
+            lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except Exception as exc:
+            logger.debug("SessionStore._flock: %s (degraded, no lock)", exc)
+            yield
+        finally:
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
 
     def _read_raw(self) -> Dict[str, Any]:
         """Read and parse the sessions file. Returns empty dict on any error."""
@@ -121,15 +152,16 @@ class SessionStore:
         if not session_id:
             return
         try:
-            data = self._read_raw()
-            data.setdefault("schema_version", SCHEMA_VERSION)
-            terminals = data.setdefault("terminals", {})
-            terminals[terminal_id] = {
-                "session_id": session_id,
-                "dispatch_id": dispatch_id,
-                "updated_at": _now_iso(),
-            }
-            self._write_raw(data)
+            with self._flock(exclusive=True):
+                data = self._read_raw()
+                data.setdefault("schema_version", SCHEMA_VERSION)
+                terminals = data.setdefault("terminals", {})
+                terminals[terminal_id] = {
+                    "session_id": session_id,
+                    "dispatch_id": dispatch_id,
+                    "updated_at": _now_iso(),
+                }
+                self._write_raw(data)
             logger.info(
                 "SessionStore.save: %s session_id=%s dispatch=%s",
                 terminal_id, session_id, dispatch_id,
@@ -140,12 +172,13 @@ class SessionStore:
     def clear(self, terminal_id: str) -> None:
         """Remove persisted session for terminal_id.  Never raises."""
         try:
-            data = self._read_raw()
-            terminals = data.get("terminals", {})
-            if terminal_id in terminals:
-                del terminals[terminal_id]
-                self._write_raw(data)
-                logger.info("SessionStore.clear: removed %s", terminal_id)
+            with self._flock(exclusive=True):
+                data = self._read_raw()
+                terminals = data.get("terminals", {})
+                if terminal_id in terminals:
+                    del terminals[terminal_id]
+                    self._write_raw(data)
+                    logger.info("SessionStore.clear: removed %s", terminal_id)
         except Exception as exc:
             logger.debug("SessionStore.clear(%s): %s", terminal_id, exc)
 

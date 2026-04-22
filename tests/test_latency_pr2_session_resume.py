@@ -160,6 +160,7 @@ def _make_deliver_mocks(session_id_returned: str | None = "sess-from-init"):
     mock_adapter.read_events_with_timeout.return_value = iter([])
     mock_adapter.get_session_id.return_value = session_id_returned
     mock_adapter.observe.return_value = obs_result
+    mock_adapter.was_timed_out.return_value = False
     mock_adapter._get_event_store.return_value = None
 
     return mock_adapter
