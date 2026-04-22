@@ -9,6 +9,7 @@
 - **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
 
 ### Features
+- **W0 PR-6**: `scripts/lib/dispatch_instruction_validator.py` — dispatch instruction template validator (D-1..D-8): Dispatch-ID format, description presence, scope item count thresholds (warn ≥9/block ≥16), unbounded-task language detection, gate/quality-gate alignment, file directory breadth, instruction size, and success-criteria presence; 35 tests in `tests/test_dispatch_instruction_validator.py`
 - **W0 PR-5**: `.github/workflows/burn-in-headless.yml` — scheduled weekly burn-in CI (Sunday 02:00 UTC) running billing-safety gate (BS-1..BS-6) followed by burn-in certification (B-1..B-10), snapshot tooling regression, and fixture smoke checks; `workflow_dispatch` for manual runs; zero API cost (CLI stub via `VNX_HEADLESS_CLI=echo`)
 - **W0 PR-5**: `scripts/lib/exit_classifier.py` — maps subprocess exit conditions to named failure classes (`SUCCESS/TIMEOUT/TOOL_FAIL/INFRA_FAIL/NO_OUTPUT/INTERRUPTED/PROMPT_ERR/UNKNOWN`) with retryability, signal extraction, and operator hints
 - **W0 PR-5**: `scripts/lib/log_artifact.py` — structured human-readable run-log writer (`<run_id>.log`) and raw output capture (`<run_id>.out`) for operator inspection without file spelunking
