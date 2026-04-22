@@ -25,8 +25,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 from t0_decision_summarizer import (
     DEFAULT_DECISION_LOG,
     DEFAULT_EVENTS_FILE,
+    _ROTATION_BYTES,
     _build_fallback,
     _parse_haiku_output,
+    _rotate_if_needed,
     append_decision_record,
     extract_text_content,
     load_events,
@@ -282,6 +284,56 @@ class TestAppendDecisionRecord:
         assert len(lines) == 2
         assert json.loads(lines[0])["action"] == "prior"
         assert json.loads(lines[1])["action"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# _rotate_if_needed — lock-safe rotation
+# ---------------------------------------------------------------------------
+
+class TestRotateIfNeeded:
+    def _large_content(self) -> str:
+        return '{"action":"wait"}\n' * ((_ROTATION_BYTES // 18) + 1)
+
+    def test_below_threshold_leaves_file_unchanged(self, tmp_path):
+        log_file = tmp_path / "test.jsonl"
+        log_file.write_text('{"action":"wait"}\n')
+        original = log_file.read_text()
+        _rotate_if_needed(log_file)
+        assert log_file.read_text() == original
+
+    def test_nonexistent_file_does_nothing(self, tmp_path):
+        _rotate_if_needed(tmp_path / "nonexistent.jsonl")
+
+    def test_rotation_truncates_original(self, tmp_path):
+        log_file = tmp_path / "test.jsonl"
+        log_file.write_text(self._large_content())
+        _rotate_if_needed(log_file)
+        assert log_file.stat().st_size == 0
+
+    def test_rotation_archives_original_content(self, tmp_path):
+        log_file = tmp_path / "test.jsonl"
+        content = self._large_content()
+        log_file.write_text(content)
+        _rotate_if_needed(log_file)
+        archives = list((tmp_path / "archive").glob("*.jsonl"))
+        assert len(archives) == 1
+        assert archives[0].read_text() == content
+
+    def test_rotation_creates_archive_directory(self, tmp_path):
+        log_file = tmp_path / "state" / "test.jsonl"
+        log_file.parent.mkdir(parents=True)
+        log_file.write_text(self._large_content())
+        _rotate_if_needed(log_file)
+        assert (tmp_path / "state" / "archive").is_dir()
+
+    def test_subsequent_append_after_rotation_succeeds(self, tmp_path):
+        log_file = tmp_path / "test.jsonl"
+        log_file.write_text(self._large_content())
+        _rotate_if_needed(log_file)
+        append_decision_record({"action": "dispatch"}, log_file)
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["action"] == "dispatch"
 
 
 # ---------------------------------------------------------------------------
