@@ -5,6 +5,9 @@
 - **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
 ## Unreleased
 
+### Fixes
+- **W0 cleanup**: `scripts/review_gate_manager.py` — auto-compute `changed_files` from git diff when `--changed-files` is empty and `--branch` is provided (eliminates context contamination); `scripts/lib/dispatch_instruction_validator.py` — D-8 rule bumped from `warn` to `blocker` for gate-bearing dispatches; 4 new tests
+
 ### Bug Fixes
 
 - **W0 PR-2 fix**: `receipt_processor_v4.sh` — fix shell quoting in `_auto_release_lease_on_receipt` (array-based args replace unquoted `${:+}` expansion) and fix conflicting state on `task_timeout+no_confirmation` (skip auto-release when shadow intentionally keeps terminal blocked); 8 new tests (22 total)

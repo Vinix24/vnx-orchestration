@@ -131,6 +131,26 @@ def _parse_changed_files(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _compute_changed_files(branch: str) -> List[str]:
+    """Auto-compute changed files by diffing branch against origin/main or main."""
+    for base in ("origin/main", "main"):
+        try:
+            proc = subprocess.run(
+                ["git", "diff", "--name-only", f"{base}...{branch}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode == 0:
+                files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
+                print(
+                    f"review_gate_manager: auto-computed {len(files)} changed files from {base}",
+                    file=sys.stderr,
+                )
+                return files
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    return []
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
@@ -182,12 +202,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Namespace) -> int:
     """Handle request-and-execute subcommand."""
+    changed_files = _parse_changed_files(args.changed_files)
+    if not changed_files and args.branch:
+        changed_files = _compute_changed_files(args.branch)
     result = manager.request_and_execute(
         pr_number=args.pr,
         branch=args.branch,
         review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
         risk_class=args.risk_class,
-        changed_files=_parse_changed_files(args.changed_files),
+        changed_files=changed_files,
         mode=args.mode,
     )
     print(json.dumps(result, indent=2))
@@ -231,12 +254,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manager = ReviewGateManager()
 
     if args.command == "request":
+        changed_files = _parse_changed_files(args.changed_files)
+        if not changed_files and args.branch:
+            changed_files = _compute_changed_files(args.branch)
         result = manager.request_reviews(
             pr_number=args.pr,
             branch=args.branch,
             review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
             risk_class=args.risk_class,
-            changed_files=_parse_changed_files(args.changed_files),
+            changed_files=changed_files,
             mode=args.mode,
         )
         print(json.dumps(result, indent=2))
