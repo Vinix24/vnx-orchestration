@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/submit_decision-request",
+  "title": "submit_decision Request",
+  "description": "Record a T0 decision event. Sent as JSON body on POST /v1/projects/:project_id/decisions. The daemon executes the write; T0 submits. Corresponds to t0_decision_log.jsonl entries (F36-R1/R1b).",
+  "type": "object",
+  "required": ["decision_type", "reasoning"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Client-assigned id (ISO timestamp + suffix). Daemon uses this for idempotency. If omitted, daemon generates one."
+    },
+    "decision_type": {
+      "type": "string",
+      "enum": ["dispatch", "approve", "reject", "escalate", "wait", "close_oi", "advance_gate"]
+    },
+    "dispatch_id":        { "type": ["string", "null"] },
+    "track":              { "type": ["string", "null"], "enum": ["A", "B", "C", null] },
+    "pr_id":              { "type": ["string", "null"] },
+    "reasoning":          { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "open_items_actions": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "List of OI action strings, e.g. ['OI-003 closed: resolved by PR-2 merge']."
+    },
+    "next_expected":      { "type": ["string", "null"] },
+    "session_summary_at": { "type": ["string", "null"], "format": "date-time" },
+    "source": {
+      "type": ["string", "null"],
+      "enum": ["haiku", "direct", "replay", null],
+      "description": "How this decision record was produced."
+    }
+  }
+}
