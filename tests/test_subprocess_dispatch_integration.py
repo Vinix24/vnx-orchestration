@@ -56,6 +56,9 @@ class TestDeliverViaSubprocess(unittest.TestCase):
         with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:
             instance = MockAdapter.return_value
             instance.deliver.return_value = _delivery_result(success=True)
+            obs = MagicMock()
+            obs.transport_state = {"returncode": 0}
+            instance.observe.return_value = obs
 
             result = deliver_via_subprocess(
                 terminal_id="T1",
@@ -64,7 +67,7 @@ class TestDeliverViaSubprocess(unittest.TestCase):
                 dispatch_id="dispatch-test-001",
             )
 
-        self.assertTrue(result)
+        self.assertTrue(result.success)
         call_args, call_kwargs = instance.deliver.call_args
         self.assertEqual(call_args, ("T1", "dispatch-test-001"))
         self.assertEqual(call_kwargs["model"], "sonnet")
@@ -83,7 +86,7 @@ class TestDeliverViaSubprocess(unittest.TestCase):
                 dispatch_id="dispatch-test-001",
             )
 
-        self.assertFalse(result)
+        self.assertFalse(result.success)
 
     def test_passes_model_to_adapter(self):
         with patch("subprocess_dispatch.SubprocessAdapter") as MockAdapter:

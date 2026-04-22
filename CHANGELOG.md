@@ -15,6 +15,7 @@
 - **F36 Wave C PR-1**: Shadow mode decision parity harness (`shadow_mode_runner.py`) — runs the headless T0 decision engine in dry-run mode against recent trigger events, compares shadow decisions to the actual decision log, and generates JSONL + markdown parity reports under `{VNX_DATA_DIR}/shadow_parity/`; 64 tests covering all public functions
 - **F36 Wave C PR-239 fix**: Shadow runner pairing correctness — replaced positional event↔decision alignment with `dispatch_id`-keyed lookup (FIFO fallback for non-dispatch events); prevents stale pairings when cursor lag or independent "last N" slices cause index drift; 12 new tests, 76 total
 ### Fixes
+- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
 - **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
