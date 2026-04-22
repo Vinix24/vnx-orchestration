@@ -186,6 +186,23 @@ def cmd_release_lease(args: argparse.Namespace) -> None:
     _out(result, 0 if result.get("released") else 1)
 
 
+def cmd_release_on_receipt(args: argparse.Namespace) -> None:
+    """Release canonical lease when a worker task receipt arrives.
+
+    Looks up the current lease generation internally so the caller does not
+    need to thread the generation through the receipt pipeline.
+
+    Idempotent: terminal already idle returns released=True with skipped=True.
+    Ownership guard: when --dispatch-id is provided, rejects mismatched owners.
+    """
+    core = _require_core()
+    result = core.release_on_receipt(
+        terminal_id=args.terminal,
+        dispatch_id=args.dispatch_id or None,
+    )
+    _out(result, 0 if result.get("released") else 1)
+
+
 def cmd_release_on_failure(args: argparse.Namespace) -> None:
     """Record delivery failure and release canonical lease atomically.
 
@@ -301,6 +318,13 @@ def _add_lease_subparsers(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--generation", type=int, required=True)
 
     p = sub.add_parser(
+        "release-on-receipt",
+        help="Release canonical lease on task receipt (generation looked up internally)",
+    )
+    p.add_argument("--terminal", required=True)
+    p.add_argument("--dispatch-id", default="")
+
+    p = sub.add_parser(
         "release-on-failure",
         help="Record delivery failure and release canonical lease atomically",
     )
@@ -330,6 +354,7 @@ def main() -> None:
         "check-terminal": cmd_check_terminal,
         "acquire-lease": cmd_acquire_lease,
         "release-lease": cmd_release_lease,
+        "release-on-receipt": cmd_release_on_receipt,
         "release-on-failure": cmd_release_on_failure,
         "compat-check": cmd_compat_check,
         "chain-closeout": cmd_chain_closeout,

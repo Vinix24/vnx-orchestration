@@ -5,6 +5,13 @@
 - **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
 ## Unreleased
 
+### Bug Fixes
+
+- **W0 PR-2 fix**: `receipt_processor_v4.sh` — fix shell quoting in `_auto_release_lease_on_receipt` (array-based args replace unquoted `${:+}` expansion) and fix conflicting state on `task_timeout+no_confirmation` (skip auto-release when shadow intentionally keeps terminal blocked); 8 new tests (22 total)
+
+### Features
+
+- **W0 PR-2**: Auto-lease-release on task receipt — `receipt_processor_v4.sh` now calls `release-on-receipt` automatically on `task_complete`/`task_failed`/`task_timeout` events, eliminating the need for manual `release-on-failure` after every worker receipt; `RuntimeCore.release_on_receipt()` resolves generation internally with dispatch-id ownership guard and idempotent idle-terminal handling
 ### Security
 - **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
 

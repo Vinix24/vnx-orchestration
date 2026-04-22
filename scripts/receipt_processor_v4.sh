@@ -532,6 +532,31 @@ _move_dispatch_to_completed() {
         log "WARN" "Failed to move dispatch to completed: $_rf_dispatch_id"
 }
 
+# Section C2b helper: Auto-release canonical lease on terminal task events.
+# Called for task_complete / task_failed / task_timeout.
+# Uses release-on-receipt which resolves generation internally. Non-fatal.
+_auto_release_lease_on_receipt() {
+    local terminal="$1"
+    local dispatch_id="$2"
+    [ -z "$terminal" ] && return 0
+
+    local _ror_args=(--terminal "$terminal")
+    [ -n "$dispatch_id" ] && _ror_args+=(--dispatch-id "$dispatch_id")
+    local release_result
+    release_result=$(python3 "$SCRIPTS_DIR/runtime_core_cli.py" release-on-receipt "${_ror_args[@]}" 2>/dev/null)
+    local rc=$?
+
+    if [ $rc -eq 0 ]; then
+        local reason
+        reason=$(echo "$release_result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reason','ok'))" 2>/dev/null)
+        log "INFO" "AUTO_LEASE_RELEASE: terminal=$terminal dispatch=${dispatch_id:-unset} reason=$reason"
+    else
+        local err
+        err=$(echo "$release_result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error') or d.get('reason','unknown'))" 2>/dev/null)
+        log "WARN" "AUTO_LEASE_RELEASE: failed for terminal=$terminal dispatch=${dispatch_id:-unset} err=${err:-rc=$rc} (non-fatal)"
+    fi
+}
+
 # Section D: Extract PR ID (3-tier) and attach evidence to open items.
 # Reads _rf_* variables. Non-fatal.
 attach_pr_evidence() {
@@ -959,6 +984,17 @@ process_single_report() {
 
     # C2. Move dispatch from active/ → completed/ on task finish (non-fatal)
     _move_dispatch_to_completed
+
+    # C2b. Auto-release canonical lease on terminal receipt events (non-fatal).
+    # Eliminates the need for manual `release-on-failure` after every worker receipt.
+    # release-on-receipt looks up the current generation internally; idempotent.
+    # Skip auto-release for no_confirmation timeouts: Section C intentionally keeps
+    # the terminal blocked (canonical lease held) to prevent immediate re-dispatch.
+    # Releasing the lease here would conflict with the blocked shadow state.
+    if [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] \
+       || { [ "$_rf_event_type" = "task_timeout" ] && [ "$_rf_status" != "no_confirmation" ]; }; then
+        _auto_release_lease_on_receipt "$terminal" "$_rf_dispatch_id"
+    fi
 
     # C3. Update dispatch_metadata outcome in quality DB (non-fatal)
     if [ -n "$_rf_dispatch_id" ] && { [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] || [ "$_rf_event_type" = "task_timeout" ]; }; then

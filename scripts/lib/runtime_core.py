@@ -396,6 +396,70 @@ class RuntimeCore:
         except Exception as exc:
             return {"released": False, "terminal_id": terminal_id, "error": str(exc)}
 
+    def release_on_receipt(
+        self,
+        terminal_id: str,
+        dispatch_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Release canonical lease on task receipt without requiring generation.
+
+        Called by receipt_processor after task_complete/task_failed/task_timeout.
+        Looks up the current generation from the DB so the caller does not need to
+        thread it through the receipt pipeline.
+
+        Ownership guard: when dispatch_id is provided, the lease must be owned by
+        that dispatch — a mismatched owner is rejected rather than silently stolen.
+
+        Idempotent: terminal already in idle state returns released=True.
+
+        Returns a structured dict with released/skipped/reason for audit logging.
+        """
+        try:
+            lease = self._lease_mgr.get(terminal_id)
+            if lease is None:
+                return {
+                    "released": False,
+                    "terminal_id": terminal_id,
+                    "reason": "terminal_not_found",
+                }
+
+            if lease.state == "idle":
+                return {
+                    "released": True,
+                    "terminal_id": terminal_id,
+                    "reason": "already_idle",
+                    "skipped": True,
+                }
+
+            if dispatch_id and lease.dispatch_id and lease.dispatch_id != dispatch_id:
+                return {
+                    "released": False,
+                    "terminal_id": terminal_id,
+                    "reason": f"ownership_mismatch:lease_owned_by={lease.dispatch_id}",
+                    "claimed_by": lease.dispatch_id,
+                }
+
+            generation = lease.generation
+            self._lease_mgr.release(
+                terminal_id,
+                generation,
+                actor="receipt_processor",
+                reason=f"task_receipt:{dispatch_id or 'unknown'}",
+            )
+            return {
+                "released": True,
+                "terminal_id": terminal_id,
+                "generation": generation,
+                "dispatch_id": dispatch_id,
+                "reason": "receipt_triggered_release",
+            }
+        except Exception as exc:
+            return {
+                "released": False,
+                "terminal_id": terminal_id,
+                "error": str(exc),
+            }
+
     def release_on_delivery_failure(
         self,
         dispatch_id: str,
