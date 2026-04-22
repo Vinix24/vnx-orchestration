@@ -4,7 +4,7 @@
 Complements t0_decision_summarizer.py (haiku-powered) with a zero-LLM
 path: converts already-structured decision events (from decision_executor
 or direct callers) into decision log records and appends them to
-.vnx-data/state/t0_decision_log.jsonl.
+the decision log under VNX_STATE_DIR.
 
 Two usage modes:
 
@@ -14,7 +14,7 @@ Two usage modes:
 
 2. Batch replay from events file (CLI):
    python3 scripts/lib/t0_decision_log.py
-   python3 scripts/lib/t0_decision_log.py --events-file .vnx-data/events/t0_decisions.ndjson
+   python3 scripts/lib/t0_decision_log.py --events-file "$VNX_DATA_DIR/events/t0_decisions.ndjson"
    python3 scripts/lib/t0_decision_log.py --dry-run
 
 Decision record schema (same as summarizer output):
@@ -29,8 +29,8 @@ Decision record schema (same as summarizer output):
     "next_expected": ""
   }
 
-Cursor tracking: stores the number of processed lines in
-.vnx-data/state/t0_decision_log_cursor.json so repeated runs are
+Cursor tracking: stores the number of processed lines in a
+cursor JSON file under VNX_STATE_DIR so repeated runs are
 idempotent — only unprocessed events are converted.
 
 BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls.
