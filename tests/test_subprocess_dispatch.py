@@ -22,6 +22,13 @@ def mock_adapter():
         yield instance
 
 
+def _mock_observe(returncode=0):
+    """Return a mock ObservationResult-like object with the given returncode."""
+    obs = MagicMock()
+    obs.transport_state = {"returncode": returncode}
+    return obs
+
+
 class TestDeliverViaSubprocess:
     def test_success_consumes_all_events(self, mock_adapter):
         mock_adapter.deliver.return_value = MagicMock(success=True)
@@ -30,10 +37,11 @@ class TestDeliverViaSubprocess:
             MagicMock(type="text"),
             MagicMock(type="result"),
         ])
+        mock_adapter.observe.return_value = _mock_observe(0)
 
         result = deliver_via_subprocess("T1", "do stuff", "sonnet", "d-001")
 
-        assert result is True
+        assert result.success is True
         call_args, call_kwargs = mock_adapter.deliver.call_args
         assert call_args == ("T1", "d-001")
         assert call_kwargs["model"] == "sonnet"
@@ -48,16 +56,17 @@ class TestDeliverViaSubprocess:
 
         result = deliver_via_subprocess("T1", "do stuff", "sonnet", "d-002")
 
-        assert result is False
+        assert result.success is False
         mock_adapter.read_events_with_timeout.assert_not_called()
 
     def test_empty_event_stream_succeeds(self, mock_adapter):
         mock_adapter.deliver.return_value = MagicMock(success=True)
         mock_adapter.read_events_with_timeout.return_value = iter([])
+        mock_adapter.observe.return_value = _mock_observe(0)
 
         result = deliver_via_subprocess("T1", "do stuff", "sonnet", "d-003")
 
-        assert result is True
+        assert result.success is True
         mock_adapter.read_events_with_timeout.assert_called_once_with(
             "T1", chunk_timeout=120.0, total_deadline=600.0,
         )

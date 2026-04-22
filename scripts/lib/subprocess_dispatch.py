@@ -427,7 +427,22 @@ def deliver_via_subprocess(
                         health_monitor.log_stuck_event()
                         _last_stuck_log_time = _now
         session_id = adapter.get_session_id(terminal_id)
+        # Fail-closed: non-zero exit code means failure even when events were parsed.
+        obs = adapter.observe(terminal_id)
+        returncode = obs.transport_state.get("returncode")
         completed_manifest = _promote_manifest(dispatch_id)
+        if returncode is not None and returncode != 0:
+            logger.warning(
+                "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
+                returncode,
+                terminal_id,
+            )
+            return _SubprocessResult(
+                success=False,
+                session_id=session_id,
+                event_count=event_count,
+                manifest_path=completed_manifest or manifest_path,
+            )
         return _SubprocessResult(
             success=True,
             session_id=session_id,
