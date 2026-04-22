@@ -13,8 +13,16 @@ BILLING SAFETY: No Anthropic SDK imports. No api.anthropic.com calls.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
+
+
+def _safe_filename(run_id: str) -> str:
+    """Return a filesystem-safe name component — no path separators or dot-dot sequences."""
+    safe = re.sub(r"[^a-zA-Z0-9\-_.]", "_", run_id)
+    safe = re.sub(r"\.{2,}", "_", safe)
+    return safe
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +95,7 @@ def write_log_artifact(
         status=status,
     )
 
-    log_path = artifact_dir / f"{run_id}.log"
+    log_path = artifact_dir / f"{_safe_filename(run_id)}.log"
     log_path.write_text(content, encoding="utf-8")
     return log_path
 
@@ -112,6 +120,6 @@ def write_output_artifact(
     artifact_dir = Path(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    out_path = artifact_dir / f"{run_id}.out"
+    out_path = artifact_dir / f"{_safe_filename(run_id)}.out"
     out_path.write_text(stdout, encoding="utf-8")
     return out_path

@@ -105,6 +105,8 @@ def list_runs(
         runs = registry.list_active()
     elif show_failed:
         runs = registry.list_by_state("failed")
+    elif show_all:
+        runs = registry.list_recent(limit)
     else:
         runs = registry.list_recent(limit)
 
