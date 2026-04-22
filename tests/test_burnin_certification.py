@@ -357,6 +357,35 @@ class TestB4LogArtifacts:
         assert "TOOL_FAIL" in content
         assert "rate limit exceeded" in content
 
+    def test_path_traversal_run_id_confined_to_artifact_dir(self, artifact_dir):
+        traversal_id = "../../etc/run-escape"
+        path = write_log_artifact(
+            artifact_dir=artifact_dir,
+            run_id=traversal_id,
+            dispatch_id="dispatch-traversal",
+            target_type="headless_claude_cli",
+            started_at="2026-03-30T10:00:00.000Z",
+            stdout="output",
+            stderr="",
+            exit_code=0,
+            duration_seconds=1.0,
+        )
+        assert path.parent.resolve() == artifact_dir.resolve()
+        assert ".." not in path.name
+        assert "/" not in path.name
+
+    def test_path_traversal_output_artifact_confined_to_artifact_dir(self, artifact_dir):
+        traversal_id = "../sneaky/run-out"
+        path = write_output_artifact(
+            artifact_dir=artifact_dir,
+            run_id=traversal_id,
+            stdout="sensitive data",
+        )
+        assert path is not None
+        assert path.parent.resolve() == artifact_dir.resolve()
+        assert ".." not in path.name
+        assert "/" not in path.name
+
 
 # ---------------------------------------------------------------------------
 # B-5: Operator can inspect run without file spelunking
@@ -421,6 +450,17 @@ class TestB5OperatorInspection:
         failed_lines = list_runs(registry, show_failed=True)
         assert len(failed_lines) == 1
         assert "INFRA_FAIL" in failed_lines[0]
+
+    def test_show_all_returns_recent_runs(self, state_dir, registry):
+        for _ in range(3):
+            run = _make_run(registry, state_dir)
+            registry.transition(run.run_id, "running", actor="test")
+            registry.transition(run.run_id, "completing", actor="test")
+            registry.transition(run.run_id, "succeeded", failure_class="SUCCESS", actor="test")
+        lines = list_runs(registry, show_all=True)
+        assert len(lines) == 3
+        for line in lines:
+            assert "succeeded" in line
 
 
 # ---------------------------------------------------------------------------

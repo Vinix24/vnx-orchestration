@@ -16,6 +16,10 @@
 - **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
 
 ### Fixes
+- **W0 PR-5 fix2**: `scripts/lib/log_artifact.py` — path traversal hardening: `_safe_filename()` strips path separators and collapses `..` sequences from `run_id` before using it in artifact filenames; `scripts/lib/headless_inspect.py` — `list_runs()` `show_all` parameter was dead code (never branched on); added explicit `elif show_all:` branch; 3 new tests (53 total)
+- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
+
+### Features
 - **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
 
 ### Features
