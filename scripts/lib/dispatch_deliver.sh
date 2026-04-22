@@ -501,7 +501,7 @@ _ddt_subprocess_delivery() {
 
 # deliver_dispatch_to_terminal — input-mode guard, worktree path resolution, delivery.
 # Checks VNX_ADAPTER_T{n} env var: if "subprocess", routes via SubprocessAdapter.
-# Default (tmux or unset): uses existing tmux send-keys delivery.
+# T0 defaults to tmux; T1/T2/T3 default to subprocess (set VNX_ADAPTER_Tx=tmux to opt-out).
 # Params: dispatch_file track agent_role dispatch_id target_pane terminal_id
 #         provider complete_prompt skill_command
 # Reads globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID
@@ -510,11 +510,12 @@ deliver_dispatch_to_terminal() {
     local target_pane="$5" terminal_id="$6" provider="$7"
     local complete_prompt="$8" skill_command="$9"
 
-    # Resolve per-terminal adapter: VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
-    # T1 defaults to subprocess (headless backend-developer) since F32.
+    # Resolve per-terminal adapter: VNX_ADAPTER_T0, VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
+    # T0: set VNX_ADAPTER_T0=subprocess to route T0 via SubprocessAdapter (not default).
+    # T1/T2/T3 default to subprocess (headless workers) since F32; set VNX_ADAPTER_Tx=tmux to opt-out.
     local adapter_var="VNX_ADAPTER_${terminal_id}"
     local adapter_type="${!adapter_var:-tmux}"
-    if [[ "$terminal_id" == "T1" && "$adapter_type" == "tmux" && -z "${!adapter_var:-}" ]]; then
+    if [[ "$terminal_id" =~ ^T[123]$ && "$adapter_type" == "tmux" && -z "${!adapter_var:-}" ]]; then
         adapter_type="subprocess"
     fi
 

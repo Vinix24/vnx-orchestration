@@ -22,6 +22,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 try:
     from vnx_paths import ensure_env
+    from project_root import resolve_state_dir
     from quality_advisory import generate_quality_advisory, get_changed_files
     from terminal_snapshot import collect_terminal_snapshot
     from cqs_calculator import calculate_cqs
@@ -67,6 +68,16 @@ IDEMPOTENCY_FIELDS = (
     "report_path",
     "source",
 )
+
+
+def is_headless_t0() -> bool:
+    """Return True when T0 is configured to run via subprocess adapter.
+
+    Set VNX_ADAPTER_T0=subprocess to enable headless T0 mode.  When True,
+    the receipt processor annotates the T0 terminal snapshot entry with
+    adapter/headless metadata and skips tmux-dependent probes for T0.
+    """
+    return os.environ.get("VNX_ADAPTER_T0", "tmux").lower() == "subprocess"
 
 
 @dataclass(frozen=True)
@@ -350,7 +361,7 @@ def _resolve_session_id(receipt: Dict[str, Any]) -> str:
             return value
 
     # Priority 2: Per-terminal current_session file (DETERMINISTIC)
-    state_dir = Path(os.environ.get("VNX_STATE_DIR", Path.home() / ".claude" / "vnx-system"))
+    state_dir = resolve_state_dir(__file__)
     current_session_file = state_dir / f"current_session_{terminal}"
     if current_session_file.exists():
         try:
@@ -632,6 +643,19 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
             "status": "unavailable",
             "error": str(exc),
         }
+
+    # Annotate T0 terminal snapshot entry when T0 runs via subprocess adapter.
+    # Skips tmux-based probes for T0 and marks the entry so downstream readers
+    # know T0 was headless at receipt time.
+    if is_headless_t0():
+        snapshot_data = enriched.get("terminal_snapshot") or {}
+        terminals = snapshot_data.get("terminals") or {}
+        t0_entry = dict(terminals.get("T0") or {})
+        t0_entry["adapter"] = "subprocess"
+        t0_entry["headless"] = True
+        terminals["T0"] = t0_entry
+        snapshot_data["terminals"] = terminals
+        enriched["terminal_snapshot"] = snapshot_data
 
     # Generate quality advisory (best-effort)
     try:
@@ -959,11 +983,7 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
 
         outcome = "success" if event_type == "task_complete" else "failure"
 
-        state_dir = Path(SCRIPT_DIR).parent / ".vnx-data" / "state"
-        # Try canonical env path first
-        env_state = os.environ.get("VNX_STATE_DIR", "")
-        if env_state:
-            state_dir = Path(env_state)
+        state_dir = resolve_state_dir(__file__)
 
         db_path = state_dir / "quality_intelligence.db"
         if not db_path.exists():

@@ -49,6 +49,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
+from project_root import resolve_data_dir, resolve_state_dir, resolve_dispatch_dir
 from runtime_core import RuntimeCore, load_runtime_core
 
 
@@ -57,32 +58,9 @@ from runtime_core import RuntimeCore, load_runtime_core
 # ---------------------------------------------------------------------------
 
 def _get_dirs() -> tuple[str, str]:
-    """Return (state_dir, dispatch_dir) from VNX environment.
-
-    BOOT-1: No /tmp fallback. Raises RuntimeError when required env vars are unset.
-    """
-    vnx_data = os.environ.get("VNX_DATA_DIR", "")
-    state_dir = os.environ.get("VNX_STATE_DIR", "")
-    dispatch_dir = os.environ.get("VNX_DISPATCH_DIR", "")
-
-    if not state_dir:
-        if vnx_data:
-            state_dir = str(Path(vnx_data) / "state")
-        else:
-            raise RuntimeError(
-                "VNX_STATE_DIR is not set and VNX_DATA_DIR is not set. "
-                "Source bin/vnx or set VNX_DATA_DIR before running runtime_core_cli.py."
-            )
-
-    if not dispatch_dir:
-        if vnx_data:
-            dispatch_dir = str(Path(vnx_data) / "dispatches")
-        else:
-            raise RuntimeError(
-                "VNX_DISPATCH_DIR is not set and VNX_DATA_DIR is not set. "
-                "Source bin/vnx or set VNX_DATA_DIR before running runtime_core_cli.py."
-            )
-
+    """Return (state_dir, dispatch_dir) resolved via git-based project root."""
+    state_dir = str(resolve_state_dir(__file__))
+    dispatch_dir = str(resolve_dispatch_dir(__file__))
     return state_dir, dispatch_dir
 
 

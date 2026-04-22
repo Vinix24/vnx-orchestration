@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import warnings
 from pathlib import Path
 from typing import Dict
 
@@ -98,7 +99,21 @@ def resolve_paths() -> Dict[str, str]:
         os.environ.get("VNX_CANONICAL_ROOT") or _default_canonical_root(vnx_home)
     ).expanduser().resolve()
 
-    vnx_data_dir = Path(os.environ.get("VNX_DATA_DIR") or (project_root / ".vnx-data")).expanduser().resolve()
+    _explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    _explicit_val = os.environ.get("VNX_DATA_DIR")
+    if _explicit_flag and _explicit_val:
+        vnx_data_dir = Path(_explicit_val).expanduser().resolve()
+    else:
+        if _explicit_val and not _explicit_flag:
+            warnings.warn(
+                f"VNX_DATA_DIR env-var set ({_explicit_val}) but "
+                "VNX_DATA_DIR_EXPLICIT=1 is required for it to be honored. "
+                "Ignoring and using VNX_HOME-resolved project root. "
+                "See https://github.com/Vinix24/vnx-orchestration/issues/225",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        vnx_data_dir = (project_root / ".vnx-data").resolve()
 
     paths = {
         "VNX_HOME": str(vnx_home),

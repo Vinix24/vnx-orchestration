@@ -24,6 +24,7 @@ def review_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_HOME", str(VNX_ROOT))
     monkeypatch.setenv("PROJECT_ROOT", str(project_root))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
     monkeypatch.setenv("VNX_DISPATCH_DIR", str(data_dir / "dispatches"))
     monkeypatch.setenv("VNX_LOGS_DIR", str(data_dir / "logs"))

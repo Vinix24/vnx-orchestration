@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_open_items-response",
+  "title": "query_open_items Response",
+  "description": "Response body for GET /v1/projects/:project_id/open-items.",
+  "type": "object",
+  "required": ["project_id", "items", "total", "schema_version"],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "total": {
+      "type": "integer",
+      "description": "Total count matching the query before pagination."
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/open_item"
+      }
+    }
+  },
+  "definitions": {
+    "open_item": {
+      "type": "object",
+      "required": ["id", "project_id", "severity", "status", "title", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id":                    { "type": "string" },
+        "project_id":            { "type": "string" },
+        "severity":              { "type": "string", "enum": ["blocker", "warning", "info"] },
+        "status":                { "type": "string", "enum": ["open", "in_progress", "done", "wont_fix"] },
+        "title":                 { "type": "string" },
+        "description":           { "type": ["string", "null"] },
+        "pr_id":                 { "type": ["string", "null"] },
+        "evidence_refs":         { "type": ["array", "null"], "items": { "type": "string" } },
+        "resolution":            { "type": ["string", "null"] },
+        "origin_dispatch_id":    { "type": ["string", "null"] },
+        "origin_report_path":    { "type": ["string", "null"] },
+        "closed_reason":         { "type": ["string", "null"] },
+        "closed_by_dispatch_id": { "type": ["string", "null"] },
+        "created_at":            { "type": "string", "format": "date-time" },
+        "updated_at":            { "type": "string", "format": "date-time" },
+        "closed_at":             { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

@@ -50,6 +50,9 @@ index.html
 # Runtime PID files
 *.pid
 
+# Claude Code runtime lock files
+.claude/scheduled_tasks.lock
+
 # Local runtime logs
 scripts/*.log
 scripts/smart_tap.log

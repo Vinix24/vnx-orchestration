@@ -241,6 +241,23 @@ def transition_escalation(
         },
     )
 
+    try:
+        from t0_escalations_log import (  # noqa: PLC0415
+            record_from_governance_transition,
+            write_escalation,
+        )
+        write_escalation(record_from_governance_transition(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            from_level=current_level,
+            new_level=new_level,
+            actor=actor,
+            trigger_category=trigger_category,
+            trigger_description=trigger_description,
+        ))
+    except Exception:
+        pass  # JSONL write is best-effort; never block governance transitions
+
     return dict(
         conn.execute(
             "SELECT * FROM escalation_state WHERE entity_type = ? AND entity_id = ?",

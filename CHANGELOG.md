@@ -3,7 +3,28 @@
 ## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
 
 - **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
+## Unreleased
 
+### Security
+- **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
+
+### Features
+- **W0 PR-4**: `vnx snapshot/restore/quiesce-check` — CLI tools for project-state backup and migration readiness: tarball + SQL dump of `.vnx-data/`, fail-safe restore with overwrite guard, and read-only quiesce verification across 4 conditions (active dispatches, held leases, in-flight gates, uncommitted changes)
+- **W0 PR-1**: `scripts/dispatcher_supervisor.sh` — dedicated auto-restart supervisor for `dispatcher_v8_minimal.sh` with exponential backoff (2s→60s), stale singleton lock cleanup before each restart, SIGTERM-safe child shutdown, and `status` subcommand
+- **F32 Wave D PR-1**: T2/T3 default subprocess delivery — `deliver_dispatch_to_terminal` now defaults T1/T2/T3 to subprocess adapter; T0 remains tmux by default; `VNX_ADAPTER_Tx=tmux` opts any terminal back to tmux
+- **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
+- **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
+- **F36 PR-233 fix**: `_rotate_if_needed` holds exclusive lock across full copy+truncate to prevent concurrent-writer data loss; `process_events_file` resets stale cursor when it exceeds file length after source reset
+- **F36 PR-233 re-gate fix**: inode-based cursor invalidation in `process_events_file` detects source-file replacement (same or greater line count) and resets cursor to 0; `.claude/scheduled_tasks.lock` untracked and added to `.gitignore`
+- **F36 PR-233 final fix**: parse-before-advance in `process_events_file` — partial trailing JSON line does not advance cursor (retried next invocation); malformed non-last lines log warning and advance as before
+- **F36 PR-233 round-4 fix**: legacy cursor upgrade in `process_events_file` — cursor written without inode (legacy `save_cursor` format) is upgraded with current inode even when no new events exist, enabling same-length file replacement detection on all subsequent runs
+- **F36 Wave B PR-2**: T0 escalations log (`t0_escalations_log.py`) — passive JSONL writer for escalation records with dual adapter hooks: `decision_executor._handle_escalate()` emits executor-source records; `governance_escalation.transition_escalation()` emits governance-source records with full entity/trigger data; batch-replay CLI with inode-based cursor tracking
+- **F36 Wave B PR-1**: `VNX_ADAPTER_T0=subprocess` cutover flag — `is_headless_t0()` added to receipt processor; T0 snapshot annotated with `adapter/headless` fields when headless; `dispatch_deliver.sh` documents explicit T0 subprocess support; `heartbeat_ack_monitor` docstring updated for T0 coverage
+- **F36 Wave C PR-1**: Shadow mode decision parity harness (`shadow_mode_runner.py`) — runs the headless T0 decision engine in dry-run mode against recent trigger events, compares shadow decisions to the actual decision log, and generates JSONL + markdown parity reports under `{VNX_DATA_DIR}/shadow_parity/`; 64 tests covering all public functions
+- **F36 Wave C PR-239 fix**: Shadow runner pairing correctness — replaced positional event↔decision alignment with `dispatch_id`-keyed lookup (FIFO fallback for non-dispatch events); prevents stale pairings when cursor lag or independent "last N" slices cause index drift; 12 new tests, 76 total
+### Fixes
+- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
+- **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 

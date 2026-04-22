@@ -302,7 +302,9 @@ class GateRequestHandlerMixin:
 
         required = mode == "final" or codex_final_gate_required(changed_files)
         available = self._codex_headless_available()
-        model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or "gpt-5.2-codex"
+        # Model from env only; empty string means "use codex config.toml default".
+        # See gate_runner._build_gate_cmd and ~/.codex/config.toml for defaults.
+        model = os.environ.get("VNX_CODEX_HEADLESS_MODEL") or os.environ.get("VNX_CODEX_MODEL") or ""
         requested_at = _utc_now()
         payload = {
             "gate": "codex_gate",

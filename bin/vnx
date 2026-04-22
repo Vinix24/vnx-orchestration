@@ -191,6 +191,12 @@ Gate commands (pre-merge verification):
   gate <pr> --only gemini  Run only the Gemini review gate
   gate <pr> --status       Show gate results without running
 
+Snapshot commands (W0):
+  snapshot [<path>]         Snapshot .vnx-data/ to ~/vnx-snapshots/ (tarball + SQL dump)
+  restore <tarball>         Restore .vnx-data/ from snapshot tarball
+                            Options: --target <path>, --force
+  quiesce-check [<path>]    Verify project is safe to migrate (read-only)
+
 Runtime commands:
   recover            Recover from unclean shutdown or stale state
                      Options: --aggressive, --dry-run
@@ -1831,6 +1837,15 @@ main() {
       ;;
     worktree-status)
       cmd_worktree_status
+      ;;
+    snapshot)
+      cmd_snapshot "$@"
+      ;;
+    restore)
+      cmd_restore "$@"
+      ;;
+    quiesce-check)
+      cmd_quiesce_check "$@"
       ;;
     recover)
       cmd_recover "$@"
