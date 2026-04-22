@@ -6,6 +6,7 @@
 - **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
 - **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
 - **F36 PR-233 fix**: `_rotate_if_needed` holds exclusive lock across full copy+truncate to prevent concurrent-writer data loss; `process_events_file` resets stale cursor when it exceeds file length after source reset
+- **F36 PR-233 re-gate fix**: inode-based cursor invalidation in `process_events_file` detects source-file replacement (same or greater line count) and resets cursor to 0; `.claude/scheduled_tasks.lock` untracked and added to `.gitignore`
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 

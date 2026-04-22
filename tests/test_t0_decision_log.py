@@ -472,6 +472,28 @@ class TestProcessEventsFileCursorStaleness:
         assert written_second == 0
         assert load_cursor(cursor_file) == cursor_after_first
 
+    def test_cursor_resets_when_source_replaced_same_length(self, tmp_path):
+        # Process initial 3-event file so cursor = 3 with inode recorded
+        events_file = make_events_file(tmp_path, [DISPATCH_EVENT, WAIT_EVENT, COMPLETE_EVENT])
+        log_file = tmp_path / "log.jsonl"
+        cursor_file = tmp_path / "cursor.json"
+        process_events_file(events_file, log_file, cursor_file)
+        assert load_cursor(cursor_file) == 3
+
+        # Replace source with different content but same line count (new inode)
+        events_file.unlink()
+        new_events = [REJECT_EVENT, ESCALATE_EVENT, UNKNOWN_DECISION_EVENT]
+        events_file.write_text("\n".join(json.dumps(e) for e in new_events) + "\n")
+        log_file.unlink()
+
+        # Inode mismatch must trigger cursor reset; all 3 new lines processed
+        written = process_events_file(events_file, log_file, cursor_file)
+
+        assert written == 3
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 3
+        assert json.loads(lines[0])["action"] == "reject"
+
 
 # ---------------------------------------------------------------------------
 # main() CLI

@@ -230,6 +230,26 @@ def save_cursor(cursor_file: Path, processed_lines: int) -> None:
     )
 
 
+def _load_cursor_state(cursor_file: Path) -> dict:
+    """Return full cursor state dict (processed_lines, inode).
+
+    Backward-compatible: old cursor files without 'inode' return inode=None.
+    """
+    if not cursor_file.exists():
+        return {"processed_lines": 0}
+    try:
+        return json.loads(cursor_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {"processed_lines": 0}
+
+
+def _save_cursor_state(cursor_file: Path, processed_lines: int, inode: int) -> None:
+    """Persist cursor with inode so source-identity changes can be detected."""
+    cursor_file.parent.mkdir(parents=True, exist_ok=True)
+    state = {"processed_lines": processed_lines, "inode": inode}
+    cursor_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Batch replay
 # ---------------------------------------------------------------------------
@@ -258,7 +278,26 @@ def process_events_file(
         return 0
 
     all_lines = events_file.read_text(encoding="utf-8").splitlines()
-    cursor = load_cursor(cursor_file)
+
+    cursor_state = _load_cursor_state(cursor_file)
+    cursor = int(cursor_state.get("processed_lines", 0))
+    saved_inode = cursor_state.get("inode")
+
+    try:
+        current_inode = os.stat(events_file).st_ino
+    except OSError:
+        current_inode = 0
+
+    # Inode mismatch: source file was replaced (same or greater line count) → reset
+    if saved_inode is not None and saved_inode != 0 and current_inode != 0 and current_inode != saved_inode:
+        logger.warning(
+            "t0_decision_log: source file replaced (inode %d → %d) — resetting cursor to 0",
+            saved_inode,
+            current_inode,
+        )
+        cursor = 0
+
+    # Line-count guard: also reset if cursor exceeds current file length
     if cursor > len(all_lines):
         logger.warning(
             "t0_decision_log: cursor %d exceeds file length %d — source file may have been reset; reprocessing from start",
@@ -266,6 +305,7 @@ def process_events_file(
             len(all_lines),
         )
         cursor = 0
+
     unprocessed = all_lines[cursor:]
 
     written = 0
@@ -294,7 +334,7 @@ def process_events_file(
         written += 1
 
     if not dry_run and new_cursor > cursor:
-        save_cursor(cursor_file, new_cursor)
+        _save_cursor_state(cursor_file, new_cursor, current_inode)
         logger.info(
             "t0_decision_log: processed %d new events, wrote %d records",
             new_cursor - cursor,
