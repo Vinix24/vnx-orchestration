@@ -414,11 +414,11 @@ class TestGateRequiresSuccessCriteria:
         d8 = [f for f in result.findings if f.rule == "D-8"]
         assert len(d8) == 0
 
-    def test_gate_without_criteria_is_warn(self) -> None:
+    def test_gate_without_criteria_is_blocker(self) -> None:
         result = validate_dispatch_instruction(GATE_NO_CRITERIA)
         d8 = [f for f in result.findings if f.rule == "D-8"]
         assert len(d8) == 1
-        assert d8[0].severity == "warn"
+        assert d8[0].severity == "blocker"
 
     def test_no_gate_no_d8(self) -> None:
         content = """
@@ -430,6 +430,24 @@ Simple task without gate.
         result = validate_dispatch_instruction(content)
         d8 = [f for f in result.findings if f.rule == "D-8"]
         assert len(d8) == 0
+
+    def test_d8_gate_bearing_without_success_criteria_is_blocker(self) -> None:
+        result = validate_dispatch_instruction(GATE_NO_CRITERIA)
+        d8 = [f for f in result.findings if f.rule == "D-8"]
+        assert len(d8) == 1
+        assert d8[0].severity == "blocker"
+        assert result.passed is False
+
+    def test_d8_no_gate_header_still_warn(self) -> None:
+        content = """
+Dispatch-ID: 20260422-182004-nogate3-A
+
+### Description
+Simple task without a Gate header or Success Criteria.
+"""
+        result = validate_dispatch_instruction(content)
+        d8_blockers = [f for f in result.findings if f.rule == "D-8" and f.severity == "blocker"]
+        assert len(d8_blockers) == 0
 
 
 # ---------------------------------------------------------------------------

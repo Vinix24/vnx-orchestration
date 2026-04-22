@@ -218,7 +218,7 @@ def _check_gate_has_success_criteria(content: str, result: DispatchValidationRes
         has_criteria = bool(re.search(r"###\s+Success\s+Criteria", content, re.IGNORECASE))
         if not has_criteria:
             result.findings.append(DispatchFinding(
-                rule="D-8", severity="warn",
+                rule="D-8", severity="blocker",
                 message=f"Gate '{gate_value}' declared but no '### Success Criteria' section found. "
                         "Workers cannot self-assess completion without explicit acceptance criteria.",
             ))
