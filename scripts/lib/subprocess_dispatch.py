@@ -317,8 +317,8 @@ def deliver_via_subprocess(
     repo_map: str | None = None,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
-    chunk_timeout: float = 120.0,
-    total_deadline: float = 600.0,
+    chunk_timeout: float = 300.0,
+    total_deadline: float = 900.0,
     health_monitor: "WorkerHealthMonitor | None" = None,
     commit_hash_before: str = "",
 ) -> "_SubprocessResult":
@@ -343,6 +343,16 @@ def deliver_via_subprocess(
 
     Returns _SubprocessResult(success, session_id, event_count, manifest_path).
     """
+    # Allow runtime override via env vars so operators can tune without code changes.
+    try:
+        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
+    except (KeyError, ValueError):
+        pass
+    try:
+        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
+    except (KeyError, ValueError):
+        pass
+
     # Append repo map to instruction before skill context wrapping
     if repo_map:
         instruction = instruction + f"\n\n{repo_map}"
@@ -826,8 +836,8 @@ def deliver_with_recovery(
     max_retries: int = 3,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
-    chunk_timeout: float = 120.0,
-    total_deadline: float = 600.0,
+    chunk_timeout: float = 300.0,
+    total_deadline: float = 900.0,
     auto_commit: bool = True,
     gate: str = "",
 ) -> bool:
@@ -844,6 +854,16 @@ def deliver_with_recovery(
 
     Returns True on success, False on failure.
     """
+    # Allow runtime override via env vars so operators can tune without code changes.
+    try:
+        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
+    except (KeyError, ValueError):
+        pass
+    try:
+        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
+    except (KeyError, ValueError):
+        pass
+
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _get_commit_hash()
 

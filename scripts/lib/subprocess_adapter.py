@@ -380,16 +380,26 @@ class SubprocessAdapter:
     def read_events_with_timeout(
         self,
         terminal_id: str,
-        chunk_timeout: float = 120.0,
-        total_deadline: float = 600.0,
+        chunk_timeout: float = 300.0,
+        total_deadline: float = 900.0,
     ) -> Iterator[StreamEvent]:
         """Like read_events() but with timeout protection.
 
         chunk_timeout: max seconds to wait for the next line of output.
+            Default 300s. Override with VNX_CHUNK_TIMEOUT env var.
         total_deadline: max total seconds for the entire read.
+            Default 900s. Override with VNX_TOTAL_DEADLINE env var.
 
         On timeout, the subprocess is killed via stop() and iteration ends.
         """
+        try:
+            chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
+        except (KeyError, ValueError):
+            pass
+        try:
+            total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
+        except (KeyError, ValueError):
+            pass
         process = self._processes.get(terminal_id)
         if process is None or process.stdout is None:
             return

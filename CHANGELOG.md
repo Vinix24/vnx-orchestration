@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Latency PR-1**: Add 60s cooldown for invalid-skill dispatches in `dispatcher_v8_minimal.sh` (env-tunable via `VNX_INVALID_SKILL_COOLDOWN`) to prevent log floods and queue stalls on every 2s poll
+- **Latency PR-1**: Raise `chunk_timeout` default from 120s → 300s and `total_deadline` from 600s → 900s in `subprocess_adapter.py` and `subprocess_dispatch.py`; both tuneable via `VNX_CHUNK_TIMEOUT` / `VNX_TOTAL_DEADLINE` env vars
+
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 
 ### Features
