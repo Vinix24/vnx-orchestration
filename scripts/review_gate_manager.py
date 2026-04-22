@@ -131,6 +131,30 @@ def _parse_changed_files(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _compute_changed_files(branch: str) -> List[str]:
+    """Auto-compute changed files by diffing branch against origin/main or main.
+
+    Raises ValueError when both bases fail — callers must handle or pass --changed-files explicitly.
+    """
+    last_err = None
+    for base in ("origin/main", "main"):
+        try:
+            proc = subprocess.run(
+                ["git", "diff", "--name-only", f"{base}...{branch}"],
+                capture_output=True, text=True, timeout=10, check=True,
+            )
+            return [f.strip() for f in proc.stdout.splitlines() if f.strip()]
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            last_err = e
+    print(
+        f"review_gate_manager: WARNING git diff failed for {branch!r} "
+        f"against origin/main/main — reviewers will lack scope context. "
+        f"Pass --changed-files explicitly to proceed. ({last_err})",
+        file=sys.stderr,
+    )
+    raise ValueError(f"cannot auto-compute changed_files for branch {branch!r}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands."""
     parser = argparse.ArgumentParser(description="VNX review gate manager")
@@ -182,12 +206,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Namespace) -> int:
     """Handle request-and-execute subcommand."""
+    changed_files = _parse_changed_files(args.changed_files)
+    if not changed_files and args.branch:
+        try:
+            changed_files = _compute_changed_files(args.branch)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
     result = manager.request_and_execute(
         pr_number=args.pr,
         branch=args.branch,
         review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
         risk_class=args.risk_class,
-        changed_files=_parse_changed_files(args.changed_files),
+        changed_files=changed_files,
         mode=args.mode,
     )
     print(json.dumps(result, indent=2))
@@ -231,12 +262,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     manager = ReviewGateManager()
 
     if args.command == "request":
+        changed_files = _parse_changed_files(args.changed_files)
+        if not changed_files and args.branch:
+            try:
+                changed_files = _compute_changed_files(args.branch)
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
         result = manager.request_reviews(
             pr_number=args.pr,
             branch=args.branch,
             review_stack=[item.strip() for item in args.review_stack.split(",") if item.strip()],
             risk_class=args.risk_class,
-            changed_files=_parse_changed_files(args.changed_files),
+            changed_files=changed_files,
             mode=args.mode,
         )
         print(json.dumps(result, indent=2))

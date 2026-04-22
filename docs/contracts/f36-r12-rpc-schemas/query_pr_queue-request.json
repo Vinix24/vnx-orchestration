@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_pr_queue-request",
+  "title": "query_pr_queue Request",
+  "description": "Query the PR queue for a project. HTTP query parameters on GET /v1/projects/:project_id/pr-queue.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "state": {
+      "type": "array",
+      "description": "Filter by PR state. Omit for all states.",
+      "items": {
+        "type": "string",
+        "enum": ["queued", "active", "blocked", "completed", "skipped"]
+      },
+      "uniqueItems": true
+    },
+    "pr_id": {
+      "type": "string",
+      "description": "Return only this specific PR."
+    },
+    "include_completed": {
+      "type": "boolean",
+      "description": "Include completed PRs in results.",
+      "default": false
+    }
+  }
+}

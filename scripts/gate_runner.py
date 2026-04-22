@@ -217,13 +217,18 @@ class GateRunner:
             model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
             cli_args = ["--model", model] + cli_args
         elif gate == "codex_gate":
+            # Model selection: only override if explicitly requested via env/payload.
+            # Default path: let codex use ~/.codex/config.toml (currently gpt-5.3-codex).
+            # 2026-04-19: gpt-5.2-codex deprecated via Codex CLI model-migration mapping;
+            # ChatGPT-account auth rejects older explicit model flags, causing gate
+            # failures with "model not supported when using Codex with a ChatGPT account".
             model = (
                 os.environ.get("VNX_CODEX_HEADLESS_MODEL")
                 or os.environ.get("VNX_CODEX_MODEL")
                 or request_payload.get("model")
-                or "gpt-5.2-codex"
             )
-            cli_args = cli_args + ["-c", f'model="{model}"']
+            if model:
+                cli_args = cli_args + ["-c", f'model="{model}"']
         return [binary] + cli_args
 
     def _drain_remaining(self, fd_map: Dict[int, str], raw_fds: List[int],

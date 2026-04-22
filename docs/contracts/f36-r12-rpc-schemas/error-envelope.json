@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/error-envelope",
+  "title": "VNX RPC Error Envelope",
+  "description": "Shared error response format returned by all VNX daemon RPC endpoints on 4xx/5xx status codes.",
+  "type": "object",
+  "required": ["error"],
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Machine-readable error code.",
+          "enum": [
+            "not_found",
+            "forbidden",
+            "invalid_request",
+            "conflict",
+            "rate_limited",
+            "internal_error",
+            "schema_mismatch",
+            "project_not_registered",
+            "gate_already_completed",
+            "dispatch_not_active"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error description."
+        },
+        "detail": {
+          "type": "object",
+          "description": "Optional structured detail for the specific error type.",
+          "additionalProperties": true
+        },
+        "request_id": {
+          "type": "string",
+          "description": "Opaque identifier for this request, for log correlation."
+        }
+      }
+    }
+  }
+}
