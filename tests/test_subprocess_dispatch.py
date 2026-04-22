@@ -48,7 +48,7 @@ class TestDeliverViaSubprocess:
         assert "do stuff" in call_kwargs["instruction"]
         assert call_kwargs.get("cwd") is None
         mock_adapter.read_events_with_timeout.assert_called_once_with(
-            "T1", chunk_timeout=120.0, total_deadline=600.0,
+            "T1", chunk_timeout=300.0, total_deadline=900.0,
         )
 
     def test_failure_returns_false_without_reading(self, mock_adapter):
@@ -68,5 +68,5 @@ class TestDeliverViaSubprocess:
 
         assert result.success is True
         mock_adapter.read_events_with_timeout.assert_called_once_with(
-            "T1", chunk_timeout=120.0, total_deadline=600.0,
+            "T1", chunk_timeout=300.0, total_deadline=900.0,
         )

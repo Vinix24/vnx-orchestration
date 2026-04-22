@@ -1,11 +1,12 @@
 # Changelog
 
-## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
-
-- **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
 ## Unreleased
 
 ### Fixes
+- **Latency PR-1+PR2 CI fix**: Update `tests/test_subprocess_dispatch.py` stale assertions from old defaults (chunk_timeout=120, total_deadline=600) to new defaults (chunk_timeout=300, total_deadline=900) introduced by latency PR-1
+- **Latency PR-2**: Add `SessionStore` (`scripts/lib/session_store.py`) — atomic JSON file-backed store that persists Claude session IDs per terminal; wire into `deliver_via_subprocess()` to pass `--resume <session_id>` on subsequent dispatches (opt-in via `VNX_SESSION_RESUME=1`)
+- **Latency PR-1**: Add 60s cooldown for invalid-skill dispatches in `dispatcher_v8_minimal.sh` (env-tunable via `VNX_INVALID_SKILL_COOLDOWN`) to prevent log floods and queue stalls on every 2s poll
+- **Latency PR-1**: Raise `chunk_timeout` default from 120s → 300s and `total_deadline` from 600s → 900s in `subprocess_adapter.py` and `subprocess_dispatch.py`; both tuneable via `VNX_CHUNK_TIMEOUT` / `VNX_TOTAL_DEADLINE` env vars
 - **W0 cleanup**: `scripts/review_gate_manager.py` — auto-compute `changed_files` from git diff when `--changed-files` is empty and `--branch` is provided (eliminates context contamination); `scripts/lib/dispatch_instruction_validator.py` — D-8 rule bumped from `warn` to `blocker` for gate-bearing dispatches; 4 new tests
 
 ### Bug Fixes
@@ -15,15 +16,15 @@
 ### Features
 
 - **W0 PR-2**: Auto-lease-release on task receipt — `receipt_processor_v4.sh` now calls `release-on-receipt` automatically on `task_complete`/`task_failed`/`task_timeout` events, eliminating the need for manual `release-on-failure` after every worker receipt; `RuntimeCore.release_on_receipt()` resolves generation internally with dispatch-id ownership guard and idempotent idle-terminal handling
+
 ### Security
 - **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
 
 ### Fixes
 - **W0 PR-5 fix2**: `scripts/lib/log_artifact.py` — path traversal hardening: `_safe_filename()` strips path separators and collapses `..` sequences from `run_id` before using it in artifact filenames; `scripts/lib/headless_inspect.py` — `list_runs()` `show_all` parameter was dead code (never branched on); added explicit `elif show_all:` branch; 3 new tests (53 total)
 - **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
-
-### Features
-- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
+- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
+- **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
 
 ### Features
 - **W0 PR-6**: `scripts/lib/dispatch_instruction_validator.py` — dispatch instruction template validator (D-1..D-8): Dispatch-ID format, description presence, scope item count thresholds (warn ≥9/block ≥16), unbounded-task language detection, gate/quality-gate alignment, file directory breadth, instruction size, and success-criteria presence; 35 tests in `tests/test_dispatch_instruction_validator.py`
@@ -47,9 +48,10 @@
 - **F36 Wave B PR-1**: `VNX_ADAPTER_T0=subprocess` cutover flag — `is_headless_t0()` added to receipt processor; T0 snapshot annotated with `adapter/headless` fields when headless; `dispatch_deliver.sh` documents explicit T0 subprocess support; `heartbeat_ack_monitor` docstring updated for T0 coverage
 - **F36 Wave C PR-1**: Shadow mode decision parity harness (`shadow_mode_runner.py`) — runs the headless T0 decision engine in dry-run mode against recent trigger events, compares shadow decisions to the actual decision log, and generates JSONL + markdown parity reports under `{VNX_DATA_DIR}/shadow_parity/`; 64 tests covering all public functions
 - **F36 Wave C PR-239 fix**: Shadow runner pairing correctness — replaced positional event↔decision alignment with `dispatch_id`-keyed lookup (FIFO fallback for non-dispatch events); prevents stale pairings when cursor lag or independent "last N" slices cause index drift; 12 new tests, 76 total
-### Fixes
-- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
-- **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
+
+## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
+
+- **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 

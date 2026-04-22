@@ -62,6 +62,13 @@ NC='\033[0m' # No Color
 mkdir -p "$(dirname "$LOG_FILE")"
 exec >> "$LOG_FILE" 2>&1
 
+# Cooldown tracking for invalid-skill dispatches.
+# Maps dispatch basename → unix timestamp of last warning log.
+# Prevents log floods when a dispatch has [SKILL_INVALID] and is polled every 2s.
+declare -A _INVALID_SKILL_COOLDOWN
+# Seconds between repeated "invalid skill" warnings per dispatch (env-tunable).
+VNX_INVALID_SKILL_COOLDOWN="${VNX_INVALID_SKILL_COOLDOWN:-60}"
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dispatcher V8 MINIMAL starting..."
 
 # Initialize directories
@@ -178,6 +185,15 @@ _validate_stuck_files() {
     local agent_role="$2"
 
     if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
+        local _dispatch_key _now _last_warned _elapsed
+        _dispatch_key="$(basename "$dispatch" .md)"
+        _now=$(date +%s)
+        _last_warned="${_INVALID_SKILL_COOLDOWN[$_dispatch_key]:-0}"
+        _elapsed=$(( _now - _last_warned ))
+        if (( _elapsed < VNX_INVALID_SKILL_COOLDOWN )); then
+            return 1  # still in cooldown — skip silently
+        fi
+        _INVALID_SKILL_COOLDOWN[$_dispatch_key]=$_now
         log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
         return 1
     fi
