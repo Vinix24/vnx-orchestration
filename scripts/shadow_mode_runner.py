@@ -196,6 +196,47 @@ def shadow_action_to_log_action(shadow_action: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Decision pairing helpers
+# ---------------------------------------------------------------------------
+
+def _build_decision_index(
+    decisions: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Index decisions by dispatch_id; collect decisions without dispatch_id separately.
+
+    Returns:
+        by_dispatch_id: dict mapping dispatch_id → decision record (last wins on dup)
+        unkeyed: ordered list of decisions with null/missing dispatch_id
+    """
+    by_dispatch_id: dict[str, dict[str, Any]] = {}
+    unkeyed: list[dict[str, Any]] = []
+    for decision in decisions:
+        did = decision.get("dispatch_id")
+        if did:
+            by_dispatch_id[str(did)] = decision
+        else:
+            unkeyed.append(decision)
+    return by_dispatch_id, unkeyed
+
+
+def _pair_event_to_decision(
+    event: dict[str, Any],
+    by_dispatch_id: dict[str, dict[str, Any]],
+    unkeyed: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Look up the actual decision for an event.
+
+    For dispatch events (those with dispatch_id): look up by dispatch_id in index.
+    For non-dispatch events: consume the next unkeyed decision in FIFO order.
+    Returns None when no matching decision is found.
+    """
+    event_dispatch_id = event.get("dispatch_id")
+    if event_dispatch_id:
+        return by_dispatch_id.get(str(event_dispatch_id))
+    return unkeyed.pop(0) if unkeyed else None
+
+
+# ---------------------------------------------------------------------------
 # Parity comparison
 # ---------------------------------------------------------------------------
 
@@ -417,10 +458,14 @@ def run_shadow_mode(
     if not events:
         logger.warning("No events found at %s — parity check skipped", events_file)
 
-    # Pair events to decisions by position; pad shorter list with None
+    # Pair events to decisions: by dispatch_id (keyed) or FIFO (unkeyed).
+    # Positional alignment fails when the decision log lags the events file or
+    # when both are loaded as independent "last N" slices from their respective
+    # files. Keyed lookup is stable regardless of relative file lengths.
+    by_dispatch_id, unkeyed = _build_decision_index(actual_decisions)
     comparisons: list[dict[str, Any]] = []
     for i, event in enumerate(events):
-        actual = actual_decisions[i] if i < len(actual_decisions) else None
+        actual = _pair_event_to_decision(event, by_dispatch_id, unkeyed)
         shadow = run_shadow_decision(event, state_dir, backend)
         comparison = compare_decisions(event, actual, shadow)
         comparisons.append(comparison)

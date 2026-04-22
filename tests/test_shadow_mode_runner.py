@@ -28,9 +28,11 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
 from shadow_mode_runner import (
+    _build_decision_index,
     _build_shadow_context,
     _infer_receipt_status,
     _load_ndjson,
+    _pair_event_to_decision,
     compare_decisions,
     generate_parity_report,
     main,
@@ -67,6 +69,7 @@ ESCALATE_EVENT = {
 
 DISPATCH_DECISION = {
     "action": "dispatch",
+    "dispatch_id": "20260422-103500-f36-A",
     "timestamp": "2026-04-22T10:35:01+00:00",
     "reasoning": "Dispatched to T1 — new_report",
 }
@@ -649,3 +652,97 @@ class TestMain:
             "--dry-run",
         ])
         assert not out_dir.exists() or list(out_dir.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# _build_decision_index
+# ---------------------------------------------------------------------------
+
+class TestBuildDecisionIndex:
+    def test_empty_input_returns_empty_collections(self):
+        by_did, unkeyed = _build_decision_index([])
+        assert by_did == {}
+        assert unkeyed == []
+
+    def test_keyed_decisions_indexed_by_dispatch_id(self):
+        decisions = [DISPATCH_DECISION]
+        by_did, unkeyed = _build_decision_index(decisions)
+        assert "20260422-103500-f36-A" in by_did
+        assert by_did["20260422-103500-f36-A"]["action"] == "dispatch"
+        assert unkeyed == []
+
+    def test_decisions_without_dispatch_id_go_to_unkeyed(self):
+        by_did, unkeyed = _build_decision_index([WAIT_DECISION, ESCALATE_DECISION])
+        assert by_did == {}
+        assert len(unkeyed) == 2
+        assert unkeyed[0]["action"] == "wait"
+        assert unkeyed[1]["action"] == "escalate"
+
+    def test_mixed_keyed_and_unkeyed(self):
+        decisions = [DISPATCH_DECISION, WAIT_DECISION, ESCALATE_DECISION]
+        by_did, unkeyed = _build_decision_index(decisions)
+        assert len(by_did) == 1
+        assert "20260422-103500-f36-A" in by_did
+        assert len(unkeyed) == 2
+
+    def test_last_wins_on_duplicate_dispatch_id(self):
+        first  = {"dispatch_id": "dup-id", "action": "dispatch", "version": 1}
+        second = {"dispatch_id": "dup-id", "action": "wait",     "version": 2}
+        by_did, _ = _build_decision_index([first, second])
+        assert by_did["dup-id"]["version"] == 2
+
+    def test_none_dispatch_id_treated_as_unkeyed(self):
+        d = {"dispatch_id": None, "action": "wait"}
+        by_did, unkeyed = _build_decision_index([d])
+        assert by_did == {}
+        assert len(unkeyed) == 1
+
+
+# ---------------------------------------------------------------------------
+# _pair_event_to_decision
+# ---------------------------------------------------------------------------
+
+class TestPairEventToDecision:
+    def _index(self, decisions=None):
+        return _build_decision_index(decisions or ALL_DECISIONS)
+
+    def test_dispatch_event_pairs_by_dispatch_id(self):
+        by_did, unkeyed = self._index([DISPATCH_DECISION])
+        result = _pair_event_to_decision(DISPATCH_EVENT, by_did, unkeyed)
+        assert result is not None
+        assert result["action"] == "dispatch"
+
+    def test_dispatch_event_missing_from_index_returns_none(self):
+        by_did, unkeyed = _build_decision_index([])
+        result = _pair_event_to_decision(DISPATCH_EVENT, by_did, unkeyed)
+        assert result is None
+
+    def test_non_dispatch_event_consumes_unkeyed_fifo(self):
+        by_did, unkeyed = _build_decision_index([WAIT_DECISION, ESCALATE_DECISION])
+        first  = _pair_event_to_decision(WAIT_EVENT,     by_did, unkeyed)
+        second = _pair_event_to_decision(ESCALATE_EVENT, by_did, unkeyed)
+        assert first  is not None and first["action"]  == "wait"
+        assert second is not None and second["action"] == "escalate"
+
+    def test_unkeyed_exhausted_returns_none(self):
+        by_did, unkeyed = _build_decision_index([WAIT_DECISION])
+        _pair_event_to_decision(WAIT_EVENT, by_did, unkeyed)  # consume the only one
+        result = _pair_event_to_decision(ESCALATE_EVENT, by_did, unkeyed)
+        assert result is None
+
+    def test_dispatch_event_does_not_consume_unkeyed(self):
+        by_did, unkeyed = _build_decision_index([DISPATCH_DECISION, WAIT_DECISION])
+        _pair_event_to_decision(DISPATCH_EVENT, by_did, unkeyed)
+        assert len(unkeyed) == 1  # WAIT_DECISION still there
+
+    def test_positional_drift_does_not_corrupt_pairing(self):
+        # Simulate: events file has 3 records, decision log only has 2 (cursor lag).
+        # With old positional approach, ESCALATE_EVENT would get WAIT_DECISION.
+        # With keyed approach, ESCALATE_EVENT gets None (correct: no logged decision yet).
+        by_did, unkeyed = _build_decision_index([DISPATCH_DECISION, WAIT_DECISION])
+        d_result = _pair_event_to_decision(DISPATCH_EVENT, by_did, unkeyed)
+        w_result = _pair_event_to_decision(WAIT_EVENT, by_did, unkeyed)
+        e_result = _pair_event_to_decision(ESCALATE_EVENT, by_did, unkeyed)
+        assert d_result is not None and d_result["action"] == "dispatch"
+        assert w_result is not None and w_result["action"] == "wait"
+        assert e_result is None  # no decision logged yet — correct
