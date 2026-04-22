@@ -1,7 +1,17 @@
 # Changelog
 
+## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
+
+- **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
 ## Unreleased
 
+### Bug Fixes
+
+- **W0 PR-2 fix**: `receipt_processor_v4.sh` — fix shell quoting in `_auto_release_lease_on_receipt` (array-based args replace unquoted `${:+}` expansion) and fix conflicting state on `task_timeout+no_confirmation` (skip auto-release when shadow intentionally keeps terminal blocked); 8 new tests (22 total)
+
+### Features
+
+- **W0 PR-2**: Auto-lease-release on task receipt — `receipt_processor_v4.sh` now calls `release-on-receipt` automatically on `task_complete`/`task_failed`/`task_timeout` events, eliminating the need for manual `release-on-failure` after every worker receipt; `RuntimeCore.release_on_receipt()` resolves generation internally with dispatch-id ownership guard and idempotent idle-terminal handling
 ### Security
 - **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
 
@@ -10,6 +20,10 @@
 - **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
 
 ### Features
+- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
+
+### Features
+- **W0 PR-6**: `scripts/lib/dispatch_instruction_validator.py` — dispatch instruction template validator (D-1..D-8): Dispatch-ID format, description presence, scope item count thresholds (warn ≥9/block ≥16), unbounded-task language detection, gate/quality-gate alignment, file directory breadth, instruction size, and success-criteria presence; 35 tests in `tests/test_dispatch_instruction_validator.py`
 - **W0 PR-5**: `.github/workflows/burn-in-headless.yml` — scheduled weekly burn-in CI (Sunday 02:00 UTC) running billing-safety gate (BS-1..BS-6) followed by burn-in certification (B-1..B-10), snapshot tooling regression, and fixture smoke checks; `workflow_dispatch` for manual runs; zero API cost (CLI stub via `VNX_HEADLESS_CLI=echo`)
 - **W0 PR-5**: `scripts/lib/exit_classifier.py` — maps subprocess exit conditions to named failure classes (`SUCCESS/TIMEOUT/TOOL_FAIL/INFRA_FAIL/NO_OUTPUT/INTERRUPTED/PROMPT_ERR/UNKNOWN`) with retryability, signal extraction, and operator hints
 - **W0 PR-5**: `scripts/lib/log_artifact.py` — structured human-readable run-log writer (`<run_id>.log`) and raw output capture (`<run_id>.out`) for operator inspection without file spelunking
