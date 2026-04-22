@@ -523,6 +523,53 @@ class TestProcessEventsFileCursorStaleness:
         assert len(lines) == 3
         assert json.loads(lines[0])["action"] == "reject"
 
+    def test_legacy_cursor_at_eof_upgraded_with_inode(self, tmp_path):
+        """Legacy cursor (no inode field) at EOF must gain inode on next run.
+
+        Without this upgrade the cursor file never learns the events file's
+        inode, so file replacements of the same length are permanently invisible.
+        """
+        events_file = tmp_path / "t0_decisions.ndjson"
+        cursor_file = tmp_path / "cursor.json"
+        log_file = tmp_path / "log.jsonl"
+
+        events_file.write_text(json.dumps(DISPATCH_EVENT) + "\n")
+
+        # Write a legacy cursor pointing to EOF (no inode field)
+        cursor_file.write_text(json.dumps({"processed_lines": 1}) + "\n")
+
+        # Run — no new events; cursor should still be upgraded with inode
+        written = process_events_file(events_file, log_file, cursor_file)
+        assert written == 0
+
+        cursor_state = json.loads(cursor_file.read_text())
+        assert "inode" in cursor_state, "Legacy cursor must be upgraded with inode field"
+        assert cursor_state["inode"] != 0
+        assert cursor_state["processed_lines"] == 1
+
+    def test_legacy_cursor_upgrade_enables_same_length_replacement_detection(self, tmp_path):
+        """After upgrading a legacy cursor, same-length file replacement is detected."""
+        events_file = tmp_path / "t0_decisions.ndjson"
+        cursor_file = tmp_path / "cursor.json"
+        log_file = tmp_path / "log.jsonl"
+
+        events_file.write_text(json.dumps(DISPATCH_EVENT) + "\n")
+
+        # Legacy cursor at EOF
+        cursor_file.write_text(json.dumps({"processed_lines": 1}) + "\n")
+
+        # Upgrade the cursor by running (no new events)
+        process_events_file(events_file, log_file, cursor_file)
+
+        # Replace the events file with different content but same line count
+        events_file.unlink()
+        events_file.write_text(json.dumps(WAIT_EVENT) + "\n")
+
+        # Inode mismatch is now detectable; event must be reprocessed
+        written2 = process_events_file(events_file, log_file, cursor_file)
+        assert written2 == 1
+        assert json.loads(log_file.read_text().strip())["action"] == "wait"
+
 
 # ---------------------------------------------------------------------------
 # main() CLI

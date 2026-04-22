@@ -342,13 +342,21 @@ def process_events_file(
 
     new_cursor = cursor + parsed_count
 
-    if not dry_run and new_cursor > cursor:
-        _save_cursor_state(cursor_file, new_cursor, current_inode)
-        logger.info(
-            "t0_decision_log: processed %d new events, wrote %d records",
-            new_cursor - cursor,
-            written,
-        )
+    if not dry_run:
+        upgrade_only = saved_inode is None and new_cursor == cursor
+        if new_cursor > cursor or upgrade_only:
+            _save_cursor_state(cursor_file, new_cursor, current_inode)
+        if new_cursor > cursor:
+            logger.info(
+                "t0_decision_log: processed %d new events, wrote %d records",
+                new_cursor - cursor,
+                written,
+            )
+        elif upgrade_only:
+            logger.info(
+                "t0_decision_log: upgraded legacy cursor with inode %d (no new events)",
+                current_inode,
+            )
 
     return written
 
