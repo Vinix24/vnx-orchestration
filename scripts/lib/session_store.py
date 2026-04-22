@@ -74,17 +74,21 @@ class SessionStore:
             yield
             return
         lock_fd = None
+        lock_acquired = False
         try:
-            lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             try:
-                yield
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except Exception as exc:
-            logger.debug("SessionStore._flock: %s (degraded, no lock)", exc)
+                lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                lock_acquired = True
+            except Exception as exc:
+                logger.debug("SessionStore._flock: %s (degraded, no lock)", exc)
             yield
         finally:
+            if lock_acquired and lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             if lock_fd is not None:
                 try:
                     os.close(lock_fd)
