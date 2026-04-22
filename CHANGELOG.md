@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Features
+- **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
+- **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
+- **F36 PR-233 fix**: `_rotate_if_needed` holds exclusive lock across full copy+truncate to prevent concurrent-writer data loss; `process_events_file` resets stale cursor when it exceeds file length after source reset
+- **F36 PR-233 re-gate fix**: inode-based cursor invalidation in `process_events_file` detects source-file replacement (same or greater line count) and resets cursor to 0; `.claude/scheduled_tasks.lock` untracked and added to `.gitignore`
+- **F36 PR-233 final fix**: parse-before-advance in `process_events_file` — partial trailing JSON line does not advance cursor (retried next invocation); malformed non-last lines log warning and advance as before
+- **F36 PR-233 round-4 fix**: legacy cursor upgrade in `process_events_file` — cursor written without inode (legacy `save_cursor` format) is upgraded with current inode even when no new events exist, enabling same-length file replacement detection on all subsequent runs
 ### Fixes
 - **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
 
