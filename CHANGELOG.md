@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Features
+- **W0 PR-1**: `scripts/dispatcher_supervisor.sh` — dedicated auto-restart supervisor for `dispatcher_v8_minimal.sh` with exponential backoff (2s→60s), stale singleton lock cleanup before each restart, SIGTERM-safe child shutdown, and `status` subcommand
 - **F32 Wave D PR-1**: T2/T3 default subprocess delivery — `deliver_dispatch_to_terminal` now defaults T1/T2/T3 to subprocess adapter; T0 remains tmux by default; `VNX_ADAPTER_Tx=tmux` opts any terminal back to tmux
 - **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
 - **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
