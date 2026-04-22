@@ -431,6 +431,49 @@ class TestProcessEventsFile:
 
 
 # ---------------------------------------------------------------------------
+# process_events_file — cursor staleness recovery
+# ---------------------------------------------------------------------------
+
+class TestProcessEventsFileCursorStaleness:
+    def test_stale_cursor_resets_to_start(self, tmp_path):
+        events_file = tmp_path / "t0_decisions.ndjson"
+        cursor_file = tmp_path / "cursor.json"
+        log_file = tmp_path / "log.jsonl"
+        events_file.write_text(json.dumps(DISPATCH_EVENT) + "\n")
+        save_cursor(cursor_file, 999)
+
+        written = process_events_file(events_file, log_file, cursor_file)
+
+        assert written == 1
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 1
+        assert json.loads(lines[0])["action"] == "dispatch"
+
+    def test_stale_cursor_advances_cursor_to_file_length(self, tmp_path):
+        events_file = tmp_path / "t0_decisions.ndjson"
+        cursor_file = tmp_path / "cursor.json"
+        log_file = tmp_path / "log.jsonl"
+        events_file.write_text(json.dumps(WAIT_EVENT) + "\n")
+        save_cursor(cursor_file, 50)
+
+        process_events_file(events_file, log_file, cursor_file)
+
+        assert load_cursor(cursor_file) == 1
+
+    def test_exact_match_cursor_does_not_reset(self, tmp_path):
+        events_file = make_events_file(tmp_path, [DISPATCH_EVENT, WAIT_EVENT])
+        cursor_file = tmp_path / "cursor.json"
+        log_file = tmp_path / "log.jsonl"
+        process_events_file(events_file, log_file, cursor_file)
+        cursor_after_first = load_cursor(cursor_file)
+
+        written_second = process_events_file(events_file, log_file, cursor_file)
+
+        assert written_second == 0
+        assert load_cursor(cursor_file) == cursor_after_first
+
+
+# ---------------------------------------------------------------------------
 # main() CLI
 # ---------------------------------------------------------------------------
 

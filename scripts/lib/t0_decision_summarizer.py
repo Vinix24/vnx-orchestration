@@ -36,7 +36,6 @@ import fcntl
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -242,7 +241,12 @@ def append_decision_record(record: dict[str, Any], log_file: Path) -> None:
 
 
 def _rotate_if_needed(log_file: Path) -> None:
-    """Archive and truncate log file when it exceeds the rotation threshold."""
+    """Archive and truncate log file when it exceeds the rotation threshold.
+
+    Holds an exclusive lock across the entire copy+truncate sequence to prevent
+    concurrent writers from losing records between the archive copy and the
+    in-place truncation.
+    """
     if not log_file.exists() or log_file.stat().st_size < _ROTATION_BYTES:
         return
 
@@ -250,12 +254,16 @@ def _rotate_if_needed(log_file: Path) -> None:
     archive_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     archive_path = archive_dir / f"t0_decision_log_{ts}.jsonl"
-    shutil.copy2(str(log_file), str(archive_path))
 
-    with open(log_file, "w", encoding="utf-8") as f:
+    with open(log_file, "r+", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
-            f.truncate(0)
+            if os.fstat(f.fileno()).st_size < _ROTATION_BYTES:
+                return
+            content = f.read()
+            archive_path.write_text(content, encoding="utf-8")
+            f.seek(0)
+            f.truncate()
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 

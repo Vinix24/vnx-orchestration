@@ -259,6 +259,13 @@ def process_events_file(
 
     all_lines = events_file.read_text(encoding="utf-8").splitlines()
     cursor = load_cursor(cursor_file)
+    if cursor > len(all_lines):
+        logger.warning(
+            "t0_decision_log: cursor %d exceeds file length %d — source file may have been reset; reprocessing from start",
+            cursor,
+            len(all_lines),
+        )
+        cursor = 0
     unprocessed = all_lines[cursor:]
 
     written = 0
