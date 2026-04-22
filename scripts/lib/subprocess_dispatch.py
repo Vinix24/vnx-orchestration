@@ -477,6 +477,21 @@ def deliver_via_subprocess(
                 event_count=event_count,
                 manifest_path=completed_manifest or manifest_path,
             )
+        # Fail-closed: timeout-terminated dispatches must not be classified as success.
+        # stop() removes the process from _processes so returncode above is None,
+        # but was_timed_out() tracks the authoritative kill-by-timeout signal.
+        if adapter.was_timed_out(terminal_id):
+            logger.warning(
+                "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
+                dispatch_id,
+                terminal_id,
+            )
+            return _SubprocessResult(
+                success=False,
+                session_id=session_id,
+                event_count=event_count,
+                manifest_path=completed_manifest or manifest_path,
+            )
         return _SubprocessResult(
             success=True,
             session_id=session_id,

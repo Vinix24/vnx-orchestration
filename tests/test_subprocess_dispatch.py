@@ -18,6 +18,7 @@ def mock_adapter():
     """Patch SubprocessAdapter and return the mock instance."""
     with patch("subprocess_dispatch.SubprocessAdapter") as cls:
         instance = MagicMock()
+        instance.was_timed_out.return_value = False
         cls.return_value = instance
         yield instance
 

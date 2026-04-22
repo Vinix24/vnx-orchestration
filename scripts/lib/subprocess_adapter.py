@@ -86,9 +86,17 @@ class SubprocessAdapter:
         self._session_ids: Dict[str, str] = {}
         # terminal_id -> dispatch_id from most recent deliver()
         self._dispatch_ids: Dict[str, str] = {}
+        # Set of terminal_ids that were killed by chunk/total timeout
+        self._timed_out: set = set()
         # Lazy-loaded EventStore (optional dependency)
         self._event_store = None
         self._event_store_loaded = False
+
+    def was_timed_out(self, terminal_id: str) -> bool:
+        """Return True if the last read_events_with_timeout() for terminal_id
+        hit chunk_timeout or total_deadline. Callers should check this after
+        iteration to classify outcome as failure rather than success."""
+        return terminal_id in self._timed_out
 
     def _get_event_store(self):
         """Lazy-load EventStore. Returns None if not available."""
@@ -400,6 +408,8 @@ class SubprocessAdapter:
             total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
         except (KeyError, ValueError):
             pass
+        # Clear any prior timeout flag for this terminal
+        self._timed_out.discard(terminal_id)
         process = self._processes.get(terminal_id)
         if process is None or process.stdout is None:
             return
@@ -414,6 +424,7 @@ class SubprocessAdapter:
                     "read_events_with_timeout: total deadline (%.0fs) exceeded for %s",
                     total_deadline, terminal_id,
                 )
+                self._timed_out.add(terminal_id)
                 self.stop(terminal_id)
                 break
 
@@ -425,6 +436,7 @@ class SubprocessAdapter:
                     "read_events_with_timeout: chunk timeout (%.0fs) for %s",
                     chunk_timeout, terminal_id,
                 )
+                self._timed_out.add(terminal_id)
                 self.stop(terminal_id)
                 break
 
