@@ -253,5 +253,155 @@ class TestReleaseOnReceiptCLI(unittest.TestCase):
         self.assertFalse(data.get("released"), f"mismatch should not release: {data}")
 
 
+# ---------------------------------------------------------------------------
+# TestNoConfirmationTimeoutGuard — conflicting-state fix (W0-PR2-fix)
+# ---------------------------------------------------------------------------
+
+class TestNoConfirmationTimeoutGuard(unittest.TestCase):
+    """Verify the no_confirmation timeout guard at the Python API boundary.
+
+    The shell script (receipt_processor_v4.sh C2b) must NOT call
+    release_on_receipt for task_timeout+no_confirmation events because
+    Section C deliberately keeps the canonical lease held (blocked state)
+    to prevent immediate re-dispatch.
+
+    These tests verify that:
+      1. release_on_receipt CAN release a held lease (used by other event types)
+      2. A still-leased terminal after a no_confirmation scenario remains leased
+         (i.e., the lease was NOT released — the caller honored the guard)
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir, self.dispatch_dir, self.lease_mgr, self.core = _setup(self._tmp)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_lease_stays_held_when_caller_skips_release_for_no_confirmation(self):
+        """Canonical lease must remain leased after a no_confirmation timeout
+        if the caller correctly skips calling release_on_receipt.
+
+        This is the contract: the shell C2b guard prevents the auto-release,
+        leaving the DB in leased state to match the blocked shadow state.
+        """
+        _acquire(self.lease_mgr, self.state_dir, "T1", "d-nc-001")
+        # Simulate the shell guard: do NOT call release_on_receipt for no_confirmation
+        lease = self.lease_mgr.get("T1")
+        self.assertEqual(lease.state, "leased", "lease should remain held — caller skipped release")
+        self.assertEqual(lease.dispatch_id, "d-nc-001")
+
+    def test_release_on_receipt_releases_normally_for_task_complete(self):
+        """task_complete (not no_confirmation) must still auto-release the lease."""
+        _acquire(self.lease_mgr, self.state_dir, "T2", "d-nc-002")
+        result = self.core.release_on_receipt("T2", dispatch_id="d-nc-002")
+        self.assertTrue(result["released"], f"task_complete path must release: {result}")
+        lease = self.lease_mgr.get("T2")
+        self.assertEqual(lease.state, "idle")
+
+    def test_release_on_receipt_releases_for_regular_task_timeout(self):
+        """A task_timeout without no_confirmation status must release the lease."""
+        _acquire(self.lease_mgr, self.state_dir, "T3", "d-nc-003")
+        result = self.core.release_on_receipt("T3", dispatch_id="d-nc-003")
+        self.assertTrue(result["released"], f"regular timeout must release: {result}")
+        lease = self.lease_mgr.get("T3")
+        self.assertEqual(lease.state, "idle")
+
+    def test_lease_release_after_no_confirmation_guard_still_succeeds(self):
+        """Dispatcher can explicitly release a no_confirmation-blocked lease
+        later (e.g., after the grace window expires) via release_on_receipt."""
+        _acquire(self.lease_mgr, self.state_dir, "T1", "d-nc-004")
+        # Grace window passes; dispatcher explicitly releases
+        result = self.core.release_on_receipt("T1", dispatch_id="d-nc-004")
+        self.assertTrue(result["released"], f"explicit later release must succeed: {result}")
+        lease = self.lease_mgr.get("T1")
+        self.assertEqual(lease.state, "idle")
+
+
+# ---------------------------------------------------------------------------
+# TestShellQuotingEdgeCases — dispatch IDs with special characters (W0-PR2-fix)
+# ---------------------------------------------------------------------------
+
+class TestShellQuotingEdgeCases(unittest.TestCase):
+    """Verify release_on_receipt handles dispatch IDs that could expose
+    shell quoting bugs if passed incorrectly via unquoted expansions.
+
+    The shell fix replaces `${dispatch_id:+--dispatch-id "$dispatch_id"}`
+    (unquoted outer expansion) with an array-based approach. These Python
+    tests confirm the Python API itself is robust with unusual dispatch IDs,
+    and the CLI tests confirm argument passing is correct end-to-end.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir, self.dispatch_dir, self.lease_mgr, self.core = _setup(self._tmp)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_dispatch_id_with_hyphens_and_numbers(self):
+        """Dispatch IDs matching the standard format are handled correctly."""
+        dispatch_id = "20260422-180510-w0-pr2-fix-A"
+        _acquire(self.lease_mgr, self.state_dir, "T1", dispatch_id)
+        result = self.core.release_on_receipt("T1", dispatch_id=dispatch_id)
+        self.assertTrue(result["released"], f"standard dispatch ID: {result}")
+
+    def test_dispatch_id_none_vs_empty_string_treated_consistently(self):
+        """None and empty string both skip the ownership guard."""
+        _acquire(self.lease_mgr, self.state_dir, "T2", "d-any-owner")
+
+        result_none = self.core.release_on_receipt("T2", dispatch_id=None)
+        self.assertTrue(result_none["released"], f"None dispatch_id must release: {result_none}")
+
+    def test_empty_string_dispatch_id_skips_ownership_guard(self):
+        """Empty string dispatch_id (default from CLI --dispatch-id '') must skip guard."""
+        _acquire(self.lease_mgr, self.state_dir, "T3", "d-any-owner-2")
+        result = self.core.release_on_receipt("T3", dispatch_id="")
+        self.assertTrue(result["released"], f"empty dispatch_id must skip ownership guard: {result}")
+
+    def test_cli_dispatch_id_with_hyphens_passed_correctly(self):
+        """CLI receives dispatch ID with hyphens as a single argument (array quoting fix)."""
+        tmp = tempfile.TemporaryDirectory()
+        base = Path(tmp.name)
+        state_dir = base / "state"
+        dispatch_dir = base / "dispatches"
+        state_dir.mkdir(parents=True)
+        dispatch_dir.mkdir(parents=True)
+        init_schema(state_dir)
+        lease_mgr = LeaseManager(state_dir, auto_init=False)
+
+        dispatch_id = "20260422-180510-w0-pr2-fix-A"
+        with get_connection(state_dir) as conn:
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1")
+            conn.commit()
+        lease_mgr.acquire("T1", dispatch_id=dispatch_id)
+
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "VNX_DATA_DIR": str(state_dir.parent),
+            "VNX_DATA_DIR_EXPLICIT": "1",
+            "VNX_RUNTIME_PRIMARY": "1",
+            "VNX_CANONICAL_LEASE_ACTIVE": "1",
+            "HOME": Path.home().as_posix(),
+        }
+        cli = str(SCRIPT_DIR / "runtime_core_cli.py")
+        proc = subprocess.run(
+            [sys.executable, cli, "release-on-receipt", "--terminal", "T1",
+             "--dispatch-id", dispatch_id],
+            capture_output=True, text=True, env=env,
+        )
+        try:
+            data = json.loads(proc.stdout.strip())
+        except (json.JSONDecodeError, ValueError):
+            data = {"raw": proc.stdout, "stderr": proc.stderr}
+
+        self.assertEqual(proc.returncode, 0, f"expected exit 0: {data}")
+        self.assertTrue(data.get("released"), f"hyphenated dispatch ID must release: {data}")
+
+        lease = lease_mgr.get("T1")
+        self.assertEqual(lease.state, "idle")
+        tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

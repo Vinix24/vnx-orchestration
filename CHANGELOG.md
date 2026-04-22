@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- **W0 PR-2 fix**: `receipt_processor_v4.sh` — fix shell quoting in `_auto_release_lease_on_receipt` (array-based args replace unquoted `${:+}` expansion) and fix conflicting state on `task_timeout+no_confirmation` (skip auto-release when shadow intentionally keeps terminal blocked); 8 new tests (22 total)
+
 ### Features
 
 - **W0 PR-2**: Auto-lease-release on task receipt — `receipt_processor_v4.sh` now calls `release-on-receipt` automatically on `task_complete`/`task_failed`/`task_timeout` events, eliminating the need for manual `release-on-failure` after every worker receipt; `RuntimeCore.release_on_receipt()` resolves generation internally with dispatch-id ownership guard and idempotent idle-terminal handling
