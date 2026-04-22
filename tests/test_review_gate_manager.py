@@ -271,3 +271,32 @@ def test_changed_files_override_preserves_explicit(review_env, monkeypatch):
     assert "a.py" in captured_changed_files
     assert "b.py" in captured_changed_files
     assert "should/not/appear.py" not in captured_changed_files
+
+
+def test_compute_changed_files_raises_on_both_bases_fail(review_env, monkeypatch):
+    """_compute_changed_files raises ValueError when both origin/main and main bases fail."""
+    import subprocess as sp
+
+    def fake_run_fail(cmd, **kwargs):
+        raise sp.CalledProcessError(128, cmd)
+
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run_fail)
+
+    with pytest.raises(ValueError, match="cannot auto-compute"):
+        rgm._compute_changed_files("feature/broken-branch")
+
+
+def test_main_handles_compute_failure_gracefully(review_env, monkeypatch):
+    """main exits with code 2 and helpful message when auto-compute fails."""
+    import subprocess as sp
+
+    def fake_run_fail(cmd, **kwargs):
+        raise sp.CalledProcessError(128, cmd)
+
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run_fail)
+    monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *args, **kwargs: None)
+
+    exit_code = rgm.main([
+        "request", "--pr", "55", "--branch", "feature/broken-refs", "--changed-files", "",
+    ])
+    assert exit_code == 2
