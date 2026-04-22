@@ -279,6 +279,19 @@ def _handle_escalate(decision: dict[str, Any], state_dir: Path, dry_run: bool) -
         "reason": reason,
         "timestamp": _now_utc(),
     })
+
+    if not dry_run:
+        try:
+            from t0_escalations_log import build_record, write_escalation  # noqa: PLC0415
+            write_escalation(build_record(
+                "escalate",
+                trigger_description=reason,
+                actor="t0",
+                source="executor",
+            ))
+        except Exception:
+            pass  # JSONL write is best-effort; never block execution
+
     return "escalated"
 
 
