@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_receipts-response",
+  "title": "query_receipts Response",
+  "description": "Response body for GET /v1/projects/:project_id/receipts.",
+  "type": "object",
+  "required": ["project_id", "receipts", "total"],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": { "type": "string" },
+    "total":      { "type": "integer" },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/receipt_record"
+      }
+    }
+  },
+  "definitions": {
+    "receipt_record": {
+      "type": "object",
+      "required": ["id", "project_id", "dispatch_id", "terminal", "status", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id":            { "type": "string" },
+        "project_id":    { "type": "string" },
+        "dispatch_id":   { "type": "string" },
+        "pr_id":         { "type": ["string", "null"] },
+        "terminal":      { "type": "string" },
+        "track":         { "type": ["string", "null"], "enum": ["A", "B", "C", null] },
+        "gate":          { "type": ["string", "null"] },
+        "status":        { "type": "string", "enum": ["task_started", "task_complete", "task_failed", "receipt_miss", "delivery_miss"] },
+        "confidence":    { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "report_path":   { "type": ["string", "null"] },
+        "title":         { "type": ["string", "null"] },
+        "auto_generated":{ "type": "boolean", "description": "true if this is a synthetic/missed-receipt record." },
+        "source":        { "type": ["string", "null"] },
+        "sent_at":       { "type": ["string", "null"], "format": "date-time" },
+        "confirmed_at":  { "type": ["string", "null"], "format": "date-time" },
+        "created_at":    { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

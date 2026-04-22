@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_receipts-request",
+  "title": "query_receipts Request",
+  "description": "Query the receipts index for a project. HTTP query parameters on GET /v1/projects/:project_id/receipts.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "dispatch_id": {
+      "type": "string",
+      "description": "Return only receipts for this dispatch."
+    },
+    "terminal": {
+      "type": "string",
+      "description": "Filter by terminal (T1, T2, T3, HEADLESS)."
+    },
+    "status": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["task_started", "task_complete", "task_failed", "receipt_miss", "delivery_miss"]
+      },
+      "uniqueItems": true
+    },
+    "since": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Return receipts created at or after this timestamp."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 100
+    }
+  }
+}

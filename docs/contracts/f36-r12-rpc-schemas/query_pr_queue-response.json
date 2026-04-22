@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_pr_queue-response",
+  "title": "query_pr_queue Response",
+  "description": "Response body for GET /v1/projects/:project_id/pr-queue.",
+  "type": "object",
+  "required": ["project_id", "prs", "summary", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": { "type": "string" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "summary": {
+      "type": "object",
+      "required": ["queued", "active", "blocked", "completed"],
+      "additionalProperties": false,
+      "properties": {
+        "queued":    { "type": "integer" },
+        "active":    { "type": "integer" },
+        "blocked":   { "type": "integer" },
+        "completed": { "type": "integer" },
+        "skipped":   { "type": "integer", "default": 0 }
+      }
+    },
+    "prs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/pr_entry"
+      }
+    }
+  },
+  "definitions": {
+    "pr_entry": {
+      "type": "object",
+      "required": ["pr_id", "project_id", "state", "created_at", "updated_at"],
+      "additionalProperties": false,
+      "properties": {
+        "pr_id":              { "type": "string" },
+        "project_id":         { "type": "string" },
+        "state":              { "type": "string", "enum": ["queued", "active", "blocked", "completed", "skipped"] },
+        "branch":             { "type": ["string", "null"] },
+        "title":              { "type": ["string", "null"] },
+        "skill":              { "type": ["string", "null"] },
+        "size_estimate":      { "type": ["integer", "null"] },
+        "dependencies":       { "type": ["array", "null"], "items": { "type": "string" } },
+        "active_dispatch_id": { "type": ["string", "null"] },
+        "gate_summary":       {
+          "type": ["object", "null"],
+          "description": "Map of gate_type → verdict string",
+          "additionalProperties": { "type": "string" }
+        },
+        "github_pr_number":   { "type": ["integer", "null"] },
+        "completed_at":       { "type": ["string", "null"], "format": "date-time" },
+        "created_at":         { "type": "string", "format": "date-time" },
+        "updated_at":         { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

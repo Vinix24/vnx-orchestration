@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/record_gate_result-request",
+  "title": "record_gate_result Request",
+  "description": "Write back a gate result for a previously-submitted request. Sent as JSON body on PATCH /v1/projects/:project_id/review-gates/:id. Only the daemon or an authorised gate-runner may call this. findings, blocking_findings, and advisory_findings are arrays of {severity, message} objects.",
+  "type": "object",
+  "required": ["status"],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "failed", "cancelled"]
+    },
+    "verdict": {
+      "type": ["string", "null"],
+      "enum": ["pass", "fail", "blocked", null]
+    },
+    "report_path":     { "type": ["string", "null"] },
+    "duration_seconds":{ "type": ["number", "null"] },
+    "residual_risk":   { "type": ["string", "null"] },
+    "required_reruns": { "type": ["integer", "null"], "minimum": 0 },
+    "findings": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["severity", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+          "message":  { "type": "string" }
+        }
+      }
+    },
+    "blocking_findings": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["severity", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+          "message":  { "type": "string" }
+        }
+      }
+    },
+    "advisory_findings": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["severity", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+          "message":  { "type": "string" }
+        }
+      }
+    }
+  }
+}

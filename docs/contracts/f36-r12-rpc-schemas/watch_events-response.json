@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/watch_events-response",
+  "title": "watch_events SSE Event",
+  "description": "Schema for a single Server-Sent Event (SSE) message delivered on GET /v1/projects/:project_id/events (or per-table watch endpoints like /open-items/events). Each SSE 'data:' line is a JSON object matching this schema.",
+  "type": "object",
+  "required": ["event_type", "project_id", "seq", "payload", "emitted_at"],
+  "additionalProperties": false,
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "description": "Namespaced event type.",
+      "enum": [
+        "open_item.created",
+        "open_item.updated",
+        "open_item.closed",
+        "pr_queue.state_changed",
+        "pr_queue.gate_updated",
+        "decision.recorded",
+        "review_gate.requested",
+        "review_gate.completed",
+        "receipt.received",
+        "receipt.miss_detected",
+        "project.registered",
+        "daemon.heartbeat"
+      ]
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Project scope of this event."
+    },
+    "seq": {
+      "type": "integer",
+      "description": "Monotonically increasing sequence number per project. Clients can use this to detect missed events and request a replay from a given seq."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-specific payload. Shape depends on event_type; see per-table response schemas for the full record definitions.",
+      "additionalProperties": true
+    },
+    "emitted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp when the daemon emitted this event."
+    }
+  }
+}

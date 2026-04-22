@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/submit_open_item-request",
+  "title": "submit_open_item Request",
+  "description": "Create or update an open item. Sent as JSON body on POST /v1/projects/:project_id/open-items or PATCH /v1/projects/:project_id/open-items/:id. The daemon executes the write; clients submit requests only.",
+  "type": "object",
+  "required": ["title", "severity", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Existing OI id for updates. Omit for creates (daemon assigns OI-NNN)."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["blocker", "warning", "info"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "in_progress", "done", "wont_fix"]
+    },
+    "title":                 { "type": "string", "minLength": 1, "maxLength": 500 },
+    "description":           { "type": ["string", "null"] },
+    "pr_id":                 { "type": ["string", "null"] },
+    "evidence_refs":         { "type": ["array", "null"], "items": { "type": "string" } },
+    "resolution":            { "type": ["string", "null"] },
+    "origin_dispatch_id":    { "type": ["string", "null"] },
+    "origin_report_path":    { "type": ["string", "null"] },
+    "closed_reason":         { "type": ["string", "null"] },
+    "closed_by_dispatch_id": { "type": ["string", "null"] }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_open_items-request",
+  "title": "query_open_items Request",
+  "description": "Query open items for a project. Sent as HTTP query parameters or JSON body on GET /v1/projects/:project_id/open-items.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "description": "Project scope — enforced server-side; provided here for documentation. Clients pass this in the URL path."
+    },
+    "status": {
+      "type": "array",
+      "description": "Filter by status values. Omit to return all.",
+      "items": {
+        "type": "string",
+        "enum": ["open", "in_progress", "done", "wont_fix"]
+      },
+      "uniqueItems": true
+    },
+    "severity": {
+      "type": "array",
+      "description": "Filter by severity values. Omit to return all.",
+      "items": {
+        "type": "string",
+        "enum": ["blocker", "warning", "info"]
+      },
+      "uniqueItems": true
+    },
+    "pr_id": {
+      "type": "string",
+      "description": "Filter to a specific PR. Omit for all PRs."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum number of records to return.",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 200
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Pagination offset.",
+      "minimum": 0,
+      "default": 0
+    }
+  }
+}
