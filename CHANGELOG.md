@@ -15,7 +15,18 @@
 ### Security
 - **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
 
+### Fixes
+- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
+
 ### Features
+- **W0 PR-6**: `scripts/lib/dispatch_instruction_validator.py` — dispatch instruction template validator (D-1..D-8): Dispatch-ID format, description presence, scope item count thresholds (warn ≥9/block ≥16), unbounded-task language detection, gate/quality-gate alignment, file directory breadth, instruction size, and success-criteria presence; 35 tests in `tests/test_dispatch_instruction_validator.py`
+- **W0 PR-5**: `.github/workflows/burn-in-headless.yml` — scheduled weekly burn-in CI (Sunday 02:00 UTC) running billing-safety gate (BS-1..BS-6) followed by burn-in certification (B-1..B-10), snapshot tooling regression, and fixture smoke checks; `workflow_dispatch` for manual runs; zero API cost (CLI stub via `VNX_HEADLESS_CLI=echo`)
+- **W0 PR-5**: `scripts/lib/exit_classifier.py` — maps subprocess exit conditions to named failure classes (`SUCCESS/TIMEOUT/TOOL_FAIL/INFRA_FAIL/NO_OUTPUT/INTERRUPTED/PROMPT_ERR/UNKNOWN`) with retryability, signal extraction, and operator hints
+- **W0 PR-5**: `scripts/lib/log_artifact.py` — structured human-readable run-log writer (`<run_id>.log`) and raw output capture (`<run_id>.out`) for operator inspection without file spelunking
+- **W0 PR-5**: `scripts/lib/headless_inspect.py` — operator inspection tools: `format_run_line`, `format_run_detail`, `list_runs`, `build_health_summary`, `format_health_summary`
+- **W0 PR-5**: `tests/conftest.py` — shared pytest fixtures (`vnx_state_dir`, `vnx_registry`, `vnx_artifact_dir`, `vnx_dispatch_dir`, `vnx_fake_project`, `vnx_snapshot_dir`) for burn-in and snapshot test suites; `make_vnx_dispatch_bundle` factory fixture
+- **W0 PR-5**: `tests/fixtures/dispatch_bundle_research.json` + `dispatch_bundle_analysis.json` — CI fixture bundles for headless adapter integration tests
+- **W0 PR-5**: `tests/test_billing_safety.py` — 12 billing-safety assertions across BS-1..BS-6: no SDK imports, no direct API URLs, no hardcoded keys, no key assignments, CLI-only subprocess, clean fixture files
 - **W0 PR-4**: `vnx snapshot/restore/quiesce-check` — CLI tools for project-state backup and migration readiness: tarball + SQL dump of `.vnx-data/`, fail-safe restore with overwrite guard, and read-only quiesce verification across 4 conditions (active dispatches, held leases, in-flight gates, uncommitted changes)
 - **W0 PR-1**: `scripts/dispatcher_supervisor.sh` — dedicated auto-restart supervisor for `dispatcher_v8_minimal.sh` with exponential backoff (2s→60s), stale singleton lock cleanup before each restart, SIGTERM-safe child shutdown, and `status` subcommand
 - **F32 Wave D PR-1**: T2/T3 default subprocess delivery — `deliver_dispatch_to_terminal` now defaults T1/T2/T3 to subprocess adapter; T0 remains tmux by default; `VNX_ADAPTER_Tx=tmux` opts any terminal back to tmux

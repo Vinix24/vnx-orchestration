@@ -1,0 +1,223 @@
+name: Burn-In Headless CI
+
+# Scheduled weekly burn-in that validates headless observability (B-1..B-10),
+# snapshot tooling (PR4), and billing-safety gates (BS-1..BS-6).
+#
+# No Claude API key is required — all headless tests use echo/stub adapters.
+# Billing safety is enforced by the billing-safety job before any test runs.
+
+on:
+  schedule:
+    # Sunday 02:00 UTC — off-peak, after weekly deployments settle
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  # Headless tests use echo as the CLI stub — zero API cost
+  VNX_HEADLESS_CLI: "echo"
+
+jobs:
+  # ── Gate 1: Billing safety ──────────────────────────────────────────────────
+  billing-safety:
+    name: Billing-Safety Gate (BS-1..BS-6)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Prepare repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' \
+            ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Run billing-safety assertions
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          pytest -v \
+            "$VNX_HOME/tests/test_billing_safety.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_billing_safe \
+            --tb=short
+
+  # ── Gate 2: Burn-in certification (B-1..B-10) ──────────────────────────────
+  burnin-certification:
+    name: Burn-In Certification (B-1..B-10)
+    runs-on: ubuntu-latest
+    needs: billing-safety
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Prepare repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' \
+            ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Run burn-in certification tests
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+          VNX_HEADLESS_CLI: ${{ env.VNX_HEADLESS_CLI }}
+          # Headless feature enabled with CLI stub — no real API calls
+          VNX_HEADLESS_ENABLED: "1"
+        run: |
+          set -euo pipefail
+          pytest -v \
+            "$VNX_HOME/tests/test_burnin_certification.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_burnin \
+            --tb=short \
+            -x
+
+      - name: Upload burn-in artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: burnin-failure-artifacts-${{ github.run_id }}
+          path: /tmp/vnx_burnin/
+          retention-days: 7
+
+  # ── Gate 3: Snapshot tooling (PR4) ─────────────────────────────────────────
+  snapshot-tooling:
+    name: Snapshot Tooling (PR4 regression)
+    runs-on: ubuntu-latest
+    needs: billing-safety
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Prepare repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' \
+            ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Run snapshot tooling tests
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          pytest -v \
+            "$VNX_HOME/tests/test_vnx_snapshot_tooling.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_snapshot \
+            --tb=short \
+            -x
+
+  # ── Gate 4: Conftest fixture smoke ──────────────────────────────────────────
+  fixture-smoke:
+    name: Conftest Fixture Smoke
+    runs-on: ubuntu-latest
+    needs: billing-safety
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Prepare repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' \
+            ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Verify conftest fixtures load cleanly
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          # Collect-only verifies that conftest.py parses and all fixtures
+          # are importable without actually running tests.
+          pytest --collect-only -q \
+            "$VNX_HOME/tests/test_burnin_certification.py" \
+            "$VNX_HOME/tests/test_vnx_snapshot_tooling.py" \
+            "$VNX_HOME/tests/test_billing_safety.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_collect
+
+      - name: Validate fixture JSON files
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json, os, sys
+          from pathlib import Path
+
+          fixtures_dir = Path(os.environ.get("VNX_HOME", ".")) / "tests/fixtures"
+          if not fixtures_dir.is_dir():
+              print("no fixtures dir — skipping")
+              sys.exit(0)
+
+          errors = []
+          for f in fixtures_dir.glob("*.json"):
+              try:
+                  data = json.loads(f.read_text())
+                  required = {"dispatch_id", "task_class"}
+                  missing = required - data.keys()
+                  if missing:
+                      errors.append(f"{f.name}: missing keys {missing}")
+              except json.JSONDecodeError as e:
+                  errors.append(f"{f.name}: invalid JSON — {e}")
+
+          if errors:
+              print("Fixture validation failures:")
+              for e in errors:
+                  print(f"  {e}")
+              sys.exit(1)
+
+          print(f"All {len(list(fixtures_dir.glob('*.json')))} fixture(s) valid.")
+          EOF
