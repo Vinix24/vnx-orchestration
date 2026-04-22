@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixes
+- **Latency PR-1+PR2 CI fix**: Update `tests/test_subprocess_dispatch.py` stale assertions from old defaults (chunk_timeout=120, total_deadline=600) to new defaults (chunk_timeout=300, total_deadline=900) introduced by latency PR-1
 - **Latency PR-2**: Add `SessionStore` (`scripts/lib/session_store.py`) — atomic JSON file-backed store that persists Claude session IDs per terminal; wire into `deliver_via_subprocess()` to pass `--resume <session_id>` on subsequent dispatches (opt-in via `VNX_SESSION_RESUME=1`)
 - **Latency PR-1**: Add 60s cooldown for invalid-skill dispatches in `dispatcher_v8_minimal.sh` (env-tunable via `VNX_INVALID_SKILL_COOLDOWN`) to prevent log floods and queue stalls on every 2s poll
 - **Latency PR-1**: Raise `chunk_timeout` default from 120s → 300s and `total_deadline` from 600s → 900s in `subprocess_adapter.py` and `subprocess_dispatch.py`; both tuneable via `VNX_CHUNK_TIMEOUT` / `VNX_TOTAL_DEADLINE` env vars
