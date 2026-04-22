@@ -1,0 +1,10 @@
+{
+  "dispatch_id": "fixture-analysis-001",
+  "task_class": "analysis",
+  "terminal_id": "T2",
+  "prompt": "Analyze the security posture of the VNX snapshot tooling. Focus on path traversal prevention, symlink filtering, and tarball validation guards.",
+  "metadata": {
+    "source": "burn_in_fixture",
+    "scenario": "analysis_security_review"
+  }
+}
