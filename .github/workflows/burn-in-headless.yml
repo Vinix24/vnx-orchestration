@@ -11,15 +11,6 @@ on:
     # Sunday 02:00 UTC — off-peak, after weekly deployments settle
     - cron: "0 2 * * 0"
   workflow_dispatch:
-    inputs:
-      skip_billing_gate:
-        description: "Skip billing-safety gate (emergency override — requires approval)"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 permissions:
   contents: read
@@ -34,7 +25,6 @@ jobs:
   billing-safety:
     name: Billing-Safety Gate (BS-1..BS-6)
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_billing_gate != 'true' }}
 
     steps:
       - name: Checkout
@@ -204,10 +194,10 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'EOF'
-          import json, sys
+          import json, os, sys
           from pathlib import Path
 
-          fixtures_dir = Path("$VNX_HOME/tests/fixtures")
+          fixtures_dir = Path(os.environ.get("VNX_HOME", ".")) / "tests/fixtures"
           if not fixtures_dir.is_dir():
               print("no fixtures dir — skipping")
               sys.exit(0)
