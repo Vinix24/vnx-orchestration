@@ -1,5 +1,10 @@
 # Changelog
 
+## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
+
+- **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
+
+
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 
 ### Features
