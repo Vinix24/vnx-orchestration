@@ -510,7 +510,8 @@ deliver_dispatch_to_terminal() {
     local target_pane="$5" terminal_id="$6" provider="$7"
     local complete_prompt="$8" skill_command="$9"
 
-    # Resolve per-terminal adapter: VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
+    # Resolve per-terminal adapter: VNX_ADAPTER_T0, VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
+    # T0: set VNX_ADAPTER_T0=subprocess to route T0 via SubprocessAdapter (not default).
     # T1 defaults to subprocess (headless backend-developer) since F32.
     local adapter_var="VNX_ADAPTER_${terminal_id}"
     local adapter_type="${!adapter_var:-tmux}"

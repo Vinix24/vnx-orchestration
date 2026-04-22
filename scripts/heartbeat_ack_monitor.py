@@ -204,9 +204,11 @@ class HeartbeatACKMonitor:
     def _is_subprocess_terminal(self, terminal: str) -> bool:
         """Check if terminal uses subprocess adapter (not tmux).
 
-        VNX_ADAPTER_T1=subprocess skips tmux-based monitoring because the
+        VNX_ADAPTER_T{n}=subprocess skips tmux-based monitoring because the
         subprocess adapter has its own event pipeline and any tmux pane
         activity reflects the subprocess launcher, not the actual worker.
+        Applies to any terminal (T0, T1, T2, T3) via VNX_ADAPTER_{terminal}.
+        T0 subprocess mode is enabled by VNX_ADAPTER_T0=subprocess (F36).
         """
         env_key = f"VNX_ADAPTER_{terminal}"
         return os.environ.get(env_key, "tmux").lower() == "subprocess"

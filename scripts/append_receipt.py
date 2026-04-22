@@ -70,6 +70,16 @@ IDEMPOTENCY_FIELDS = (
 )
 
 
+def is_headless_t0() -> bool:
+    """Return True when T0 is configured to run via subprocess adapter.
+
+    Set VNX_ADAPTER_T0=subprocess to enable headless T0 mode.  When True,
+    the receipt processor annotates the T0 terminal snapshot entry with
+    adapter/headless metadata and skips tmux-dependent probes for T0.
+    """
+    return os.environ.get("VNX_ADAPTER_T0", "tmux").lower() == "subprocess"
+
+
 @dataclass(frozen=True)
 class AppendResult:
     status: str
@@ -633,6 +643,19 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
             "status": "unavailable",
             "error": str(exc),
         }
+
+    # Annotate T0 terminal snapshot entry when T0 runs via subprocess adapter.
+    # Skips tmux-based probes for T0 and marks the entry so downstream readers
+    # know T0 was headless at receipt time.
+    if is_headless_t0():
+        snapshot_data = enriched.get("terminal_snapshot") or {}
+        terminals = snapshot_data.get("terminals") or {}
+        t0_entry = dict(terminals.get("T0") or {})
+        t0_entry["adapter"] = "subprocess"
+        t0_entry["headless"] = True
+        terminals["T0"] = t0_entry
+        snapshot_data["terminals"] = terminals
+        enriched["terminal_snapshot"] = snapshot_data
 
     # Generate quality advisory (best-effort)
     try:
