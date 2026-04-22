@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """T0 decision summarizer — haiku-powered T0 session decision log writer.
 
-Reads T0's stream-json events from .vnx-data/events/T0.ndjson,
-extracts text content, summarizes via claude haiku, and appends a
-structured decision record to .vnx-data/state/t0_decision_log.jsonl.
+Reads T0's stream-json events from the T0 events file under
+VNX_DATA_DIR, extracts text content, summarizes via claude haiku,
+and appends a structured decision record to the decision log under
+VNX_STATE_DIR.
 
 Decision record schema:
   {
@@ -19,7 +20,7 @@ Decision record schema:
 
 CLI:
   python3 scripts/lib/t0_decision_summarizer.py
-  python3 scripts/lib/t0_decision_summarizer.py --events-file .vnx-data/events/T0.ndjson
+  python3 scripts/lib/t0_decision_summarizer.py --events-file "$VNX_DATA_DIR/events/T0.ndjson"
   python3 scripts/lib/t0_decision_summarizer.py --dry-run
 
 Environment:
