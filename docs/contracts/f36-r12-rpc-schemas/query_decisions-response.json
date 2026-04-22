@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/query_decisions-response",
+  "title": "query_decisions Response",
+  "description": "Response body for GET /v1/projects/:project_id/decisions. Supports filtering by dispatch_id, pr_id, decision_type, since/until timestamps.",
+  "type": "object",
+  "required": ["project_id", "decisions", "total"],
+  "additionalProperties": false,
+  "properties": {
+    "project_id": { "type": "string" },
+    "total":      { "type": "integer" },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/decision_record"
+      }
+    }
+  },
+  "definitions": {
+    "decision_record": {
+      "type": "object",
+      "required": ["id", "project_id", "decision_type", "reasoning", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "id":                  { "type": "string" },
+        "project_id":          { "type": "string" },
+        "decision_type":       { "type": "string", "enum": ["dispatch", "approve", "reject", "escalate", "wait", "close_oi", "advance_gate"] },
+        "dispatch_id":         { "type": ["string", "null"] },
+        "track":               { "type": ["string", "null"], "enum": ["A", "B", "C", null] },
+        "pr_id":               { "type": ["string", "null"] },
+        "reasoning":           { "type": "string" },
+        "open_items_actions":  { "type": ["array", "null"], "items": { "type": "string" } },
+        "next_expected":       { "type": ["string", "null"] },
+        "session_summary_at":  { "type": ["string", "null"], "format": "date-time" },
+        "source":              { "type": ["string", "null"], "enum": ["haiku", "direct", "replay", null] },
+        "created_at":          { "type": "string", "format": "date-time" },
+        "updated_at":          { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
