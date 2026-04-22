@@ -5,6 +5,9 @@
 ### Security
 - **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
 
+### Fixes
+- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
+
 ### Features
 - **W0 PR-5**: `.github/workflows/burn-in-headless.yml` — scheduled weekly burn-in CI (Sunday 02:00 UTC) running billing-safety gate (BS-1..BS-6) followed by burn-in certification (B-1..B-10), snapshot tooling regression, and fixture smoke checks; `workflow_dispatch` for manual runs; zero API cost (CLI stub via `VNX_HEADLESS_CLI=echo`)
 - **W0 PR-5**: `scripts/lib/exit_classifier.py` — maps subprocess exit conditions to named failure classes (`SUCCESS/TIMEOUT/TOOL_FAIL/INFRA_FAIL/NO_OUTPUT/INTERRUPTED/PROMPT_ERR/UNKNOWN`) with retryability, signal extraction, and operator hints
