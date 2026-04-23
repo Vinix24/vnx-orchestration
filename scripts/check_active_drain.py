@@ -94,11 +94,17 @@ def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
 # ---------------------------------------------------------------------------
 
 def _parse_timestamp(raw: str) -> datetime | None:
+    """Parse ISO-8601 timestamp. Always returns timezone-aware UTC datetime."""
     for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc) if raw.endswith("Z") and "%z" in fmt else datetime.strptime(raw, fmt)
+            dt = datetime.strptime(raw, fmt)
         except ValueError:
             continue
+        # Normalize: ensure tzinfo is set. Z-suffixed formats parse as naive on
+        # some platforms, so force UTC. Already-aware datetimes pass through.
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     return None
 
 
