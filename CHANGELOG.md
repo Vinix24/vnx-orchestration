@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixes
+- **ghost-receipt-filter**: Route headless gate receipts with `dispatch_id="unknown"` to a separate `gate_events.ndjson` stream instead of polluting `t0_receipts.ndjson`; adds `headless_review_receipt` schema module (missing source) with 30 passing tests
 - **dispatcher**: Skip tmux MODE_CONTROL pre-flight (pane probe, configure_terminal_mode, C-u clear, sleep) for subprocess-routed terminals; call only mode_pre_check to set _CTM_* globals needed by deliver_dispatch_to_terminal
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
