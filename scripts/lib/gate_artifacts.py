@@ -234,7 +234,7 @@ def materialize_artifacts(
     # Write JSON sidecar to report_pipeline/ for intelligence DB ingestion (OI-1066)
     try:
         sidecar = {
-            "dispatch_id": real_dispatch_id or f"gate-{gate}-pr-{pr_number}",
+            "dispatch_id": real_dispatch_id or f"gate-{gate}-pr-{pr_number if pr_number is not None else pr_id}",
             "gate": gate,
             "pr_id": pr_id,
             "pr_number": pr_number,
