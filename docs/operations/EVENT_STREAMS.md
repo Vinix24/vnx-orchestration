@@ -30,7 +30,7 @@ Only **subprocess-routed** terminals emit per-terminal NDJSON.
 
 ## Historical context
 
-In April 2026 an audit ([parent report](../../.vnx-data/unified_reports/20260423-063527-C-audit-trail-investigation.md), finding W-2) flagged `T1.ndjson` and `T2.ndjson` as "partially silent" based on observing 0-byte live files between dispatches. A follow-up investigation (OI-AT-6) proved the observation was correct but the interpretation was wrong: the files are ring buffers by design, and events were being durably archived the whole time. This document exists so that future observers don't re-derive the same wrong conclusion.
+In April 2026 an audit (finding W-2) flagged `T1.ndjson` and `T2.ndjson` as "partially silent" based on observing 0-byte live files between dispatches. A follow-up investigation (OI-AT-6) proved the observation was correct but the interpretation was wrong: the files are ring buffers by design, and events were being durably archived the whole time. This document exists so that future observers don't re-derive the same wrong conclusion.
 
 ## Related docs
 
