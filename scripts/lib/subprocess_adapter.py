@@ -219,12 +219,22 @@ class SubprocessAdapter:
                 failure_reason=str(exc),
             )
 
-        # Replace any prior process tracking (stop old one first)
+        # Replace any prior process tracking (stop old one first).
+        # Use SIGTERM then SIGKILL fallback so a non-responsive prior process
+        # can't linger as an orphan after we drop the tracking reference.
         if terminal_id in self._processes:
             old = self._processes[terminal_id]
             if old.poll() is None:
                 try:
                     os.killpg(os.getpgid(old.pid), signal.SIGTERM)
+                    try:
+                        old.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(os.getpgid(old.pid), signal.SIGKILL)
+                        try:
+                            old.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
                 except (OSError, ProcessLookupError):
                     pass
 
