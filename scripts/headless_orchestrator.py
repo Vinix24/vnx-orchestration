@@ -380,7 +380,7 @@ class HeadlessOrchestrator:
         try:
             sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
             from auto_gate_trigger import trigger_gates_if_feature_complete  # noqa: PLC0415
-            result = trigger_gates_if_feature_complete(feature_id, self.state_dir)
+            result = trigger_gates_if_feature_complete(feature_id, self.state_dir, dispatch_id=dispatch_id)
         except Exception as exc:
             logger.warning("auto_gate_trigger check failed: %s", exc)
             return

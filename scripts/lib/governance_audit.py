@@ -16,7 +16,8 @@ Schema per line:
         "override":     str | null,
         "operator":     str | null,
         "feature":      str | null,
-        "pr_number":    int | null
+        "pr_number":    int | null,
+        "dispatch_id":  str | null
     }
 """
 
@@ -113,6 +114,7 @@ def log_gate_result(
     pr_number: Optional[int],
     status: str,
     findings_count: int,
+    dispatch_id: Optional[str] = None,
 ) -> None:
     """Log a review gate execution result (codex/gemini) to the audit trail.
 
@@ -121,6 +123,7 @@ def log_gate_result(
         pr_number:      GitHub PR number, or None if unavailable.
         status:         Outcome string (e.g. "triggered", "passed", "failed").
         findings_count: Number of findings returned by the gate.
+        dispatch_id:    Dispatch that triggered this gate (for traceability).
     """
     passed = status in ("triggered", "passed", "ok", "success")
     _append({
@@ -135,6 +138,7 @@ def log_gate_result(
         "operator": os.environ.get("VNX_OPERATOR") or None,
         "feature": None,
         "pr_number": pr_number,
+        "dispatch_id": dispatch_id,
     })
 
 
@@ -142,6 +146,7 @@ def log_dispatch_decision(
     action: str,
     dispatch_id: str,
     reasoning: str,
+    pr_number: Optional[int] = None,
 ) -> None:
     """Log a T0 dispatch accept/reject/block decision to the audit trail.
 
@@ -149,6 +154,7 @@ def log_dispatch_decision(
         action:      Decision action: "accepted", "blocked", "rejected", "dispatched".
         dispatch_id: Dispatch file stem (e.g. "f51-pr3-t1-20260413T120000").
         reasoning:   Human-readable explanation of the decision.
+        pr_number:   GitHub PR number associated with this dispatch, or None.
     """
     _append({
         "timestamp": _now_utc(),
@@ -161,7 +167,7 @@ def log_dispatch_decision(
         "override": None,
         "operator": os.environ.get("VNX_OPERATOR") or None,
         "feature": None,
-        "pr_number": None,
+        "pr_number": pr_number,
         "dispatch_id": dispatch_id,
         "action": action,
     })

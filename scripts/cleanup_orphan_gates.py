@@ -120,25 +120,40 @@ def _write_abandoned_result(orphan: dict, dry_run: bool) -> bool:
         return False
 
 
+def _extract_pr_number_from_stem(stem: str) -> "int | None":
+    """Extract PR number from gate request stem like 'pr-57-gemini_review'."""
+    import re
+    m = re.match(r"^pr-(\d+)-", stem)
+    return int(m.group(1)) if m else None
+
+
 def _log_to_audit(orphans: list[dict]) -> None:
     """Append cleanup event to governance_audit.ndjson."""
     try:
         sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
         from governance_audit import log_enforcement  # noqa: PLC0415
         for orphan in orphans:
+            pr_number = _extract_pr_number_from_stem(orphan["stem"])
+            dispatch_id = orphan.get("request_data", {}).get("dispatch_id") or None
+            context: dict = {
+                "stem": orphan["stem"],
+                "age_hours": orphan["age_hours"],
+                "gate_name": orphan["gate_name"],
+            }
+            if pr_number is not None:
+                context["pr_number"] = pr_number
+            if dispatch_id is not None:
+                context["dispatch_id"] = dispatch_id
             log_enforcement(
                 check_name="orphan_gate_cleanup",
                 level=1,
                 result=True,
-                context={
-                    "stem": orphan["stem"],
-                    "age_hours": orphan["age_hours"],
-                    "gate_name": orphan["gate_name"],
-                },
+                context=context,
                 message=(
                     f"Orphan gate {orphan['stem']} abandoned after "
                     f"{orphan['age_hours']:.1f}h with no result"
                 ),
+                dispatch_id=dispatch_id,
             )
     except Exception as exc:
         print(f"  [WARN] Could not write to governance_audit: {exc}", file=sys.stderr)

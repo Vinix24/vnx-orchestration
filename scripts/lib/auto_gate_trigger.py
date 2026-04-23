@@ -199,7 +199,11 @@ def _log_auto_gate_event(data_dir: Path, record: Dict[str, Any]) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def trigger_gates_if_feature_complete(feature_id: str, state_dir: Path) -> Dict[str, Any]:
+def trigger_gates_if_feature_complete(
+    feature_id: str,
+    state_dir: Path,
+    dispatch_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Auto-trigger gates when all PRs for feature_id are committed.
 
     Checks FEATURE_PLAN.md completion state, finds/creates a GitHub PR,
@@ -299,6 +303,7 @@ def trigger_gates_if_feature_complete(feature_id: str, state_dir: Path) -> Dict[
                     pr_number=pr_number,
                     status="triggered" if ok else "failed",
                     findings_count=0,
+                    dispatch_id=dispatch_id,
                 )
             except Exception:
                 pass  # audit must never block gate trigger flow
