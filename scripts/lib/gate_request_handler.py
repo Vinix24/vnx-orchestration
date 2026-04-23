@@ -49,6 +49,7 @@ class GateRequestHandlerMixin:
         risk_class: str,
         changed_files: Iterable[str],
         mode: str,
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         from review_gate_manager import DEFAULT_REVIEW_STACK, _utc_now, emit_governance_receipt
 
@@ -58,11 +59,11 @@ class GateRequestHandlerMixin:
 
         for gate in review_stack_list:
             if gate == "gemini_review":
-                payload = self._request_gemini(pr_number, branch, risk_class, changed_files, mode)
+                payload = self._request_gemini(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             elif gate == "codex_gate":
-                payload = self._request_codex(pr_number, branch, risk_class, changed_files, mode)
+                payload = self._request_codex(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             elif gate == "claude_github_optional":
-                payload = self._request_claude_github(pr_number, branch, risk_class, changed_files, mode)
+                payload = self._request_claude_github(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             else:
                 payload = {
                     "gate": gate,
@@ -117,7 +118,8 @@ class GateRequestHandlerMixin:
         )
 
     def _request_gemini(
-        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         from review_gate_manager import _utc_now
 
@@ -139,6 +141,8 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number,
             ),
         }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
                 payload, gate="gemini_review", binary_name="gemini",
@@ -152,6 +156,7 @@ class GateRequestHandlerMixin:
         *,
         contract: ReviewContract,
         mode: str = "per_pr",
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         """Request a Gemini review driven by a canonical ReviewContract.
 
@@ -185,6 +190,8 @@ class GateRequestHandlerMixin:
                 pr_id=contract.pr_id,
             ),
         }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
                 payload, gate="gemini_review", binary_name="gemini",
@@ -237,6 +244,7 @@ class GateRequestHandlerMixin:
         *,
         contract: ReviewContract,
         mode: str = "per_pr",
+        dispatch_id: str = "",
     ) -> ClaudeGitHubReviewReceipt:
         """Request a Claude GitHub review driven by a canonical ReviewContract.
 
@@ -275,6 +283,8 @@ class GateRequestHandlerMixin:
             requested_at=requested_at,
             pr_id=contract.pr_id,
         )
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
 
         request_file = self._contract_request_path("claude_github_optional", contract.pr_id)
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -296,7 +306,8 @@ class GateRequestHandlerMixin:
         return receipt
 
     def _request_codex(
-        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         from review_gate_manager import _utc_now
 
@@ -324,6 +335,8 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number,
             ),
         }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
                 payload, gate="codex_gate", binary_name="codex",
@@ -333,7 +346,8 @@ class GateRequestHandlerMixin:
         return payload
 
     def _request_claude_github(
-        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         from review_gate_manager import _utc_now
 
@@ -355,6 +369,8 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number,
             ),
         }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
         if configured:
             payload["status"] = "queued"
             if os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") == "1":

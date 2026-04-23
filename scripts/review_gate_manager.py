@@ -167,6 +167,7 @@ def _build_parser() -> argparse.ArgumentParser:
     request_parser.add_argument("--risk-class", default="medium")
     request_parser.add_argument("--changed-files", default="")
     request_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
+    request_parser.add_argument("--dispatch-id", default="")
     request_parser.add_argument("--json", action="store_true")
 
     result_parser = sub.add_parser("record-result")
@@ -195,6 +196,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rexec_parser.add_argument("--risk-class", default="medium")
     rexec_parser.add_argument("--changed-files", default="")
     rexec_parser.add_argument("--mode", choices=("per_pr", "final"), default="per_pr")
+    rexec_parser.add_argument("--dispatch-id", default="")
     rexec_parser.add_argument("--json", action="store_true")
 
     status_parser = sub.add_parser("status")
@@ -220,6 +222,7 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
         risk_class=args.risk_class,
         changed_files=changed_files,
         mode=args.mode,
+        dispatch_id=getattr(args, "dispatch_id", "") or "",
     )
     print(json.dumps(result, indent=2))
     if result.get("has_required_failure"):
@@ -276,6 +279,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             risk_class=args.risk_class,
             changed_files=changed_files,
             mode=args.mode,
+            dispatch_id=getattr(args, "dispatch_id", "") or "",
         )
         print(json.dumps(result, indent=2))
         return 0

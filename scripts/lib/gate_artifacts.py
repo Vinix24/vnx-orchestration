@@ -202,6 +202,7 @@ def materialize_artifacts(
         residual_risk = parsed.get("residual_risk", "") or ""
     blocking, advisory = _classify_findings(findings)
 
+    real_dispatch_id = request_payload.get("dispatch_id", "")
     result_payload: Dict[str, Any] = {
         "gate": gate,
         "pr_id": pr_id or (str(pr_number) if pr_number else ""),
@@ -218,6 +219,8 @@ def materialize_artifacts(
         "duration_seconds": duration_seconds,
         "recorded_at": now,
     }
+    if real_dispatch_id:
+        result_payload["dispatch_id"] = real_dispatch_id
 
     if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file)):
         return gate_recorder.record_failure_simple(
@@ -231,7 +234,7 @@ def materialize_artifacts(
     # Write JSON sidecar to report_pipeline/ for intelligence DB ingestion (OI-1066)
     try:
         sidecar = {
-            "dispatch_id": f"gate-{gate}-pr-{pr_number}",
+            "dispatch_id": real_dispatch_id or f"gate-{gate}-pr-{pr_number if pr_number is not None else pr_id}",
             "gate": gate,
             "pr_id": pr_id,
             "pr_number": pr_number,
