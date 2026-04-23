@@ -27,6 +27,7 @@ try:
     from terminal_snapshot import collect_terminal_snapshot
     from cqs_calculator import calculate_cqs
     from receipt_provenance import enrich_receipt_provenance, validate_receipt_provenance
+    from ghost_receipt_filter import should_route_to_gate_stream, gate_events_file
 except Exception as exc:  # pragma: no cover - hard fail on bootstrap issue
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
@@ -908,6 +909,20 @@ def append_receipt_payload(
 
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
     receipt = _enrich_completion_receipt(receipt)
+
+    # Route ghost gate receipts (dispatch_id="unknown" + gate event) to the
+    # separate gate_events stream so t0_receipts.ndjson stays traceable.
+    if receipts_file is None and should_route_to_gate_stream(receipt):
+        try:
+            paths = ensure_env()
+            state_dir = Path(paths["VNX_STATE_DIR"])
+            receipts_file = str(gate_events_file(state_dir))
+            _emit("INFO", "ghost_receipt_rerouted",
+                  gate=str(receipt.get("gate") or ""),
+                  pr_id=str(receipt.get("pr_id") or ""),
+                  destination=receipts_file)
+        except Exception as exc:
+            _emit("WARN", "ghost_receipt_reroute_failed", error=str(exc))
 
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)
