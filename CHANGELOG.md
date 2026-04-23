@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixes
+- **headless-gate-dispatch-id**: Gate request handlers now accept and persist `dispatch_id` in request payloads; `materialize_artifacts` emits real dispatch_id in result JSON and sidecar instead of synthetic `gate-<gate>-pr-<n>` strings; `review_gate_manager` CLI gains `--dispatch-id` arg; 12 new tests (OI-AT-4)
 - **audit-hook-active-drain**: Install `prepare-commit-msg` hook via `core.hooksPath=hooks/git`; add `scripts/check_active_drain.py` janitor that moves receipted dispatches from `active/` to `completed/` and orphans older than threshold to `dead_letter/`; 23 passing tests
 - **ghost-receipt-filter**: Route headless gate receipts with `dispatch_id="unknown"` to a separate `gate_events.ndjson` stream instead of polluting `t0_receipts.ndjson`; adds `headless_review_receipt` schema module (missing source) with 30 passing tests
 - **dispatcher**: Skip tmux MODE_CONTROL pre-flight (pane probe, configure_terminal_mode, C-u clear, sleep) for subprocess-routed terminals; call only mode_pre_check to set _CTM_* globals needed by deliver_dispatch_to_terminal

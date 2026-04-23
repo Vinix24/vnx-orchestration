@@ -108,6 +108,7 @@ class GateExecutorMixin:
         risk_class: str,
         changed_files: Iterable[str],
         mode: str,
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         """Request and immediately execute all gates atomically.
 
@@ -124,6 +125,7 @@ class GateExecutorMixin:
             risk_class=risk_class,
             changed_files=changed_files,
             mode=mode,
+            dispatch_id=dispatch_id,
         )
 
         gates, has_required_failure = self._execute_requested_gates(
