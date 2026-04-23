@@ -591,3 +591,32 @@ Teach the dispatcher to detect `pane_in_mode`, attempt safe recovery, and fail c
         assert SCOPE_WARN_THRESHOLD < SCOPE_BLOCK_THRESHOLD
         assert INSTRUCTION_SIZE_WARN > 0
         assert DIR_BREADTH_WARN >= 2
+
+
+class TestD2DescriptionHeaderLevels:
+    def test_hash2_description_accepted(self, tmp_path):
+        """D-2: ## Description should satisfy description requirement."""
+        from dispatch_instruction_validator import DispatchValidationResult, _check_description_present
+        result = DispatchValidationResult(dispatch_id="test", findings=[])
+        _check_description_present("## Description\n\nThis is a description.\n", result)
+        assert not any(f.rule == "D-2" for f in result.findings)
+
+    def test_hash3_description_accepted(self, tmp_path):
+        """D-2: ### Description should also satisfy description requirement."""
+        from dispatch_instruction_validator import DispatchValidationResult, _check_description_present
+        result = DispatchValidationResult(dispatch_id="test", findings=[])
+        _check_description_present("### Description\n\nThis is a description.\n", result)
+        assert not any(f.rule == "D-2" for f in result.findings)
+
+
+class TestD4ScopeSectionCoverage:
+    def test_unbounded_lang_in_scope_is_caught(self, tmp_path):
+        """D-4: unbounded language in ### Scope (Description clean) should be caught."""
+        from dispatch_instruction_validator import DispatchValidationResult, _check_unbounded_language
+        result = DispatchValidationResult(dispatch_id="test", findings=[])
+        content = (
+            "## Description\n\nNarrow fix for function X.\n\n"
+            "### Scope\n\n- Fix all the things while you are at it\n"
+        )
+        _check_unbounded_language(content, result)
+        assert any(f.rule == "D-4" for f in result.findings)

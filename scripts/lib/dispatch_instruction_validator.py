@@ -132,7 +132,7 @@ def _check_dispatch_id(dispatch_id: Optional[str], result: DispatchValidationRes
 
 def _check_description_present(content: str, result: DispatchValidationResult) -> None:
     """D-2: Instruction body must contain a description anchor."""
-    has_description = bool(re.search(r"###\s+Description", content))
+    has_description = bool(re.search(r"#{2,}\s+Description", content))
     has_instruction_block = bool(re.search(r"^Instruction:", content, re.MULTILINE))
     if not has_description and not has_instruction_block:
         result.findings.append(DispatchFinding(
@@ -289,20 +289,31 @@ def _extract_instruction_body(content: str) -> str:
 
 
 def _extract_description_scope_section(content: str) -> str:
-    """Extract Description/Context section text for D-4 scanning.
+    """Extract Description/Context/Scope section text for D-4 scanning.
 
-    Priority: Description > Context > Task > empty string (→ no D-4 findings).
+    Concatenates ALL matching sections (Description, Context, Scope) so
+    unbounded language in Scope-only dispatches is still caught. Falls
+    back to Task if none of the primary sections are present.
     Matches ## or ### headings to support both dispatch formats.
     """
-    for heading in ("Description", "Context", "Task"):
+    collected: list[str] = []
+    for heading in ("Description", "Context", "Scope"):
         match = re.search(
             rf"#{{{2},}}\s+{heading}\s*\n(.*?)(?=\n#{{{2},}}|\Z)",
             content,
             re.DOTALL | re.IGNORECASE,
         )
         if match:
-            return match.group(1)
-    return ""
+            collected.append(match.group(1))
+    if collected:
+        return "\n".join(collected)
+    # Fallback to Task only when no primary section is present
+    match = re.search(
+        r"#{2,}\s+Task\s*\n(.*?)(?=\n#{2,}|\Z)",
+        content,
+        re.DOTALL | re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
 
 
 def _extract_top_level_dirs(content: str) -> Set[str]:
