@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/submit_gate_request-request",
+  "title": "submit_gate_request Request",
+  "description": "Request a review gate to be executed for a PR. Sent as JSON body on POST /v1/projects/:project_id/review-gates. The daemon enqueues the gate; T0 submits the request.",
+  "type": "object",
+  "required": ["id", "gate_type", "pr_id", "branch"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Client-assigned request_id. Used for idempotency — submitting the same id twice is a no-op."
+    },
+    "gate_type": {
+      "type": "string",
+      "enum": ["codex", "gemini_review", "ci", "burn_in", "human"]
+    },
+    "pr_id":         { "type": "string" },
+    "pr_number":     { "type": ["integer", "null"], "description": "GitHub PR number, required for gemini_review and codex gates." },
+    "branch":        { "type": "string" },
+    "contract_hash": { "type": ["string", "null"], "description": "Hash of the gate contract doc, for reproducibility." },
+    "changed_files": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "File paths changed in the PR."
+    },
+    "diff_stat": { "type": ["string", "null"] }
+  }
+}

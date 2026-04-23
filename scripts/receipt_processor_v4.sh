@@ -46,13 +46,14 @@ RECEIPTS_PROCESSED_DIR="${VNX_DATA_DIR}/receipts/processed"
 RECEIPT_RETRY_INTERVAL="${VNX_RECEIPT_RETRY_INTERVAL:-10}"  # seconds between pending retry sweeps
 
 # Cross-platform SHA-256 helper (Linux: sha256sum, macOS: shasum -a 256)
+_SHA256_FALLBACK_WARN=""
 if command -v sha256sum >/dev/null 2>&1; then
     _sha256() { sha256sum "$1" | cut -d' ' -f1; }
 elif command -v shasum >/dev/null 2>&1; then
     _sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 else
     _sha256() { cksum "$1" | awk '{print $1}'; }
-    log "WARN" "No sha256sum or shasum found; falling back to cksum (weaker)"
+    _SHA256_FALLBACK_WARN="No sha256sum or shasum found; falling back to cksum (weaker)"
 fi
 
 # Create state files if they don't exist
@@ -67,6 +68,9 @@ log() {
     shift
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$PROCESSING_LOG" >&2
 }
+
+# Emit deferred SHA fallback warning now that log() is defined
+[ -n "$_SHA256_FALLBACK_WARN" ] && log "WARN" "$_SHA256_FALLBACK_WARN"
 
 log_structured_failure() {
     local code="$1"
@@ -187,8 +191,14 @@ should_process_report() {
         else
             cutoff_seconds=$(($(date +%s) - 86400))
         fi
+    elif [ "$MODE" = "manual" ] && [ -f "$WATERMARK_FILE" ]; then
+        # Manual mode: honor last-processed watermark (epoch seconds) when available
+        cutoff_seconds=$(cat "$WATERMARK_FILE" 2>/dev/null)
+        if ! [[ "$cutoff_seconds" =~ ^[0-9]+$ ]]; then
+            cutoff_seconds=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
+        fi
     else
-        # Catchup/manual mode: Process files from last N hours
+        # Catchup mode (or manual with no prior watermark): process last N hours
         cutoff_seconds=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
     fi
 
@@ -277,7 +287,7 @@ check_flood_protection() {
 
     # Check if flood protection is active — auto-clear if lock is stale
     if [ -f "$FLOOD_LOCKFILE" ]; then
-        local lock_age=$(( $(date +%s) - $(stat -f %m "$FLOOD_LOCKFILE" 2>/dev/null || echo "0") ))
+        local lock_age=$(( $(date +%s) - $(stat -c %Y "$FLOOD_LOCKFILE" 2>/dev/null || stat -f %m "$FLOOD_LOCKFILE" 2>/dev/null || echo "0") ))
         if [ "$lock_age" -ge "$FLOOD_LOCK_MAX_AGE" ]; then
             log "INFO" "Flood lock expired after ${lock_age}s (max ${FLOOD_LOCK_MAX_AGE}s) — auto-clearing"
             rm -f "$FLOOD_LOCKFILE"
@@ -520,6 +530,31 @@ _move_dispatch_to_completed() {
     mv "$src" "$VNX_DISPATCH_DIR/completed/" 2>/dev/null && \
         log "DEBUG" "Dispatch moved: active → completed ($_rf_dispatch_id)" || \
         log "WARN" "Failed to move dispatch to completed: $_rf_dispatch_id"
+}
+
+# Section C2b helper: Auto-release canonical lease on terminal task events.
+# Called for task_complete / task_failed / task_timeout.
+# Uses release-on-receipt which resolves generation internally. Non-fatal.
+_auto_release_lease_on_receipt() {
+    local terminal="$1"
+    local dispatch_id="$2"
+    [ -z "$terminal" ] && return 0
+
+    local _ror_args=(--terminal "$terminal")
+    [ -n "$dispatch_id" ] && _ror_args+=(--dispatch-id "$dispatch_id")
+    local release_result
+    release_result=$(python3 "$SCRIPTS_DIR/runtime_core_cli.py" release-on-receipt "${_ror_args[@]}" 2>/dev/null)
+    local rc=$?
+
+    if [ $rc -eq 0 ]; then
+        local reason
+        reason=$(echo "$release_result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('reason','ok'))" 2>/dev/null)
+        log "INFO" "AUTO_LEASE_RELEASE: terminal=$terminal dispatch=${dispatch_id:-unset} reason=$reason"
+    else
+        local err
+        err=$(echo "$release_result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error') or d.get('reason','unknown'))" 2>/dev/null)
+        log "WARN" "AUTO_LEASE_RELEASE: failed for terminal=$terminal dispatch=${dispatch_id:-unset} err=${err:-rc=$rc} (non-fatal)"
+    fi
 }
 
 # Section D: Extract PR ID (3-tier) and attach evidence to open items.
@@ -783,13 +818,23 @@ _deliver_receipt_to_t0_pane() {
     local receipt_json="$1"
     local terminal="$2"
 
+    local dispatch_id="${_rf_dispatch_id:-no-id}"
+
+    # Ghost-receipt filter: skip pastes for stop-hook triggers without real dispatch context.
+    # Prevents flooding T0 pane when long-running sessions emit interim Stop events.
+    case "$dispatch_id" in
+        unknown-*|no-id)
+            log "INFO" "Skipping ghost receipt paste: dispatch_id=$dispatch_id"
+            return 0
+            ;;
+    esac
+
     local t0_pane=$(get_pane_id_smart "T0" 2>/dev/null)
     if [ -z "$t0_pane" ]; then
         log "ERROR" "Could not find T0 pane - get_pane_id_smart returned empty"
         return 1
     fi
 
-    local dispatch_id="${_rf_dispatch_id:-no-id}"
     local report_path="${_rf_report_path:-no-report}"
 
     # Determine next action based on status
@@ -939,6 +984,17 @@ process_single_report() {
 
     # C2. Move dispatch from active/ → completed/ on task finish (non-fatal)
     _move_dispatch_to_completed
+
+    # C2b. Auto-release canonical lease on terminal receipt events (non-fatal).
+    # Eliminates the need for manual `release-on-failure` after every worker receipt.
+    # release-on-receipt looks up the current generation internally; idempotent.
+    # Skip auto-release for no_confirmation timeouts: Section C intentionally keeps
+    # the terminal blocked (canonical lease held) to prevent immediate re-dispatch.
+    # Releasing the lease here would conflict with the blocked shadow state.
+    if [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] \
+       || { [ "$_rf_event_type" = "task_timeout" ] && [ "$_rf_status" != "no_confirmation" ]; }; then
+        _auto_release_lease_on_receipt "$terminal" "$_rf_dispatch_id"
+    fi
 
     # C3. Update dispatch_metadata outcome in quality DB (non-fatal)
     if [ -n "$_rf_dispatch_id" ] && { [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] || [ "$_rf_event_type" = "task_timeout" ]; }; then

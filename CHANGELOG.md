@@ -5,6 +5,55 @@
 ### Fixes
 - **ghost-receipt-filter**: Route headless gate receipts with `dispatch_id="unknown"` to a separate `gate_events.ndjson` stream instead of polluting `t0_receipts.ndjson`; adds `headless_review_receipt` schema module (missing source) with 30 passing tests
 - **dispatcher**: Skip tmux MODE_CONTROL pre-flight (pane probe, configure_terminal_mode, C-u clear, sleep) for subprocess-routed terminals; call only mode_pre_check to set _CTM_* globals needed by deliver_dispatch_to_terminal
+- **Latency PR-1+PR2 CI fix**: Update `tests/test_subprocess_dispatch.py` stale assertions from old defaults (chunk_timeout=120, total_deadline=600) to new defaults (chunk_timeout=300, total_deadline=900) introduced by latency PR-1
+- **Latency PR-2**: Add `SessionStore` (`scripts/lib/session_store.py`) — atomic JSON file-backed store that persists Claude session IDs per terminal; wire into `deliver_via_subprocess()` to pass `--resume <session_id>` on subsequent dispatches (opt-in via `VNX_SESSION_RESUME=1`)
+- **Latency PR-1**: Add 60s cooldown for invalid-skill dispatches in `dispatcher_v8_minimal.sh` (env-tunable via `VNX_INVALID_SKILL_COOLDOWN`) to prevent log floods and queue stalls on every 2s poll
+- **Latency PR-1**: Raise `chunk_timeout` default from 120s → 300s and `total_deadline` from 600s → 900s in `subprocess_adapter.py` and `subprocess_dispatch.py`; both tuneable via `VNX_CHUNK_TIMEOUT` / `VNX_TOTAL_DEADLINE` env vars
+- **W0 cleanup**: `scripts/review_gate_manager.py` — auto-compute `changed_files` from git diff when `--changed-files` is empty and `--branch` is provided (eliminates context contamination); `scripts/lib/dispatch_instruction_validator.py` — D-8 rule bumped from `warn` to `blocker` for gate-bearing dispatches; 4 new tests
+
+### Bug Fixes
+
+- **W0 PR-2 fix**: `receipt_processor_v4.sh` — fix shell quoting in `_auto_release_lease_on_receipt` (array-based args replace unquoted `${:+}` expansion) and fix conflicting state on `task_timeout+no_confirmation` (skip auto-release when shadow intentionally keeps terminal blocked); 8 new tests (22 total)
+
+### Features
+
+- **W0 PR-2**: Auto-lease-release on task receipt — `receipt_processor_v4.sh` now calls `release-on-receipt` automatically on `task_complete`/`task_failed`/`task_timeout` events, eliminating the need for manual `release-on-failure` after every worker receipt; `RuntimeCore.release_on_receipt()` resolves generation internally with dispatch-id ownership guard and idempotent idle-terminal handling
+
+### Security
+- **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
+
+### Fixes
+- **W0 PR-5 fix2**: `scripts/lib/log_artifact.py` — path traversal hardening: `_safe_filename()` strips path separators and collapses `..` sequences from `run_id` before using it in artifact filenames; `scripts/lib/headless_inspect.py` — `list_runs()` `show_all` parameter was dead code (never branched on); added explicit `elif show_all:` branch; 3 new tests (53 total)
+- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
+- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
+- **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
+
+### Features
+- **W0 PR-6**: `scripts/lib/dispatch_instruction_validator.py` — dispatch instruction template validator (D-1..D-8): Dispatch-ID format, description presence, scope item count thresholds (warn ≥9/block ≥16), unbounded-task language detection, gate/quality-gate alignment, file directory breadth, instruction size, and success-criteria presence; 35 tests in `tests/test_dispatch_instruction_validator.py`
+- **W0 PR-5**: `.github/workflows/burn-in-headless.yml` — scheduled weekly burn-in CI (Sunday 02:00 UTC) running billing-safety gate (BS-1..BS-6) followed by burn-in certification (B-1..B-10), snapshot tooling regression, and fixture smoke checks; `workflow_dispatch` for manual runs; zero API cost (CLI stub via `VNX_HEADLESS_CLI=echo`)
+- **W0 PR-5**: `scripts/lib/exit_classifier.py` — maps subprocess exit conditions to named failure classes (`SUCCESS/TIMEOUT/TOOL_FAIL/INFRA_FAIL/NO_OUTPUT/INTERRUPTED/PROMPT_ERR/UNKNOWN`) with retryability, signal extraction, and operator hints
+- **W0 PR-5**: `scripts/lib/log_artifact.py` — structured human-readable run-log writer (`<run_id>.log`) and raw output capture (`<run_id>.out`) for operator inspection without file spelunking
+- **W0 PR-5**: `scripts/lib/headless_inspect.py` — operator inspection tools: `format_run_line`, `format_run_detail`, `list_runs`, `build_health_summary`, `format_health_summary`
+- **W0 PR-5**: `tests/conftest.py` — shared pytest fixtures (`vnx_state_dir`, `vnx_registry`, `vnx_artifact_dir`, `vnx_dispatch_dir`, `vnx_fake_project`, `vnx_snapshot_dir`) for burn-in and snapshot test suites; `make_vnx_dispatch_bundle` factory fixture
+- **W0 PR-5**: `tests/fixtures/dispatch_bundle_research.json` + `dispatch_bundle_analysis.json` — CI fixture bundles for headless adapter integration tests
+- **W0 PR-5**: `tests/test_billing_safety.py` — 12 billing-safety assertions across BS-1..BS-6: no SDK imports, no direct API URLs, no hardcoded keys, no key assignments, CLI-only subprocess, clean fixture files
+- **W0 PR-4**: `vnx snapshot/restore/quiesce-check` — CLI tools for project-state backup and migration readiness: tarball + SQL dump of `.vnx-data/`, fail-safe restore with overwrite guard, and read-only quiesce verification across 4 conditions (active dispatches, held leases, in-flight gates, uncommitted changes)
+- **W0 PR-1**: `scripts/dispatcher_supervisor.sh` — dedicated auto-restart supervisor for `dispatcher_v8_minimal.sh` with exponential backoff (2s→60s), stale singleton lock cleanup before each restart, SIGTERM-safe child shutdown, and `status` subcommand
+- **F32 Wave D PR-1**: T2/T3 default subprocess delivery — `deliver_dispatch_to_terminal` now defaults T1/T2/T3 to subprocess adapter; T0 remains tmux by default; `VNX_ADAPTER_Tx=tmux` opts any terminal back to tmux
+- **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
+- **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
+- **F36 PR-233 fix**: `_rotate_if_needed` holds exclusive lock across full copy+truncate to prevent concurrent-writer data loss; `process_events_file` resets stale cursor when it exceeds file length after source reset
+- **F36 PR-233 re-gate fix**: inode-based cursor invalidation in `process_events_file` detects source-file replacement (same or greater line count) and resets cursor to 0; `.claude/scheduled_tasks.lock` untracked and added to `.gitignore`
+- **F36 PR-233 final fix**: parse-before-advance in `process_events_file` — partial trailing JSON line does not advance cursor (retried next invocation); malformed non-last lines log warning and advance as before
+- **F36 PR-233 round-4 fix**: legacy cursor upgrade in `process_events_file` — cursor written without inode (legacy `save_cursor` format) is upgraded with current inode even when no new events exist, enabling same-length file replacement detection on all subsequent runs
+- **F36 Wave B PR-2**: T0 escalations log (`t0_escalations_log.py`) — passive JSONL writer for escalation records with dual adapter hooks: `decision_executor._handle_escalate()` emits executor-source records; `governance_escalation.transition_escalation()` emits governance-source records with full entity/trigger data; batch-replay CLI with inode-based cursor tracking
+- **F36 Wave B PR-1**: `VNX_ADAPTER_T0=subprocess` cutover flag — `is_headless_t0()` added to receipt processor; T0 snapshot annotated with `adapter/headless` fields when headless; `dispatch_deliver.sh` documents explicit T0 subprocess support; `heartbeat_ack_monitor` docstring updated for T0 coverage
+- **F36 Wave C PR-1**: Shadow mode decision parity harness (`shadow_mode_runner.py`) — runs the headless T0 decision engine in dry-run mode against recent trigger events, compares shadow decisions to the actual decision log, and generates JSONL + markdown parity reports under `{VNX_DATA_DIR}/shadow_parity/`; 64 tests covering all public functions
+- **F36 Wave C PR-239 fix**: Shadow runner pairing correctness — replaced positional event↔decision alignment with `dispatch_id`-keyed lookup (FIFO fallback for non-dispatch events); prevents stale pairings when cursor lag or independent "last N" slices cause index drift; 12 new tests, 76 total
+
+## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
+
+- **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
 
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 

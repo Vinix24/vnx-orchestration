@@ -43,6 +43,8 @@ vnx status        # See your healthy state
 
 Starter mode gives you scoped dispatches, structured receipts, and a full audit trail — without the multi-terminal setup. When you're ready for parallel agents, upgrade with `vnx init --operator`.
 
+**New to VNX?** Start with the [5-Minute Quickstart](docs/QUICKSTART.md).
+
 ### Operator Mode — Full multi-agent orchestration
 
 Four-terminal tmux grid, multiple AI providers, parallel tracks, quality gates, worktrees, and dashboard.
@@ -89,6 +91,23 @@ python3 scripts/headless_trigger.py --watch-dir .vnx-data/unified_reports/
 The same governance applies regardless of mode. Receipts, quality gates, and provenance records are generated identically whether a worker is interactive or headless. Headless does not mean ungoverned.
 
 Typical use cases: overnight feature execution, CI/CD integration, shadow testing of new agent configurations.
+
+## Why CLI Subprocess — Not OAuth, Not API
+
+Anthropic's April 2026 policy bans third-party tools from using OAuth tokens obtained through Pro/Max subscriptions. OpenClaw (340K+ stars) and similar "harness" tools were affected. **VNX was not.**
+
+VNX exclusively spawns official `claude` CLI processes via subprocess. The binary handles authentication internally. VNX never touches OAuth tokens, never calls `api.anthropic.com`, never imports the Anthropic SDK. A [formal audit](docs/compliance/vnx_anthropic_billing_audit.pdf) confirms this with line-by-line evidence:
+
+| Audit Question | Result |
+|----------------|--------|
+| Does any code call Anthropic OAuth endpoints? | **NO** |
+| Does any code call `api.anthropic.com` using subscription credentials? | **NO** |
+| Does it only launch `claude` CLI processes? | **YES** |
+| Are there HTTP clients targeting Anthropic endpoints? | **NO** |
+
+The cost advantage is significant: ~$200/month Max subscription versus ~$3,000/month in equivalent API tokens for the same workload. CLI subprocess trades some observability for a ~15x cost reduction — without sacrificing core functionality.
+
+Full analysis: [Best OpenClaw Alternative? How CLI Subprocess Orchestration Survives Anthropic's OAuth Ban](https://vincentvandeth.nl/blog/best-openclaw-alternative-cli-subprocess-oauth-ban)
 
 ## How It Works
 
@@ -301,6 +320,7 @@ See [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) and [VNX vs Mul
 | | VNX | Raw Claude Code | OpenClaw / CrewAI / LangGraph |
 |---|-----|----------------|-------------------------------|
 | **Multi-agent coordination** | Built-in (T0-T3 grid) | Manual (multiple terminals) | Framework-level orchestration |
+| **Auth method** | CLI subprocess (unaffected by OAuth ban) | CLI OAuth (subscription) | Direct API keys |
 | **Audit trail** | Append-only NDJSON ledger | Chat logs only | Varies; often requires custom logging |
 | **Quality gates** | Deterministic, non-LLM | None built-in | Framework-dependent |
 | **Human approval** | Mandatory on every dispatch | Per-tool approval | Configurable but not default |
@@ -315,13 +335,38 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 Active development. Priorities shift based on real usage patterns.
 
-- **Headless A/B testing** — run interactive and autonomous side-by-side on the same feature, compare output quality (completed — see [results](docs/research/HEADLESS_AB_TEST_RESULTS.md))
-- **Governance profiles** — configurable review depth per folder/project: full, light, minimal (landed in v0.8.0)
-- **Context rotation package** — extract the automatic context window management as a standalone installable package
-- **Multi-channel operator input** — Slack, WhatsApp, and webhook triggers alongside tmux terminal control
+### Recently landed (F46–F60, April 2026)
+
+- **F46** Intelligence extraction pipeline — learning loop writes success/anti-patterns to SQLite; intelligence selector returns real items per dispatch
+- **F47** T0 state feedback loop — receipt watcher, feature state machine, structured feature context in `t0_brief.json`
+- **F48** Autonomous loop + headless dispatch daemon — model-agnostic LLM decision router (Ollama / Claude CLI / dry-run backends)
+- **F49** Dashboard intelligence — pattern/injection/classification API endpoints, intelligence page, session transcript viewer
+- **F50** Self-improvement loop — proposals API, confidence trends, weekly digest, pattern-usage feedback wiring
+- **F51** Configurable governance enforcement — 4-level YAML config (off / advisory / soft / hard mandatory) with per-check override support
+- **F52** Operator CLI + per-terminal permission profiles + post-dispatch commit enforcement
+- **F53** Multi-provider adapter layer — `ProviderAdapter` ABC with Claude / Gemini / Codex / Ollama adapters
+- **F54** Temporal pattern lifecycle (`valid_from` / `valid_until` on intelligence tables)
+- **F55** PageRank repo map — tree-sitter symbol extraction wired into pre-dispatch enrichment
+- **F56** Nightly NDJSON memory consolidation
+- **F57** Karpathy-style dispatch parameter tracker + correlation analysis
+- **F58** Observability fixes — dispatch manifest, session/commit traceability in receipts, event archival, layered user-message architecture
+- **F60** Intelligence activation — SQL fixes, universal-scope patterns, retroactive backfill of 829 dispatch experiments
+
+T0 orchestration hardening (2026-04-19 postmortem response) landed in `fix/t0-hardening-2026-04-19`: dispatch_guard cross-validates brief vs terminal_state, auto-recover expired leases, `canonical_state_views.py` restored.
+
+### Next
+
+- **Task Control Surface** — live dispatch board, SSE streaming, one-click re-dispatch from dashboard
+- **Battle testing** — overnight soak + failure injection on the full autonomous loop
+- **Model-agnostic execution** — route headless dispatches to Gemini / Codex / Ollama using the F53 adapter layer (currently Claude-only in practice)
+- **Multi-channel operator input** — Slack / WhatsApp / webhook triggers alongside tmux
 - **Dynamic worker pools** — scale headless workers based on queue depth and API budget
-- **Model-agnostic adapter layer** — unified dispatch interface across Claude, Codex, Gemini, Kimi, and future CLI providers
-- **Business agent templates** — pre-built agent configurations for content creation, research, and analysis workflows
+- **Business agent templates** — pre-built configurations for content, research, analysis
+
+### Known gaps / deferred
+
+- **Headless context rotation** (F43 follow-up, tracked in OI-1073) — subprocess workers currently use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
+- **MCP server** — expose VNX state to external Claude sessions; not yet built.
 
 See [CHANGELOG.md](CHANGELOG.md) for what shipped recently.
 
@@ -330,6 +375,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what shipped recently.
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/manifesto/ARCHITECTURE.md) | Glass Box Governance design and data flow |
+| [Compliance Audit](docs/compliance/vnx_anthropic_billing_audit.pdf) | Formal billing-policy audit — zero OAuth tokens, zero API calls |
 | [Productization Contract](docs/contracts/PRODUCTIZATION_CONTRACT.md) | User modes, command surface, migration plan |
 | [Dispatch Guide](docs/DISPATCH_GUIDE.md) | How T0 routes tasks to workers |
 | [Limitations](docs/manifesto/LIMITATIONS.md) | Known constraints and failure modes |

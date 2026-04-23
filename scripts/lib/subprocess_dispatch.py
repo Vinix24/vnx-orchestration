@@ -317,8 +317,8 @@ def deliver_via_subprocess(
     repo_map: str | None = None,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
-    chunk_timeout: float = 120.0,
-    total_deadline: float = 600.0,
+    chunk_timeout: float = 300.0,
+    total_deadline: float = 900.0,
     health_monitor: "WorkerHealthMonitor | None" = None,
     commit_hash_before: str = "",
 ) -> "_SubprocessResult":
@@ -343,6 +343,16 @@ def deliver_via_subprocess(
 
     Returns _SubprocessResult(success, session_id, event_count, manifest_path).
     """
+    # Allow runtime override via env vars so operators can tune without code changes.
+    try:
+        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
+    except (KeyError, ValueError):
+        pass
+    try:
+        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
+    except (KeyError, ValueError):
+        pass
+
     # Append repo map to instruction before skill context wrapping
     if repo_map:
         instruction = instruction + f"\n\n{repo_map}"
@@ -382,6 +392,20 @@ def deliver_via_subprocess(
         branch=_get_current_branch(),
     )
 
+    # Load prior session ID for --resume (opt-in via VNX_SESSION_RESUME=1)
+    resume_session: str | None = None
+    if os.environ.get("VNX_SESSION_RESUME", "0") == "1":
+        try:
+            from session_store import SessionStore as _SessionStore
+            resume_session = _SessionStore().load(terminal_id)
+            if resume_session:
+                logger.info(
+                    "deliver_via_subprocess: resuming %s with session_id=%s",
+                    terminal_id, resume_session,
+                )
+        except Exception as _exc:
+            logger.debug("deliver_via_subprocess: session load failed: %s", _exc)
+
     adapter = SubprocessAdapter()
     result = adapter.deliver(
         terminal_id,
@@ -389,6 +413,7 @@ def deliver_via_subprocess(
         instruction=instruction,
         model=model,
         cwd=agent_cwd,
+        resume_session=resume_session,
     )
     if not result.success:
         return _SubprocessResult(success=False, session_id=None, event_count=0, manifest_path=manifest_path)
@@ -427,7 +452,46 @@ def deliver_via_subprocess(
                         health_monitor.log_stuck_event()
                         _last_stuck_log_time = _now
         session_id = adapter.get_session_id(terminal_id)
+
+        # Persist session_id for next dispatch to resume (VNX_SESSION_RESUME=1)
+        if session_id and os.environ.get("VNX_SESSION_RESUME", "0") == "1":
+            try:
+                from session_store import SessionStore as _SessionStore
+                _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
+            except Exception as _exc:
+                logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
+
+        # Fail-closed: non-zero exit code means failure even when events were parsed.
+        obs = adapter.observe(terminal_id)
+        returncode = obs.transport_state.get("returncode")
         completed_manifest = _promote_manifest(dispatch_id)
+        if returncode is not None and returncode != 0:
+            logger.warning(
+                "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
+                returncode,
+                terminal_id,
+            )
+            return _SubprocessResult(
+                success=False,
+                session_id=session_id,
+                event_count=event_count,
+                manifest_path=completed_manifest or manifest_path,
+            )
+        # Fail-closed: timeout-terminated dispatches must not be classified as success.
+        # stop() removes the process from _processes so returncode above is None,
+        # but was_timed_out() tracks the authoritative kill-by-timeout signal.
+        if adapter.was_timed_out(terminal_id):
+            logger.warning(
+                "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
+                dispatch_id,
+                terminal_id,
+            )
+            return _SubprocessResult(
+                success=False,
+                session_id=session_id,
+                event_count=event_count,
+                manifest_path=completed_manifest or manifest_path,
+            )
         return _SubprocessResult(
             success=True,
             session_id=session_id,
@@ -826,8 +890,8 @@ def deliver_with_recovery(
     max_retries: int = 3,
     lease_generation: int | None = None,
     heartbeat_interval: float = 300.0,
-    chunk_timeout: float = 120.0,
-    total_deadline: float = 600.0,
+    chunk_timeout: float = 300.0,
+    total_deadline: float = 900.0,
     auto_commit: bool = True,
     gate: str = "",
 ) -> bool:
@@ -844,6 +908,16 @@ def deliver_with_recovery(
 
     Returns True on success, False on failure.
     """
+    # Allow runtime override via env vars so operators can tune without code changes.
+    try:
+        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
+    except (KeyError, ValueError):
+        pass
+    try:
+        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
+    except (KeyError, ValueError):
+        pass
+
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _get_commit_hash()
 

@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vnx/f36-r12/submit_open_item-response",
+  "title": "submit_open_item Response",
+  "description": "Response after creating or updating an open item.",
+  "type": "object",
+  "required": ["id", "project_id", "created", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id":          { "type": "string", "description": "Assigned or existing OI id." },
+    "project_id":  { "type": "string" },
+    "created":     { "type": "boolean", "description": "true if this was a new record; false if updated." },
+    "updated_at":  { "type": "string", "format": "date-time" }
+  }
+}

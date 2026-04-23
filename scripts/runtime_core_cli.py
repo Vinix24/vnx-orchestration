@@ -49,6 +49,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
+from project_root import resolve_data_dir, resolve_state_dir, resolve_dispatch_dir
 from runtime_core import RuntimeCore, load_runtime_core
 
 
@@ -57,32 +58,9 @@ from runtime_core import RuntimeCore, load_runtime_core
 # ---------------------------------------------------------------------------
 
 def _get_dirs() -> tuple[str, str]:
-    """Return (state_dir, dispatch_dir) from VNX environment.
-
-    BOOT-1: No /tmp fallback. Raises RuntimeError when required env vars are unset.
-    """
-    vnx_data = os.environ.get("VNX_DATA_DIR", "")
-    state_dir = os.environ.get("VNX_STATE_DIR", "")
-    dispatch_dir = os.environ.get("VNX_DISPATCH_DIR", "")
-
-    if not state_dir:
-        if vnx_data:
-            state_dir = str(Path(vnx_data) / "state")
-        else:
-            raise RuntimeError(
-                "VNX_STATE_DIR is not set and VNX_DATA_DIR is not set. "
-                "Source bin/vnx or set VNX_DATA_DIR before running runtime_core_cli.py."
-            )
-
-    if not dispatch_dir:
-        if vnx_data:
-            dispatch_dir = str(Path(vnx_data) / "dispatches")
-        else:
-            raise RuntimeError(
-                "VNX_DISPATCH_DIR is not set and VNX_DATA_DIR is not set. "
-                "Source bin/vnx or set VNX_DATA_DIR before running runtime_core_cli.py."
-            )
-
+    """Return (state_dir, dispatch_dir) resolved via git-based project root."""
+    state_dir = str(resolve_state_dir(__file__))
+    dispatch_dir = str(resolve_dispatch_dir(__file__))
     return state_dir, dispatch_dir
 
 
@@ -208,6 +186,23 @@ def cmd_release_lease(args: argparse.Namespace) -> None:
     _out(result, 0 if result.get("released") else 1)
 
 
+def cmd_release_on_receipt(args: argparse.Namespace) -> None:
+    """Release canonical lease when a worker task receipt arrives.
+
+    Looks up the current lease generation internally so the caller does not
+    need to thread the generation through the receipt pipeline.
+
+    Idempotent: terminal already idle returns released=True with skipped=True.
+    Ownership guard: when --dispatch-id is provided, rejects mismatched owners.
+    """
+    core = _require_core()
+    result = core.release_on_receipt(
+        terminal_id=args.terminal,
+        dispatch_id=args.dispatch_id or None,
+    )
+    _out(result, 0 if result.get("released") else 1)
+
+
 def cmd_release_on_failure(args: argparse.Namespace) -> None:
     """Record delivery failure and release canonical lease atomically.
 
@@ -323,6 +318,13 @@ def _add_lease_subparsers(sub: "argparse._SubParsersAction") -> None:
     p.add_argument("--generation", type=int, required=True)
 
     p = sub.add_parser(
+        "release-on-receipt",
+        help="Release canonical lease on task receipt (generation looked up internally)",
+    )
+    p.add_argument("--terminal", required=True)
+    p.add_argument("--dispatch-id", default="")
+
+    p = sub.add_parser(
         "release-on-failure",
         help="Record delivery failure and release canonical lease atomically",
     )
@@ -352,6 +354,7 @@ def main() -> None:
         "check-terminal": cmd_check_terminal,
         "acquire-lease": cmd_acquire_lease,
         "release-lease": cmd_release_lease,
+        "release-on-receipt": cmd_release_on_receipt,
         "release-on-failure": cmd_release_on_failure,
         "compat-check": cmd_compat_check,
         "chain-closeout": cmd_chain_closeout,
