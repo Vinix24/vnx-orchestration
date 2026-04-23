@@ -11,6 +11,7 @@
 
 - Monitoring guide: `MONITORING_GUIDE.md`
 - Multi-model guide: `MULTI_MODEL_GUIDE.md`
+- Event streams: `EVENT_STREAMS.md`
 - Receipt pipeline: `RECEIPT_PIPELINE.md`
 - Receipt processing flow: `RECEIPT_PROCESSING_FLOW.md`
 - Runtime rollback: `RUNTIME_CORE_ROLLBACK.md`
