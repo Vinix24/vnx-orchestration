@@ -30,6 +30,7 @@ from dispatch_instruction_validator import (
     DispatchFinding,
     DispatchValidationResult,
     validate_dispatch_instruction,
+    _extract_top_level_dirs,
 )
 
 
@@ -322,6 +323,32 @@ Sweep through all the tests and update them.
         d4 = [f for f in result.findings if f.rule == "D-4"]
         assert len(d4) >= 1
 
+    def test_d4_ignores_unbounded_lang_in_quality_gate_section(self) -> None:
+        content = """
+Dispatch-ID: 20260422-182004-qualgate-A
+
+## Description
+Deploy the authentication fix.
+
+## Quality Gate
+- fix all blockers before merge
+"""
+        result = validate_dispatch_instruction(content)
+        d4 = [f for f in result.findings if f.rule == "D-4"]
+        assert len(d4) == 0
+
+    def test_d4_catches_unbounded_lang_in_description(self) -> None:
+        content = """
+Dispatch-ID: 20260422-182004-desc-unbounded-A
+
+## Description
+Fix all the issues in the codebase.
+"""
+        result = validate_dispatch_instruction(content)
+        d4 = [f for f in result.findings if f.rule == "D-4"]
+        assert len(d4) >= 1
+        assert d4[0].severity == "warn"
+
 
 # ---------------------------------------------------------------------------
 # D-5: Gate requires Quality Gate section
@@ -383,6 +410,32 @@ Update files.
         result = validate_dispatch_instruction(content)
         d6 = [f for f in result.findings if f.rule == "D-6"]
         assert len(d6) == 0
+
+    def test_d6_counts_yml_sh_md_paths(self) -> None:
+        content = """
+Dispatch-ID: 20260422-182004-yml-dirs-A
+
+### Description
+Update files.
+
+### Scope
+- `scripts/foo.sh`
+- `.github/workflows/x.yml`
+- `docs/y.md`
+"""
+        dirs = _extract_top_level_dirs(content)
+        assert dirs == {"scripts", ".github", "docs"}
+
+    def test_d6_ignores_inline_non_path_words(self) -> None:
+        content = """
+Dispatch-ID: 20260422-182004-nodots-A
+
+### Description
+Uses version 1.2.3 and v0.9.0 semantics.
+Also references foo.bar.baz() method calls.
+"""
+        dirs = _extract_top_level_dirs(content)
+        assert len(dirs) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -538,3 +591,32 @@ Teach the dispatcher to detect `pane_in_mode`, attempt safe recovery, and fail c
         assert SCOPE_WARN_THRESHOLD < SCOPE_BLOCK_THRESHOLD
         assert INSTRUCTION_SIZE_WARN > 0
         assert DIR_BREADTH_WARN >= 2
+
+
+class TestD2DescriptionHeaderLevels:
+    def test_hash2_description_accepted(self, tmp_path):
+        """D-2: ## Description should satisfy description requirement."""
+        from dispatch_instruction_validator import DispatchValidationResult, _check_description_present
+        result = DispatchValidationResult(dispatch_id="test", findings=[])
+        _check_description_present("## Description\n\nThis is a description.\n", result)
+        assert not any(f.rule == "D-2" for f in result.findings)
+
+    def test_hash3_description_accepted(self, tmp_path):
+        """D-2: ### Description should also satisfy description requirement."""
+        from dispatch_instruction_validator import DispatchValidationResult, _check_description_present
+        result = DispatchValidationResult(dispatch_id="test", findings=[])
+        _check_description_present("### Description\n\nThis is a description.\n", result)
+        assert not any(f.rule == "D-2" for f in result.findings)
+
+
+class TestD4ScopeSectionCoverage:
+    def test_unbounded_lang_in_scope_is_caught(self, tmp_path):
+        """D-4: unbounded language in ### Scope (Description clean) should be caught."""
+        from dispatch_instruction_validator import DispatchValidationResult, _check_unbounded_language
+        result = DispatchValidationResult(dispatch_id="test", findings=[])
+        content = (
+            "## Description\n\nNarrow fix for function X.\n\n"
+            "### Scope\n\n- Fix all the things while you are at it\n"
+        )
+        _check_unbounded_language(content, result)
+        assert any(f.rule == "D-4" for f in result.findings)
