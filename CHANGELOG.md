@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Features
+- **F59-PR1 event-archive-analyzer**: `scripts/lib/event_analyzer.py` — deterministic behavioral analysis of dispatch NDJSON event archives; extracts tool counts (Read/Write/Edit/Bash/Grep/Glob), exploration depth (`reads_before_first_write`), rework indicators (`edit_cycles_same_file`, `test_fail_edit_cycles`), phase sequences (explore→implement→test→commit), bash error extraction, pytest result parsing, and commit/push/report detection; CLI supports `--dispatch`, `--all`, `--summary`, and `--output` modes; 22 tests in `tests/test_event_analyzer.py` covering real archive fixtures and synthetic NDJSON scenarios
+
 ### Docs
 - **event-streams**: Add `docs/operations/EVENT_STREAMS.md` documenting the per-dispatch ring-buffer lifecycle of `.vnx-data/events/T{n}.ndjson` and the `events/archive/{terminal}/{dispatch_id}.ndjson` layout; linked from `docs/operations/README.md` and `docs/DOCS_INDEX.md`. Clarifies a misinterpretation flagged as W-2 in the 2026-04-23 audit-trail investigation (OI-AT-6a). Updates CHANGELOG to remove a stale `(missing source)` parenthetical on the ghost-receipt-filter entry now that `scripts/lib/headless_review_receipt.py` is in tree (OI-1133).
 
