@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixes
+- **gate-status-check**: `_check_all_gates_passed()` now loads each required gate result JSON and verifies `status` is in `{"completed", "pass"}` before emitting `feature_gates_complete`; a `"failed"` result file no longer unblocks features (OI-1139). `cleanup_orphan_gates.main()` tracks resolved orphans individually instead of using a count-based slice, so non-prefix write failures log the correct set to `governance_audit.ndjson` (OI-1140). 7 new tests in `tests/test_gate_status_check.py`.
 - **governance-audit-stamping**: All `governance_audit.ndjson` writers now stamp `dispatch_id` and `pr_number` on every row; `log_gate_result()` gains `dispatch_id` param; `log_dispatch_decision()` gains `pr_number` param; `cleanup_orphan_gates` extracts pr_number from stem and dispatch_id from request_data; `auto_gate_trigger` forwards dispatch_id to gate log; headless daemon returns pr_number from pre-check for dispatch_decision rows; 10 new tests in `tests/test_governance_audit_stamping.py` (OI-AT-5)
 - **headless-receipts-backfill**: Backfill script `scripts/backfill_headless_receipts.py` retroactively patches all 363 processed receipts and 275 ndjson entries that carried `dispatch_id="unknown"` prior to OI-AT-4 phase 1; idempotent; 34 tests in `tests/test_backfill_headless_receipts.py`
 - **headless-reports-layout**: Gate reports now written to `unified_reports/headless/` subdir; `VNX_HEADLESS_REPORTS_DIR` added to `vnx_paths.py` and `vnx_paths.sh`; receipt processor scans both dirs; 11 new tests (OI-AT-7)
