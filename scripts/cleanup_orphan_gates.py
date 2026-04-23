@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     mode_label = "[DRY RUN] " if args.dry_run else ""
     print(f"{mode_label}Found {len(orphans)} orphan gate request(s):\n")
 
-    resolved = 0
+    resolved_orphans: list[dict] = []
     failed = 0
     for orphan in orphans:
         status = "would write" if args.dry_run else "writing"
@@ -217,13 +217,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         ok = _write_abandoned_result(orphan, dry_run=args.dry_run)
         if ok:
-            resolved += 1
+            resolved_orphans.append(orphan)
         else:
             failed += 1
 
-    if not args.dry_run and resolved > 0:
-        _log_to_audit(orphans[:resolved])
-        print(f"\nResolved {resolved} orphan(s). Logged to governance_audit.ndjson.")
+    if not args.dry_run and resolved_orphans:
+        _log_to_audit(resolved_orphans)
+        print(f"\nResolved {len(resolved_orphans)} orphan(s). Logged to governance_audit.ndjson.")
 
     if failed:
         print(f"\n[WARN] {failed} write failure(s) — check stderr.")
