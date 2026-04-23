@@ -161,9 +161,12 @@ def _check_scope_item_count(content: str, result: DispatchValidationResult) -> N
 
 
 def _check_unbounded_language(content: str, result: DispatchValidationResult) -> None:
-    """D-4: Detect open-ended / unbounded task language in scope or description."""
+    """D-4: Detect open-ended / unbounded task language in Description/Context only."""
+    scan_text = _extract_description_scope_section(content)
+    if not scan_text:
+        return
     for pattern in UNBOUNDED_SCOPE_PATTERNS:
-        match = re.search(pattern, content, re.IGNORECASE)
+        match = re.search(pattern, scan_text, re.IGNORECASE)
         if match:
             result.findings.append(DispatchFinding(
                 rule="D-4", severity="warn",
@@ -285,10 +288,30 @@ def _extract_instruction_body(content: str) -> str:
     return "\n".join(lines[body_start:])
 
 
+def _extract_description_scope_section(content: str) -> str:
+    """Extract Description/Context section text for D-4 scanning.
+
+    Priority: Description > Context > Task > empty string (→ no D-4 findings).
+    Matches ## or ### headings to support both dispatch formats.
+    """
+    for heading in ("Description", "Context", "Task"):
+        match = re.search(
+            rf"#{{{2},}}\s+{heading}\s*\n(.*?)(?=\n#{{{2},}}|\Z)",
+            content,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+    return ""
+
+
 def _extract_top_level_dirs(content: str) -> Set[str]:
     """Extract distinct top-level directory names from file path mentions in content."""
-    # Match backtick-quoted paths and bare paths that look like relative file paths
-    path_pattern = re.compile(r"`([a-zA-Z][\w/.-]+/[\w/.-]+)`|(?<!\w)([\w][\w-]*/[\w/.-]+\.py\b)")
+    _EXT_RE = r"(?:py|sh|yml|yaml|md|json|toml|bash|ts|tsx|js|jsx|rs|go)"
+    path_pattern = re.compile(
+        r"`([.a-zA-Z_][\w/.-]*/[\w/.-]+)`"
+        r"|(?<!\w)([\w][\w-]*/[\w/.-]+\.(?:" + _EXT_RE + r")\b)"
+    )
     dirs: Set[str] = set()
     for match in path_pattern.finditer(content):
         raw = match.group(1) or match.group(2)
