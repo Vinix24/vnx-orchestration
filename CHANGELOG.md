@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **dispatcher**: Skip tmux MODE_CONTROL pre-flight (pane probe, configure_terminal_mode, C-u clear, sleep) for subprocess-routed terminals; call only mode_pre_check to set _CTM_* globals needed by deliver_dispatch_to_terminal
+
 ## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
 
 ### Features
