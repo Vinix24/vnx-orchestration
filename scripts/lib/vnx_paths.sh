@@ -101,7 +101,7 @@ unset _VNX_HOME_GIT_ROOT _VNX_HOME_COMMON_ROOT
 if [ -n "${VNX_HOME:-}" ] && [ "$VNX_HOME" != "$VNX_HOME_DEFAULT" ]; then
   # Preserve explicit VNX_DATA_DIR override (worktree isolation)
   _vnx_saved_data_dir="${VNX_DATA_DIR:-}"
-  unset VNX_HOME PROJECT_ROOT VNX_CANONICAL_ROOT VNX_INTELLIGENCE_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR
+  unset VNX_HOME PROJECT_ROOT VNX_CANONICAL_ROOT VNX_INTELLIGENCE_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_HEADLESS_REPORTS_DIR VNX_DB_DIR
   if [ -n "$_vnx_saved_data_dir" ]; then
     VNX_DATA_DIR="$_vnx_saved_data_dir"
   else
@@ -138,6 +138,7 @@ export VNX_LOGS_DIR="${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}"
 export VNX_PIDS_DIR="${VNX_PIDS_DIR:-$VNX_DATA_DIR/pids}"
 export VNX_LOCKS_DIR="${VNX_LOCKS_DIR:-$VNX_DATA_DIR/locks}"
 export VNX_REPORTS_DIR="${VNX_REPORTS_DIR:-$VNX_DATA_DIR/unified_reports}"
+export VNX_HEADLESS_REPORTS_DIR="${VNX_HEADLESS_REPORTS_DIR:-$VNX_REPORTS_DIR/headless}"
 export VNX_DB_DIR="${VNX_DB_DIR:-$VNX_DATA_DIR/database}"
 export LEGACY_REPORTS_DIR="${LEGACY_REPORTS_DIR:-$VNX_HOME/unified_reports}"
 
@@ -169,6 +170,7 @@ if [ "$_vnx_cwd" != "$PROJECT_ROOT" ]; then
       export VNX_PIDS_DIR="$VNX_DATA_DIR/pids"
       export VNX_LOCKS_DIR="$VNX_DATA_DIR/locks"
       export VNX_REPORTS_DIR="$VNX_DATA_DIR/unified_reports"
+      export VNX_HEADLESS_REPORTS_DIR="$VNX_REPORTS_DIR/headless"
       export VNX_DB_DIR="$VNX_DATA_DIR/database"
     fi
     # Re-derive skills dir

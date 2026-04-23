@@ -4,6 +4,7 @@
 
 ### Fixes
 - **headless-receipts-backfill**: Backfill script `scripts/backfill_headless_receipts.py` retroactively patches all 363 processed receipts and 275 ndjson entries that carried `dispatch_id="unknown"` prior to OI-AT-4 phase 1; idempotent; 34 tests in `tests/test_backfill_headless_receipts.py`
+- **headless-reports-layout**: Gate reports now written to `unified_reports/headless/` subdir; `VNX_HEADLESS_REPORTS_DIR` added to `vnx_paths.py` and `vnx_paths.sh`; receipt processor scans both dirs; 11 new tests (OI-AT-7)
 - **ci-slug-match-gate**: `scripts/check_ci_slug_match.py` — CI gate validates Dispatch-ID present in commit bodies and slug portion matches branch name; shadow mode by default (`VNX_SLUG_ENFORCEMENT=1` to block); new `slug-match-check` job added to `vnx-ci.yml`; 57 tests in `tests/test_ci_slug_match_gate.py`
 - **headless-gate-dispatch-id**: Gate request handlers now accept and persist `dispatch_id` in request payloads; `materialize_artifacts` emits real dispatch_id in result JSON and sidecar instead of synthetic `gate-<gate>-pr-<n>` strings; `review_gate_manager` CLI gains `--dispatch-id` arg; 12 new tests (OI-AT-4)
 - **audit-hook-active-drain**: Install `prepare-commit-msg` hook via `core.hooksPath=hooks/git`; add `scripts/check_active_drain.py` janitor that moves receipted dispatches from `active/` to `completed/` and orphans older than threshold to `dead_letter/`; 23 passing tests
