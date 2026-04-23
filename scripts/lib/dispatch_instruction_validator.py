@@ -132,7 +132,7 @@ def _check_dispatch_id(dispatch_id: Optional[str], result: DispatchValidationRes
 
 def _check_description_present(content: str, result: DispatchValidationResult) -> None:
     """D-2: Instruction body must contain a description anchor."""
-    has_description = bool(re.search(r"###\s+Description", content))
+    has_description = bool(re.search(r"#{2,}\s+Description", content))
     has_instruction_block = bool(re.search(r"^Instruction:", content, re.MULTILINE))
     if not has_description and not has_instruction_block:
         result.findings.append(DispatchFinding(
@@ -161,9 +161,12 @@ def _check_scope_item_count(content: str, result: DispatchValidationResult) -> N
 
 
 def _check_unbounded_language(content: str, result: DispatchValidationResult) -> None:
-    """D-4: Detect open-ended / unbounded task language in scope or description."""
+    """D-4: Detect open-ended / unbounded task language in Description/Context only."""
+    scan_text = _extract_description_scope_section(content)
+    if not scan_text:
+        return
     for pattern in UNBOUNDED_SCOPE_PATTERNS:
-        match = re.search(pattern, content, re.IGNORECASE)
+        match = re.search(pattern, scan_text, re.IGNORECASE)
         if match:
             result.findings.append(DispatchFinding(
                 rule="D-4", severity="warn",
@@ -176,7 +179,7 @@ def _check_gate_has_quality_section(content: str, result: DispatchValidationResu
     """D-5: Dispatches declaring a Gate header must have a Quality Gate section."""
     gate_value = _extract_field(content, "Gate")
     if gate_value and gate_value.strip():
-        has_quality_gate = bool(re.search(r"###\s+Quality\s+Gate", content, re.IGNORECASE))
+        has_quality_gate = bool(re.search(r"#{2,}\s+Quality\s+Gate", content, re.IGNORECASE))
         if not has_quality_gate:
             result.findings.append(DispatchFinding(
                 rule="D-5", severity="blocker",
@@ -215,7 +218,7 @@ def _check_gate_has_success_criteria(content: str, result: DispatchValidationRes
     """D-8: Gate-bearing dispatches must include a Success Criteria section."""
     gate_value = _extract_field(content, "Gate")
     if gate_value and gate_value.strip():
-        has_criteria = bool(re.search(r"###\s+Success\s+Criteria", content, re.IGNORECASE))
+        has_criteria = bool(re.search(r"#{2,}\s+Success\s+Criteria", content, re.IGNORECASE))
         if not has_criteria:
             result.findings.append(DispatchFinding(
                 rule="D-8", severity="blocker",
@@ -252,7 +255,7 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
 def _extract_scope_items(content: str) -> List[str]:
     """Extract bullet items from the ### Scope section (if present)."""
     scope_match = re.search(
-        r"###\s+Scope\s*\n(.*?)(?=\n###|\Z)", content, re.DOTALL | re.IGNORECASE
+        r"#{2,}\s+Scope\s*\n(.*?)(?=\n#{2,}|\Z)", content, re.DOTALL | re.IGNORECASE
     )
     if not scope_match:
         return []
@@ -285,16 +288,54 @@ def _extract_instruction_body(content: str) -> str:
     return "\n".join(lines[body_start:])
 
 
+def _extract_description_scope_section(content: str) -> str:
+    """Extract Description/Context/Scope section text for D-4 scanning.
+
+    Concatenates ALL matching sections (Description, Context, Scope) so
+    unbounded language in Scope-only dispatches is still caught. Falls
+    back to Task if none of the primary sections are present.
+    Matches ## or ### headings to support both dispatch formats.
+    """
+    collected: list[str] = []
+    for heading in ("Description", "Context", "Scope"):
+        match = re.search(
+            rf"#{{{2},}}\s+{heading}\s*\n(.*?)(?=\n#{{{2},}}|\Z)",
+            content,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if match:
+            collected.append(match.group(1))
+    if collected:
+        return "\n".join(collected)
+    # Fallback to Task only when no primary section is present
+    match = re.search(
+        r"#{2,}\s+Task\s*\n(.*?)(?=\n#{2,}|\Z)",
+        content,
+        re.DOTALL | re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
 def _extract_top_level_dirs(content: str) -> Set[str]:
     """Extract distinct top-level directory names from file path mentions in content."""
-    # Match backtick-quoted paths and bare paths that look like relative file paths
-    path_pattern = re.compile(r"`([a-zA-Z][\w/.-]+/[\w/.-]+)`|(?<!\w)([\w][\w-]*/[\w/.-]+\.py\b)")
+    _EXT_RE = r"(?:py|sh|yml|yaml|md|json|toml|bash|ts|tsx|js|jsx|rs|go)"
+    path_pattern = re.compile(
+        r"`([.a-zA-Z_][\w/.-]*/[\w/.-]+)`"
+        r"|(?<!\w)([\w][\w-]*/[\w/.-]+\.(?:" + _EXT_RE + r")\b)"
+    )
     dirs: Set[str] = set()
     for match in path_pattern.finditer(content):
         raw = match.group(1) or match.group(2)
         if raw:
-            top = Path(raw).parts[0]
-            if top not in (".", "..", "http:", "https:"):
+            parts = Path(raw).parts
+            # Skip leading ./ or ../ so ./scripts/foo.py → scripts
+            idx = 0
+            while idx < len(parts) and parts[idx] in (".", ".."):
+                idx += 1
+            if idx >= len(parts):
+                continue
+            top = parts[idx]
+            if top not in ("http:", "https:"):
                 dirs.add(top)
     return dirs
 
