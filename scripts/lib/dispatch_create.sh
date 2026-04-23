@@ -230,6 +230,27 @@ _pdp_resolve_target() {
 
     log "V8 DISPATCH: Routing to terminal $target_pane (Track: $track, Role: $agent_role)"
 
+    # Detect subprocess-routed terminals; skip tmux MODE_CONTROL pre-flight for them.
+    # Uses same adapter resolution logic as deliver_dispatch_to_terminal().
+    local _rt_terminal_id
+    _rt_terminal_id=$(get_terminal_from_pane "$target_pane" "$STATE_DIR/panes.json" 2>/dev/null || true)
+    if [ -z "$_rt_terminal_id" ] || [ "$_rt_terminal_id" = "UNKNOWN" ]; then
+        _rt_terminal_id="$(track_to_terminal "$track")"
+    fi
+    local _rt_adapter_var="VNX_ADAPTER_${_rt_terminal_id}"
+    local _rt_adapter_type="${!_rt_adapter_var:-tmux}"
+    if [[ "$_rt_terminal_id" == "T1" && "$_rt_adapter_type" == "tmux" && -z "${!_rt_adapter_var:-}" ]]; then
+        _rt_adapter_type="subprocess"
+    fi
+
+    if [[ "$_rt_adapter_type" == "subprocess" ]]; then
+        log "V8 DISPATCH: subprocess adapter — skipping tmux MODE_CONTROL pre-flight terminal=$_rt_terminal_id"
+        # mode_pre_check sets _CTM_REQUIRES_MODEL and other globals consumed by deliver_dispatch_to_terminal.
+        mode_pre_check "$target_pane" "$dispatch_file" || return 1
+        _PDP_TARGET_PANE="$target_pane"
+        return 0
+    fi
+
     # RES-B1: Best-effort pre-lease pane mode check; skip if in copy/search mode.
     local _pre_probe
     if _pre_probe=$(_input_mode_probe "$target_pane" 2>/dev/null); then

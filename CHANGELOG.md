@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Fixes
+- **ghost-receipt-filter**: Route headless gate receipts with `dispatch_id="unknown"` to a separate `gate_events.ndjson` stream instead of polluting `t0_receipts.ndjson`; adds `headless_review_receipt` schema module (missing source) with 30 passing tests
+- **dispatcher**: Skip tmux MODE_CONTROL pre-flight (pane probe, configure_terminal_mode, C-u clear, sleep) for subprocess-routed terminals; call only mode_pre_check to set _CTM_* globals needed by deliver_dispatch_to_terminal
 - **Latency PR-1+PR2 CI fix**: Update `tests/test_subprocess_dispatch.py` stale assertions from old defaults (chunk_timeout=120, total_deadline=600) to new defaults (chunk_timeout=300, total_deadline=900) introduced by latency PR-1
 - **Latency PR-2**: Add `SessionStore` (`scripts/lib/session_store.py`) — atomic JSON file-backed store that persists Claude session IDs per terminal; wire into `deliver_via_subprocess()` to pass `--resume <session_id>` on subsequent dispatches (opt-in via `VNX_SESSION_RESUME=1`)
 - **Latency PR-1**: Add 60s cooldown for invalid-skill dispatches in `dispatcher_v8_minimal.sh` (env-tunable via `VNX_INVALID_SKILL_COOLDOWN`) to prevent log floods and queue stalls on every 2s poll
