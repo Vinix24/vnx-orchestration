@@ -399,6 +399,9 @@ class HeadlessOrchestrator:
                 feature_id, result.get("pr_number"), result.get("gates"),
             )
 
+    # Gate result statuses that indicate a gate executed successfully (OI-1139).
+    _GATE_PASSING_STATUSES: frozenset = frozenset({"completed", "pass"})
+
     def _check_all_gates_passed(self, event: LoopEvent) -> None:
         """When a gate event arrives, check if all required gates have passed."""
         ctx = _flatten_context(event.context)
@@ -422,7 +425,10 @@ class HeadlessOrchestrator:
         if not result_files:
             return
 
-        # Determine highest PR number from results
+        # Determine highest PR number from results.
+        # The event context does not carry a GitHub PR number, so we fall back
+        # to max(pr_numbers) across all result files.  This may match a PR from
+        # a different feature if artifacts are not cleaned between features.
         pr_numbers: List[int] = []
         for f in result_files:
             m2 = re.match(r"pr-(\d+)-", f.name)
@@ -436,18 +442,42 @@ class HeadlessOrchestrator:
         gate_names_present = {f.name.split(f"pr-{latest_pr}-")[1].replace(".json", "") for f in pr_files}
 
         required = {"codex_gate", "gemini_review"}
-        if required.issubset(gate_names_present):
-            _log_loop_event(self.data_dir, {
-                "timestamp": _now_utc(),
-                "event_type": "feature_gates_complete",
-                "feature_id": feature_id,
-                "pr_number": latest_pr,
-                "gate_names": sorted(gate_names_present),
-            })
-            logger.info(
-                "All required gates passed for %s PR #%d — next feature dispatch unblocked",
-                feature_id, latest_pr,
+        if not required.issubset(gate_names_present):
+            return
+
+        # Verify each required gate's result JSON reports a passing status.
+        # File presence alone is insufficient — a failed gate still produces a
+        # result file with status "failed", which must block feature unblocking.
+        failed_gates: List[str] = []
+        for gate_name in required:
+            result_file = gate_results_dir / f"pr-{latest_pr}-{gate_name}.json"
+            try:
+                result_data = json.loads(result_file.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Could not read gate result %s: %s", result_file, exc)
+                return
+            status = result_data.get("status", "")
+            if status not in self._GATE_PASSING_STATUSES:
+                failed_gates.append(f"{gate_name}(status={status!r})")
+
+        if failed_gates:
+            logger.warning(
+                "Required gate(s) did not pass for %s PR #%d: %s — feature NOT unblocked",
+                feature_id, latest_pr, ", ".join(failed_gates),
             )
+            return
+
+        _log_loop_event(self.data_dir, {
+            "timestamp": _now_utc(),
+            "event_type": "feature_gates_complete",
+            "feature_id": feature_id,
+            "pr_number": latest_pr,
+            "gate_names": sorted(gate_names_present),
+        })
+        logger.info(
+            "All required gates passed for %s PR #%d — next feature dispatch unblocked",
+            feature_id, latest_pr,
+        )
 
     def _decision_loop(self) -> None:
         """Read events from bus, route through DecisionRouter, log decisions."""
