@@ -199,6 +199,10 @@ class CommitResult:
 
     @property
     def all_slugs_match(self) -> bool:
+        # Empty slug_matches means Dispatch-ID was malformed (couldn't extract
+        # slug). Treat that as failure, not vacuous True.
+        if not self.slug_matches:
+            return False
         return all(self.slug_matches)
 
 
@@ -324,7 +328,7 @@ def run_gate(
 
     if slug_mismatches:
         print()
-        print("Commits with slug mismatch (expected branch slug: {bslug!r}):")
+        print(f"Commits with slug mismatch (expected branch slug: {bslug!r}):")
         for cr in slug_mismatches:
             print(f"  - {cr.sha[:8]} {cr.subject[:60]}  ids={cr.dispatch_ids}")
 
