@@ -129,6 +129,11 @@ def resolve_paths() -> Dict[str, str]:
         "VNX_DB_DIR": str(Path(os.environ.get("VNX_DB_DIR") or (vnx_data_dir / "database")).expanduser()),
     }
 
+    reports_dir = Path(paths["VNX_REPORTS_DIR"])
+    paths["VNX_HEADLESS_REPORTS_DIR"] = str(
+        Path(os.environ.get("VNX_HEADLESS_REPORTS_DIR") or (reports_dir / "headless")).expanduser()
+    )
+
     # Git-tracked intelligence directory (portable across worktrees)
     paths["VNX_INTELLIGENCE_DIR"] = str(
         Path(os.environ.get("VNX_INTELLIGENCE_DIR") or (canonical_root / ".vnx-intelligence")).expanduser().resolve()

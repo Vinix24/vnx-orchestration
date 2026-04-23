@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/receipt_terminal_detection.sh"
 # Base directories
 VNX_BASE="$VNX_HOME"
 UNIFIED_REPORTS="$VNX_REPORTS_DIR"
+HEADLESS_REPORTS="${VNX_HEADLESS_REPORTS_DIR:-$VNX_REPORTS_DIR/headless}"
 STATE_DIR="$VNX_STATE_DIR"
 SCRIPTS_DIR="$VNX_BASE/scripts"
 APPEND_RECEIPT_SCRIPT="$SCRIPTS_DIR/append_receipt.py"
@@ -1075,9 +1076,9 @@ process_pending_reports() {
 
     log "INFO" "Scanning for reports newer than: $cutoff"
 
-    # Count pending reports first
+    # Count pending reports first (unified_reports/ and unified_reports/headless/)
     local pending_reports=()
-    for report in "$UNIFIED_REPORTS"/*.md; do
+    for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
         [ -f "$report" ] || continue
         if should_process_report "$report"; then
             pending_reports+=("$report")
@@ -1143,7 +1144,7 @@ _poll_new_reports() {
     local _cycle=0
     while true; do
         local _poll_max_mtime=0
-        for report in "$UNIFIED_REPORTS"/*.md; do
+        for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
             [ -f "$report" ] || continue
             if should_process_report "$report" && process_single_report "$report"; then
                 local _mtime
@@ -1176,7 +1177,7 @@ monitor_new_reports() {
     # may have been written while the receipt processor was down (restart gap).
     local catchup_count=0
     local now=$(date +%s)
-    for report in "$UNIFIED_REPORTS"/*.md; do
+    for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
         [ -f "$report" ] || continue
         local mtime=$(stat -f%m "$report" 2>/dev/null || stat -c%Y "$report" 2>/dev/null || echo 0)
         local age_secs=$(( now - mtime ))

@@ -50,9 +50,11 @@ class ReviewGateManager(
         self.paths = ensure_env()
         self.state_dir = Path(self.paths["VNX_STATE_DIR"])
         self.reports_dir = Path(self.paths["VNX_REPORTS_DIR"])
+        self.headless_reports_dir = Path(self.paths["VNX_HEADLESS_REPORTS_DIR"])
         self.requests_dir = self.state_dir / "review_gates" / "requests"
         self.results_dir = self.state_dir / "review_gates" / "results"
         self.reports_dir.mkdir(parents=True, exist_ok=True)
+        self.headless_reports_dir.mkdir(parents=True, exist_ok=True)
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,7 +112,7 @@ class ReviewGateManager(
         ts = self._report_timestamp_slug(requested_at)
         pr_slug = self._report_pr_slug(pr_number=pr_number, pr_id=pr_id)
         filename = f"{ts}-HEADLESS-{gate}-{pr_slug}.md"
-        return str((self.reports_dir / filename).resolve())
+        return str((self.headless_reports_dir / filename).resolve())
 
     def _load_request_payload(self, gate: str, pr_number: int) -> Dict[str, Any]:
         path = self._request_path(gate, pr_number)
