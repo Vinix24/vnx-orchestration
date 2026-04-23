@@ -179,7 +179,7 @@ def _check_gate_has_quality_section(content: str, result: DispatchValidationResu
     """D-5: Dispatches declaring a Gate header must have a Quality Gate section."""
     gate_value = _extract_field(content, "Gate")
     if gate_value and gate_value.strip():
-        has_quality_gate = bool(re.search(r"###\s+Quality\s+Gate", content, re.IGNORECASE))
+        has_quality_gate = bool(re.search(r"#{2,}\s+Quality\s+Gate", content, re.IGNORECASE))
         if not has_quality_gate:
             result.findings.append(DispatchFinding(
                 rule="D-5", severity="blocker",
@@ -218,7 +218,7 @@ def _check_gate_has_success_criteria(content: str, result: DispatchValidationRes
     """D-8: Gate-bearing dispatches must include a Success Criteria section."""
     gate_value = _extract_field(content, "Gate")
     if gate_value and gate_value.strip():
-        has_criteria = bool(re.search(r"###\s+Success\s+Criteria", content, re.IGNORECASE))
+        has_criteria = bool(re.search(r"#{2,}\s+Success\s+Criteria", content, re.IGNORECASE))
         if not has_criteria:
             result.findings.append(DispatchFinding(
                 rule="D-8", severity="blocker",
@@ -255,7 +255,7 @@ def _extract_field(content: str, field_name: str) -> Optional[str]:
 def _extract_scope_items(content: str) -> List[str]:
     """Extract bullet items from the ### Scope section (if present)."""
     scope_match = re.search(
-        r"###\s+Scope\s*\n(.*?)(?=\n###|\Z)", content, re.DOTALL | re.IGNORECASE
+        r"#{2,}\s+Scope\s*\n(.*?)(?=\n#{2,}|\Z)", content, re.DOTALL | re.IGNORECASE
     )
     if not scope_match:
         return []
@@ -327,8 +327,15 @@ def _extract_top_level_dirs(content: str) -> Set[str]:
     for match in path_pattern.finditer(content):
         raw = match.group(1) or match.group(2)
         if raw:
-            top = Path(raw).parts[0]
-            if top not in (".", "..", "http:", "https:"):
+            parts = Path(raw).parts
+            # Skip leading ./ or ../ so ./scripts/foo.py → scripts
+            idx = 0
+            while idx < len(parts) and parts[idx] in (".", ".."):
+                idx += 1
+            if idx >= len(parts):
+                continue
+            top = parts[idx]
+            if top not in ("http:", "https:"):
                 dirs.add(top)
     return dirs
 
