@@ -146,7 +146,7 @@ def _run_governance_pre_check(
 ) -> tuple:
     """Run governance pre-dispatch checks.
 
-    Returns (is_blocked: bool, blocked_check_names: List[str]).
+    Returns (is_blocked: bool, blocked_check_names: List[str], pr_number: Optional[int]).
     Never raises — governance errors are logged and treated as non-blocking.
     """
     try:
@@ -155,11 +155,11 @@ def _run_governance_pre_check(
         from governance_enforcer import GovernanceEnforcer, DEFAULT_CONFIG_PATH  # noqa: PLC0415
     except ImportError as exc:
         logger.warning("GovernanceEnforcer import failed: %s — skipping pre-check", exc)
-        return False, []
+        return False, [], None
 
     if not DEFAULT_CONFIG_PATH.exists():
         logger.debug("governance_enforcement.yaml not found — skipping pre-check")
-        return False, []
+        return False, [], None
 
     mode = os.environ.get("VNX_GOVERNANCE_MODE", "") or None
     enforcer = GovernanceEnforcer()
@@ -167,7 +167,7 @@ def _run_governance_pre_check(
         enforcer.load_config(DEFAULT_CONFIG_PATH, mode_override=mode)
     except Exception as exc:
         logger.warning("Failed to load governance config: %s — skipping pre-check", exc)
-        return False, []
+        return False, [], None
 
     gate_results_dir = data_dir / "state" / "review_gates" / "results"
     context: Dict[str, Any] = {
@@ -191,7 +191,7 @@ def _run_governance_pre_check(
 
     is_blocked = enforcer.is_blocked(results) or enforcer.has_soft_failures(results)
     blocked_checks = [r.check_name for r in results if not r.passed and r.level >= 2]
-    return is_blocked, blocked_checks
+    return is_blocked, blocked_checks, pr_number
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +550,7 @@ class DispatchDaemon:
             return
 
         # Governance pre-dispatch gate check
-        is_blocked, blocked_checks = _run_governance_pre_check(meta, path, self.data_dir)
+        is_blocked, blocked_checks, gov_pr_number = _run_governance_pre_check(meta, path, self.data_dir)
         if is_blocked:
             logger.warning(
                 "Dispatch %s BLOCKED by governance checks: %s — deferring",
@@ -570,6 +570,7 @@ class DispatchDaemon:
                     action="blocked",
                     dispatch_id=dispatch_id,
                     reasoning=f"Governance checks failed: {', '.join(blocked_checks)}",
+                    pr_number=gov_pr_number,
                 )
             except Exception:
                 pass  # audit must never block dispatch flow
