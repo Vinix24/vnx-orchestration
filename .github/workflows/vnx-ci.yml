@@ -110,6 +110,54 @@ jobs:
           set -euo pipefail
           python3 "$VNX_HOME/tests/test_trace_token_validator.py"
 
+  slug-match-check:
+    name: Dispatch-ID Slug-Match Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Prepare expected repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Run Dispatch-ID slug-match gate
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref || 'main' }}
+          VNX_SLUG_ENFORCEMENT: "0"
+        run: |
+          set -euo pipefail
+          python3 "$VNX_HOME/scripts/check_ci_slug_match.py" \
+            --base-ref "${GITHUB_BASE_REF:-main}" \
+            --branch-name "${GITHUB_HEAD_REF:-}"
+
+      - name: Run slug-match gate unit tests
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          pytest -q \
+            "$VNX_HOME/tests/test_ci_slug_match_gate.py" \
+            -p no:cacheprovider \
+            --basetemp=/tmp/vnx_pytest_safe
+
   profile-c:
     name: Profile C (adoption smoke tests)
     runs-on: ubuntu-latest
