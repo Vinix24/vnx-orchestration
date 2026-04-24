@@ -218,7 +218,34 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated session_analytics: added context_reset_count column')
 
-        # Migration: add dispatch_id column to report_findings if missing
+        # Migration: create report_findings table if missing
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='report_findings'")
+        if not cursor.fetchone():
+            cursor.executescript("""
+                CREATE TABLE IF NOT EXISTS report_findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    report_path TEXT NOT NULL,
+                    report_date TIMESTAMP,
+                    terminal TEXT,
+                    task_type TEXT,
+                    patterns_found INTEGER,
+                    antipatterns_found INTEGER,
+                    prevention_rules_found INTEGER,
+                    tags_found TEXT,
+                    summary TEXT,
+                    age_category TEXT,
+                    extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    dispatch_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_report_findings_extracted
+                    ON report_findings (extracted_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_report_findings_dispatch
+                    ON report_findings (dispatch_id);
+            """)
+            conn.commit()
+            log('INFO', 'Migrated: created report_findings table')
+
+        # Migration: add dispatch_id column to report_findings if missing (for existing DBs)
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='report_findings'")
         if cursor.fetchone():
             cursor.execute("PRAGMA table_info(report_findings)")
@@ -414,7 +441,8 @@ def verify_database_structure() -> bool:
             'governance_metrics',
             'spc_control_limits',
             'spc_alerts',
-            'confidence_events'
+            'confidence_events',
+            'report_findings'
         ]
 
         # Expected views

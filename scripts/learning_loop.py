@@ -11,7 +11,7 @@ import sqlite3
 import time
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from collections import defaultdict
@@ -23,6 +23,15 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+
+
+def _to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Normalize a datetime to timezone-aware UTC, handling naive datetimes gracefully."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass
@@ -106,7 +115,7 @@ class LearningLoop:
                     ignored_count=row['ignored_count'],
                     success_count=row['success_count'],
                     failure_count=row['failure_count'],
-                    last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None,
+                    last_used=_to_aware_utc(datetime.fromisoformat(row['last_used'])) if row['last_used'] else None,
                     confidence=row['confidence']
                 )
                 self.pattern_metrics[metric.pattern_id] = metric
@@ -122,7 +131,9 @@ class LearningLoop:
         Queries patterns where used_count > 0 and updated_at is within the window.
         """
         if not start_time:
-            start_time = datetime.now() - timedelta(hours=24)
+            start_time = datetime.now(timezone.utc) - timedelta(hours=24)
+        else:
+            start_time = _to_aware_utc(start_time)
 
         used_patterns = defaultdict(list)
 
@@ -151,7 +162,9 @@ class LearningLoop:
         (last_offered within the time window).
         """
         if not start_time:
-            start_time = datetime.now() - timedelta(hours=24)
+            start_time = datetime.now(timezone.utc) - timedelta(hours=24)
+        else:
+            start_time = _to_aware_utc(start_time)
 
         ignored_patterns = defaultdict(int)
 
@@ -276,7 +289,9 @@ class LearningLoop:
     def extract_failure_patterns(self, start_time: datetime = None) -> List[Dict]:
         """Extract new failure patterns from recent terminal errors"""
         if not start_time:
-            start_time = datetime.now() - timedelta(hours=24)
+            start_time = datetime.now(timezone.utc) - timedelta(hours=24)
+        else:
+            start_time = _to_aware_utc(start_time)
 
         failure_patterns = []
 
@@ -606,11 +621,12 @@ class LearningLoop:
 
         Candidates are written to pending_archival.json — NOT auto-archived.
         """
-        archive_date = datetime.now() - timedelta(days=threshold_days)
+        archive_date = datetime.now(timezone.utc) - timedelta(days=threshold_days)
 
         candidates = []
         for pattern_id, metric in self.pattern_metrics.items():
-            if not metric.last_used or metric.last_used < archive_date:
+            aware_last_used = _to_aware_utc(metric.last_used)
+            if not aware_last_used or aware_last_used < archive_date:
                 if metric.confidence < 0.3:
                     candidates.append(pattern_id)
 
@@ -866,7 +882,7 @@ def main():
                 high_confidence = sum(1 for m in loop.pattern_metrics.values() if m.confidence > 1.5)
                 low_confidence = sum(1 for m in loop.pattern_metrics.values() if m.confidence < 0.5)
                 recently_used = sum(1 for m in loop.pattern_metrics.values()
-                                  if m.last_used and m.last_used > datetime.now() - timedelta(days=7))
+                                  if m.last_used and m.last_used > datetime.now(timezone.utc) - timedelta(days=7))
 
                 print(f"  High confidence (>1.5): {high_confidence}")
                 print(f"  Low confidence (<0.5): {low_confidence}")
@@ -875,8 +891,8 @@ def main():
         elif command == "test":
             # Test pattern extraction
             print("Testing pattern extraction...")
-            used = loop.extract_used_patterns(datetime.now() - timedelta(hours=1))
-            ignored = loop.extract_ignored_patterns(datetime.now() - timedelta(hours=1))
+            used = loop.extract_used_patterns(datetime.now(timezone.utc) - timedelta(hours=1))
+            ignored = loop.extract_ignored_patterns(datetime.now(timezone.utc) - timedelta(hours=1))
             print(f"  Used patterns: {len(used)}")
             print(f"  Ignored patterns: {len(ignored)}")
 
