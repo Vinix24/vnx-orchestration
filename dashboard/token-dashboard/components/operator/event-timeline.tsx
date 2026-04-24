@@ -140,7 +140,7 @@ export default function EventTimeline({ events }: Props) {
     return () => clearInterval(timer);
   }, [playing, filtered.length]);
 
-  if (events.length === 0) {
+  if (toolEvents.length === 0) {
     return (
       <div
         style={{

@@ -141,7 +141,13 @@ export default function DispatchDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const dispatchId = decodeURIComponent(id);
+  let dispatchId = id;
+  let decodeError: string | null = null;
+  try {
+    dispatchId = decodeURIComponent(id);
+  } catch {
+    decodeError = `Invalid dispatch id in URL: ${id}`;
+  }
   const [tab, setTab] = useState<Tab>('overview');
 
   const { data: detail, error: detailErr, isLoading: detailLoading, mutate: mutateDetail } =
@@ -237,7 +243,7 @@ export default function DispatchDetailPage({
       </div>
 
       {/* Error / 404 */}
-      {detailErr || detail?.error ? (
+      {decodeError || detailErr || detail?.error ? (
         <div
           data-testid="dispatch-detail-error"
           style={{
@@ -249,7 +255,7 @@ export default function DispatchDetailPage({
             fontSize: 13,
           }}
         >
-          {detail?.error ?? `Failed to load dispatch: ${String(detailErr)}`}
+          {decodeError ?? detail?.error ?? `Failed to load dispatch: ${String(detailErr)}`}
         </div>
       ) : (
         <>

@@ -182,6 +182,26 @@ describe('DispatchesPage', () => {
     expect(screen.getByTestId('dispatch-row-t3-1')).toBeInTheDocument();
   });
 
+  test('receipt_status="pass" is classified as a successful receipt', () => {
+    // Governance emits receipt_status="pass" for gates that passed; the
+    // list view must render a green success dot, not an orange alert.
+    const data = envelope([
+      card('pass-1', 'done', { has_receipt: true, receipt_status: 'pass' }),
+    ]);
+    mockResponse(data);
+    render(<DispatchesPage />);
+
+    const row = screen.getByTestId('dispatch-row-pass-1');
+    const dot = row.querySelector('[aria-label="Receipt: pass"]');
+    expect(dot).not.toBeNull();
+    // lucide renders inline SVG; the success icon (CheckCircle2) carries
+    // the distinctive green color set inline — jsdom normalizes the hex
+    // (#22c55e) into its rgb() equivalent.
+    const svg = dot!.querySelector('svg');
+    expect(svg).not.toBeNull();
+    expect(svg!.getAttribute('style')).toMatch(/rgb\(34,\s*197,\s*94\)|#22c55e/);
+  });
+
   test('dispatch row links to the detail page with encoded id', () => {
     const id = '20260424-020100-f59-pr4-dashboard-viewer-C';
     const data = envelope([card(id, 'active')]);

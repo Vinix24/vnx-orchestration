@@ -51,6 +51,20 @@ describe('EventTimeline', () => {
     expect(screen.getByText(/No tool events recorded/i)).toBeInTheDocument();
   });
 
+  test('renders empty state when archive has only phase markers (no tool_use)', () => {
+    // Archives that never emitted tool_use should not render replay controls,
+    // otherwise the "1 / 0" cursor state would appear on step-forward.
+    const phaseOnly: DispatchEvent[] = [
+      { type: 'phase_marker', phase: 'explore' },
+      { type: 'phase_marker', phase: 'implement' },
+      { type: 'phase_marker', phase: 'commit' },
+    ];
+    render(<EventTimeline events={phaseOnly} />);
+    expect(screen.getByText(/No tool events recorded/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('replay-forward')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('replay-scrub')).not.toBeInTheDocument();
+  });
+
   test('renders tool_use events with tool name and summary', () => {
     const events: DispatchEvent[] = [
       { type: 'phase_marker', phase: 'explore' },

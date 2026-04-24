@@ -17,7 +17,11 @@ function ReceiptDot({ status }: { status: string | null }) {
       </span>
     );
   }
-  const ok = status === 'success' || status === 'completed' || status === 'passed';
+  const ok =
+    status === 'success' ||
+    status === 'completed' ||
+    status === 'passed' ||
+    status === 'pass';
   const Icon = ok ? CheckCircle2 : AlertCircle;
   const color = ok ? '#22c55e' : '#f97316';
   return (
