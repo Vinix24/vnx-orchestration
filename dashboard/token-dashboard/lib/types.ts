@@ -434,75 +434,101 @@ export interface ProposalActionResponse {
 
 // ===== Dispatch Viewer Types =====
 
+export type DispatchStage = 'staging' | 'pending' | 'active' | 'review' | 'done';
+
 export interface DispatchSummary {
-  dispatch_id: string;
+  id: string;
+  file: string;
+  pr_id: string;
+  track: string;
   terminal: string;
   role: string;
   gate: string;
-  pr: string | null;
+  priority: string;
   status: string;
-  timestamp: string;
-  duration_secs: number | null;
-  track: string | null;
-}
-
-export interface DispatchDetail {
-  dispatch_id: string;
-  terminal: string;
-  role: string;
-  gate: string;
-  pr: string | null;
-  model: string | null;
-  track: string | null;
-  instruction: string;
-  intelligence_patterns: string[];
-  repo_map: string[];
-}
-
-export interface DispatchEvent {
-  offset_secs: number;
-  tool: string;
-  target: string;
-  input?: string;
-  output?: string;
-  has_error: boolean;
-  timestamp?: string;
-}
-
-export interface DispatchResult {
-  status: string;
-  cqs_score: number | null;
-  cqs_components: Record<string, number>;
-  commit_before: string | null;
-  commit_after: string | null;
-  files_changed: number | null;
-  lines_added: number | null;
-  lines_removed: number | null;
-  test_pass: number | null;
-  test_fail: number | null;
-  report_markdown: string | null;
-  exploration_depth: number | null;
-  rework_count: number | null;
-  duration_secs: number | null;
-  baseline_secs: number | null;
+  reason: string;
+  domain: string;
+  dir: string;
+  stage: DispatchStage;
+  duration_secs: number;
+  duration_label: string;
+  has_receipt: boolean;
+  receipt_status: string | null;
 }
 
 export interface DispatchesResponse {
-  dispatches: DispatchSummary[];
+  stages: Record<DispatchStage, DispatchSummary[]>;
   total: number;
 }
 
-export interface DispatchDetailResponse {
-  dispatch: DispatchDetail;
+export interface DispatchDetailMetadata {
+  dispatch_id?: string;
+  terminal?: string;
+  role?: string;
+  gate?: string;
+  track?: string;
+  pr?: string;
+  pr_id?: string;
+  priority?: string;
+  model?: string;
+  status?: string;
+  cognition?: string;
+  skill?: string;
+  [key: string]: string | undefined;
 }
 
+export interface DispatchDetailResponse {
+  dispatch_id: string;
+  stage: string;
+  file: string;
+  instruction: string;
+  metadata: DispatchDetailMetadata;
+  error?: string;
+}
+
+export type DispatchEventPhase = 'explore' | 'implement' | 'commit' | 'test' | 'other';
+
+export interface DispatchPhaseMarker {
+  type: 'phase_marker';
+  phase: DispatchEventPhase;
+}
+
+export interface DispatchToolUseEvent {
+  type: 'tool_use';
+  timestamp_offset: number | null;
+  tool_name: string;
+  file_path: string;
+  summary: string;
+}
+
+export type DispatchEvent = DispatchPhaseMarker | DispatchToolUseEvent;
+
 export interface DispatchEventsResponse {
+  dispatch_id: string;
   events: DispatchEvent[];
-  is_live: boolean;
+  error?: string;
+}
+
+export interface DispatchReceipt {
+  dispatch_id?: string;
+  status?: string;
+  terminal?: string;
+  track?: string;
+  gate?: string;
+  pr?: string | number;
+  commit_after?: string;
+  commit_before?: string;
+  duration_secs?: number;
+  timestamp?: string;
+  [key: string]: unknown;
 }
 
 export interface DispatchResultResponse {
-  result: DispatchResult;
+  dispatch_id: string;
+  receipt: DispatchReceipt | null;
+  report: string | null;
+  report_file?: string;
+  error?: string;
 }
 
 // ===== Transcript Types =====
