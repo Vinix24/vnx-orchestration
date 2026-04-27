@@ -39,7 +39,7 @@ Mode: LEGACY ONLY (rollback — terminal_state_shadow path)
 |------|--------------|---------|
 | `VNX_RUNTIME_PRIMARY` | `1` | `0` |
 | `VNX_BROKER_SHADOW` | `0` | `1` |
-| `VNX_CANONICAL_LEASE_ACTIVE` | `0` | `0` (unchanged) |
+| `VNX_CANONICAL_LEASE_ACTIVE` | `1` | `1` (unchanged) |
 
 When `VNX_RUNTIME_PRIMARY=0`:
 - `dispatcher_v8_minimal.sh` skips all `rc_*` function calls

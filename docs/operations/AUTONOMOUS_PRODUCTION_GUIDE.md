@@ -53,7 +53,7 @@ Use this guide as the production protocol reference, but prefer:
 
 ## 1. Preflight Checklist
 
-Script: `vnx_preflight.sh`
+Script: `vnx_preflight.sh` *(not yet implemented — planned)*
 Output: `$VNX_STATE_DIR/preflight_report.json`
 
 Draait VOOR de eerste dispatch van een autonome sessie. Elke check levert PASS/FAIL/WARN.
@@ -321,7 +321,7 @@ Receipt ontvangen
 
 ## 4. T0 Quality Enforcement
 
-Script: `t0_evidence_validator.py`
+Script: `t0_evidence_validator.py` *(not yet implemented — planned)*
 Aangeroepen door T0 na elke worker completion receipt.
 
 ### 4.1 Validatie Pipeline
@@ -866,8 +866,8 @@ bash .claude/vnx-system/scripts/vnx_preflight.sh
 
 | Bestand | Type | Beschrijving |
 |---------|------|--------------|
-| `scripts/vnx_preflight.sh` | NIEUW | Preflight validatie (sectie 1) |
-| `scripts/t0_evidence_validator.py` | NIEUW | Evidence verificatie (sectie 4) |
+| `scripts/vnx_preflight.sh` | NIEUW ⚠️ niet geïmplementeerd | Preflight validatie (sectie 1) |
+| `scripts/t0_evidence_validator.py` | NIEUW ⚠️ niet geïmplementeerd | Evidence verificatie (sectie 4) |
 | `scripts/queue_popup_watcher.sh` | EDIT | VNX_AUTO_ACCEPT bypass |
 | `scripts/dispatcher_v8_minimal.sh` | EDIT | Quality gate + evidence in dispatch footer |
 | `scripts/cost_tracker.py` | EDIT | Budget threshold per wave/fase/sessie |

@@ -35,12 +35,12 @@ Markdown Reports (Terminal) → Automated Parsing → Receipt Generation → T0 
 #### 1. Report Generation Layer (Terminal Responsibility)
 - **What**: Terminals write ONE markdown report per investigation/task
 - **Format**: Enhanced template with structured fields
-- **Location**: `.claude/vnx-system/unified_reports/`
+- **Location**: `.vnx-data/unified_reports/`
 - **Naming**: `YYYYMMDD-HHMMSS-{terminal}-{brief-description}.md`
 
 #### 2. Extraction Layer (Automated)
 - **Report Parser**: `report_parser.py` - Extracts structured receipts from markdown
-- **Location**: `.claude/vnx-system/scripts/`
+- **Location**: `scripts/`
 - **Output**: JSON receipt with task metadata, tags, metrics
 
 #### 3. Processing Layer (Automated)
@@ -148,7 +148,7 @@ The verdict is included in the receipt for T0 review. At pre-merge time, `vnx ga
 After receipts are generated, VNX can derive deterministic usage/cost metrics from `t0_receipts.ndjson`.
 
 **Script**:
-- `.claude/vnx-system/scripts/cost_tracker.py`
+- `scripts/cost_tracker.py`
 
 **CLI**:
 - `vnx cost-report` (JSON)
