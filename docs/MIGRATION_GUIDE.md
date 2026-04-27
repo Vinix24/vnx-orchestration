@@ -144,7 +144,10 @@ vnx gate-check --pr PR-6
 All VNX scripts now use centralized path resolution:
 - **Bash**: `source scripts/lib/vnx_paths.sh` exports `VNX_HOME`, `PROJECT_ROOT`, `VNX_DATA_DIR`, etc.
 - **Python**: `from vnx_paths import ensure_env` populates `os.environ` with resolved paths
-- **Environment overrides**: Set `VNX_HOME`, `PROJECT_ROOT`, or `VNX_DATA_DIR` to override auto-detection
+- **Environment overrides**: Set `VNX_CANONICAL_ROOT` to override project-root auto-detection.
+  Set `VNX_DATA_DIR_EXPLICIT=1` alongside `VNX_DATA_DIR` to override the data directory.
+  (`VNX_HOME` and `PROJECT_ROOT` are exported by path resolution but are not honoured as
+  override inputs — see `scripts/lib/project_root.py` for the resolution order.)
 
 No hardcoded `/Users/...` paths remain in active VNX runtime code.
 

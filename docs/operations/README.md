@@ -9,13 +9,16 @@
 
 ## Canonical Docs
 
-- Monitoring guide: `MONITORING_GUIDE.md`
-- Multi-model guide: `MULTI_MODEL_GUIDE.md`
 - Event streams: `EVENT_STREAMS.md`
 - Receipt pipeline: `RECEIPT_PIPELINE.md`
-- Receipt processing flow: `RECEIPT_PROCESSING_FLOW.md`
+- Receipt processing flow: `RECEIPT_PROCESSING_FLOW.md` *(historical — `report_watcher.sh` deprecated)*
 - Runtime rollback: `RUNTIME_CORE_ROLLBACK.md`
 - Subprocess adapter flag: `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`
+- Multi-model guide: `MULTI_MODEL_GUIDE.md`
+- Autonomous production guide: `AUTONOMOUS_PRODUCTION_GUIDE.md`
+
+> **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available
+> via the dashboard server (`dashboard/serve_dashboard.py`) at `/api/health`.
 
 ## Public Operations Scope
 

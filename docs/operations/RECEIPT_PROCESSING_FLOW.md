@@ -1,7 +1,12 @@
 # VNX Receipt Processing Flow - Automatic Report to T0 Delivery
 
-**Status**: ✅ FIXED (report_watcher added to dashboard)
-**Date**: 2026-02-08
+**Status**: ⚠️ HISTORICAL — `report_watcher.sh` is deprecated; see `RECEIPT_PIPELINE.md` for the active `receipt_processor_v4.sh` flow
+**Date**: 2026-02-08 (document last updated; `report_watcher.sh` superseded 2026-04-27)
+
+> **⚠️ Deprecation notice**: `report_watcher.sh` (described below) is deprecated and exits
+> immediately with a "superseded" message. The active receipt pipeline uses
+> `scripts/receipt_processor_v4.sh` — see `RECEIPT_PIPELINE.md` for current documentation.
+> This document is retained for historical reference only.
 
 ## How It Should Work
 

@@ -12,7 +12,7 @@
 - `scripts/commands/` contains shell entrypoints used by `bin/vnx`.
 - `scripts/` contains operational scripts, daemons, utilities, and helpers.
 - `scripts/lib/` contains the reusable implementation modules that power the CLI and runtime.
-- `scripts/_archive/` contains retired scripts kept only for historical reference.
+- `scripts/_archive/` — retired scripts directory (not present on disk; retired scripts are deleted, not archived).
 
 This index is intentionally concise. It points you to the canonical areas instead of trying to document every internal helper inline.
 
@@ -110,4 +110,4 @@ Important shared library areas:
 
 ## Archived Scripts
 
-Retired scripts live under `scripts/_archive/`. They are not part of the active supported surface and should not be used as references for new work unless you are doing historical investigation.
+Retired scripts are removed from the repository rather than archived. `scripts/_archive/` does not exist on disk. If you are looking for a script that used to exist, check `git log --all -- scripts/<name>` to find when it was removed.

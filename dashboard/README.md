@@ -25,19 +25,21 @@ Built on [Claud-ometer](https://github.com/deshraj/Claud-ometer) | Next.js 15 | 
 
 ```bash
 # From vnx-system root:
-cd dashboard/
+cd dashboard/token-dashboard/
 
 # Install dependencies
 npm install
 
 # Development (hot reload)
 npm run dev
-# -> http://localhost:5173 (proxies API to :4173)
+# -> http://localhost:3100
 
 # Production build
 npm run build
-# -> dist/ served by existing dashboard server
+# -> .next/ (Next.js output)
 ```
+
+**Backend API server** (separate process): `python dashboard/serve_dashboard.py` — runs on port 4173.
 
 **Prerequisites**: Node.js 18+, running VNX dashboard server (`launch-dashboard.sh`), populated `quality_intelligence.db`.
 
@@ -71,9 +73,9 @@ React app (Next.js 15)
 
 ## Status
 
-- [x] Data collection pipeline (conversation_analyzer)
+- [x] Data collection pipeline (`conversation_analyzer_nightly.sh`, launchd 02:00)
 - [x] Token metrics specification (TTD)
 - [x] Product requirements (PRD)
-- [ ] API endpoints
-- [ ] React frontend
+- [x] API endpoints (`/api/token-stats`, `/api/token-stats/sessions`, `/api/health` — `serve_dashboard.py`)
+- [x] React frontend (`dashboard/token-dashboard/` — Next.js 15, port 3100)
 - [ ] Production deployment
