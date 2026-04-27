@@ -434,7 +434,7 @@ export interface ProposalActionResponse {
 
 // ===== Dispatch Viewer Types =====
 
-export type DispatchStage = 'staging' | 'pending' | 'active' | 'review' | 'done';
+export type DispatchStage = 'staging' | 'pending' | 'active' | 'review' | 'done' | 'rejected';
 
 export interface DispatchSummary {
   id: string;

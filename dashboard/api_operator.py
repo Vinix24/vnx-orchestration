@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -48,7 +49,18 @@ _DIR_TO_STAGE: dict[str, str] = {
     "queue": "pending",
     "active": "active",
     "completed": "done",
-    "rejected": "done",
+    "rejected": "rejected",
+    "dead_letter": "rejected",
+    "cancelled": "rejected",
+}
+
+_STAGE_PRIORITY: dict[str, int] = {
+    "staging": 0,
+    "pending": 1,
+    "active": 2,
+    "review": 3,
+    "done": 4,
+    "rejected": 5,
 }
 
 
@@ -117,31 +129,41 @@ def _scan_receipts() -> dict[str, dict]:
 
 
 def _scan_dispatches() -> dict:
-    """Scan dispatch directories and return dispatches grouped by Kanban stage."""
+    """Scan dispatch directories and return dispatches grouped by Kanban stage.
+
+    Deduplicates by dispatch_id: when the same id appears in multiple directories
+    (e.g. both completed/ and rejected/), keeps the entry from the highest-priority
+    stage. Priority order: staging > pending > active > review > done > rejected.
+    Ties broken by most-recent mtime.
+    """
     receipts = _scan_receipts()
-    stages: dict[str, list] = {s: [] for s in ["staging", "pending", "active", "review", "done"]}
+    stages: dict[str, list] = {s: [] for s in ["staging", "pending", "active", "review", "done", "rejected"]}
 
     if not DISPATCHES_DIR.exists():
         return {"stages": stages, "total": 0}
 
     now = datetime.now(timezone.utc).timestamp()
 
+    # Collect all candidate entries keyed by dispatch_id
+    candidates: dict[str, list] = defaultdict(list)
+
     for dir_name, base_stage in _DIR_TO_STAGE.items():
         dir_path = DISPATCHES_DIR / dir_name
         if not dir_path.exists():
             continue
-        for path in sorted(dir_path.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in dir_path.glob("*.md"):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
                 header = _parse_dispatch_header(text)
-                duration_secs = now - path.stat().st_mtime
+                mtime = path.stat().st_mtime
+                duration_secs = now - mtime
                 dispatch_id = header.get("dispatch_id", path.stem)
                 receipt = receipts.get(dispatch_id)
 
                 # Promote active dispatches with a filed receipt to "review"
                 stage = "review" if base_stage == "active" and receipt else base_stage
 
-                stages[stage].append({
+                entry = {
                     "id": dispatch_id,
                     "file": path.name,
                     "pr_id": header.get("pr_id", "\u2014"),
@@ -159,9 +181,26 @@ def _scan_dispatches() -> dict:
                     "duration_label": _format_duration(duration_secs),
                     "has_receipt": receipt is not None,
                     "receipt_status": receipt.get("status") if receipt else None,
-                })
+                }
+                candidates[dispatch_id].append((stage, mtime, entry))
             except Exception as exc:
                 print(f"[kanban] skipping {path.name}: {exc}", file=sys.stderr)
+
+    # Dedup: pick one canonical entry per dispatch_id (highest-priority stage wins)
+    dupe_count = sum(len(v) - 1 for v in candidates.values() if len(v) > 1)
+    if dupe_count:
+        print(f"[kanban] deduped {dupe_count} duplicate dispatch entries", file=sys.stderr)
+
+    for dispatch_id, entries in candidates.items():
+        winner_stage, _, winner_entry = min(
+            entries,
+            key=lambda e: (_STAGE_PRIORITY.get(e[0], 99), -e[1]),
+        )
+        stages[winner_stage].append(winner_entry)
+
+    # Restore mtime-descending order within each stage (most recent first)
+    for stage_name in stages:
+        stages[stage_name].sort(key=lambda e: e["duration_secs"])
 
     total = sum(len(v) for v in stages.values())
     return {"stages": stages, "total": total}

@@ -6,7 +6,7 @@ import { useDispatches } from '@/lib/hooks';
 import type { DispatchStage, DispatchSummary } from '@/lib/types';
 import DispatchList from '@/components/operator/dispatch-list';
 
-const ALL_STAGES: (DispatchStage | 'all')[] = ['all', 'pending', 'active', 'review', 'done', 'staging'];
+const ALL_STAGES: (DispatchStage | 'all')[] = ['all', 'pending', 'active', 'review', 'done', 'staging', 'rejected'];
 
 const STAGE_LABELS: Record<string, string> = {
   all: 'All',
@@ -15,6 +15,7 @@ const STAGE_LABELS: Record<string, string> = {
   active: 'Active',
   review: 'Review',
   done: 'Done',
+  rejected: 'Rejected',
 };
 
 function LoadingSkeleton() {
@@ -54,7 +55,7 @@ export default function DispatchesPage() {
   const allDispatches: DispatchSummary[] = useMemo(() => {
     if (!data?.stages) return [];
     const out: DispatchSummary[] = [];
-    for (const stage of ['pending', 'active', 'review', 'done', 'staging'] as DispatchStage[]) {
+    for (const stage of ['pending', 'active', 'review', 'done', 'staging', 'rejected'] as DispatchStage[]) {
       const group = data.stages[stage];
       if (group) out.push(...group);
     }
