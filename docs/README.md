@@ -16,7 +16,7 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 - Architecture: `core/00_VNX_ARCHITECTURE.md`
 - Getting started: `core/00_GETTING_STARTED.md`
 - Dispatch workflow: `DISPATCH_GUIDE.md`
-- Monitoring: `operations/MONITORING_GUIDE.md`
+- Monitoring: `operations/README.md`
 - Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
 - Roadmap: `manifesto/ROADMAP.md`
 

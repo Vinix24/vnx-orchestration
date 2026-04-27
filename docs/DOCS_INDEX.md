@@ -31,6 +31,13 @@
 | Examples | `docs/examples/` | Example orchestration flows |
 | Archive | `docs/_archive/` | Historical docs kept for traceability |
 
-## Internal (not in repo)
+## Internal
 
-Internal strategy, business plans, wave maps, and maintainer-only status docs are maintained privately in the BUSINESS workspace outside this repository.
+Most internal strategy, business plans, wave maps, and maintainer-only docs are gitignored and maintained privately outside this repository. The following research docs are tracked for historical reference:
+
+| Document | Path | Description |
+|----------|------|-------------|
+| Headless T0 Feasibility | `docs/internal/plans/HEADLESS_T0_FEASIBILITY_REPORT.md` | Feasibility analysis for headless T0 orchestration |
+| Headless T0 Framework | `docs/internal/plans/HEADLESS_T0_FRAMEWORK_RESEARCH.md` | Framework research for headless implementation |
+| Headless T0 State Architecture | `docs/internal/plans/HEADLESS_T0_STATE_ARCHITECTURE.md` | State architecture design for headless T0 |
+| Architecture Supplement | `docs/internal/plans/VNX_ARCHITECTURE_SUPPLEMENT_EXTERNAL_PATTERNS.md` | External patterns supplement to core architecture |
