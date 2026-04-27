@@ -33,6 +33,12 @@ const STAGE_STYLES: Record<DispatchStage, { bg: string; border: string; color: s
     color: '#22c55e',
     label: 'Done',
   },
+  rejected: {
+    bg: 'rgba(239, 68, 68, 0.10)',
+    border: 'rgba(239, 68, 68, 0.30)',
+    color: '#ef4444',
+    label: 'Rejected',
+  },
 };
 
 export default function DispatchStageBadge({ stage }: { stage: DispatchStage }) {

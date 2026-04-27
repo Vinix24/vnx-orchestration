@@ -92,7 +92,7 @@ export default function DispatchList({ dispatches }: Props) {
       </div>
       {dispatches.map(d => (
         <Link
-          key={d.id}
+          key={`${d.id}-${d.stage}`}
           href={`/operator/dispatches/${encodeURIComponent(d.id)}`}
           role="row"
           data-testid={`dispatch-row-${d.id}`}
