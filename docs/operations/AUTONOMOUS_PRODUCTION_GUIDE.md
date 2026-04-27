@@ -4,8 +4,8 @@
 **Date**: 2026-04-01
 **Status**: Active reference with historical sections
 **Source**: VNX_PID.md, VNX_DIGITAL_AGENT_TEAM_VISION.md, VNX_N8N_PROJECTPLAN.md
-**Prerequisite**: [AUTONOMOUS_EXECUTION_PLAN.md](../plans/AUTONOMOUS_EXECUTION_PLAN.md)
-**Wave Mapping**: [VNX_AGENT_TEAM_WAVE_MAPPING.md](VNX_AGENT_TEAM_WAVE_MAPPING.md)
+**Prerequisite**: AUTONOMOUS_EXECUTION_PLAN.md (private planning doc, not in repo)
+**Wave Mapping**: VNX_AGENT_TEAM_WAVE_MAPPING.md (private planning doc, not in repo)
 
 ---
 
@@ -694,7 +694,7 @@ Source: VNX_PID.md (Fase 0-4, 4 Tracks, 12 weken, 23 workflows)
 Terminals: T0 (Opus) + T1 (Sonnet) + T2 (Sonnet) + T3 (Opus)
 Mode: `--dangerously-skip-permissions`
 
-Gedetailleerde PR-niveau breakdown: zie [VNX_AGENT_TEAM_WAVE_MAPPING.md](VNX_AGENT_TEAM_WAVE_MAPPING.md)
+Gedetailleerde PR-niveau breakdown: zie VNX_AGENT_TEAM_WAVE_MAPPING.md (private planning doc, not in repo)
 
 ### Fase 0: Fundament (Week 1-2) — 15 PRs, 5 Waves
 
@@ -938,9 +938,9 @@ This reduces T0 review scope to semantic review for PRs covered by deterministic
 - `VNX_N8N_PROJECTPLAN.md` — 23 workflows, Docker setup, governance
 
 ### VNX System
-- [AUTONOMOUS_EXECUTION_PLAN.md](../plans/AUTONOMOUS_EXECUTION_PLAN.md) — S1-S5, R1-R5, G1-G5
+- `AUTONOMOUS_EXECUTION_PLAN.md` — S1-S5, R1-R5, G1-G5 (private planning doc, not in repo)
 - [00_VNX_ARCHITECTURE.md](../core/00_VNX_ARCHITECTURE.md) — V11.0 architectuur
-- [VNX_AGENT_TEAM_WAVE_MAPPING.md](VNX_AGENT_TEAM_WAVE_MAPPING.md) — Gedetailleerde PR mapping
+- `VNX_AGENT_TEAM_WAVE_MAPPING.md` — Gedetailleerde PR mapping (private planning doc, not in repo)
 - [RECEIPT_PIPELINE.md](RECEIPT_PIPELINE.md) — Receipt processing flow
 - `terminals/T0/CLAUDE.md` — T0 richtlijnen
 - `scripts/vnx_worktree_setup.sh` — Worktree management

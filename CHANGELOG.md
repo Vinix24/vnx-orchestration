@@ -9,6 +9,7 @@
 - **dispatch-viewer**: Add `/operator/dispatches` list view with stage tabs (staging/pending/active/review/done), track/terminal/search filters, and per-row receipt status indicator. Add `/operator/dispatches/[id]` detail page with Overview/Event Replay/Instruction/Result tabs; replay tab renders phase-colored tool-use timeline from archived NDJSON with scrubbable cursor, play/pause/step controls, and phase filter chips. Data flows through existing `/api/dispatches*` endpoints (F59-PR4).
 
 ### Docs
+- **docs-audit-cleanup**: Fix broken link to archived `MONITORING_GUIDE.md` in `docs/README.md`; correct inaccurate "Internal (not in repo)" claim in `docs/DOCS_INDEX.md` to list the 4 tracked headless-T0 research docs; remove 5 dead markdown hyperlinks in `docs/operations/AUTONOMOUS_PRODUCTION_GUIDE.md` pointing to private planning docs not in repo.
 - **event-streams**: Add `docs/operations/EVENT_STREAMS.md` documenting the per-dispatch ring-buffer lifecycle of `.vnx-data/events/T{n}.ndjson` and the `events/archive/{terminal}/{dispatch_id}.ndjson` layout; linked from `docs/operations/README.md` and `docs/DOCS_INDEX.md`. Clarifies a misinterpretation flagged as W-2 in the 2026-04-23 audit-trail investigation (OI-AT-6a). Updates CHANGELOG to remove a stale `(missing source)` parenthetical on the ghost-receipt-filter entry now that `scripts/lib/headless_review_receipt.py` is in tree (OI-1133).
 
 ### Fixes
