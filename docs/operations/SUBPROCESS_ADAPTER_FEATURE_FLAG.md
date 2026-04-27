@@ -24,15 +24,16 @@ export VNX_ADAPTER_T1=tmux
 Supported values:
 - `subprocess` — delivers via `SubprocessAdapter` (headless `claude -p` subprocess)
 - `tmux` — delivers via tmux send-keys (existing behavior)
-- unset — defaults to `tmux` (fully backward compatible)
+- unset — T0 defaults to `tmux`; T1/T2/T3 default to `subprocess` (set `VNX_ADAPTER_Tx=tmux` to opt-out)
 
 ## Implementation
 
-The routing check lives in `dispatch_deliver()` in `scripts/lib/dispatch_deliver.sh`:
+The routing check lives in `deliver_dispatch_to_terminal()` in `scripts/lib/dispatch_deliver.sh`:
 
 ```bash
+# T0: default tmux. T1/T2/T3: default subprocess (headless workers) since F32.
 local adapter_var="VNX_ADAPTER_${terminal_id}"
-local adapter_type="${!adapter_var:-tmux}"
+local adapter_type="${!adapter_var}"  # resolved by caller per terminal
 
 if [[ "$adapter_type" == "subprocess" ]]; then
     _ddt_subprocess_delivery ...
