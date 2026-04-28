@@ -81,6 +81,52 @@ def _inject_permission_profile(terminal_id: str, role: str | None, instruction: 
     return f"{preamble}\n---\n\n{instruction}"
 
 
+def _build_intelligence_section(dispatch_id: str, role: str | None) -> str:
+    """Return formatted intelligence items as markdown, or empty string (best-effort).
+
+    Calls IntelligenceSelector to gather antipatterns, success patterns, and
+    recent comparable dispatches from quality_intelligence.db.  Any import or
+    DB failure is caught and logged — dispatch proceeds without intelligence.
+    """
+    try:
+        from intelligence_selector import IntelligenceSelector  # noqa: PLC0415
+        quality_db_path = _default_state_dir() / "quality_intelligence.db"
+        selector = IntelligenceSelector(quality_db_path=quality_db_path)
+        try:
+            result = selector.select(
+                dispatch_id=dispatch_id,
+                injection_point="dispatch_create",
+                skill_name=role or "",
+            )
+        finally:
+            selector.close()
+        if not result.items:
+            return ""
+        by_class: dict[str, list] = {}
+        for item in result.items:
+            by_class.setdefault(item.item_class, []).append(item)
+        parts: list[str] = []
+        if "failure_prevention" in by_class:
+            parts.append("### Antipatterns to avoid")
+            for item in by_class["failure_prevention"]:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if "proven_pattern" in by_class:
+            parts.append("### Proven success patterns")
+            for item in by_class["proven_pattern"]:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if "recent_comparable" in by_class:
+            parts.append("### Tag warnings")
+            for item in by_class["recent_comparable"]:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        return "\n".join(parts)
+    except Exception as exc:
+        logger.warning("intelligence injection failed (%s); proceeding without", exc)
+        return ""
+
+
 def _inject_skill_context(
     terminal_id: str,
     instruction: str,
@@ -112,12 +158,18 @@ def _inject_skill_context(
 
     Returns the full pipe_input string ready for `claude -p`.
     """
+    # Gather intelligence before assembling prompt (best-effort)
+    _dispatch_id = (dispatch_metadata or {}).get("dispatch_id") or ""
+    intelligence_section = _build_intelligence_section(_dispatch_id, role)
+
     try:
         from prompt_assembler import PromptAssembler  # noqa: PLC0415
         assembler = PromptAssembler()
         meta = dict(dispatch_metadata or {})
         meta.setdefault("role", role or "")
         meta.setdefault("terminal", terminal_id)
+        if intelligence_section:
+            meta.setdefault("intelligence", intelligence_section)
         assembled = assembler.assemble(
             dispatch_metadata=meta,
             instruction=instruction,
@@ -148,8 +200,21 @@ def _inject_skill_context(
     for path in candidates:
         if path.exists():
             context = path.read_text()
+            if intelligence_section:
+                return (
+                    f"{context}\n\n---\n\n"
+                    f"## Relevant Intelligence (from past dispatches)\n\n"
+                    f"{intelligence_section}\n"
+                    f"---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+                )
             return f"{context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
 
+    if intelligence_section:
+        return (
+            f"## Relevant Intelligence (from past dispatches)\n\n"
+            f"{intelligence_section}\n"
+            f"---\n\nDISPATCH INSTRUCTION:\n\n{instruction}"
+        )
     return instruction
 
 
