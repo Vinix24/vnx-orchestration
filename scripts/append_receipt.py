@@ -938,15 +938,13 @@ def _count_quality_violations(receipt: dict) -> int:
     open_items = rec.get("open_items") or []
     if not open_items:
         return 0
-    # Mirror dedup_key from _register_quality_open_items: qa:{check_id}:{basename}:{symbol}.
-    # Collisions across directories tracked as OI-1176; out of scope for PR-4b3.
+    # Mirror dedup_key from _register_quality_open_items: qa:{check_id}:{full_path}:{symbol}.
     seen_keys: set = set()
     for item in open_items:
         check_id = str(item.get("check_id", "unknown"))
-        file_path = str(item.get("file", ""))
-        file_basename = Path(file_path).name if file_path else "unknown"
+        file_path = str(item.get("file", "")) or "unknown"
         symbol = str(item.get("symbol") or "")
-        seen_keys.add(f"qa:{check_id}:{file_basename}:{symbol}")
+        seen_keys.add(f"qa:{check_id}:{file_path}:{symbol}")
     return len(seen_keys)
 
 
@@ -989,12 +987,8 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
                     raw_severity = str(item.get("severity", "info"))
                     mapped_severity = _SEVERITY_MAP.get(raw_severity, "info")
                     title = str(item.get("item", ""))
-                    file_basename = Path(file_path).name if file_path else "unknown"
-
-                    # Build dedup key: qa:{check_id}:{file_basename}:{symbol}
-                    # Dedup key uses basename+symbol; collisions across directories tracked as OI-1176.
-                    # Out of scope for PR-4b3.
-                    dedup_key = f"qa:{check_id}:{file_basename}:{symbol}"
+                    # Build dedup key: qa:{check_id}:{full_path}:{symbol} (OI-1176 fix)
+                    dedup_key = f"qa:{check_id}:{file_path or 'unknown'}:{symbol}"
 
                     item_id, created = oim.add_item_programmatic(
                         title=title,
