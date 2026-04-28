@@ -605,15 +605,8 @@ def test_gate_artifacts_pr_id_non_numeric_does_not_crash(isolated_register, tmp_
 
 
 def test_gate_artifacts_triggers_state_rebuild(isolated_register, tmp_path, monkeypatch):
-    """materialize_artifacts must call maybe_trigger_state_rebuild after writing the register event."""
-    import state_rebuild_trigger
-
+    """materialize_artifacts must reach the SUCCESS path and call maybe_trigger_state_rebuild."""
     rebuild_calls: list = []
-    monkeypatch.setattr(state_rebuild_trigger, "maybe_trigger_state_rebuild", lambda: rebuild_calls.append(1) or True)
-
-    # Also patch where gate_artifacts imported it from
-    import gate_artifacts as _ga
-    monkeypatch.setattr(_ga, "_trigger_rebuild" if hasattr(_ga, "_trigger_rebuild") else "__builtins__", None, raising=False)
 
     requests_dir = tmp_path / "requests"
     results_dir = tmp_path / "results"
@@ -630,10 +623,17 @@ def test_gate_artifacts_triggers_state_rebuild(isolated_register, tmp_path, monk
         "report_path": str(report_path),
         "dispatch_id": "D-REBUILD-019",
     }
-    stdout = "# Review\nLGTM"
+    # 4 non-empty lines — satisfies gate_artifacts._validate_content (requires >= 3)
+    stdout = (
+        "# Gemini Review\n\n"
+        "The implementation follows established patterns correctly.\n"
+        "No security issues identified.\n"
+        "Approved: LGTM."
+    )
 
-    with mock.patch("state_rebuild_trigger.maybe_trigger_state_rebuild", side_effect=lambda: rebuild_calls.append(1) or True):
-        gate_artifacts.materialize_artifacts(
+    with mock.patch("state_rebuild_trigger.maybe_trigger_state_rebuild", side_effect=lambda: rebuild_calls.append(1) or True), \
+         mock.patch.object(gate_recorder, "record_failure_simple", wraps=gate_recorder.record_failure_simple) as mock_failure:
+        result = gate_artifacts.materialize_artifacts(
             gate="gemini_review",
             pr_number=30,
             pr_id="pr-30",
@@ -645,6 +645,10 @@ def test_gate_artifacts_triggers_state_rebuild(isolated_register, tmp_path, monk
             reports_dir=reports_dir,
         )
 
+    # Success path: status must be "completed" — failure path returns status="failure"
+    assert result.get("status") == "completed", f"Expected success path, got status={result.get('status')!r}"
+    # record_failure_simple must NOT have been called on the success path
+    mock_failure.assert_not_called()
     assert len(rebuild_calls) >= 1, "maybe_trigger_state_rebuild must be called after register write"
 
 

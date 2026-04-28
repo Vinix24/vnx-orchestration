@@ -461,17 +461,13 @@ finalize_dispatch_delivery() {
         terminal="${terminal_id:-}" \
         >/dev/null 2>&1 || true
 
-    # Throttled non-blocking rebuild of t0_state.json (integer epoch only)
-    local _fdd_throttle_file _fdd_now _fdd_last
-    _fdd_throttle_file="${STATE_DIR}/.last_state_rebuild_ts"
-    _fdd_now=$(date +%s)
-    _fdd_last=$(cat "$_fdd_throttle_file" 2>/dev/null || echo 0)
-    _fdd_last=${_fdd_last%.*}
-    [ -z "$_fdd_last" ] && _fdd_last=0
-    if [ "$((_fdd_now - _fdd_last))" -ge 30 ]; then
-        nohup python3 "$VNX_DIR/scripts/build_t0_state.py" >/dev/null 2>&1 &
-        echo "$_fdd_now" > "${_fdd_throttle_file}.tmp" && mv "${_fdd_throttle_file}.tmp" "$_fdd_throttle_file" || true
-    fi
+    # Throttled non-blocking rebuild via Python helper (single source of truth for throttle+Popen)
+    python3 -c "
+import sys
+sys.path.insert(0, '$VNX_DIR/scripts/lib')
+from state_rebuild_trigger import maybe_trigger_state_rebuild
+maybe_trigger_state_rebuild()
+" >/dev/null 2>&1 || true
 
     return 0
 }

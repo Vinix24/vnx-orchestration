@@ -521,6 +521,23 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Dispatch register events (minimal reader — full aggregation deferred to PR-4c)
+# ---------------------------------------------------------------------------
+
+def _build_register_events(limit: int = 50) -> List[Dict[str, Any]]:
+    """Read last N events from dispatch_register.ndjson — minimal exposure for PR-4b.
+
+    Full aggregation into feature_state is deferred to PR-4c.
+    """
+    try:
+        from dispatch_register import read_events
+        events = read_events()
+        return events[-limit:] if events else []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -545,6 +562,7 @@ def build_t0_state(
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
     git_context = _build_git_context()
+    dispatch_register_events = _build_register_events(limit=50)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
 
@@ -563,6 +581,7 @@ def build_t0_state(
         "active_work": active_work,
         "recent_receipts": recent_receipts,
         "git_context": git_context,
+        "dispatch_register_events": dispatch_register_events,
         "system_health": system_health,
         "_build_seconds": round(elapsed, 2),
     }
