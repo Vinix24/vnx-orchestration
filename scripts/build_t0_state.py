@@ -470,6 +470,7 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
+        events = [e for e in events if e.get("event_type") != "state_mutation"]
         return events[-n:]
     except Exception:
         return []
@@ -677,28 +678,31 @@ def main() -> int:
 
     output_path = Path(args.output)
     elapsed = 0.0
+    _build_succeeded = False
     try:
         t_start = time.monotonic()
         state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
         elapsed = time.monotonic() - t_start
+        _build_succeeded = True
     except Exception:
         pass  # SessionStart hook must never block session
 
-    try:
-        if str(_LIB_DIR) not in sys.path:
-            sys.path.insert(0, str(_LIB_DIR))
-        from state_mutation import emit_state_mutation
-        size_bytes = output_path.stat().st_size if output_path.exists() else 0
-        emit_state_mutation(
-            output_path.name,
-            trigger="auto_rebuild",
-            rebuild_seconds=elapsed,
-            size_bytes=size_bytes,
-        )
-    except Exception:
-        pass
+    if _build_succeeded:
+        try:
+            if str(_LIB_DIR) not in sys.path:
+                sys.path.insert(0, str(_LIB_DIR))
+            from state_mutation import emit_state_mutation
+            size_bytes = output_path.stat().st_size if output_path.exists() else 0
+            emit_state_mutation(
+                output_path.name,
+                trigger="auto_rebuild",
+                rebuild_seconds=elapsed,
+                size_bytes=size_bytes,
+            )
+        except Exception:
+            pass
 
     return 0  # Always exit 0
 

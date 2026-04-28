@@ -28,6 +28,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 import append_receipt as ar
 import state_mutation as sm
+import build_t0_state as bts
 
 
 def test_emit_state_mutation_receipt_shape(tmp_path: Path) -> None:
@@ -145,3 +146,54 @@ def test_integration_emit_and_read_back(tmp_path: Path) -> None:
     assert parsed["trigger"] == "auto_rebuild"
     assert parsed["section"] == "feature_state"
     assert parsed["rebuild_seconds"] == 0.5
+
+
+def test_build_failure_does_not_emit_state_mutation(tmp_path: Path) -> None:
+    """main() must NOT emit state_mutation when build_t0_state raises (blocking fix)."""
+    output_path = tmp_path / "t0_state.json"
+
+    with mock.patch("sys.argv", ["build_t0_state.py", "--output", str(output_path)]), \
+         mock.patch("build_t0_state.build_t0_state", side_effect=RuntimeError("simulated build failure")), \
+         mock.patch("state_mutation.emit_state_mutation") as mock_emit:
+        result = bts.main()
+
+    assert result == 0
+    mock_emit.assert_not_called()
+
+
+def test_write_atomic_failure_does_not_emit_state_mutation(tmp_path: Path) -> None:
+    """main() must NOT emit state_mutation when _write_atomic raises (blocking fix)."""
+    output_path = tmp_path / "t0_state.json"
+    fake_state: dict = {"schema_version": "2.0"}
+
+    with mock.patch("sys.argv", ["build_t0_state.py", "--output", str(output_path)]), \
+         mock.patch("build_t0_state.build_t0_state", return_value=fake_state), \
+         mock.patch("build_t0_state._write_atomic", side_effect=OSError("disk full")), \
+         mock.patch("state_mutation.emit_state_mutation") as mock_emit:
+        result = bts.main()
+
+    assert result == 0
+    mock_emit.assert_not_called()
+
+
+def test_state_mutation_excluded_from_recency_summary(tmp_path: Path) -> None:
+    """_build_recent_receipts must filter out state_mutation events (advisory fix)."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_path = state_dir / "t0_receipts.ndjson"
+
+    events = [
+        {"event_type": "task_complete", "terminal": "T1", "timestamp": "2026-04-28T10:00:00Z", "dispatch_id": "D1"},
+        {"event_type": "state_mutation", "terminal": "T0", "timestamp": "2026-04-28T10:01:00Z"},
+        {"event_type": "state_mutation", "terminal": "T0", "timestamp": "2026-04-28T10:02:00Z"},
+        {"event_type": "review_gate_request", "terminal": "T3", "timestamp": "2026-04-28T10:03:00Z", "gate": "codex"},
+        {"event_type": "state_mutation", "terminal": "T0", "timestamp": "2026-04-28T10:04:00Z"},
+    ]
+    receipts_path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+    result = bts._build_recent_receipts(state_dir, n=3)
+
+    returned_types = [r.get("event_type") for r in result]
+    assert "state_mutation" not in returned_types, f"state_mutation leaked into recency summary: {result}"
+    assert "task_complete" in returned_types
+    assert "review_gate_request" in returned_types

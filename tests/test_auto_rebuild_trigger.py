@@ -112,6 +112,18 @@ def test_rebuild_failure_does_not_raise(tmp_path: Path) -> None:
         ar._maybe_trigger_state_rebuild(receipt)
 
 
+def test_popen_failure_does_not_write_throttle(tmp_path: Path) -> None:
+    """Throttle file must NOT be written when Popen raises (advisory fix)."""
+    throttle_file = tmp_path / ".last_state_rebuild_ts"
+    receipt = _minimal_receipt("task_complete")
+
+    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+         mock.patch("append_receipt.subprocess.Popen", side_effect=OSError("popen failed")):
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    assert not throttle_file.exists(), "throttle file must not be written on Popen failure"
+
+
 def test_rebuild_failure_does_not_break_append(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()

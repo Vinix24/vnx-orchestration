@@ -1058,13 +1058,6 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
         except Exception:
             pass
 
-        try:
-            tmp = throttle_file.with_name(throttle_file.name + ".tmp")
-            tmp.write_text(str(time.time()), encoding="utf-8")
-            os.replace(str(tmp), str(throttle_file))
-        except Exception:
-            pass
-
         subprocess.Popen(
             ["python3", "scripts/build_t0_state.py"],
             cwd=str(_REPO_ROOT),
@@ -1072,6 +1065,14 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        # Write throttle marker only after Popen succeeds; a failed launch
+        # should not suppress the next rebuild attempt for 30s.
+        try:
+            tmp = throttle_file.with_name(throttle_file.name + ".tmp")
+            tmp.write_text(str(time.time()), encoding="utf-8")
+            os.replace(str(tmp), str(throttle_file))
+        except Exception:
+            pass
     except Exception:
         pass
 
