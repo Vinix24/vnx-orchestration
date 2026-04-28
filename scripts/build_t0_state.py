@@ -521,6 +521,28 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Register events (dispatch_register.ndjson reader)
+# ---------------------------------------------------------------------------
+
+def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> list[dict]:
+    """Read last N events from dispatch_register.ndjson — minimal exposure for PR-4b2.
+
+    Honors state_dir override (test/headless contexts). Goes through canonical
+    dispatch_register.read_events() to preserve fcntl.LOCK_SH contract.
+
+    Full register-canonical aggregation deferred to PR-4c.
+    """
+    try:
+        if str(_LIB_DIR) not in sys.path:
+            sys.path.insert(0, str(_LIB_DIR))
+        from dispatch_register import read_events
+        events = read_events(state_dir=state_dir) if state_dir else read_events()
+        return events[-limit:] if events else []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -544,6 +566,7 @@ def build_t0_state(
     dispatch_insights = _build_dispatch_insights()
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
+    register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
@@ -562,6 +585,7 @@ def build_t0_state(
         "dispatch_insights": dispatch_insights,
         "active_work": active_work,
         "recent_receipts": recent_receipts,
+        "dispatch_register_events": register_events,
         "git_context": git_context,
         "system_health": system_health,
         "_build_seconds": round(elapsed, 2),
