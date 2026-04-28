@@ -663,7 +663,7 @@ def test_emit_dispatch_register_non_numeric_pr_id_uses_feature_id(isolated_regis
         "pr_id": "PR-6",
         "dispatch_id": "",
         "terminal": "T3",
-        "gate": "gemini_review",
+        "gate": "codex_gate",
     }
     append_receipt._emit_dispatch_register(receipt)
     events = _reg_events(isolated_register)
@@ -873,4 +873,54 @@ def test_gate_artifacts_claude_github_optional_skips_register_emit(isolated_regi
     gate_events = [e for e in events if e.get("gate") == "claude_github_optional"]
     assert len(gate_events) == 0, (
         f"claude_github_optional must not emit register event (parser unimplemented), got: {gate_events}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests 28-30: symmetric defer — review_gate_request only emits for codex_gate
+# ---------------------------------------------------------------------------
+
+
+def test_emit_review_gate_request_gemini_skips_register(isolated_register):
+    """review_gate_request for gemini_review must NOT write to register (symmetric defer with fixup #6)."""
+    receipt = {
+        "event_type": "review_gate_request",
+        "dispatch_id": "D-SYMM-028",
+        "terminal": "T3",
+        "gate": "gemini_review",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 0, (
+        f"gemini_review review_gate_request must not emit register event (deferred), got: {events}"
+    )
+
+
+def test_emit_review_gate_request_codex_gate_emits_gate_requested(isolated_register):
+    """review_gate_request for codex_gate must emit gate_requested (only gate with full lifecycle)."""
+    receipt = {
+        "event_type": "review_gate_request",
+        "dispatch_id": "D-SYMM-029",
+        "terminal": "T3",
+        "gate": "codex_gate",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 1, f"Expected 1 register event for codex_gate, got: {events}"
+    assert events[0]["event"] == "gate_requested"
+    assert events[0].get("gate") == "codex_gate"
+
+
+def test_emit_review_gate_request_claude_github_optional_skips_register(isolated_register):
+    """review_gate_request for claude_github_optional must NOT write to register (symmetric defer with fixup #6)."""
+    receipt = {
+        "event_type": "review_gate_request",
+        "dispatch_id": "D-SYMM-030",
+        "terminal": "T3",
+        "gate": "claude_github_optional",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 0, (
+        f"claude_github_optional review_gate_request must not emit register event (deferred), got: {events}"
     )

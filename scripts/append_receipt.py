@@ -1086,6 +1086,16 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
         elif event_type == "task_timeout":
             register_event = "dispatch_failed"
         elif event_type == "review_gate_request":
+            gate = str(receipt.get("gate", "")).lower()
+            if gate != "codex_gate":
+                # Symmetric with fixup #6: only codex_gate has full register lifecycle
+                # gemini_review and claude_github_optional defer until proper parsers exist
+                import logging as _logging
+                _logging.info(
+                    "_emit_dispatch_register: review_gate_request for gate=%r deferred (symmetric defer — only codex_gate has full register lifecycle)",
+                    gate,
+                )
+                return
             register_event = "gate_requested"
         else:
             return  # not register-worthy
