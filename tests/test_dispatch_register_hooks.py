@@ -117,6 +117,32 @@ def test_task_complete_receipt_triggers_dispatch_completed(tmp_path: Path):
                for e in events)
 
 
+def test_task_complete_with_failed_status_triggers_dispatch_failed(tmp_path: Path):
+    """task_complete receipt with status=failed must emit dispatch_failed, not dispatch_completed.
+
+    Regression for: _emit_dispatch_register treated every task_complete as a success,
+    ignoring receipt['status']. Failed completions (status=failed/error/blocked) must
+    register as dispatch_failed.
+    """
+    receipt = {
+        "timestamp": "2026-04-28T10:30:00Z",
+        "event_type": "task_complete",
+        "status": "failed",
+        "dispatch_id": "d-failed-complete-001",
+        "terminal": "T1",
+    }
+    _run_emit_helper(tmp_path, receipt)
+    events = _read_register(tmp_path)
+    assert any(
+        e["event"] == "dispatch_failed" and e["dispatch_id"] == "d-failed-complete-001"
+        for e in events
+    ), f"Expected dispatch_failed in register, got: {events}"
+    assert not any(
+        e["event"] == "dispatch_completed" and e["dispatch_id"] == "d-failed-complete-001"
+        for e in events
+    ), "Must not emit dispatch_completed for a failed-status task_complete receipt"
+
+
 def test_task_failed_receipt_triggers_dispatch_failed(tmp_path: Path):
     receipt = {
         "timestamp": "2026-04-28T10:01:00Z",

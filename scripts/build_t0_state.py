@@ -297,8 +297,6 @@ def _aggregate_register_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     _COMPLETION_EVENTS = {"dispatch_completed", "pr_merged"}
     _ACTIVE_EVENTS = {"dispatch_promoted", "dispatch_started"}
     _FAILED_EVENTS = {"dispatch_failed"}
-    # Higher rank wins when merging multiple dispatch_ids under the same key.
-    _STATUS_RANK = {"completed": 3, "active": 2, "failed": 1, "pending": 0}
 
     # --- First pass: group by dispatch_id ---
     by_dispatch: Dict[str, List[Dict[str, Any]]] = {}
@@ -364,15 +362,13 @@ def _aggregate_register_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
             "last_event_ts": "",
         })
 
-        if last_event_ts > entry["last_event_ts"]:
-            entry["last_event"] = last_event
-            entry["last_event_ts"] = last_event_ts
-
         for p in prs:
             if p not in entry["prs"]:
                 entry["prs"].append(p)
 
-        if _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(entry["status"], 0):
+        if last_event_ts > entry["last_event_ts"]:
+            entry["last_event"] = last_event
+            entry["last_event_ts"] = last_event_ts
             entry["status"] = status
 
     return aggregated

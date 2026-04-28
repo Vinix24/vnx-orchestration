@@ -9,6 +9,21 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest import mock
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_cached_vnx_paths():
+    """Clear vnx_paths from sys.modules between tests.
+
+    test_dispatch_register_hooks.py stubs vnx_paths as a MagicMock whose
+    ensure_env() returns only 3 keys. If that stub lingers in sys.modules when
+    build_t0_state.py is loaded here, it causes a KeyError on VNX_DISPATCH_DIR.
+    """
+    sys.modules.pop("vnx_paths", None)
+    yield
+    sys.modules.pop("vnx_paths", None)
+
 TESTS_DIR = Path(__file__).resolve().parent
 VNX_ROOT = TESTS_DIR.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
@@ -304,3 +319,48 @@ def test_dispatch_id_primary_key_no_stale_active(tmp_path: Path):
     assert rf["pr-200"]["status"] == "completed"
     # No leftover entry for the key that would have been used without the fix.
     assert "d-stale-active" not in rf
+
+
+def test_retry_dispatch_after_completed_yields_active(tmp_path: Path):
+    """A completed dispatch followed by a newer promoted dispatch on the same PR
+    must yield PR status 'active', not 'completed'.
+
+    Regression for: build_t0_state used max-rank aggregation, so a completed
+    dispatch (rank 3) prevented a later retry dispatch (active, rank 2) from
+    moving the PR status back to 'active'.
+    """
+    env_patch, state_dir, _ = _load_build_t0_state(tmp_path)
+
+    events = [
+        {
+            "timestamp": "2026-04-28T09:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-first",
+            "pr_number": 50,
+            "terminal": "T1",
+        },
+        {
+            "timestamp": "2026-04-28T09:30:00Z",
+            "event": "dispatch_completed",
+            "dispatch_id": "d-first",
+            "pr_number": 50,
+        },
+        # Retry dispatch: promoted after the first one completed.
+        {
+            "timestamp": "2026-04-28T10:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-retry",
+            "pr_number": 50,
+            "terminal": "T1",
+        },
+    ]
+    _write_register(state_dir, events)
+
+    with mock.patch.dict(os.environ, env_patch):
+        result = _load_mod_with_fake_fsm(tmp_path, env_patch, state_dir)
+
+    rf = result["register_features"]
+    assert "pr-50" in rf, f"Expected 'pr-50' in {list(rf.keys())}"
+    assert rf["pr-50"]["status"] == "active", (
+        f"Expected 'active' (retry dispatch is most recent), got {rf['pr-50']['status']!r}"
+    )

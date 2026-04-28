@@ -1021,15 +1021,19 @@ def append_receipt_payload(
 def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
     """Emit lifecycle event to dispatch_register.ndjson. Best-effort, never raises."""
     try:
-        event_type = str(receipt.get("event_type") or receipt.get("event") or "")
+        event_type = receipt.get("event_type", "")
+        status = str(receipt.get("status", "")).lower()
         if event_type in ("task_complete", "task_completed"):
-            register_event = "dispatch_completed"
+            if status in ("failed", "error", "blocked"):
+                register_event = "dispatch_failed"
+            else:
+                register_event = "dispatch_completed"
         elif event_type == "task_failed":
             register_event = "dispatch_failed"
         elif event_type == "review_gate_request":
             register_event = "gate_requested"
         else:
-            return
+            return  # not a register-worthy event
 
         dispatch_id = str(receipt.get("dispatch_id") or "")
         terminal = str(receipt.get("terminal") or "")
