@@ -113,27 +113,36 @@ class ReconcileResult:
 # ---------------------------------------------------------------------------
 
 def parse_feature_plan(plan_path: Path) -> tuple[str, List[PREntry]]:
-    """Parse FEATURE_PLAN.md and return (feature_name, list of PREntry)."""
+    """Parse FEATURE_PLAN.md and return (feature_name, list of PREntry).
+
+    Supports both legacy (## PR-N: Title) and new (### F<N>-PR<M>: Title) formats,
+    including mixed files where both appear.
+    """
     content = plan_path.read_text(encoding="utf-8")
 
-    # Extract feature name from first heading
+    # Feature name — legacy '# Feature: X' first, else first document heading
     feature_name = "Unknown"
     name_match = re.search(r"^#\s+Feature:\s*(.+)$", content, re.MULTILINE)
     if name_match:
         feature_name = name_match.group(1).strip()
+    else:
+        first_heading = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+        if first_heading:
+            feature_name = first_heading.group(1).strip()
 
-    # Split into PR sections on lines like "## PR-N: Title"
-    pr_section_pattern = re.compile(r"^##\s+(PR-\d+):\s*(.+)$", re.MULTILINE)
-    pr_matches = list(pr_section_pattern.finditer(content))
+    # Collect PR section headers from both formats, ordered by file position
+    legacy_pat = re.compile(r"^##\s+(PR-\d+):\s*(.+)$", re.MULTILINE)
+    new_pat = re.compile(r"^###\s+(F\d+-PR\d+):\s*(.+)$", re.MULTILINE)
+
+    # (file_position, pr_id, title, section_content_start)
+    all_pr_headers: List[tuple[int, str, str, int]] = []
+    for m in (*legacy_pat.finditer(content), *new_pat.finditer(content)):
+        all_pr_headers.append((m.start(), m.group(1), m.group(2).strip(), m.end()))
+    all_pr_headers.sort(key=lambda x: x[0])
 
     prs: List[PREntry] = []
-    for i, match in enumerate(pr_matches):
-        pr_id = match.group(1)
-        title = match.group(2).strip()
-
-        # Extract the section text up to the next PR section or end of file
-        section_start = match.end()
-        section_end = pr_matches[i + 1].start() if i + 1 < len(pr_matches) else len(content)
+    for i, (_, pr_id, title, section_start) in enumerate(all_pr_headers):
+        section_end = all_pr_headers[i + 1][0] if i + 1 < len(all_pr_headers) else len(content)
         section = content[section_start:section_end]
 
         def extract(pattern: str, default: str = "") -> str:
@@ -151,7 +160,6 @@ def parse_feature_plan(plan_path: Path) -> tuple[str, List[PREntry]]:
         track = extract(r"\*\*Track\*\*:\s*(\S+)", "?")
         gate = extract(r"\*\*Quality Gate\*\*\s*\n[`]([^`]+)[`]")
         if not gate:
-            # Try inline gate name like `gate_pr0_...`
             g = re.search(r"`(gate_\w+)`", section)
             gate = g.group(1) if g else ""
         skill = extract(r"\*\*Skill\*\*:\s*(\S+)")
