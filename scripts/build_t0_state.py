@@ -10,6 +10,12 @@ Usage:
 
 Output schema: schema_version "2.0" (t0_state.json)
 With --format brief: schema 1.0 backward-compat (t0_brief.json format)
+
+Index/detail split (Sprint 4a):
+  - t0_index.json: cheap always-loaded index (≤50 fields, ≤5KB)
+  - t0_detail/<section>.json: full per-section files loaded on-demand
+  - t0_state.json: DEPRECATED — kept for backward-compat; future consumers
+    should read t0_index.json (orientation) + t0_detail/*.json (on-demand).
 """
 
 from __future__ import annotations
@@ -751,6 +757,84 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Index / detail split (Sprint 4a)
+# ---------------------------------------------------------------------------
+
+# Maps state-dict key → detail file stem (t0_detail/<stem>.json)
+_DETAIL_SECTION_MAP: Dict[str, str] = {
+    "feature_state": "feature_state",
+    "quality_digest": "quality_digest",
+    "open_items": "open_items",
+    "dispatch_register_events": "dispatch_register",
+    "active_chains": "active_chains",
+    "intelligence": "intelligence",
+}
+
+
+def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the cheap, always-loaded index from full state dict.
+
+    Guaranteed ≤50 top-level keys and ≤5KB serialized. Suitable for
+    cold-start orientation without loading any heavy section data.
+    """
+    queues = state.get("queues") or {}
+    open_items = state.get("open_items") or {}
+    active_work = state.get("active_work") or []
+    git_ctx = state.get("git_context") or {}
+
+    last_commits: List[str] = git_ctx.get("last_5_commits") or []
+    raw_head = last_commits[0].split()[0] if last_commits else ""
+
+    return {
+        "schema": "t0_index/1.0",
+        "timestamp": state.get("generated_at", ""),
+        "git_branch": git_ctx.get("branch", ""),
+        "git_head": raw_head[:7],
+        "terminals": {
+            tid: {
+                "status": t.get("status", ""),
+                "lease_expires": t.get("lease_expires_at"),
+            }
+            for tid, t in (state.get("terminals") or {}).items()
+        },
+        "queue": {
+            "pending": queues.get("pending_count", 0),
+            "active": queues.get("active_count", 0),
+            "open_prs": len((state.get("pr_progress") or {}).get("in_progress", [])),
+            "blocking_open_items": open_items.get("blocker_count", 0),
+        },
+        "active_dispatches": [d.get("dispatch_id", "") for d in active_work],
+        "recent_receipts": (state.get("recent_receipts") or [])[-3:],
+        "health": state.get("system_health") or {},
+        "last_rebuild_seconds": state.get("_build_seconds"),
+    }
+
+
+def _write_detail_files(state: Dict[str, Any], detail_dir: Path) -> Dict[str, str]:
+    """Write per-section detail files atomically; return manifest of written paths."""
+    detail_dir.mkdir(parents=True, exist_ok=True)
+    manifest: Dict[str, str] = {}
+    for state_key, file_stem in _DETAIL_SECTION_MAP.items():
+        if state_key not in state:
+            continue
+        section_path = detail_dir / f"{file_stem}.json"
+        fd, tmp_str = tempfile.mkstemp(
+            prefix=section_path.name + ".tmp.", dir=str(detail_dir)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state[state_key], fh, indent=2, default=str)
+            os.replace(tmp_str, str(section_path))
+            manifest[state_key] = str(section_path)
+        except Exception:
+            try:
+                os.unlink(tmp_str)
+            except Exception:
+                pass
+    return manifest
+
+
+# ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
 
@@ -807,6 +891,16 @@ def main() -> int:
         state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
+        # Write cheap index — always loaded for cold-start orientation (Sprint 4a)
+        try:
+            _write_atomic(_STATE_DIR / "t0_index.json", _build_t0_index(state))
+        except Exception:
+            pass  # best-effort — must not block SessionStart
+        # Write per-section detail files — loaded on-demand (Sprint 4a)
+        try:
+            _write_detail_files(state, _STATE_DIR / "t0_detail")
+        except Exception:
+            pass  # best-effort — must not block SessionStart
         # Regenerate t0_brief.json alongside t0_state.json — orchestration helpers
         # (receipt_processor_v4, intelligence_ack, t0_intelligence_aggregator) read
         # t0_brief.json directly and must stay in sync with the new state.
