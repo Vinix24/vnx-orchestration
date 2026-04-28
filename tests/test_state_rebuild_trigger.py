@@ -319,3 +319,73 @@ def test_concurrent_calls_dedupe(tmp_path: Path) -> None:
 
     assert sum(1 for r in results if r) == 1, f"expected exactly one True, got {results}"
     assert len(fired) == 1, f"expected exactly one Popen call, got {len(fired)}"
+
+
+# ---------------------------------------------------------------------------
+# Test 17: Normal (non-critical) event in throttle window → throttled
+# ---------------------------------------------------------------------------
+
+def test_normal_event_in_window_is_throttled(tmp_path: Path) -> None:
+    throttle = tmp_path / ".last_state_rebuild_ts"
+    throttle.write_text(str(int(time.time())), encoding="utf-8")
+
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen") as mock_p:
+        result = srt.maybe_trigger_state_rebuild(throttle_seconds=30, event_type="dispatch_promoted")
+
+    assert result is False
+    mock_p.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 18: CRITICAL event in throttle window → bypasses throttle, fires
+# ---------------------------------------------------------------------------
+
+def test_critical_event_bypasses_throttle(tmp_path: Path) -> None:
+    throttle = tmp_path / ".last_state_rebuild_ts"
+    throttle.write_text(str(int(time.time())), encoding="utf-8")
+
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        result = srt.maybe_trigger_state_rebuild(throttle_seconds=30, event_type="task_complete")
+
+    assert result is True
+    mock_p.assert_called_once()
+
+
+def test_task_failed_bypasses_throttle(tmp_path: Path) -> None:
+    throttle = tmp_path / ".last_state_rebuild_ts"
+    throttle.write_text(str(int(time.time())), encoding="utf-8")
+
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        result = srt.maybe_trigger_state_rebuild(throttle_seconds=30, event_type="task_failed")
+
+    assert result is True
+    mock_p.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 19: dispatch_promoted then task_complete within 30s → 2 Popen calls
+# ---------------------------------------------------------------------------
+
+def test_promoted_then_complete_within_window_yields_two_rebuilds(tmp_path: Path) -> None:
+    """dispatch_promoted (normal, fires) then task_complete (critical, bypasses) = 2 Popens."""
+    base_time = int(time.time())
+
+    call_count = [0]
+
+    def fake_time():
+        # Both events happen at base_time (within same 30s window)
+        return base_time
+
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p, \
+         mock.patch("state_rebuild_trigger.time.time", fake_time):
+
+        r1 = srt.maybe_trigger_state_rebuild(throttle_seconds=30, event_type="dispatch_promoted")
+        r2 = srt.maybe_trigger_state_rebuild(throttle_seconds=30, event_type="task_complete")
+
+    assert r1 is True, "dispatch_promoted should fire (no prior marker)"
+    assert r2 is True, "task_complete should bypass throttle and also fire"
+    assert mock_p.call_count == 2, f"expected 2 Popen calls, got {mock_p.call_count}"

@@ -134,6 +134,30 @@ def test_rebuild_failure_does_not_break_append(tmp_path: Path) -> None:
     assert result.status == "appended"
 
 
+def test_event_type_forwarded_to_helper_for_completion(tmp_path: Path) -> None:
+    """append_receipt._maybe_trigger_state_rebuild passes event_type to shared helper."""
+    receipt = _minimal_receipt("task_complete")
+
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    mock_fn.assert_called_once_with(event_type="task_complete")
+
+
+def test_event_type_forwarded_to_helper_for_dispatch_promoted(tmp_path: Path) -> None:
+    receipt = {
+        "timestamp": "2026-04-28T10:00:00Z",
+        "event_type": "dispatch_promoted",
+        "terminal": "T0",
+        "source": "pytest",
+    }
+
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    mock_fn.assert_called_once_with(event_type="dispatch_promoted")
+
+
 def test_task_complete_survives_100_state_mutations(tmp_path: Path) -> None:
     """filter-before-trim: task_complete must survive when followed by 100 state_mutations."""
     state_dir = tmp_path / "state"

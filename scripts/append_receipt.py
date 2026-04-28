@@ -1057,7 +1057,7 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
     try:
         sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
         from state_rebuild_trigger import maybe_trigger_state_rebuild
-        maybe_trigger_state_rebuild()
+        maybe_trigger_state_rebuild(event_type=event_type)
     except Exception:
         pass  # best-effort
 

@@ -19,6 +19,11 @@ from typing import Optional
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_THROTTLE_SECONDS = 30
 
+CRITICAL_EVENTS = {
+    "task_complete", "task_completed", "completion", "complete",
+    "task_failed", "task_timeout",
+}
+
 
 def _resolve_state_dir() -> Path:
     """Resolve state dir via canonical vnx_paths, with fallback chain."""
@@ -36,8 +41,14 @@ def _resolve_state_dir() -> Path:
         return _REPO_ROOT / ".vnx-data" / "state"
 
 
-def maybe_trigger_state_rebuild(throttle_seconds: int = _DEFAULT_THROTTLE_SECONDS) -> bool:
+def maybe_trigger_state_rebuild(
+    throttle_seconds: int = _DEFAULT_THROTTLE_SECONDS,
+    event_type: str = "",
+) -> bool:
     """Fire build_t0_state.py if throttle expired. Best-effort, non-blocking.
+
+    Critical events (CRITICAL_EVENTS) bypass throttle to avoid stale completion
+    state when dispatch_promoted → task_complete land within the same 30s window.
 
     Returns True if rebuild was triggered, False if throttled or on failure.
 
@@ -46,7 +57,11 @@ def maybe_trigger_state_rebuild(throttle_seconds: int = _DEFAULT_THROTTLE_SECOND
     - Marker is written ONLY after Popen succeeds (no failure-suppression bug)
     - Atomic write via .tmp + rename
     - fcntl.LOCK_EX | LOCK_NB on sibling .lock file prevents concurrent races
+    # Throttle marker written when Popen succeeds. Child may crash post-spawn;
+    # this is acceptable because next CRITICAL event bypasses throttle anyway.
     """
+    bypass_throttle = event_type in CRITICAL_EVENTS
+
     state_dir = _resolve_state_dir()
     throttle = state_dir / ".last_state_rebuild_ts"
     lock_path = state_dir / ".last_state_rebuild_ts.lock"
@@ -71,7 +86,7 @@ def maybe_trigger_state_rebuild(throttle_seconds: int = _DEFAULT_THROTTLE_SECOND
             except (ValueError, OSError):
                 last = 0
 
-            if now - last < throttle_seconds:
+            if not bypass_throttle and now - last < throttle_seconds:
                 return False
 
             try:
@@ -93,7 +108,7 @@ def maybe_trigger_state_rebuild(throttle_seconds: int = _DEFAULT_THROTTLE_SECOND
         return False
 
 
-__all__ = ["maybe_trigger_state_rebuild"]
+__all__ = ["maybe_trigger_state_rebuild", "CRITICAL_EVENTS"]
 
 
 # CLI entry for bash hooks (e.g., dispatch_lifecycle.sh):
