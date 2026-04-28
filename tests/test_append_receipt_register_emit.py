@@ -487,3 +487,127 @@ def test_open_items_created_dedup_count_in_ndjson(tmp_path: Path):
     assert persisted.get("open_items_created") == 3, (
         f"Expected 3 (5 violations deduped to 3), got {persisted.get('open_items_created')!r}"
     )
+
+
+# ── Tests for _update_confidence_from_receipt status-aware logic ─────────────
+
+def _run_confidence_update(ar_mod, receipt: dict, captured: list) -> None:
+    """Run _update_confidence_from_receipt with a mock update_confidence_from_outcome."""
+    import types as _types
+
+    fake_persist = _types.ModuleType("intelligence_persist")
+
+    def _mock_update(db_path, dispatch_id, terminal, outcome):
+        captured.append({"dispatch_id": dispatch_id, "terminal": terminal, "outcome": outcome})
+
+    fake_persist.update_confidence_from_outcome = _mock_update
+
+    fake_state_dir = Path("/tmp/fake_state_dir_confidence_test")
+    fake_db = fake_state_dir / "quality_intelligence.db"
+
+    with patch.dict(sys.modules, {"intelligence_persist": fake_persist}), \
+         patch.object(ar_mod, "resolve_state_dir", return_value=fake_state_dir), \
+         patch("pathlib.Path.exists", return_value=True):
+        ar_mod._update_confidence_from_receipt(receipt)
+
+
+def test_confidence_task_complete_success_yields_success(ar):
+    """task_complete + status=success → outcome='success'."""
+    captured = []
+    receipt = _make_receipt("task_complete", status="success", dispatch_id="CONF-001", terminal="T1")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "success"
+
+
+def test_confidence_task_complete_failed_yields_failure(ar):
+    """task_complete + status=failed → outcome='failure' (the bug fix)."""
+    captured = []
+    receipt = _make_receipt("task_complete", status="failed", dispatch_id="CONF-002", terminal="T1")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "failure"
+
+
+def test_confidence_task_complete_failure_variant_yields_failure(ar):
+    """task_complete + status=failure → outcome='failure'."""
+    captured = []
+    receipt = _make_receipt("task_complete", status="failure", dispatch_id="CONF-003", terminal="T2")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "failure"
+
+
+def test_confidence_task_complete_error_status_yields_failure(ar):
+    """task_complete + status=error → outcome='failure'."""
+    captured = []
+    receipt = _make_receipt("task_complete", status="error", dispatch_id="CONF-004", terminal="T1")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "failure"
+
+
+def test_confidence_task_complete_unknown_status_skips(ar):
+    """task_complete + unknown status → no confidence update."""
+    captured = []
+    receipt = _make_receipt("task_complete", status="pending", dispatch_id="CONF-005", terminal="T1")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 0
+
+
+def test_confidence_task_completed_alternate_form(ar):
+    """task_completed (alternate form) + success → outcome='success'."""
+    captured = []
+    receipt = _make_receipt("task_completed", status="success", dispatch_id="CONF-006", terminal="T3")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "success"
+
+
+def test_confidence_task_failed_always_failure(ar):
+    """task_failed → outcome='failure' regardless of status field."""
+    captured = []
+    receipt = _make_receipt("task_failed", dispatch_id="CONF-007", terminal="T2")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "failure"
+
+
+def test_confidence_non_task_event_skips(ar):
+    """Non-task events don't update confidence."""
+    captured = []
+    receipt = _make_receipt("review_gate_request", dispatch_id="CONF-008", terminal="T0")
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 0
+
+
+def test_confidence_missing_dispatch_id_skips(ar):
+    """Missing dispatch_id → no confidence update."""
+    captured = []
+    receipt = {"event_type": "task_complete", "status": "success", "terminal": "T1"}
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 0
+
+
+def test_confidence_legacy_event_field(ar):
+    """Legacy 'event' field instead of 'event_type' is handled."""
+    captured = []
+    receipt = {
+        "event": "task_complete",
+        "status": "success",
+        "dispatch_id": "CONF-010",
+        "terminal": "T1",
+    }
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "success"
+
+
+def test_confidence_task_complete_empty_status_yields_success(ar):
+    """task_complete with empty status ('' in SUCCESS_STATUSES) → outcome='success'."""
+    captured = []
+    receipt = _make_receipt("task_complete", dispatch_id="CONF-011", terminal="T1")
+    # no status field → str(receipt.get("status", "")).lower() == ""
+    _run_confidence_update(ar, receipt, captured)
+    assert len(captured) == 1
+    assert captured[0]["outcome"] == "success"

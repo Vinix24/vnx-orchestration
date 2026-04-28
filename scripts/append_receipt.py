@@ -1123,16 +1123,28 @@ def append_receipt_payload(
 def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
     """Wire dispatch outcome into pattern confidence scores (best-effort)."""
     try:
-        event_type = str(receipt.get("event_type") or receipt.get("status") or "")
-        if event_type not in ("task_complete", "task_failed"):
+        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
+        FAILURE_STATUSES = {"failed", "failure", "error", "blocked"}
+
+        event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+        status = str(receipt.get("status", "")).lower()
+
+        if event_type in ("task_complete", "task_completed"):
+            if status in FAILURE_STATUSES:
+                outcome = "failure"
+            elif status in SUCCESS_STATUSES:
+                outcome = "success"
+            else:
+                return  # unknown status — don't update confidence
+        elif event_type == "task_failed":
+            outcome = "failure"
+        else:
             return
 
         dispatch_id = str(receipt.get("dispatch_id") or "")
         terminal = str(receipt.get("terminal") or "")
         if not dispatch_id:
             return
-
-        outcome = "success" if event_type == "task_complete" else "failure"
 
         state_dir = resolve_state_dir(__file__)
 
