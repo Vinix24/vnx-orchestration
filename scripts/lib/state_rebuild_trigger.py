@@ -23,8 +23,8 @@ def _resolve_state_dir() -> Path:
     """Resolve state dir via canonical vnx_paths, with fallback chain."""
     try:
         sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
-        from vnx_paths import resolve_state_dir as _canonical
-        return Path(_canonical())
+        from vnx_paths import resolve_paths
+        return Path(resolve_paths()["VNX_STATE_DIR"])
     except Exception:
         # Fallback chain: VNX_STATE_DIR > VNX_DATA_DIR (with EXPLICIT) > repo-relative
         state_dir_env = os.environ.get("VNX_STATE_DIR")

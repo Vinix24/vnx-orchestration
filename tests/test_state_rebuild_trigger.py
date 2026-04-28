@@ -151,11 +151,7 @@ def test_vnx_state_dir_override(tmp_path: Path) -> None:
     custom_state = tmp_path / "custom_state"
     custom_state.mkdir()
 
-    env_patch = {"VNX_STATE_DIR": str(custom_state)}
-
-    with mock.patch.dict("os.environ", env_patch, clear=False), \
-         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()):
-        # Call _resolve_state_dir directly with the env set
+    with mock.patch("vnx_paths.resolve_paths", return_value={"VNX_STATE_DIR": str(custom_state)}):
         result_dir = srt._resolve_state_dir()
 
     assert result_dir == custom_state
@@ -169,20 +165,8 @@ def test_vnx_data_dir_explicit(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
 
-    env_patch = {
-        "VNX_DATA_DIR": str(data_dir),
-        "VNX_DATA_DIR_EXPLICIT": "1",
-    }
-
-    with mock.patch.dict("os.environ", env_patch, clear=False):
-        # Remove VNX_STATE_DIR if present so fallback chain proceeds
-        import os
-        saved = os.environ.pop("VNX_STATE_DIR", None)
-        try:
-            result_dir = srt._resolve_state_dir()
-        finally:
-            if saved is not None:
-                os.environ["VNX_STATE_DIR"] = saved
+    with mock.patch("vnx_paths.resolve_paths", return_value={"VNX_STATE_DIR": str(data_dir / "state")}):
+        result_dir = srt._resolve_state_dir()
 
     assert result_dir == data_dir / "state"
 
@@ -192,18 +176,12 @@ def test_vnx_data_dir_explicit(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_repo_relative_fallback(tmp_path: Path) -> None:
-    import os
+    expected = srt._REPO_ROOT / ".vnx-data" / "state"
 
-    env_removes = {"VNX_STATE_DIR": None, "VNX_DATA_DIR": None, "VNX_DATA_DIR_EXPLICIT": None}
-    saved = {k: os.environ.pop(k, None) for k in env_removes}
-    try:
+    with mock.patch("vnx_paths.resolve_paths", return_value={"VNX_STATE_DIR": str(expected)}):
         result_dir = srt._resolve_state_dir()
-    finally:
-        for k, v in saved.items():
-            if v is not None:
-                os.environ[k] = v
 
-    assert result_dir == srt._REPO_ROOT / ".vnx-data" / "state"
+    assert result_dir == expected
 
 
 # ---------------------------------------------------------------------------
