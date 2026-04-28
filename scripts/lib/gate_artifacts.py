@@ -182,12 +182,18 @@ def materialize_artifacts(
             reason_detail=f"Failed to write report: {exc}",
         )
 
-    if (err := _validate_report_file(report_file)):
-        return gate_recorder.record_failure_simple(
-            **_fail, reason="artifact_materialization_failed", reason_detail=err,
-        )
-
-    if (content_err := _validate_content(stdout)):
+    # GATE-11: validate atomically — cleanup orphan report on any validation failure
+    file_err = _validate_report_file(report_file)
+    content_err = None if file_err else _validate_content(stdout)
+    if file_err or content_err:
+        try:
+            report_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if file_err:
+            return gate_recorder.record_failure_simple(
+                **_fail, reason="artifact_materialization_failed", reason_detail=file_err,
+            )
         return gate_recorder.record_failure_simple(
             **_fail, reason=content_err[0], reason_detail=content_err[1],
         )
