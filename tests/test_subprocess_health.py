@@ -53,6 +53,30 @@ from subprocess_health_monitor import (
 )
 
 
+def _ok_result(touched: frozenset = frozenset()):
+    """Build a successful _SubprocessResult for mocking deliver_via_subprocess."""
+    from subprocess_dispatch import _SubprocessResult
+    return _SubprocessResult(
+        success=True,
+        session_id="sess-test",
+        event_count=1,
+        manifest_path=None,
+        touched_files=touched,
+    )
+
+
+def _fail_result(touched: frozenset = frozenset()):
+    """Build a failed _SubprocessResult for mocking deliver_via_subprocess."""
+    from subprocess_dispatch import _SubprocessResult
+    return _SubprocessResult(
+        success=False,
+        session_id=None,
+        event_count=0,
+        manifest_path=None,
+        touched_files=touched,
+    )
+
+
 # ===================================================================
 # classify_worker tests
 # ===================================================================
@@ -179,7 +203,7 @@ class TestDeliverWithRecovery:
         state_dir.mkdir()
 
         with (
-            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=True) as mock_deliver,
+            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_ok_result()) as mock_deliver,
             mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
         ):
             result = deliver_with_recovery("T1", "do work", "sonnet", "d1", max_retries=3)
@@ -202,7 +226,7 @@ class TestDeliverWithRecovery:
         with (
             mock.patch(
                 "subprocess_dispatch.deliver_via_subprocess",
-                side_effect=[False, True],
+                side_effect=[_fail_result(), _ok_result()],
             ) as mock_deliver,
             mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
             mock.patch("subprocess_dispatch.time.sleep") as mock_sleep,
@@ -226,7 +250,7 @@ class TestDeliverWithRecovery:
         state_dir.mkdir()
 
         with (
-            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=False) as mock_deliver,
+            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_fail_result()) as mock_deliver,
             mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
             mock.patch("subprocess_dispatch.time.sleep"),
         ):
@@ -249,7 +273,7 @@ class TestDeliverWithRecovery:
         state_dir.mkdir()
 
         with (
-            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=False),
+            mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_fail_result()),
             mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
             mock.patch("subprocess_dispatch.time.sleep") as mock_sleep,
         ):
