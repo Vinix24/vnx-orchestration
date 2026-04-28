@@ -524,15 +524,32 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 # Dispatch register events (minimal reader — full aggregation deferred to PR-4c)
 # ---------------------------------------------------------------------------
 
-def _build_register_events(limit: int = 50) -> List[Dict[str, Any]]:
+def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> List[Dict[str, Any]]:
     """Read last N events from dispatch_register.ndjson — minimal exposure for PR-4b.
 
-    Full aggregation into feature_state is deferred to PR-4c.
+    If state_dir is provided, read from that location directly (test/headless override).
+    Otherwise use the canonical dispatch_register.read_events() resolution.
     """
     try:
-        from dispatch_register import read_events
-        events = read_events()
-        return events[-limit:] if events else []
+        if state_dir is not None:
+            register_path = Path(state_dir) / "dispatch_register.ndjson"
+            if not register_path.exists():
+                return []
+            events = []
+            content = register_path.read_text(encoding="utf-8", errors="replace")
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return events[-limit:] if events else []
+        else:
+            from dispatch_register import read_events
+            events = read_events()
+            return events[-limit:] if events else []
     except Exception:
         return []
 
@@ -562,7 +579,7 @@ def build_t0_state(
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
     git_context = _build_git_context()
-    dispatch_register_events = _build_register_events(limit=50)
+    dispatch_register_events = _build_register_events(state_dir=state_dir, limit=50)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
 

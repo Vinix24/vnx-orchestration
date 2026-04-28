@@ -758,3 +758,40 @@ def test_gate_recorder_non_numeric_pr_id_uses_feature_id(isolated_register, tmp_
         f"Non-numeric pr_id='PR-6' must become feature_id='PR-6', got {gate_events[0].get('feature_id')!r}"
     )
     assert gate_events[0].get("pr_number") is None
+
+
+# ---------------------------------------------------------------------------
+# Tests 23-24: legacy 'event' field fallback in _emit_dispatch_register
+# ---------------------------------------------------------------------------
+
+
+def test_emit_legacy_event_field_triggers_register_entry(isolated_register):
+    """Receipt with legacy 'event' key (no event_type) must trigger a register entry."""
+    receipt = {
+        "event": "task_complete",
+        "status": "success",
+        "dispatch_id": "D-LEGACY-001",
+        "terminal": "T1",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 1, f"Expected 1 register entry, got: {events}"
+    assert events[0]["event"] == "dispatch_completed", (
+        f"Legacy 'event' field must produce dispatch_completed, got {events[0]['event']!r}"
+    )
+    assert events[0]["dispatch_id"] == "D-LEGACY-001"
+
+
+def test_emit_canonical_event_type_field_still_works(isolated_register):
+    """Canonical 'event_type' key must still produce a register entry (regression guard)."""
+    receipt = {
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "D-CANON-001",
+        "terminal": "T1",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 1
+    assert events[0]["event"] == "dispatch_completed"
+    assert events[0]["dispatch_id"] == "D-CANON-001"

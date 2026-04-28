@@ -1048,7 +1048,8 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
     """Emit a dispatch_register event mirroring this receipt. Best-effort."""
     try:
         from dispatch_register import append_event
-        event_type = str(receipt.get("event_type", "")).lower()
+        # Mirror _validate_receipt() — accept event_type (canonical) or event (legacy)
+        event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()
         dispatch_id = str(receipt.get("dispatch_id", ""))
         pr_number = receipt.get("pr_number")

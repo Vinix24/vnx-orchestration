@@ -78,6 +78,32 @@ def test_build_register_events_missing_file_returns_empty(tmp_path: Path) -> Non
     assert result == []
 
 
+def test_build_register_events_honors_state_dir(tmp_path: Path) -> None:
+    """When state_dir is provided, read from state_dir/dispatch_register.ndjson directly."""
+    state_dir = tmp_path / "custom_state"
+    state_dir.mkdir()
+    register_file = state_dir / "dispatch_register.ndjson"
+    register_file.write_text(
+        json.dumps({"timestamp": "2026-04-28T10:00:00Z", "event": "gate_passed", "dispatch_id": "D-CUSTOM"}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = bts._build_register_events(state_dir=state_dir, limit=50)
+
+    assert len(result) == 1
+    assert result[0]["dispatch_id"] == "D-CUSTOM"
+
+
+def test_build_register_events_state_dir_missing_returns_empty(tmp_path: Path) -> None:
+    """When state_dir is provided but has no dispatch_register.ndjson, return []."""
+    state_dir = tmp_path / "empty_state"
+    state_dir.mkdir()
+
+    result = bts._build_register_events(state_dir=state_dir, limit=50)
+
+    assert result == []
+
+
 # ---------------------------------------------------------------------------
 # Test 2: build_t0_state return dict contains dispatch_register_events
 # ---------------------------------------------------------------------------
@@ -106,6 +132,35 @@ def test_build_t0_state_exposes_register_events(tmp_path: Path, monkeypatch: pyt
     events = state["dispatch_register_events"]
     assert isinstance(events, list)
     assert any(e.get("event") == "gate_passed" for e in events)
+
+
+def test_build_t0_state_state_dir_reads_local_register(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_t0_state(state_dir=X) must read register from X, not the canonical VNX_STATE_DIR location."""
+    state_dir = tmp_path / "state"
+    dispatch_dir = tmp_path / "dispatches"
+    state_dir.mkdir(parents=True)
+    dispatch_dir.mkdir(parents=True)
+
+    # Write a recognizable event to the state_dir register
+    register_file = state_dir / "dispatch_register.ndjson"
+    register_file.write_text(
+        json.dumps({"timestamp": "2026-04-28T11:00:00Z", "event": "dispatch_completed", "dispatch_id": "D-STATEDIR-WIRE"}) + "\n",
+        encoding="utf-8",
+    )
+
+    # Point VNX_STATE_DIR to a DIFFERENT dir (no register file there)
+    canonical_state = tmp_path / "canonical_state"
+    canonical_state.mkdir(parents=True)
+    monkeypatch.setenv("VNX_STATE_DIR", str(canonical_state))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+    state = bts.build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
+
+    events = state.get("dispatch_register_events", [])
+    assert any(e.get("dispatch_id") == "D-STATEDIR-WIRE" for e in events), (
+        "build_t0_state(state_dir=X) must read dispatch_register.ndjson from X, not from VNX_STATE_DIR"
+    )
 
 
 # ---------------------------------------------------------------------------
