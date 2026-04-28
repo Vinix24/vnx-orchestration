@@ -154,6 +154,135 @@ class TestParseFeaturePlan:
         assert prs == []
 
 
+NEW_FORMAT_FEATURE_PLAN = """\
+# F46–F50 Feature Plan — Intelligence
+
+## F46: Intelligence Extraction Pipeline Fix
+
+**Problem**: Something is broken.
+
+### F46-PR1: Learning Loop DB Bridge
+**Track**: A (T1 backend-developer)
+**Dependencies**: []
+**Risk-Class**: medium
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate
+
+Description of F46-PR1.
+
+### F46-PR2: Conversation Analyzer DB Bridge
+**Track**: B (T2 test-engineer)
+**Dependencies**: [F46-PR1]
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: codex_gate
+
+---
+
+## F47: T0 State Feedback Loop
+
+### F47-PR1: Receipt Watcher
+**Track**: A (T1 backend-developer)
+**Dependencies**: []
+**Risk-Class**: medium
+**Merge-Policy**: human
+**Review-Stack**: gemini_review
+"""
+
+MIXED_FORMAT_FEATURE_PLAN = """\
+# Feature: Mixed Syntax Test
+
+## PR-0: Legacy Foundation
+**Track**: C
+**Dependencies**: []
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate
+
+`gate_pr0_foundation`
+
+---
+
+### F46-PR1: New Format PR
+**Track**: A (T1 backend-developer)
+**Dependencies**: [PR-0]
+**Risk-Class**: medium
+**Merge-Policy**: human
+**Review-Stack**: codex_gate
+"""
+
+
+class TestParseFeaturePlanNewFormat:
+    def test_parses_pr_ids_and_titles(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
+        name, prs = parse_feature_plan(fp)
+        assert [p.pr_id for p in prs] == ["F46-PR1", "F46-PR2", "F47-PR1"]
+        assert prs[0].title == "Learning Loop DB Bridge"
+        assert prs[1].title == "Conversation Analyzer DB Bridge"
+        assert prs[2].title == "Receipt Watcher"
+
+    def test_parses_feature_name_from_first_heading(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
+        name, _ = parse_feature_plan(fp)
+        assert name == "F46–F50 Feature Plan — Intelligence"
+
+    def test_parses_dependencies(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
+        _, prs = parse_feature_plan(fp)
+        assert prs[0].dependencies == []
+        assert prs[1].dependencies == ["F46-PR1"]
+        assert prs[2].dependencies == []
+
+    def test_parses_track_with_suffix(self, tmp_path):
+        """'**Track**: A (T1 backend-developer)' should yield track == 'A'."""
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
+        _, prs = parse_feature_plan(fp)
+        assert prs[0].track == "A"
+        assert prs[1].track == "B"
+
+    def test_parses_metadata(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(NEW_FORMAT_FEATURE_PLAN)
+        _, prs = parse_feature_plan(fp)
+        pr1 = prs[1]
+        assert pr1.risk_class == "high"
+        assert pr1.merge_policy == "human"
+        assert pr1.review_stack == ["codex_gate"]
+
+
+class TestParseFeaturePlanMixed:
+    def test_both_formats_parsed(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
+        name, prs = parse_feature_plan(fp)
+        assert name == "Mixed Syntax Test"
+        assert [p.pr_id for p in prs] == ["PR-0", "F46-PR1"]
+
+    def test_mixed_ordering_by_file_position(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
+        _, prs = parse_feature_plan(fp)
+        assert prs[0].pr_id == "PR-0"
+        assert prs[1].pr_id == "F46-PR1"
+
+    def test_mixed_dependencies_cross_format(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
+        _, prs = parse_feature_plan(fp)
+        assert prs[0].dependencies == []
+        assert prs[1].dependencies == ["PR-0"]
+
+    def test_mixed_gate_extracted_from_legacy_section(self, tmp_path):
+        fp = tmp_path / "FEATURE_PLAN.md"
+        fp.write_text(MIXED_FORMAT_FEATURE_PLAN)
+        _, prs = parse_feature_plan(fp)
+        assert prs[0].gate == "gate_pr0_foundation"
+
+
 # ---------------------------------------------------------------------------
 # Dispatch directory scanning tests
 # ---------------------------------------------------------------------------
