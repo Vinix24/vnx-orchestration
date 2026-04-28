@@ -763,10 +763,9 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     if "open_items_created" not in enriched:
         enriched["open_items_created"] = _count_quality_violations(enriched)
 
-    # Compute CQS and persist to dispatch_metadata (best-effort)
-    # CQS computed at receipt time may be later overwritten by update_dispatch_cqs.py
-    # with a stripped payload that omits quality_advisory. Tracked as OI-1175.
-    # Out of scope for this PR (PR-4b3 only adds dispatch_register emit).
+    # Compute CQS and persist to dispatch_metadata (best-effort).
+    # quality_advisory_json is stored so update_dispatch_cqs.py can round-trip it
+    # without losing T0 advisory and OI-delta scoring (OI-1175).
     try:
         db_path = state_dir / "quality_intelligence.db"
         if db_path.exists():
@@ -779,7 +778,8 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
                 conn.execute(
                     """UPDATE dispatch_metadata
                        SET cqs=?, normalized_status=?, cqs_components=?,
-                           open_items_created=?, open_items_resolved=?
+                           open_items_created=?, open_items_resolved=?,
+                           quality_advisory_json=?
                        WHERE dispatch_id=?""",
                     (
                         cqs_result["cqs"],
@@ -787,6 +787,7 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
                         json.dumps(cqs_result["components"]),
                         enriched.get("open_items_created", 0),
                         enriched.get("open_items_resolved", 0),
+                        json.dumps(enriched.get("quality_advisory") or {}),
                         dispatch_id,
                     ),
                 )
@@ -1173,6 +1174,7 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
 
     TRIGGER_EVENTS = {
         "task_complete", "task_completed", "completion", "complete",
+        "task_failed", "task_timeout",
         "dispatch_promoted", "dispatch_started",
     }
     if event_type not in TRIGGER_EVENTS:
