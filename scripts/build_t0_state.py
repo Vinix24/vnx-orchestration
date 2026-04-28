@@ -916,6 +916,12 @@ def main() -> int:
             write_project_status(_STATE_DIR)
         except Exception:
             pass  # best-effort
+        # Regenerate FEATURE_PLAN.md from canonical state sources (Phase 2.2)
+        try:
+            from build_feature_plan import write_feature_plan
+            write_feature_plan(_PROJECT_ROOT / "FEATURE_PLAN.md", state_dir=_STATE_DIR)
+        except Exception:
+            pass  # best-effort — must not block SessionStart
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
     except Exception:
