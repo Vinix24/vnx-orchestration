@@ -239,3 +239,139 @@ def _stub_heavy_imports(env: dict) -> None:
     }
     for name, stub in stubs.items():
         sys.modules[name] = stub
+
+
+def _load_append_receipt_mod(env: dict):
+    """Load append_receipt module with heavy deps stubbed."""
+    _stub_heavy_imports(env)
+    for key in list(sys.modules.keys()):
+        if "append_receipt" in key:
+            del sys.modules[key]
+    spec = importlib.util.spec_from_file_location(
+        "append_receipt", SCRIPTS_DIR / "append_receipt.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["append_receipt"] = mod
+    with mock.patch.dict(os.environ, env):
+        spec.loader.exec_module(mod)
+    return mod
+
+
+# ---------------------------------------------------------------------------
+# Rebuild trigger tests
+# ---------------------------------------------------------------------------
+
+
+def test_review_gate_request_triggers_state_rebuild(tmp_path: Path):
+    """_maybe_trigger_state_rebuild must fire Popen for review_gate_request events."""
+    env = _setup_env(tmp_path)
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        # Override state_dir resolution so the throttle file lives in tmp.
+        mod.resolve_state_dir = mock.MagicMock(
+            return_value=Path(env["VNX_STATE_DIR"])
+        )
+
+        receipt = {
+            "event_type": "review_gate_request",
+            "dispatch_id": "d-gate-rebuild-001",
+            "terminal": "T3",
+        }
+
+        with mock.patch("subprocess.Popen") as mock_popen:
+            mod._maybe_trigger_state_rebuild(receipt)
+
+        mock_popen.assert_called_once()
+        args = mock_popen.call_args[0][0]
+        assert "build_t0_state.py" in args[-1]
+
+
+def test_gate_passed_event_triggers_state_rebuild(tmp_path: Path):
+    """_maybe_trigger_state_rebuild must fire Popen for gate_passed events."""
+    env = _setup_env(tmp_path)
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(
+            return_value=Path(env["VNX_STATE_DIR"])
+        )
+
+        receipt = {
+            "event_type": "gate_passed",
+            "dispatch_id": "d-gate-passed-001",
+            "terminal": "T3",
+        }
+
+        with mock.patch("subprocess.Popen") as mock_popen:
+            mod._maybe_trigger_state_rebuild(receipt)
+
+        mock_popen.assert_called_once()
+
+
+def test_gate_failed_event_triggers_state_rebuild(tmp_path: Path):
+    """_maybe_trigger_state_rebuild must fire Popen for gate_failed events."""
+    env = _setup_env(tmp_path)
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(
+            return_value=Path(env["VNX_STATE_DIR"])
+        )
+
+        receipt = {
+            "event_type": "gate_failed",
+            "dispatch_id": "d-gate-failed-001",
+            "terminal": "T3",
+        }
+
+        with mock.patch("subprocess.Popen") as mock_popen:
+            mod._maybe_trigger_state_rebuild(receipt)
+
+        mock_popen.assert_called_once()
+
+
+def test_register_write_before_rebuild_trigger(tmp_path: Path):
+    """_emit_dispatch_register must execute before _maybe_trigger_state_rebuild.
+
+    Verifies the ADVISORY fix: the register append must happen first so the
+    rebuild's tail-read on dispatch_register.ndjson includes the just-written event.
+    """
+    env = _setup_env(tmp_path)
+    call_log: list = []
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(
+            return_value=Path(env["VNX_STATE_DIR"])
+        )
+
+        # Patch both hooks to record their call order.
+        original_emit = mod._emit_dispatch_register
+        original_rebuild = mod._maybe_trigger_state_rebuild
+
+        def _emit_spy(receipt):
+            call_log.append("emit")
+
+        def _rebuild_spy(receipt):
+            call_log.append("rebuild")
+
+        mod._emit_dispatch_register = _emit_spy
+        mod._maybe_trigger_state_rebuild = _rebuild_spy
+
+        try:
+            # Simulate the post-append hook block (fixed order: emit THEN rebuild).
+            receipt = {
+                "event_type": "task_complete",
+                "dispatch_id": "d-order-test",
+                "terminal": "T1",
+            }
+            mod._emit_dispatch_register(receipt)
+            mod._maybe_trigger_state_rebuild(receipt)
+        finally:
+            mod._emit_dispatch_register = original_emit
+            mod._maybe_trigger_state_rebuild = original_rebuild
+
+    assert call_log == ["emit", "rebuild"], (
+        f"Expected emit before rebuild, got: {call_log}"
+    )

@@ -1011,9 +1011,9 @@ def append_receipt_payload(
 
         _update_confidence_from_receipt(receipt)
 
-        _maybe_trigger_state_rebuild(receipt)
-
         _emit_dispatch_register(receipt)
+
+        _maybe_trigger_state_rebuild(receipt)
 
     return result
 
@@ -1082,7 +1082,10 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
     """Fire non-blocking rebuild of t0_state.json after qualifying events. Best-effort."""
     try:
         event_type = str(receipt.get("event_type") or receipt.get("event") or "")
-        if not (_is_completion_event(receipt) or event_type in ("dispatch_promoted", "dispatch_started")):
+        if not (_is_completion_event(receipt) or event_type in (
+            "dispatch_promoted", "dispatch_started",
+            "review_gate_request", "gate_passed", "gate_failed",
+        )):
             return
 
         state_dir = resolve_state_dir(__file__)

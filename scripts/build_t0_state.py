@@ -285,53 +285,95 @@ def _build_feature_state() -> Dict[str, Any]:
 
 
 def _aggregate_register_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate dispatch_register events by pr_number / feature_id.
+    """Aggregate dispatch_register events using dispatch_id as primary key.
 
-    Returns: {<id>: {status, prs, last_event, last_event_ts}}
+    First pass: group all events by dispatch_id (events without dispatch_id are
+    dropped). Second pass: derive pr_number / feature_id from the latest event
+    in each group that carries them, then merge groups into a display-key dict.
+
+    Returns: {<display_key>: {status, prs, last_event, last_event_ts}}
+    where display_key = "pr-{n}" | feature_id | dispatch_id.
     """
     _COMPLETION_EVENTS = {"dispatch_completed", "pr_merged"}
     _ACTIVE_EVENTS = {"dispatch_promoted", "dispatch_started"}
     _FAILED_EVENTS = {"dispatch_failed"}
+    # Higher rank wins when merging multiple dispatch_ids under the same key.
+    _STATUS_RANK = {"completed": 3, "active": 2, "failed": 1, "pending": 0}
 
+    # --- First pass: group by dispatch_id ---
+    by_dispatch: Dict[str, List[Dict[str, Any]]] = {}
+    for ev in events:
+        dispatch_id = ev.get("dispatch_id", "")
+        if not dispatch_id:
+            continue
+        by_dispatch.setdefault(dispatch_id, []).append(ev)
+
+    # --- Second pass: aggregate each group, then fold into display-key dict ---
     aggregated: Dict[str, Dict[str, Any]] = {}
 
-    for ev in events:
-        pr_number = ev.get("pr_number")
-        feature_id = ev.get("feature_id", "")
-        dispatch_id = ev.get("dispatch_id", "")
+    for dispatch_id, group in by_dispatch.items():
+        group_sorted = sorted(group, key=lambda e: e.get("timestamp", ""))
 
-        key = (
-            f"pr-{pr_number}" if pr_number is not None
-            else feature_id if feature_id
-            else dispatch_id if dispatch_id
-            else None
-        )
-        if not key:
-            continue
+        pr_number: Optional[int] = None
+        feature_id: str = ""
+        status = "pending"
+        prs: List[Any] = []
+        last_event = ""
+        last_event_ts = ""
 
-        entry = aggregated.setdefault(key, {
+        for ev in group_sorted:
+            event_name = ev.get("event", "")
+            ts = ev.get("timestamp", "")
+            ev_pr = ev.get("pr_number")
+            ev_feature = ev.get("feature_id", "")
+
+            # Derive from the latest event that supplies them.
+            if ev_pr is not None:
+                pr_number = ev_pr
+            if ev_feature:
+                feature_id = ev_feature
+
+            if ts > last_event_ts:
+                last_event = event_name
+                last_event_ts = ts
+
+            if ev_pr is not None and ev_pr not in prs:
+                prs.append(ev_pr)
+
+            if event_name in _COMPLETION_EVENTS:
+                status = "completed"
+            elif event_name in _ACTIVE_EVENTS and status != "completed":
+                status = "active"
+            elif event_name in _FAILED_EVENTS and status not in ("completed",):
+                status = "failed"
+
+        # Determine display key from derived fields.
+        if pr_number is not None:
+            display_key = f"pr-{pr_number}"
+        elif feature_id:
+            display_key = feature_id
+        else:
+            display_key = dispatch_id
+
+        # Merge into the shared display-key bucket (multiple dispatches may
+        # share the same PR or feature).
+        entry = aggregated.setdefault(display_key, {
             "status": "pending",
             "prs": [],
             "last_event": "",
             "last_event_ts": "",
         })
 
-        event_name = ev.get("event", "")
-        ts = ev.get("timestamp", "")
+        if last_event_ts > entry["last_event_ts"]:
+            entry["last_event"] = last_event
+            entry["last_event_ts"] = last_event_ts
 
-        if ts > entry["last_event_ts"]:
-            entry["last_event"] = event_name
-            entry["last_event_ts"] = ts
+        for p in prs:
+            if p not in entry["prs"]:
+                entry["prs"].append(p)
 
-        if pr_number is not None and pr_number not in entry["prs"]:
-            entry["prs"].append(pr_number)
-
-        if event_name in _COMPLETION_EVENTS:
-            entry["status"] = "completed"
-        elif event_name in _ACTIVE_EVENTS and entry["status"] != "completed":
-            entry["status"] = "active"
-        elif event_name in _FAILED_EVENTS and entry["status"] not in ("completed",):
-            entry["status"] = "failed"
+        if _STATUS_RANK.get(status, 0) > _STATUS_RANK.get(entry["status"], 0):
+            entry["status"] = status
 
     return aggregated
 

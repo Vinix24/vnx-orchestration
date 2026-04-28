@@ -243,5 +243,45 @@ def emit_gate_register_event(
             pr_number=pr_number,
             gate=gate,
         )
+        # Gate results update register state; trigger a non-blocking rebuild so
+        # t0_state.json reflects the outcome without waiting for the next completion.
+        _trigger_state_rebuild_from_gate()
+    except Exception:
+        pass
+
+
+def _trigger_state_rebuild_from_gate() -> None:
+    """Fire a non-blocking build_t0_state.py rebuild. Best-effort."""
+    try:
+        import subprocess
+        import time
+        from pathlib import Path as _Path
+        from project_root import resolve_project_root
+        repo_root = resolve_project_root(__file__)
+        state_dir = _Path(os.environ.get("VNX_STATE_DIR", ""))
+        if not state_dir or not state_dir.is_dir():
+            return
+        throttle_file = state_dir / ".last_state_rebuild_ts"
+        _THROTTLE = 30
+        if throttle_file.exists():
+            try:
+                last_ts = float(throttle_file.read_text(encoding="utf-8").strip())
+                if time.time() - last_ts < _THROTTLE:
+                    return
+            except Exception:
+                pass
+        subprocess.Popen(
+            ["python3", "scripts/build_t0_state.py"],
+            cwd=str(repo_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            tmp = throttle_file.with_name(throttle_file.name + ".tmp")
+            tmp.write_text(str(time.time()), encoding="utf-8")
+            os.replace(str(tmp), str(throttle_file))
+        except Exception:
+            pass
     except Exception:
         pass

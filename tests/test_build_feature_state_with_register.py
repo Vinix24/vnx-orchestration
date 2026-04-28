@@ -205,3 +205,102 @@ def test_aggregation_by_pr_number_and_feature_id(tmp_path: Path):
     assert "F99" in rf
     assert rf["F99"]["status"] == "failed"
     assert rf["F99"]["last_event"] == "dispatch_failed"
+
+
+def _load_mod_with_fake_fsm(tmp_path: Path, env_patch: dict, state_dir: Path):
+    """Load build_t0_state with a minimal fake feature_state_machine."""
+    if "build_t0_state" in sys.modules:
+        del sys.modules["build_t0_state"]
+    spec = importlib.util.spec_from_file_location(
+        "build_t0_state", SCRIPTS_DIR / "build_t0_state.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    fake_fsm = mock.MagicMock()
+    fake_state = mock.MagicMock()
+    fake_state.as_dict.return_value = {
+        "feature_name": None, "current_pr": None, "next_task": None,
+        "assigned_track": None, "assigned_role": None,
+        "completion_pct": 0, "total_prs": 0, "completed_prs": 0,
+        "status": "planned",
+    }
+    fake_fsm.parse_feature_plan.return_value = fake_state
+    (tmp_path / "FEATURE_PLAN.md").write_text("# F\n")
+    with mock.patch.dict(sys.modules, {"feature_state_machine": fake_fsm}):
+        spec.loader.exec_module(mod)
+        result = mod._build_feature_state()
+    return result
+
+
+def test_dispatch_id_primary_key_grouping(tmp_path: Path):
+    """dispatch_promoted (no pr_number) + task_complete (pr_number set) for the same
+    dispatch_id must aggregate to ONE entry keyed 'pr-{n}', status 'completed'."""
+    env_patch, state_dir, _ = _load_build_t0_state(tmp_path)
+
+    events = [
+        {
+            "timestamp": "2026-04-28T11:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-split-test",
+            "terminal": "T1",
+            # No pr_number on the early event — this was the root cause.
+        },
+        {
+            "timestamp": "2026-04-28T11:30:00Z",
+            "event": "dispatch_completed",
+            "dispatch_id": "d-split-test",
+            "pr_number": 99,
+        },
+    ]
+    _write_register(state_dir, events)
+
+    with mock.patch.dict(os.environ, env_patch):
+        result = _load_mod_with_fake_fsm(tmp_path, env_patch, state_dir)
+
+    rf = result["register_features"]
+
+    # Must be exactly one entry (keyed by derived pr_number, not by dispatch_id).
+    assert len(rf) == 1, f"Expected 1 entry, got {len(rf)}: {list(rf.keys())}"
+    assert "pr-99" in rf, f"Expected key 'pr-99', got {list(rf.keys())}"
+    entry = rf["pr-99"]
+    assert entry["status"] == "completed"
+    assert 99 in entry["prs"]
+    # No stale 'd-split-test' entry under its own key.
+    assert "d-split-test" not in rf
+
+
+def test_dispatch_id_primary_key_no_stale_active(tmp_path: Path):
+    """A dispatch that starts without pr_number and later gets one must not leave
+    a stale 'active' entry alongside the completed one."""
+    env_patch, state_dir, _ = _load_build_t0_state(tmp_path)
+
+    events = [
+        {
+            "timestamp": "2026-04-28T12:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-stale-active",
+            "terminal": "T2",
+        },
+        {
+            "timestamp": "2026-04-28T12:10:00Z",
+            "event": "dispatch_started",
+            "dispatch_id": "d-stale-active",
+            "pr_number": 200,
+            "terminal": "T2",
+        },
+        {
+            "timestamp": "2026-04-28T12:45:00Z",
+            "event": "dispatch_completed",
+            "dispatch_id": "d-stale-active",
+            "pr_number": 200,
+        },
+    ]
+    _write_register(state_dir, events)
+
+    with mock.patch.dict(os.environ, env_patch):
+        result = _load_mod_with_fake_fsm(tmp_path, env_patch, state_dir)
+
+    rf = result["register_features"]
+    assert "pr-200" in rf
+    assert rf["pr-200"]["status"] == "completed"
+    # No leftover entry for the key that would have been used without the fix.
+    assert "d-stale-active" not in rf
