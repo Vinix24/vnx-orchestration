@@ -350,6 +350,12 @@ def initialize_database() -> bool:
             conn.commit()
             log('INFO', 'Migrated dispatch_metadata: added target_open_items, open_items_created, open_items_resolved columns')
 
+        # Migration: add quality_advisory_json for CQS round-trip preservation (OI-1175)
+        if "quality_advisory_json" not in dm_cols_v2:
+            cursor.execute("ALTER TABLE dispatch_metadata ADD COLUMN quality_advisory_json TEXT")
+            conn.commit()
+            log('INFO', 'Migrated dispatch_metadata: added quality_advisory_json column')
+
         # Migration: add dispatch_id to pattern_usage for dispatch-scoped traceability
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pattern_usage'")
         if cursor.fetchone():
