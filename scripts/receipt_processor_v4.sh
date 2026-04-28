@@ -1076,9 +1076,12 @@ process_pending_reports() {
 
     log "INFO" "Scanning for reports newer than: $cutoff"
 
-    # Count pending reports first (unified_reports/ and unified_reports/headless/)
+    # Scan unified_reports/ only — gate reports under headless/ are recorded
+    # separately in state/review_gates/results/ and the gate runner returns
+    # structured JSON synchronously. Scanning them here produces ghost
+    # "RECEIPT:unknown:unknown" pings because they have no dispatch_id metadata.
     local pending_reports=()
-    for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
+    for report in "$UNIFIED_REPORTS"/*.md; do
         [ -f "$report" ] || continue
         if should_process_report "$report"; then
             pending_reports+=("$report")
