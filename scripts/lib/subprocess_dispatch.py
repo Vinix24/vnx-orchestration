@@ -700,16 +700,36 @@ def _write_receipt(
     if commit_missing:
         receipt["commit_missing"] = True
 
-    receipt_path = _default_state_dir() / "t0_receipts.ndjson"
-    receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(receipt_path, "a") as f:
-        f.write(json.dumps(receipt) + "\n")
-
-    logger.info(
-        "Receipt written: dispatch=%s terminal=%s status=%s",
-        dispatch_id, terminal_id, status,
-    )
-    return receipt_path
+    _scripts_dir = Path(__file__).resolve().parents[1]
+    try:
+        sys.path.insert(0, str(_scripts_dir))
+        from append_receipt import append_receipt_payload
+        result = append_receipt_payload(receipt)
+        receipt_path = result.receipts_file
+        if result.status == "duplicate":
+            logger.debug(
+                "Receipt already appended (idempotent skip): dispatch=%s", dispatch_id
+            )
+        else:
+            logger.info(
+                "Receipt written: dispatch=%s terminal=%s status=%s",
+                dispatch_id, terminal_id, status,
+            )
+        return receipt_path
+    except Exception as exc:
+        # Fallback: bare write to prevent receipt loss on import error (e.g. circular import)
+        logger.warning(
+            "append_receipt_payload failed (%s); falling back to bare write", exc
+        )
+        receipt_path = _default_state_dir() / "t0_receipts.ndjson"
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(receipt_path, "a") as f:
+            f.write(json.dumps(receipt) + "\n")
+        logger.info(
+            "Receipt written (bare): dispatch=%s terminal=%s status=%s",
+            dispatch_id, terminal_id, status,
+        )
+        return receipt_path
 
 
 def _capture_dispatch_parameters(
