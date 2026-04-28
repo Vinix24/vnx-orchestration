@@ -5,8 +5,14 @@ Idempotent: safe to run multiple times. Deduplication key: timestamp + context_h
 If VNX_STATE_DIR file already exists, appends only entries not already present.
 After a successful merge, removes events/ file.
 
+Data-dir resolution uses the same logic as governance_audit.py writer:
+    os.environ.get("VNX_DATA_DIR", "<repo_root>/.vnx-data")
+Both must agree to prevent the migration from searching a different location
+than where the writer writes. Do not change one without changing the other.
+
 Usage:
     python3 scripts/migrate_governance_audit_path.py [--data-dir PATH] [--dry-run]
+    VNX_DATA_DIR=/custom/path python3 scripts/migrate_governance_audit_path.py
 """
 
 from __future__ import annotations
@@ -19,8 +25,6 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
-from project_root import resolve_data_dir
 
 
 def _parse_ndjson(path: Path) -> list[dict]:
@@ -109,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         data_dir = Path(args.data_dir)
     else:
-        data_dir = resolve_data_dir(__file__)
+        data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
 
     result = migrate(data_dir, dry_run=args.dry_run)
     print(json.dumps(result, indent=2))

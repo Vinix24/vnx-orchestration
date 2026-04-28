@@ -110,22 +110,23 @@ def test_enforcer_validator_passes_with_state_entries(tmp_path, monkeypatch, tmp
     result = enforcer.check("decision_audit_trail", {})
 
     assert result.passed is True, f"Expected passed=True, got: {result.message}"
-    assert "entry" in result.message.lower()
+    assert "entries" in result.message.lower()
 
 
 def test_enforcer_validator_fails_when_state_empty(tmp_path, monkeypatch):
     import importlib
     import governance_enforcer
+
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    importlib.reload(governance_audit)
     importlib.reload(governance_enforcer)
 
-    # Ensure state/ audit does not exist
-    audit_path = tmp_path / "state" / "governance_audit.ndjson"
-    assert not audit_path.exists()
+    # Ensure neither state/ nor events/ audit exists in tmp_path
+    assert not (tmp_path / "state" / "governance_audit.ndjson").exists()
+    assert not (tmp_path / "events" / "governance_audit.ndjson").exists()
 
     config_path = tmp_path / "governance_enforcement.yaml"
     config_path.write_text(MINIMAL_CONFIG, encoding="utf-8")
-
-    monkeypatch.setattr(governance_enforcer, "AUDIT_LOG", audit_path)
 
     enforcer = governance_enforcer.GovernanceEnforcer()
     enforcer.load_config(config_path)
@@ -269,3 +270,74 @@ def test_migration_same_timestamp_empty_context_hash_no_collision(tmp_path):
     assert len(final) == 2, f"Expected 2 entries after migration, got {len(final)}"
     check_names = {e["check_name"] for e in final}
     assert check_names == {"codex", "gemini"}
+
+
+# ---------------------------------------------------------------------------
+# Test: legacy fallback in get_recent()
+# ---------------------------------------------------------------------------
+
+
+def test_get_recent_legacy_fallback_only(tmp_path, monkeypatch):
+    """get_recent() returns entries from legacy events/ when state/ does not exist.
+
+    This is the core upgrade-regression fix: an upgraded workspace where only
+    events/governance_audit.ndjson exists must NOT return [] from get_recent().
+    """
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    import importlib
+    importlib.reload(governance_audit)
+    governance_audit._legacy_warned = False
+
+    legacy_entries = [
+        {"timestamp": f"2026-01-01T00:0{i}:00Z", "event_type": "gate_result", "check_name": f"check_{i}"}
+        for i in range(5)
+    ]
+    events_path = tmp_path / "events" / "governance_audit.ndjson"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(events_path, "w", encoding="utf-8") as fh:
+        for e in legacy_entries:
+            fh.write(json.dumps(e) + "\n")
+
+    assert not (tmp_path / "state" / "governance_audit.ndjson").exists()
+
+    result = governance_audit.get_recent(limit=50)
+    assert len(result) == 5, f"Expected 5 legacy entries, got {len(result)}"
+
+
+def test_get_recent_merges_state_and_legacy(tmp_path, monkeypatch):
+    """get_recent() merges entries from both state/ and events/, sorted newest-first.
+
+    Represents a partial-migration workspace: some entries already in state/ (new writer),
+    older entries still in legacy events/. Both must appear in the merged result.
+    """
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+    import importlib
+    importlib.reload(governance_audit)
+    governance_audit._legacy_warned = False
+
+    legacy_entries = [
+        {"timestamp": f"2026-01-01T00:0{i}:00Z", "event_type": "gate_result", "check_name": f"legacy_{i}"}
+        for i in range(5)
+    ]
+    state_entries = [
+        {"timestamp": f"2026-01-02T00:0{i}:00Z", "event_type": "enforcement_check", "check_name": f"state_{i}"}
+        for i in range(3)
+    ]
+
+    events_path = tmp_path / "events" / "governance_audit.ndjson"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(events_path, "w", encoding="utf-8") as fh:
+        for e in legacy_entries:
+            fh.write(json.dumps(e) + "\n")
+
+    state_path = tmp_path / "state" / "governance_audit.ndjson"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as fh:
+        for e in state_entries:
+            fh.write(json.dumps(e) + "\n")
+
+    result = governance_audit.get_recent(limit=50)
+    assert len(result) == 8, f"Expected 8 merged entries (3 state + 5 legacy), got {len(result)}"
+
+    timestamps = [r["timestamp"] for r in result]
+    assert timestamps == sorted(timestamps, reverse=True), "Entries must be sorted newest-first"

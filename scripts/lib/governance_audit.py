@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,10 +37,17 @@ from typing import Any, Dict, List, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+_legacy_warned: bool = False
+
 
 def _audit_path() -> Path:
     data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
     return data_dir / "state" / "governance_audit.ndjson"
+
+
+def _legacy_audit_path() -> Path:
+    data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
+    return data_dir / "events" / "governance_audit.ndjson"
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +62,26 @@ def _now_utc() -> str:
 def _context_hash(context: dict) -> str:
     serialized = json.dumps(context, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(serialized.encode()).hexdigest()[:16]
+
+
+def _read_path(path: Path) -> List[Dict[str, Any]]:
+    """Read all valid NDJSON entries from path. Returns [] if missing or unreadable."""
+    if not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    entries: List[Dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
 
 
 def _append(record: Dict[str, Any]) -> None:
@@ -179,47 +207,34 @@ def log_dispatch_decision(
 
 
 def get_recent(limit: int = 50) -> List[Dict[str, Any]]:
-    """Return the last `limit` entries from the governance audit trail (newest first)."""
-    path = _audit_path()
-    if not path.exists():
-        return []
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+    """Return the last `limit` entries from the governance audit trail (newest first).
 
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    entries: List[Dict[str, Any]] = []
-    for line in reversed(lines):
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-        if len(entries) >= limit:
-            break
-    return entries
+    Also reads legacy events/governance_audit.ndjson if present, merging both
+    sources during the upgrade window. Logs a one-time warning on first legacy read.
+    """
+    global _legacy_warned
+
+    state_entries = _read_path(_audit_path())
+    legacy_entries = _read_path(_legacy_audit_path())
+
+    if legacy_entries and not _legacy_warned:
+        logging.getLogger(__name__).warning(
+            "governance_audit: reading legacy events/governance_audit.ndjson — "
+            "run scripts/migrate_governance_audit_path.py to consolidate"
+        )
+        _legacy_warned = True
+
+    all_entries = state_entries + legacy_entries
+    all_entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return all_entries[:limit]
 
 
 def get_overrides(days: int = 7) -> List[Dict[str, Any]]:
     """Return entries with a non-null override field from the last `days` days."""
-    path = _audit_path()
-    if not path.exists():
-        return []
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
     overrides: List[Dict[str, Any]] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for record in _read_path(_audit_path()) + _read_path(_legacy_audit_path()):
         if record.get("override") is not None and record.get("timestamp", "") >= cutoff:
             overrides.append(record)
+    overrides.sort(key=lambda e: e.get("timestamp", ""))
     return overrides
