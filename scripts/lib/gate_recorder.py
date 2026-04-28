@@ -219,3 +219,29 @@ def record_failure_simple(
         requests_dir=requests_dir,
         results_dir=results_dir,
     )
+
+
+def emit_gate_register_event(
+    *,
+    gate: str,
+    dispatch_id: str,
+    pr_number: Optional[int],
+    blocking_findings: list,
+) -> None:
+    """Emit gate_passed or gate_failed to dispatch_register.ndjson. Best-effort."""
+    try:
+        import sys
+        from pathlib import Path as _Path
+        _lib = _Path(__file__).resolve().parent
+        if str(_lib) not in sys.path:
+            sys.path.insert(0, str(_lib))
+        from dispatch_register import append_event
+        status = "passed" if not blocking_findings else "failed"
+        append_event(
+            f"gate_{status}",
+            dispatch_id=dispatch_id,
+            pr_number=pr_number,
+            gate=gate,
+        )
+    except Exception:
+        pass

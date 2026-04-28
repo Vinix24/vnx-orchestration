@@ -238,7 +238,11 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _build_feature_state() -> Dict[str, Any]:
-    """Parse FEATURE_PLAN.md and return structured feature state for T0 context."""
+    """Return structured feature state for T0 context.
+
+    Reads from dispatch_register.ndjson first; falls back to FEATURE_PLAN.md
+    when the register is absent or empty.
+    """
     _empty: Dict[str, Any] = {
         "feature_name": None,
         "current_pr": None,
@@ -250,15 +254,86 @@ def _build_feature_state() -> Dict[str, Any]:
         "completed_prs": 0,
         "status": "planned",
     }
+
+    # Attempt register-based aggregation first
+    register_features: Dict[str, Any] = {}
+    try:
+        from dispatch_register import read_events
+        events = read_events()
+        if events:
+            register_features = _aggregate_register_events(events)
+    except Exception:
+        pass
+
+    # FEATURE_PLAN.md fallback (kept as canonical backward-compat source)
     feature_plan = _PROJECT_ROOT / "FEATURE_PLAN.md"
     if not feature_plan.exists():
-        return _empty
+        result = dict(_empty)
+        if register_features:
+            result["register_features"] = register_features
+        return result
     try:
         from feature_state_machine import parse_feature_plan
         state = parse_feature_plan(feature_plan)
-        return state.as_dict()
+        result = state.as_dict()
     except Exception:
-        return _empty
+        result = dict(_empty)
+
+    if register_features:
+        result["register_features"] = register_features
+    return result
+
+
+def _aggregate_register_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate dispatch_register events by pr_number / feature_id.
+
+    Returns: {<id>: {status, prs, last_event, last_event_ts}}
+    """
+    _COMPLETION_EVENTS = {"dispatch_completed", "pr_merged"}
+    _ACTIVE_EVENTS = {"dispatch_promoted", "dispatch_started"}
+    _FAILED_EVENTS = {"dispatch_failed"}
+
+    aggregated: Dict[str, Dict[str, Any]] = {}
+
+    for ev in events:
+        pr_number = ev.get("pr_number")
+        feature_id = ev.get("feature_id", "")
+        dispatch_id = ev.get("dispatch_id", "")
+
+        key = (
+            f"pr-{pr_number}" if pr_number is not None
+            else feature_id if feature_id
+            else dispatch_id if dispatch_id
+            else None
+        )
+        if not key:
+            continue
+
+        entry = aggregated.setdefault(key, {
+            "status": "pending",
+            "prs": [],
+            "last_event": "",
+            "last_event_ts": "",
+        })
+
+        event_name = ev.get("event", "")
+        ts = ev.get("timestamp", "")
+
+        if ts > entry["last_event_ts"]:
+            entry["last_event"] = event_name
+            entry["last_event_ts"] = ts
+
+        if pr_number is not None and pr_number not in entry["prs"]:
+            entry["prs"].append(pr_number)
+
+        if event_name in _COMPLETION_EVENTS:
+            entry["status"] = "completed"
+        elif event_name in _ACTIVE_EVENTS and entry["status"] != "completed":
+            entry["status"] = "active"
+        elif event_name in _FAILED_EVENTS and entry["status"] not in ("completed",):
+            entry["status"] = "failed"
+
+    return aggregated
 
 
 # ---------------------------------------------------------------------------

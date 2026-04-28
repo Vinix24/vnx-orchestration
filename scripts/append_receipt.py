@@ -1013,7 +1013,42 @@ def append_receipt_payload(
 
         _maybe_trigger_state_rebuild(receipt)
 
+        _emit_dispatch_register(receipt)
+
     return result
+
+
+def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
+    """Emit lifecycle event to dispatch_register.ndjson. Best-effort, never raises."""
+    try:
+        event_type = str(receipt.get("event_type") or receipt.get("event") or "")
+        if event_type in ("task_complete", "task_completed"):
+            register_event = "dispatch_completed"
+        elif event_type == "task_failed":
+            register_event = "dispatch_failed"
+        elif event_type == "review_gate_request":
+            register_event = "gate_requested"
+        else:
+            return
+
+        dispatch_id = str(receipt.get("dispatch_id") or "")
+        terminal = str(receipt.get("terminal") or "")
+        pr_number = receipt.get("pr_number")
+        feature_id = str(receipt.get("feature_id") or "")
+
+        _lib = SCRIPT_DIR / "lib"
+        if str(_lib) not in sys.path:
+            sys.path.insert(0, str(_lib))
+        from dispatch_register import append_event
+        append_event(
+            register_event,
+            dispatch_id=dispatch_id,
+            terminal=terminal,
+            pr_number=pr_number,
+            feature_id=feature_id,
+        )
+    except Exception:
+        pass
 
 
 def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
