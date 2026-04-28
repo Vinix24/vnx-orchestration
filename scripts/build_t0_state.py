@@ -909,6 +909,13 @@ def main() -> int:
             _write_atomic(brief_path, _state_to_brief(state))
         except Exception:
             pass  # best-effort — must not block SessionStart
+        # Write human-readable cold-start orientation doc (Sprint 4b)
+        try:
+            sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+            from build_project_status import write_project_status
+            write_project_status(_STATE_DIR)
+        except Exception:
+            pass  # best-effort
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
     except Exception:
