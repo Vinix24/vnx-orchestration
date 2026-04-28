@@ -12,12 +12,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+from project_root import resolve_data_dir
 
 
 def _parse_ndjson(path: Path) -> list[dict]:
@@ -32,10 +35,14 @@ def _parse_ndjson(path: Path) -> list[dict]:
 
 
 def _dedup_key(entry: dict) -> str:
-    ts = entry.get("timestamp", "")
-    ch = entry.get("context_hash") or ""
-    et = entry.get("event_type", "")
-    return f"{ts}|{ch}|{et}"
+    """Content hash over the full entry for safe dedup.
+
+    Previous implementation used timestamp|context_hash|event_type, which
+    collided for entries with empty context_hash (e.g. gate_result, dispatch_decision)
+    that shared a timestamp + event_type — silently dropping legitimate rows.
+    """
+    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def migrate(data_dir: Path, dry_run: bool = False) -> dict:
@@ -102,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         data_dir = Path(args.data_dir)
     else:
-        data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
+        data_dir = resolve_data_dir(__file__)
 
     result = migrate(data_dir, dry_run=args.dry_run)
     print(json.dumps(result, indent=2))

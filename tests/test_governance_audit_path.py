@@ -242,3 +242,30 @@ def test_migration_no_source_is_noop(tmp_path):
     assert result["src_exists"] is False
     assert result["src_removed"] is False
     assert not (tmp_path / "state" / "governance_audit.ndjson").exists()
+
+
+def test_migration_same_timestamp_empty_context_hash_no_collision(tmp_path):
+    """Distinct entries with same timestamp+event_type and empty context_hash must both survive.
+
+    Regression: old _dedup_key used timestamp|context_hash|event_type, which reduced
+    both entries to the same key (e.g. '2026-01-01T00:00:00Z||gate_result') and silently
+    dropped the second row. Content-hash dedup must keep both because their payloads differ.
+    """
+    entries = [
+        {"timestamp": "2026-01-01T00:00:00Z", "context_hash": None, "event_type": "gate_result", "check_name": "codex"},
+        {"timestamp": "2026-01-01T00:00:00Z", "context_hash": None, "event_type": "gate_result", "check_name": "gemini"},
+    ]
+    _make_events_file(tmp_path, entries)
+
+    result = migrate(tmp_path)
+
+    assert result["appended"] == 2, (
+        f"Both distinct entries must survive migration (got appended={result['appended']}); "
+        "collision in dedup_key would drop one row and set appended=1"
+    )
+    assert result["skipped_dupes"] == 0
+
+    final = _read_entries(tmp_path / "state" / "governance_audit.ndjson")
+    assert len(final) == 2, f"Expected 2 entries after migration, got {len(final)}"
+    check_names = {e["check_name"] for e in final}
+    assert check_names == {"codex", "gemini"}
