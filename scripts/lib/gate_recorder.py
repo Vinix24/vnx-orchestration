@@ -191,6 +191,21 @@ def record_failure(
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
         rf.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
+
+    # Emit codex_gate failure to dispatch register (best-effort)
+    if gate == "codex_gate":
+        try:
+            from gate_register_emit import emit_codex_gate_to_register
+            emit_codex_gate_to_register(
+                "gate_failed",
+                dispatch_id=request_payload.get("dispatch_id", ""),
+                pr_number=pr_number,
+                pr_id=pr_id,
+                gate=gate,
+            )
+        except Exception:
+            pass
+
     return failure_payload
 
 
