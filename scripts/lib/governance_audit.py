@@ -2,7 +2,7 @@
 """VNX Governance Audit Trail — F51-PR3.
 
 Append-only NDJSON log of all governance enforcement decisions.
-Written to: $VNX_DATA_DIR/events/governance_audit.ndjson
+Written to: $VNX_DATA_DIR/state/governance_audit.ndjson
 
 Schema per line:
     {
@@ -39,7 +39,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _audit_path() -> Path:
     data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
-    return data_dir / "events" / "governance_audit.ndjson"
+    return data_dir / "state" / "governance_audit.ndjson"
 
 
 # ---------------------------------------------------------------------------

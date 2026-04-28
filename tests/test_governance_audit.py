@@ -30,7 +30,7 @@ def _set_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _read_entries(tmp_path: Path) -> list[dict]:
-    audit_file = tmp_path / "events" / "governance_audit.ndjson"
+    audit_file = tmp_path / "state" / "governance_audit.ndjson"
     if not audit_file.exists():
         return []
     lines = [ln.strip() for ln in audit_file.read_text().splitlines() if ln.strip()]
