@@ -197,3 +197,97 @@ def test_state_mutation_excluded_from_recency_summary(tmp_path: Path) -> None:
     assert "state_mutation" not in returned_types, f"state_mutation leaked into recency summary: {result}"
     assert "task_complete" in returned_types
     assert "review_gate_request" in returned_types
+
+
+def test_idempotency_key_differs_for_different_files() -> None:
+    """Same-second state_mutations for different files must produce different idempotency keys."""
+    ts = "2026-04-28T10:00:00Z"
+    receipt_a = {
+        "timestamp": ts,
+        "event_type": "state_mutation",
+        "terminal": "T0",
+        "source": "vnx_state",
+        "file": "t0_state.json",
+        "trigger": "auto_rebuild",
+    }
+    receipt_b = {
+        "timestamp": ts,
+        "event_type": "state_mutation",
+        "terminal": "T0",
+        "source": "vnx_state",
+        "file": "t0_brief.json",
+        "trigger": "auto_rebuild",
+    }
+
+    key_a = ar._compute_idempotency_key(receipt_a, "state_mutation")
+    key_b = ar._compute_idempotency_key(receipt_b, "state_mutation")
+
+    assert key_a != key_b, f"Expected different idempotency keys for different files, got same: {key_a}"
+
+
+def test_non_state_mutation_idempotency_key_unchanged() -> None:
+    """Adding file/trigger/section fields must not change idempotency keys for other event types."""
+    receipt = {
+        "timestamp": "2026-04-28T10:00:00Z",
+        "event_type": "task_complete",
+        "terminal": "T1",
+        "source": "pytest",
+        "dispatch_id": "DISP-001",
+    }
+
+    key = ar._compute_idempotency_key(receipt, "task_complete")
+    assert isinstance(key, str) and len(key) == 64
+
+    receipt_with_extra = dict(receipt)
+    del receipt_with_extra["dispatch_id"]
+    receipt_with_extra["dispatch_id"] = "DISP-001"
+    key2 = ar._compute_idempotency_key(receipt_with_extra, "task_complete")
+    assert key == key2, "Idempotency key changed for non-state-mutation receipt"
+
+
+def test_emit_state_mutation_timestamp_has_microseconds() -> None:
+    """emit_state_mutation must produce microsecond-precision timestamps."""
+    captured: list[dict] = []
+
+    def _fake_append(receipt, *, skip_enrichment=False, **kwargs):
+        captured.append(receipt)
+        return ar.AppendResult(status="appended", receipts_file=Path("/dev/null"), idempotency_key="k")
+
+    with mock.patch("append_receipt.append_receipt_payload", _fake_append):
+        sm.emit_state_mutation("t0_state.json", trigger="auto_rebuild")
+
+    assert len(captured) == 1
+    ts = captured[0]["timestamp"]
+    assert "." in ts, f"Expected microsecond-precision timestamp (with '.'), got: {ts}"
+
+
+def test_same_timestamp_different_files_both_persisted(tmp_path: Path) -> None:
+    """Two state_mutations with same mocked timestamp but different files must both be persisted."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_file = state_dir / "t0_receipts.ndjson"
+
+    ts = "2026-04-28T10:00:00Z"
+
+    env_patch = {
+        "PROJECT_ROOT": str(tmp_path),
+        "VNX_DATA_DIR": str(tmp_path / "data"),
+        "VNX_STATE_DIR": str(state_dir),
+        "VNX_HOME": str(SCRIPTS_DIR.parent),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+    }
+
+    with mock.patch.dict(os.environ, env_patch), \
+         mock.patch("append_receipt.resolve_state_dir", return_value=state_dir), \
+         mock.patch("append_receipt._maybe_trigger_state_rebuild"), \
+         mock.patch("state_mutation._utc_now_iso", return_value=ts):
+        r1 = sm.emit_state_mutation("t0_state.json", trigger="auto_rebuild")
+        r2 = sm.emit_state_mutation("t0_brief.json", trigger="auto_rebuild")
+
+    assert r1 is not None and r1.status == "appended", f"First emit failed: {r1}"
+    assert r2 is not None and r2.status == "appended", f"Second emit was dropped as duplicate: {r2}"
+
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 2, f"Expected both receipts persisted, got {len(lines)}: {lines}"
+    files = {json.loads(l)["file"] for l in lines}
+    assert files == {"t0_state.json", "t0_brief.json"}

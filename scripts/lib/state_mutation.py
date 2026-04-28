@@ -12,7 +12,7 @@ _SCRIPTS_DIR = _LIB_DIR.parent
 
 
 def _utc_now_iso() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def emit_state_mutation(

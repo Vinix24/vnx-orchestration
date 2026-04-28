@@ -27,6 +27,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(LIB_DIR))
 
 import append_receipt as ar
+import build_t0_state as bts
 
 
 def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP-001") -> dict:
@@ -148,3 +149,30 @@ def test_rebuild_failure_does_not_break_append(tmp_path: Path) -> None:
         result = ar.append_receipt_payload(receipt, receipts_file=receipts_file)
 
     assert result.status == "appended"
+
+
+def test_task_complete_survives_100_state_mutations(tmp_path: Path) -> None:
+    """filter-before-trim: task_complete must survive when followed by 100 state_mutations."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_path = state_dir / "t0_receipts.ndjson"
+
+    lines = []
+    lines.append(json.dumps({
+        "event_type": "task_complete",
+        "terminal": "T1",
+        "timestamp": "2026-04-28T09:00:00Z",
+        "dispatch_id": "D1",
+    }))
+    for i in range(100):
+        lines.append(json.dumps({
+            "event_type": "state_mutation",
+            "terminal": "T0",
+            "timestamp": f"2026-04-28T10:{i // 60:02d}:{i % 60:02d}Z",
+        }))
+    receipts_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    result = bts._build_recent_receipts(state_dir, n=3)
+    types = [r.get("event_type") for r in result]
+    assert "task_complete" in types, f"task_complete disappeared after 100 state_mutations: {result}"
+    assert "state_mutation" not in types, f"state_mutation leaked into recency summary: {result}"

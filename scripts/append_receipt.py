@@ -76,6 +76,9 @@ IDEMPOTENCY_FIELDS = (
     "event",
     "report_path",
     "source",
+    "file",
+    "trigger",
+    "section",
 )
 
 

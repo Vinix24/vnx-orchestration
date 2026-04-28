@@ -438,27 +438,17 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
         return []
 
     try:
-        # Tail-read without loading entire file
-        with open(receipts_path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            end = f.tell()
-            data = b""
-            block = 8192
-            while end > 0 and data.count(b"\n") < 100:
-                start = max(0, end - block)
-                f.seek(start)
-                data = f.read(end - start) + data
-                end = start
-                if start == 0:
-                    break
+        raw_lines = receipts_path.read_bytes().splitlines()
 
         events: List[Dict[str, Any]] = []
-        for line in data.splitlines()[-100:]:
-            line = line.strip()
+        for raw_line in raw_lines:
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 e = json.loads(line.decode("utf-8"))
+                if e.get("event_type") == "state_mutation":
+                    continue
                 events.append({
                     "terminal": e.get("terminal"),
                     "status": e.get("status"),
@@ -470,8 +460,7 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-        events = [e for e in events if e.get("event_type") != "state_mutation"]
-        return events[-n:]
+        return events[-100:][-n:]
     except Exception:
         return []
 
