@@ -43,6 +43,12 @@ _DISPATCH_DIR = Path(_PATHS["VNX_DISPATCH_DIR"])
 _DATA_DIR = Path(_PATHS["VNX_DATA_DIR"])
 _PROJECT_ROOT = Path(_PATHS["PROJECT_ROOT"])
 
+# Register events reader (raw events list exposure for now; aggregation is PR-4c)
+try:
+    from dispatch_register import read_events as _read_register_events
+except ImportError:
+    _read_register_events = None  # Module is optional during initial deploy
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -367,12 +373,13 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
 # Dispatch insights (from DispatchParameterTracker)
 # ---------------------------------------------------------------------------
 
-def _build_dispatch_insights() -> Dict[str, Any]:
+def _build_dispatch_insights(state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Return top 5 dispatch insights when >= 20 experiments exist."""
     _empty: Dict[str, Any] = {"available": False, "insights": [], "experiment_count": 0}
+    actual_state_dir = state_dir if state_dir else _STATE_DIR
     try:
         from dispatch_parameter_tracker import DispatchParameterTracker
-        tracker = DispatchParameterTracker(state_dir=_STATE_DIR)
+        tracker = DispatchParameterTracker(state_dir=actual_state_dir)
         stats = tracker.stats()
         if not stats.get("insights_available"):
             return {**_empty, "experiment_count": stats.get("completed", 0)}
@@ -527,20 +534,11 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 
 def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> list[dict]:
-    """Return last N dispatch_register events as raw list — minimal exposure.
-
-    NOT a feature_state aggregation. Full register-canonical pr_progress
-    aggregation (group-by-dispatch, recency status, PR/feature rollup) is
-    deferred to PR-4c.
-
-    Honors state_dir override (test/headless contexts) via
-    dispatch_register.read_events shared-lock contract.
-    """
+    """Last N register events. Aggregation is PR-4c."""
+    if _read_register_events is None:
+        return []
     try:
-        if str(_LIB_DIR) not in sys.path:
-            sys.path.insert(0, str(_LIB_DIR))
-        from dispatch_register import read_events
-        events = read_events(state_dir=state_dir) if state_dir else read_events()
+        events = _read_register_events(state_dir=state_dir) if state_dir else _read_register_events()
         return events[-limit:] if events else []
     except Exception:
         return []
@@ -567,7 +565,7 @@ def build_t0_state(
     feature_state = _build_feature_state()
     open_items = _build_open_items(state_dir)
     quality_digest = _build_quality_digest(state_dir)
-    dispatch_insights = _build_dispatch_insights()
+    dispatch_insights = _build_dispatch_insights(state_dir=state_dir)
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
     register_events = _build_register_events(state_dir=state_dir)

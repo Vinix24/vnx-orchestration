@@ -1,9 +1,13 @@
 """Dispatch lifecycle register — append-only NDJSON log of dispatch state changes.
 
 File: $VNX_STATE_DIR/dispatch_register.ndjson
-Currently consumed by build_t0_state.py (raw events list exposure).
-Hook callers (append_receipt, gate_recorder, dispatch_lifecycle) added in
-parallel PRs (PR-4b3, PR-4b4). Full register-canonical aggregation in PR-4c.
+
+Current consumers:
+- build_t0_state.py: exposes raw events list as dispatch_register_events (PR-4b2)
+
+Future consumers (separate PRs):
+- append_receipt.py + gate_recorder.py + dispatch_lifecycle.sh: hook callers (PR-4b3, PR-4b4)
+- build_t0_state.py: full register-canonical pr_progress aggregation (PR-4c)
 """
 from __future__ import annotations
 import datetime as _dt, json, os, fcntl, sys
