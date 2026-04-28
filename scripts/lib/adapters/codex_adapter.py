@@ -15,13 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import select
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -166,6 +167,9 @@ class CodexAdapter(ProviderAdapter):
             )
 
         events, findings = self._parse_ndjson(stdout)
+        token_usage = self._parse_token_usage_from_output(stdout)
+        if token_usage:
+            self._write_token_cache(token_usage)
         return AdapterResult(
             status="done",
             output=findings,
@@ -190,6 +194,114 @@ class CodexAdapter(ProviderAdapter):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Token usage
+    # ------------------------------------------------------------------
+
+    _TOKEN_TEXT_RE = re.compile(
+        r"tokens?:\s*(\d+)\s+input\s*/\s*(\d+)\s+output",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _parse_token_usage_from_output(raw: str) -> Optional[dict]:
+        """Parse token counts from Codex CLI output.
+
+        Handles three formats emitted by Codex CLI (NDJSON mode):
+        1. Explicit token_usage event:  {"type":"token_usage","input_tokens":N,"output_tokens":M}
+        2. OpenAI-compat usage block:   {"usage":{"prompt_tokens":N,"completion_tokens":M}}
+           (also input_tokens/output_tokens variants)
+        3. Human-readable text line:    "Tokens: 1200 input / 350 output [/ 1550 total]"
+
+        Returns None if no parseable token info is found.
+        """
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Try JSON event
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    continue
+                # Format 1: explicit token_usage event
+                if event.get("type") == "token_usage":
+                    input_t = event.get("input_tokens", 0)
+                    output_t = event.get("output_tokens", 0)
+                    if isinstance(input_t, int) and isinstance(output_t, int):
+                        return {
+                            "input_tokens": input_t,
+                            "output_tokens": output_t,
+                            "cache_creation_tokens": 0,
+                            "cache_read_tokens": 0,
+                        }
+                # Format 2: OpenAI-compatible usage block
+                usage = event.get("usage")
+                if isinstance(usage, dict):
+                    input_t = (
+                        usage.get("input_tokens")
+                        or usage.get("prompt_tokens")
+                        or 0
+                    )
+                    output_t = (
+                        usage.get("output_tokens")
+                        or usage.get("completion_tokens")
+                        or 0
+                    )
+                    if isinstance(input_t, int) and isinstance(output_t, int) and (input_t or output_t):
+                        return {
+                            "input_tokens": input_t,
+                            "output_tokens": output_t,
+                            "cache_creation_tokens": 0,
+                            "cache_read_tokens": 0,
+                        }
+            except json.JSONDecodeError:
+                pass
+            # Format 3: text line "Tokens: N input / M output"
+            m = CodexAdapter._TOKEN_TEXT_RE.search(line)
+            if m:
+                return {
+                    "input_tokens": int(m.group(1)),
+                    "output_tokens": int(m.group(2)),
+                    "cache_creation_tokens": 0,
+                    "cache_read_tokens": 0,
+                }
+        return None
+
+    def _write_token_cache(self, usage: dict, state_dir: Optional[Path] = None) -> None:
+        """Persist token usage to per-terminal state file (best-effort)."""
+        try:
+            sd = state_dir or Path(os.environ.get("VNX_STATE_DIR", ""))
+            if not sd or str(sd) == ".":
+                return
+            cache_dir = sd / "token_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / f"{self._terminal_id}_usage.json").write_text(
+                json.dumps(usage), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_token_usage(terminal_id: str, state_dir: Optional[Path] = None) -> Optional[dict]:
+        """Read last captured token usage for a terminal from the state cache.
+
+        Returns None if no cache file exists or the file cannot be parsed.
+        """
+        try:
+            sd = state_dir or Path(os.environ.get("VNX_STATE_DIR", ""))
+            if not sd or str(sd) == ".":
+                return None
+            cache_file = Path(sd) / "token_cache" / f"{terminal_id}_usage.json"
+            if not cache_file.is_file():
+                return None
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "input_tokens" in data and "output_tokens" in data:
+                return data
+        except Exception:
+            pass
+        return None
 
     def _build_prompt(self, instruction: str, changed_files: list[str]) -> str:
         """Combine instruction with inline file contents (no PR references)."""

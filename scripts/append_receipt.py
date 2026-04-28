@@ -567,9 +567,18 @@ def _build_session_metadata(receipt: Dict[str, Any], state_dir: Path) -> Dict[st
         "captured_at": _utc_now_iso(),
     }
 
-    # Inject token usage from session JSONL (best-effort)
+    # Inject token usage — provider-specific, best-effort
+    provider = model_provider["provider"]
     try:
-        token_usage = _extract_session_token_usage(session_id, terminal)
+        if provider == "codex_cli":
+            from adapters.codex_adapter import CodexAdapter  # noqa: PLC0415
+            token_usage = CodexAdapter.get_token_usage(terminal, state_dir)
+        elif provider in ("gemini_cli", "gemini"):
+            from adapters.gemini_adapter import GeminiAdapter  # noqa: PLC0415
+            token_usage = GeminiAdapter.get_token_usage(terminal, state_dir)
+        else:
+            # Claude (and other) terminals: scan session JSONL (existing path)
+            token_usage = _extract_session_token_usage(session_id, terminal)
         if token_usage:
             metadata["token_usage"] = token_usage
     except Exception:

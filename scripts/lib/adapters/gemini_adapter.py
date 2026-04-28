@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -128,6 +128,9 @@ class GeminiAdapter(ProviderAdapter):
             )
 
         parsed = self._parse_response(stdout)
+        token_usage = self._parse_token_usage_from_response(stdout)
+        if token_usage:
+            self._write_token_cache(token_usage)
         return AdapterResult(
             status="done",
             output=parsed,
@@ -149,6 +152,102 @@ class GeminiAdapter(ProviderAdapter):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Token usage
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_usage_metadata(data: dict) -> Optional[dict]:
+        """Extract usageMetadata from a parsed Gemini response dict.
+
+        Handles both top-level and nested usageMetadata. Field names follow the
+        Gemini REST API: promptTokenCount (input) and candidatesTokenCount (output).
+        """
+        usage_meta = data.get("usageMetadata")
+        if not isinstance(usage_meta, dict):
+            return None
+        prompt_t = usage_meta.get("promptTokenCount", 0) or 0
+        candidates_t = usage_meta.get("candidatesTokenCount", 0) or 0
+        if not isinstance(prompt_t, int) or not isinstance(candidates_t, int):
+            return None
+        if prompt_t == 0 and candidates_t == 0:
+            return None
+        return {
+            "input_tokens": prompt_t,
+            "output_tokens": candidates_t,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+        }
+
+    @staticmethod
+    def _parse_token_usage_from_response(raw: str) -> Optional[dict]:
+        """Parse token counts from Gemini CLI stdout.
+
+        Gemini CLI (--output-format json) returns a JSON object with a top-level
+        `usageMetadata` key, or an NDJSON stream where one of the lines contains it.
+        Returns None if no parseable metadata is found.
+        """
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        # Try top-level JSON object
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict):
+                result = GeminiAdapter._extract_usage_metadata(data)
+                if result:
+                    return result
+        except json.JSONDecodeError:
+            pass
+        # Try NDJSON stream (multiple JSON lines)
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if isinstance(data, dict):
+                    result = GeminiAdapter._extract_usage_metadata(data)
+                    if result:
+                        return result
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _write_token_cache(self, usage: dict, state_dir: Optional[Path] = None) -> None:
+        """Persist token usage to per-terminal state file (best-effort)."""
+        try:
+            sd = state_dir or Path(os.environ.get("VNX_STATE_DIR", ""))
+            if not sd or str(sd) == ".":
+                return
+            cache_dir = sd / "token_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            (cache_dir / f"{self._terminal_id}_usage.json").write_text(
+                json.dumps(usage), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_token_usage(terminal_id: str, state_dir: Optional[Path] = None) -> Optional[dict]:
+        """Read last captured token usage for a terminal from the state cache.
+
+        Returns None if no cache file exists or the file cannot be parsed.
+        """
+        try:
+            sd = state_dir or Path(os.environ.get("VNX_STATE_DIR", ""))
+            if not sd or str(sd) == ".":
+                return None
+            cache_file = Path(sd) / "token_cache" / f"{terminal_id}_usage.json"
+            if not cache_file.is_file():
+                return None
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "input_tokens" in data and "output_tokens" in data:
+                return data
+        except Exception:
+            pass
+        return None
 
     def _build_prompt(self, instruction: str, changed_files: list[str]) -> str:
         """Combine instruction with inline file contents."""
