@@ -127,7 +127,7 @@ class TestGovernanceAuditHasDispatchId:
             dispatch_id="f58-pr2-test-dispatch",
         )
 
-        lines = (tmp_path / "events" / "governance_audit.ndjson").read_text().splitlines()
+        lines = (tmp_path / "state" / "governance_audit.ndjson").read_text().splitlines()
         assert len(lines) == 1
         record = json.loads(lines[0])
         assert record["dispatch_id"] == "f58-pr2-test-dispatch"
@@ -148,7 +148,7 @@ class TestGovernanceAuditHasDispatchId:
             message="From context",
         )
 
-        lines = (tmp_path / "events" / "governance_audit.ndjson").read_text().splitlines()
+        lines = (tmp_path / "state" / "governance_audit.ndjson").read_text().splitlines()
         record = json.loads(lines[0])
         assert record["dispatch_id"] == "context-dispatch-id"
 
@@ -167,7 +167,7 @@ class TestGovernanceAuditHasDispatchId:
             message="No dispatch",
         )
 
-        lines = (tmp_path / "events" / "governance_audit.ndjson").read_text().splitlines()
+        lines = (tmp_path / "state" / "governance_audit.ndjson").read_text().splitlines()
         record = json.loads(lines[0])
         assert record["dispatch_id"] is None
 
