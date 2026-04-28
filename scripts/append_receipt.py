@@ -1165,6 +1165,7 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
 
     TRIGGER_EVENTS = {
         "task_complete", "task_completed", "completion", "complete",
+        "task_failed", "task_timeout",
         "dispatch_promoted", "dispatch_started",
     }
     if event_type not in TRIGGER_EVENTS:

@@ -183,3 +183,23 @@ def test_task_complete_survives_100_state_mutations(tmp_path: Path) -> None:
     types = [r.get("event_type") for r in result]
     assert "task_complete" in types, f"task_complete disappeared after 100 state_mutations: {result}"
     assert "state_mutation" not in types, f"state_mutation leaked into recency summary: {result}"
+
+
+def test_task_failed_triggers_rebuild() -> None:
+    """task_failed receipts must trigger a state rebuild (codex audit v2 fix)."""
+    receipt = _minimal_receipt("task_failed")
+
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    mock_fn.assert_called_once_with(event_type="task_failed")
+
+
+def test_task_timeout_triggers_rebuild() -> None:
+    """task_timeout receipts must trigger a state rebuild (codex audit v2 fix)."""
+    receipt = _minimal_receipt("task_timeout")
+
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    mock_fn.assert_called_once_with(event_type="task_timeout")
