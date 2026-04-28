@@ -71,6 +71,8 @@ _warned_review_gate_no_dispatch_id = False
 IDEMPOTENCY_FIELDS = (
     "dispatch_id",
     "task_id",
+    "pr_number",  # gate requests differ per PR
+    "gate",       # gate requests differ per gate type (gemini/codex/claude_github)
     "terminal",
     "event_type",
     "event",
@@ -755,35 +757,6 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     except Exception as exc:
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
-    # Compute CQS and persist to dispatch_metadata (best-effort)
-    try:
-        db_path = state_dir / "quality_intelligence.db"
-        if db_path.exists():
-            dispatch_id = enriched.get("dispatch_id") or enriched.get("metadata", {}).get("dispatch_id")
-            if dispatch_id:
-                cqs_result = calculate_cqs(enriched, None, db_path, dispatch_id)
-                enriched["cqs"] = cqs_result
-                import sqlite3
-                conn = sqlite3.connect(str(db_path))
-                conn.execute(
-                    """UPDATE dispatch_metadata
-                       SET cqs=?, normalized_status=?, cqs_components=?,
-                           open_items_created=?, open_items_resolved=?
-                       WHERE dispatch_id=?""",
-                    (
-                        cqs_result["cqs"],
-                        cqs_result["normalized_status"],
-                        json.dumps(cqs_result["components"]),
-                        enriched.get("open_items_created", 0),
-                        enriched.get("open_items_resolved", 0),
-                        dispatch_id,
-                    ),
-                )
-                conn.commit()
-                conn.close()
-    except Exception as exc:
-        _emit("WARN", "cqs_calculation_failed", error=str(exc))
-
     return enriched
 
 
@@ -1008,6 +981,39 @@ def append_receipt_payload(
     if result is not None and result.status == "appended" and not skip_enrichment:
         created_count = _register_quality_open_items(receipt)
         receipt["open_items_created"] = created_count
+
+        # Compute CQS AFTER open items registration so open_items_created reflects actual count.
+        # Moved here from _enrich_completion_receipt to fix ordering bug: the enrich phase ran
+        # before _register_quality_open_items, so open_items_created was always 0 in CQS.
+        try:
+            _cqs_paths = ensure_env()
+            _cqs_state_dir = Path(_cqs_paths.get("VNX_STATE_DIR", ".")).resolve()
+            _cqs_db = _cqs_state_dir / "quality_intelligence.db"
+            if _cqs_db.exists():
+                _cqs_dispatch_id = receipt.get("dispatch_id") or receipt.get("metadata", {}).get("dispatch_id")
+                if _cqs_dispatch_id:
+                    import sqlite3 as _sqlite3_cqs
+                    cqs_result = calculate_cqs(receipt, None, _cqs_db, _cqs_dispatch_id)
+                    receipt["cqs"] = cqs_result
+                    _cqs_conn = _sqlite3_cqs.connect(str(_cqs_db))
+                    _cqs_conn.execute(
+                        """UPDATE dispatch_metadata
+                           SET cqs=?, normalized_status=?, cqs_components=?,
+                               open_items_created=?, open_items_resolved=?
+                           WHERE dispatch_id=?""",
+                        (
+                            cqs_result["cqs"],
+                            cqs_result["normalized_status"],
+                            json.dumps(cqs_result["components"]),
+                            receipt.get("open_items_created", 0),
+                            receipt.get("open_items_resolved", 0),
+                            _cqs_dispatch_id,
+                        ),
+                    )
+                    _cqs_conn.commit()
+                    _cqs_conn.close()
+        except Exception as _cqs_exc:
+            _emit("WARN", "cqs_calculation_failed", error=str(_cqs_exc))
 
         _update_confidence_from_receipt(receipt)
 
