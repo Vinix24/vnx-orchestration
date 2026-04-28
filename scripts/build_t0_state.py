@@ -43,6 +43,12 @@ _DISPATCH_DIR = Path(_PATHS["VNX_DISPATCH_DIR"])
 _DATA_DIR = Path(_PATHS["VNX_DATA_DIR"])
 _PROJECT_ROOT = Path(_PATHS["PROJECT_ROOT"])
 
+# Register events reader (raw events list exposure for now; aggregation is PR-4c)
+try:
+    from dispatch_register import read_events as _read_register_events
+except ImportError:
+    _read_register_events = None  # Module is optional during initial deploy
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -294,6 +300,7 @@ def _build_pr_progress(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
         in_progress = [p.pr_id for p in result.prs if p.state == "active"]
         pct = int(completed * 100 / total) if total > 0 else 0
 
+        blocked = [p.pr_id for p in result.prs if p.state == "blocked"]
         return {
             "feature_name": result.feature_name,
             "total": total,
@@ -301,6 +308,7 @@ def _build_pr_progress(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
             "in_progress": in_progress,
             "completion_pct": pct,
             "has_blocking_drift": result.has_blocking_drift,
+            "blocked": blocked,
         }
     except Exception:
         return _empty
@@ -365,12 +373,13 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
 # Dispatch insights (from DispatchParameterTracker)
 # ---------------------------------------------------------------------------
 
-def _build_dispatch_insights() -> Dict[str, Any]:
+def _build_dispatch_insights(state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Return top 5 dispatch insights when >= 20 experiments exist."""
     _empty: Dict[str, Any] = {"available": False, "insights": [], "experiment_count": 0}
+    actual_state_dir = state_dir if state_dir else _STATE_DIR
     try:
         from dispatch_parameter_tracker import DispatchParameterTracker
-        tracker = DispatchParameterTracker(state_dir=_STATE_DIR)
+        tracker = DispatchParameterTracker(state_dir=actual_state_dir)
         stats = tracker.stats()
         if not stats.get("insights_available"):
             return {**_empty, "experiment_count": stats.get("completed", 0)}
@@ -521,6 +530,21 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Register events (dispatch_register.ndjson reader)
+# ---------------------------------------------------------------------------
+
+def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> list[dict]:
+    """Last N register events. Aggregation is PR-4c."""
+    if _read_register_events is None:
+        return []
+    try:
+        events = _read_register_events(state_dir=state_dir) if state_dir else _read_register_events()
+        return events[-limit:] if events else []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -541,9 +565,10 @@ def build_t0_state(
     feature_state = _build_feature_state()
     open_items = _build_open_items(state_dir)
     quality_digest = _build_quality_digest(state_dir)
-    dispatch_insights = _build_dispatch_insights()
+    dispatch_insights = _build_dispatch_insights(state_dir=state_dir)
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
+    register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
@@ -562,6 +587,7 @@ def build_t0_state(
         "dispatch_insights": dispatch_insights,
         "active_work": active_work,
         "recent_receipts": recent_receipts,
+        "dispatch_register_events": register_events,
         "git_context": git_context,
         "system_health": system_health,
         "_build_seconds": round(elapsed, 2),
@@ -590,6 +616,14 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_raw = state.get("pr_progress") or {}
     oi = state.get("open_items") or {}
     sh = state.get("system_health") or {}
+    active_work = state.get("active_work") or []
+
+    blockers = (oi.get("top_blockers") or [])[:3]
+    next_gates = [
+        item["gate"]
+        for item in active_work
+        if item.get("gate")
+    ]
 
     return {
         "timestamp": state.get("generated_at", _now_iso()),
@@ -602,9 +636,10 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "conflicts": queues.get("conflict_count", 0),
         },
         "tracks": state.get("tracks", {}),
-        "active_work": state.get("active_work", []),
+        "active_work": active_work,
         "recent_receipts": state.get("recent_receipts", []),
-        "blockers": [],
+        "blockers": blockers,
+        "next_gates": next_gates,
         "open_items_summary": {
             "open_count": oi.get("open_count", 0),
             "blocker_count": oi.get("blocker_count", 0),
@@ -615,6 +650,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "completed": pr_raw.get("completed", 0),
             "in_progress": pr_raw.get("in_progress", []),
             "completion_percentage": pr_raw.get("completion_pct", 0),
+            "blocked": pr_raw.get("blocked", []),
         },
         "system_health": {
             "status": sh.get("status", "unknown"),
@@ -653,17 +689,26 @@ def main() -> int:
         description="Build unified T0 state JSON from all runtime sources."
     )
     parser.add_argument(
-        "--output",
-        default=str(_STATE_DIR / "t0_state.json"),
-        help="Output path (default: $VNX_STATE_DIR/t0_state.json)",
-    )
-    parser.add_argument(
         "--format",
         choices=["state", "brief"],
         default="state",
         help="Output format: 'state' (schema 2.0) or 'brief' (backward-compat 1.0)",
     )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Output path (default: t0_state.json for --format state, "
+            "t0_brief.json for --format brief)"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.output is None:
+        if args.format == "brief":
+            args.output = str(_STATE_DIR / "t0_brief.json")
+        else:
+            args.output = str(_STATE_DIR / "t0_state.json")
 
     output_path = Path(args.output)
     elapsed = 0.0
@@ -673,6 +718,14 @@ def main() -> int:
         state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
+        # Regenerate t0_brief.json alongside t0_state.json — orchestration helpers
+        # (receipt_processor_v4, intelligence_ack, t0_intelligence_aggregator) read
+        # t0_brief.json directly and must stay in sync with the new state.
+        try:
+            brief_path = _STATE_DIR / "t0_brief.json"
+            _write_atomic(brief_path, _state_to_brief(state))
+        except Exception:
+            pass  # best-effort — must not block SessionStart
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
     except Exception:
