@@ -83,6 +83,7 @@ class GateRequestHandlerMixin:
                 risk_class=risk_class,
                 changed_files=changed_files,
                 request=payload,
+                dispatch_id=dispatch_id,
             )
 
         return {
