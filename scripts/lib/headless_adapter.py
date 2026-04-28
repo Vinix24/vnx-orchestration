@@ -75,24 +75,28 @@ GATE_TIMEOUT_DEFAULTS: Dict[str, int] = {
     "gemini_review": 300,
     "codex_gate": 600,
     "claude_github_optional": 300,
+    "ci_gate": 60,
 }
 
 GATE_TIMEOUT_ENV: Dict[str, str] = {
     "gemini_review": "VNX_GEMINI_GATE_TIMEOUT",
     "codex_gate": "VNX_CODEX_GATE_TIMEOUT",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_GATE_TIMEOUT",
+    "ci_gate": "VNX_CI_GATE_TIMEOUT",
 }
 
 GATE_STALL_DEFAULTS: Dict[str, int] = {
     "gemini_review": 180,
     "codex_gate": 300,
     "claude_github_optional": 60,
+    "ci_gate": 30,
 }
 
 GATE_STALL_ENV: Dict[str, str] = {
     "gemini_review": "VNX_GEMINI_STALL_THRESHOLD",
     "codex_gate": "VNX_CODEX_STALL_THRESHOLD",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_STALL_THRESHOLD",
+    "ci_gate": "VNX_CI_GATE_STALL_THRESHOLD",
 }
 
 

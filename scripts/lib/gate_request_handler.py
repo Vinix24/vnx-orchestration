@@ -40,6 +40,9 @@ class GateRequestHandlerMixin:
     def _claude_github_configured(self) -> bool:
         return os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0") == "1" and shutil.which("gh") is not None
 
+    def _ci_gate_available(self) -> bool:
+        return os.environ.get("VNX_CI_GATE_REQUIRED", "0") == "1" and shutil.which("gh") is not None
+
     def request_reviews(
         self,
         *,
@@ -64,6 +67,8 @@ class GateRequestHandlerMixin:
                 payload = self._request_codex(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             elif gate == "claude_github_optional":
                 payload = self._request_claude_github(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+            elif gate == "ci_gate":
+                payload = self._request_ci_gate(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             else:
                 payload = {
                     "gate": gate,
@@ -393,4 +398,38 @@ class GateRequestHandlerMixin:
             else:
                 payload["status"] = "configured_dry_run"
         self._request_path("claude_github_optional", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+
+    def _request_ci_gate(
+        self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        from review_gate_manager import _utc_now
+
+        available = self._ci_gate_available()
+        requested_at = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": "ci_gate",
+            "status": "requested" if available else "not_executable",
+            "provider": "gh_cli",
+            "branch": branch,
+            "pr_number": pr_number,
+            "review_mode": mode,
+            "risk_class": risk_class,
+            "changed_files": changed_files,
+            "requested_at": requested_at,
+            "report_path": self._build_report_path(
+                gate="ci_gate",
+                requested_at=requested_at,
+                pr_number=pr_number,
+            ),
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        if not available:
+            self._mark_gate_unavailable(
+                payload, gate="ci_gate", binary_name="gh",
+                pr_number=pr_number, pr_id="",
+            )
+        self._request_path("ci_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload

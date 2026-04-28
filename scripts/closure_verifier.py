@@ -466,6 +466,57 @@ def _validate_review_evidence(
                         f"gemini review not passing — {reason}",
                     ))
 
+        elif gate == "ci_gate":
+            if result is None:
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    "no ci_gate result found",
+                ))
+            else:
+                status = result.get("status", "missing")
+                blocking_count = result.get("blocking_count", 0)
+                contract_hash = result.get("contract_hash", "")
+                report_path = result.get("report_path", "")
+                if status in ("pass", "fail"):
+                    if not contract_hash:
+                        checks.append(CheckResult(
+                            f"gate_{gate}",
+                            "FAIL",
+                            "ci_gate result is missing required contract_hash field",
+                        ))
+                    elif not report_path:
+                        checks.append(CheckResult(
+                            f"gate_{gate}",
+                            "FAIL",
+                            "ci_gate result is missing required report_path field",
+                        ))
+                    elif status == "pass" and blocking_count == 0:
+                        advisory_count = result.get("advisory_count", 0)
+                        checks.append(CheckResult(
+                            f"gate_{gate}",
+                            "PASS",
+                            f"ci_gate passed ({advisory_count} advisory, 0 blocking)",
+                        ))
+                    else:
+                        checks.append(CheckResult(
+                            f"gate_{gate}",
+                            "FAIL",
+                            f"ci_gate status: {status}, {blocking_count} blocking check(s)",
+                        ))
+                elif status == "running":
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        "ci_gate checks still running — incomplete evidence",
+                    ))
+                else:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        f"ci_gate status: {status}, {blocking_count} blocking check(s)",
+                    ))
+
         else:
             if result is None:
                 checks.append(CheckResult(
