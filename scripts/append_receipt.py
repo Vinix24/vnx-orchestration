@@ -71,6 +71,8 @@ _warned_review_gate_no_dispatch_id = False
 IDEMPOTENCY_FIELDS = (
     "dispatch_id",
     "task_id",
+    "pr_number",  # prevents review_gate_request fan-out collision per gate
+    "gate",       # multiple gates per dispatch_id must not collide
     "terminal",
     "event_type",
     "event",
@@ -756,6 +758,9 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
     # Compute CQS and persist to dispatch_metadata (best-effort)
+    # CQS computed at receipt time may be later overwritten by update_dispatch_cqs.py
+    # with a stripped payload that omits quality_advisory. Tracked as OI-1175.
+    # Out of scope for this PR (PR-4b3 only adds dispatch_register emit).
     try:
         db_path = state_dir / "quality_intelligence.db"
         if db_path.exists():
@@ -856,6 +861,95 @@ _SEVERITY_MAP = {
 }
 
 
+def _emit_dispatch_register(receipt: dict) -> bool:
+    """Emit dispatch_register event for codex_gate-relevant receipts.
+
+    SCOPE: codex_gate only. gemini_review and claude_github_optional are
+    deferred until proper findings parsers exist (separate PR).
+
+    Returns True on success, False on any failure (best-effort, never raises).
+    """
+    try:
+        sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+        from dispatch_register import append_event
+
+        event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+        status = str(receipt.get("status", "")).lower()
+        gate = str(receipt.get("gate", "")).lower()
+        dispatch_id = str(receipt.get("dispatch_id", ""))
+        terminal = str(receipt.get("terminal", ""))
+        feature_id = str(receipt.get("feature_id", ""))
+        pr_number = receipt.get("pr_number")
+        if pr_number is None:
+            pr_number = receipt.get("metadata", {}).get("pr_number") if isinstance(receipt.get("metadata"), dict) else None
+        try:
+            pr_number = int(pr_number) if pr_number is not None else None
+        except (ValueError, TypeError):
+            pr_number = None
+
+        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
+        FAILURE_STATUSES = {"failed", "failure", "error", "blocked"}
+
+        register_event = None
+        if event_type in ("task_complete", "task_completed"):
+            if status in FAILURE_STATUSES:
+                register_event = "dispatch_failed"
+            elif status in SUCCESS_STATUSES:
+                register_event = "dispatch_completed"
+            else:
+                return False
+        elif event_type == "task_failed":
+            register_event = "dispatch_failed"
+        elif event_type == "task_timeout":
+            # task_timeout → dispatch_failed: terminal failure semantic.
+            # no_confirmation-style transient timeouts use a different event flow
+            # and don't reach here. Map separately if/when needed (TBD).
+            register_event = "dispatch_failed"
+        elif event_type in ("task_started", "task_start", "dispatch_start"):
+            register_event = "dispatch_started"
+        elif event_type == "review_gate_request":
+            if gate != "codex_gate":
+                return False
+            register_event = "gate_requested"
+        else:
+            return False
+
+        return append_event(
+            register_event,
+            dispatch_id=dispatch_id,
+            pr_number=pr_number,
+            feature_id=feature_id,
+            terminal=terminal,
+            gate=gate,
+        )
+    except Exception:
+        return False
+
+
+def _count_quality_violations(receipt: dict) -> int:
+    """Count violations that _register_quality_open_items WILL create (after dedup).
+
+    Uses the same dedup_key logic as _register_quality_open_items so the
+    pre-computed count matches the actual creation count.
+    Returns 0 when quality_advisory or t0_recommendation is absent.
+    """
+    advisory = receipt.get("quality_advisory") or {}
+    rec = advisory.get("t0_recommendation") or {}
+    open_items = rec.get("open_items") or []
+    if not open_items:
+        return 0
+    # Mirror dedup_key from _register_quality_open_items: qa:{check_id}:{basename}:{symbol}.
+    # Collisions across directories tracked as OI-1176; out of scope for PR-4b3.
+    seen_keys: set = set()
+    for item in open_items:
+        check_id = str(item.get("check_id", "unknown"))
+        file_path = str(item.get("file", ""))
+        file_basename = Path(file_path).name if file_path else "unknown"
+        symbol = str(item.get("symbol") or "")
+        seen_keys.add(f"qa:{check_id}:{file_basename}:{symbol}")
+    return len(seen_keys)
+
+
 def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
     """Best-effort: register quality advisory violations as tracked open items.
 
@@ -898,6 +992,8 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
                     file_basename = Path(file_path).name if file_path else "unknown"
 
                     # Build dedup key: qa:{check_id}:{file_basename}:{symbol}
+                    # Dedup key uses basename+symbol; collisions across directories tracked as OI-1176.
+                    # Out of scope for PR-4b3.
                     dedup_key = f"qa:{check_id}:{file_basename}:{symbol}"
 
                     item_id, created = oim.add_item_programmatic(
@@ -934,6 +1030,11 @@ def append_receipt_payload(
 ) -> AppendResult:
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
+
+    # Pre-count BEFORE enrichment so CQS computed inside _enrich_completion_receipt sees the
+    # correct open_items_created value. Previously this was set AFTER enrichment, so the
+    # UPDATE at _enrich_completion_receipt:760-789 always read open_items_created=0.
+    receipt["open_items_created"] = _count_quality_violations(receipt)
 
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
     if not skip_enrichment:
@@ -1006,10 +1107,13 @@ def append_receipt_payload(
 
     # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events)
     if result is not None and result.status == "appended" and not skip_enrichment:
-        created_count = _register_quality_open_items(receipt)
-        receipt["open_items_created"] = created_count
+        # DB registration runs outside lock (existing constraint preserved).
+        # Count is already embedded in the receipt above; do not overwrite.
+        _register_quality_open_items(receipt)
 
         _update_confidence_from_receipt(receipt)
+
+        _emit_dispatch_register(receipt)
 
         _maybe_trigger_state_rebuild(receipt)
 
@@ -1019,16 +1123,28 @@ def append_receipt_payload(
 def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
     """Wire dispatch outcome into pattern confidence scores (best-effort)."""
     try:
-        event_type = str(receipt.get("event_type") or receipt.get("status") or "")
-        if event_type not in ("task_complete", "task_failed"):
+        SUCCESS_STATUSES = {"success", "completed", "complete", "ok", ""}
+        FAILURE_STATUSES = {"failed", "failure", "error", "blocked"}
+
+        event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+        status = str(receipt.get("status", "")).lower()
+
+        if event_type in ("task_complete", "task_completed"):
+            if status in FAILURE_STATUSES:
+                outcome = "failure"
+            elif status in SUCCESS_STATUSES:
+                outcome = "success"
+            else:
+                return  # unknown status — don't update confidence
+        elif event_type == "task_failed":
+            outcome = "failure"
+        else:
             return
 
         dispatch_id = str(receipt.get("dispatch_id") or "")
         terminal = str(receipt.get("terminal") or "")
         if not dispatch_id:
             return
-
-        outcome = "success" if event_type == "task_complete" else "failure"
 
         state_dir = resolve_state_dir(__file__)
 
