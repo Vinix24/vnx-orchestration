@@ -22,11 +22,11 @@ import governance_audit
 
 def _set_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
-    (tmp_path / "events").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
 
 def _read_entries(tmp_path: Path) -> list[dict]:
-    audit_file = tmp_path / "events" / "governance_audit.ndjson"
+    audit_file = tmp_path / "state" / "governance_audit.ndjson"
     if not audit_file.exists():
         return []
     return [json.loads(ln) for ln in audit_file.read_text().splitlines() if ln.strip()]
@@ -243,7 +243,7 @@ def test_auto_gate_trigger_passes_dispatch_id_to_log_gate_result(tmp_path, monke
 
     # Stub out everything except the log call
     state_dir = tmp_path / "state"
-    state_dir.mkdir()
+    state_dir.mkdir(exist_ok=True)
 
     with (
         patch.object(auto_gate_trigger, "_find_feature_plan", return_value=tmp_path / "FEATURE_PLAN.md"),

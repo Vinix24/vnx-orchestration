@@ -34,9 +34,10 @@ except ImportError:
     yaml = None  # type: ignore[assignment]
 
 try:
-    from governance_audit import log_enforcement as _log_enforcement_audit
+    from governance_audit import log_enforcement as _log_enforcement_audit, get_recent as _ga_get_recent
 except ImportError:  # pragma: no cover — audit module optional at import time
     _log_enforcement_audit = None  # type: ignore[assignment]
+    _ga_get_recent = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -608,6 +609,19 @@ class GovernanceEnforcer:
 
     def _check_decision_audit_trail(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
         """governance_audit.ndjson must exist with at least one entry."""
+        if _ga_get_recent is not None:
+            entries = _ga_get_recent(limit=1)
+            passed = len(entries) > 0
+            return EnforcementResult(
+                check_name=cfg.name, level=cfg.level, passed=passed,
+                message=(
+                    "Audit trail has entries"
+                    if passed
+                    else "governance_audit.ndjson is empty or missing"
+                ),
+                override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
+            )
+        # Fallback when governance_audit module is not importable
         if not AUDIT_LOG.exists():
             return EnforcementResult(
                 check_name=cfg.name, level=cfg.level, passed=False,

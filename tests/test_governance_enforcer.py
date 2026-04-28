@@ -256,10 +256,10 @@ def test_no_blocking_open_items_file_missing(config_file: Path, tmp_path: Path):
 
 
 def test_decision_audit_trail_file_missing(config_file: Path, tmp_path: Path):
-    missing = tmp_path / "no_audit.ndjson"
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
-    with patch("governance_enforcer.AUDIT_LOG", missing):
+    # Point VNX_DATA_DIR at empty tmp_path so get_recent() finds neither state/ nor events/
+    with patch.dict(os.environ, {"VNX_DATA_DIR": str(tmp_path)}):
         result = enforcer._check_decision_audit_trail(
             CheckConfig(name="decision_audit_trail", level=3), {}
         )
@@ -267,11 +267,12 @@ def test_decision_audit_trail_file_missing(config_file: Path, tmp_path: Path):
 
 
 def test_decision_audit_trail_has_entries(config_file: Path, tmp_path: Path):
-    audit = tmp_path / "governance_audit.ndjson"
-    audit.write_text('{"ts": "2026-04-13T00:00:00Z", "event": "test"}\n')
+    audit = tmp_path / "state" / "governance_audit.ndjson"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text('{"timestamp": "2026-04-13T00:00:00Z", "event_type": "gate_result"}\n')
     enforcer = GovernanceEnforcer()
     enforcer.load_config(config_file)
-    with patch("governance_enforcer.AUDIT_LOG", audit):
+    with patch.dict(os.environ, {"VNX_DATA_DIR": str(tmp_path)}):
         result = enforcer._check_decision_audit_trail(
             CheckConfig(name="decision_audit_trail", level=3), {}
         )
