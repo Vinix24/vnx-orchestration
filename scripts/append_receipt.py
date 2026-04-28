@@ -60,6 +60,9 @@ DISPATCH_REQUIRED_EVENTS = {
     "ack",
 }
 
+_warned_review_gate_no_dispatch_id = False
+
+
 IDEMPOTENCY_FIELDS = (
     "dispatch_id",
     "task_id",
@@ -132,6 +135,20 @@ def _requires_dispatch_id(receipt: Dict[str, Any], event_name: str) -> bool:
     return False
 
 
+def _warn_if_review_gate_missing_dispatch_id(event_name: str, receipt: Dict[str, Any]) -> None:
+    global _warned_review_gate_no_dispatch_id
+    if _warned_review_gate_no_dispatch_id:
+        return
+    if event_name == "review_gate_request":
+        if not str(receipt.get("dispatch_id", "")).strip():
+            _warned_review_gate_no_dispatch_id = True
+            _emit(
+                "WARN",
+                "review_gate_request_missing_dispatch_id",
+                message="review_gate_request receipt has no dispatch_id — receipt-to-gate audit linkage severed",
+            )
+
+
 def _validate_receipt(receipt: Dict[str, Any]) -> str:
     timestamp = str(receipt.get("timestamp", "")).strip()
     if not timestamp:
@@ -157,6 +174,8 @@ def _validate_receipt(receipt: Dict[str, Any]) -> str:
                 EXIT_VALIDATION_ERROR,
                 "Missing required key: dispatch_id",
             )
+
+    _warn_if_review_gate_missing_dispatch_id(event_name, receipt)
 
     return event_name
 
@@ -910,8 +929,11 @@ def append_receipt_payload(
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
     receipt = _enrich_completion_receipt(receipt)
 
-    # Route ghost gate receipts (dispatch_id="unknown" + gate event) to the
-    # separate gate_events stream so t0_receipts.ndjson stays traceable.
+    # Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson.
+    # review_gate_request with empty/missing dispatch_id is redirected here (pre-existing
+    # behaviour from PR #255, see ghost_receipt_filter.py). With PR-2 fix, callers supply
+    # a real dispatch_id so is_ghost_dispatch_id() returns False and receipts land normally
+    # in t0_receipts.ndjson. This is documented intent, not a regression.
     if receipts_file is None and should_route_to_gate_stream(receipt):
         try:
             paths = ensure_env()

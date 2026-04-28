@@ -71,6 +71,10 @@ def should_route_to_gate_stream(receipt: Dict[str, Any]) -> bool:
     Routes when: dispatch_id is a ghost value AND the receipt is a gate event.
     Receipts with a valid dispatch_id always stay in the main stream regardless
     of whether they are gate events.
+
+    For review_gate_request specifically: legacy headless runners that omit
+    dispatch_id produce ghost receipts and are redirected here. Callers that
+    supply a real dispatch_id (PR-2 fix) bypass this and land in t0_receipts.ndjson.
     """
     dispatch_id = receipt.get("dispatch_id")
     if not is_ghost_dispatch_id(dispatch_id):
