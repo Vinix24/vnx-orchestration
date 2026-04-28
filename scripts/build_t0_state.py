@@ -294,6 +294,7 @@ def _build_pr_progress(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
         in_progress = [p.pr_id for p in result.prs if p.state == "active"]
         pct = int(completed * 100 / total) if total > 0 else 0
 
+        blocked = [p.pr_id for p in result.prs if p.state == "blocked"]
         return {
             "feature_name": result.feature_name,
             "total": total,
@@ -301,6 +302,7 @@ def _build_pr_progress(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
             "in_progress": in_progress,
             "completion_pct": pct,
             "has_blocking_drift": result.has_blocking_drift,
+            "blocked": blocked,
         }
     except Exception:
         return _empty
@@ -641,6 +643,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "completed": pr_raw.get("completed", 0),
             "in_progress": pr_raw.get("in_progress", []),
             "completion_percentage": pr_raw.get("completion_pct", 0),
+            "blocked": pr_raw.get("blocked", []),
         },
         "system_health": {
             "status": sh.get("status", "unknown"),
@@ -699,6 +702,14 @@ def main() -> int:
         state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
+        # Regenerate t0_brief.json alongside t0_state.json — orchestration helpers
+        # (receipt_processor_v4, intelligence_ack, t0_intelligence_aggregator) read
+        # t0_brief.json directly and must stay in sync with the new state.
+        try:
+            brief_path = _STATE_DIR / "t0_brief.json"
+            _write_atomic(brief_path, _state_to_brief(state))
+        except Exception:
+            pass  # best-effort — must not block SessionStart
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
     except Exception:

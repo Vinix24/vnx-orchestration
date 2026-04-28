@@ -1,9 +1,9 @@
 """Dispatch lifecycle register — append-only NDJSON log of dispatch state changes.
 
 File: $VNX_STATE_DIR/dispatch_register.ndjson
-Currently exposed via build_t0_state as 'dispatch_register_events' (raw last 50).
-Full register-canonical pr_progress / feature_state aggregation is deferred
-to a future PR (Sprint 3 split 3/3).
+Currently consumed by build_t0_state.py (raw events list exposure).
+Hook callers (append_receipt, gate_recorder, dispatch_lifecycle) added in
+parallel PRs (PR-4b3, PR-4b4). Full register-canonical aggregation in PR-4c.
 """
 from __future__ import annotations
 import datetime as _dt, json, os, fcntl, sys
