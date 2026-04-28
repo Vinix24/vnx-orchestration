@@ -191,6 +191,16 @@ def record_failure(
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
         rf.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
+
+    if gate != "codex_gate":
+        import logging as _logging
+        _logging.info(
+            "gate_recorder.record_failure: register emit deferred for gate=%s "
+            "(only codex_gate has structured findings parser)",
+            gate,
+        )
+        return failure_payload
+
     try:
         import logging as _logging
         from dispatch_register import append_event as _append_reg

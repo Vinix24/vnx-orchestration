@@ -13,9 +13,9 @@ Coverage:
   10. Throttle marker is integer (not float) after Python write
   11. Bash CLI dispatch_promoted event writes register entry
   12. Throttle expiry: rebuild triggers when stale throttle marker present
-  13. gate_artifacts success with no blocking → gate_passed in register
-  14. gate_artifacts success with blocking → gate_failed in register
-  15. gate_recorder failure path emits gate_failed (not just success-materialization)
+  13. gate_artifacts gemini_review → NO register event (parser deferred)
+  14. gate_artifacts codex_gate with blocking → gate_failed in register
+  15. gate_recorder failure for gemini_review → NO register event (parser deferred)
 """
 from __future__ import annotations
 
@@ -337,8 +337,8 @@ def _make_gate_request_payload(tmp_path: Path, pr_number: int = 1) -> dict:
     }
 
 
-def test_gate_artifacts_no_blocking_emits_gate_passed(isolated_register, tmp_path):
-    """materialize_artifacts with no blocking findings emits gate_passed."""
+def test_gate_artifacts_gemini_review_skips_register_emit(isolated_register, tmp_path):
+    """materialize_artifacts for gemini_review must not emit any register event (parser deferred)."""
     requests_dir = tmp_path / "requests"
     results_dir = tmp_path / "results"
     reports_dir = tmp_path / "reports"
@@ -363,8 +363,9 @@ def test_gate_artifacts_no_blocking_emits_gate_passed(isolated_register, tmp_pat
     assert result.get("status") == "completed"
     events = _reg_events(isolated_register)
     reg_events_for_gate = [e for e in events if e.get("gate") == "gemini_review"]
-    assert len(reg_events_for_gate) == 1
-    assert reg_events_for_gate[0]["event"] == "gate_passed"
+    assert len(reg_events_for_gate) == 0, (
+        f"gemini_review must not emit register events (parser deferred), got: {reg_events_for_gate}"
+    )
 
 
 def test_gate_artifacts_blocking_emits_gate_failed(isolated_register, tmp_path):
@@ -417,8 +418,8 @@ def test_gate_artifacts_blocking_emits_gate_failed(isolated_register, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_gate_recorder_failure_path_emits_gate_failed(isolated_register, tmp_path):
-    """record_failure (execution failure path) must emit gate_failed to the register."""
+def test_gate_recorder_gemini_failure_skips_register_emit(isolated_register, tmp_path):
+    """record_failure for gemini_review must NOT emit to the register (parser deferred)."""
     requests_dir = tmp_path / "requests"
     results_dir = tmp_path / "results"
     for d in (requests_dir, results_dir):
@@ -451,9 +452,9 @@ def test_gate_recorder_failure_path_emits_gate_failed(isolated_register, tmp_pat
 
     events = _reg_events(isolated_register)
     gate_events = [e for e in events if e.get("gate") == "gemini_review"]
-    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
-    assert gate_events[0]["event"] == "gate_failed"
-    assert gate_events[0].get("dispatch_id") == "D-FAILURE-020"
+    assert len(gate_events) == 0, (
+        f"gemini_review record_failure must not emit register event (parser deferred), got: {gate_events}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -482,8 +483,8 @@ def test_emit_task_complete_failure_status_classifies_failed(isolated_register):
 # ---------------------------------------------------------------------------
 
 
-def test_gate_artifacts_pr_id_numeric_resolves_pr_number(isolated_register, tmp_path):
-    """gate hook with pr_id='276' and pr_number=None must write pr_number=276 to register."""
+def test_gate_artifacts_gemini_pr_id_numeric_skips_register_emit(isolated_register, tmp_path):
+    """gate hook with gemini_review + pr_id='276' must complete but NOT emit a register event."""
     requests_dir = tmp_path / "requests"
     results_dir = tmp_path / "results"
     reports_dir = tmp_path / "reports"
@@ -516,10 +517,8 @@ def test_gate_artifacts_pr_id_numeric_resolves_pr_number(isolated_register, tmp_
     assert result.get("status") == "completed"
     events = _reg_events(isolated_register)
     gate_events = [e for e in events if e.get("gate") == "gemini_review"]
-    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
-    assert gate_events[0]["event"] == "gate_passed"
-    assert gate_events[0].get("pr_number") == 276, (
-        f"pr_id='276' must resolve to pr_number=276, got {gate_events[0].get('pr_number')!r}"
+    assert len(gate_events) == 0, (
+        f"gemini_review must not emit register events (parser deferred), got: {gate_events}"
     )
 
 
@@ -676,8 +675,8 @@ def test_emit_dispatch_register_non_numeric_pr_id_uses_feature_id(isolated_regis
     assert events[0].get("pr_number") is None
 
 
-def test_gate_artifacts_non_numeric_pr_id_uses_feature_id(isolated_register, tmp_path):
-    """gate hook with pr_id='PR-6', dispatch_id='', pr_number=None → feature_id='PR-6' in register."""
+def test_gate_artifacts_gemini_non_numeric_pr_id_skips_register_emit(isolated_register, tmp_path):
+    """gate hook with gemini_review + pr_id='PR-6' must complete but NOT emit a register event."""
     requests_dir = tmp_path / "requests"
     results_dir = tmp_path / "results"
     reports_dir = tmp_path / "reports"
@@ -710,12 +709,9 @@ def test_gate_artifacts_non_numeric_pr_id_uses_feature_id(isolated_register, tmp
     assert result.get("status") == "completed"
     events = _reg_events(isolated_register)
     gate_events = [e for e in events if e.get("gate") == "gemini_review"]
-    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
-    assert gate_events[0]["event"] == "gate_passed"
-    assert gate_events[0].get("feature_id") == "PR-6", (
-        f"Non-numeric pr_id='PR-6' must become feature_id='PR-6', got {gate_events[0].get('feature_id')!r}"
+    assert len(gate_events) == 0, (
+        f"gemini_review must not emit register events (parser deferred), got: {gate_events}"
     )
-    assert gate_events[0].get("pr_number") is None
 
 
 def test_gate_recorder_non_numeric_pr_id_uses_feature_id(isolated_register, tmp_path):
@@ -833,53 +829,8 @@ def test_emit_task_complete_empty_status_emits_completed(isolated_register):
 
 
 # ---------------------------------------------------------------------------
-# Tests 27-28: multi-gate findings parser (BLOCKING — Codex PR #278 round 5)
+# Test 27: claude_github_optional must not emit register events (parser deferred)
 # ---------------------------------------------------------------------------
-
-
-def test_gate_artifacts_gemini_blocking_in_stdout_emits_gate_failed(isolated_register, tmp_path):
-    """materialize_artifacts gemini_review with 'BLOCKING' in stdout emits gate_failed."""
-    requests_dir = tmp_path / "requests"
-    results_dir = tmp_path / "results"
-    reports_dir = tmp_path / "reports"
-    for d in (requests_dir, results_dir, reports_dir):
-        d.mkdir(parents=True, exist_ok=True)
-
-    report_path = reports_dir / "gate_report.md"
-    payload = {
-        "gate": "gemini_review",
-        "pr_number": 50,
-        "pr_id": "pr-50",
-        "branch": "feat/test",
-        "report_path": str(report_path),
-        "dispatch_id": "D-GEMINI-BLOCKING",
-    }
-    stdout = (
-        "# Gemini Review\n\n"
-        "This PR has a BLOCKING issue with null pointer dereference.\n"
-        "Must fix before merge.\n"
-        "Overall: FAIL"
-    )
-
-    result = gate_artifacts.materialize_artifacts(
-        gate="gemini_review",
-        pr_number=50,
-        pr_id="pr-50",
-        stdout=stdout,
-        request_payload=payload,
-        duration_seconds=1.5,
-        requests_dir=requests_dir,
-        results_dir=results_dir,
-        reports_dir=reports_dir,
-    )
-
-    assert result.get("status") == "completed"
-    events = _reg_events(isolated_register)
-    gate_events = [e for e in events if e.get("gate") == "gemini_review"]
-    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
-    assert gate_events[0]["event"] == "gate_failed", (
-        f"BLOCKING in gemini stdout must produce gate_failed, got {gate_events[0]['event']!r}"
-    )
 
 
 def test_gate_artifacts_claude_github_optional_skips_register_emit(isolated_register, tmp_path):

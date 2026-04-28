@@ -19,16 +19,6 @@ import gate_recorder
 from codex_parser import parse_codex_findings
 
 
-def _parse_gemini_findings(stdout: str) -> List[Dict[str, Any]]:
-    """Minimal gemini findings parser — scans for BLOCKING/blocker severity markers."""
-    findings = []
-    for line in stdout.splitlines():
-        line_lower = line.lower()
-        if "blocking" in line_lower or "blocker" in line_lower:
-            findings.append({"severity": "blocking", "message": line.strip()})
-    return findings
-
-
 # ---------------------------------------------------------------------------
 # Contract hash
 # ---------------------------------------------------------------------------
@@ -210,8 +200,6 @@ def materialize_artifacts(
         parsed = parse_codex_findings(stdout)
         _parsed_findings = parsed["findings"]
         residual_risk = parsed.get("residual_risk", "") or ""
-    elif gate == "gemini_review":
-        _parsed_findings = _parse_gemini_findings(stdout)
 
     _skip_register_emit = False
     if _parsed_findings is None:
