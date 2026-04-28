@@ -617,6 +617,126 @@ def test_confidence_task_complete_empty_status_yields_success(ar):
     assert captured[0]["outcome"] == "success"
 
 
+# ── Tests: CQS timing — open_items_created set AFTER enrichment ───────────────
+
+
+def test_open_items_created_from_enrichment_generated_advisory(tmp_path: Path, ar):
+    """Normal completion path: enrichment generates quality_advisory with violations.
+    open_items_created in NDJSON must equal the real count, not 0.
+
+    Regression guard for codex post-merge audit v2 (PR #281): pre-count ran before
+    enrichment so advisory was empty → count was always 0.
+    """
+    receipts_file = tmp_path / "receipts.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-CQS-TIMING-001",
+        "terminal": "T1",
+        # No quality_advisory here — enrichment generates it
+    }
+
+    def fake_enrich(r, repo_root=None):
+        enriched = dict(r)
+        enriched["quality_advisory"] = {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "severity": "blocker", "item": "missing tests"},
+                    {"check_id": "c2", "severity": "warn", "item": "low coverage"},
+                ]
+            }
+        }
+        return enriched
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=fake_enrich), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register", return_value=False), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1
+    persisted = json.loads(lines[0])
+    assert persisted.get("open_items_created") == 2, (
+        f"Expected 2 (from enrichment-generated advisory), got {persisted.get('open_items_created')!r}. "
+        "Bug: pre-count ran before enrichment so advisory was empty → count was 0."
+    )
+
+
+def test_open_items_created_zero_when_enrichment_adds_no_violations(tmp_path: Path, ar):
+    """Normal completion path: enrichment generates empty open_items → open_items_created=0."""
+    receipts_file = tmp_path / "receipts_clean.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:01Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-CQS-TIMING-002",
+        "terminal": "T1",
+    }
+
+    def fake_enrich_clean(r, repo_root=None):
+        enriched = dict(r)
+        enriched["quality_advisory"] = {"t0_recommendation": {"open_items": []}}
+        return enriched
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=fake_enrich_clean), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register", return_value=False), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    persisted = json.loads(lines[0])
+    assert persisted.get("open_items_created", 0) == 0
+
+
+def test_enrich_sets_open_items_created_internally(ar):
+    """_enrich_completion_receipt sets open_items_created from the quality_advisory it generates.
+    Ensures the CQS DB UPDATE sees the real count (not 0 from a missing field)."""
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-CQS-INTERNAL-001",
+        "terminal": "T1",
+        # No quality_advisory — the function generates it via generate_quality_advisory
+    }
+
+    # Advisory dict that generate_quality_advisory would produce with 3 violations.
+    advisory_dict = {
+        "version": "1.0",
+        "t0_recommendation": {
+            "open_items": [
+                {"check_id": "c1", "file": "a.py", "symbol": "", "severity": "blocker"},
+                {"check_id": "c2", "file": "b.py", "symbol": "", "severity": "warn"},
+                {"check_id": "c3", "file": "c.py", "symbol": "", "severity": "info"},
+            ]
+        },
+    }
+    fake_advisory = MagicMock()
+    fake_advisory.to_dict.return_value = advisory_dict
+
+    with patch.object(ar, "_build_git_provenance", return_value={"git_ref": "HEAD"}), \
+         patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
+         patch.object(ar, "enrich_receipt_provenance"), \
+         patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])), \
+         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
+         patch.object(ar, "get_changed_files", return_value=[Path("a.py"), Path("b.py"), Path("c.py")]), \
+         patch.object(ar, "generate_quality_advisory", return_value=fake_advisory), \
+         patch.object(ar, "_get_open_items_manager", return_value=MagicMock(count_items_closed_by_dispatch=lambda _: 0)), \
+         patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch("pathlib.Path.exists", return_value=False):
+        enriched = ar._enrich_completion_receipt(receipt)
+
+    assert enriched.get("open_items_created") == 3, (
+        f"Expected 3 (from generate_quality_advisory result), got {enriched.get('open_items_created')!r}. "
+        "_enrich_completion_receipt must set open_items_created before the CQS DB write."
+    )
+
+
 # ── OI-1176: dedup key directory-aware ───────────────────────────────────────
 
 def _make_quality_receipt(open_items: list) -> dict:
