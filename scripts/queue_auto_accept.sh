@@ -37,6 +37,18 @@ while true; do
         mv "$f" "$target"
         moved=$((moved + 1))
         echo "[auto-accept] $(date +%H:%M:%S) Moved to pending: $filename"
+
+        # emit dispatch_created — best-effort, must not block the accept loop
+        local _dispatch_id; _dispatch_id="$(basename "$f" .md)"
+        local _reg_rc=0
+        set +e
+        python3 "$VNX_HOME/scripts/lib/dispatch_register.py" append dispatch_created \
+            "dispatch_id=$_dispatch_id" 2>/dev/null
+        _reg_rc=$?
+        set -e
+        if [ "$_reg_rc" -ne 0 ]; then
+            echo "[auto-accept] WARNING: dispatch_created emit failed for $_dispatch_id (non-fatal)"
+        fi
     done
 
     if [ "$moved" -gt 0 ]; then

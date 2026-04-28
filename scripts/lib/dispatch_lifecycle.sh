@@ -478,5 +478,17 @@ finalize_dispatch_delivery() {
     local filename; filename=$(basename "$dispatch_file")
     mv "$dispatch_file" "$ACTIVE_DIR/$filename"
     log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
+
+    # emit dispatch_promoted — best-effort, must not block delivery
+    local _reg_rc=0
+    set +e
+    python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
+        "dispatch_id=$dispatch_id" "terminal=$terminal_id" 2>/dev/null
+    _reg_rc=$?
+    set -e
+    if [ "$_reg_rc" -ne 0 ]; then
+        log "V8 WARNING: dispatch_promoted emit failed (non-fatal)"
+    fi
+
     return 0
 }
