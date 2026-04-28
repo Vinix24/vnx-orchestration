@@ -77,6 +77,7 @@ class WorkerHealthMonitor:
         *,
         events_dir: Optional[Path] = None,
         avg_events: int = AVG_EVENTS_PER_DISPATCH,
+        event_store: Optional[Any] = None,
     ) -> None:
         self.terminal_id = terminal_id
         self.dispatch_id = dispatch_id
@@ -86,7 +87,10 @@ class WorkerHealthMonitor:
         self._last_event_time = time.monotonic()
         self._event_count = 0
         self._last_tool = ""
+        self._last_event_type = ""
         self._completed = False
+        self._stuck_count = 0
+        self._event_store = event_store
         self._lock = threading.Lock()
 
         # Resolve events dir
@@ -129,6 +133,7 @@ class WorkerHealthMonitor:
             else:
                 return
 
+            self._last_event_type = etype
             if etype == "tool_use":
                 tool_name = edata.get("name", "")
                 if tool_name:
@@ -179,6 +184,12 @@ class WorkerHealthMonitor:
         # Write final snapshot
         self._write_health_json()
 
+    @property
+    def stuck_count(self) -> int:
+        """Number of times this dispatch transitioned into STUCK status."""
+        with self._lock:
+            return self._stuck_count
+
     def stop(self) -> None:
         """Stop background writer thread."""
         self._stop_event.set()
@@ -210,10 +221,14 @@ class WorkerHealthMonitor:
             logger.debug("worker_health_monitor: failed to write health json: %s", exc)
 
     def log_stuck_event(self, stuck_log_path: Optional[Path] = None) -> None:
-        """Append a stuck-warning entry to events/worker_stuck.ndjson."""
+        """Append a stuck-warning entry to events/worker_stuck.ndjson and EventStore."""
         h = self.health_status()
         if h.status != HealthStatus.STUCK:
             return
+
+        with self._lock:
+            self._stuck_count += 1
+            last_event_type = self._last_event_type
 
         try:
             log_path = stuck_log_path or (self._events_dir / "worker_stuck.ndjson")
@@ -237,3 +252,18 @@ class WorkerHealthMonitor:
             )
         except Exception as exc:
             logger.debug("worker_health_monitor: failed to log stuck event: %s", exc)
+
+        if self._event_store is not None:
+            try:
+                self._event_store.append(
+                    self.terminal_id,
+                    {
+                        "type": "worker_stuck",
+                        "elapsed_secs": h.elapsed_seconds,
+                        "dispatch_id": self.dispatch_id,
+                        "last_event_type": last_event_type,
+                    },
+                    dispatch_id=self.dispatch_id,
+                )
+            except Exception as exc:
+                logger.debug("worker_health_monitor: event_store.append failed: %s", exc)

@@ -483,6 +483,12 @@ def deliver_via_subprocess(
     if not result.success:
         return _SubprocessResult(success=False, session_id=None, event_count=0, manifest_path=manifest_path)
 
+    # Wire event_store into health_monitor so STUCK events are persisted to NDJSON
+    if health_monitor is not None and health_monitor._event_store is None:
+        _es = adapter._get_event_store()
+        if _es is not None:
+            health_monitor._event_store = _es
+
     # Start heartbeat thread if lease generation is known
     heartbeat_stop: threading.Event | None = None
     heartbeat_thread: threading.Thread | None = None
@@ -733,6 +739,7 @@ def _write_receipt(
     commit_hash_before: str = "",
     commit_hash_after: str = "",
     manifest_path: str | None = None,
+    stuck_event_count: int = 0,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -764,6 +771,8 @@ def _write_receipt(
         receipt["failure_reason"] = failure_reason
     if commit_missing:
         receipt["commit_missing"] = True
+    if stuck_event_count:
+        receipt["stuck_event_count"] = stuck_event_count
 
     _scripts_dir = Path(__file__).resolve().parents[1]
     try:
@@ -1056,6 +1065,7 @@ def deliver_with_recovery(
                 commit_hash_before=commit_hash_before,
                 commit_hash_after=commit_hash_after,
                 manifest_path=sub_result.manifest_path,
+                stuck_event_count=monitor.stuck_count,
             )
 
             # Feedback loop: boost pattern confidence for successful dispatch
@@ -1099,6 +1109,7 @@ def deliver_with_recovery(
                 failure_reason=f"Exhausted {max_retries} retries",
                 commit_hash_before=commit_hash_before,
                 manifest_path=sub_result.manifest_path,
+                stuck_event_count=monitor.stuck_count,
             )
 
             # Feedback loop: decay pattern confidence for failed dispatch
