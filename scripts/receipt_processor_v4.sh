@@ -1077,7 +1077,7 @@ process_pending_reports() {
     log "INFO" "Scanning for reports newer than: $cutoff"
 
     # Scan unified_reports/ only — gate reports under headless/ are recorded
-    # separately in state/review_gates/results/ and the gate runner returns
+    # separately in $VNX_STATE_DIR/review_gates/results/ and the gate runner returns
     # structured JSON synchronously. Scanning them here produces ghost
     # "RECEIPT:unknown:unknown" pings because they have no dispatch_id metadata.
     local pending_reports=()
