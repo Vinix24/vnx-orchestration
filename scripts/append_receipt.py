@@ -1056,6 +1056,7 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
             pr_number = (receipt.get("metadata") or {}).get("pr_number")
         terminal = str(receipt.get("terminal", ""))
         gate = str(receipt.get("gate", ""))
+        pr_id = str(receipt.get("pr_id", ""))
         feature_id = str(receipt.get("feature_id", ""))
 
         if event_type in ("task_complete", "task_completed"):
@@ -1074,6 +1075,14 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
                 pr_number = int(pr_number)
             except (ValueError, TypeError):
                 pr_number = None
+
+        if pr_number is None and pr_id:
+            try:
+                pr_number = int(pr_id)
+            except (ValueError, TypeError):
+                # Non-numeric pr_id (contract path "PR-6" style) — use as feature_id fallback
+                if not feature_id:
+                    feature_id = pr_id
 
         append_event(
             register_event,

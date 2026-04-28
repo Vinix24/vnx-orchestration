@@ -237,17 +237,20 @@ def materialize_artifacts(
         from state_rebuild_trigger import maybe_trigger_state_rebuild as _trigger_rebuild
 
         _pr_num = pr_number
+        _feature_id = ""
         if _pr_num is None and pr_id:
             try:
                 _pr_num = int(pr_id)
             except (ValueError, TypeError):
-                pass
+                # Non-numeric pr_id (contract path "PR-6" style) — use as feature_id fallback
+                _feature_id = str(pr_id)
 
         _gate_event = "gate_passed" if not blocking else "gate_failed"
         _reg_result = _append_reg(
             _gate_event,
             dispatch_id=real_dispatch_id or "",
             pr_number=_pr_num,
+            feature_id=_feature_id,
             gate=gate,
         )
         if not _reg_result:

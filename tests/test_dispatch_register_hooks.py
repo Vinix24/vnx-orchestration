@@ -646,3 +646,111 @@ def test_gate_artifacts_triggers_state_rebuild(isolated_register, tmp_path, monk
         )
 
     assert len(rebuild_calls) >= 1, "maybe_trigger_state_rebuild must be called after register write"
+
+
+# ---------------------------------------------------------------------------
+# Tests 20-22: non-numeric pr_id fallback to feature_id (BLOCKING fix 2)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_dispatch_register_non_numeric_pr_id_uses_feature_id(isolated_register):
+    """_emit_dispatch_register with pr_id='PR-6' + no dispatch_id must write feature_id='PR-6'."""
+    receipt = {
+        "event_type": "review_gate_request",
+        "pr_id": "PR-6",
+        "dispatch_id": "",
+        "terminal": "T3",
+        "gate": "gemini_review",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 1, f"Expected 1 event, got: {events}"
+    assert events[0]["event"] == "gate_requested"
+    assert events[0].get("feature_id") == "PR-6", (
+        f"Non-numeric pr_id='PR-6' must become feature_id='PR-6', got {events[0].get('feature_id')!r}"
+    )
+    assert events[0].get("pr_number") is None
+
+
+def test_gate_artifacts_non_numeric_pr_id_uses_feature_id(isolated_register, tmp_path):
+    """gate hook with pr_id='PR-6', dispatch_id='', pr_number=None → feature_id='PR-6' in register."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    reports_dir = tmp_path / "reports"
+    for d in (requests_dir, results_dir, reports_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "gate_report.md"
+    payload = {
+        "gate": "gemini_review",
+        "pr_number": None,
+        "pr_id": "PR-6",
+        "branch": "feat/contract",
+        "report_path": str(report_path),
+        "dispatch_id": "",
+    }
+    stdout = "# Review\nOverall: LGTM\nNo issues found."
+
+    result = gate_artifacts.materialize_artifacts(
+        gate="gemini_review",
+        pr_number=None,
+        pr_id="PR-6",
+        stdout=stdout,
+        request_payload=payload,
+        duration_seconds=1.0,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        reports_dir=reports_dir,
+    )
+
+    assert result.get("status") == "completed"
+    events = _reg_events(isolated_register)
+    gate_events = [e for e in events if e.get("gate") == "gemini_review"]
+    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
+    assert gate_events[0]["event"] == "gate_passed"
+    assert gate_events[0].get("feature_id") == "PR-6", (
+        f"Non-numeric pr_id='PR-6' must become feature_id='PR-6', got {gate_events[0].get('feature_id')!r}"
+    )
+    assert gate_events[0].get("pr_number") is None
+
+
+def test_gate_recorder_non_numeric_pr_id_uses_feature_id(isolated_register, tmp_path):
+    """record_failure with pr_id='PR-6', dispatch_id='', pr_number=None → feature_id='PR-6' in register."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    for d in (requests_dir, results_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    request_payload = {
+        "gate": "codex_gate",
+        "pr_number": None,
+        "pr_id": "PR-6",
+        "dispatch_id": "",
+        "report_path": str(tmp_path / "report.md"),
+    }
+    failure_result = {
+        "reason": "timeout",
+        "reason_detail": "stalled after 300 s",
+        "duration_seconds": 300.0,
+        "partial_output_lines": 0,
+        "runner_pid": 42,
+    }
+
+    gate_recorder.record_failure(
+        gate="codex_gate",
+        pr_number=None,
+        pr_id="PR-6",
+        result=failure_result,
+        request_payload=request_payload,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+    )
+
+    events = _reg_events(isolated_register)
+    gate_events = [e for e in events if e.get("gate") == "codex_gate"]
+    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
+    assert gate_events[0]["event"] == "gate_failed"
+    assert gate_events[0].get("feature_id") == "PR-6", (
+        f"Non-numeric pr_id='PR-6' must become feature_id='PR-6', got {gate_events[0].get('feature_id')!r}"
+    )
+    assert gate_events[0].get("pr_number") is None

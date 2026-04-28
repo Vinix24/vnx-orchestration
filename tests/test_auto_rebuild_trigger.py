@@ -28,6 +28,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 import append_receipt as ar
 import build_t0_state as bts
+import state_rebuild_trigger
 
 
 def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP-001") -> dict:
@@ -43,20 +44,22 @@ def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP
 def test_completion_event_triggers_rebuild(tmp_path: Path) -> None:
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen") as mock_popen:
         ar._maybe_trigger_state_rebuild(receipt)
 
     mock_popen.assert_called_once()
     call_kwargs = mock_popen.call_args
-    assert call_kwargs[0][0] == ["python3", "scripts/build_t0_state.py"]
+    cmd = call_kwargs[0][0]
+    assert cmd[0] == "python3"
+    assert "build_t0_state.py" in cmd[-1]
     assert call_kwargs[1].get("start_new_session") is True
 
 
 def test_non_completion_event_does_not_trigger_rebuild(tmp_path: Path) -> None:
     receipt = _minimal_receipt("task_started")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen") as mock_popen:
         ar._maybe_trigger_state_rebuild(receipt)
 
@@ -71,7 +74,7 @@ def test_dispatch_promoted_event_triggers_rebuild(tmp_path: Path) -> None:
         "source": "pytest",
     }
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen") as mock_popen:
         ar._maybe_trigger_state_rebuild(receipt)
 
@@ -80,11 +83,11 @@ def test_dispatch_promoted_event_triggers_rebuild(tmp_path: Path) -> None:
 
 def test_throttle_prevents_double_rebuild(tmp_path: Path) -> None:
     throttle_file = tmp_path / ".last_state_rebuild_ts"
-    throttle_file.write_text(str(time.time()), encoding="utf-8")
+    throttle_file.write_text(str(int(time.time())), encoding="utf-8")
 
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen") as mock_popen:
         ar._maybe_trigger_state_rebuild(receipt)
 
@@ -98,7 +101,7 @@ def test_throttle_allows_rebuild_after_window(tmp_path: Path) -> None:
 
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen") as mock_popen:
         ar._maybe_trigger_state_rebuild(receipt)
 
@@ -108,7 +111,7 @@ def test_throttle_allows_rebuild_after_window(tmp_path: Path) -> None:
 def test_rebuild_failure_does_not_raise(tmp_path: Path) -> None:
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen", side_effect=OSError("popen failed")):
         ar._maybe_trigger_state_rebuild(receipt)
 
@@ -118,7 +121,7 @@ def test_popen_failure_does_not_write_throttle(tmp_path: Path) -> None:
     throttle_file = tmp_path / ".last_state_rebuild_ts"
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
+    with mock.patch("state_rebuild_trigger._resolve_state_dir", return_value=tmp_path), \
          mock.patch("append_receipt.subprocess.Popen", side_effect=OSError("popen failed")):
         ar._maybe_trigger_state_rebuild(receipt)
 
