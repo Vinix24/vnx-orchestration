@@ -43,8 +43,10 @@ _MODULE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "lib" / "dis
 @pytest.fixture(autouse=True)
 def isolated_data_dir(monkeypatch, tmp_path):
     """Route all register I/O into a fresh tmp dir for every test."""
-    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
-    return tmp_path / ".vnx-data"
+    data_dir = tmp_path / ".vnx-data"
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_STATE_DIR", str(data_dir / "state"))
+    return data_dir
 
 
 def _reg_path(data_dir: Path) -> Path:
@@ -261,6 +263,29 @@ class TestCli:
         )
         assert result.returncode == 2
 
+    def test_cli_extra_field(self, isolated_data_dir):
+        env = self._env(isolated_data_dir)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_MODULE_PATH),
+                "append",
+                "dispatch_failed",
+                "dispatch_id=abc",
+                "extra.reason=timeout",
+                "extra.attempt=3",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        reg = _reg_path(isolated_data_dir)
+        rec = json.loads(reg.read_text().strip())
+        assert rec["event"] == "dispatch_failed"
+        assert rec["dispatch_id"] == "abc"
+        assert rec["extra"] == {"reason": "timeout", "attempt": "3"}
+
 
 # ---------------------------------------------------------------------------
 # 12. Concurrent writes via threads — no corruption
@@ -300,16 +325,61 @@ class TestBestEffortOsError:
 
 
 # ---------------------------------------------------------------------------
-# 14. VNX_DATA_DIR path resolution
+# 14. VNX_STATE_DIR path resolution
 # ---------------------------------------------------------------------------
 
 class TestPathResolution:
-    def test_register_lands_in_vnx_data_dir(self, tmp_path, monkeypatch):
-        custom_data = tmp_path / "custom-data"
-        monkeypatch.setenv("VNX_DATA_DIR", str(custom_data))
+    def test_register_lands_in_vnx_state_dir(self, tmp_path, monkeypatch):
+        custom_state = tmp_path / "custom-state"
+        monkeypatch.setenv("VNX_STATE_DIR", str(custom_state))
         result = append_event("dispatch_created", dispatch_id="path-test")
         assert result is True
-        expected = custom_data / "state" / "dispatch_register.ndjson"
+        expected = custom_state / "dispatch_register.ndjson"
         assert expected.exists(), f"Register not found at {expected}"
         rec = json.loads(expected.read_text().strip())
         assert rec["dispatch_id"] == "path-test"
+
+
+# ---------------------------------------------------------------------------
+# 15–17. Canonical resolver: VNX_STATE_DIR override, fallback
+# ---------------------------------------------------------------------------
+
+class TestPathResolutionCanonical:
+    def test_register_path_uses_canonical_resolver(self, tmp_path, monkeypatch):
+        """Canonical resolver is used: register lands at resolve_paths()['VNX_STATE_DIR']."""
+        custom_state = tmp_path / "canonical-state"
+        monkeypatch.setenv("VNX_STATE_DIR", str(custom_state))
+        result = append_event("dispatch_created", dispatch_id="canonical-test")
+        assert result is True
+        expected = custom_state / "dispatch_register.ndjson"
+        assert expected.exists(), f"Register not at VNX_STATE_DIR: {expected}"
+        rec = json.loads(expected.read_text().strip())
+        assert rec["dispatch_id"] == "canonical-test"
+
+    def test_register_path_respects_state_dir_override(self, tmp_path, monkeypatch):
+        """VNX_STATE_DIR=X lands register at X, not VNX_DATA_DIR/state."""
+        custom_data = tmp_path / "override-data"
+        custom_state = tmp_path / "override-state"
+        monkeypatch.setenv("VNX_DATA_DIR", str(custom_data))
+        monkeypatch.setenv("VNX_STATE_DIR", str(custom_state))
+        result = append_event("dispatch_created", dispatch_id="override-test")
+        assert result is True
+        expected = custom_state / "dispatch_register.ndjson"
+        assert expected.exists(), f"Register not at VNX_STATE_DIR override: {expected}"
+        wrong = custom_data / "state" / "dispatch_register.ndjson"
+        assert not wrong.exists(), f"Register incorrectly landed at VNX_DATA_DIR/state: {wrong}"
+
+    def test_register_path_fallback(self, tmp_path, monkeypatch):
+        """When vnx_paths import fails, falls back to VNX_DATA_DIR/state."""
+        custom_data = tmp_path / "fallback-data"
+        monkeypatch.setenv("VNX_DATA_DIR", str(custom_data))
+        monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+        with patch.dict(sys.modules, {"vnx_paths": None}):
+            result = append_event("dispatch_created", dispatch_id="fallback-test")
+        assert result is True
+        expected = custom_data / "state" / "dispatch_register.ndjson"
+        assert expected.exists(), f"Fallback register not found at {expected}"
+        rec = json.loads(expected.read_text().strip())
+        assert rec["dispatch_id"] == "fallback-test"
+
+

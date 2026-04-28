@@ -4,7 +4,7 @@ File: $VNX_STATE_DIR/dispatch_register.ndjson
 Source of truth for feature/PR queue state (consumed by build_t0_state.py).
 """
 from __future__ import annotations
-import datetime as _dt, json, os, fcntl
+import datetime as _dt, json, os, fcntl, sys
 from pathlib import Path
 from typing import Optional
 
@@ -25,8 +25,18 @@ VALID_EVENTS = {
 
 
 def _register_path() -> Path:
-    data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
-    return data_dir / "state" / "dispatch_register.ndjson"
+    """Resolve dispatch_register.ndjson location via canonical vnx_paths."""
+    try:
+        scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
+        if scripts_lib not in sys.path:
+            sys.path.insert(0, scripts_lib)
+        from vnx_paths import resolve_paths
+        state_dir = resolve_paths()["VNX_STATE_DIR"]
+        return Path(state_dir) / "dispatch_register.ndjson"
+    except Exception:
+        # Fallback: derive from VNX_DATA_DIR with /state subdir
+        data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
+        return data_dir / "state" / "dispatch_register.ndjson"
 
 
 def _utc_now_iso() -> str:
@@ -101,24 +111,30 @@ def read_events(*, since_iso: Optional[str] = None) -> list[dict]:
 # CLI for bash callers
 def _cli(argv: list[str]) -> int:
     if len(argv) < 3 or argv[1] != "append":
-        print("Usage: dispatch_register.py append <event> [key=value ...]", flush=True)
+        print("Usage: dispatch_register.py append <event> [key=value ...] [extra.key=value ...]", flush=True)
         return 2
     event = argv[2]
-    kwargs = {}
+    kwargs: dict = {}
+    extra: dict = {}
     for arg in argv[3:]:
         if "=" not in arg:
             continue
         k, v = arg.split("=", 1)
-        if k == "pr_number":
+        if k.startswith("extra."):
+            extra_key = k[len("extra."):]
+            if extra_key:
+                extra[extra_key] = v
+        elif k == "pr_number":
             try:
                 kwargs[k] = int(v)
             except ValueError:
                 continue
         elif k in ("dispatch_id", "feature_id", "terminal", "gate"):
             kwargs[k] = v
+    if extra:
+        kwargs["extra"] = extra
     return 0 if append_event(event, **kwargs) else 1
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(_cli(sys.argv))
