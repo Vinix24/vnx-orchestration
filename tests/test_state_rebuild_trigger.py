@@ -389,3 +389,47 @@ def test_promoted_then_complete_within_window_yields_two_rebuilds(tmp_path: Path
     assert r1 is True, "dispatch_promoted should fire (no prior marker)"
     assert r2 is True, "task_complete should bypass throttle and also fire"
     assert mock_p.call_count == 2, f"expected 2 Popen calls, got {mock_p.call_count}"
+
+
+# ---------------------------------------------------------------------------
+# Test 20: task_complete waits for in-flight dispatch_promoted rebuild lock
+# ---------------------------------------------------------------------------
+
+def test_critical_event_waits_for_lock(tmp_path: Path) -> None:
+    """task_complete blocks on LOCK_EX until dispatch_promoted releases the lock."""
+    import os
+
+    fired: list[float] = []
+    real_popen = subprocess.Popen
+
+    def slow_popen(*args, **kwargs):
+        fired.append(time.time())
+        time.sleep(0.3)  # simulate slow rebuild start while holding lock
+        return real_popen(
+            ["true"],
+            **{k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "start_new_session")},
+        )
+
+    results: list[tuple[str, bool]] = []
+
+    def call_promoted():
+        results.append(("promoted", srt.maybe_trigger_state_rebuild(event_type="dispatch_promoted")))
+
+    def call_completed():
+        time.sleep(0.05)  # ensure thread 1 acquires lock first
+        results.append(("completed", srt.maybe_trigger_state_rebuild(event_type="task_complete")))
+
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", slow_popen):
+        t1 = threading.Thread(target=call_promoted)
+        t2 = threading.Thread(target=call_completed)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    # Both fired: promoted first, then task_complete waited for lock + bypassed throttle
+    assert sum(1 for _, fired_ok in results if fired_ok) == 2, (
+        f"expected both to fire, got {results}"
+    )
+    assert len(fired) == 2, f"expected 2 Popen calls, got {len(fired)}"

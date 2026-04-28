@@ -45,10 +45,14 @@ def maybe_trigger_state_rebuild(
     throttle_seconds: int = _DEFAULT_THROTTLE_SECONDS,
     event_type: str = "",
 ) -> bool:
-    """Fire build_t0_state.py if throttle expired. Best-effort, non-blocking.
+    """Fire build_t0_state.py if throttle expired.
 
-    Critical events (CRITICAL_EVENTS) bypass throttle to avoid stale completion
-    state when dispatch_promoted → task_complete land within the same 30s window.
+    Critical events (CRITICAL_EVENTS) bypass throttle and BLOCK on lock
+    acquisition so they never get silently dropped when a non-critical rebuild
+    is in flight (e.g. dispatch_promoted holds the lock while task_complete
+    arrives within the same 30s window).
+
+    Non-critical events use LOCK_NB — they skip if another rebuild is in flight.
 
     Returns True if rebuild was triggered, False if throttled or on failure.
 
@@ -56,9 +60,6 @@ def maybe_trigger_state_rebuild(
     - Marker file holds INTEGER epoch seconds (no float — bash arithmetic compat)
     - Marker is written ONLY after Popen succeeds (no failure-suppression bug)
     - Atomic write via .tmp + rename
-    - fcntl.LOCK_EX | LOCK_NB on sibling .lock file prevents concurrent races
-    # Throttle marker written when Popen succeeds. Child may crash post-spawn;
-    # this is acceptable because next CRITICAL event bypasses throttle anyway.
     """
     bypass_throttle = event_type in CRITICAL_EVENTS
 
@@ -70,24 +71,27 @@ def maybe_trigger_state_rebuild(
 
     try:
         with lock_path.open("a+", encoding="utf-8") as lock_handle:
-            try:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                # Another caller is in the critical section — they will fire if needed
-                return False
+            if bypass_throttle:
+                # CRITICAL events: block until lock is free so the rebuild fires
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            else:
+                # Non-critical: skip if another rebuild is already in flight
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
 
-            # Critical section: read marker, decide, optionally fire + write marker
-            last = 0
-            try:
-                if throttle.exists():
-                    content = throttle.read_text(encoding="utf-8").strip()
-                    # Tolerate float (legacy main writers) — strip decimal portion
-                    last = int(float(content)) if content else 0
-            except (ValueError, OSError):
+            if not bypass_throttle:
                 last = 0
-
-            if not bypass_throttle and now - last < throttle_seconds:
-                return False
+                try:
+                    if throttle.exists():
+                        content = throttle.read_text(encoding="utf-8").strip()
+                        # Tolerate float (legacy main writers) — strip decimal portion
+                        last = int(float(content)) if content else 0
+                except (ValueError, OSError):
+                    last = 0
+                if now - last < throttle_seconds:
+                    return False
 
             try:
                 subprocess.Popen(
