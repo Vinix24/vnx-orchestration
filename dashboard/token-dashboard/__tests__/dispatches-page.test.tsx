@@ -57,6 +57,7 @@ function envelope(cards: DispatchSummary[]): DispatchesResponse {
     active: [],
     review: [],
     done: [],
+    rejected: [],
   };
   for (const c of cards) stages[c.stage].push(c);
   return { stages, total: cards.length };

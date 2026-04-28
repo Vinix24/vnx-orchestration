@@ -35,7 +35,6 @@ import {
   actionStartSession,
   actionStopSession,
   actionAttachTerminal,
-  actionRefreshProjections,
 } from '@/lib/operator-api';
 import ProjectCard from '@/components/operator/project-card';
 import type { ProjectEntry, ActionOutcome } from '@/lib/types';
@@ -44,8 +43,6 @@ const mockUseGateConfig = useGateConfig as jest.MockedFunction<typeof useGateCon
 const mockStartSession = actionStartSession as jest.MockedFunction<typeof actionStartSession>;
 const mockStopSession = actionStopSession as jest.MockedFunction<typeof actionStopSession>;
 const mockAttachTerminal = actionAttachTerminal as jest.MockedFunction<typeof actionAttachTerminal>;
-const mockRefreshProjections = actionRefreshProjections as jest.MockedFunction<typeof actionRefreshProjections>;
-
 // ---- Fixtures ----
 
 const INACTIVE_PROJECT: ProjectEntry = {
