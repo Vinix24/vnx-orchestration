@@ -191,6 +191,16 @@ def record_failure(
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
         rf.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
+    try:
+        from dispatch_register import append_event as _append_reg
+        _append_reg(
+            "gate_failed",
+            dispatch_id=request_payload.get("dispatch_id", "") or "",
+            pr_number=pr_number,
+            gate=gate,
+        )
+    except Exception:
+        pass
     return failure_payload
 
 

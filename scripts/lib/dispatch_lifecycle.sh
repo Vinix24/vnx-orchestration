@@ -454,5 +454,24 @@ finalize_dispatch_delivery() {
     local filename; filename=$(basename "$dispatch_file")
     mv "$dispatch_file" "$ACTIVE_DIR/$filename"
     log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
+
+    # Register dispatch_promoted event (best-effort)
+    python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
+        dispatch_id="$dispatch_id" \
+        terminal="${terminal_id:-}" \
+        >/dev/null 2>&1 || true
+
+    # Throttled non-blocking rebuild of t0_state.json (integer epoch only)
+    local _fdd_throttle_file _fdd_now _fdd_last
+    _fdd_throttle_file="${STATE_DIR}/.last_state_rebuild_ts"
+    _fdd_now=$(date +%s)
+    _fdd_last=$(cat "$_fdd_throttle_file" 2>/dev/null || echo 0)
+    _fdd_last=${_fdd_last%.*}
+    [ -z "$_fdd_last" ] && _fdd_last=0
+    if [ "$((_fdd_now - _fdd_last))" -ge 30 ]; then
+        nohup python3 "$VNX_DIR/scripts/build_t0_state.py" >/dev/null 2>&1 &
+        echo "$_fdd_now" > "${_fdd_throttle_file}.tmp" && mv "${_fdd_throttle_file}.tmp" "$_fdd_throttle_file" || true
+    fi
+
     return 0
 }

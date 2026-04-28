@@ -231,6 +231,17 @@ def materialize_artifacts(
     request_payload["completed_at"] = now
     gate_recorder.persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
 
+    try:
+        from dispatch_register import append_event as _append_reg
+        _append_reg(
+            "gate_passed" if not blocking else "gate_failed",
+            dispatch_id=real_dispatch_id or "",
+            pr_number=pr_number,
+            gate=gate,
+        )
+    except Exception:
+        pass
+
     # Write JSON sidecar to report_pipeline/ for intelligence DB ingestion (OI-1066)
     try:
         sidecar = {

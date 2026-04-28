@@ -1011,6 +1011,7 @@ def append_receipt_payload(
 
         _update_confidence_from_receipt(receipt)
 
+        _emit_dispatch_register(receipt)  # must precede rebuild so rebuild sees this event
         _maybe_trigger_state_rebuild(receipt)
 
     return result
@@ -1043,11 +1044,60 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
         _emit("WARN", "confidence_update_failed", error=str(exc))
 
 
+def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
+    """Emit a dispatch_register event mirroring this receipt. Best-effort."""
+    try:
+        from dispatch_register import append_event
+        event_type = str(receipt.get("event_type", "")).lower()
+        status = str(receipt.get("status", "")).lower()
+        dispatch_id = str(receipt.get("dispatch_id", ""))
+        pr_number = receipt.get("pr_number")
+        if pr_number is None:
+            pr_number = (receipt.get("metadata") or {}).get("pr_number")
+        terminal = str(receipt.get("terminal", ""))
+        gate = str(receipt.get("gate", ""))
+        feature_id = str(receipt.get("feature_id", ""))
+
+        if event_type in ("task_complete", "task_completed"):
+            register_event = "dispatch_failed" if status in ("failed", "error", "blocked") else "dispatch_completed"
+        elif event_type == "task_failed":
+            register_event = "dispatch_failed"
+        elif event_type == "task_timeout":
+            register_event = "dispatch_failed"
+        elif event_type == "review_gate_request":
+            register_event = "gate_requested"
+        else:
+            return  # not register-worthy
+
+        if pr_number is not None:
+            try:
+                pr_number = int(pr_number)
+            except (ValueError, TypeError):
+                pr_number = None
+
+        append_event(
+            register_event,
+            dispatch_id=dispatch_id,
+            pr_number=pr_number,
+            feature_id=feature_id,
+            terminal=terminal,
+            gate=gate,
+        )
+    except Exception:
+        pass  # best-effort, never break receipt append
+
+
 def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
     """Fire non-blocking rebuild of t0_state.json after qualifying events. Best-effort."""
     try:
         event_type = str(receipt.get("event_type") or receipt.get("event") or "")
-        if not (_is_completion_event(receipt) or event_type in ("dispatch_promoted", "dispatch_started")):
+        if not (
+            _is_completion_event(receipt)
+            or event_type in (
+                "dispatch_promoted", "dispatch_started",
+                "review_gate_request", "gate_passed", "gate_failed",
+            )
+        ):
             return
 
         state_dir = resolve_state_dir(__file__)
@@ -1072,7 +1122,7 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
         # should not suppress the next rebuild attempt for 30s.
         try:
             tmp = throttle_file.with_name(throttle_file.name + ".tmp")
-            tmp.write_text(str(time.time()), encoding="utf-8")
+            tmp.write_text(str(int(time.time())), encoding="utf-8")
             os.replace(str(tmp), str(throttle_file))
         except Exception:
             pass
