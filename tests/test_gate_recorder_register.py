@@ -72,14 +72,45 @@ def _read_register_events(env) -> list[dict]:
 
 class TestGateRecorderRegisterEmit:
 
-    def test_record_failure_codex_gate_emits_gate_failed(self, recorder_env):
-        """record_failure for codex_gate must emit gate_failed to the register."""
+    def test_record_failure_codex_timeout_no_register_emit(self, recorder_env):
+        """record_failure for codex_gate with reason=timeout must NOT emit to register.
+
+        Timeouts are infrastructure failures, not gate verdicts. Emitting gate_failed
+        would abuse the 'gate completed with blocking findings' semantic.
+        """
         payload = _make_payload(gate="codex_gate", pr_number=99)
         result = record_failure(
             gate="codex_gate",
             pr_number=99,
             pr_id="",
-            result=_make_result(),
+            result=_make_result(),  # reason="timeout"
+            request_payload=payload,
+            requests_dir=recorder_env["requests_dir"],
+            results_dir=recorder_env["results_dir"],
+        )
+
+        assert result["status"] == "failed"
+        events = _read_register_events(recorder_env)
+        assert events == [], f"Expected no register events for timeout; got: {events}"
+
+    def test_record_failure_codex_non_execution_reason_emits_gate_failed(self, recorder_env):
+        """record_failure for codex_gate with a non-execution reason emits gate_failed.
+
+        When the reason is not an infrastructure failure (e.g. an explicit review
+        verdict that triggered record_failure), gate_failed must be emitted.
+        """
+        payload = _make_payload(gate="codex_gate", pr_number=99)
+        result = record_failure(
+            gate="codex_gate",
+            pr_number=99,
+            pr_id="",
+            result={
+                "reason": "review_verdict_blocked",
+                "reason_detail": "Codex explicitly blocked the gate",
+                "duration_seconds": 12.0,
+                "partial_output_lines": 8,
+                "runner_pid": os.getpid(),
+            },
             request_payload=payload,
             requests_dir=recorder_env["requests_dir"],
             results_dir=recorder_env["results_dir"],

@@ -156,3 +156,59 @@ class TestGateArtifactsRegisterEmit:
         assert len(events) == 1
         assert events[0].get("feature_id") == "PR-6"
         assert "pr_number" not in events[0]
+
+    def test_codex_gate_verdict_pass_overrides_blocking_findings(self, artifact_env):
+        """codex verdict='pass' must emit gate_passed even when severity-derived result would be gate_failed."""
+        payload = _make_payload(gate="codex_gate", pr_number=42)
+        blocking = [{"severity": "error", "message": "Flagged but verdict overrides"}]
+        with patch("gate_artifacts.parse_codex_findings", return_value={
+            "findings": blocking,
+            "residual_risk": "Low",
+            "verdict": {"verdict": "pass"},
+            "raw_text": "",
+        }):
+            result = _run(artifact_env, payload)
+
+        assert result["status"] == "completed"
+        events = _read_register_events(artifact_env)
+        assert len(events) == 1, f"Expected 1 event; got: {events}"
+        assert events[0]["event"] == "gate_passed", (
+            "Explicit verdict='pass' must override severity-derived gate_failed"
+        )
+
+    def test_codex_gate_verdict_fail_with_no_findings_emits_gate_failed(self, artifact_env):
+        """codex verdict='fail' must emit gate_failed even when there are no findings."""
+        payload = _make_payload(gate="codex_gate", pr_number=42)
+        with patch("gate_artifacts.parse_codex_findings", return_value={
+            "findings": [],
+            "residual_risk": "",
+            "verdict": {"verdict": "fail"},
+            "raw_text": "",
+        }):
+            result = _run(artifact_env, payload)
+
+        assert result["status"] == "completed"
+        events = _read_register_events(artifact_env)
+        assert len(events) == 1, f"Expected 1 event; got: {events}"
+        assert events[0]["event"] == "gate_failed", (
+            "Explicit verdict='fail' must emit gate_failed even with no findings"
+        )
+
+    def test_codex_gate_missing_verdict_falls_back_to_severity(self, artifact_env):
+        """When codex output has no explicit verdict, classification falls back to severity."""
+        payload = _make_payload(gate="codex_gate", pr_number=42)
+        blocking = [{"severity": "error", "message": "Critical issue"}]
+        with patch("gate_artifacts.parse_codex_findings", return_value={
+            "findings": blocking,
+            "residual_risk": "",
+            "verdict": {},
+            "raw_text": "",
+        }):
+            result = _run(artifact_env, payload)
+
+        assert result["status"] == "completed"
+        events = _read_register_events(artifact_env)
+        assert len(events) == 1
+        assert events[0]["event"] == "gate_failed", (
+            "Missing verdict with blocking severity must fall back to gate_failed"
+        )

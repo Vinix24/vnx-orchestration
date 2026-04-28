@@ -26,6 +26,14 @@ _GATE_BINARIES: Dict[str, str] = {
     "claude_github_optional": "gh",
 }
 
+# Infrastructure/execution failures — NOT semantic gate verdicts.
+# gate_failed means "gate completed with blocking findings"; never emit it for these.
+EXECUTION_FAILURE_REASONS: frozenset = frozenset({
+    "exit_nonzero", "timeout", "stall", "stalled",
+    "artifact_materialization_error", "artifact_materialization_failed",
+    "subprocess_failed", "killed", "binary_not_found",
+})
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -192,8 +200,9 @@ def record_failure(
     if rf:
         rf.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
 
-    # Emit codex_gate failure to dispatch register (best-effort)
-    if gate == "codex_gate":
+    # Emit gate_failed for codex_gate only when the gate itself reported a verdict
+    # failure (not for infrastructure/execution errors like timeout or stall).
+    if gate == "codex_gate" and result["reason"] not in EXECUTION_FAILURE_REASONS:
         try:
             from gate_register_emit import emit_codex_gate_to_register
             emit_codex_gate_to_register(

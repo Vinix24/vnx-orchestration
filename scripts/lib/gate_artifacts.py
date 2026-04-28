@@ -255,11 +255,19 @@ def materialize_artifacts(
     except Exception as _exc:
         logger.warning("materialize_artifacts: sidecar write failed: %s", _exc)
 
-    # Emit to dispatch register (codex_gate only — best-effort)
+    # Emit to dispatch register (codex_gate only — best-effort).
+    # Prefer explicit JSON verdict from codex output; fall back to severity-derivation.
     if gate == "codex_gate":
         try:
             from gate_register_emit import emit_codex_gate_to_register
-            register_event = "gate_passed" if not blocking else "gate_failed"
+            verdict_obj = parsed.get("verdict", {})
+            verdict_str = verdict_obj.get("verdict", "").lower() if isinstance(verdict_obj, dict) else ""
+            if verdict_str in ("pass", "passed"):
+                register_event = "gate_passed"
+            elif verdict_str in ("fail", "failed", "blocked"):
+                register_event = "gate_failed"
+            else:
+                register_event = "gate_passed" if not blocking else "gate_failed"
             emit_codex_gate_to_register(
                 register_event,
                 dispatch_id=real_dispatch_id,
