@@ -929,8 +929,11 @@ def append_receipt_payload(
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
     receipt = _enrich_completion_receipt(receipt)
 
-    # Route ghost gate receipts (dispatch_id="unknown" + gate event) to the
-    # separate gate_events stream so t0_receipts.ndjson stays traceable.
+    # Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson.
+    # review_gate_request with empty/missing dispatch_id is redirected here (pre-existing
+    # behaviour from PR #255, see ghost_receipt_filter.py). With PR-2 fix, callers supply
+    # a real dispatch_id so is_ghost_dispatch_id() returns False and receipts land normally
+    # in t0_receipts.ndjson. This is documented intent, not a regression.
     if receipts_file is None and should_route_to_gate_stream(receipt):
         try:
             paths = ensure_env()

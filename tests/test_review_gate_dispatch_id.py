@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -18,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import review_gate_manager as rgm
 import append_receipt
+from governance_receipts import emit_governance_receipt as _emit_real
 from review_contract import ReviewContract
 
 
@@ -287,3 +289,40 @@ def test_request_claude_github_with_contract_propagates_dispatch_id(review_env, 
     assert receipt.get("dispatch_id") == "contract-dispatch-claude-gh", (
         "dispatch_id must be forwarded to emit_governance_receipt in request_claude_github_with_contract"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Integration — real emit_governance_receipt + real append_receipt path
+# ---------------------------------------------------------------------------
+
+def test_emit_governance_receipt_with_dispatch_id_routes_to_t0_receipts(review_env, monkeypatch):
+    """Integration: receipt with a real dispatch_id must land in t0_receipts.ndjson.
+
+    Exercises the full path: emit_governance_receipt → append_receipt_payload → disk
+    write → read-back. Covers Codex advisory (PR #274): prior tests mocked
+    emit_governance_receipt and never exercised the real storage stream.
+    """
+    state_dir = review_env / ".vnx-data" / "state"
+    t0_receipts = state_dir / "t0_receipts.ndjson"
+    gate_events = state_dir / "gate_events.ndjson"
+
+    _emit_real(
+        "review_gate_request",
+        dispatch_id="abc-123",
+        gate="gemini_review",
+        pr_id="99",
+        branch="fix/test-branch",
+    )
+
+    assert t0_receipts.exists(), "t0_receipts.ndjson must be created by emit_governance_receipt"
+    lines = [ln for ln in t0_receipts.read_text().splitlines() if ln.strip()]
+    assert len(lines) == 1, "exactly one receipt line expected"
+    stored = json.loads(lines[0])
+    assert stored["event_type"] == "review_gate_request"
+    assert stored["dispatch_id"] == "abc-123", "dispatch_id must be preserved in the persisted JSON line"
+
+    # With a real dispatch_id, should_route_to_gate_stream() returns False.
+    # gate_events.ndjson must NOT contain this receipt.
+    if gate_events.exists():
+        gate_lines = [ln for ln in gate_events.read_text().splitlines() if ln.strip()]
+        assert len(gate_lines) == 0, "receipt must NOT appear in gate_events.ndjson when dispatch_id is real"
