@@ -214,6 +214,7 @@ class GateRequestHandlerMixin:
             risk_class=contract.risk_class,
             contract_hash=contract.content_hash,
             changed_files=contract.changed_files,
+            dispatch_id=dispatch_id,
         )
         return payload
 
@@ -303,6 +304,7 @@ class GateRequestHandlerMixin:
             changed_files=contract.changed_files,
             contributed_evidence=receipt.contributed_evidence(),
             was_intentionally_absent=receipt.was_intentionally_absent(),
+            dispatch_id=dispatch_id,
         )
         return receipt
 

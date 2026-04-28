@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import review_gate_manager as rgm
 import append_receipt
+from review_contract import ReviewContract
 
 
 @pytest.fixture
@@ -210,3 +211,79 @@ def test_append_receipt_no_warning_for_other_event_types():
         )
 
     assert len(warn_calls) == 0, "Warning is review_gate_request-specific"
+
+
+# ---------------------------------------------------------------------------
+# Test 6: request_gemini_with_contract propagates dispatch_id to receipt
+# ---------------------------------------------------------------------------
+
+def test_request_gemini_with_contract_propagates_dispatch_id(review_env, monkeypatch):
+    captured: List[Dict[str, Any]] = []
+
+    def fake_emit(event_type, **kwargs):
+        captured.append({"event_type": event_type, **kwargs})
+        return {"append_status": "appended", "idempotency_key": "k"}
+
+    monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
+    monkeypatch.setattr("gate_request_handler.render_gemini_prompt", lambda c: "mocked prompt")
+    monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/fake")
+    monkeypatch.setenv("VNX_GEMINI_REVIEW_ENABLED", "1")
+
+    contract = ReviewContract(
+        pr_id="PR-99",
+        branch="fix/test-contract",
+        risk_class="medium",
+        changed_files=["scripts/lib/gate_request_handler.py"],
+        content_hash="deadbeef",
+    )
+
+    manager = rgm.ReviewGateManager()
+    manager.request_gemini_with_contract(
+        contract=contract,
+        mode="per_pr",
+        dispatch_id="contract-dispatch-gemini",
+    )
+
+    assert len(captured) == 1
+    receipt = captured[0]
+    assert receipt["event_type"] == "review_gate_request"
+    assert receipt.get("dispatch_id") == "contract-dispatch-gemini", (
+        "dispatch_id must be forwarded to emit_governance_receipt in request_gemini_with_contract"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7: request_claude_github_with_contract propagates dispatch_id to receipt
+# ---------------------------------------------------------------------------
+
+def test_request_claude_github_with_contract_propagates_dispatch_id(review_env, monkeypatch):
+    captured: List[Dict[str, Any]] = []
+
+    def fake_emit(event_type, **kwargs):
+        captured.append({"event_type": event_type, **kwargs})
+        return {"append_status": "appended", "idempotency_key": "k"}
+
+    monkeypatch.setattr(rgm, "emit_governance_receipt", fake_emit)
+    monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+
+    contract = ReviewContract(
+        pr_id="PR-99",
+        branch="fix/test-contract",
+        risk_class="medium",
+        changed_files=["scripts/lib/gate_request_handler.py"],
+        content_hash="deadbeef",
+    )
+
+    manager = rgm.ReviewGateManager()
+    manager.request_claude_github_with_contract(
+        contract=contract,
+        mode="per_pr",
+        dispatch_id="contract-dispatch-claude-gh",
+    )
+
+    assert len(captured) == 1
+    receipt = captured[0]
+    assert receipt["event_type"] == "review_gate_request"
+    assert receipt.get("dispatch_id") == "contract-dispatch-claude-gh", (
+        "dispatch_id must be forwarded to emit_governance_receipt in request_claude_github_with_contract"
+    )
