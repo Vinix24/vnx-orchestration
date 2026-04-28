@@ -34,8 +34,11 @@ def _register_path() -> Path:
         state_dir = resolve_paths()["VNX_STATE_DIR"]
         return Path(state_dir) / "dispatch_register.ndjson"
     except Exception:
-        # Fallback: derive from VNX_DATA_DIR with /state subdir
-        data_dir = Path(os.environ.get("VNX_DATA_DIR", str(_REPO_ROOT / ".vnx-data")))
+        # Fallback: only honor VNX_DATA_DIR if explicitly enabled (mirrors canonical contract)
+        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
+            data_dir = Path(os.environ["VNX_DATA_DIR"])
+        else:
+            data_dir = _REPO_ROOT / ".vnx-data"
         return data_dir / "state" / "dispatch_register.ndjson"
 
 
@@ -89,22 +92,31 @@ def append_event(
 
 
 def read_events(*, since_iso: Optional[str] = None) -> list[dict]:
-    """Read all events as list of dicts, optionally filtered by minimum timestamp."""
+    """Read all events; takes shared lock to avoid partial-write reads."""
     path = _register_path()
     if not path.exists():
         return []
     events = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-            if since_iso and rec.get("timestamp", "") < since_iso:
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+            try:
+                content = fh.read()
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            events.append(rec)
-        except json.JSONDecodeError:
-            continue
+            try:
+                rec = json.loads(line)
+                if since_iso and rec.get("timestamp", "") < since_iso:
+                    continue
+                events.append(rec)
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        return []
     return events
 
 
