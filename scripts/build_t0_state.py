@@ -438,27 +438,17 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
         return []
 
     try:
-        # Tail-read without loading entire file
-        with open(receipts_path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            end = f.tell()
-            data = b""
-            block = 8192
-            while end > 0 and data.count(b"\n") < 100:
-                start = max(0, end - block)
-                f.seek(start)
-                data = f.read(end - start) + data
-                end = start
-                if start == 0:
-                    break
+        raw_lines = receipts_path.read_bytes().splitlines()
 
         events: List[Dict[str, Any]] = []
-        for line in data.splitlines()[-100:]:
-            line = line.strip()
+        for raw_line in raw_lines:
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 e = json.loads(line.decode("utf-8"))
+                if e.get("event_type") == "state_mutation":
+                    continue
                 events.append({
                     "terminal": e.get("terminal"),
                     "status": e.get("status"),
@@ -470,7 +460,7 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-        return events[-n:]
+        return events[-100:][-n:]
     except Exception:
         return []
 
@@ -675,12 +665,33 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    output_path = Path(args.output)
+    elapsed = 0.0
+    _build_succeeded = False
     try:
+        t_start = time.monotonic()
         state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
         payload = _state_to_brief(state) if args.format == "brief" else state
-        _write_atomic(Path(args.output), payload)
+        _write_atomic(output_path, payload)
+        elapsed = time.monotonic() - t_start
+        _build_succeeded = True
     except Exception:
         pass  # SessionStart hook must never block session
+
+    if _build_succeeded:
+        try:
+            if str(_LIB_DIR) not in sys.path:
+                sys.path.insert(0, str(_LIB_DIR))
+            from state_mutation import emit_state_mutation
+            size_bytes = output_path.stat().st_size if output_path.exists() else 0
+            emit_state_mutation(
+                output_path.name,
+                trigger="auto_rebuild",
+                rebuild_seconds=elapsed,
+                size_bytes=size_bytes,
+            )
+        except Exception:
+            pass
 
     return 0  # Always exit 0
 
