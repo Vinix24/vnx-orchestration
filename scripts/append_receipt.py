@@ -575,6 +575,17 @@ def _build_session_metadata(receipt: Dict[str, Any], state_dir: Path) -> Dict[st
     except Exception:
         pass
 
+    # Inject instruction_sha256 from manifest (best-effort)
+    manifest_path = receipt.get("manifest_path")
+    if manifest_path:
+        try:
+            manifest_data = json.loads(Path(manifest_path).read_text())
+            sha = manifest_data.get("instruction_sha256")
+            if sha:
+                metadata["instruction_sha256"] = sha
+        except (OSError, IOError, json.JSONDecodeError) as exc:
+            print(f"[append_receipt] warning: could not read instruction_sha256 from manifest {manifest_path}: {exc}", file=sys.stderr)
+
     return metadata
 
 
