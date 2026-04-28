@@ -41,13 +41,32 @@ def main() -> int:
         conn.close()
         return 0
 
-    receipt = {
+    row_keys = set(row.keys())
+
+    def _field(key, default=None):
+        return row[key] if key in row_keys else default
+
+    def _parse_json_field(value: str | None) -> dict | list | None:
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    receipt: dict = {
         "status": row["outcome_status"],
         "report_path": row["outcome_report_path"],
         "role": row["role"],
         "gate": row["gate"],
         "pr_id": row["pr_id"],
+        "open_items_created": _field("open_items_created") or 0,
+        "open_items_resolved": _field("open_items_resolved") or 0,
+        "target_open_items": _parse_json_field(_field("target_open_items")),
     }
+    qa = _parse_json_field(_field("quality_advisory_json"))
+    if qa is not None:
+        receipt["quality_advisory"] = qa
 
     session = None
     sa_row = conn.execute(
