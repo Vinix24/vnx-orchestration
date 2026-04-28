@@ -1060,8 +1060,21 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
         pr_id = str(receipt.get("pr_id", ""))
         feature_id = str(receipt.get("feature_id", ""))
 
+        _SUCCESS_STATUSES = {"success", "completed", "complete", "ok"}
+        _FAILURE_STATUSES = {"failed", "failure", "error", "blocked"}
+
         if event_type in ("task_complete", "task_completed"):
-            register_event = "dispatch_failed" if status in ("failed", "failure", "error", "blocked") else "dispatch_completed"
+            if status in _FAILURE_STATUSES:
+                register_event = "dispatch_failed"
+            elif status in _SUCCESS_STATUSES or status == "":
+                register_event = "dispatch_completed"
+            else:
+                import logging as _logging
+                _logging.warning(
+                    "_emit_dispatch_register: task_complete with unknown status=%r; skipping register emit",
+                    status,
+                )
+                return
         elif event_type == "task_failed":
             register_event = "dispatch_failed"
         elif event_type == "task_timeout":

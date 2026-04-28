@@ -19,6 +19,16 @@ import gate_recorder
 from codex_parser import parse_codex_findings
 
 
+def _parse_gemini_findings(stdout: str) -> List[Dict[str, Any]]:
+    """Minimal gemini findings parser — scans for BLOCKING/blocker severity markers."""
+    findings = []
+    for line in stdout.splitlines():
+        line_lower = line.lower()
+        if "blocking" in line_lower or "blocker" in line_lower:
+            findings.append({"severity": "blocking", "message": line.strip()})
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Contract hash
 # ---------------------------------------------------------------------------
@@ -194,12 +204,26 @@ def materialize_artifacts(
 
     contract_hash = _compute_contract_hash(request_payload, gate)
     now = utc_now_iso()
-    findings: List[Dict[str, Any]] = []
+    _parsed_findings: Optional[List[Dict[str, Any]]] = None
     residual_risk = ""
     if gate == "codex_gate":
         parsed = parse_codex_findings(stdout)
-        findings = parsed["findings"]
+        _parsed_findings = parsed["findings"]
         residual_risk = parsed.get("residual_risk", "") or ""
+    elif gate == "gemini_review":
+        _parsed_findings = _parse_gemini_findings(stdout)
+
+    _skip_register_emit = False
+    if _parsed_findings is None:
+        logger.warning(
+            "materialize_artifacts: findings parser not implemented for gate=%s; skipping register emit",
+            gate,
+        )
+        findings: List[Dict[str, Any]] = []
+        _skip_register_emit = True
+    else:
+        findings = _parsed_findings
+
     blocking, advisory = _classify_findings(findings)
 
     real_dispatch_id = request_payload.get("dispatch_id", "")
@@ -245,20 +269,21 @@ def materialize_artifacts(
                 # Non-numeric pr_id (contract path "PR-6" style) — use as feature_id fallback
                 _feature_id = str(pr_id)
 
-        _gate_event = "gate_passed" if not blocking else "gate_failed"
-        _reg_result = _append_reg(
-            _gate_event,
-            dispatch_id=real_dispatch_id or "",
-            pr_number=_pr_num,
-            feature_id=_feature_id,
-            gate=gate,
-        )
-        if not _reg_result:
-            _logging.warning(
-                "dispatch_register: gate event %s dropped — no identifying field "
-                "(dispatch_id=%r, pr_number=%r, pr_id=%r)",
-                _gate_event, real_dispatch_id, _pr_num, pr_id,
+        if not _skip_register_emit:
+            _gate_event = "gate_passed" if not blocking else "gate_failed"
+            _reg_result = _append_reg(
+                _gate_event,
+                dispatch_id=real_dispatch_id or "",
+                pr_number=_pr_num,
+                feature_id=_feature_id,
+                gate=gate,
             )
+            if not _reg_result:
+                _logging.warning(
+                    "dispatch_register: gate event %s dropped — no identifying field "
+                    "(dispatch_id=%r, pr_number=%r, pr_id=%r)",
+                    _gate_event, real_dispatch_id, _pr_num, pr_id,
+                )
         _trigger_rebuild()
     except Exception:
         pass

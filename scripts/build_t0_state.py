@@ -525,31 +525,11 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 
 def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> List[Dict[str, Any]]:
-    """Read last N events from dispatch_register.ndjson — minimal exposure for PR-4b.
-
-    If state_dir is provided, read from that location directly (test/headless override).
-    Otherwise use the canonical dispatch_register.read_events() resolution.
-    """
+    """Read last N events with shared-lock contract preserved."""
     try:
-        if state_dir is not None:
-            register_path = Path(state_dir) / "dispatch_register.ndjson"
-            if not register_path.exists():
-                return []
-            events = []
-            content = register_path.read_text(encoding="utf-8", errors="replace")
-            for line in content.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-            return events[-limit:] if events else []
-        else:
-            from dispatch_register import read_events
-            events = read_events()
-            return events[-limit:] if events else []
+        from dispatch_register import read_events
+        events = read_events(state_dir=state_dir)
+        return events[-limit:] if events else []
     except Exception:
         return []
 

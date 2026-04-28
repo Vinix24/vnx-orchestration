@@ -103,9 +103,12 @@ def append_event(
         return False
 
 
-def read_events(*, since_iso: Optional[str] = None) -> list[dict]:
-    """Read all events; takes shared lock to avoid partial-write reads."""
-    path = _register_path()
+def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
+    """Read all events; honors optional state_dir override; takes shared lock."""
+    if state_dir is not None:
+        path = Path(state_dir) / "dispatch_register.ndjson"
+    else:
+        path = _register_path()
     if not path.exists():
         return []
     events = []

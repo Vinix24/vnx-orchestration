@@ -795,3 +795,131 @@ def test_emit_canonical_event_type_field_still_works(isolated_register):
     assert len(events) == 1
     assert events[0]["event"] == "dispatch_completed"
     assert events[0]["dispatch_id"] == "D-CANON-001"
+
+
+# ---------------------------------------------------------------------------
+# Tests 25-26: status defaulting guards (ADVISORY 1 — Codex PR #278 round 5)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_task_complete_unknown_status_skips_emit(isolated_register):
+    """task_complete with status='unknown' must NOT emit to register (malformed receipt guard)."""
+    receipt = {
+        "event_type": "task_complete",
+        "status": "unknown",
+        "dispatch_id": "D-UNKNOWN-001",
+        "terminal": "T1",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 0, (
+        f"task_complete with status='unknown' must not emit, got: {events}"
+    )
+
+
+def test_emit_task_complete_empty_status_emits_completed(isolated_register):
+    """task_complete with status='' (empty) must map to dispatch_completed (legacy convention)."""
+    receipt = {
+        "event_type": "task_complete",
+        "status": "",
+        "dispatch_id": "D-EMPTY-001",
+        "terminal": "T1",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 1
+    assert events[0]["event"] == "dispatch_completed"
+    assert events[0]["dispatch_id"] == "D-EMPTY-001"
+
+
+# ---------------------------------------------------------------------------
+# Tests 27-28: multi-gate findings parser (BLOCKING — Codex PR #278 round 5)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_artifacts_gemini_blocking_in_stdout_emits_gate_failed(isolated_register, tmp_path):
+    """materialize_artifacts gemini_review with 'BLOCKING' in stdout emits gate_failed."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    reports_dir = tmp_path / "reports"
+    for d in (requests_dir, results_dir, reports_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "gate_report.md"
+    payload = {
+        "gate": "gemini_review",
+        "pr_number": 50,
+        "pr_id": "pr-50",
+        "branch": "feat/test",
+        "report_path": str(report_path),
+        "dispatch_id": "D-GEMINI-BLOCKING",
+    }
+    stdout = (
+        "# Gemini Review\n\n"
+        "This PR has a BLOCKING issue with null pointer dereference.\n"
+        "Must fix before merge.\n"
+        "Overall: FAIL"
+    )
+
+    result = gate_artifacts.materialize_artifacts(
+        gate="gemini_review",
+        pr_number=50,
+        pr_id="pr-50",
+        stdout=stdout,
+        request_payload=payload,
+        duration_seconds=1.5,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        reports_dir=reports_dir,
+    )
+
+    assert result.get("status") == "completed"
+    events = _reg_events(isolated_register)
+    gate_events = [e for e in events if e.get("gate") == "gemini_review"]
+    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
+    assert gate_events[0]["event"] == "gate_failed", (
+        f"BLOCKING in gemini stdout must produce gate_failed, got {gate_events[0]['event']!r}"
+    )
+
+
+def test_gate_artifacts_claude_github_optional_skips_register_emit(isolated_register, tmp_path):
+    """materialize_artifacts claude_github_optional must not emit any register event (parser unimplemented)."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    reports_dir = tmp_path / "reports"
+    for d in (requests_dir, results_dir, reports_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "gate_report.md"
+    payload = {
+        "gate": "claude_github_optional",
+        "pr_number": 60,
+        "pr_id": "pr-60",
+        "branch": "feat/test",
+        "report_path": str(report_path),
+        "dispatch_id": "D-CLAUDE-GH-060",
+    }
+    stdout = (
+        "# Claude GitHub Review\n\n"
+        "Looks good overall.\n"
+        "Minor suggestions noted."
+    )
+
+    result = gate_artifacts.materialize_artifacts(
+        gate="claude_github_optional",
+        pr_number=60,
+        pr_id="pr-60",
+        stdout=stdout,
+        request_payload=payload,
+        duration_seconds=1.0,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        reports_dir=reports_dir,
+    )
+
+    assert result.get("status") == "completed"
+    events = _reg_events(isolated_register)
+    gate_events = [e for e in events if e.get("gate") == "claude_github_optional"]
+    assert len(gate_events) == 0, (
+        f"claude_github_optional must not emit register event (parser unimplemented), got: {gate_events}"
+    )

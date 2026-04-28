@@ -104,6 +104,35 @@ def test_build_register_events_state_dir_missing_returns_empty(tmp_path: Path) -
     assert result == []
 
 
+def test_build_register_events_state_dir_uses_shared_lock_reader(tmp_path: Path) -> None:
+    """_build_register_events(state_dir=X) must use shared-lock reader, not raw read_text."""
+    import fcntl as _fcntl
+
+    state_dir = tmp_path / "lock_state"
+    state_dir.mkdir()
+    register_file = state_dir / "dispatch_register.ndjson"
+    register_file.write_text(
+        json.dumps({"timestamp": "2026-04-28T10:00:00Z", "event": "gate_passed", "dispatch_id": "D-LOCK"}) + "\n",
+        encoding="utf-8",
+    )
+
+    lock_calls = []
+    original_flock = _fcntl.flock
+
+    def spy_flock(fd, op):
+        lock_calls.append(op)
+        return original_flock(fd, op)
+
+    with mock.patch("dispatch_register.fcntl.flock", side_effect=spy_flock):
+        result = bts._build_register_events(state_dir=state_dir, limit=50)
+
+    assert len(result) == 1
+    assert result[0]["dispatch_id"] == "D-LOCK"
+    assert _fcntl.LOCK_SH in lock_calls, (
+        f"LOCK_SH not observed — state_dir path must use shared-lock reader, got: {lock_calls}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 2: build_t0_state return dict contains dispatch_register_events
 # ---------------------------------------------------------------------------

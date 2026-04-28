@@ -532,3 +532,67 @@ class TestAppendEventIdRequirement:
         result = append_event("dispatch_created", feature_id="F-55")
         assert result is True
 
+
+# ---------------------------------------------------------------------------
+# 20. read_events state_dir param — reads from override, preserves shared lock
+# ---------------------------------------------------------------------------
+
+class TestReadEventsStateDir:
+    def test_read_events_state_dir_reads_from_override(self, tmp_path):
+        """read_events(state_dir=X) reads from X/dispatch_register.ndjson."""
+        custom_state = tmp_path / "custom-state"
+        custom_state.mkdir()
+        reg_file = custom_state / "dispatch_register.ndjson"
+        reg_file.write_text(
+            json.dumps({"timestamp": "2026-04-28T10:00:00.000000Z", "event": "gate_passed", "dispatch_id": "SD-001"}) + "\n",
+            encoding="utf-8",
+        )
+        events = read_events(state_dir=custom_state)
+        assert len(events) == 1
+        assert events[0]["dispatch_id"] == "SD-001"
+
+    def test_read_events_state_dir_missing_file_returns_empty(self, tmp_path):
+        """read_events(state_dir=X) returns [] when X/dispatch_register.ndjson doesn't exist."""
+        custom_state = tmp_path / "empty-state"
+        custom_state.mkdir()
+        events = read_events(state_dir=custom_state)
+        assert events == []
+
+    def test_read_events_state_dir_takes_shared_lock(self, tmp_path):
+        """read_events(state_dir=X) acquires fcntl.LOCK_SH on the file."""
+        import fcntl as _fcntl
+        custom_state = tmp_path / "lock-state"
+        custom_state.mkdir()
+        reg_file = custom_state / "dispatch_register.ndjson"
+        reg_file.write_text(
+            json.dumps({"timestamp": "2026-04-28T10:00:00.000000Z", "event": "gate_passed", "dispatch_id": "LOCK-001"}) + "\n",
+            encoding="utf-8",
+        )
+
+        lock_calls = []
+        original_flock = _fcntl.flock
+
+        def spy_flock(fd, op):
+            lock_calls.append(op)
+            return original_flock(fd, op)
+
+        with patch("dispatch_register.fcntl.flock", side_effect=spy_flock):
+            events = read_events(state_dir=custom_state)
+
+        assert len(events) == 1
+        assert _fcntl.LOCK_SH in lock_calls, f"LOCK_SH not observed; calls: {lock_calls}"
+
+    def test_read_events_state_dir_since_iso_filter_still_works(self, tmp_path):
+        """read_events(state_dir=X, since_iso=...) applies the time filter correctly."""
+        custom_state = tmp_path / "filter-state"
+        custom_state.mkdir()
+        reg_file = custom_state / "dispatch_register.ndjson"
+        reg_file.write_text(
+            json.dumps({"timestamp": "2026-01-01T00:00:00.000000Z", "event": "dispatch_created", "dispatch_id": "OLD"}) + "\n"
+            + json.dumps({"timestamp": "2026-06-01T00:00:00.000000Z", "event": "gate_passed", "dispatch_id": "NEW"}) + "\n",
+            encoding="utf-8",
+        )
+        events = read_events(state_dir=custom_state, since_iso="2026-03-01T00:00:00.000000Z")
+        assert len(events) == 1
+        assert events[0]["dispatch_id"] == "NEW"
+
