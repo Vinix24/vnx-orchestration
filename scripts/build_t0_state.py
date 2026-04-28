@@ -618,6 +618,14 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
     pr_raw = state.get("pr_progress") or {}
     oi = state.get("open_items") or {}
     sh = state.get("system_health") or {}
+    active_work = state.get("active_work") or []
+
+    blockers = (oi.get("top_blockers") or [])[:3]
+    next_gates = [
+        item["gate"]
+        for item in active_work
+        if item.get("gate")
+    ]
 
     return {
         "timestamp": state.get("generated_at", _now_iso()),
@@ -630,9 +638,10 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "conflicts": queues.get("conflict_count", 0),
         },
         "tracks": state.get("tracks", {}),
-        "active_work": state.get("active_work", []),
+        "active_work": active_work,
         "recent_receipts": state.get("recent_receipts", []),
-        "blockers": [],
+        "blockers": blockers,
+        "next_gates": next_gates,
         "open_items_summary": {
             "open_count": oi.get("open_count", 0),
             "blocker_count": oi.get("blocker_count", 0),
@@ -682,17 +691,26 @@ def main() -> int:
         description="Build unified T0 state JSON from all runtime sources."
     )
     parser.add_argument(
-        "--output",
-        default=str(_STATE_DIR / "t0_state.json"),
-        help="Output path (default: $VNX_STATE_DIR/t0_state.json)",
-    )
-    parser.add_argument(
         "--format",
         choices=["state", "brief"],
         default="state",
         help="Output format: 'state' (schema 2.0) or 'brief' (backward-compat 1.0)",
     )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "Output path (default: t0_state.json for --format state, "
+            "t0_brief.json for --format brief)"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.output is None:
+        if args.format == "brief":
+            args.output = str(_STATE_DIR / "t0_brief.json")
+        else:
+            args.output = str(_STATE_DIR / "t0_state.json")
 
     output_path = Path(args.output)
     elapsed = 0.0
