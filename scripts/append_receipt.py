@@ -901,6 +901,9 @@ def _emit_dispatch_register(receipt: dict) -> bool:
         elif event_type == "task_failed":
             register_event = "dispatch_failed"
         elif event_type == "task_timeout":
+            # task_timeout → dispatch_failed: terminal failure semantic.
+            # no_confirmation-style transient timeouts use a different event flow
+            # and don't reach here. Map separately if/when needed (TBD).
             register_event = "dispatch_failed"
         elif event_type in ("task_started", "task_start", "dispatch_start"):
             register_event = "dispatch_started"
@@ -924,16 +927,27 @@ def _emit_dispatch_register(receipt: dict) -> bool:
 
 
 def _count_quality_violations(receipt: dict) -> int:
-    """Count violations that _register_quality_open_items WILL create.
+    """Count violations that _register_quality_open_items WILL create (after dedup).
 
-    Reads the same data path as _register_quality_open_items so the
-    pre-computed count is consistent with what will be registered.
+    Uses the same dedup_key logic as _register_quality_open_items so the
+    pre-computed count matches the actual creation count.
     Returns 0 when quality_advisory or t0_recommendation is absent.
     """
     advisory = receipt.get("quality_advisory") or {}
     rec = advisory.get("t0_recommendation") or {}
     open_items = rec.get("open_items") or []
-    return len(open_items)
+    if not open_items:
+        return 0
+    # Mirror dedup_key from _register_quality_open_items: qa:{check_id}:{basename}:{symbol}.
+    # Collisions across directories tracked as OI-1176; out of scope for PR-4b3.
+    seen_keys: set = set()
+    for item in open_items:
+        check_id = str(item.get("check_id", "unknown"))
+        file_path = str(item.get("file", ""))
+        file_basename = Path(file_path).name if file_path else "unknown"
+        symbol = str(item.get("symbol") or "")
+        seen_keys.add(f"qa:{check_id}:{file_basename}:{symbol}")
+    return len(seen_keys)
 
 
 def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
@@ -1017,14 +1031,14 @@ def append_receipt_payload(
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
+    # Pre-count BEFORE enrichment so CQS computed inside _enrich_completion_receipt sees the
+    # correct open_items_created value. Previously this was set AFTER enrichment, so the
+    # UPDATE at _enrich_completion_receipt:760-789 always read open_items_created=0.
+    receipt["open_items_created"] = _count_quality_violations(receipt)
+
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
     if not skip_enrichment:
         receipt = _enrich_completion_receipt(receipt)
-
-    # Pre-compute open_items_created BEFORE the lock-protected ndjson write so the
-    # embedded count is non-zero when the advisory has violations.  Without this,
-    # open_items_created persisted as 0 and _score_open_items_delta() lost the penalty.
-    receipt["open_items_created"] = _count_quality_violations(receipt)
 
     # Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson.
     # review_gate_request with empty/missing dispatch_id is redirected here (pre-existing

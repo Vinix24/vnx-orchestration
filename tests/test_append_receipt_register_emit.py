@@ -395,3 +395,95 @@ def test_open_items_created_zero_when_no_violations(tmp_path: Path):
     lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     persisted = json.loads(lines[0])
     assert persisted.get("open_items_created", 0) == 0
+
+
+# ── Tests for dedup-aware _count_quality_violations ─────────────────────────
+
+def test_count_quality_violations_dedup_same_key(ar):
+    """Two items with identical (check_id, file_basename, symbol) collapse to 1."""
+    receipt = {
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "src/foo.py", "symbol": "my_func", "severity": "blocker"},
+                    {"check_id": "c1", "file": "src/foo.py", "symbol": "my_func", "severity": "blocker"},
+                    {"check_id": "c2", "file": "src/bar.py", "symbol": "", "severity": "warn"},
+                ]
+            }
+        }
+    }
+    assert ar._count_quality_violations(receipt) == 2
+
+
+def test_count_quality_violations_five_with_two_deduped(ar):
+    """5 violations: 2 share basename+symbol with c1, 2 are duplicate c3 → returns 3."""
+    receipt = {
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "a/foo.py", "symbol": "fn", "severity": "blocker"},
+                    {"check_id": "c1", "file": "b/foo.py", "symbol": "fn", "severity": "blocker"},  # same basename+symbol → dedup
+                    {"check_id": "c2", "file": "a/foo.py", "symbol": "fn", "severity": "warn"},
+                    {"check_id": "c3", "file": "c/bar.py", "symbol": "", "severity": "info"},
+                    {"check_id": "c3", "file": "c/bar.py", "symbol": "", "severity": "info"},  # identical → dedup
+                ]
+            }
+        }
+    }
+    assert ar._count_quality_violations(receipt) == 3
+
+
+def test_count_quality_violations_different_checks_not_deduped(ar):
+    """Same file + symbol but different check_ids are NOT deduped (separate findings)."""
+    receipt = {
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "src/foo.py", "symbol": "fn", "severity": "blocker"},
+                    {"check_id": "c2", "file": "src/foo.py", "symbol": "fn", "severity": "warn"},
+                    {"check_id": "c3", "file": "src/foo.py", "symbol": "fn", "severity": "info"},
+                ]
+            }
+        }
+    }
+    assert ar._count_quality_violations(receipt) == 3
+
+
+# ── Test: NDJSON persists dedup-aware open_items_created ────────────────────
+
+def test_open_items_created_dedup_count_in_ndjson(tmp_path: Path):
+    """5 violations with 2 dedup pairs → open_items_created=3 in NDJSON."""
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI-DEDUP-001",
+        "terminal": "T1",
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "a/foo.py", "symbol": "fn", "severity": "blocker"},
+                    {"check_id": "c1", "file": "b/foo.py", "symbol": "fn", "severity": "blocker"},
+                    {"check_id": "c2", "file": "a/foo.py", "symbol": "fn", "severity": "warn"},
+                    {"check_id": "c3", "file": "c/bar.py", "symbol": "", "severity": "info"},
+                    {"check_id": "c3", "file": "c/bar.py", "symbol": "", "severity": "info"},
+                ]
+            }
+        },
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "append_receipt.py"), "--skip-enrichment"],
+        input=json.dumps(receipt),
+        capture_output=True,
+        text=True,
+        env=_build_env(tmp_path),
+    )
+    assert result.returncode == 0, f"append failed: {result.stderr}"
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1
+    persisted = json.loads(lines[0])
+    assert persisted.get("open_items_created") == 3, (
+        f"Expected 3 (5 violations deduped to 3), got {persisted.get('open_items_created')!r}"
+    )
