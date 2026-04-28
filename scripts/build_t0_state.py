@@ -525,12 +525,14 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 
 def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> list[dict]:
-    """Read last N events from dispatch_register.ndjson — minimal exposure for PR-4b2.
+    """Return last N dispatch_register events as raw list — minimal exposure.
 
-    Honors state_dir override (test/headless contexts). Goes through canonical
-    dispatch_register.read_events() to preserve fcntl.LOCK_SH contract.
+    NOT a feature_state aggregation. Full register-canonical pr_progress
+    aggregation (group-by-dispatch, recency status, PR/feature rollup) is
+    deferred to PR-4c.
 
-    Full register-canonical aggregation deferred to PR-4c.
+    Honors state_dir override (test/headless contexts) via
+    dispatch_register.read_events shared-lock contract.
     """
     try:
         if str(_LIB_DIR) not in sys.path:
