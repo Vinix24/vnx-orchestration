@@ -296,7 +296,7 @@ def _aggregate_register_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     _COMPLETION_EVENTS = {"dispatch_completed", "pr_merged"}
     _ACTIVE_EVENTS = {"dispatch_promoted", "dispatch_started"}
-    _FAILED_EVENTS = {"dispatch_failed"}
+    _FAILED_EVENTS = {"dispatch_failed", "gate_failed"}
 
     # --- First pass: group by dispatch_id ---
     by_dispatch: Dict[str, List[Dict[str, Any]]] = {}

@@ -321,6 +321,78 @@ def test_dispatch_id_primary_key_no_stale_active(tmp_path: Path):
     assert "d-stale-active" not in rf
 
 
+def test_gate_failed_flips_dispatch_status_to_failed(tmp_path: Path):
+    """dispatch_promoted + gate_failed must yield status 'failed', not 'active'.
+
+    Regression for: gate events were written to the register but did not participate
+    in status aggregation, so a gate-failed dispatch still showed status 'active'.
+    """
+    env_patch, state_dir, _ = _load_build_t0_state(tmp_path)
+
+    events = [
+        {
+            "timestamp": "2026-04-28T13:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-gate-fail-status",
+            "pr_number": 301,
+            "terminal": "T1",
+        },
+        {
+            "timestamp": "2026-04-28T13:30:00Z",
+            "event": "gate_failed",
+            "dispatch_id": "d-gate-fail-status",
+            "pr_number": 301,
+            "gate": "codex_gate",
+        },
+    ]
+    _write_register(state_dir, events)
+
+    with mock.patch.dict(os.environ, env_patch):
+        result = _load_mod_with_fake_fsm(tmp_path, env_patch, state_dir)
+
+    rf = result["register_features"]
+    assert "pr-301" in rf, f"Expected 'pr-301' in {list(rf.keys())}"
+    assert rf["pr-301"]["status"] == "failed", (
+        f"Expected 'failed' after gate_failed, got {rf['pr-301']['status']!r}"
+    )
+
+
+def test_gate_passed_does_not_complete_dispatch(tmp_path: Path):
+    """dispatch_promoted + gate_passed must keep status 'active'; gate passing alone is not completion.
+
+    Regression guard: gate_passed must not be treated as a completion event.
+    """
+    env_patch, state_dir, _ = _load_build_t0_state(tmp_path)
+
+    events = [
+        {
+            "timestamp": "2026-04-28T14:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-gate-pass-status",
+            "pr_number": 302,
+            "terminal": "T1",
+        },
+        {
+            "timestamp": "2026-04-28T14:20:00Z",
+            "event": "gate_passed",
+            "dispatch_id": "d-gate-pass-status",
+            "pr_number": 302,
+            "gate": "gemini_review",
+        },
+    ]
+    _write_register(state_dir, events)
+
+    with mock.patch.dict(os.environ, env_patch):
+        result = _load_mod_with_fake_fsm(tmp_path, env_patch, state_dir)
+
+    rf = result["register_features"]
+    assert "pr-302" in rf, f"Expected 'pr-302' in {list(rf.keys())}"
+    assert rf["pr-302"]["status"] == "active", (
+        f"Expected 'active' (gate_passed alone must not complete dispatch), "
+        f"got {rf['pr-302']['status']!r}"
+    )
+
+
 def test_retry_dispatch_after_completed_yields_active(tmp_path: Path):
     """A completed dispatch followed by a newer promoted dispatch on the same PR
     must yield PR status 'active', not 'completed'.

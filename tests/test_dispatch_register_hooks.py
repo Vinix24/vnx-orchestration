@@ -156,6 +156,30 @@ def test_task_failed_receipt_triggers_dispatch_failed(tmp_path: Path):
                for e in events)
 
 
+def test_task_timeout_receipt_triggers_dispatch_failed(tmp_path: Path):
+    """task_timeout is a terminal failure; must emit dispatch_failed, not be silently dropped.
+
+    Regression for: _emit_dispatch_register had no branch for task_timeout, so timed-out
+    dispatches stayed stuck at their last dispatch_promoted status in the register.
+    """
+    receipt = {
+        "timestamp": "2026-04-28T11:00:00Z",
+        "event_type": "task_timeout",
+        "dispatch_id": "d-timeout-001",
+        "terminal": "T1",
+    }
+    _run_emit_helper(tmp_path, receipt)
+    events = _read_register(tmp_path)
+    assert any(
+        e["event"] == "dispatch_failed" and e["dispatch_id"] == "d-timeout-001"
+        for e in events
+    ), f"Expected dispatch_failed in register for task_timeout, got: {events}"
+    assert not any(
+        e["event"] == "dispatch_completed" and e["dispatch_id"] == "d-timeout-001"
+        for e in events
+    ), "task_timeout must not produce dispatch_completed"
+
+
 def test_review_gate_request_triggers_gate_requested(tmp_path: Path):
     receipt = {
         "timestamp": "2026-04-28T10:02:00Z",

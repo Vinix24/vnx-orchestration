@@ -1028,8 +1028,8 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
                 register_event = "dispatch_failed"
             else:
                 register_event = "dispatch_completed"
-        elif event_type == "task_failed":
-            register_event = "dispatch_failed"
+        elif event_type in ("task_failed", "task_timeout"):
+            register_event = "dispatch_failed"  # timeout is terminal failure
         elif event_type == "review_gate_request":
             register_event = "gate_requested"
         else:
