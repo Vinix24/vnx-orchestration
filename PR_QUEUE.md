@@ -1,3 +1,4 @@
+<!-- DEPRECATED: see pr_queue_state.json -->
 # PR Queue - Feature: Dependency Chain Test
 
 ## Progress Overview
