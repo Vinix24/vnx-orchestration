@@ -43,11 +43,11 @@ _DISPATCH_DIR = Path(_PATHS["VNX_DISPATCH_DIR"])
 _DATA_DIR = Path(_PATHS["VNX_DATA_DIR"])
 _PROJECT_ROOT = Path(_PATHS["PROJECT_ROOT"])
 
-# Register events reader (raw events list exposure for now; aggregation is PR-4c)
+# Register events reader — used by _build_register_events and _build_feature_state
 try:
-    from dispatch_register import read_events as _read_register_events
+    from dispatch_register import read_events as _dr_read_events
 except ImportError:
-    _read_register_events = None  # Module is optional during initial deploy
+    _dr_read_events = None
 
 
 # ---------------------------------------------------------------------------
@@ -240,12 +240,99 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Feature state (via FeatureStateMachine)
+# Feature state — register-canonical aggregation with FEATURE_PLAN.md fallback
 # ---------------------------------------------------------------------------
 
-def _build_feature_state() -> Dict[str, Any]:
-    """Parse FEATURE_PLAN.md and return structured feature state for T0 context."""
+def _read_register_events(state_dir: Optional[Path] = None) -> list[dict]:
+    """Read all register events, honoring state_dir for test isolation."""
+    if _dr_read_events is None:
+        return []
+    try:
+        return _dr_read_events(state_dir=state_dir) or []
+    except Exception:
+        return []
+
+
+_EVENT_TO_STATUS: Dict[str, str] = {
+    "dispatch_completed": "completed",
+    "dispatch_failed": "failed",
+    "gate_failed": "failed",
+    "dispatch_promoted": "active",
+    "dispatch_started": "active",
+    "gate_requested": "active",
+    "gate_passed": "active",
+    "dispatch_created": "queued",
+}
+
+
+def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Build feature_state from dispatch_register.ndjson (register-canonical).
+
+    Aggregation contract:
+    - Group events by dispatch_id (primary key)
+    - Per-dispatch status: latest-event-wins (recency)
+    - Per-PR/feature: most-recently-active dispatch supplies status
+    - FEATURE_PLAN.md fallback when register has no data
+
+    Refs: synthesis 2026-04-28 §D Sprint 3 split 3/3, codex findings PR #276 r1+r2.
+    """
+    register_events = _read_register_events(state_dir=state_dir)
+    if not register_events:
+        return _build_feature_state_from_feature_plan()
+
+    by_dispatch: Dict[str, list] = {}
+    for ev in register_events:
+        did = ev.get("dispatch_id", "").strip()
+        if not did:
+            continue
+        by_dispatch.setdefault(did, []).append(ev)
+
+    dispatch_records: Dict[str, Any] = {}
+    for did, events in by_dispatch.items():
+        events_sorted = sorted(events, key=lambda e: e.get("timestamp", ""))
+        latest = events_sorted[-1]
+        latest_event = latest.get("event", "")
+        status = _EVENT_TO_STATUS.get(latest_event, "unknown")
+        pr_number = next(
+            (e.get("pr_number") for e in events if e.get("pr_number") is not None), None
+        )
+        feature_id = next((e.get("feature_id") for e in events if e.get("feature_id")), "")
+        dispatch_records[did] = {
+            "status": status,
+            "latest_event": latest_event,
+            "latest_event_ts": latest.get("timestamp", ""),
+            "pr_number": pr_number,
+            "feature_id": feature_id,
+            "event_count": len(events),
+        }
+
+    by_pr: Dict[str, Any] = {}
+    by_feature: Dict[str, Any] = {}
+    for did, rec in dispatch_records.items():
+        if rec["pr_number"] is not None:
+            pr_key = str(rec["pr_number"])
+            existing = by_pr.get(pr_key)
+            if existing is None or rec["latest_event_ts"] > existing["latest_event_ts"]:
+                by_pr[pr_key] = rec
+        if rec["feature_id"]:
+            f_key = rec["feature_id"]
+            existing = by_feature.get(f_key)
+            if existing is None or rec["latest_event_ts"] > existing["latest_event_ts"]:
+                by_feature[f_key] = rec
+
+    return {
+        "source": "dispatch_register",
+        "dispatches": dispatch_records,
+        "pr_status": by_pr,
+        "feature_status": by_feature,
+        "register_event_count": len(register_events),
+    }
+
+
+def _build_feature_state_from_feature_plan() -> Dict[str, Any]:
+    """FEATURE_PLAN.md parser — fallback when register is empty."""
     _empty: Dict[str, Any] = {
+        "source": "feature_plan_md",
         "feature_name": None,
         "current_pr": None,
         "next_task": None,
@@ -262,7 +349,9 @@ def _build_feature_state() -> Dict[str, Any]:
     try:
         from feature_state_machine import parse_feature_plan
         state = parse_feature_plan(feature_plan)
-        return state.as_dict()
+        result = state.as_dict()
+        result["source"] = "feature_plan_md"
+        return result
     except Exception:
         return _empty
 
@@ -534,11 +623,11 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 
 def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) -> list[dict]:
-    """Last N register events. Aggregation is PR-4c."""
-    if _read_register_events is None:
+    """Last N register events (raw; for debugging)."""
+    if _dr_read_events is None:
         return []
     try:
-        events = _read_register_events(state_dir=state_dir) if state_dir else _read_register_events()
+        events = _dr_read_events(state_dir=state_dir)
         return events[-limit:] if events else []
     except Exception:
         return []
@@ -562,7 +651,7 @@ def build_t0_state(
     queues = _build_queues(dispatch_dir, state_dir)
     tracks = _build_tracks(state_dir)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
-    feature_state = _build_feature_state()
+    feature_state = _build_feature_state(state_dir=state_dir)
     open_items = _build_open_items(state_dir)
     quality_digest = _build_quality_digest(state_dir)
     dispatch_insights = _build_dispatch_insights(state_dir=state_dir)
