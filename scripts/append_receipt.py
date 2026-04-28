@@ -60,6 +60,11 @@ DISPATCH_REQUIRED_EVENTS = {
     "ack",
 }
 
+STATE_MUTATION_EVENTS = {"state_mutation"}
+
+_REPO_ROOT = SCRIPT_DIR.parent
+_REBUILD_THROTTLE_SECONDS = 30
+
 _warned_review_gate_no_dispatch_id = False
 
 
@@ -922,12 +927,14 @@ def append_receipt_payload(
     *,
     receipts_file: Optional[str] = None,
     cache_window_seconds: int = 300,
+    skip_enrichment: bool = False,
 ) -> AppendResult:
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
-    receipt = _enrich_completion_receipt(receipt)
+    if not skip_enrichment:
+        receipt = _enrich_completion_receipt(receipt)
 
     # Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson.
     # review_gate_request with empty/missing dispatch_id is redirected here (pre-existing
@@ -994,14 +1001,14 @@ def append_receipt_payload(
     except OSError as exc:
         raise AppendReceiptError("lock_failed", EXIT_LOCK_ERROR, f"Failed to acquire append lock: {exc}") from exc
 
-    # Best-effort: register quality advisory violations as tracked open items
-    # (outside flock to avoid holding the receipt lock during OI registration)
-    if result is not None and result.status == "appended":
+    # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events)
+    if result is not None and result.status == "appended" and not skip_enrichment:
         created_count = _register_quality_open_items(receipt)
         receipt["open_items_created"] = created_count
 
-        # Best-effort: update pattern confidence from dispatch outcome
         _update_confidence_from_receipt(receipt)
+
+        _maybe_trigger_state_rebuild(receipt)
 
     return result
 
@@ -1031,6 +1038,42 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
         update_confidence_from_outcome(db_path, dispatch_id, terminal, outcome)
     except Exception as exc:
         _emit("WARN", "confidence_update_failed", error=str(exc))
+
+
+def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
+    """Fire non-blocking rebuild of t0_state.json after qualifying events. Best-effort."""
+    try:
+        event_type = str(receipt.get("event_type") or receipt.get("event") or "")
+        if not (_is_completion_event(receipt) or event_type in ("dispatch_promoted", "dispatch_started")):
+            return
+
+        state_dir = resolve_state_dir(__file__)
+        throttle_file = state_dir / ".last_state_rebuild_ts"
+
+        try:
+            if throttle_file.exists():
+                last_ts = float(throttle_file.read_text(encoding="utf-8").strip())
+                if time.time() - last_ts < _REBUILD_THROTTLE_SECONDS:
+                    return
+        except Exception:
+            pass
+
+        try:
+            tmp = throttle_file.with_name(throttle_file.name + ".tmp")
+            tmp.write_text(str(time.time()), encoding="utf-8")
+            os.replace(str(tmp), str(throttle_file))
+        except Exception:
+            pass
+
+        subprocess.Popen(
+            ["python3", "scripts/build_t0_state.py"],
+            cwd=str(_REPO_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
 
 
 def _parse_input(receipt_json: Optional[str], receipt_file: Optional[str]) -> Dict[str, Any]:
@@ -1066,6 +1109,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--receipt-file", help="Path to file containing a single receipt JSON payload", default=None)
     parser.add_argument("--receipts-file", help="Override canonical receipts file path", default=None)
     parser.add_argument("--cache-window-seconds", type=int, default=300, help="Recent idempotency window in seconds")
+    parser.add_argument("--skip-enrichment", action="store_true", default=False, help="Skip quality advisory and provenance enrichment (for state-mutation events)")
     args = parser.parse_args(argv)
 
     try:
@@ -1074,6 +1118,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             receipt,
             receipts_file=args.receipts_file,
             cache_window_seconds=args.cache_window_seconds,
+            skip_enrichment=args.skip_enrichment,
         )
     except AppendReceiptError as exc:
         _emit("ERROR", exc.code, message=exc.message)
