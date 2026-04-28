@@ -147,6 +147,11 @@ from api_agent_stream import (  # noqa: E402
     handle_agent_stream_status,
 )
 
+from api_register_stream import (  # noqa: E402
+    handle_register_stream,
+    handle_register_stream_archive,
+)
+
 from api_intelligence import (  # noqa: E402
     _intelligence_get_patterns,
     _intelligence_get_injections,
@@ -328,6 +333,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/agents":
             _json_response(self, HTTPStatus.OK, _operator_get_agents())
+            return
+
+        # Register stream SSE endpoints
+        if path == "/api/register-stream/archive":
+            handle_register_stream_archive(self)
+            return
+
+        if path == "/api/register-stream":
+            since_ts = params.get("since_ts", [None])[0]
+            event_type_filter = params.get("event_type", [None])[0]
+            handle_register_stream(self, since_ts, event_type_filter)
             return
 
         # Agent stream SSE endpoints
