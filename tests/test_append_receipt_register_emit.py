@@ -294,3 +294,104 @@ def test_two_gate_receipts_same_dispatch_both_persist(tmp_path: Path):
     gates = {json.loads(l).get("gate") for l in lines}
     assert "codex_gate" in gates
     assert "gemini_review" in gates
+
+
+# ── Tests for _count_quality_violations ─────────────────────────────────────
+
+def test_count_quality_violations_with_items(ar):
+    receipt = {
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "severity": "blocker", "item": "bad thing"},
+                    {"check_id": "c2", "severity": "warn", "item": "risky thing"},
+                    {"check_id": "c3", "severity": "info", "item": "note"},
+                ]
+            }
+        }
+    }
+    assert ar._count_quality_violations(receipt) == 3
+
+
+def test_count_quality_violations_empty_open_items(ar):
+    receipt = {"quality_advisory": {"t0_recommendation": {"open_items": []}}}
+    assert ar._count_quality_violations(receipt) == 0
+
+
+def test_count_quality_violations_missing_t0_recommendation(ar):
+    receipt = {"quality_advisory": {"version": "1.0"}}
+    assert ar._count_quality_violations(receipt) == 0
+
+
+def test_count_quality_violations_missing_advisory(ar):
+    assert ar._count_quality_violations({}) == 0
+
+
+def test_count_quality_violations_null_advisory(ar):
+    assert ar._count_quality_violations({"quality_advisory": None}) == 0
+
+
+# ── Test: open_items_created embedded in NDJSON BEFORE _register runs ────────
+
+def test_open_items_created_embedded_in_ndjson(tmp_path: Path):
+    """Receipt with pre-populated quality_advisory must persist open_items_created
+    in the NDJSON line, not as 0 (the pre-existing bug)."""
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI-PRECOUNT-001",
+        "terminal": "T1",
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "qa_check_1", "severity": "blocker", "item": "missing tests"},
+                    {"check_id": "qa_check_2", "severity": "warn", "item": "low coverage"},
+                ]
+            }
+        },
+    }
+    # --skip-enrichment prevents _enrich_completion_receipt from overwriting the
+    # injected quality_advisory, so _count_quality_violations sees 2 items.
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "append_receipt.py"), "--skip-enrichment"],
+        input=json.dumps(receipt),
+        capture_output=True,
+        text=True,
+        env=_build_env(tmp_path),
+    )
+    assert result.returncode == 0, f"append failed: {result.stderr}"
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1
+
+    persisted = json.loads(lines[0])
+    assert persisted.get("open_items_created") == 2, (
+        f"open_items_created should be 2 (pre-computed before write), got {persisted.get('open_items_created')!r}. "
+        "Pre-existing bug: count was set after ndjson write so it persisted as 0."
+    )
+
+
+def test_open_items_created_zero_when_no_violations(tmp_path: Path):
+    """Receipt with no open_items must persist open_items_created == 0."""
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI-PRECOUNT-002",
+        "terminal": "T1",
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "append_receipt.py"), "--skip-enrichment"],
+        input=json.dumps(receipt),
+        capture_output=True,
+        text=True,
+        env=_build_env(tmp_path),
+    )
+    assert result.returncode == 0, f"append failed: {result.stderr}"
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    persisted = json.loads(lines[0])
+    assert persisted.get("open_items_created", 0) == 0

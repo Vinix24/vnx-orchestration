@@ -758,6 +758,9 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
     # Compute CQS and persist to dispatch_metadata (best-effort)
+    # CQS computed at receipt time may be later overwritten by update_dispatch_cqs.py
+    # with a stripped payload that omits quality_advisory. Tracked as OI-1175.
+    # Out of scope for this PR (PR-4b3 only adds dispatch_register emit).
     try:
         db_path = state_dir / "quality_intelligence.db"
         if db_path.exists():
@@ -920,6 +923,19 @@ def _emit_dispatch_register(receipt: dict) -> bool:
         return False
 
 
+def _count_quality_violations(receipt: dict) -> int:
+    """Count violations that _register_quality_open_items WILL create.
+
+    Reads the same data path as _register_quality_open_items so the
+    pre-computed count is consistent with what will be registered.
+    Returns 0 when quality_advisory or t0_recommendation is absent.
+    """
+    advisory = receipt.get("quality_advisory") or {}
+    rec = advisory.get("t0_recommendation") or {}
+    open_items = rec.get("open_items") or []
+    return len(open_items)
+
+
 def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
     """Best-effort: register quality advisory violations as tracked open items.
 
@@ -962,6 +978,8 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
                     file_basename = Path(file_path).name if file_path else "unknown"
 
                     # Build dedup key: qa:{check_id}:{file_basename}:{symbol}
+                    # Dedup key uses basename+symbol; collisions across directories tracked as OI-1176.
+                    # Out of scope for PR-4b3.
                     dedup_key = f"qa:{check_id}:{file_basename}:{symbol}"
 
                     item_id, created = oim.add_item_programmatic(
@@ -1002,6 +1020,11 @@ def append_receipt_payload(
     # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
     if not skip_enrichment:
         receipt = _enrich_completion_receipt(receipt)
+
+    # Pre-compute open_items_created BEFORE the lock-protected ndjson write so the
+    # embedded count is non-zero when the advisory has violations.  Without this,
+    # open_items_created persisted as 0 and _score_open_items_delta() lost the penalty.
+    receipt["open_items_created"] = _count_quality_violations(receipt)
 
     # Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson.
     # review_gate_request with empty/missing dispatch_id is redirected here (pre-existing
@@ -1070,8 +1093,9 @@ def append_receipt_payload(
 
     # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events)
     if result is not None and result.status == "appended" and not skip_enrichment:
-        created_count = _register_quality_open_items(receipt)
-        receipt["open_items_created"] = created_count
+        # DB registration runs outside lock (existing constraint preserved).
+        # Count is already embedded in the receipt above; do not overwrite.
+        _register_quality_open_items(receipt)
 
         _update_confidence_from_receipt(receipt)
 
