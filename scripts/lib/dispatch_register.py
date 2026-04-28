@@ -25,7 +25,13 @@ VALID_EVENTS = {
 
 
 def _register_path() -> Path:
-    """Resolve dispatch_register.ndjson location via canonical vnx_paths."""
+    """Resolve dispatch_register.ndjson via canonical vnx_paths resolver.
+
+    Fallback precedence (when canonical resolver unavailable):
+    1. VNX_STATE_DIR (if set) — use directly as state dir
+    2. VNX_DATA_DIR + state subdir (only when VNX_DATA_DIR_EXPLICIT=1)
+    3. Repo-relative .vnx-data/state
+    """
     try:
         scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
         if scripts_lib not in sys.path:
@@ -34,12 +40,15 @@ def _register_path() -> Path:
         state_dir = resolve_paths()["VNX_STATE_DIR"]
         return Path(state_dir) / "dispatch_register.ndjson"
     except Exception:
-        # Fallback: only honor VNX_DATA_DIR if explicitly enabled (mirrors canonical contract)
-        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
-            data_dir = Path(os.environ["VNX_DATA_DIR"])
+        # Fallback chain mirrors canonical contract
+        state_dir_env = os.environ.get("VNX_STATE_DIR")
+        if state_dir_env:
+            state_dir = Path(state_dir_env)
+        elif os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1" and os.environ.get("VNX_DATA_DIR"):
+            state_dir = Path(os.environ["VNX_DATA_DIR"]) / "state"
         else:
-            data_dir = _REPO_ROOT / ".vnx-data"
-        return data_dir / "state" / "dispatch_register.ndjson"
+            state_dir = _REPO_ROOT / ".vnx-data" / "state"
+        return state_dir / "dispatch_register.ndjson"
 
 
 def _utc_now_iso() -> str:
@@ -63,6 +72,9 @@ def append_event(
     where caller flow must not break on register write failure.
     """
     if event not in VALID_EVENTS:
+        return False
+    # Require at least one identifying field — register is canonical source, must be queryable
+    if not dispatch_id and pr_number is None and not feature_id:
         return False
     record = {
         "timestamp": _utc_now_iso(),

@@ -18,6 +18,8 @@ Covers:
   15. Fallback ignores VNX_DATA_DIR when VNX_DATA_DIR_EXPLICIT not set
   16. Fallback honors VNX_DATA_DIR when VNX_DATA_DIR_EXPLICIT=1
   17. read_events takes shared lock (blocks on concurrent exclusive writer)
+  18. Fallback honors VNX_STATE_DIR (BLOCKING fix Codex PR #277)
+  19. append_event requires at least one identifying field (ADVISORY fix Codex PR #277)
 """
 
 import json
@@ -115,14 +117,10 @@ class TestAppendEventAllKwargs:
         assert rec["extra"] == {"foo": "bar"}
 
     def test_omitted_optional_fields_absent(self, isolated_data_dir):
-        append_event("dispatch_created")
-        rec = json.loads(_reg_path(isolated_data_dir).read_text().strip())
-        assert "dispatch_id" not in rec
-        assert "pr_number" not in rec
-        assert "feature_id" not in rec
-        assert "terminal" not in rec
-        assert "gate" not in rec
-        assert "extra" not in rec
+        """Events with no identifying fields are now rejected (require ID field)."""
+        result = append_event("dispatch_created")
+        assert result is False
+        assert not _reg_path(isolated_data_dir).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -469,4 +467,68 @@ class TestReadEventsSharedLock:
         assert not errors, f"Writer thread raised: {errors}"
         assert len(reader_results) == 1, f"Expected 1 event, got {len(reader_results)}: {reader_results}"
         assert reader_results[0]["dispatch_id"] == "lock-test"
+
+
+# ---------------------------------------------------------------------------
+# 18. Fallback honors VNX_STATE_DIR (BLOCKING fix — Codex PR #277 round 3)
+# ---------------------------------------------------------------------------
+
+class TestFallbackStateDir:
+    def test_fallback_honors_vnx_state_dir(self, tmp_path, monkeypatch):
+        """When vnx_paths import fails, VNX_STATE_DIR is used as state dir (not ignored)."""
+        custom_state = tmp_path / "state-from-env"
+        monkeypatch.setenv("VNX_STATE_DIR", str(custom_state))
+        monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+        monkeypatch.delenv("VNX_DATA_DIR_EXPLICIT", raising=False)
+        with patch.dict(sys.modules, {"vnx_paths": None}):
+            path = dispatch_register._register_path()
+        assert path == custom_state / "dispatch_register.ndjson", (
+            f"Fallback did not honor VNX_STATE_DIR: {path}"
+        )
+
+    def test_fallback_precedence_state_dir_over_data_dir_explicit(self, tmp_path, monkeypatch):
+        """VNX_STATE_DIR beats VNX_DATA_DIR+EXPLICIT=1 in the fallback chain."""
+        custom_state = tmp_path / "state-wins"
+        custom_data = tmp_path / "data-loses"
+        monkeypatch.setenv("VNX_STATE_DIR", str(custom_state))
+        monkeypatch.setenv("VNX_DATA_DIR", str(custom_data))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        with patch.dict(sys.modules, {"vnx_paths": None}):
+            path = dispatch_register._register_path()
+        assert path == custom_state / "dispatch_register.ndjson", (
+            f"VNX_STATE_DIR did not win over VNX_DATA_DIR+EXPLICIT: {path}"
+        )
+        assert str(custom_data) not in str(path)
+
+
+# ---------------------------------------------------------------------------
+# 19. append_event requires at least one identifying field
+#     (ADVISORY fix — Codex PR #277 round 3)
+# ---------------------------------------------------------------------------
+
+class TestAppendEventIdRequirement:
+    def test_append_event_requires_id_field(self, isolated_data_dir):
+        """append_event with no dispatch_id/pr_number/feature_id returns False."""
+        result = append_event("dispatch_created")
+        assert result is False
+
+    def test_no_file_written_when_no_id(self, isolated_data_dir):
+        """When the ID requirement fails, no register file is created."""
+        append_event("dispatch_created")
+        assert not _reg_path(isolated_data_dir).exists()
+
+    def test_append_event_accepts_dispatch_id_only(self, isolated_data_dir):
+        """dispatch_id alone satisfies the ID requirement."""
+        result = append_event("dispatch_created", dispatch_id="d-id-only")
+        assert result is True
+
+    def test_append_event_accepts_pr_number_only(self, isolated_data_dir):
+        """pr_number alone satisfies the ID requirement."""
+        result = append_event("pr_opened", pr_number=99)
+        assert result is True
+
+    def test_append_event_accepts_feature_id_only(self, isolated_data_dir):
+        """feature_id alone satisfies the ID requirement."""
+        result = append_event("dispatch_created", feature_id="F-55")
+        assert result is True
 
