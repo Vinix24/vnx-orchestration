@@ -138,3 +138,39 @@ class TestGateRecorderRegisterEmit:
         assert result["status"] == "failed"
         events = _read_register_events(recorder_env)
         assert events == []
+
+    @pytest.mark.parametrize("reason", [
+        "subprocess_error",
+        "auth_error",
+        "binary_not_found",
+        "network_error",
+        "validation_failed",
+        "empty_review_content",
+        "artifact_materialization_failed",
+    ])
+    def test_record_failure_execution_reasons_no_register_emit(self, recorder_env, reason):
+        """record_failure with any execution-level reason must NOT emit gate_failed.
+
+        These are infrastructure failures, not semantic gate verdicts. Emitting
+        gate_failed would abuse the 'gate completed with blocking findings' contract.
+        """
+        payload = _make_payload(gate="codex_gate", pr_number=77)
+        result_dict = _make_result()
+        result_dict["reason"] = reason
+        result_dict["reason_detail"] = f"Execution failure: {reason}"
+
+        out = record_failure(
+            gate="codex_gate",
+            pr_number=77,
+            pr_id="",
+            result=result_dict,
+            request_payload=payload,
+            requests_dir=recorder_env["requests_dir"],
+            results_dir=recorder_env["results_dir"],
+        )
+
+        assert out["status"] == "failed"
+        events = _read_register_events(recorder_env)
+        assert events == [], (
+            f"reason={reason!r} must not emit gate_failed; got: {events}"
+        )

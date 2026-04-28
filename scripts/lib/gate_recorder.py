@@ -27,11 +27,19 @@ _GATE_BINARIES: Dict[str, str] = {
 }
 
 # Infrastructure/execution failures — NOT semantic gate verdicts.
-# gate_failed means "gate completed with blocking findings"; never emit it for these.
+# gate_failed means "gate completed with blocking findings"; only emit it for reasons
+# that represent a completed gate run with actual blocking findings. Anything else
+# (timeouts, crashes, infra errors, validation failures) is execution-level → skip.
 EXECUTION_FAILURE_REASONS: frozenset = frozenset({
-    "exit_nonzero", "timeout", "stall", "stalled",
+    # Process lifecycle
+    "exit_nonzero", "timeout", "stall", "stalled", "killed",
+    # Subprocess / binary
+    "subprocess_error", "subprocess_failed", "binary_not_found",
+    # Artifact and content issues
     "artifact_materialization_error", "artifact_materialization_failed",
-    "subprocess_failed", "killed", "binary_not_found",
+    "empty_review_content", "validation_failed",
+    # Network / auth
+    "network_error", "auth_error",
 })
 
 
