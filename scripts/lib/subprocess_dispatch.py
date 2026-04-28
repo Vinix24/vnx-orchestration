@@ -1362,16 +1362,12 @@ def deliver_with_recovery(
             )
 
             # Feedback loop: boost pattern confidence for successful dispatch
+            # update_confidence_from_outcome is handled by append_receipt_payload (VNX-R4)
             _quality_db = _default_state_dir() / "quality_intelligence.db"
             _patt_updated = _update_pattern_confidence(dispatch_id, "success", _quality_db)
             logger.debug(
                 "Feedback boost: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
             )
-            try:
-                from intelligence_persist import update_confidence_from_outcome as _upcf
-                _upcf(_quality_db, dispatch_id, terminal_id, "success")
-            except Exception as _exc:
-                logger.debug("update_confidence_from_outcome(success) failed: %s", _exc)
 
             # Capture outcome after receipt is written
             _capture_dispatch_outcome(
@@ -1423,16 +1419,12 @@ def deliver_with_recovery(
             )
 
             # Feedback loop: decay pattern confidence for failed dispatch
+            # update_confidence_from_outcome is handled by append_receipt_payload (VNX-R4)
             _quality_db = _default_state_dir() / "quality_intelligence.db"
             _patt_updated = _update_pattern_confidence(dispatch_id, "failure", _quality_db)
             logger.debug(
                 "Feedback decay: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
             )
-            try:
-                from intelligence_persist import update_confidence_from_outcome as _upcf
-                _upcf(_quality_db, dispatch_id, terminal_id, "failure")
-            except Exception as _exc:
-                logger.debug("update_confidence_from_outcome(failure) failed: %s", _exc)
 
             # Capture failed outcome
             _capture_dispatch_outcome(
