@@ -2,7 +2,7 @@
 """VNX Governance Audit Trail — F51-PR3.
 
 Append-only NDJSON log of all governance enforcement decisions.
-Written to: $VNX_DATA_DIR/state/governance_audit.ndjson
+Written to: $VNX_STATE_DIR/governance_audit.ndjson
 
 Schema per line:
     {

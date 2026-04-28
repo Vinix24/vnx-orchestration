@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Migrate governance_audit.ndjson from events/ to state/.
+"""Migrate governance_audit.ndjson from VNX_EVENTS_DIR to VNX_STATE_DIR.
 
 Idempotent: safe to run multiple times. Deduplication key: timestamp + context_hash.
-If state/ file already exists, appends only entries not already present.
+If VNX_STATE_DIR file already exists, appends only entries not already present.
 After a successful merge, removes events/ file.
 
 Usage:
