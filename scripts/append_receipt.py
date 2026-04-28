@@ -757,10 +757,15 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     except Exception as exc:
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
-    # Compute CQS and persist to dispatch_metadata (best-effort)
-    # CQS computed at receipt time may be later overwritten by update_dispatch_cqs.py
-    # with a stripped payload that omits quality_advisory. Tracked as OI-1175.
-    # Out of scope for this PR (PR-4b3 only adds dispatch_register emit).
+    # Set open_items_created from the quality_advisory generated above.
+    # Must run after quality_advisory is populated so _count_quality_violations sees real items.
+    # This ensures the CQS DB UPDATE below stores the actual count, not 0.
+    if "open_items_created" not in enriched:
+        enriched["open_items_created"] = _count_quality_violations(enriched)
+
+    # Compute CQS and persist to dispatch_metadata (best-effort).
+    # quality_advisory_json is stored so update_dispatch_cqs.py can round-trip it
+    # without losing T0 advisory and OI-delta scoring (OI-1175).
     try:
         db_path = state_dir / "quality_intelligence.db"
         if db_path.exists():
@@ -773,7 +778,8 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
                 conn.execute(
                     """UPDATE dispatch_metadata
                        SET cqs=?, normalized_status=?, cqs_components=?,
-                           open_items_created=?, open_items_resolved=?
+                           open_items_created=?, open_items_resolved=?,
+                           quality_advisory_json=?
                        WHERE dispatch_id=?""",
                     (
                         cqs_result["cqs"],
@@ -781,6 +787,7 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
                         json.dumps(cqs_result["components"]),
                         enriched.get("open_items_created", 0),
                         enriched.get("open_items_resolved", 0),
+                        json.dumps(enriched.get("quality_advisory") or {}),
                         dispatch_id,
                     ),
                 )
@@ -938,15 +945,13 @@ def _count_quality_violations(receipt: dict) -> int:
     open_items = rec.get("open_items") or []
     if not open_items:
         return 0
-    # Mirror dedup_key from _register_quality_open_items: qa:{check_id}:{basename}:{symbol}.
-    # Collisions across directories tracked as OI-1176; out of scope for PR-4b3.
+    # Mirror dedup_key from _register_quality_open_items: qa:{check_id}:{full_path}:{symbol}.
     seen_keys: set = set()
     for item in open_items:
         check_id = str(item.get("check_id", "unknown"))
-        file_path = str(item.get("file", ""))
-        file_basename = Path(file_path).name if file_path else "unknown"
+        file_path = str(item.get("file", "")) or "unknown"
         symbol = str(item.get("symbol") or "")
-        seen_keys.add(f"qa:{check_id}:{file_basename}:{symbol}")
+        seen_keys.add(f"qa:{check_id}:{file_path}:{symbol}")
     return len(seen_keys)
 
 
@@ -989,12 +994,8 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
                     raw_severity = str(item.get("severity", "info"))
                     mapped_severity = _SEVERITY_MAP.get(raw_severity, "info")
                     title = str(item.get("item", ""))
-                    file_basename = Path(file_path).name if file_path else "unknown"
-
-                    # Build dedup key: qa:{check_id}:{file_basename}:{symbol}
-                    # Dedup key uses basename+symbol; collisions across directories tracked as OI-1176.
-                    # Out of scope for PR-4b3.
-                    dedup_key = f"qa:{check_id}:{file_basename}:{symbol}"
+                    # Build dedup key: qa:{check_id}:{full_path}:{symbol} (OI-1176 fix)
+                    dedup_key = f"qa:{check_id}:{file_path or 'unknown'}:{symbol}"
 
                     item_id, created = oim.add_item_programmatic(
                         title=title,
@@ -1031,14 +1032,16 @@ def append_receipt_payload(
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
-    # Pre-count BEFORE enrichment so CQS computed inside _enrich_completion_receipt sees the
-    # correct open_items_created value. Previously this was set AFTER enrichment, so the
-    # UPDATE at _enrich_completion_receipt:760-789 always read open_items_created=0.
-    receipt["open_items_created"] = _count_quality_violations(receipt)
-
-    # Enrich completion receipts with quality advisory and terminal snapshot (best-effort)
+    # Enrich completion receipts with quality advisory and terminal snapshot (best-effort).
+    # Enrichment generates quality_advisory; count must run after it sees real items.
     if not skip_enrichment:
         receipt = _enrich_completion_receipt(receipt)
+
+    # Count violations from real quality_advisory (generated by enrichment above).
+    # _enrich_completion_receipt sets open_items_created internally; setdefault avoids
+    # double-counting on that path and handles skip_enrichment=True (returns 0 when
+    # quality_advisory is absent).
+    receipt.setdefault("open_items_created", _count_quality_violations(receipt))
 
     # Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson.
     # review_gate_request with empty/missing dispatch_id is redirected here (pre-existing
@@ -1165,6 +1168,7 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
 
     TRIGGER_EVENTS = {
         "task_complete", "task_completed", "completion", "complete",
+        "task_failed", "task_timeout",
         "dispatch_promoted", "dispatch_started",
     }
     if event_type not in TRIGGER_EVENTS:
