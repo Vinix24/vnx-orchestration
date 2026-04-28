@@ -192,13 +192,31 @@ def record_failure(
     if rf:
         rf.write_text(json.dumps(failure_payload, indent=2), encoding="utf-8")
     try:
+        import logging as _logging
         from dispatch_register import append_event as _append_reg
-        _append_reg(
+        from state_rebuild_trigger import maybe_trigger_state_rebuild as _trigger_rebuild
+
+        _pr_num = pr_number
+        if _pr_num is None and pr_id:
+            try:
+                _pr_num = int(pr_id)
+            except (ValueError, TypeError):
+                pass
+
+        _dispatch_id = request_payload.get("dispatch_id", "") or ""
+        _reg_result = _append_reg(
             "gate_failed",
-            dispatch_id=request_payload.get("dispatch_id", "") or "",
-            pr_number=pr_number,
+            dispatch_id=_dispatch_id,
+            pr_number=_pr_num,
             gate=gate,
         )
+        if not _reg_result:
+            _logging.warning(
+                "dispatch_register: gate event gate_failed dropped — no identifying field "
+                "(dispatch_id=%r, pr_number=%r, pr_id=%r)",
+                _dispatch_id, _pr_num, pr_id,
+            )
+        _trigger_rebuild()
     except Exception:
         pass
     return failure_payload

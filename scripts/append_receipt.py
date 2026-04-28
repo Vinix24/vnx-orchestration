@@ -1059,7 +1059,7 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
         feature_id = str(receipt.get("feature_id", ""))
 
         if event_type in ("task_complete", "task_completed"):
-            register_event = "dispatch_failed" if status in ("failed", "error", "blocked") else "dispatch_completed"
+            register_event = "dispatch_failed" if status in ("failed", "failure", "error", "blocked") else "dispatch_completed"
         elif event_type == "task_failed":
             register_event = "dispatch_failed"
         elif event_type == "task_timeout":
@@ -1099,33 +1099,8 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
             )
         ):
             return
-
-        state_dir = resolve_state_dir(__file__)
-        throttle_file = state_dir / ".last_state_rebuild_ts"
-
-        try:
-            if throttle_file.exists():
-                last_ts = float(throttle_file.read_text(encoding="utf-8").strip())
-                if time.time() - last_ts < _REBUILD_THROTTLE_SECONDS:
-                    return
-        except Exception:
-            pass
-
-        subprocess.Popen(
-            ["python3", "scripts/build_t0_state.py"],
-            cwd=str(_REPO_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        # Write throttle marker only after Popen succeeds; a failed launch
-        # should not suppress the next rebuild attempt for 30s.
-        try:
-            tmp = throttle_file.with_name(throttle_file.name + ".tmp")
-            tmp.write_text(str(int(time.time())), encoding="utf-8")
-            os.replace(str(tmp), str(throttle_file))
-        except Exception:
-            pass
+        from state_rebuild_trigger import maybe_trigger_state_rebuild
+        maybe_trigger_state_rebuild()
     except Exception:
         pass
 

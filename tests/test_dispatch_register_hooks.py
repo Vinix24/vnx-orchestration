@@ -43,6 +43,7 @@ import append_receipt
 import dispatch_register
 import gate_recorder
 import gate_artifacts
+import state_rebuild_trigger
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +217,7 @@ def test_maybe_trigger_rebuild_on_review_gate_request(monkeypatch, tmp_path):
     throttle = state_dir / ".last_state_rebuild_ts"
     throttle.write_text("1", encoding="utf-8")
 
-    monkeypatch.setattr(append_receipt, "resolve_state_dir", lambda f: state_dir)
+    monkeypatch.setattr(state_rebuild_trigger, "_resolve_state_dir", lambda: state_dir)
 
     popen_calls: list = []
 
@@ -224,7 +225,7 @@ def test_maybe_trigger_rebuild_on_review_gate_request(monkeypatch, tmp_path):
         def __init__(self, cmd, **kwargs):
             popen_calls.append(cmd)
 
-    monkeypatch.setattr(append_receipt.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(state_rebuild_trigger.subprocess, "Popen", _FakePopen)
 
     receipt = {"event_type": "review_gate_request", "dispatch_id": "D-GATE-001"}
     append_receipt._maybe_trigger_state_rebuild(receipt)
@@ -246,8 +247,8 @@ def test_throttle_marker_is_integer(monkeypatch, tmp_path):
     throttle = state_dir / ".last_state_rebuild_ts"
     throttle.write_text("1", encoding="utf-8")  # stale
 
-    monkeypatch.setattr(append_receipt, "resolve_state_dir", lambda f: state_dir)
-    monkeypatch.setattr(append_receipt.subprocess, "Popen", lambda cmd, **kw: None)
+    monkeypatch.setattr(state_rebuild_trigger, "_resolve_state_dir", lambda: state_dir)
+    monkeypatch.setattr(state_rebuild_trigger.subprocess, "Popen", lambda cmd, **kw: None)
 
     receipt = {"event_type": "task_complete", "dispatch_id": "D-THROTTLE-001"}
     append_receipt._maybe_trigger_state_rebuild(receipt)
@@ -299,7 +300,7 @@ def test_throttle_expiry_triggers_rebuild(monkeypatch, tmp_path):
     throttle = state_dir / ".last_state_rebuild_ts"
     throttle.write_text("1000", encoding="utf-8")
 
-    monkeypatch.setattr(append_receipt, "resolve_state_dir", lambda f: state_dir)
+    monkeypatch.setattr(state_rebuild_trigger, "_resolve_state_dir", lambda: state_dir)
 
     popen_calls: list = []
 
@@ -307,7 +308,7 @@ def test_throttle_expiry_triggers_rebuild(monkeypatch, tmp_path):
         def __init__(self, cmd, **kwargs):
             popen_calls.append(cmd)
 
-    monkeypatch.setattr(append_receipt.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(state_rebuild_trigger.subprocess, "Popen", _FakePopen)
 
     receipt = {"event_type": "task_complete", "dispatch_id": "D-EXPIRE-001"}
     append_receipt._maybe_trigger_state_rebuild(receipt)
@@ -453,3 +454,195 @@ def test_gate_recorder_failure_path_emits_gate_failed(isolated_register, tmp_pat
     assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
     assert gate_events[0]["event"] == "gate_failed"
     assert gate_events[0].get("dispatch_id") == "D-FAILURE-020"
+
+
+# ---------------------------------------------------------------------------
+# Test 16: status="failure" → dispatch_failed (BLOCKING fix 1)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_task_complete_failure_status_classifies_failed(isolated_register):
+    """task_complete with status='failure' must map to dispatch_failed (not dispatch_completed)."""
+    receipt = {
+        "event_type": "task_complete",
+        "status": "failure",
+        "dispatch_id": "D-EMIT-016",
+        "terminal": "T1",
+    }
+    append_receipt._emit_dispatch_register(receipt)
+    events = _reg_events(isolated_register)
+    assert len(events) == 1
+    assert events[0]["event"] == "dispatch_failed", (
+        f"status='failure' must produce dispatch_failed, got {events[0]['event']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests 17-18: gate hook pr_id → pr_number parsing (BLOCKING fix 2)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_artifacts_pr_id_numeric_resolves_pr_number(isolated_register, tmp_path):
+    """gate hook with pr_id='276' and pr_number=None must write pr_number=276 to register."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    reports_dir = tmp_path / "reports"
+    for d in (requests_dir, results_dir, reports_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "gate_report.md"
+    payload = {
+        "gate": "gemini_review",
+        "pr_number": None,
+        "pr_id": "276",
+        "branch": "feat/test",
+        "report_path": str(report_path),
+        "dispatch_id": "",
+    }
+    stdout = "\n".join(["# Review", "Overall: LGTM", "No issues found."])
+
+    result = gate_artifacts.materialize_artifacts(
+        gate="gemini_review",
+        pr_number=None,
+        pr_id="276",
+        stdout=stdout,
+        request_payload=payload,
+        duration_seconds=1.0,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        reports_dir=reports_dir,
+    )
+
+    assert result.get("status") == "completed"
+    events = _reg_events(isolated_register)
+    gate_events = [e for e in events if e.get("gate") == "gemini_review"]
+    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
+    assert gate_events[0]["event"] == "gate_passed"
+    assert gate_events[0].get("pr_number") == 276, (
+        f"pr_id='276' must resolve to pr_number=276, got {gate_events[0].get('pr_number')!r}"
+    )
+
+
+def test_gate_recorder_pr_id_numeric_resolves_pr_number(isolated_register, tmp_path):
+    """record_failure with pr_id='276' and pr_number=None must write pr_number=276 to register."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    for d in (requests_dir, results_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    request_payload = {
+        "gate": "codex_gate",
+        "pr_number": None,
+        "pr_id": "276",
+        "dispatch_id": "",
+        "report_path": str(tmp_path / "report.md"),
+    }
+    failure_result = {
+        "reason": "timeout",
+        "reason_detail": "stalled",
+        "duration_seconds": 60.0,
+        "partial_output_lines": 0,
+        "runner_pid": 99,
+    }
+
+    gate_recorder.record_failure(
+        gate="codex_gate",
+        pr_number=None,
+        pr_id="276",
+        result=failure_result,
+        request_payload=request_payload,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+    )
+
+    events = _reg_events(isolated_register)
+    gate_events = [e for e in events if e.get("gate") == "codex_gate"]
+    assert len(gate_events) == 1, f"Expected 1 gate event, got: {gate_events}"
+    assert gate_events[0]["event"] == "gate_failed"
+    assert gate_events[0].get("pr_number") == 276, (
+        f"pr_id='276' must resolve to pr_number=276, got {gate_events[0].get('pr_number')!r}"
+    )
+
+
+def test_gate_artifacts_pr_id_non_numeric_does_not_crash(isolated_register, tmp_path):
+    """gate hook with pr_id='abc' (non-numeric) and pr_number=None must not crash."""
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    reports_dir = tmp_path / "reports"
+    for d in (requests_dir, results_dir, reports_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "gate_report.md"
+    payload = {
+        "gate": "gemini_review",
+        "pr_number": None,
+        "pr_id": "abc-branch",
+        "branch": "feat/test",
+        "report_path": str(report_path),
+        "dispatch_id": "D-NONNUM-018",
+    }
+    stdout = "\n".join(["# Review", "Overall: LGTM", "No issues."])
+
+    result = gate_artifacts.materialize_artifacts(
+        gate="gemini_review",
+        pr_number=None,
+        pr_id="abc-branch",
+        stdout=stdout,
+        request_payload=payload,
+        duration_seconds=1.0,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        reports_dir=reports_dir,
+    )
+
+    # Must complete without raising; register event may use dispatch_id fallback
+    assert result.get("status") == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Test 19: gate hook fires Popen rebuild after register write (ADVISORY fix)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_artifacts_triggers_state_rebuild(isolated_register, tmp_path, monkeypatch):
+    """materialize_artifacts must call maybe_trigger_state_rebuild after writing the register event."""
+    import state_rebuild_trigger
+
+    rebuild_calls: list = []
+    monkeypatch.setattr(state_rebuild_trigger, "maybe_trigger_state_rebuild", lambda: rebuild_calls.append(1) or True)
+
+    # Also patch where gate_artifacts imported it from
+    import gate_artifacts as _ga
+    monkeypatch.setattr(_ga, "_trigger_rebuild" if hasattr(_ga, "_trigger_rebuild") else "__builtins__", None, raising=False)
+
+    requests_dir = tmp_path / "requests"
+    results_dir = tmp_path / "results"
+    reports_dir = tmp_path / "reports"
+    for d in (requests_dir, results_dir, reports_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    report_path = reports_dir / "gate_report.md"
+    payload = {
+        "gate": "gemini_review",
+        "pr_number": 30,
+        "pr_id": "pr-30",
+        "branch": "feat/test",
+        "report_path": str(report_path),
+        "dispatch_id": "D-REBUILD-019",
+    }
+    stdout = "# Review\nLGTM"
+
+    with mock.patch("state_rebuild_trigger.maybe_trigger_state_rebuild", side_effect=lambda: rebuild_calls.append(1) or True):
+        gate_artifacts.materialize_artifacts(
+            gate="gemini_review",
+            pr_number=30,
+            pr_id="pr-30",
+            stdout=stdout,
+            request_payload=payload,
+            duration_seconds=0.5,
+            requests_dir=requests_dir,
+            results_dir=results_dir,
+            reports_dir=reports_dir,
+        )
+
+    assert len(rebuild_calls) >= 1, "maybe_trigger_state_rebuild must be called after register write"

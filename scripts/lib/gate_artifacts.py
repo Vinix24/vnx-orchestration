@@ -232,13 +232,31 @@ def materialize_artifacts(
     gate_recorder.persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
 
     try:
+        import logging as _logging
         from dispatch_register import append_event as _append_reg
-        _append_reg(
-            "gate_passed" if not blocking else "gate_failed",
+        from state_rebuild_trigger import maybe_trigger_state_rebuild as _trigger_rebuild
+
+        _pr_num = pr_number
+        if _pr_num is None and pr_id:
+            try:
+                _pr_num = int(pr_id)
+            except (ValueError, TypeError):
+                pass
+
+        _gate_event = "gate_passed" if not blocking else "gate_failed"
+        _reg_result = _append_reg(
+            _gate_event,
             dispatch_id=real_dispatch_id or "",
-            pr_number=pr_number,
+            pr_number=_pr_num,
             gate=gate,
         )
+        if not _reg_result:
+            _logging.warning(
+                "dispatch_register: gate event %s dropped — no identifying field "
+                "(dispatch_id=%r, pr_number=%r, pr_id=%r)",
+                _gate_event, real_dispatch_id, _pr_num, pr_id,
+            )
+        _trigger_rebuild()
     except Exception:
         pass
 
