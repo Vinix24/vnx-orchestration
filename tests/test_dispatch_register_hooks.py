@@ -149,7 +149,7 @@ def test_emit_review_gate_request_classifies_gate_requested(isolated_register):
 
 def test_emit_irrelevant_event_writes_nothing(isolated_register):
     receipt = {
-        "event_type": "task_started",
+        "event_type": "system_heartbeat",  # genuinely not register-worthy
         "dispatch_id": "D-EMIT-006",
         "terminal": "T1",
     }
@@ -193,7 +193,8 @@ def test_emit_called_before_rebuild(tmp_path):
     }
 
     with (
-        mock.patch.object(append_receipt, "_emit_dispatch_register", side_effect=lambda r: call_order.append("emit")),
+        mock.patch.object(append_receipt, "_emit_dispatch_register",
+                          side_effect=lambda r: call_order.append("emit") or True),
         mock.patch.object(append_receipt, "_maybe_trigger_state_rebuild", side_effect=lambda r: call_order.append("rebuild")),
         mock.patch.object(append_receipt, "_register_quality_open_items", return_value=0),
         mock.patch.object(append_receipt, "_update_confidence_from_receipt"),
@@ -923,4 +924,149 @@ def test_emit_review_gate_request_claude_github_optional_skips_register(isolated
     events = _reg_events(isolated_register)
     assert len(events) == 0, (
         f"claude_github_optional review_gate_request must not emit register event (deferred), got: {events}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests 31-33: task_started / task_start / dispatch_start → dispatch_started
+# (ADVISORY fix: VALID_EVENTS includes dispatch_started; map caller event types)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_task_started_maps_to_dispatch_started(isolated_register):
+    """task_started event must map to dispatch_started in register (ADVISORY fix)."""
+    receipt = {
+        "event_type": "task_started",
+        "dispatch_id": "D-STARTED-031",
+        "terminal": "T1",
+    }
+    result = append_receipt._emit_dispatch_register(receipt)
+    assert result is True
+    events = _reg_events(isolated_register)
+    assert len(events) == 1, f"Expected 1 dispatch_started event, got: {events}"
+    assert events[0]["event"] == "dispatch_started"
+    assert events[0]["dispatch_id"] == "D-STARTED-031"
+
+
+def test_emit_task_start_maps_to_dispatch_started(isolated_register):
+    """task_start event must map to dispatch_started in register (ADVISORY fix)."""
+    receipt = {
+        "event_type": "task_start",
+        "dispatch_id": "D-STARTED-032",
+        "terminal": "T2",
+    }
+    result = append_receipt._emit_dispatch_register(receipt)
+    assert result is True
+    events = _reg_events(isolated_register)
+    assert len(events) == 1, f"Expected 1 dispatch_started event, got: {events}"
+    assert events[0]["event"] == "dispatch_started"
+
+
+def test_emit_dispatch_start_maps_to_dispatch_started(isolated_register):
+    """dispatch_start event must map to dispatch_started in register (ADVISORY fix)."""
+    receipt = {
+        "event_type": "dispatch_start",
+        "dispatch_id": "D-STARTED-033",
+        "terminal": "T1",
+    }
+    result = append_receipt._emit_dispatch_register(receipt)
+    assert result is True
+    events = _reg_events(isolated_register)
+    assert len(events) == 1, f"Expected 1 dispatch_started event, got: {events}"
+    assert events[0]["event"] == "dispatch_started"
+
+
+# ---------------------------------------------------------------------------
+# Test 34: persisted ndjson receipt carries open_items_created (BLOCKING 1 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_receipt_persisted_with_open_items_count(isolated_register, tmp_path):
+    """Persisted ndjson line must carry open_items_created field (BLOCKING 1 fix).
+
+    Before the fix: open_items_created was set after the ndjson write, so the
+    persisted receipt had the field absent. After the fix: pre-computed before write.
+    """
+    receipts_file = tmp_path / "receipts.ndjson"
+
+    receipt = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "D-PERSIST-OI-034",
+        "terminal": "T1",
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "chk-1", "file": "foo.py", "severity": "warning", "item": "issue 1"},
+                    {"check_id": "chk-2", "file": "bar.py", "severity": "warning", "item": "issue 2"},
+                ],
+            },
+        },
+    }
+
+    with (
+        # Prevent _enrich_completion_receipt from overwriting quality_advisory with real repo data
+        mock.patch.object(append_receipt, "_enrich_completion_receipt", side_effect=lambda r: r),
+        mock.patch.object(append_receipt, "_register_quality_open_items", return_value=2),
+        mock.patch.object(append_receipt, "_update_confidence_from_receipt"),
+        mock.patch.object(append_receipt, "_maybe_trigger_state_rebuild"),
+    ):
+        result = append_receipt.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert result.status == "appended"
+
+    lines = [ln.strip() for ln in receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+    persisted = json.loads(lines[0])
+
+    assert "open_items_created" in persisted, (
+        "Persisted receipt must contain open_items_created (BLOCKING 1 regression guard)"
+    )
+    assert persisted["open_items_created"] == 2, (
+        f"Expected open_items_created=2, got {persisted['open_items_created']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 35: register written before ndjson commit (BLOCKING 2 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_register_written_before_ndjson_commit(isolated_register, tmp_path):
+    """_emit_dispatch_register must be called before ndjson write (BLOCKING 2 fix).
+
+    Verified by spying on _emit_dispatch_register: at the moment it is called,
+    the ndjson file must not yet exist (or be empty).
+    """
+    receipts_file = tmp_path / "receipts.ndjson"
+
+    receipt = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "D-BLOCKING2-035",
+        "terminal": "T1",
+    }
+
+    call_observations: list = []
+    real_emit = append_receipt._emit_dispatch_register  # capture before patch
+
+    def emit_spy(r):
+        ndjson_written = receipts_file.exists() and bool(receipts_file.read_text(encoding="utf-8").strip())
+        call_observations.append(ndjson_written)
+        return real_emit(r)
+
+    with (
+        mock.patch.object(append_receipt, "_emit_dispatch_register", side_effect=emit_spy),
+        mock.patch.object(append_receipt, "_register_quality_open_items", return_value=0),
+        mock.patch.object(append_receipt, "_update_confidence_from_receipt"),
+        mock.patch.object(append_receipt, "_maybe_trigger_state_rebuild"),
+    ):
+        result = append_receipt.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert result.status == "appended"
+    assert len(call_observations) == 1, f"Expected 1 emit call, got {len(call_observations)}"
+    assert not call_observations[0], (
+        "ndjson must NOT contain data when _emit_dispatch_register is called (BLOCKING 2 regression guard)"
     )

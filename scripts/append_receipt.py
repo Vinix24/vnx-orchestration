@@ -898,6 +898,25 @@ def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
         return 0
 
 
+def _count_quality_violations(receipt: dict) -> int:
+    """Pre-count items in t0_recommendation.open_items without registering.
+
+    Mirrors _register_quality_open_items structure. Actual dedup-aware count
+    may differ but pre-count is correct for fresh receipts (no prior history).
+    """
+    try:
+        advisory = receipt.get("quality_advisory")
+        if not isinstance(advisory, dict):
+            return 0
+        rec = advisory.get("t0_recommendation")
+        if not isinstance(rec, dict):
+            return 0
+        open_items = rec.get("open_items") or []
+        return len(open_items) if isinstance(open_items, list) else 0
+    except Exception:
+        return 0
+
+
 def append_receipt_payload(
     receipt: Dict[str, Any],
     *,
@@ -940,6 +959,32 @@ def append_receipt_payload(
 
     min_epoch = time.time() - max(1, int(cache_window_seconds))
 
+    # Pre-compute open_items_created and CQS BEFORE ndjson write (BLOCKING 1 fix):
+    # persisted receipt carries these fields from the start, not added afterward.
+    _pre_cqs_result: Optional[Any] = None
+    if not skip_enrichment:
+        receipt["open_items_created"] = _count_quality_violations(receipt)
+        try:
+            _cqs_paths_pre = ensure_env()
+            _cqs_db_pre = Path(_cqs_paths_pre.get("VNX_STATE_DIR", ".")).resolve() / "quality_intelligence.db"
+            if _cqs_db_pre.exists():
+                _cqs_dispatch_id_pre = receipt.get("dispatch_id") or receipt.get("metadata", {}).get("dispatch_id")
+                if _cqs_dispatch_id_pre:
+                    import sqlite3 as _sqlite3_pre
+                    _pre_cqs_result = calculate_cqs(receipt, None, _cqs_db_pre, _cqs_dispatch_id_pre)
+                    receipt["cqs"] = _pre_cqs_result
+        except Exception as _cqs_pre_exc:
+            _emit("WARN", "cqs_precalc_failed", error=str(_cqs_pre_exc))
+
+        # Emit to register BEFORE ndjson commit (BLOCKING 2 fix):
+        # reduces window where ndjson committed but register missing.
+        _reg_emitted = _emit_dispatch_register(receipt)
+        if not _reg_emitted:
+            _emit("ERROR", "register_emit_failed",
+                  dispatch_id=str(receipt.get("dispatch_id", "")),
+                  event_type=str(receipt.get("event_type", "")))
+            # Continue — receipt write still proceeds (don't lose data)
+
     result: Optional[AppendResult] = None
 
     try:
@@ -979,45 +1024,41 @@ def append_receipt_payload(
 
     # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events)
     if result is not None and result.status == "appended" and not skip_enrichment:
-        created_count = _register_quality_open_items(receipt)
-        receipt["open_items_created"] = created_count
+        _register_quality_open_items(receipt)
+        # receipt["open_items_created"] already set from _count_quality_violations before ndjson
+        # write; actual dedup-aware count may differ but pre-count is canonical in persisted receipt.
 
-        # Compute CQS AFTER open items registration so open_items_created reflects actual count.
-        # Moved here from _enrich_completion_receipt to fix ordering bug: the enrich phase ran
-        # before _register_quality_open_items, so open_items_created was always 0 in CQS.
-        try:
-            _cqs_paths = ensure_env()
-            _cqs_state_dir = Path(_cqs_paths.get("VNX_STATE_DIR", ".")).resolve()
-            _cqs_db = _cqs_state_dir / "quality_intelligence.db"
-            if _cqs_db.exists():
+        # Update CQS in DB now that receipt is confirmed appended.
+        # _pre_cqs_result was computed before the ndjson write (BLOCKING 1 fix).
+        if _pre_cqs_result is not None:
+            try:
                 _cqs_dispatch_id = receipt.get("dispatch_id") or receipt.get("metadata", {}).get("dispatch_id")
                 if _cqs_dispatch_id:
                     import sqlite3 as _sqlite3_cqs
-                    cqs_result = calculate_cqs(receipt, None, _cqs_db, _cqs_dispatch_id)
-                    receipt["cqs"] = cqs_result
-                    _cqs_conn = _sqlite3_cqs.connect(str(_cqs_db))
-                    _cqs_conn.execute(
-                        """UPDATE dispatch_metadata
-                           SET cqs=?, normalized_status=?, cqs_components=?,
-                               open_items_created=?, open_items_resolved=?
-                           WHERE dispatch_id=?""",
-                        (
-                            cqs_result["cqs"],
-                            cqs_result["normalized_status"],
-                            json.dumps(cqs_result["components"]),
-                            receipt.get("open_items_created", 0),
-                            receipt.get("open_items_resolved", 0),
-                            _cqs_dispatch_id,
-                        ),
-                    )
-                    _cqs_conn.commit()
-                    _cqs_conn.close()
-        except Exception as _cqs_exc:
-            _emit("WARN", "cqs_calculation_failed", error=str(_cqs_exc))
+                    _cqs_paths = ensure_env()
+                    _cqs_db = Path(_cqs_paths.get("VNX_STATE_DIR", ".")).resolve() / "quality_intelligence.db"
+                    if _cqs_db.exists():
+                        _cqs_conn = _sqlite3_cqs.connect(str(_cqs_db))
+                        _cqs_conn.execute(
+                            """UPDATE dispatch_metadata
+                               SET cqs=?, normalized_status=?, cqs_components=?,
+                                   open_items_created=?, open_items_resolved=?
+                               WHERE dispatch_id=?""",
+                            (
+                                _pre_cqs_result["cqs"],
+                                _pre_cqs_result["normalized_status"],
+                                json.dumps(_pre_cqs_result["components"]),
+                                receipt.get("open_items_created", 0),
+                                receipt.get("open_items_resolved", 0),
+                                _cqs_dispatch_id,
+                            ),
+                        )
+                        _cqs_conn.commit()
+                        _cqs_conn.close()
+            except Exception as _cqs_exc:
+                _emit("WARN", "cqs_db_update_failed", error=str(_cqs_exc))
 
         _update_confidence_from_receipt(receipt)
-
-        _emit_dispatch_register(receipt)  # must precede rebuild so rebuild sees this event
         _maybe_trigger_state_rebuild(receipt)
 
     return result
@@ -1050,8 +1091,12 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
         _emit("WARN", "confidence_update_failed", error=str(exc))
 
 
-def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
-    """Emit a dispatch_register event mirroring this receipt. Best-effort."""
+def _emit_dispatch_register(receipt: Dict[str, Any]) -> bool:
+    """Emit a dispatch_register event mirroring this receipt. Best-effort.
+
+    Returns True if emitted successfully or if the event was not register-worthy.
+    Returns False only on failure (exception during append_event).
+    """
     try:
         from dispatch_register import append_event
         # Mirror _validate_receipt() — accept event_type (canonical) or event (legacy)
@@ -1080,11 +1125,13 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
                     "_emit_dispatch_register: task_complete with unknown status=%r; skipping register emit",
                     status,
                 )
-                return
+                return True  # skipped (malformed), not a failure
         elif event_type == "task_failed":
             register_event = "dispatch_failed"
         elif event_type == "task_timeout":
             register_event = "dispatch_failed"
+        elif event_type in ("task_started", "task_start", "dispatch_start"):
+            register_event = "dispatch_started"
         elif event_type == "review_gate_request":
             gate = str(receipt.get("gate", "")).lower()
             if gate != "codex_gate":
@@ -1095,10 +1142,10 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
                     "_emit_dispatch_register: review_gate_request for gate=%r deferred (symmetric defer — only codex_gate has full register lifecycle)",
                     gate,
                 )
-                return
+                return True  # deferred, not a failure
             register_event = "gate_requested"
         else:
-            return  # not register-worthy
+            return True  # not register-worthy
 
         if pr_number is not None:
             try:
@@ -1114,7 +1161,7 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
                 if not feature_id:
                     feature_id = pr_id
 
-        append_event(
+        return append_event(
             register_event,
             dispatch_id=dispatch_id,
             pr_number=pr_number,
@@ -1123,7 +1170,7 @@ def _emit_dispatch_register(receipt: Dict[str, Any]) -> None:
             gate=gate,
         )
     except Exception:
-        pass  # best-effort, never break receipt append
+        return False  # best-effort, never break receipt append
 
 
 def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
