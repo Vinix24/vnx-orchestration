@@ -1,7 +1,13 @@
 """Dispatch lifecycle register — append-only NDJSON log of dispatch state changes.
 
 File: $VNX_STATE_DIR/dispatch_register.ndjson
-Source of truth for feature/PR queue state (consumed by build_t0_state.py).
+
+Current consumers:
+- build_t0_state.py: exposes raw events list as dispatch_register_events (PR-4b2)
+
+Future consumers (separate PRs):
+- append_receipt.py + gate_recorder.py + dispatch_lifecycle.sh: hook callers (PR-4b3, PR-4b4)
+- build_t0_state.py: full register-canonical pr_progress aggregation (PR-4c)
 """
 from __future__ import annotations
 import datetime as _dt, json, os, fcntl, sys
@@ -103,9 +109,12 @@ def append_event(
         return False
 
 
-def read_events(*, since_iso: Optional[str] = None) -> list[dict]:
-    """Read all events; takes shared lock to avoid partial-write reads."""
-    path = _register_path()
+def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
+    """Read all events; takes shared lock to avoid partial-write reads. Honors optional state_dir override."""
+    if state_dir is not None:
+        path = Path(state_dir) / "dispatch_register.ndjson"
+    else:
+        path = _register_path()
     if not path.exists():
         return []
     events = []
