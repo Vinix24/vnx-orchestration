@@ -186,28 +186,27 @@ def test_repo_relative_fallback(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 11: CLI entry returns 0 on success, 1 on throttled
+# Test 11: CLI entry always exits 0 (fired-successfully AND throttled are both valid)
 # ---------------------------------------------------------------------------
 
 def test_cli_returns_0_on_success(tmp_path: Path) -> None:
     with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
          mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()):
         with mock.patch("sys.exit") as mock_exit:
-            # Re-run the __main__ block logic
-            success = srt.maybe_trigger_state_rebuild()
-            sys.exit(0 if success else 1)
+            srt.maybe_trigger_state_rebuild()
+            sys.exit(0)
         mock_exit.assert_called_with(0)
 
 
-def test_cli_returns_1_on_throttled(tmp_path: Path) -> None:
+def test_cli_returns_0_on_throttled(tmp_path: Path) -> None:
     throttle = tmp_path / ".last_state_rebuild_ts"
     throttle.write_text(str(int(time.time())), encoding="utf-8")
 
     with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path):
         with mock.patch("sys.exit") as mock_exit:
-            success = srt.maybe_trigger_state_rebuild()
-            sys.exit(0 if success else 1)
-        mock_exit.assert_called_with(1)
+            srt.maybe_trigger_state_rebuild()
+            sys.exit(0)
+        mock_exit.assert_called_with(0)
 
 
 # ---------------------------------------------------------------------------

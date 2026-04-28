@@ -99,5 +99,5 @@ __all__ = ["maybe_trigger_state_rebuild"]
 # CLI entry for bash hooks (e.g., dispatch_lifecycle.sh):
 #   python3 scripts/lib/state_rebuild_trigger.py
 if __name__ == "__main__":
-    success = maybe_trigger_state_rebuild()
-    sys.exit(0 if success else 1)
+    maybe_trigger_state_rebuild()
+    sys.exit(0)  # Always 0: throttled-as-expected and fired-successfully are both valid outcomes

@@ -1044,40 +1044,22 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
 
 
 def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
-    """Fire non-blocking rebuild of t0_state.json after qualifying events. Best-effort."""
+    """Trigger state rebuild via shared throttled helper. Best-effort."""
+    event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+
+    TRIGGER_EVENTS = {
+        "task_complete", "task_completed", "completion", "complete",
+        "dispatch_promoted", "dispatch_started",
+    }
+    if event_type not in TRIGGER_EVENTS:
+        return
+
     try:
-        event_type = str(receipt.get("event_type") or receipt.get("event") or "")
-        if not (_is_completion_event(receipt) or event_type in ("dispatch_promoted", "dispatch_started")):
-            return
-
-        state_dir = resolve_state_dir(__file__)
-        throttle_file = state_dir / ".last_state_rebuild_ts"
-
-        try:
-            if throttle_file.exists():
-                last_ts = float(throttle_file.read_text(encoding="utf-8").strip())
-                if time.time() - last_ts < _REBUILD_THROTTLE_SECONDS:
-                    return
-        except Exception:
-            pass
-
-        subprocess.Popen(
-            ["python3", "scripts/build_t0_state.py"],
-            cwd=str(_REPO_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        # Write throttle marker only after Popen succeeds; a failed launch
-        # should not suppress the next rebuild attempt for 30s.
-        try:
-            tmp = throttle_file.with_name(throttle_file.name + ".tmp")
-            tmp.write_text(str(time.time()), encoding="utf-8")
-            os.replace(str(tmp), str(throttle_file))
-        except Exception:
-            pass
+        sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+        from state_rebuild_trigger import maybe_trigger_state_rebuild
+        maybe_trigger_state_rebuild()
     except Exception:
-        pass
+        pass  # best-effort
 
 
 def _parse_input(receipt_json: Optional[str], receipt_file: Optional[str]) -> Dict[str, Any]:
