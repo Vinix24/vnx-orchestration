@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -285,3 +286,37 @@ def test_two_calls_31s_apart_both_fire(tmp_path: Path) -> None:
     assert r1 is True, "first call should fire"
     assert r2 is True, "second call 31s later should also fire"
     assert mock_p.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 16: Two concurrent threads — only one fires Popen (lock deduplication)
+# ---------------------------------------------------------------------------
+
+def test_concurrent_calls_dedupe(tmp_path: Path) -> None:
+    """Two simultaneous calls — only one fires Popen."""
+    fired = []
+    real_popen = subprocess.Popen
+
+    def slow_popen(*args, **kwargs):
+        fired.append(args)
+        time.sleep(0.5)  # hold lock long enough for second caller to see contention
+        return real_popen(
+            ["true"],
+            **{k: v for k, v in kwargs.items() if k in ("stdout", "stderr", "start_new_session")},
+        )
+
+    results = []
+
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", slow_popen):
+        threads = [
+            threading.Thread(target=lambda: results.append(srt.maybe_trigger_state_rebuild()))
+            for _ in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert sum(1 for r in results if r) == 1, f"expected exactly one True, got {results}"
+    assert len(fired) == 1, f"expected exactly one Popen call, got {len(fired)}"

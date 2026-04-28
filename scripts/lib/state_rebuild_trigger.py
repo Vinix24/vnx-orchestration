@@ -8,6 +8,7 @@ Default throttle window: 30 seconds.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
 import sys
@@ -44,36 +45,50 @@ def maybe_trigger_state_rebuild(throttle_seconds: int = _DEFAULT_THROTTLE_SECOND
     - Marker file holds INTEGER epoch seconds (no float — bash arithmetic compat)
     - Marker is written ONLY after Popen succeeds (no failure-suppression bug)
     - Atomic write via .tmp + rename
+    - fcntl.LOCK_EX | LOCK_NB on sibling .lock file prevents concurrent races
     """
     state_dir = _resolve_state_dir()
     throttle = state_dir / ".last_state_rebuild_ts"
+    lock_path = state_dir / ".last_state_rebuild_ts.lock"
+    state_dir.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
 
-    last = 0
     try:
-        if throttle.exists():
-            content = throttle.read_text(encoding="utf-8").strip()
-            # Tolerate float (legacy main writers) — strip decimal portion
-            last = int(float(content)) if content else 0
-    except (ValueError, OSError):
-        last = 0
+        with lock_path.open("a+", encoding="utf-8") as lock_handle:
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Another caller is in the critical section — they will fire if needed
+                return False
 
-    if now - last < throttle_seconds:
-        return False  # throttled
+            # Critical section: read marker, decide, optionally fire + write marker
+            last = 0
+            try:
+                if throttle.exists():
+                    content = throttle.read_text(encoding="utf-8").strip()
+                    # Tolerate float (legacy main writers) — strip decimal portion
+                    last = int(float(content)) if content else 0
+            except (ValueError, OSError):
+                last = 0
 
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.Popen(
-            ["python3", str(_REPO_ROOT / "scripts" / "build_t0_state.py")],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        # Atomic throttle marker — write ONLY after Popen succeeded
-        tmp = throttle.with_suffix(".tmp")
-        tmp.write_text(str(now), encoding="utf-8")
-        tmp.replace(throttle)
-        return True
+            if now - last < throttle_seconds:
+                return False
+
+            try:
+                subprocess.Popen(
+                    ["python3", str(_REPO_ROOT / "scripts" / "build_t0_state.py")],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                # Atomic throttle marker — write ONLY after Popen succeeded
+                tmp = throttle.with_suffix(".tmp")
+                tmp.write_text(str(now), encoding="utf-8")
+                tmp.replace(throttle)
+                return True
+            except Exception:
+                return False
+            # fcntl.flock released on with-exit
     except Exception:
         return False
 
