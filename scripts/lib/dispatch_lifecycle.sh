@@ -456,5 +456,15 @@ finalize_dispatch_delivery() {
     log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
     python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
         dispatch_id="$dispatch_id" terminal="$terminal_id" 2>/dev/null || true
+    # Trigger throttled t0_state rebuild (non-blocking). Throttle marker shared
+    # with Python hook (UTF-8 epoch seconds, atomic write via .tmp+mv).
+    local _REBUILD_THROTTLE_FILE="$STATE_DIR/.last_state_rebuild_ts"
+    local _REBUILD_NOW; _REBUILD_NOW=$(date +%s)
+    local _REBUILD_LAST; _REBUILD_LAST=$(cat "$_REBUILD_THROTTLE_FILE" 2>/dev/null || echo 0)
+    if [ ! -f "$_REBUILD_THROTTLE_FILE" ] || [ $((_REBUILD_NOW - _REBUILD_LAST)) -ge 30 ]; then
+        nohup python3 "$VNX_DIR/scripts/build_t0_state.py" >/dev/null 2>&1 &
+        printf '%s' "$_REBUILD_NOW" > "${_REBUILD_THROTTLE_FILE}.tmp" && \
+            mv "${_REBUILD_THROTTLE_FILE}.tmp" "$_REBUILD_THROTTLE_FILE"
+    fi
     return 0
 }

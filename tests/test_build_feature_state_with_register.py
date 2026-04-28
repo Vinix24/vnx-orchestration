@@ -436,3 +436,93 @@ def test_retry_dispatch_after_completed_yields_active(tmp_path: Path):
     assert rf["pr-50"]["status"] == "active", (
         f"Expected 'active' (retry dispatch is most recent), got {rf['pr-50']['status']!r}"
     )
+
+
+def test_register_is_canonical_when_populated(tmp_path: Path):
+    """When register has events, top-level feature_state fields come from register, not FEATURE_PLAN.
+
+    Regression for: _build_feature_state returned FEATURE_PLAN-derived values (completion_pct,
+    total_prs, etc.) as the canonical feature_state even when register was populated.
+    """
+    env_patch, state_dir, _ = _load_build_t0_state(tmp_path)
+
+    # 2 dispatches: pr-42 completed, pr-43 active → total=2, completed=1, pct=50
+    events = [
+        {
+            "timestamp": "2026-04-28T10:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-canon-001",
+            "pr_number": 42,
+            "terminal": "T1",
+        },
+        {
+            "timestamp": "2026-04-28T10:30:00Z",
+            "event": "dispatch_completed",
+            "dispatch_id": "d-canon-001",
+            "pr_number": 42,
+        },
+        {
+            "timestamp": "2026-04-28T11:00:00Z",
+            "event": "dispatch_promoted",
+            "dispatch_id": "d-canon-002",
+            "pr_number": 43,
+            "terminal": "T2",
+        },
+    ]
+    _write_register(state_dir, events)
+
+    with mock.patch.dict(os.environ, env_patch):
+        if "build_t0_state" in sys.modules:
+            del sys.modules["build_t0_state"]
+        spec = importlib.util.spec_from_file_location(
+            "build_t0_state", SCRIPTS_DIR / "build_t0_state.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+
+        # FEATURE_PLAN claims 90% done / 9 of 10 — must NOT appear as canonical fields
+        fake_fsm = mock.MagicMock()
+        fake_state = mock.MagicMock()
+        fake_state.as_dict.return_value = {
+            "feature_name": "ShouldNotBePrimary",
+            "current_pr": "pr-999",
+            "next_task": "old_task",
+            "assigned_track": "C",
+            "assigned_role": "architect",
+            "completion_pct": 90,
+            "total_prs": 10,
+            "completed_prs": 9,
+            "status": "in_progress",
+        }
+        fake_fsm.parse_feature_plan.return_value = fake_state
+        (tmp_path / "FEATURE_PLAN.md").write_text("# F\n")
+
+        with mock.patch.dict(sys.modules, {"feature_state_machine": fake_fsm}):
+            spec.loader.exec_module(mod)
+            result = mod._build_feature_state()
+
+    # Canonical fields must reflect register (2 PRs, 1 completed)
+    assert result["total_prs"] == 2, (
+        f"Expected total_prs=2 from register, got {result['total_prs']}"
+    )
+    assert result["completed_prs"] == 1, (
+        f"Expected completed_prs=1 from register, got {result['completed_prs']}"
+    )
+    assert result["completion_pct"] == 50, (
+        f"Expected completion_pct=50 from register, got {result['completion_pct']}"
+    )
+    # FEATURE_PLAN's values must not be the canonical top-level values
+    assert result["total_prs"] != 10, "total_prs must not be FEATURE_PLAN's 10"
+    assert result["completion_pct"] != 90, "completion_pct must not be FEATURE_PLAN's 90"
+    assert result.get("feature_name") != "ShouldNotBePrimary", (
+        "feature_name must not be FEATURE_PLAN's value when register is canonical"
+    )
+    # Most recent active dispatch is pr-43
+    assert result["current_pr"] == "pr-43", (
+        f"Expected current_pr='pr-43' (most recent active), got {result['current_pr']!r}"
+    )
+    # register_features must be present
+    assert "register_features" in result
+    # FEATURE_PLAN stored under supplementary key only
+    assert "feature_plan" in result
+    fp = result["feature_plan"]
+    assert fp["feature_name"] == "ShouldNotBePrimary"  # supplementary, not canonical

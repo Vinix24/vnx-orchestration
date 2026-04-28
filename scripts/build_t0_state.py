@@ -240,8 +240,8 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 def _build_feature_state() -> Dict[str, Any]:
     """Return structured feature state for T0 context.
 
-    Reads from dispatch_register.ndjson first; falls back to FEATURE_PLAN.md
-    when the register is absent or empty.
+    When dispatch_register.ndjson has events, the register is the canonical source.
+    FEATURE_PLAN.md is used only when the register is absent or empty (true fallback).
     """
     _empty: Dict[str, Any] = {
         "feature_name": None,
@@ -265,23 +265,67 @@ def _build_feature_state() -> Dict[str, Any]:
     except Exception:
         pass
 
-    # FEATURE_PLAN.md fallback (kept as canonical backward-compat source)
     feature_plan = _PROJECT_ROOT / "FEATURE_PLAN.md"
-    if not feature_plan.exists():
-        result = dict(_empty)
-        if register_features:
-            result["register_features"] = register_features
+
+    # Register is canonical when populated
+    if register_features:
+        result = _canonical_from_register(register_features)
+        result["register_features"] = register_features
+        # FEATURE_PLAN is supplementary metadata only
+        if feature_plan.exists():
+            try:
+                from feature_state_machine import parse_feature_plan
+                result["feature_plan"] = parse_feature_plan(feature_plan).as_dict()
+            except Exception:
+                pass
         return result
+
+    # True fallback: register empty/absent — use FEATURE_PLAN
+    if not feature_plan.exists():
+        return dict(_empty)
     try:
         from feature_state_machine import parse_feature_plan
         state = parse_feature_plan(feature_plan)
-        result = state.as_dict()
+        return state.as_dict()
     except Exception:
-        result = dict(_empty)
+        return dict(_empty)
 
-    if register_features:
-        result["register_features"] = register_features
-    return result
+
+def _canonical_from_register(register_features: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive canonical feature_state dict from register aggregation output."""
+    total_prs = len(register_features)
+    completed_prs = sum(
+        1 for v in register_features.values() if v.get("status") == "completed"
+    )
+    completion_pct = round(completed_prs / total_prs * 100) if total_prs else 0
+
+    # Most recently active entry determines current_pr
+    active = [
+        (k, v) for k, v in register_features.items() if v.get("status") == "active"
+    ]
+    current_pr: Optional[str] = None
+    if active:
+        active.sort(key=lambda x: x[1].get("last_event_ts", ""), reverse=True)
+        current_pr = active[0][0]
+
+    if completed_prs == total_prs and total_prs > 0:
+        overall_status = "completed"
+    elif total_prs > 0:
+        overall_status = "in_progress"
+    else:
+        overall_status = "planned"
+
+    return {
+        "feature_name": None,
+        "current_pr": current_pr,
+        "next_task": None,
+        "assigned_track": None,
+        "assigned_role": None,
+        "completion_pct": completion_pct,
+        "total_prs": total_prs,
+        "completed_prs": completed_prs,
+        "status": overall_status,
+    }
 
 
 def _aggregate_register_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:

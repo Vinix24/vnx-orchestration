@@ -1059,15 +1059,23 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
     """Wire dispatch outcome into pattern confidence scores (best-effort)."""
     try:
         event_type = str(receipt.get("event_type") or receipt.get("status") or "")
-        if event_type not in ("task_complete", "task_failed"):
+        status_field = str(receipt.get("status", "")).lower()
+
+        if event_type == "task_complete":
+            # Honor receipt.status — failed completions are NOT successes
+            if status_field in ("failed", "error", "blocked"):
+                outcome = "failure"
+            else:
+                outcome = "success"
+        elif event_type == "task_failed":
+            outcome = "failure"
+        else:
             return
 
         dispatch_id = str(receipt.get("dispatch_id") or "")
         terminal = str(receipt.get("terminal") or "")
         if not dispatch_id:
             return
-
-        outcome = "success" if event_type == "task_complete" else "failure"
 
         state_dir = resolve_state_dir(__file__)
 

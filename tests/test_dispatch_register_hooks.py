@@ -425,3 +425,217 @@ def test_register_write_before_rebuild_trigger(tmp_path: Path):
     assert call_log == ["emit", "rebuild"], (
         f"Expected emit before rebuild, got: {call_log}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Confidence-learning status-aware tests (BLOCKING 1)
+# ---------------------------------------------------------------------------
+
+
+def test_confidence_task_complete_success_outcome_is_success(tmp_path: Path):
+    """task_complete with no failed status must pass 'success' to update_confidence_from_outcome."""
+    env = _setup_env(tmp_path)
+    captured: list = []
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(return_value=Path(env["VNX_STATE_DIR"]))
+        db_path = Path(env["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        db_path.touch()
+
+        def _fake_update(_db, _did, _term, outcome):
+            captured.append(outcome)
+
+        fake_intel = mock.MagicMock()
+        fake_intel.update_confidence_from_outcome = _fake_update
+        with mock.patch.dict(sys.modules, {"intelligence_persist": fake_intel}):
+            mod._update_confidence_from_receipt({
+                "event_type": "task_complete",
+                "dispatch_id": "d-conf-ok",
+                "terminal": "T1",
+            })
+
+    assert captured == ["success"], (
+        f"task_complete with no failed status must yield 'success', got: {captured}"
+    )
+
+
+def test_confidence_task_complete_with_failed_status_yields_failure(tmp_path: Path):
+    """task_complete + status=failed must pass 'failure', not 'success', to confidence update.
+
+    Regression for: _update_confidence_from_receipt treated every task_complete as
+    a success regardless of receipt['status'], boosting patterns for failed dispatches.
+    """
+    env = _setup_env(tmp_path)
+    captured: list = []
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(return_value=Path(env["VNX_STATE_DIR"]))
+        db_path = Path(env["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        db_path.touch()
+
+        def _fake_update(_db, _did, _term, outcome):
+            captured.append(outcome)
+
+        fake_intel = mock.MagicMock()
+        fake_intel.update_confidence_from_outcome = _fake_update
+        with mock.patch.dict(sys.modules, {"intelligence_persist": fake_intel}):
+            mod._update_confidence_from_receipt({
+                "event_type": "task_complete",
+                "status": "failed",
+                "dispatch_id": "d-conf-failed",
+                "terminal": "T1",
+            })
+
+    assert captured == ["failure"], (
+        f"task_complete+status=failed must yield 'failure', got: {captured}"
+    )
+
+
+def test_confidence_task_complete_with_error_status_yields_failure(tmp_path: Path):
+    """task_complete + status=error must yield 'failure' (covers all failed-status variants)."""
+    env = _setup_env(tmp_path)
+    captured: list = []
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(return_value=Path(env["VNX_STATE_DIR"]))
+        db_path = Path(env["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        db_path.touch()
+
+        def _fake_update(_db, _did, _term, outcome):
+            captured.append(outcome)
+
+        fake_intel = mock.MagicMock()
+        fake_intel.update_confidence_from_outcome = _fake_update
+        with mock.patch.dict(sys.modules, {"intelligence_persist": fake_intel}):
+            mod._update_confidence_from_receipt({
+                "event_type": "task_complete",
+                "status": "error",
+                "dispatch_id": "d-conf-error",
+                "terminal": "T2",
+            })
+
+    assert captured == ["failure"], (
+        f"task_complete+status=error must yield 'failure', got: {captured}"
+    )
+
+
+def test_confidence_task_failed_event_yields_failure(tmp_path: Path):
+    """task_failed event must pass 'failure' to update_confidence_from_outcome."""
+    env = _setup_env(tmp_path)
+    captured: list = []
+
+    with mock.patch.dict(os.environ, env):
+        mod = _load_append_receipt_mod(env)
+        mod.resolve_state_dir = mock.MagicMock(return_value=Path(env["VNX_STATE_DIR"]))
+        db_path = Path(env["VNX_STATE_DIR"]) / "quality_intelligence.db"
+        db_path.touch()
+
+        def _fake_update(_db, _did, _term, outcome):
+            captured.append(outcome)
+
+        fake_intel = mock.MagicMock()
+        fake_intel.update_confidence_from_outcome = _fake_update
+        with mock.patch.dict(sys.modules, {"intelligence_persist": fake_intel}):
+            mod._update_confidence_from_receipt({
+                "event_type": "task_failed",
+                "dispatch_id": "d-conf-task-failed",
+                "terminal": "T3",
+            })
+
+    assert captured == ["failure"], (
+        f"task_failed must yield 'failure', got: {captured}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bash promotion rebuild trigger test (BLOCKING 2)
+# ---------------------------------------------------------------------------
+
+
+def test_bash_promotion_rebuild_trigger(tmp_path: Path):
+    """Bash throttle snippet in dispatch_lifecycle.sh must fire build_t0_state.py on promotion.
+
+    Regression for: finalize_dispatch_delivery wrote dispatch_promoted to the register
+    but never triggered build_t0_state.py, leaving t0_state.json stale until an
+    unrelated receipt arrived.
+    """
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    marker_file = tmp_path / "rebuild_triggered"
+    fake_build_t0 = scripts_dir / "build_t0_state.py"
+    fake_build_t0.write_text(
+        f"import pathlib; pathlib.Path({str(marker_file)!r}).write_text('ok')\n"
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # Reproduce the throttle snippet as written in dispatch_lifecycle.sh (no throttle file = fires)
+    bash_snippet = f"""
+set -e
+VNX_DIR={str(tmp_path)!r}
+STATE_DIR={str(state_dir)!r}
+_REBUILD_THROTTLE_FILE="$STATE_DIR/.last_state_rebuild_ts"
+_REBUILD_NOW=$(date +%s)
+_REBUILD_LAST=$(cat "$_REBUILD_THROTTLE_FILE" 2>/dev/null || echo 0)
+if [ ! -f "$_REBUILD_THROTTLE_FILE" ] || [ $((_REBUILD_NOW - _REBUILD_LAST)) -ge 30 ]; then
+    nohup python3 "$VNX_DIR/scripts/build_t0_state.py" >/dev/null 2>&1 &
+    _BG_PID=$!
+    printf '%s' "$_REBUILD_NOW" > "${{_REBUILD_THROTTLE_FILE}}.tmp" && \\
+        mv "${{_REBUILD_THROTTLE_FILE}}.tmp" "$_REBUILD_THROTTLE_FILE"
+    wait $_BG_PID
+fi
+"""
+    result = subprocess.run(["bash", "-c", bash_snippet], capture_output=True, timeout=15)
+    assert result.returncode == 0, f"Bash script failed: {result.stderr.decode()}"
+    assert marker_file.exists(), (
+        "build_t0_state.py was not triggered by the bash promotion rebuild hook"
+    )
+    throttle_file = state_dir / ".last_state_rebuild_ts"
+    assert throttle_file.exists(), "Throttle file must be written after rebuild trigger"
+    ts_val = throttle_file.read_text(encoding="utf-8").strip()
+    assert ts_val.isdigit(), f"Throttle file must contain epoch seconds, got: {ts_val!r}"
+
+
+def test_bash_promotion_rebuild_throttle_suppresses_second_call(tmp_path: Path):
+    """Second promotion within 30s must not fire a second rebuild (throttle respected)."""
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    counter_file = tmp_path / "rebuild_count"
+    counter_file.write_text("0")
+    fake_build_t0 = scripts_dir / "build_t0_state.py"
+    fake_build_t0.write_text(
+        f"import pathlib; p=pathlib.Path({str(counter_file)!r}); "
+        f"p.write_text(str(int(p.read_text()) + 1))\n"
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    # Pre-write a fresh throttle timestamp so the throttle fires
+    throttle_file = state_dir / ".last_state_rebuild_ts"
+    import time as _time
+    throttle_file.write_text(str(int(_time.time())))
+
+    bash_snippet = f"""
+set -e
+VNX_DIR={str(tmp_path)!r}
+STATE_DIR={str(state_dir)!r}
+_REBUILD_THROTTLE_FILE="$STATE_DIR/.last_state_rebuild_ts"
+_REBUILD_NOW=$(date +%s)
+_REBUILD_LAST=$(cat "$_REBUILD_THROTTLE_FILE" 2>/dev/null || echo 0)
+if [ ! -f "$_REBUILD_THROTTLE_FILE" ] || [ $((_REBUILD_NOW - _REBUILD_LAST)) -ge 30 ]; then
+    nohup python3 "$VNX_DIR/scripts/build_t0_state.py" >/dev/null 2>&1 &
+    _BG_PID=$!
+    printf '%s' "$_REBUILD_NOW" > "${{_REBUILD_THROTTLE_FILE}}.tmp" && \\
+        mv "${{_REBUILD_THROTTLE_FILE}}.tmp" "$_REBUILD_THROTTLE_FILE"
+    wait $_BG_PID
+fi
+"""
+    result = subprocess.run(["bash", "-c", bash_snippet], capture_output=True, timeout=15)
+    assert result.returncode == 0, f"Bash script failed: {result.stderr.decode()}"
+    # Throttle was fresh — rebuild must be suppressed
+    count = int(counter_file.read_text().strip())
+    assert count == 0, f"Expected 0 rebuilds (throttled), got {count}"
