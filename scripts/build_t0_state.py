@@ -55,6 +55,11 @@ try:
 except ImportError:
     _dr_read_events = None
 
+try:
+    from pr_queue_state import build_pr_queue_state as _build_pqs
+except ImportError:
+    _build_pqs = None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -665,6 +670,18 @@ def build_t0_state(
     recent_receipts = _build_recent_receipts(state_dir)
     register_events = _build_register_events(state_dir=state_dir)
     git_context = _build_git_context()
+    pr_queue: Dict[str, Any] = {
+        "schema": "pr_queue/1.0",
+        "timestamp": _now_iso(),
+        "open_prs": [],
+        "merged_today": [],
+        "queued_features": [],
+    }
+    if _build_pqs is not None:
+        try:
+            pr_queue = _build_pqs(state_dir)
+        except Exception:
+            pass
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
 
@@ -685,6 +702,7 @@ def build_t0_state(
         "dispatch_register_events": register_events,
         "git_context": git_context,
         "system_health": system_health,
+        "pr_queue": pr_queue,
         "_build_seconds": round(elapsed, 2),
     }
 
@@ -899,6 +917,13 @@ def main() -> int:
         # Write per-section detail files — loaded on-demand (Sprint 4a)
         try:
             _write_detail_files(state, _STATE_DIR / "t0_detail")
+        except Exception:
+            pass  # best-effort — must not block SessionStart
+        # Write pr_queue_state.json — replaces hand-maintained PR_QUEUE.md (Phase 2.1)
+        try:
+            pqs = state.get("pr_queue")
+            if pqs:
+                _write_atomic(_STATE_DIR / "pr_queue_state.json", pqs)
         except Exception:
             pass  # best-effort — must not block SessionStart
         # Regenerate t0_brief.json alongside t0_state.json — orchestration helpers
