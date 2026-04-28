@@ -28,6 +28,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 import append_receipt as ar
 import build_t0_state as bts
+import state_rebuild_trigger as srt
 
 
 def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP-001") -> dict:
@@ -43,24 +44,19 @@ def _minimal_receipt(event_type: str = "task_complete", dispatch_id: str = "DISP
 def test_completion_event_triggers_rebuild(tmp_path: Path) -> None:
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen") as mock_popen:
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
         ar._maybe_trigger_state_rebuild(receipt)
 
-    mock_popen.assert_called_once()
-    call_kwargs = mock_popen.call_args
-    assert call_kwargs[0][0] == ["python3", "scripts/build_t0_state.py"]
-    assert call_kwargs[1].get("start_new_session") is True
+    mock_fn.assert_called_once()
 
 
 def test_non_completion_event_does_not_trigger_rebuild(tmp_path: Path) -> None:
     receipt = _minimal_receipt("task_started")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen") as mock_popen:
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
         ar._maybe_trigger_state_rebuild(receipt)
 
-    mock_popen.assert_not_called()
+    mock_fn.assert_not_called()
 
 
 def test_dispatch_promoted_event_triggers_rebuild(tmp_path: Path) -> None:
@@ -71,58 +67,45 @@ def test_dispatch_promoted_event_triggers_rebuild(tmp_path: Path) -> None:
         "source": "pytest",
     }
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen") as mock_popen:
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
         ar._maybe_trigger_state_rebuild(receipt)
 
-    mock_popen.assert_called_once()
+    mock_fn.assert_called_once()
 
 
 def test_throttle_prevents_double_rebuild(tmp_path: Path) -> None:
-    throttle_file = tmp_path / ".last_state_rebuild_ts"
-    throttle_file.write_text(str(time.time()), encoding="utf-8")
-
+    # Throttle is handled by the shared helper; when it returns False (throttled), no error raised
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen") as mock_popen:
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=False) as mock_fn:
         ar._maybe_trigger_state_rebuild(receipt)
 
-    mock_popen.assert_not_called()
+    mock_fn.assert_called_once()
 
 
 def test_throttle_allows_rebuild_after_window(tmp_path: Path) -> None:
-    throttle_file = tmp_path / ".last_state_rebuild_ts"
-    old_ts = time.time() - ar._REBUILD_THROTTLE_SECONDS - 5
-    throttle_file.write_text(str(old_ts), encoding="utf-8")
-
+    # Throttle window expired: shared helper returns True (rebuild fired)
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen") as mock_popen:
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
         ar._maybe_trigger_state_rebuild(receipt)
 
-    mock_popen.assert_called_once()
+    mock_fn.assert_called_once()
 
 
 def test_rebuild_failure_does_not_raise(tmp_path: Path) -> None:
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen", side_effect=OSError("popen failed")):
-        ar._maybe_trigger_state_rebuild(receipt)
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", side_effect=RuntimeError("boom")):
+        ar._maybe_trigger_state_rebuild(receipt)  # must not raise
 
 
-def test_popen_failure_does_not_write_throttle(tmp_path: Path) -> None:
-    """Throttle file must NOT be written when Popen raises (advisory fix)."""
-    throttle_file = tmp_path / ".last_state_rebuild_ts"
+def test_shared_helper_exception_is_swallowed(tmp_path: Path) -> None:
+    """Any exception from the shared helper must be swallowed (best-effort contract)."""
     receipt = _minimal_receipt("task_complete")
 
-    with mock.patch("append_receipt.resolve_state_dir", return_value=tmp_path), \
-         mock.patch("append_receipt.subprocess.Popen", side_effect=OSError("popen failed")):
-        ar._maybe_trigger_state_rebuild(receipt)
-
-    assert not throttle_file.exists(), "throttle file must not be written on Popen failure"
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", side_effect=OSError("popen failed")):
+        ar._maybe_trigger_state_rebuild(receipt)  # must not raise
 
 
 def test_rebuild_failure_does_not_break_append(tmp_path: Path) -> None:
@@ -145,10 +128,34 @@ def test_rebuild_failure_does_not_break_append(tmp_path: Path) -> None:
          mock.patch("append_receipt._enrich_completion_receipt", side_effect=lambda r: r), \
          mock.patch("append_receipt._register_quality_open_items", return_value=0), \
          mock.patch("append_receipt._update_confidence_from_receipt"), \
-         mock.patch("append_receipt.subprocess.Popen", side_effect=OSError("boom")):
+         mock.patch.object(srt, "maybe_trigger_state_rebuild", side_effect=OSError("boom")):
         result = ar.append_receipt_payload(receipt, receipts_file=receipts_file)
 
     assert result.status == "appended"
+
+
+def test_event_type_forwarded_to_helper_for_completion(tmp_path: Path) -> None:
+    """append_receipt._maybe_trigger_state_rebuild passes event_type to shared helper."""
+    receipt = _minimal_receipt("task_complete")
+
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    mock_fn.assert_called_once_with(event_type="task_complete")
+
+
+def test_event_type_forwarded_to_helper_for_dispatch_promoted(tmp_path: Path) -> None:
+    receipt = {
+        "timestamp": "2026-04-28T10:00:00Z",
+        "event_type": "dispatch_promoted",
+        "terminal": "T0",
+        "source": "pytest",
+    }
+
+    with mock.patch.object(srt, "maybe_trigger_state_rebuild", return_value=True) as mock_fn:
+        ar._maybe_trigger_state_rebuild(receipt)
+
+    mock_fn.assert_called_once_with(event_type="dispatch_promoted")
 
 
 def test_task_complete_survives_100_state_mutations(tmp_path: Path) -> None:
