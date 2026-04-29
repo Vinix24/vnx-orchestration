@@ -196,7 +196,11 @@ rc_delivery_start() {
 }
 
 # Record delivery success (broker: delivering -> accepted).
-# Idempotent: duplicate acceptance returns noop=true instead of failing.
+# Returns 0 when the broker confirms acceptance (real success or idempotent
+# no-op). Returns 1 when the broker rejects the transition (noop_rejected) or
+# the CLI invocation fails for any other reason — caller MUST treat both as
+# "broker state did not transition to accepted" and refuse to mark the
+# dispatch active locally.
 rc_delivery_success() {
     local dispatch_id="$1" attempt_id="$2"
     _rc_enabled || return 0
@@ -206,26 +210,30 @@ rc_delivery_success() {
     if result=$(_rc_python delivery-success \
         --dispatch-id "$dispatch_id" \
         --attempt-id "$attempt_id" 2>/dev/null); then
-        # Check if this was a no-op (duplicate acceptance)
+        # Exit 0 from runtime_core_cli: success OR idempotent noop (already accepted).
         local is_noop
         is_noop=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop","false"))' 2>/dev/null || echo "false")
         if [[ "$is_noop" == "True" || "$is_noop" == "true" ]]; then
             log "V8 RUNTIME_CORE: delivery-success idempotent no-op dispatch=$dispatch_id (already accepted/beyond)"
         fi
-    else
-        # Check if this was a terminal-state rejection vs real error
-        local is_rejected
-        is_rejected=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop_rejected","false"))' 2>/dev/null || echo "false")
-        if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
-            log "V8 RUNTIME_CORE: delivery-success rejected dispatch=$dispatch_id (terminal state)"
-        else
-            # RES-D2: Log structured failure when delivery_success recording fails.
-            # Broker will show 'delivering' instead of 'accepted' for this dispatch.
-            log_structured_failure "delivery_success_record_failed" \
-                "delivery-success recording failed — broker state may show delivering instead of accepted" \
-                "dispatch=$dispatch_id attempt=$attempt_id"
-        fi
+        return 0
     fi
+
+    # Non-zero exit: terminal-state rejection (noop_rejected) or hard CLI error.
+    # In both cases the broker has NOT recorded acceptance — fail closed.
+    local is_rejected
+    is_rejected=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop_rejected","false"))' 2>/dev/null || echo "false")
+    if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
+        log_structured_failure "delivery_success_rejected" \
+            "delivery-success rejected by broker — terminal state mismatch; refusing to mark dispatch active" \
+            "dispatch=$dispatch_id attempt=$attempt_id"
+    else
+        # RES-D2: structured failure when delivery_success recording fails.
+        log_structured_failure "delivery_success_record_failed" \
+            "delivery-success recording failed — broker state may show delivering instead of accepted" \
+            "dispatch=$dispatch_id attempt=$attempt_id"
+    fi
+    return 1
 }
 
 # Invoke the unified cleanup_worker_exit helper (SUP-PR1).  Best-effort —
@@ -468,13 +476,58 @@ _fdd_log_dispatch_metadata() {
 # finalize_dispatch_delivery — broker success, progress state, heartbeat, metadata, move to active.
 # Params: dispatch_file track terminal_id dispatch_id pr_id gate agent_role instruction_content [intelligence_data]
 # Reads globals: _DL_RC_ATTEMPT_ID
+# Returns 0 on confirmed-accepted activation, 1 when the broker did not confirm
+# acceptance — in the latter case the dispatch file stays in pending/, no
+# dispatch_promoted is emitted, and dispatch_failed is appended to the register
+# so register-driven views see the rejection.
 finalize_dispatch_delivery() {
     local dispatch_file="$1" track="$2" terminal_id="$3" dispatch_id="$4"
     local pr_id="$5" gate="$6" agent_role="$7" instruction_content="$8"
     local intelligence_data="${9:-}"
 
-    rc_delivery_success "$dispatch_id" "$_DL_RC_ATTEMPT_ID"
+    # Fail closed: if the broker did not record `accepted`, refuse to mark the
+    # dispatch active locally. Otherwise local state would say `active` while
+    # the broker still says `delivering` (or has already rejected), which is
+    # exactly the inconsistency the runtime-core integration is meant to
+    # prevent (see Contract 90 §WF-5: delivery is complete only once
+    # `accepted` is recorded).
+    if ! rc_delivery_success "$dispatch_id" "$_DL_RC_ATTEMPT_ID"; then
+        log "V8 DISPATCH: delivery-success not confirmed — leaving dispatch in pending/ dispatch=$dispatch_id terminal=$terminal_id"
+        local _failed_rc=0
+        local _failed_stderr
+        set +e
+        _failed_stderr=$(python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_failed \
+            "dispatch_id=$dispatch_id" "terminal=$terminal_id" "extra.reason=delivery_success_unconfirmed" 2>&1 >/dev/null)
+        _failed_rc=$?
+        set -e
+        if [ "$_failed_rc" -ne 0 ]; then
+            log_structured_failure "register_emit_failed" \
+                "dispatch_failed emit to register failed after delivery-success failure — register-driven views will misclassify this dispatch" \
+                "dispatch=$dispatch_id terminal=$terminal_id rc=$_failed_rc stderr=${_failed_stderr}"
+        fi
+        return 1
+    fi
+
     log "V8 DISPATCH: Successfully sent dispatch to terminal $terminal_id"
+
+    # Emit dispatch_promoted BEFORE the pending→active mv so register-driven
+    # views never observe a dispatch in active/ without a matching canonical
+    # promotion event. Best-effort: emit failures are surfaced via
+    # log_structured_failure so the broker/register inconsistency is visible
+    # in audit, but they do not abort the mv — the broker has confirmed
+    # acceptance and the worker is already running.
+    local _promote_rc=0
+    local _promote_stderr
+    set +e
+    _promote_stderr=$(python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
+        "dispatch_id=$dispatch_id" "terminal=$terminal_id" 2>&1 >/dev/null)
+    _promote_rc=$?
+    set -e
+    if [ "$_promote_rc" -ne 0 ]; then
+        log_structured_failure "register_emit_failed" \
+            "dispatch_promoted emit failed — register-driven views may miss/misclassify this successfully delivered dispatch" \
+            "dispatch=$dispatch_id terminal=$terminal_id rc=$_promote_rc stderr=${_promote_stderr}"
+    fi
 
     _fdd_update_progress_state "$track" "$gate" "$dispatch_id"
 
@@ -488,17 +541,6 @@ finalize_dispatch_delivery() {
     local filename; filename=$(basename "$dispatch_file")
     mv "$dispatch_file" "$ACTIVE_DIR/$filename"
     log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
-
-    # emit dispatch_promoted — best-effort, must not block delivery
-    local _reg_rc=0
-    set +e
-    python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
-        "dispatch_id=$dispatch_id" "terminal=$terminal_id" 2>/dev/null
-    _reg_rc=$?
-    set -e
-    if [ "$_reg_rc" -ne 0 ]; then
-        log "V8 WARNING: dispatch_promoted emit failed (non-fatal)"
-    fi
 
     return 0
 }
