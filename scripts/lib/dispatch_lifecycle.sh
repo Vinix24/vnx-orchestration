@@ -313,8 +313,18 @@ rc_release_on_failure() {
 
     if [[ "$lease_released" == "true" ]]; then
         log "V8 RUNTIME_CORE: lease released on delivery failure terminal=$terminal_id dispatch=$dispatch_id"
-        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-            "lease_released_on_failure" "true"
+        if [[ "$cleanup_complete" != "true" ]]; then
+            # Lease was released but broker did not record failed_delivery.
+            # Canonical broker state is inconsistent — surface explicitly so audit trail is truthful.
+            log_structured_failure "failure_recording_missed" \
+                "Lease released but broker failed_delivery not recorded — broker state inconsistent" \
+                "dispatch=$dispatch_id terminal=$terminal_id"
+            emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+                "lease_released_on_failure" "true" "broker_failure_not_recorded"
+        else
+            emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+                "lease_released_on_failure" "true"
+        fi
     else
         log_structured_failure "lease_release_failed" \
             "Canonical lease not released after delivery failure" \

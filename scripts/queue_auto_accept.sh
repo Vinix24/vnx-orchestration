@@ -39,8 +39,8 @@ while true; do
         echo "[auto-accept] $(date +%H:%M:%S) Moved to pending: $filename"
 
         # emit dispatch_created — best-effort, must not block the accept loop
-        local _dispatch_id; _dispatch_id="$(basename "$f" .md)"
-        local _reg_rc=0
+        _dispatch_id="$(basename "$f" .md)"
+        _reg_rc=0
         set +e
         python3 "$VNX_HOME/scripts/lib/dispatch_register.py" append dispatch_created \
             "dispatch_id=$_dispatch_id" 2>/dev/null
