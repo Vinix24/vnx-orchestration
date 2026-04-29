@@ -405,6 +405,45 @@ def _get_commit_hash() -> str:
         return ""
 
 
+def _count_lines_changed_since_sha(
+    pre_sha: str, paths: "list[str] | None" = None
+) -> int:
+    """Count lines added+removed between pre_sha and HEAD via git diff --numstat.
+
+    Replaces the time-window-based ``_count_lines_changed`` from
+    dispatch_parameter_tracker, which over-counted unrelated commits made
+    by parallel dispatches in the same window.
+
+    paths, when provided, restricts the diff to specific pathspecs so the
+    count attributes only files inside the dispatch's declared scope.
+    Returns 0 on any failure (never raises).
+    """
+    if not pre_sha:
+        return 0
+    try:
+        cwd = Path(__file__).resolve().parents[2]
+        cmd = ["git", "diff", "--numstat", f"{pre_sha}..HEAD"]
+        if paths:
+            cmd.append("--")
+            cmd.extend(paths)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10, cwd=cwd,
+        )
+        total = 0
+        for line in proc.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    total += int(parts[0]) + int(parts[1])
+                except ValueError:
+                    # Binary files report "-\t-\t<path>" — skip silently.
+                    pass
+        return total
+    except Exception as exc:
+        logger.debug("_count_lines_changed_since_sha failed: %s", exc)
+        return 0
+
+
 def _get_current_branch() -> str:
     """Return current branch name, or empty string on failure."""
     try:
@@ -822,6 +861,7 @@ def _auto_commit_changes(
     gate: str = "",
     pre_dispatch_dirty: "set[str] | None" = None,
     dispatch_touched_files: "frozenset[str] | set[str] | None" = None,
+    manifest_paths: "list[str] | None" = None,
 ) -> bool:
     """Stage and commit changes introduced by this dispatch.
 
@@ -843,6 +883,12 @@ def _auto_commit_changes(
     treated as "no eligible files" and is therefore also a no-op (correct: a
     worker that performed no structured file writes should not auto-commit).
 
+    manifest_paths, when provided (CFX-1), further restricts the staged set
+    to files inside the dispatch's declared mutation scope.  This protects
+    parallel dispatches in shared worktrees from sweeping each other's
+    changes.  When None, falls back to pre_dispatch_dirty-only scoping
+    with a deprecation log.
+
     Returns True if a commit was made, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
@@ -860,6 +906,13 @@ def _auto_commit_changes(
             dispatch_id,
         )
         return False
+    if manifest_paths is None:
+        logger.warning(
+            "auto_commit: manifest_paths absent for dispatch %s — using legacy "
+            "pre_dispatch_dirty scoping only (callers should declare paths via "
+            "dispatch_paths.write_manifest for parallel-worktree safety)",
+            dispatch_id,
+        )
     try:
         cwd = Path(__file__).resolve().parents[2]
         # Check for uncommitted changes
@@ -882,6 +935,16 @@ def _auto_commit_changes(
         new_during_dispatch = current_dirty - pre_dispatch_dirty
         touched = set(dispatch_touched_files)
         files_to_stage = sorted(new_during_dispatch & touched)
+        if manifest_paths is not None:
+            from dispatch_paths import filter_paths
+            before = list(files_to_stage)
+            files_to_stage = filter_paths(before, manifest_paths)
+            dropped = sorted(set(before) - set(files_to_stage))
+            if dropped:
+                logger.info(
+                    "auto_commit: dispatch %s manifest excluded %d out-of-scope files: %s",
+                    dispatch_id, len(dropped), dropped,
+                )
         if not files_to_stage:
             ignored_dispatch_dirty = sorted(new_during_dispatch - touched)
             if ignored_dispatch_dirty:
@@ -896,7 +959,7 @@ def _auto_commit_changes(
             else:
                 logger.debug(
                     "auto_commit: no dispatch-touched files dirty for dispatch %s "
-                    "(all dirty files pre-existed the dispatch)",
+                    "(all dirty files pre-existed the dispatch or fell outside manifest)",
                     dispatch_id,
                 )
             return False
@@ -943,6 +1006,7 @@ def _auto_stash_changes(
     terminal_id: str,
     pre_dispatch_dirty: "set[str] | None" = None,
     dispatch_touched_files: "frozenset[str] | set[str] | None" = None,
+    manifest_paths: "list[str] | None" = None,
 ) -> bool:
     """Stash changes introduced by this dispatch after a failure (preserves but does not commit).
 
@@ -962,6 +1026,10 @@ def _auto_stash_changes(
     a legitimate "no structured writes happened" signal and also yields a
     no-op stash.
 
+    manifest_paths, when provided (CFX-1), further restricts the stash set to
+    files inside the dispatch's declared mutation scope.  When None, falls
+    back to pre_dispatch_dirty-only scoping with a deprecation log.
+
     Returns True if a stash was created, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
@@ -979,6 +1047,13 @@ def _auto_stash_changes(
             dispatch_id,
         )
         return False
+    if manifest_paths is None:
+        logger.warning(
+            "auto_stash: manifest_paths absent for dispatch %s — using legacy "
+            "pre_dispatch_dirty scoping only (callers should declare paths via "
+            "dispatch_paths.write_manifest for parallel-worktree safety)",
+            dispatch_id,
+        )
     try:
         cwd = Path(__file__).resolve().parents[2]
         status_proc = subprocess.run(
@@ -996,6 +1071,16 @@ def _auto_stash_changes(
         new_during_dispatch = current_dirty - pre_dispatch_dirty
         touched = set(dispatch_touched_files)
         files_to_stash = sorted(new_during_dispatch & touched)
+        if manifest_paths is not None:
+            from dispatch_paths import filter_paths
+            before = list(files_to_stash)
+            files_to_stash = filter_paths(before, manifest_paths)
+            dropped = sorted(set(before) - set(files_to_stash))
+            if dropped:
+                logger.info(
+                    "auto_stash: dispatch %s manifest excluded %d out-of-scope files: %s",
+                    dispatch_id, len(dropped), dropped,
+                )
         if not files_to_stash:
             ignored_dispatch_dirty = sorted(new_during_dispatch - touched)
             if ignored_dispatch_dirty:
@@ -1010,7 +1095,7 @@ def _auto_stash_changes(
             else:
                 logger.debug(
                     "auto_stash: no dispatch-touched files dirty for dispatch %s "
-                    "(all dirty files pre-existed the dispatch)",
+                    "(all dirty files pre-existed the dispatch or fell outside manifest)",
                     dispatch_id,
                 )
             return False
@@ -1161,8 +1246,16 @@ def _capture_dispatch_outcome(
     success: bool,
     start_ts: str,
     committed: bool,
+    pre_sha: str = "",
+    manifest_paths: "list[str] | None" = None,
 ) -> None:
-    """Capture DispatchOutcome after completion. Never raises."""
+    """Capture DispatchOutcome after completion. Never raises.
+
+    When pre_sha is provided (CFX-1), lines_changed is computed via
+    HEAD-comparison against the pre-dispatch SHA — restricted to manifest_paths
+    when supplied — so concurrent unrelated commits do not inflate the count.
+    Falls back to the legacy time-window counter when pre_sha is empty.
+    """
     try:
         from dispatch_parameter_tracker import (
             DispatchParameterTracker,
@@ -1180,13 +1273,18 @@ def _capture_dispatch_outcome(
         except Exception:
             elapsed = 0.0
 
+        if pre_sha:
+            lines_changed = _count_lines_changed_since_sha(pre_sha, manifest_paths)
+        else:
+            lines_changed = _count_lines_changed(start_ts)
+
         outcome = DispatchOutcome(
             cqs=_lookup_cqs(dispatch_id),
             success=success,
             completion_minutes=round(elapsed, 2),
             test_count=0,        # not reliably parseable here
             committed=committed,
-            lines_changed=_count_lines_changed(start_ts),
+            lines_changed=lines_changed,
         )
         tracker = DispatchParameterTracker()
         tracker.capture_outcome(dispatch_id, outcome)
@@ -1353,10 +1451,28 @@ def deliver_with_recovery(
 
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _get_commit_hash()
+    _dispatch_pre_sha = commit_hash_before
     # Snapshot dirty files before dispatch so auto-commit/stash can scope to
     # changes introduced by this dispatch only (not pre-existing dirty state).
     _repo_cwd = Path(__file__).resolve().parents[2]
     pre_dispatch_dirty = _get_dirty_files(_repo_cwd)
+
+    # Read dispatch path manifest (CFX-1).  Workers declare allowed mutation
+    # paths via dispatch_paths.write_manifest before delivery; auto-commit /
+    # auto-stash will then refuse to touch files outside this scope, even when
+    # dirty.  None means "no manifest declared" — legacy pre_dispatch_dirty
+    # scoping applies (with a deprecation warning logged inside the helpers).
+    try:
+        from dispatch_paths import read_manifest as _read_manifest
+        manifest_paths = _read_manifest(_default_state_dir(), dispatch_id)
+    except Exception as _exc:
+        logger.debug("dispatch_paths manifest read failed: %s", _exc)
+        manifest_paths = None
+    if manifest_paths is not None:
+        logger.info(
+            "deliver_with_recovery: dispatch %s declared %d manifest path(s): %s",
+            dispatch_id, len(manifest_paths), manifest_paths,
+        )
 
     # Capture dispatch parameters before execution
     _capture_dispatch_parameters(
@@ -1397,6 +1513,7 @@ def deliver_with_recovery(
                     dispatch_id, terminal_id, gate=gate,
                     pre_dispatch_dirty=pre_dispatch_dirty,
                     dispatch_touched_files=sub_result.touched_files,
+                    manifest_paths=manifest_paths,
                 )
                 if committed:
                     commit_missing = False
@@ -1423,12 +1540,15 @@ def deliver_with_recovery(
                 "Feedback boost: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
             )
 
-            # Capture outcome after receipt is written
+            # Capture outcome after receipt is written.  pre_sha drives a
+            # HEAD-comparison line count that ignores parallel-dispatch commits.
             _capture_dispatch_outcome(
                 dispatch_id=dispatch_id,
                 success=True,
                 start_ts=dispatch_start_ts,
                 committed=committed,
+                pre_sha=_dispatch_pre_sha,
+                manifest_paths=manifest_paths,
             )
 
             # Single-owner post-exit cleanup (SUP-PR1).  Idempotent — the bash
@@ -1460,6 +1580,7 @@ def deliver_with_recovery(
                     terminal_id,
                     pre_dispatch_dirty=pre_dispatch_dirty,
                     dispatch_touched_files=sub_result.touched_files,
+                    manifest_paths=manifest_paths,
                 )
             _write_receipt(
                 dispatch_id, terminal_id, "failed",
@@ -1480,12 +1601,15 @@ def deliver_with_recovery(
                 "Feedback decay: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
             )
 
-            # Capture failed outcome
+            # Capture failed outcome.  Pass pre_sha so lines_changed reflects
+            # only this dispatch's diff, not parallel work.
             _capture_dispatch_outcome(
                 dispatch_id=dispatch_id,
                 success=False,
                 start_ts=dispatch_start_ts,
                 committed=False,
+                pre_sha=_dispatch_pre_sha,
+                manifest_paths=manifest_paths,
             )
 
             # Single-owner post-exit cleanup (SUP-PR1).  Routes failure-path
@@ -1515,7 +1639,23 @@ if __name__ == "__main__":
     parser.add_argument("--no-auto-commit", action="store_true",
                         help="Disable auto-commit of uncommitted changes after dispatch")
     parser.add_argument("--gate", default="", help="Gate tag for auto-commit message")
+    parser.add_argument(
+        "--dispatch-paths",
+        default="",
+        help=(
+            "Comma-separated list of paths this dispatch is allowed to mutate "
+            "(CFX-1).  Auto-commit/stash will refuse to touch files outside "
+            "this scope.  When omitted, legacy pre_dispatch_dirty scoping is used."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.dispatch_paths.strip():
+        from dispatch_paths import write_manifest as _write_dispatch_paths_manifest
+        _allowed = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
+        _write_dispatch_paths_manifest(
+            _default_state_dir(), args.dispatch_id, _allowed,
+        )
 
     ok = deliver_with_recovery(
         terminal_id=args.terminal_id,
