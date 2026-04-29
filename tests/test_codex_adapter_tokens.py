@@ -166,3 +166,144 @@ class TestGetTokenUsageStateCache:
         adapter._write_token_cache(usage, state_dir=tmp_path)
         result = CodexAdapter.get_token_usage("T2", state_dir=tmp_path)
         assert result == usage
+
+
+# ── Round-2 codex regate (PR #307): parse `event_msg.payload.type=='token_count'` ──
+
+
+class TestParseTokenCountWrappedEvent:
+    """Round-2 fix: real `codex exec --json` emits token_count under event_msg.payload."""
+
+    def test_event_msg_payload_token_count(self):
+        """Primary shape flagged by codex regate: event_msg.payload.type=='token_count'."""
+        event = {
+            "id": "evt-1",
+            "event_msg": {
+                "payload": {
+                    "type": "token_count",
+                    "input_tokens": 1500,
+                    "cached_input_tokens": 200,
+                    "output_tokens": 400,
+                    "reasoning_output_tokens": 50,
+                    "total_tokens": 2150,
+                }
+            },
+        }
+        raw = json.dumps(event)
+        result = CodexAdapter._parse_token_usage_from_output(raw)
+        assert result is not None, (
+            "Round-2 regression: event_msg.payload.type=='token_count' must be parsed. "
+            "Pre-fix _parse_token_usage_from_output returned None for this format."
+        )
+        assert result["input_tokens"] == 1500
+        assert result["output_tokens"] == 400
+        assert result["cache_read_tokens"] == 200
+
+    def test_event_msg_token_count_directly_under_event_msg(self):
+        """Variant: event_msg.type=='token_count' (no payload wrapper)."""
+        event = {
+            "event_msg": {
+                "type": "token_count",
+                "input_tokens": 800,
+                "output_tokens": 300,
+            }
+        }
+        result = CodexAdapter._parse_token_usage_from_output(json.dumps(event))
+        assert result is not None
+        assert result["input_tokens"] == 800
+        assert result["output_tokens"] == 300
+
+    def test_msg_wrapped_token_count(self):
+        """Variant: msg.type=='token_count' (older Codex shape)."""
+        event = {"id": "abc", "msg": {"type": "token_count", "input_tokens": 600, "output_tokens": 200}}
+        result = CodexAdapter._parse_token_usage_from_output(json.dumps(event))
+        assert result is not None
+        assert result["input_tokens"] == 600
+        assert result["output_tokens"] == 200
+
+    def test_token_count_takes_last_event(self):
+        """Codex emits running totals — keep the LAST token_count seen."""
+        events = [
+            {"event_msg": {"payload": {"type": "token_count",
+                                        "input_tokens": 100, "output_tokens": 20}}},
+            {"event_msg": {"payload": {"type": "token_count",
+                                        "input_tokens": 250, "output_tokens": 60}}},
+            {"event_msg": {"payload": {"type": "token_count",
+                                        "input_tokens": 412, "output_tokens": 91}}},
+        ]
+        raw = "\n".join(json.dumps(e) for e in events)
+        result = CodexAdapter._parse_token_usage_from_output(raw)
+        assert result is not None
+        assert result["input_tokens"] == 412, (
+            "Codex emits running totals; final token_count event is the authoritative usage."
+        )
+        assert result["output_tokens"] == 91
+
+    def test_token_count_inside_realistic_ndjson_stream(self):
+        """End-to-end: a realistic NDJSON stream from `codex exec` with mixed events."""
+        events = [
+            {"event_msg": {"payload": {"type": "session_start"}}},
+            {"event_msg": {"payload": {"type": "agent_message", "text": "Reviewing files..."}}},
+            {"event_msg": {"payload": {
+                "type": "token_count",
+                "input_tokens": 2048,
+                "cached_input_tokens": 512,
+                "output_tokens": 600,
+                "cache_creation_input_tokens": 0,
+            }}},
+            {"event_msg": {"payload": {"type": "agent_message", "text": "Done."}}},
+        ]
+        raw = "\n".join(json.dumps(e) for e in events)
+        result = CodexAdapter._parse_token_usage_from_output(raw)
+        assert result is not None
+        assert result["input_tokens"] == 2048
+        assert result["output_tokens"] == 600
+        assert result["cache_read_tokens"] == 512
+
+    def test_token_count_with_only_prompt_completion_keys(self):
+        """OpenAI-style key names inside a token_count payload are accepted too."""
+        event = {"event_msg": {"payload": {
+            "type": "token_count",
+            "prompt_tokens": 700,
+            "completion_tokens": 220,
+        }}}
+        result = CodexAdapter._parse_token_usage_from_output(json.dumps(event))
+        assert result is not None
+        assert result["input_tokens"] == 700
+        assert result["output_tokens"] == 220
+
+    def test_zero_token_count_returns_none(self):
+        """A token_count with both fields zero is not useful — return None so we don't
+        clobber a real usage value already cached."""
+        event = {"event_msg": {"payload": {
+            "type": "token_count",
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }}}
+        result = CodexAdapter._parse_token_usage_from_output(json.dumps(event))
+        assert result is None
+
+
+class TestExtractTokenCountPayloadHelper:
+    """Direct unit tests for the wrapper-extraction helper."""
+
+    def test_extract_event_msg_payload(self):
+        event = {"event_msg": {"payload": {"type": "token_count", "input_tokens": 1}}}
+        payload = CodexAdapter._extract_token_count_payload(event)
+        assert payload == {"type": "token_count", "input_tokens": 1}
+
+    def test_extract_msg_wrapper(self):
+        event = {"msg": {"type": "token_count", "x": 1}}
+        assert CodexAdapter._extract_token_count_payload(event) == {"type": "token_count", "x": 1}
+
+    def test_extract_top_level(self):
+        event = {"type": "token_count", "input_tokens": 5}
+        assert CodexAdapter._extract_token_count_payload(event) == event
+
+    def test_extract_returns_none_for_other_types(self):
+        assert CodexAdapter._extract_token_count_payload(
+            {"event_msg": {"payload": {"type": "agent_message"}}}
+        ) is None
+        assert CodexAdapter._extract_token_count_payload({"msg": {"type": "session_start"}}) is None
+        assert CodexAdapter._extract_token_count_payload({"unrelated": 1}) is None
+        assert CodexAdapter._extract_token_count_payload(None) is None  # type: ignore[arg-type]

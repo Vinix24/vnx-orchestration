@@ -205,17 +205,103 @@ class CodexAdapter(ProviderAdapter):
     )
 
     @staticmethod
+    def _extract_token_count_payload(event: dict) -> Optional[dict]:
+        """Locate a `token_count` payload nested inside a Codex NDJSON event.
+
+        Codex `exec --json` emits records where the actual event body lives under
+        one of several wrapper keys, e.g.:
+
+            {"event_msg": {"payload": {"type": "token_count",
+                                        "input_tokens": N,
+                                        "cached_input_tokens": M,
+                                        "output_tokens": K, ...}}}
+
+            {"msg": {"type": "token_count", "input_tokens": N, ...}}
+
+            {"item": {"type": "token_count", ...}}
+
+        Returns the inner payload dict when type == "token_count", else None.
+        """
+        if not isinstance(event, dict):
+            return None
+        # event_msg.payload (current `codex exec` shape)
+        em = event.get("event_msg")
+        if isinstance(em, dict):
+            payload = em.get("payload")
+            if isinstance(payload, dict) and payload.get("type") == "token_count":
+                return payload
+            if em.get("type") == "token_count":
+                return em
+        # msg-wrapped variant
+        msg = event.get("msg")
+        if isinstance(msg, dict) and msg.get("type") == "token_count":
+            return msg
+        # item-wrapped variant
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "token_count":
+            return item
+        # top-level token_count
+        if event.get("type") == "token_count":
+            return event
+        return None
+
+    @staticmethod
+    def _normalize_token_count(payload: dict) -> Optional[dict]:
+        """Normalize a Codex token_count payload to the canonical token_usage dict.
+
+        Codex variants we accept:
+        - input_tokens / output_tokens (preferred)
+        - prompt_tokens / completion_tokens (OpenAI-compat key names)
+        Cache breakdown (best-effort, both names supported):
+        - cached_input_tokens / cache_read_tokens
+        - cache_creation_input_tokens / cache_creation_tokens
+        """
+        if not isinstance(payload, dict):
+            return None
+        input_t = payload.get("input_tokens")
+        if input_t is None:
+            input_t = payload.get("prompt_tokens", 0)
+        output_t = payload.get("output_tokens")
+        if output_t is None:
+            output_t = payload.get("completion_tokens", 0)
+        if not isinstance(input_t, int) or not isinstance(output_t, int):
+            return None
+        if input_t == 0 and output_t == 0:
+            return None
+        cache_read = payload.get("cached_input_tokens")
+        if cache_read is None:
+            cache_read = payload.get("cache_read_tokens", 0)
+        cache_creation = payload.get("cache_creation_input_tokens")
+        if cache_creation is None:
+            cache_creation = payload.get("cache_creation_tokens", 0)
+        return {
+            "input_tokens": int(input_t),
+            "output_tokens": int(output_t),
+            "cache_creation_tokens": int(cache_creation) if isinstance(cache_creation, int) else 0,
+            "cache_read_tokens": int(cache_read) if isinstance(cache_read, int) else 0,
+        }
+
+    @staticmethod
     def _parse_token_usage_from_output(raw: str) -> Optional[dict]:
         """Parse token counts from Codex CLI output.
 
-        Handles three formats emitted by Codex CLI (NDJSON mode):
-        1. Explicit token_usage event:  {"type":"token_usage","input_tokens":N,"output_tokens":M}
-        2. OpenAI-compat usage block:   {"usage":{"prompt_tokens":N,"completion_tokens":M}}
+        Handles the formats emitted by `codex exec --json`:
+        1. Wrapped token_count event (current shape):
+           {"event_msg":{"payload":{"type":"token_count","input_tokens":N,...}}}
+           (also matched: top-level msg/item wrappers and direct type=token_count)
+        2. Explicit token_usage event:  {"type":"token_usage","input_tokens":N,"output_tokens":M}
+        3. OpenAI-compat usage block:   {"usage":{"prompt_tokens":N,"completion_tokens":M}}
            (also input_tokens/output_tokens variants)
-        3. Human-readable text line:    "Tokens: 1200 input / 350 output [/ 1550 total]"
+        4. Human-readable text line:    "Tokens: 1200 input / 350 output [/ 1550 total]"
+
+        Codex emits multiple token_count events during a run (turn-by-turn).
+        We retain the LAST parseable token_count payload because Codex reports
+        a running total that updates as the session progresses; the final event
+        therefore reflects the complete usage for the run.
 
         Returns None if no parseable token info is found.
         """
+        last_token_count: Optional[dict] = None
         for line in raw.splitlines():
             line = line.strip()
             if not line:
@@ -223,9 +309,18 @@ class CodexAdapter(ProviderAdapter):
             # Try JSON event
             try:
                 event = json.loads(line)
-                if not isinstance(event, dict):
-                    continue
-                # Format 1: explicit token_usage event
+            except json.JSONDecodeError:
+                event = None
+
+            if isinstance(event, dict):
+                # Format 1: token_count wrapped under event_msg.payload / msg / item / top-level.
+                tc_payload = CodexAdapter._extract_token_count_payload(event)
+                if tc_payload is not None:
+                    normalized = CodexAdapter._normalize_token_count(tc_payload)
+                    if normalized is not None:
+                        last_token_count = normalized
+                        continue
+                # Format 2: explicit token_usage event
                 if event.get("type") == "token_usage":
                     input_t = event.get("input_tokens", 0)
                     output_t = event.get("output_tokens", 0)
@@ -236,7 +331,7 @@ class CodexAdapter(ProviderAdapter):
                             "cache_creation_tokens": 0,
                             "cache_read_tokens": 0,
                         }
-                # Format 2: OpenAI-compatible usage block
+                # Format 3: OpenAI-compatible usage block
                 usage = event.get("usage")
                 if isinstance(usage, dict):
                     input_t = (
@@ -256,9 +351,7 @@ class CodexAdapter(ProviderAdapter):
                             "cache_creation_tokens": 0,
                             "cache_read_tokens": 0,
                         }
-            except json.JSONDecodeError:
-                pass
-            # Format 3: text line "Tokens: N input / M output"
+            # Format 4: text line "Tokens: N input / M output"
             m = CodexAdapter._TOKEN_TEXT_RE.search(line)
             if m:
                 return {
@@ -267,7 +360,7 @@ class CodexAdapter(ProviderAdapter):
                     "cache_creation_tokens": 0,
                     "cache_read_tokens": 0,
                 }
-        return None
+        return last_token_count
 
     def _write_token_cache(self, usage: dict, state_dir: Optional[Path] = None) -> None:
         """Persist token usage to per-terminal state file (best-effort)."""

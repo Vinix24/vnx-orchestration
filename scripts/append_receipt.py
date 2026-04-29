@@ -774,11 +774,12 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     except Exception as exc:
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
-    # Register quality violations now and use the actual creation count (dedup-aware).
-    # _register_quality_open_items deduplicates against the open-items store, so repeated
-    # advisories for the same finding correctly return 0 rather than inflating CQS.
+    # Compute the would-be creation count without mutating the open-items store.
+    # The actual _register_quality_open_items() call is deferred until after the
+    # idempotency check in append_receipt_payload(), so a replayed receipt skipped
+    # as a duplicate cannot still mutate open_items.json or CQS state.
     if "open_items_created" not in enriched:
-        enriched["open_items_created"] = _register_quality_open_items(enriched)
+        enriched["open_items_created"] = _count_quality_violations_against_store(enriched)
 
     # Compute CQS and persist to dispatch_metadata (best-effort).
     # quality_advisory_json is stored so update_dispatch_cqs.py can round-trip it
@@ -972,6 +973,63 @@ def _count_quality_violations(receipt: dict) -> int:
     return len(seen_keys)
 
 
+def _count_quality_violations_against_store(receipt: Dict[str, Any]) -> int:
+    """Dry-run dedup count: how many open items _register_quality_open_items WOULD create.
+
+    Mirrors the dedup_key construction of _register_quality_open_items and
+    consults the on-disk open-items store via OpenItemsManager.load_items()
+    so the count reflects items that are NOT already tracked (any status).
+
+    This is read-only: it never writes to open_items.json. It exists so the
+    enrichment step can record an accurate ``open_items_created`` value
+    BEFORE the receipt's idempotency check, without mutating state for
+    receipts that are later skipped as duplicates.
+
+    Returns:
+        Count of unique dedup keys that would result in new open items.
+        0 when quality_advisory or t0_recommendation is absent or on any error.
+    """
+    try:
+        advisory = receipt.get("quality_advisory")
+        if not isinstance(advisory, dict):
+            return 0
+        rec = advisory.get("t0_recommendation")
+        if not isinstance(rec, dict):
+            return 0
+        open_items = rec.get("open_items") or []
+        if not open_items:
+            return 0
+
+        # Load existing dedup keys (any status) from the OI store.
+        existing_keys: set = set()
+        try:
+            oim = _get_open_items_manager()
+            data = oim.load_items()
+            for item in data.get("items", []):
+                key = item.get("dedup_key")
+                if key:
+                    existing_keys.add(key)
+        except Exception as exc:
+            _emit("WARN", "oi_dryrun_load_failed", error=str(exc))
+            # On error, fall back to intra-receipt-only dedup so the count is
+            # still useful (matches pre-fix behaviour for first-run receipts).
+            existing_keys = set()
+
+        seen_keys: set = set()
+        for item in open_items:
+            check_id = str(item.get("check_id", "unknown"))
+            file_path = str(item.get("file", "")) or "unknown"
+            symbol = str(item.get("symbol") or "")
+            dedup_key = f"qa:{check_id}:{file_path}:{symbol}"
+            if dedup_key in existing_keys:
+                continue
+            seen_keys.add(dedup_key)
+        return len(seen_keys)
+    except Exception as exc:
+        _emit("WARN", "oi_dryrun_count_failed", error=str(exc))
+        return 0
+
+
 def _register_quality_open_items(receipt: Dict[str, Any]) -> int:
     """Best-effort: register quality advisory violations as tracked open items.
 
@@ -1125,8 +1183,14 @@ def append_receipt_payload(
     except OSError as exc:
         raise AppendReceiptError("lock_failed", EXIT_LOCK_ERROR, f"Failed to acquire append lock: {exc}") from exc
 
-    # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events)
+    # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events).
+    # IMPORTANT: _register_quality_open_items must run only AFTER the idempotency check
+    # has accepted this receipt as 'appended'. A receipt that hits the duplicate cache
+    # must not mutate open_items.json or CQS state. Run it here (post-lock release is
+    # fine — add_item_programmatic uses its own lock file).
     if result is not None and result.status == "appended" and not skip_enrichment:
+        _register_quality_open_items(receipt)
+
         _update_confidence_from_receipt(receipt)
 
         _emit_dispatch_register(receipt)
