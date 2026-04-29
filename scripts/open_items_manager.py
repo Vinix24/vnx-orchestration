@@ -90,14 +90,23 @@ def generate_item_id(data: dict) -> str:
     data['next_id'] += 1
     return item_id
 
-def _find_open_by_dedup_key(data: dict, key: str) -> Optional[dict]:
-    """Scan open items for matching dedup_key (only status == 'open')."""
+def _find_by_dedup_key(data: dict, key: str) -> Optional[dict]:
+    """Scan all items for matching dedup_key (any status).
+
+    Replay safety: a duplicate receipt must not recreate findings that were
+    previously closed. Matching against any status (open/done/deferred/wontfix)
+    keeps replays idempotent. Genuine regressions of a closed finding can be
+    surfaced by manually reopening the existing item.
+    """
     for item in data.get("items", []):
-        if item.get("status") != "open":
-            continue
         if item.get("dedup_key") == key:
             return item
     return None
+
+
+# Backwards-compatible alias kept for any external callers that imported the
+# previous open-only helper. New code should call _find_by_dedup_key.
+_find_open_by_dedup_key = _find_by_dedup_key
 
 
 def add_item_programmatic(
@@ -126,9 +135,11 @@ def add_item_programmatic(
         try:
             data = load_items()
 
-            # Dedup check: if key matches an existing open item, skip
+            # Dedup check: if key matches an existing item (any status), skip.
+            # Closed items are included so duplicate/replayed receipts cannot
+            # recreate findings that were already closed.
             if dedup_key:
-                existing = _find_open_by_dedup_key(data, dedup_key)
+                existing = _find_by_dedup_key(data, dedup_key)
                 if existing is not None:
                     return (existing["id"], False)
 

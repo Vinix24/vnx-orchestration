@@ -647,6 +647,9 @@ def test_open_items_created_from_enrichment_generated_advisory(tmp_path: Path, a
                 ]
             }
         }
+        # In round-2, _enrich is responsible for setting open_items_created from
+        # the dry-run count. Mirror that here so this stub matches the contract.
+        enriched["open_items_created"] = 2
         return enriched
 
     with patch.object(ar, "_enrich_completion_receipt", side_effect=fake_enrich), \
@@ -694,8 +697,12 @@ def test_open_items_created_zero_when_enrichment_adds_no_violations(tmp_path: Pa
 
 
 def test_enrich_sets_open_items_created_internally(ar):
-    """_enrich_completion_receipt sets open_items_created from the quality_advisory it generates.
-    Ensures the CQS DB UPDATE sees the real count (not 0 from a missing field)."""
+    """_enrich_completion_receipt sets open_items_created from the dry-run dedup count.
+
+    Round-2 fix: enrichment no longer mutates the OI store; it uses
+    _count_quality_violations_against_store so a duplicate receipt that gets
+    skipped post-idempotency does not leak side effects into open_items.json.
+    """
     receipt = {
         "timestamp": "2026-04-28T12:00:00Z",
         "event_type": "task_complete",
@@ -705,7 +712,6 @@ def test_enrich_sets_open_items_created_internally(ar):
         # No quality_advisory — the function generates it via generate_quality_advisory
     }
 
-    # Advisory dict that generate_quality_advisory would produce with 3 violations.
     advisory_dict = {
         "version": "1.0",
         "t0_recommendation": {
@@ -719,6 +725,12 @@ def test_enrich_sets_open_items_created_internally(ar):
     fake_advisory = MagicMock()
     fake_advisory.to_dict.return_value = advisory_dict
 
+    register_calls = []
+
+    def _record_register(*args, **kwargs):
+        register_calls.append(args)
+        return 3
+
     with patch.object(ar, "_build_git_provenance", return_value={"git_ref": "HEAD"}), \
          patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
          patch.object(ar, "enrich_receipt_provenance"), \
@@ -726,14 +738,82 @@ def test_enrich_sets_open_items_created_internally(ar):
          patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
          patch.object(ar, "get_changed_files", return_value=[Path("a.py"), Path("b.py"), Path("c.py")]), \
          patch.object(ar, "generate_quality_advisory", return_value=fake_advisory), \
-         patch.object(ar, "_get_open_items_manager", return_value=MagicMock(count_items_closed_by_dispatch=lambda _: 0)), \
+         patch.object(ar, "_get_open_items_manager", return_value=MagicMock(
+             count_items_closed_by_dispatch=lambda _: 0,
+             load_items=lambda: {"items": []},
+         )), \
          patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch.object(ar, "_register_quality_open_items", side_effect=_record_register), \
          patch("pathlib.Path.exists", return_value=False):
         enriched = ar._enrich_completion_receipt(receipt)
 
     assert enriched.get("open_items_created") == 3, (
-        f"Expected 3 (from generate_quality_advisory result), got {enriched.get('open_items_created')!r}. "
-        "_enrich_completion_receipt must set open_items_created before the CQS DB write."
+        f"Expected 3 (dry-run dedup count for 3 unique findings), got {enriched.get('open_items_created')!r}."
+    )
+    assert register_calls == [], (
+        "_enrich_completion_receipt must NOT mutate the OI store. "
+        "_register_quality_open_items must run post-append, not during enrichment."
+    )
+
+
+# ── Finding 2 regression: open_items_created uses registration count, not advisory count ──
+
+def test_enrich_open_items_created_uses_registration_count_not_advisory_count(ar):
+    """When all dedup keys are already in the OI store, open_items_created is 0
+    even when quality_advisory has items.
+
+    Round-2 fix: dry-run dedup uses _count_quality_violations_against_store which
+    consults the OI store (any status) rather than mutating it. Replayed receipts
+    no longer recreate previously-closed findings.
+    """
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-DEDUP-REG-001",
+        "terminal": "T1",
+    }
+    advisory_dict = {
+        "version": "1.0",
+        "t0_recommendation": {
+            "open_items": [
+                {"check_id": "c1", "file": "a.py", "symbol": "", "severity": "blocker"},
+                {"check_id": "c2", "file": "b.py", "symbol": "", "severity": "warn"},
+            ]
+        },
+    }
+    fake_advisory = MagicMock()
+    fake_advisory.to_dict.return_value = advisory_dict
+
+    # Pre-seed OI store with both dedup keys (one open, one CLOSED) so the dry-run
+    # count returns 0 — exercising the closed-item dedup safety net.
+    pre_seeded_items = {
+        "items": [
+            {"id": "OI-001", "status": "open",
+             "dedup_key": "qa:c1:a.py:"},
+            {"id": "OI-002", "status": "done",
+             "dedup_key": "qa:c2:b.py:"},
+        ]
+    }
+
+    with patch.object(ar, "_build_git_provenance", return_value={"git_ref": "HEAD"}), \
+         patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
+         patch.object(ar, "enrich_receipt_provenance"), \
+         patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])), \
+         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
+         patch.object(ar, "get_changed_files", return_value=[Path("a.py"), Path("b.py")]), \
+         patch.object(ar, "generate_quality_advisory", return_value=fake_advisory), \
+         patch.object(ar, "_get_open_items_manager", return_value=MagicMock(
+             count_items_closed_by_dispatch=lambda _: 0,
+             load_items=lambda: pre_seeded_items,
+         )), \
+         patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch("pathlib.Path.exists", return_value=False):
+        enriched = ar._enrich_completion_receipt(receipt)
+
+    assert enriched.get("open_items_created") == 0, (
+        f"Expected 0 (all items already in OI store, including CLOSED OI-002), "
+        f"got {enriched.get('open_items_created')!r}."
     )
 
 
@@ -773,3 +853,101 @@ def test_count_quality_violations_same_file_collapsed(ar):
     receipt = _make_quality_receipt(items)
     count = ar._count_quality_violations(receipt)
     assert count == 1, f"Expected 1 OI for identical file+check_id+symbol, got {count}"
+
+
+# ── Round-2 codex regate: side-effect ordering and closed-item dedup ─────────
+
+
+def test_count_quality_violations_against_store_dedups_against_closed(ar):
+    """Round-2 fix: dry-run count excludes items already present in OI store
+    REGARDLESS of status. Replayed receipts must not recreate closed findings."""
+    receipt = {
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "a.py", "symbol": "fn", "severity": "blocker"},
+                    {"check_id": "c2", "file": "b.py", "symbol": "", "severity": "warn"},
+                    {"check_id": "c3", "file": "c.py", "symbol": "", "severity": "info"},
+                ]
+            }
+        }
+    }
+    pre_seeded = {
+        "items": [
+            # Closed/done item with matching dedup_key — must still suppress recreation.
+            {"id": "OI-100", "status": "done", "dedup_key": "qa:c1:a.py:fn"},
+            # Open item that should also dedup.
+            {"id": "OI-101", "status": "open", "dedup_key": "qa:c2:b.py:"},
+            # Unrelated item.
+            {"id": "OI-102", "status": "open", "dedup_key": "qa:zzz:other.py:"},
+        ]
+    }
+
+    fake_oim = MagicMock()
+    fake_oim.load_items.return_value = pre_seeded
+    with patch.object(ar, "_get_open_items_manager", return_value=fake_oim):
+        count = ar._count_quality_violations_against_store(receipt)
+
+    # Only c3 should count: c1 dedups vs closed OI-100; c2 dedups vs open OI-101.
+    assert count == 1, f"Expected 1 (c3 only); c1 and c2 must dedup against existing items, got {count}"
+
+
+def test_count_quality_violations_against_store_empty_advisory(ar):
+    """Empty/missing advisory → 0 with no OI-store reads."""
+    fake_oim = MagicMock()
+    fake_oim.load_items.return_value = {"items": []}
+    with patch.object(ar, "_get_open_items_manager", return_value=fake_oim):
+        assert ar._count_quality_violations_against_store({}) == 0
+        assert ar._count_quality_violations_against_store({"quality_advisory": None}) == 0
+        assert ar._count_quality_violations_against_store(
+            {"quality_advisory": {"t0_recommendation": {"open_items": []}}}
+        ) == 0
+
+
+def test_duplicate_receipt_does_not_mutate_open_items_store(tmp_path: Path, ar):
+    """Round-2 codex regate Finding 1: a replayed receipt that lands as 'duplicate'
+    must NOT call _register_quality_open_items. The OI store stays untouched."""
+    receipts_file = tmp_path / "receipts.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-REPLAY-SAFE-001",
+        "terminal": "T1",
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "a.py", "symbol": "", "severity": "blocker"},
+                ]
+            }
+        },
+    }
+
+    register_calls: list = []
+
+    def _record_register(r):
+        register_calls.append(r.get("dispatch_id"))
+        return 1
+
+    def _passthrough_enrich(r, repo_root=None):
+        # Skip heavy enrichment but mimic the dry-run count contract.
+        enriched = dict(r)
+        enriched.setdefault("open_items_created", 1)
+        return enriched
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=_passthrough_enrich), \
+         patch.object(ar, "_register_quality_open_items", side_effect=_record_register), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register", return_value=False), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        # First append: must call _register_quality_open_items.
+        first = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+        # Second append (same receipt): hits idempotency cache → status='duplicate'.
+        second = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert first.status == "appended"
+    assert second.status == "duplicate"
+    assert register_calls == ["DISP-REPLAY-SAFE-001"], (
+        f"_register_quality_open_items must run once (post-append) and NOT again on duplicate. "
+        f"Got register calls: {register_calls!r}"
+    )
