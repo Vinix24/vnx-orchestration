@@ -27,6 +27,7 @@ export default function ActionToast({ outcome, onDismiss, autoDismissMs = 5000 }
       const timer = setTimeout(() => { setVisible(false); onDismiss?.(); }, autoDismissMs);
       return () => clearTimeout(timer);
     }
+    return undefined;
   }, [outcome, autoDismissMs, onDismiss]);
 
   if (!outcome || !visible) return null;

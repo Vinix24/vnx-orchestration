@@ -287,11 +287,6 @@ interface TranscriptViewerProps {
   onClose: () => void;
 }
 
-function formatDuration(minutes: number): string {
-  if (minutes < 60) return `${Math.round(minutes)}m`;
-  return `${Math.floor(minutes / 60)}h ${Math.round(minutes % 60)}m`;
-}
-
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;

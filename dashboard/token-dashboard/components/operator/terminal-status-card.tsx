@@ -1,6 +1,6 @@
 'use client';
 
-import { Cpu, Clock, AlertCircle, CheckCircle2, MinusCircle, XCircle } from 'lucide-react';
+import { Clock, AlertCircle, CheckCircle2, MinusCircle, XCircle } from 'lucide-react';
 import type { TerminalEntry, HeartbeatClassification, TerminalStatus } from '@/lib/types';
 import { TERMINAL_COLORS } from '@/lib/types';
 
