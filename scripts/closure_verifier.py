@@ -25,6 +25,7 @@ from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
+from gate_status import is_pass as gate_is_pass, is_terminal as gate_is_terminal
 
 
 @dataclass(frozen=True)
@@ -290,8 +291,8 @@ def _validate_review_evidence(
                         f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
                     ))
                 else:
-                    verdict = result.get("verdict", "missing")
-                    if verdict == "pass":
+                    passed, reason = gate_is_pass(result)
+                    if passed:
                         checks.append(CheckResult(
                             f"gate_{gate}",
                             "PASS",
@@ -301,7 +302,7 @@ def _validate_review_evidence(
                         checks.append(CheckResult(
                             f"gate_{gate}",
                             "FAIL",
-                            f"codex gate verdict: {verdict}",
+                            f"codex gate not passing — {reason}",
                         ))
             else:
                 checks.append(CheckResult(
@@ -318,10 +319,9 @@ def _validate_review_evidence(
                     f"no gate result for required reviewer {gate}",
                 ))
             else:
-                status = result.get("status", "missing")
-                blocking_count = result.get("blocking_count", 0)
-                if status == "pass" and blocking_count == 0:
-                    advisory_count = result.get("advisory_count", 0)
+                passed, reason = gate_is_pass(result)
+                advisory_count = result.get("advisory_count", 0)
+                if passed:
                     checks.append(CheckResult(
                         f"gate_{gate}",
                         "PASS",
@@ -331,7 +331,7 @@ def _validate_review_evidence(
                     checks.append(CheckResult(
                         f"gate_{gate}",
                         "FAIL",
-                        f"gemini review status: {status}, {blocking_count} blocking finding(s)",
+                        f"gemini review not passing — {reason}",
                     ))
 
         else:
@@ -366,15 +366,7 @@ def _validate_review_evidence(
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir)
-        # Check both status and verdict fields independently to avoid the OR-priority escape:
-        # if status="requested" (truthy) but verdict="pass", the old OR logic would yield
-        # gate_status="requested" and skip report_path enforcement for a terminal verdict.
-        _terminal = ("pass", "fail")
-        _has_terminal = result is not None and (
-            (result.get("status") or "").lower() in _terminal
-            or (result.get("verdict") or "").lower() in _terminal
-        )
-        if _has_terminal:
+        if result is not None and gate_is_terminal(result):
             report_path = result.get("report_path", "")
             if not report_path:
                 checks.append(CheckResult(
@@ -612,14 +604,16 @@ def _detect_gate_report_contradictions(
         except OSError:
             continue
 
-        gate_status = result.get("status") or result.get("verdict") or "unknown"
+        passed, _reason = gate_is_pass(result)
         gate_blocking = result.get("blocking_count", 0)
+        if not isinstance(gate_blocking, int):
+            gate_blocking = len(result.get("blocking_findings") or [])
 
         # Count blocking-severity indicators in report
         report_blocking_indicators = _count_report_blocking_indicators(report_content)
 
         # Contradiction 1: gate says pass but report has blocking indicators
-        if gate_status == "pass" and report_blocking_indicators > 0:
+        if passed and report_blocking_indicators > 0:
             checks.append(CheckResult(
                 f"contradiction_{gate}",
                 "FAIL",
@@ -627,7 +621,7 @@ def _detect_gate_report_contradictions(
                 f"{report_blocking_indicators} blocking indicator(s) — evidence mismatch",
             ))
         # Contradiction 2: gate says fail/blocking but report has none
-        elif gate_status == "fail" and gate_blocking > 0 and report_blocking_indicators == 0:
+        elif (not passed) and gate_blocking > 0 and report_blocking_indicators == 0:
             checks.append(CheckResult(
                 f"contradiction_{gate}",
                 "FAIL",
