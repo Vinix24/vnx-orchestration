@@ -294,6 +294,28 @@ def _find_gate_request_payload(
     return None
 
 
+def _gate_terminal_status(result: Dict[str, Any]) -> str:
+    """Return canonical terminal status ("pass"/"fail") for a gate result, or empty when non-terminal.
+
+    Two persisted formats are recognised so completed Claude reviews cannot bypass enforcement:
+    - Standard gates persist ``{"status": ...}`` or ``{"verdict": ...}``.
+    - claude_github_optional persists ``{"state": "completed", "result_status": "pass"|"fail"}``
+      and does not write top-level ``status``/``verdict``. Without this branch, terminal-failure
+      and report-path enforcement skip a completed Claude review with ``result_status="fail"``.
+    """
+    status = (result.get("status") or "").lower()
+    if status in ("pass", "fail"):
+        return status
+    verdict = (result.get("verdict") or "").lower()
+    if verdict in ("pass", "fail"):
+        return verdict
+    if (result.get("state") or "").lower() == "completed":
+        rs = (result.get("result_status") or "").lower()
+        if rs in ("pass", "fail"):
+            return rs
+    return ""
+
+
 def _validate_review_evidence(
     contract: ReviewContract,
     results_dir: Path,
@@ -346,6 +368,36 @@ def _validate_review_evidence(
                     "FAIL",
                     f"no evidence for optional gate {gate} — state must be explicit",
                 ))
+            elif (result.get("state") or "").lower() == "completed":
+                # Completed Claude review: terminal outcome lives in result_status, not status/verdict.
+                # contributed_evidence=true alone must NOT mask a fail outcome or blocking findings.
+                terminal = _gate_terminal_status(result)
+                blocking_count = int(result.get("blocking_count") or 0)
+                if terminal == "fail":
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        f"{gate} completed with result_status=fail",
+                    ))
+                elif blocking_count > 0:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        f"{gate} completed with {blocking_count} blocking finding(s)",
+                    ))
+                elif terminal == "pass":
+                    advisory_count = int(result.get("advisory_count") or 0)
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "PASS",
+                        f"{gate} completed: pass (0 blocking, {advisory_count} advisory)",
+                    ))
+                else:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        f"{gate} state=completed but result_status is missing or unknown",
+                    ))
             elif result.get("was_intentionally_absent") or result.get("contributed_evidence"):
                 state = result.get("state", "unknown")
                 source = result.get("__source", "result")
@@ -446,7 +498,10 @@ def _validate_review_evidence(
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
-        if result is not None and gate_is_terminal(result):
+        # Treat status/verdict AND state="completed" + result_status as terminal so completed
+        # Claude reviews cannot bypass report_path enforcement (they never set status/verdict).
+        _has_terminal = result is not None and bool(_gate_terminal_status(result))
+        if _has_terminal:
             report_path = result.get("report_path", "")
             if not report_path:
                 checks.append(CheckResult(
@@ -716,7 +771,10 @@ def _detect_gate_report_contradictions(
         except OSError:
             continue
 
-        passed, _reason = gate_is_pass(result)
+        # Recognise both standard (status/verdict) and Claude (state=completed/result_status)
+        # terminal formats so a completed Claude review with mismatched evidence is detected.
+        gate_status = _gate_terminal_status(result) or "unknown"
+        passed = gate_status == "pass"
         gate_blocking = result.get("blocking_count", 0)
         if not isinstance(gate_blocking, int):
             gate_blocking = len(result.get("blocking_findings") or [])
