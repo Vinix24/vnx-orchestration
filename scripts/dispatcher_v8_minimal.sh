@@ -15,6 +15,22 @@ source "$SCRIPT_DIR/lib/provider_routing.sh"
 source "$SCRIPT_DIR/lib/model_routing.sh"
 source "$SCRIPT_DIR/lib/input_mode_guard.sh"
 
+# BOOT-3: Fail-closed startup precondition check.
+# Runs here — after vnx_paths.sh sets the variables but before any mkdir -p or module
+# sourcing (singleton_enforcer, log init) creates .vnx-data subdirectories.  Placing
+# this check later would allow an unbootstrapped session to silently initialize a fresh
+# repo-local .vnx-data tree and then trivially pass the directory-existence tests.
+if [[ -z "${VNX_DATA_DIR:-}" ]] || [[ ! -d "${VNX_DATA_DIR}" ]]; then
+    echo "FATAL: VNX_DATA_DIR is unset or does not exist: '${VNX_DATA_DIR:-}'" >&2
+    echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
+    exit 1
+fi
+if [[ -z "${VNX_STATE_DIR:-}" ]] || [[ ! -d "${VNX_STATE_DIR}" ]]; then
+    echo "FATAL: VNX_STATE_DIR is unset or does not exist: '${VNX_STATE_DIR:-}'" >&2
+    echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
+    exit 1
+fi
+
 # Configuration
 PROJECT_ROOT="${PROJECT_ROOT}"
 VNX_DIR="$VNX_HOME"
@@ -515,18 +531,6 @@ process_dispatches() {
 
     [ $count -gt 0 ] && log "V8: Processed $count dispatches"
 }
-
-# BOOT-3: Fail-closed startup precondition check.
-if [[ -z "${VNX_STATE_DIR:-}" ]] || [[ ! -d "$VNX_STATE_DIR" ]]; then
-    echo "FATAL: VNX_STATE_DIR is unset or does not exist: '${VNX_STATE_DIR:-}'" >&2
-    echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
-    exit 1
-fi
-if [[ -z "${VNX_DATA_DIR:-}" ]] || [[ ! -d "$VNX_DATA_DIR" ]]; then
-    echo "FATAL: VNX_DATA_DIR is unset or does not exist: '${VNX_DATA_DIR:-}'" >&2
-    echo "Source bin/vnx or set VNX_DATA_DIR before starting the dispatcher." >&2
-    exit 1
-fi
 
 # Main loop
 log "Dispatcher V8 MINIMAL ready. Monitoring $PENDING_DIR for dispatches..."
