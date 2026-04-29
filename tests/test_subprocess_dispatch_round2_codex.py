@@ -42,7 +42,11 @@ class TestFailSafeWhenScopeUnknown(unittest.TestCase):
     def test_auto_commit_runs_no_git_when_scope_none(self):
         mock_sp = MagicMock()
         with patch("subprocess_dispatch.subprocess", mock_sp):
-            result = _auto_commit_changes("d-r2-1", "T1", pre_dispatch_dirty=None)
+            result = _auto_commit_changes(
+                "d-r2-1", "T1",
+                pre_dispatch_dirty=None,
+                dispatch_touched_files=frozenset({"x.py"}),
+            )
         self.assertFalse(result)
         self.assertFalse(
             mock_sp.run.called,
@@ -52,7 +56,11 @@ class TestFailSafeWhenScopeUnknown(unittest.TestCase):
     def test_auto_stash_runs_no_git_when_scope_none(self):
         mock_sp = MagicMock()
         with patch("subprocess_dispatch.subprocess", mock_sp):
-            result = _auto_stash_changes("d-r2-2", "T1", pre_dispatch_dirty=None)
+            result = _auto_stash_changes(
+                "d-r2-2", "T1",
+                pre_dispatch_dirty=None,
+                dispatch_touched_files=frozenset({"x.py"}),
+            )
         self.assertFalse(result)
         self.assertFalse(
             mock_sp.run.called,
@@ -60,8 +68,10 @@ class TestFailSafeWhenScopeUnknown(unittest.TestCase):
         )
 
     def test_auto_commit_empty_scope_still_uses_explicit_paths(self):
-        """An empty scope (set()) is allowed and means: stage every currently-
-        dirty file by explicit path — never via ``git add -A``."""
+        """An empty pre_dispatch_dirty (set()) is allowed and means: every
+        currently-dirty file is dispatch-window-new — but the file must also
+        be in dispatch_touched_files for it to be staged.  Staging always uses
+        ``git add -- <files>``, never ``git add -A``."""
         status_proc = MagicMock()
         status_proc.stdout = " M only_new.py\n"
         status_proc.returncode = 0
@@ -73,7 +83,11 @@ class TestFailSafeWhenScopeUnknown(unittest.TestCase):
 
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files", return_value={"only_new.py"}):
-            result = _auto_commit_changes("d-r2-3", "T1", pre_dispatch_dirty=set())
+            result = _auto_commit_changes(
+                "d-r2-3", "T1",
+                pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset({"only_new.py"}),
+            )
 
         self.assertTrue(result)
         add_cmd = mock_sp.run.call_args_list[1][0][0]

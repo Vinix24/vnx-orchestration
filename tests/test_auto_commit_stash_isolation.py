@@ -103,7 +103,11 @@ class TestAutoCommitIsolation(unittest.TestCase):
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files", return_value={"old_file.py", "new_file.py"}):
-            result = _auto_commit_changes("d-001", "T1", pre_dispatch_dirty=pre)
+            result = _auto_commit_changes(
+                "d-001", "T1",
+                pre_dispatch_dirty=pre,
+                dispatch_touched_files=frozenset({"new_file.py"}),
+            )
 
         self.assertTrue(result)
         add_call = mock_sp.run.call_args_list[1]
@@ -122,7 +126,11 @@ class TestAutoCommitIsolation(unittest.TestCase):
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files", return_value={"already_dirty.py"}):
-            result = _auto_commit_changes("d-002", "T1", pre_dispatch_dirty=pre)
+            result = _auto_commit_changes(
+                "d-002", "T1",
+                pre_dispatch_dirty=pre,
+                dispatch_touched_files=frozenset(),
+            )
 
         self.assertFalse(result)
         # git add must NOT have been called
@@ -137,7 +145,11 @@ class TestAutoCommitIsolation(unittest.TestCase):
         status_lines = [" M some_file.py"]
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp):
-            result = _auto_commit_changes("d-003", "T1", pre_dispatch_dirty=None)
+            result = _auto_commit_changes(
+                "d-003", "T1",
+                pre_dispatch_dirty=None,
+                dispatch_touched_files=frozenset({"some_file.py"}),
+            )
 
         self.assertFalse(result)
         # No git command must have been invoked at all — fail-safe before any git work.
@@ -147,7 +159,11 @@ class TestAutoCommitIsolation(unittest.TestCase):
         """Returns False without calling add/commit when tree is clean."""
         mock_sp = self._mock_subprocess([])
         with patch("subprocess_dispatch.subprocess", mock_sp):
-            result = _auto_commit_changes("d-004", "T1", pre_dispatch_dirty=set())
+            result = _auto_commit_changes(
+                "d-004", "T1",
+                pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(),
+            )
 
         self.assertFalse(result)
         self.assertEqual(mock_sp.run.call_count, 1)  # only git status
@@ -159,7 +175,11 @@ class TestAutoCommitIsolation(unittest.TestCase):
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files", return_value={"foo.py"}):
-            _auto_commit_changes("dispatch-xyz-123", "T2", pre_dispatch_dirty=pre)
+            _auto_commit_changes(
+                "dispatch-xyz-123", "T2",
+                pre_dispatch_dirty=pre,
+                dispatch_touched_files=frozenset({"foo.py"}),
+            )
 
         commit_call = mock_sp.run.call_args_list[2]
         cmd = commit_call[0][0]
@@ -198,7 +218,11 @@ class TestAutoStashIsolation(unittest.TestCase):
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files",
                    return_value={"pre_existing.py", "new_untracked.py"}):
-            result = _auto_stash_changes("d-010", "T1", pre_dispatch_dirty=pre)
+            result = _auto_stash_changes(
+                "d-010", "T1",
+                pre_dispatch_dirty=pre,
+                dispatch_touched_files=frozenset({"new_untracked.py"}),
+            )
 
         self.assertTrue(result)
         stash_call = mock_sp.run.call_args_list[1]
@@ -222,7 +246,11 @@ class TestAutoStashIsolation(unittest.TestCase):
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files", return_value={"already_there.py"}):
-            result = _auto_stash_changes("d-011", "T1", pre_dispatch_dirty=pre)
+            result = _auto_stash_changes(
+                "d-011", "T1",
+                pre_dispatch_dirty=pre,
+                dispatch_touched_files=frozenset(),
+            )
 
         self.assertFalse(result)
         # stash must NOT have been called
@@ -237,7 +265,11 @@ class TestAutoStashIsolation(unittest.TestCase):
         status_lines = [" M some.py"]
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp):
-            result = _auto_stash_changes("d-012", "T1", pre_dispatch_dirty=None)
+            result = _auto_stash_changes(
+                "d-012", "T1",
+                pre_dispatch_dirty=None,
+                dispatch_touched_files=frozenset({"some.py"}),
+            )
 
         self.assertFalse(result)
         # No git command must have been invoked — fail-safe before any git work.
@@ -247,7 +279,11 @@ class TestAutoStashIsolation(unittest.TestCase):
         """Returns False without calling stash when tree is clean."""
         mock_sp = self._mock_subprocess([])
         with patch("subprocess_dispatch.subprocess", mock_sp):
-            result = _auto_stash_changes("d-013", "T1", pre_dispatch_dirty=set())
+            result = _auto_stash_changes(
+                "d-013", "T1",
+                pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(),
+            )
 
         self.assertFalse(result)
         self.assertEqual(mock_sp.run.call_count, 1)  # only git status
@@ -259,7 +295,11 @@ class TestAutoStashIsolation(unittest.TestCase):
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp), \
              patch("subprocess_dispatch._get_dirty_files", return_value={"bar.py"}):
-            _auto_stash_changes("dispatch-abc-789", "T3", pre_dispatch_dirty=pre)
+            _auto_stash_changes(
+                "dispatch-abc-789", "T3",
+                pre_dispatch_dirty=pre,
+                dispatch_touched_files=frozenset({"bar.py"}),
+            )
 
         stash_call = mock_sp.run.call_args_list[1]
         cmd_str = " ".join(stash_call[0][0])
@@ -287,7 +327,8 @@ class TestDeliverWithRecoveryPreDispatchCapture(unittest.TestCase):
         return adapter
 
     def test_pre_dispatch_dirty_forwarded_to_auto_commit_on_success(self):
-        """On success path, _auto_commit_changes receives the pre-dispatch dirty set."""
+        """On success path, _auto_commit_changes receives both the pre-dispatch
+        dirty set and the dispatch_touched_files captured from tool events."""
         fake_pre_dirty = {"existing_file.py"}
 
         with patch("subprocess_dispatch.SubprocessAdapter") as mock_cls, \
@@ -318,6 +359,10 @@ class TestDeliverWithRecoveryPreDispatchCapture(unittest.TestCase):
         self.assertEqual(
             kwargs.get("pre_dispatch_dirty"), fake_pre_dirty,
             "deliver_with_recovery must forward pre_dispatch_dirty to _auto_commit_changes",
+        )
+        self.assertIn(
+            "dispatch_touched_files", kwargs,
+            "deliver_with_recovery must forward dispatch_touched_files to _auto_commit_changes",
         )
 
     def test_pre_dispatch_dirty_forwarded_to_auto_stash_on_failure(self):
@@ -357,6 +402,10 @@ class TestDeliverWithRecoveryPreDispatchCapture(unittest.TestCase):
         self.assertEqual(
             kwargs.get("pre_dispatch_dirty"), fake_pre_dirty,
             "deliver_with_recovery must forward pre_dispatch_dirty to _auto_stash_changes",
+        )
+        self.assertIn(
+            "dispatch_touched_files", kwargs,
+            "deliver_with_recovery must forward dispatch_touched_files to _auto_stash_changes",
         )
 
 
