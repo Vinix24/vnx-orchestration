@@ -551,14 +551,6 @@ def deliver_via_subprocess(
                         _last_stuck_log_time = _now
         session_id = adapter.get_session_id(terminal_id)
 
-        # Persist session_id for next dispatch to resume (VNX_SESSION_RESUME=1)
-        if session_id and os.environ.get("VNX_SESSION_RESUME", "0") == "1":
-            try:
-                from session_store import SessionStore as _SessionStore
-                _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
-            except Exception as _exc:
-                logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
-
         # Fail-closed: non-zero exit code means failure even when events were parsed.
         obs = adapter.observe(terminal_id)
         returncode = obs.transport_state.get("returncode")
@@ -590,6 +582,17 @@ def deliver_via_subprocess(
                 event_count=event_count,
                 manifest_path=completed_manifest or manifest_path,
             )
+
+        # Only persist session_id once all fail-closed checks pass, so the next
+        # dispatch (with VNX_SESSION_RESUME=1) cannot resume a failed or
+        # timeout-killed conversation.
+        if session_id and os.environ.get("VNX_SESSION_RESUME", "0") == "1":
+            try:
+                from session_store import SessionStore as _SessionStore
+                _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
+            except Exception as _exc:
+                logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
+
         return _SubprocessResult(
             success=True,
             session_id=session_id,
@@ -666,13 +669,21 @@ def _auto_commit_changes(
 ) -> bool:
     """Stage and commit changes introduced by this dispatch.
 
-    When pre_dispatch_dirty is provided, only files that were NOT already dirty
-    before the dispatch started are staged.  This prevents sweeping concurrent or
-    pre-existing dirty files from other terminals into this worker's commit.
+    pre_dispatch_dirty is REQUIRED for safe operation: only files that became
+    dirty during the dispatch are staged.  When None is passed, the helper
+    refuses to commit anything (fail-safe) rather than sweeping unrelated
+    user/terminal changes into this worker's commit via ``git add -A``.
 
     Returns True if a commit was made, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
+    if pre_dispatch_dirty is None:
+        logger.warning(
+            "auto_commit: pre_dispatch_dirty=None — refusing to commit for dispatch %s "
+            "(would otherwise sweep unrelated dirty files via git add -A)",
+            dispatch_id,
+        )
+        return False
     try:
         cwd = Path(__file__).resolve().parents[2]
         # Check for uncommitted changes
@@ -686,23 +697,17 @@ def _auto_commit_changes(
             logger.debug("auto_commit: working tree clean for dispatch %s", dispatch_id)
             return False
 
-        # Scope staging to files that became dirty during this dispatch
-        if pre_dispatch_dirty is not None:
-            current_dirty = _get_dirty_files(cwd)
-            files_to_stage = sorted(current_dirty - pre_dispatch_dirty)
-            if not files_to_stage:
-                logger.debug(
-                    "auto_commit: no new files to stage for dispatch %s "
-                    "(all dirty files pre-existed the dispatch)",
-                    dispatch_id,
-                )
-                return False
-            add_cmd = ["git", "add", "--"] + files_to_stage
-        else:
-            # Fallback: stage all current dirty files when pre-dispatch state is unknown.
-            # This is equivalent to the old git add -A behaviour and should only occur
-            # when _auto_commit_changes is called directly (not via deliver_with_recovery).
-            add_cmd = ["git", "add", "-A"]
+        # Scope staging to files that became dirty during this dispatch.
+        current_dirty = _get_dirty_files(cwd)
+        files_to_stage = sorted(current_dirty - pre_dispatch_dirty)
+        if not files_to_stage:
+            logger.debug(
+                "auto_commit: no new files to stage for dispatch %s "
+                "(all dirty files pre-existed the dispatch)",
+                dispatch_id,
+            )
+            return False
+        add_cmd = ["git", "add", "--"] + files_to_stage
 
         add_proc = subprocess.run(
             add_cmd,
@@ -747,14 +752,21 @@ def _auto_stash_changes(
 ) -> bool:
     """Stash changes introduced by this dispatch after a failure (preserves but does not commit).
 
-    When pre_dispatch_dirty is provided, only files that were NOT dirty before
-    the dispatch started are stashed via ``git stash push -u -- <files>``.
-    This prevents hiding unrelated tracked edits from other terminals and ensures
-    untracked files created by the failed dispatch are also captured.
+    pre_dispatch_dirty is REQUIRED for safe operation: only files that became
+    dirty during the dispatch are stashed via ``git stash push -u -- <files>``.
+    When None is passed, the helper refuses to stash anything (fail-safe)
+    rather than hiding unrelated tracked/untracked edits from other terminals.
 
     Returns True if a stash was created, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
+    if pre_dispatch_dirty is None:
+        logger.warning(
+            "auto_stash: pre_dispatch_dirty=None — refusing to stash for dispatch %s "
+            "(would otherwise sweep unrelated dirty files into a global stash)",
+            dispatch_id,
+        )
+        return False
     try:
         cwd = Path(__file__).resolve().parents[2]
         status_proc = subprocess.run(
@@ -768,24 +780,18 @@ def _auto_stash_changes(
 
         stash_name = f"vnx-auto-stash-{dispatch_id}"
 
-        if pre_dispatch_dirty is not None:
-            current_dirty = _get_dirty_files(cwd)
-            files_to_stash = sorted(current_dirty - pre_dispatch_dirty)
-            if not files_to_stash:
-                logger.debug(
-                    "auto_stash: no new files to stash for dispatch %s "
-                    "(all dirty files pre-existed the dispatch)",
-                    dispatch_id,
-                )
-                return False
-            # -u includes untracked files matching the specified paths so
-            # newly-created files from the failed dispatch are also captured.
-            stash_cmd = ["git", "stash", "push", "-u", "-m", stash_name, "--"] + files_to_stash
-        else:
-            # Fallback when pre-dispatch state is unknown: stash all tracked
-            # changes including untracked files (-u).  This replaces the old
-            # ``git stash save`` (no -u) which left untracked files behind.
-            stash_cmd = ["git", "stash", "push", "-u", "-m", stash_name]
+        current_dirty = _get_dirty_files(cwd)
+        files_to_stash = sorted(current_dirty - pre_dispatch_dirty)
+        if not files_to_stash:
+            logger.debug(
+                "auto_stash: no new files to stash for dispatch %s "
+                "(all dirty files pre-existed the dispatch)",
+                dispatch_id,
+            )
+            return False
+        # -u includes untracked files matching the specified paths so
+        # newly-created files from the failed dispatch are also captured.
+        stash_cmd = ["git", "stash", "push", "-u", "-m", stash_name, "--"] + files_to_stash
 
         stash_proc = subprocess.run(
             stash_cmd,

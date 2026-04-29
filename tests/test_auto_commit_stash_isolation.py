@@ -130,17 +130,18 @@ class TestAutoCommitIsolation(unittest.TestCase):
             cmd = c[0][0]
             self.assertNotEqual(cmd[0:2], ["git", "add"])
 
-    def test_fallback_to_add_all_when_pre_dispatch_dirty_is_none(self):
-        """Without pre_dispatch_dirty, falls back to git add -A (backward compat)."""
+    def test_refuses_to_commit_when_pre_dispatch_dirty_is_none(self):
+        """Codex round-2 finding 1: when pre_dispatch_dirty is None, refuse to commit
+        rather than fall back to git add -A — that would sweep unrelated user changes
+        in a dirty or shared worktree, breaking dispatch isolation."""
         status_lines = [" M some_file.py"]
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp):
             result = _auto_commit_changes("d-003", "T1", pre_dispatch_dirty=None)
 
-        self.assertTrue(result)
-        add_call = mock_sp.run.call_args_list[1]
-        cmd = add_call[0][0]
-        self.assertIn("-A", cmd)
+        self.assertFalse(result)
+        # No git command must have been invoked at all — fail-safe before any git work.
+        self.assertEqual(mock_sp.run.call_count, 0)
 
     def test_returns_false_on_clean_tree(self):
         """Returns False without calling add/commit when tree is clean."""
@@ -229,20 +230,18 @@ class TestAutoStashIsolation(unittest.TestCase):
             cmd = c[0][0]
             self.assertNotEqual(cmd[:2], ["git", "stash"])
 
-    def test_fallback_uses_stash_push_with_u_flag(self):
-        """Without pre_dispatch_dirty, fallback also uses -u to capture untracked files."""
+    def test_refuses_to_stash_when_pre_dispatch_dirty_is_none(self):
+        """Codex round-2 finding 1: when pre_dispatch_dirty is None, refuse to stash
+        rather than running ``git stash push -u`` over the whole repo — that would
+        hide unrelated edits from other terminals into this dispatch's stash."""
         status_lines = [" M some.py"]
         mock_sp = self._mock_subprocess(status_lines)
         with patch("subprocess_dispatch.subprocess", mock_sp):
             result = _auto_stash_changes("d-012", "T1", pre_dispatch_dirty=None)
 
-        self.assertTrue(result)
-        stash_call = mock_sp.run.call_args_list[1]
-        cmd = stash_call[0][0]
-        self.assertEqual(cmd[:3], ["git", "stash", "push"])
-        self.assertIn("-u", cmd)
-        # Fallback must NOT use the old 'git stash save' form
-        self.assertNotIn("save", cmd)
+        self.assertFalse(result)
+        # No git command must have been invoked — fail-safe before any git work.
+        self.assertEqual(mock_sp.run.call_count, 0)
 
     def test_returns_false_on_clean_tree(self):
         """Returns False without calling stash when tree is clean."""
