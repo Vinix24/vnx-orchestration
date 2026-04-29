@@ -196,11 +196,26 @@ def build_codex_prompt(
         f"Review the following code changes on branch {branch} (risk: {risk}).\n\n"
         f"{file_contents}\n\n"
         "Perform a thorough code review of the file contents above.\n\n"
+        "## Severity rules (strict)\n\n"
+        "Default `severity` is `warning`. Promote to `error` ONLY when the finding's impact includes one of:\n"
+        "- Data loss or corruption (database, files, append-only logs)\n"
+        "- False-positive PR closure (closure_verifier passing when it should block)\n"
+        "- False-negative PR rejection (closure_verifier blocking when it should pass)\n"
+        "- Security boundary breach (auth bypass, secret leak, privilege escalation)\n"
+        "- Cross-dispatch state corruption (one dispatch's data leaking into another's audit trail)\n\n"
+        "Use `info` for advisory-only observations.\n\n"
+        "Findings about the following are NOT `error`-severity by default:\n"
+        "- Style, formatting, log shape (stderr vs stdout, plain vs JSON)\n"
+        "- Truncated-but-named hash fields (unless a caller compares to a real full SHA)\n"
+        "- Hardcoded test fixtures (only when tests run elsewhere, mark out-of-scope)\n"
+        "- Operator-toggled surfaces (when toggling resolves the issue)\n\n"
+        "Findings about lines NOT in this PR's diff: mark as `severity: info` AND set `\"out_of_scope\": true`.\n"
+        "Findings introduced by a previous fix-round commit: mark as `severity: warning` AND set `\"introduced_by_prior_fix\": true`.\n\n"
         "Respond with a structured JSON verdict only:\n"
         "```json\n"
         "{\n"
         '  "verdict": "pass|fail|blocked",\n'
-        '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
+        '  "findings": [{"severity": "error|warning|info", "message": "...", "out_of_scope": false, "introduced_by_prior_fix": false}],\n'
         '  "residual_risk": "description of remaining risks or null",\n'
         '  "rerun_required": false,\n'
         '  "rerun_reason": null\n'
