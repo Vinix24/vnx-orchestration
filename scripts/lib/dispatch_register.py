@@ -17,16 +17,17 @@ from typing import Optional
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 VALID_EVENTS = {
-    "dispatch_created",     # written to pending/
-    "dispatch_promoted",    # moved pending/ → active/
-    "dispatch_started",     # worker began
-    "dispatch_completed",   # successful task_complete
-    "dispatch_failed",      # task_failed OR task_complete with status=failed OR task_timeout
-    "gate_requested",       # review_gate_request
-    "gate_passed",          # gate completed with no blocking findings
-    "gate_failed",          # gate completed with blocking findings
+    "dispatch_created",         # written to pending/
+    "dispatch_promoted",        # moved pending/ → active/
+    "dispatch_started",         # worker began
+    "dispatch_completed",       # successful task_complete
+    "dispatch_failed",          # task_failed OR task_complete with status=failed OR task_timeout
+    "gate_requested",           # review_gate_request
+    "gate_passed",              # gate completed with no blocking findings
+    "gate_failed",              # gate completed with blocking findings
     "pr_opened",
     "pr_merged",
+    "runtime_anomaly_detected", # RuntimeSupervisor detected a stalled/zombie worker
 }
 
 

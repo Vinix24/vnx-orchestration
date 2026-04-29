@@ -300,13 +300,15 @@ def test_d_stale_lock_cleanup(tmp_path: Path):
     _write_fake_child(fake_child, exit_code=None, sleep_secs=120)
     pid_record = Path(str(fake_child) + ".pid")
 
-    # Pre-seed a stale lock + PID file with bogus PID before launch
+    # Pre-seed a stale lock + PID file with bogus PID before launch.
+    # Names must match the singleton key used in receipt_processor_v4.sh:
+    #   enforce_singleton "receipt_processor_v4.sh"
     locks_dir = tmp_path / "locks"
     pids_dir = tmp_path / "pids"
-    stale_lock = locks_dir / "receipt_processor_v4.lock"
+    stale_lock = locks_dir / "receipt_processor_v4.sh.lock"
     stale_lock.mkdir(parents=True, exist_ok=True)
     (stale_lock / "pid").write_text("999999\n")
-    stale_pidfile = pids_dir / "receipt_processor_v4.pid"
+    stale_pidfile = pids_dir / "receipt_processor_v4.sh.pid"
     stale_pidfile.write_text("999999\n")
 
     sup, _env = _launch_supervisor_with_fake_child(

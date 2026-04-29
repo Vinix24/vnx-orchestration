@@ -23,12 +23,17 @@ source "$SCRIPT_DIR/lib/process_lifecycle.sh"
 VNX_DIR="$VNX_HOME"
 RECEIPT_PROCESSOR_SCRIPT="$SCRIPT_DIR/receipt_processor_v4.sh"
 SUPERVISOR_NAME="receipt_processor_supervisor"
-RECEIPT_PROCESSOR_NAME="receipt_processor_v4"
+# Singleton name passed to enforce_singleton in receipt_processor_v4.sh.
+# Must match the argument: enforce_singleton "receipt_processor_v4.sh"
+RECEIPT_PROCESSOR_SINGLETON_NAME="receipt_processor_v4.sh"
 
 LOG_FILE="$VNX_LOGS_DIR/receipt_processor_supervisor.log"
 PID_FILE="$VNX_PIDS_DIR/${SUPERVISOR_NAME}.pid"
-RECEIPT_PROCESSOR_PID_FILE="$VNX_PIDS_DIR/${RECEIPT_PROCESSOR_NAME}.pid"
-RECEIPT_PROCESSOR_LOCK_DIR="$VNX_LOCKS_DIR/${RECEIPT_PROCESSOR_NAME}.lock"
+# Singleton-managed PID/lock artifacts (named after the singleton key).
+RECEIPT_PROCESSOR_PID_FILE="$VNX_PIDS_DIR/${RECEIPT_PROCESSOR_SINGLETON_NAME}.pid"
+RECEIPT_PROCESSOR_LOCK_DIR="$VNX_LOCKS_DIR/${RECEIPT_PROCESSOR_SINGLETON_NAME}.lock"
+# Script-internal PID file written directly by receipt_processor_v4.sh.
+RECEIPT_PROCESSOR_APP_PID_FILE="$VNX_PIDS_DIR/receipt_processor.pid"
 
 # Backoff configuration (seconds)
 BACKOFF_INIT="${VNX_SUPERVISOR_BACKOFF_INIT:-2}"
@@ -114,8 +119,16 @@ _clear_stale_receipt_processor_lock() {
     if [ -f "$RECEIPT_PROCESSOR_PID_FILE" ]; then
         stale_pid=$(cat "$RECEIPT_PROCESSOR_PID_FILE" 2>/dev/null || echo "")
         if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-            _log "Clearing stale receipt_processor PID file (dead PID: $stale_pid)"
+            _log "Clearing stale receipt_processor singleton PID file (dead PID: $stale_pid)"
             rm -f "$RECEIPT_PROCESSOR_PID_FILE" "${RECEIPT_PROCESSOR_PID_FILE}.fingerprint"
+        fi
+    fi
+
+    if [ -f "$RECEIPT_PROCESSOR_APP_PID_FILE" ]; then
+        stale_pid=$(cat "$RECEIPT_PROCESSOR_APP_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+            _log "Clearing stale receipt_processor app PID file (dead PID: $stale_pid)"
+            rm -f "$RECEIPT_PROCESSOR_APP_PID_FILE"
         fi
     fi
 }

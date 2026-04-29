@@ -385,8 +385,32 @@ _cleanup_stuck_dispatches() {
     done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
 }
 
+# --- Unified supervisor: throttled runtime_supervise tick (SUP-PR3) ---
+# Invokes RuntimeSupervisor.supervise_all() at most once per 60s when
+# VNX_SUPERVISOR_MODE=unified. Default legacy mode is bit-identical.
+_maybe_runtime_supervise() {
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+    local interval="${VNX_RUNTIME_SUPERVISE_INTERVAL:-60}"
+    local state_file="$STATE_DIR/.last_runtime_supervise_ts"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last < interval )); then
+        return 0
+    fi
+    local log_file="$VNX_LOGS_DIR/runtime_supervise.log"
+    mkdir -p "$(dirname "$log_file")"
+    python3 "$VNX_DIR/scripts/lib/runtime_supervise.py" >> "$log_file" 2>&1 || true
+    echo "$now" > "$state_file"
+}
+
 process_dispatches() {
     local count=0
+    _maybe_runtime_supervise
     _cleanup_stuck_dispatches
 
     for dispatch in "$PENDING_DIR"/*.md; do
