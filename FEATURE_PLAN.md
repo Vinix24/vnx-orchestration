@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-04-28T18:13:04.782785+00:00
+**Last updated**: 2026-04-29T03:53:23.332334+00:00
 
 ## Active features
 
@@ -9,8 +9,11 @@ _No active features._
 
 ## Completed
 
-### F32–F42
-All PRs merged. (#187 + #188 + #189 + 18 more)
+### F32
+All PRs merged. (#240 + #241)
+
+### F34–F42
+All PRs merged. (#189 + #190 + #191 + 14 more)
 
 ### F44–F46
 All PRs merged. (#218 + #220 + #221 + 1 more)
