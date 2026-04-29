@@ -277,6 +277,25 @@ def _is_completion_event(receipt: Dict[str, Any]) -> bool:
     )
 
 
+def _is_subprocess_intermediate_completion(receipt: Dict[str, Any]) -> bool:
+    """True for the intermediate subprocess-adapter completion receipt.
+
+    These receipts are appended when the subprocess exits but BEFORE the
+    real report has been extracted (subprocess_adapter only drops an async
+    trigger file at that point). They typically lack ``report_path`` and a
+    git diff against HEAD will report no changed files, so generating a
+    quality advisory or persisting CQS would overwrite ``dispatch_metadata``
+    with synthetic "No changed files detected" data and corrupt the row
+    permanently if the downstream report-driven enrichment is delayed or
+    fails.
+
+    The session/provenance/snapshot enrichment is still safe and desirable
+    for these receipts (e.g. instruction_sha256 surfacing).
+    """
+    event_type = receipt.get("event_type") or receipt.get("event") or ""
+    return event_type == "subprocess_completion"
+
+
 def _safe_subprocess(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 5) -> Optional[str]:
     try:
         result = subprocess.run(
@@ -703,6 +722,15 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
         terminals["T0"] = t0_entry
         snapshot_data["terminals"] = terminals
         enriched["terminal_snapshot"] = snapshot_data
+
+    # Subprocess intermediate completions skip quality-advisory generation and
+    # CQS persistence entirely. The real report is not yet extracted at this
+    # point (subprocess_adapter only drops an async trigger file), so a git
+    # diff would yield zero changed files and we'd write a synthetic
+    # "No changed files detected" advisory + zero-CQS row that overwrites
+    # any later, report-driven enrichment for this dispatch.
+    if _is_subprocess_intermediate_completion(receipt):
+        return enriched
 
     # Generate quality advisory (best-effort)
     try:

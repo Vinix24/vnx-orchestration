@@ -246,3 +246,207 @@ def test_subprocess_completion_surfaces_sha256_via_append_path(ar, tmp_path):
         "instruction_sha256 must be present in session metadata for subprocess_completion receipts"
     )
     assert session["instruction_sha256"] == "deadbeef00112233"
+
+
+# ── Case G: subprocess_completion must NOT overwrite quality_advisory_json/cqs ──
+#
+# Codex regate finding (PR #309 round 2): treating subprocess_completion as a
+# full completion event made _enrich_completion_receipt run quality-advisory +
+# CQS persistence for receipts written before the real report exists. With no
+# changed files visible at that point, the synthetic "No changed files
+# detected" advisory and a zero-CQS row would overwrite any later, report-
+# driven enrichment in dispatch_metadata.
+
+def _seed_dispatch_metadata(db_path: Path, dispatch_id: str, advisory_json: str, cqs_value: float) -> None:
+    """Seed quality_intelligence.db with a populated dispatch_metadata row."""
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS dispatch_metadata (
+            dispatch_id TEXT PRIMARY KEY,
+            cqs REAL,
+            normalized_status TEXT,
+            cqs_components TEXT,
+            open_items_created INTEGER,
+            open_items_resolved INTEGER,
+            quality_advisory_json TEXT,
+            target_open_items TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT OR REPLACE INTO dispatch_metadata
+           (dispatch_id, cqs, normalized_status, cqs_components,
+            open_items_created, open_items_resolved, quality_advisory_json, target_open_items)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (dispatch_id, cqs_value, "passed", json.dumps({"base": cqs_value}),
+         3, 1, advisory_json, json.dumps([])),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _read_dispatch_metadata(db_path: Path, dispatch_id: str) -> dict:
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        """SELECT cqs, normalized_status, cqs_components,
+                  open_items_created, open_items_resolved, quality_advisory_json
+           FROM dispatch_metadata WHERE dispatch_id=?""",
+        (dispatch_id,),
+    ).fetchone()
+    conn.close()
+    assert row is not None, f"no dispatch_metadata row for {dispatch_id}"
+    return {
+        "cqs": row[0],
+        "normalized_status": row[1],
+        "cqs_components": row[2],
+        "open_items_created": row[3],
+        "open_items_resolved": row[4],
+        "quality_advisory_json": row[5],
+    }
+
+
+def test_subprocess_completion_does_not_overwrite_dispatch_metadata(ar, tmp_path):
+    """Regression: subprocess_completion must NOT touch quality_advisory_json/cqs.
+
+    The intermediate subprocess receipt is appended before the real report
+    exists. Running quality advisory + CQS persistence for it would write a
+    synthetic "No changed files detected" advisory and zero-CQS row, then
+    permanently corrupt dispatch_metadata if the report-driven enrichment is
+    delayed or fails (codex finding 1, PR #309 r2).
+    """
+    dispatch_id = "DISP-IH-G01"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "quality_intelligence.db"
+
+    real_advisory = json.dumps({
+        "version": "1.0",
+        "summary": {"warning_count": 2, "blocking_count": 1, "risk_score": 75},
+        "t0_recommendation": {"decision": "review", "reason": "real findings"},
+    })
+    seeded_cqs = 0.82
+    _seed_dispatch_metadata(db_path, dispatch_id, real_advisory, seeded_cqs)
+
+    receipt = {
+        "timestamp": "2026-04-29T01:00:00Z",
+        "event_type": "subprocess_completion",
+        "dispatch_id": dispatch_id,
+        "terminal": "T1",
+        "status": "success",
+        "source": "subprocess",
+    }
+
+    with patch.dict(os.environ, {
+        "PROJECT_ROOT": str(VNX_ROOT),
+        "VNX_DATA_DIR": str(tmp_path),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_STATE_DIR": str(state_dir),
+        "VNX_HOME": str(VNX_ROOT),
+    }):
+        with patch.object(ar, "_resolve_model_provider",
+                          return_value={"model": "claude-sonnet-4-6", "provider": "anthropic"}):
+            with patch.object(ar, "_resolve_session_id", return_value="sess-g-0001"):
+                with patch.object(ar, "_extract_session_token_usage", return_value=None):
+                    with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
+                        snap = MagicMock()
+                        snap.to_dict.return_value = {"status": "ok"}
+                        mock_snap.return_value = snap
+                        with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                            with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                                mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                                with patch.object(ar, "_build_git_provenance",
+                                                  return_value={"git_ref": "HEAD", "branch": "test"}):
+                                    with patch.object(ar, "get_changed_files", return_value=[]):
+                                        with patch.object(ar, "calculate_cqs",
+                                                          side_effect=AssertionError(
+                                                              "calculate_cqs must NOT be called for subprocess_completion"
+                                                          )):
+                                            with patch.object(ar, "generate_quality_advisory",
+                                                              side_effect=AssertionError(
+                                                                  "generate_quality_advisory must NOT be called for subprocess_completion"
+                                                              )):
+                                                enriched = ar._enrich_completion_receipt(receipt)
+
+    # Receipt itself must not carry a synthetic advisory or CQS payload.
+    assert "quality_advisory" not in enriched, (
+        "subprocess_completion must not generate a quality_advisory on the receipt"
+    )
+    assert "cqs" not in enriched, (
+        "subprocess_completion must not compute cqs"
+    )
+
+    # Most importantly: dispatch_metadata row must be untouched.
+    after = _read_dispatch_metadata(db_path, dispatch_id)
+    assert after["quality_advisory_json"] == real_advisory, (
+        "dispatch_metadata.quality_advisory_json was overwritten by subprocess_completion"
+    )
+    assert after["cqs"] == seeded_cqs, (
+        "dispatch_metadata.cqs was overwritten by subprocess_completion"
+    )
+    assert after["normalized_status"] == "passed"
+    assert after["open_items_created"] == 3
+    assert after["open_items_resolved"] == 1
+
+
+# ── Case H: real task_complete still triggers quality_advisory + CQS persistence ──
+
+def test_task_complete_still_persists_quality_advisory_and_cqs(ar, tmp_path):
+    """Positive control: real completion events still persist advisory + CQS.
+
+    Ensures the subprocess_completion guard does not regress the canonical
+    completion path.
+    """
+    dispatch_id = "DISP-IH-H01"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    db_path = state_dir / "quality_intelligence.db"
+    _seed_dispatch_metadata(db_path, dispatch_id, json.dumps({"placeholder": True}), 0.0)
+
+    receipt = {
+        "timestamp": "2026-04-29T02:00:00Z",
+        "event_type": "task_complete",
+        "dispatch_id": dispatch_id,
+        "terminal": "T1",
+        "status": "success",
+        "source": "pytest",
+    }
+
+    fake_cqs = {
+        "cqs": 0.91,
+        "normalized_status": "passed",
+        "components": {"base": 0.91},
+    }
+
+    with patch.dict(os.environ, {
+        "PROJECT_ROOT": str(VNX_ROOT),
+        "VNX_DATA_DIR": str(tmp_path),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_STATE_DIR": str(state_dir),
+        "VNX_HOME": str(VNX_ROOT),
+    }):
+        with patch.object(ar, "_resolve_model_provider",
+                          return_value={"model": "claude-sonnet-4-6", "provider": "anthropic"}):
+            with patch.object(ar, "_resolve_session_id", return_value="sess-h-0001"):
+                with patch.object(ar, "_extract_session_token_usage", return_value=None):
+                    with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
+                        snap = MagicMock()
+                        snap.to_dict.return_value = {"status": "ok"}
+                        mock_snap.return_value = snap
+                        with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                            with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                                mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                                with patch.object(ar, "_build_git_provenance",
+                                                  return_value={"git_ref": "HEAD", "branch": "test"}):
+                                    with patch.object(ar, "get_changed_files", return_value=[]):
+                                        with patch.object(ar, "calculate_cqs", return_value=fake_cqs) as mock_cqs:
+                                            enriched = ar._enrich_completion_receipt(receipt)
+
+    assert mock_cqs.called, "calculate_cqs must run for task_complete events"
+    assert enriched.get("cqs") == fake_cqs
+    assert "quality_advisory" in enriched, "task_complete must produce a quality_advisory on receipt"
+
+    after = _read_dispatch_metadata(db_path, dispatch_id)
+    assert after["cqs"] == 0.91
+    persisted_advisory = json.loads(after["quality_advisory_json"])
+    assert persisted_advisory.get("t0_recommendation", {}).get("reason") == "No changed files detected"
