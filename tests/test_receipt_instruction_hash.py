@@ -179,3 +179,70 @@ def test_existing_session_enrichment_unaffected(ar, tmp_path):
     assert metadata["token_usage"] == token_usage
     assert metadata["instruction_sha256"] == "cafebabe12345678"
     assert "captured_at" in metadata
+
+
+# ── Case F: subprocess_completion event → instruction_sha256 surfaces via full append path ──
+
+def test_subprocess_completion_surfaces_sha256_via_append_path(ar, tmp_path):
+    """Regression: subprocess_completion must reach _build_session_metadata.
+
+    Before the fix, _is_completion_event excluded 'subprocess_completion', so
+    _enrich_completion_receipt returned early and instruction_sha256 was never
+    written to the persisted receipt's session metadata.
+    """
+    manifest = {
+        "dispatch_id": "DISP-IH-F01",
+        "instruction_sha256": "deadbeef00112233",
+        "instruction_chars": 64,
+    }
+    manifest_file = tmp_path / "manifest_f.json"
+    manifest_file.write_text(json.dumps(manifest))
+
+    receipt = {
+        "timestamp": "2026-04-29T00:00:00Z",
+        "event_type": "subprocess_completion",
+        "dispatch_id": "DISP-IH-F01",
+        "terminal": "T1",
+        "status": "success",
+        "source": "subprocess",
+        "manifest_path": str(manifest_file),
+    }
+
+    receipts_file = str(tmp_path / "receipts.ndjson")
+
+    with patch.dict(os.environ, {
+        "PROJECT_ROOT": str(VNX_ROOT),
+        "VNX_DATA_DIR": str(tmp_path),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_STATE_DIR": str(tmp_path / "state"),
+        "VNX_HOME": str(VNX_ROOT),
+    }):
+        (tmp_path / "state").mkdir(exist_ok=True)
+        with patch.object(ar, "_resolve_model_provider",
+                          return_value={"model": "claude-sonnet-4-6", "provider": "anthropic"}):
+            with patch.object(ar, "_resolve_session_id", return_value="sess-f-0001"):
+                with patch.object(ar, "_extract_session_token_usage", return_value=None):
+                    with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
+                        snap = MagicMock()
+                        snap.to_dict.return_value = {"status": "ok"}
+                        mock_snap.return_value = snap
+                        with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                            with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                                mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                                with patch.object(ar, "_build_git_provenance",
+                                                  return_value={"git_ref": "HEAD", "branch": "test"}):
+                                    result = ar.append_receipt_payload(
+                                        receipt,
+                                        receipts_file=receipts_file,
+                                    )
+
+    assert result.status == "appended", f"append failed: {result}"
+
+    written = (tmp_path / "receipts.ndjson").read_text().strip()
+    persisted = json.loads(written)
+
+    session = persisted.get("session", {})
+    assert "instruction_sha256" in session, (
+        "instruction_sha256 must be present in session metadata for subprocess_completion receipts"
+    )
+    assert session["instruction_sha256"] == "deadbeef00112233"

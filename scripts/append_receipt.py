@@ -268,7 +268,13 @@ def _write_cache(cache_file: Path, entries: List[Dict[str, Any]], max_entries: i
 def _is_completion_event(receipt: Dict[str, Any]) -> bool:
     """Check if receipt is a completion event."""
     event_type = receipt.get("event_type") or receipt.get("event") or ""
-    return event_type in ("task_complete", "task_completed", "completion", "complete")
+    return event_type in (
+        "task_complete",
+        "task_completed",
+        "completion",
+        "complete",
+        "subprocess_completion",
+    )
 
 
 def _safe_subprocess(cmd: List[str], cwd: Optional[Path] = None, timeout: int = 5) -> Optional[str]:
