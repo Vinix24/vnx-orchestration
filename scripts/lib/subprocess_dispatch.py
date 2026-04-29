@@ -25,8 +25,29 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
 from worker_health_monitor import WorkerHealthMonitor, HealthStatus, SLOW_THRESHOLD
+from cleanup_worker_exit import cleanup_worker_exit
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_active_dispatch_file(dispatch_id: str) -> Path | None:
+    """Locate the dispatch file in dispatches/active/ for cleanup_worker_exit.
+
+    Returns None when no matching file exists (e.g. file already moved by
+    another path).  Used by the deliver_with_recovery exit hooks.
+    """
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    base = (
+        Path(data_dir) / "dispatches" / "active"
+        if data_dir
+        else Path(__file__).resolve().parents[2] / ".vnx-data" / "dispatches" / "active"
+    )
+    if not base.is_dir():
+        return None
+    for path in base.iterdir():
+        if path.is_file() and dispatch_id in path.name:
+            return path
+    return None
 
 
 def _inject_permission_profile(terminal_id: str, role: str | None, instruction: str) -> str:
@@ -1186,6 +1207,18 @@ def deliver_with_recovery(
                 start_ts=dispatch_start_ts,
                 committed=committed,
             )
+
+            # Single-owner post-exit cleanup (SUP-PR1).  Idempotent — the bash
+            # caller's rc_release_lease may have already released the lease,
+            # which is fine; this records the worker state transition and
+            # dispatch_register audit event regardless.
+            cleanup_worker_exit(
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                exit_status="success",
+                lease_generation=lease_generation,
+                dispatch_file=_resolve_active_dispatch_file(dispatch_id),
+            )
             return True
 
         if attempt < max_retries:
@@ -1229,6 +1262,17 @@ def deliver_with_recovery(
                 success=False,
                 start_ts=dispatch_start_ts,
                 committed=False,
+            )
+
+            # Single-owner post-exit cleanup (SUP-PR1).  Routes failure-path
+            # disposition (move to rejected/failure/, transition worker to
+            # exited_bad, audit) through the same helper as the bash caller.
+            cleanup_worker_exit(
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                exit_status="failure",
+                lease_generation=lease_generation,
+                dispatch_file=_resolve_active_dispatch_file(dispatch_id),
             )
 
     return False
