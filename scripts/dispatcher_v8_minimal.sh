@@ -63,11 +63,24 @@ mkdir -p "$(dirname "$LOG_FILE")"
 exec >> "$LOG_FILE" 2>&1
 
 # Cooldown tracking for invalid-skill dispatches.
-# Maps dispatch basename → unix timestamp of last warning log.
+# Stores last-warned unix timestamp per dispatch basename in a sanitized
+# variable name (_INVALID_SKILL_COOLDOWN_<sanitized_key>) accessed via bash
+# indirect expansion. Uses indirect expansion + printf -v instead of an
+# associative array, since /bin/bash 3.2 on macOS does not support the
+# associative-array shell option (codex round-2 finding 1).
 # Prevents log floods when a dispatch has [SKILL_INVALID] and is polled every 2s.
-declare -A _INVALID_SKILL_COOLDOWN
 # Seconds between repeated "invalid skill" warnings per dispatch (env-tunable).
 VNX_INVALID_SKILL_COOLDOWN="${VNX_INVALID_SKILL_COOLDOWN:-60}"
+
+# _invalid_skill_cooldown_var — return the sanitized variable name used to
+# track the last-warned timestamp for a dispatch key. Replaces every
+# non-alphanumeric character with `_` so the result is a valid bash identifier
+# under bash 3.2.
+_invalid_skill_cooldown_var() {
+    local _key="$1"
+    local _safe="${_key//[^a-zA-Z0-9]/_}"
+    printf '_INVALID_SKILL_COOLDOWN_%s' "$_safe"
+}
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dispatcher V8 MINIMAL starting..."
 
@@ -201,15 +214,17 @@ _validate_stuck_files() {
     local agent_role="$2"
 
     if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-        local _dispatch_key _now _last_warned _elapsed
+        local _dispatch_key _now _last_warned _elapsed _cd_var
         _dispatch_key="$(basename "$dispatch" .md)"
         _now=$(date +%s)
-        _last_warned="${_INVALID_SKILL_COOLDOWN[$_dispatch_key]:-0}"
+        _cd_var="$(_invalid_skill_cooldown_var "$_dispatch_key")"
+        _last_warned="${!_cd_var:-0}"
         _elapsed=$(( _now - _last_warned ))
         if (( _elapsed < VNX_INVALID_SKILL_COOLDOWN )); then
             return 1  # still in cooldown — skip silently
         fi
-        _INVALID_SKILL_COOLDOWN[$_dispatch_key]=$_now
+        # Bash 3.2-safe assignment to a dynamic variable name via printf -v.
+        printf -v "$_cd_var" '%s' "$_now"
         log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
         return 1
     fi
@@ -489,7 +504,12 @@ process_dispatches() {
         gather_dispatch_intelligence "$dispatch" "$agent_role" "$_PD_TRACK" "$_PD_DISPATCH_ID" "$_PD_GATE" || continue
         execute_and_classify_dispatch "$dispatch" "$_PD_TRACK" "$agent_role" "$_PD_INTEL_RESULT" "$_PD_DISPATCH_ID" || continue
 
-        ((count++))
+        # Use plain assignment for the increment — under `set -e`, a bare
+        # post-increment arithmetic command returns status 1 when the
+        # incoming value was 0 (the expression evaluates to the prior
+        # value), aborting the dispatcher loop after the first successful
+        # dispatch on bash 4.x and later. See codex round-2 finding 2.
+        count=$((count + 1))
         sleep 1  # Small delay between dispatches
     done
 

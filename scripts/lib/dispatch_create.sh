@@ -35,7 +35,12 @@ extract_instruction_content() {
 
 extract_context_files() {
     local dispatch_file="$1"
-    # Extract Context: line(s) with @ references
+    # Extract Context: line(s) with @ references.
+    # The trailing `|| true` is required: under the parent shell's
+    # `set -euo pipefail`, when a dispatch has no inline `[[@...]]` context
+    # refs, `grep` exits 1 with no matches; pipefail then propagates that
+    # nonzero status out of the command substitution and aborts the function
+    # before the YAML-frontmatter fallback runs. See codex round-2 finding 3.
     local context
     context=$(awk '
         /^Context:/ {
@@ -60,7 +65,7 @@ extract_context_files() {
         END {
             if (context) print context
         }
-    ' "$dispatch_file" | tr ' ' '\n' | grep '^\[\[@' )
+    ' "$dispatch_file" | tr ' ' '\n' | grep '^\[\[@' || true)
     if [ -n "$context" ]; then
         echo "$context"
         return 0
