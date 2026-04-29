@@ -468,24 +468,39 @@ class IntelligenceSelector:
         Uses item_id as pattern_id, item title as pattern_title, and dispatch_id
         from result.  Only writes for proven_pattern items (sourced from
         success_patterns); other item classes are noted with a class prefix title.
+
+        dispatch_id is recorded in the separate dispatch_pattern_offered junction table
+        (one row per dispatch+pattern pair) rather than in pattern_usage.dispatch_id, so
+        that concurrent dispatches offering the same pattern do not overwrite each other's
+        dispatch association.
         """
         db = self._get_quality_db()
         if db is None:
             return
         now = _now_utc()
         try:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dispatch_pattern_offered (
+                    dispatch_id   TEXT NOT NULL,
+                    pattern_id    TEXT NOT NULL,
+                    pattern_title TEXT NOT NULL,
+                    offered_at    TEXT NOT NULL,
+                    PRIMARY KEY (dispatch_id, pattern_id)
+                )
+                """
+            )
             for item in result.items:
                 db.execute(
                     """
                     INSERT INTO pattern_usage
                         (pattern_id, pattern_title, pattern_hash, used_count,
                          ignored_count, success_count, failure_count,
-                         last_offered, confidence, created_at, updated_at, dispatch_id)
-                    VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?)
+                         last_offered, confidence, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
                     ON CONFLICT(pattern_id) DO UPDATE SET
                         last_offered = excluded.last_offered,
-                        updated_at   = excluded.updated_at,
-                        dispatch_id  = excluded.dispatch_id
+                        updated_at   = excluded.updated_at
                     """,
                     (
                         item.item_id,
@@ -495,8 +510,17 @@ class IntelligenceSelector:
                         item.confidence,
                         now,
                         now,
-                        result.dispatch_id,
                     ),
+                )
+                db.execute(
+                    """
+                    INSERT INTO dispatch_pattern_offered
+                        (dispatch_id, pattern_id, pattern_title, offered_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
+                        offered_at = excluded.offered_at
+                    """,
+                    (result.dispatch_id, item.item_id, item.title[:255], now),
                 )
             db.commit()
         except Exception:

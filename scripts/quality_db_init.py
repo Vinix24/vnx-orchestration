@@ -405,6 +405,32 @@ def initialize_database() -> bool:
                 conn.commit()
                 log('INFO', f'Migrated {_tbl}: added valid_until column')
 
+        # Migration: create dispatch_pattern_offered junction table for isolated per-dispatch
+        # pattern tracking.  Replaces pattern_usage.dispatch_id as the lookup key for
+        # _update_pattern_confidence so concurrent dispatches cannot overwrite each other.
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='dispatch_pattern_offered'"
+        )
+        if not cursor.fetchone():
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dispatch_pattern_offered (
+                    dispatch_id   TEXT NOT NULL,
+                    pattern_id    TEXT NOT NULL,
+                    pattern_title TEXT NOT NULL,
+                    offered_at    TEXT NOT NULL,
+                    PRIMARY KEY (dispatch_id, pattern_id)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dpo_dispatch_id "
+                "ON dispatch_pattern_offered (dispatch_id)"
+            )
+            conn.commit()
+            log('INFO', 'Migrated: created dispatch_pattern_offered table + index')
+
         log('SUCCESS', 'Database schema initialized successfully')
 
         # Close connection

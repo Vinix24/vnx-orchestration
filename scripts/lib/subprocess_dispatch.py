@@ -995,8 +995,9 @@ def _auto_stash_changes(
         )
         if stash_proc.returncode == 0:
             logger.info(
-                "Stashed uncommitted changes from failed dispatch %s (terminal=%s, stash=%s)",
-                dispatch_id, terminal_id, stash_name,
+                "Stashed %d dispatch-produced file(s) from failed dispatch %s "
+                "(terminal=%s, stash=%s)",
+                len(files_to_stash), dispatch_id, terminal_id, stash_name,
             )
             return True
         else:
@@ -1197,10 +1198,26 @@ def _update_pattern_confidence(
         conn = _sqlite3.connect(str(db_path))
         conn.row_factory = _sqlite3.Row
 
-        injected = conn.execute(
-            "SELECT pattern_id, pattern_title FROM pattern_usage WHERE dispatch_id = ?",
-            (dispatch_id,),
-        ).fetchall()
+        # Query dispatch_pattern_offered (isolated per-dispatch junction table) so that
+        # patterns offered to multiple concurrent dispatches are not misattributed.
+        # Falls back to pattern_usage.dispatch_id for DBs that predate the junction table.
+        offered_table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='dispatch_pattern_offered'"
+        ).fetchone()
+
+        if offered_table_exists:
+            injected = conn.execute(
+                "SELECT pattern_id, pattern_title FROM dispatch_pattern_offered "
+                "WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchall()
+        else:
+            injected = conn.execute(
+                "SELECT pattern_id, pattern_title FROM pattern_usage "
+                "WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchall()
 
         for row in injected:
             pattern_id = row["pattern_id"]
@@ -1224,9 +1241,9 @@ def _update_pattern_confidence(
                         success_count = success_count + 1,
                         last_used     = ?,
                         updated_at    = ?
-                    WHERE dispatch_id = ? AND pattern_id = ?
+                    WHERE pattern_id = ?
                     """,
-                    (now, now, dispatch_id, pattern_id),
+                    (now, now, pattern_id),
                 )
             else:
                 conn.execute(
@@ -1244,9 +1261,9 @@ def _update_pattern_confidence(
                         failure_count  = failure_count + 1,
                         last_used      = ?,
                         updated_at     = ?
-                    WHERE dispatch_id = ? AND pattern_id = ?
+                    WHERE pattern_id = ?
                     """,
-                    (now, now, dispatch_id, pattern_id),
+                    (now, now, pattern_id),
                 )
             updated += 1
 
