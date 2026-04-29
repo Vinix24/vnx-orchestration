@@ -609,3 +609,296 @@ def test_gh_not_available_returns_not_executable(gate_env):
 
     assert result["status"] == "not_executable"
     assert result["reason"] == "provider_not_installed"
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 regression: contract_hash compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_contract_mode_uses_request_contract_hash(gate_env):
+    """Finding 1: When request carries contract_hash, result propagates it unchanged.
+
+    closure_verifier compares result.contract_hash to ReviewContract.content_hash.
+    In contract-backed mode the request is created with content_hash, so the
+    executor must forward it — not overwrite it with a sha256 of execution params.
+    """
+    executor = _make_mock_executor(gate_env)
+    pr_number = 70
+    contract_content_hash = "aabbccdd11223344"  # simulates ReviewContract.content_hash
+    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+        contract_hash=contract_content_hash,
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(json.dumps(checks))
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        result = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="PR-70",
+            request_payload=request_payload,
+        )
+
+    assert result["status"] == "pass"
+    assert result["contract_hash"] == contract_content_hash, (
+        "contract_hash in result must equal the contract's content_hash, "
+        "not a sha256 of execution params"
+    )
+
+
+def test_legacy_mode_contract_hash_is_sha256_of_execution_params(gate_env):
+    """Finding 1 counterpart: legacy mode (no contract_hash in request) still produces sha256 hash."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 71
+    head_sha = "cafebabe1234"
+    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+        # No contract_hash key → legacy mode
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(json.dumps(checks), head_sha=head_sha)
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        result = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=request_payload,
+        )
+
+    expected = hashlib.sha256(
+        json.dumps(
+            {"gate_name": "ci_gate", "head_sha": head_sha, "pr_number": pr_number},
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()[:16]
+    assert result["contract_hash"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Finding 2 regression: contract-scoped ci_gate request/result path
+# ---------------------------------------------------------------------------
+
+
+def test_request_ci_gate_with_contract_creates_contract_file(gate_env, monkeypatch):
+    """Finding 2: request_ci_gate_with_contract writes {pr_slug}-ci_gate-contract.json."""
+    import review_gate_manager as rgm
+    from review_contract import ReviewContract
+
+    manager = rgm.ReviewGateManager()
+
+    contract = ReviewContract(
+        pr_id="PR-72",
+        branch="feat/test-72",
+        risk_class="medium",
+        review_stack=["ci_gate"],
+        changed_files=[],
+        content_hash="deadbeef12345678",
+    )
+
+    with patch("gate_request_handler.shutil.which", return_value=None):
+        payload = manager.request_ci_gate_with_contract(
+            contract=contract,
+            pr_number=301,
+        )
+
+    request_file = manager.requests_dir / "pr72-ci_gate-contract.json"
+    assert request_file.exists(), f"Contract request file missing: {request_file}"
+    stored = json.loads(request_file.read_text())
+    assert stored["pr_id"] == "PR-72"
+    assert stored["pr_number"] == 301
+    assert stored["contract_hash"] == "deadbeef12345678"
+    assert stored["gate"] == "ci_gate"
+
+
+def test_ci_gate_contract_result_discoverable_by_find_gate_result(gate_env):
+    """Finding 2: ci_gate result written with pr_id='PR-73' is found by _find_gate_result('ci_gate','PR-73',...)."""
+    import closure_verifier as cv
+
+    results_dir = gate_env["results_dir"]
+    pr_id = "PR-73"
+    report_file = gate_env["headless_reports_dir"] / "test-ci_gate-pr-73.md"
+    report_file.write_text("# ci_gate PASS\n", encoding="utf-8")
+
+    # Simulate what _execute_ci_gate writes when called with pr_id="PR-73"
+    result_data = {
+        "gate": "ci_gate",
+        "pr_id": pr_id,
+        "pr_number": 301,
+        "status": "pass",
+        "blocking_count": 0,
+        "advisory_count": 0,
+        "blocking_findings": [],
+        "advisory_findings": [],
+        "contract_hash": "deadbeef12345678",
+        "report_path": str(report_file),
+    }
+    # Contract-scoped result file: {pr_slug}-ci_gate-contract.json
+    (results_dir / "pr73-ci_gate-contract.json").write_text(
+        json.dumps(result_data), encoding="utf-8",
+    )
+
+    found = cv._find_gate_result("ci_gate", pr_id, results_dir)
+    assert found is not None, "_find_gate_result must locate contract-scoped ci_gate result"
+    assert found["pr_id"] == pr_id
+    assert found["status"] == "pass"
+
+
+def test_legacy_numeric_pr_id_not_matched_by_canonical_pr_id(gate_env):
+    """Finding 2 guard: legacy result with pr_id='301' is NOT matched when searching by 'PR-73'."""
+    import closure_verifier as cv
+
+    results_dir = gate_env["results_dir"]
+    # Legacy result with numeric pr_id string
+    result_data = {
+        "gate": "ci_gate",
+        "pr_id": "301",  # numeric string — legacy format
+        "pr_number": 301,
+        "status": "pass",
+        "blocking_count": 0,
+        "contract_hash": "somevalue",
+        "report_path": "",
+    }
+    (results_dir / "pr-301-ci_gate.json").write_text(
+        json.dumps(result_data), encoding="utf-8",
+    )
+
+    found = cv._find_gate_result("ci_gate", "PR-73", results_dir)
+    assert found is None, (
+        "Legacy result with pr_id='301' must NOT match canonical search for 'PR-73'"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 regression: running verdict → request reset to requested
+# ---------------------------------------------------------------------------
+
+
+def test_running_verdict_resets_request_to_requested(gate_env):
+    """Finding 3: when verdict=running, request status reverts to 'requested' for re-execution."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 80
+    checks = [
+        {"name": "ci/test", "status": "IN_PROGRESS", "conclusion": None},
+    ]
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(json.dumps(checks))
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        result = executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=request_payload,
+        )
+
+    assert result["status"] == "running"
+
+    # Request file must have been reset to "requested", not "completed"
+    request_file = gate_env["requests_dir"] / f"pr-{pr_number}-ci_gate.json"
+    assert request_file.exists()
+    stored_request = json.loads(request_file.read_text())
+    assert stored_request["status"] == "requested", (
+        "Request must be reset to 'requested' after running verdict so the gate "
+        "can be re-executed once CI checks complete"
+    )
+    assert "completed_at" not in stored_request, (
+        "completed_at must not be written when verdict is 'running'"
+    )
+
+
+def test_completed_verdict_marks_request_completed(gate_env):
+    """Finding 3 complement: terminal verdicts (pass/fail) still mark request as completed."""
+    executor = _make_mock_executor(gate_env)
+    pr_number = 81
+    checks = [{"name": "ci/test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    request_payload = _make_request_payload(
+        pr_number=pr_number,
+        headless_reports_dir=gate_env["headless_reports_dir"],
+    )
+
+    with patch("gate_executor.subprocess") as mock_sub, \
+         patch("gate_executor.shutil.which", return_value="/usr/bin/gh"):
+        mock_sub.run.side_effect = _make_subprocess_run(json.dumps(checks))
+        mock_sub.TimeoutExpired = subprocess.TimeoutExpired
+        executor._execute_ci_gate(
+            gate="ci_gate", pr_number=pr_number, pr_id="",
+            request_payload=request_payload,
+        )
+
+    request_file = gate_env["requests_dir"] / f"pr-{pr_number}-ci_gate.json"
+    stored_request = json.loads(request_file.read_text())
+    assert stored_request["status"] == "completed"
+    assert "completed_at" in stored_request
+
+
+# ---------------------------------------------------------------------------
+# Finding 4 regression: CLI per-PR mode forwards --branch and --require-github-pr
+# ---------------------------------------------------------------------------
+
+
+def test_cli_per_pr_forwards_branch_and_require_github_pr(gate_env, tmp_path, monkeypatch):
+    """Finding 4: --branch and --require-github-pr reach verify_pr_closure when --pr-id is set."""
+    import closure_verifier as cv
+
+    # Write a minimal FEATURE_PLAN.md
+    feature_plan = tmp_path / "FEATURE_PLAN.md"
+    feature_plan.write_text(
+        "# Feature: F\n\n**Status**: Active\n**Risk-Class**: medium\n\n"
+        "## PR-0: Thing\n**Track**: A\n**Priority**: P1\n**Skill**: @architect\n"
+        "**Risk-Class**: medium\n**Merge-Policy**: human\n**Review-Stack**: codex_gate\n"
+        "**Dependencies**: []\n\n`gate_pr0_thing`\n\n---\n"
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    dispatch_dir = tmp_path / "dispatches"
+    dispatch_dir.mkdir()
+
+    monkeypatch.setenv("VNX_HOME", str(VNX_ROOT))
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("VNX_DISPATCH_DIR", str(dispatch_dir))
+    monkeypatch.setenv("VNX_LOGS_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("VNX_PIDS_DIR", str(tmp_path / "pids"))
+    monkeypatch.setenv("VNX_LOCKS_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("VNX_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setenv("VNX_DB_DIR", str(tmp_path / "db"))
+
+    captured: dict = {}
+
+    def _fake_verify_pr_closure(**kwargs):
+        captured.update(kwargs)
+        return {
+            "verdict": "fail",
+            "mode": "per_pr",
+            "pr_id": kwargs["pr_id"],
+            "checks": [],
+            "reconciled_state": None,
+            "review_evidence": None,
+        }
+
+    monkeypatch.setattr(cv, "verify_pr_closure", _fake_verify_pr_closure)
+
+    cv.main([
+        "--feature-plan", str(feature_plan),
+        "--pr-id", "PR-0",
+        "--branch", "feat/test-branch",
+        "--require-github-pr",
+    ])
+
+    assert captured.get("branch") == "feat/test-branch", (
+        "--branch must be forwarded to verify_pr_closure"
+    )
+    assert captured.get("require_github_pr") is True, (
+        "--require-github-pr must be forwarded to verify_pr_closure"
+    )

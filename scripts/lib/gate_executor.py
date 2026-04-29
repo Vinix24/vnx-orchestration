@@ -238,13 +238,19 @@ class GateExecutorMixin:
 
         now = utc_now_iso()
 
-        # Compute contract hash: sha256({gate_name, head_sha, pr_number})[:16]
-        head_sha = _get_pr_head_sha(pr_number)
-        hash_input = json.dumps(
-            {"gate_name": gate, "head_sha": head_sha, "pr_number": pr_number},
-            sort_keys=True,
-        )
-        contract_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
+        # In contract-backed mode the request carries the review contract's content_hash,
+        # which is what closure_verifier compares against.  Fall back to an
+        # execution-scoped sha256 only in legacy (pr_number-only) mode.
+        request_contract_hash = request_payload.get("contract_hash", "")
+        if request_contract_hash:
+            contract_hash = request_contract_hash
+        else:
+            head_sha = _get_pr_head_sha(pr_number)
+            hash_input = json.dumps(
+                {"gate_name": gate, "head_sha": head_sha, "pr_number": pr_number},
+                sort_keys=True,
+            )
+            contract_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
 
         blocking_findings = [
             {
@@ -313,8 +319,18 @@ class GateExecutorMixin:
         if rf:
             rf.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
 
-        request_payload["status"] = "completed"
-        request_payload["completed_at"] = now
+        # When checks are still running, reset request to "requested" so it
+        # can be re-executed once GitHub reports a terminal conclusion.
+        # Setting it to "completed" would cause execute_gate to short-circuit on
+        # the next call (status in ("not_executable", "completed", "failed")),
+        # leaving the gate permanently stuck with a "running" snapshot.
+        if verdict == "running":
+            request_payload["status"] = "requested"
+            request_payload.pop("started_at", None)
+            request_payload.pop("runner_pid", None)
+        else:
+            request_payload["status"] = "completed"
+            request_payload["completed_at"] = now
         _rec.persist_request(
             self.requests_dir, gate, request_payload,
             pr_number=pr_number, pr_id=pr_id,

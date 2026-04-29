@@ -433,3 +433,72 @@ class GateRequestHandlerMixin:
             )
         self._request_path("ci_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
+
+    def request_ci_gate_with_contract(
+        self,
+        *,
+        contract: "ReviewContract",
+        pr_number: int,
+        mode: str = "per_pr",
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        """Request a ci_gate execution driven by a canonical ReviewContract.
+
+        Writes a contract-scoped request file ({pr_slug}-ci_gate-contract.json)
+        with the canonical pr_id and the contract's content_hash.  This enables
+        closure_verifier._find_gate_result to locate the result via the contract
+        path and ensures the result's contract_hash matches ReviewContract.content_hash.
+
+        ``pr_number`` is the real GitHub PR number used by ``gh pr checks``.
+        """
+        from review_gate_manager import _utc_now, emit_governance_receipt
+
+        if not contract.pr_id:
+            raise ValueError("contract.pr_id is required for ci_gate contract request")
+
+        available = self._ci_gate_available()
+        requested_at = _utc_now()
+        payload: Dict[str, Any] = {
+            "gate": "ci_gate",
+            "status": "requested" if available else "not_executable",
+            "provider": "gh_cli",
+            "branch": contract.branch,
+            "pr_id": contract.pr_id,
+            "pr_number": pr_number,
+            "review_mode": mode,
+            "risk_class": contract.risk_class,
+            "changed_files": contract.changed_files,
+            "contract_hash": contract.content_hash,
+            "requested_at": requested_at,
+            "report_path": self._build_report_path(
+                gate="ci_gate",
+                requested_at=requested_at,
+                pr_id=contract.pr_id,
+            ),
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        if not available:
+            self._mark_gate_unavailable(
+                payload, gate="ci_gate", binary_name="gh",
+                pr_number=pr_number, pr_id=contract.pr_id,
+                contract_hash=contract.content_hash,
+            )
+
+        request_file = self._contract_request_path("ci_gate", contract.pr_id)
+        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        emit_governance_receipt(
+            "review_gate_request",
+            status=payload["status"],
+            terminal="T0",
+            pr_id=contract.pr_id,
+            branch=contract.branch,
+            gate="ci_gate",
+            review_mode=mode,
+            risk_class=contract.risk_class,
+            contract_hash=contract.content_hash,
+            changed_files=contract.changed_files,
+            dispatch_id=dispatch_id,
+        )
+        return payload
