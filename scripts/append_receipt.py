@@ -366,7 +366,7 @@ def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
     return provenance
 
 
-def _resolve_session_id(receipt: Dict[str, Any]) -> str:
+def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = None) -> str:
     """Resolve session_id with deterministic priority chain (parallel-terminal safe).
 
     Priority chain (matches session_resolver.sh):
@@ -375,6 +375,11 @@ def _resolve_session_id(receipt: Dict[str, Any]) -> str:
     3. Environment variables (with auto-create of per-terminal files)
     4. Provider "current" files (global session files)
     5. Fallback: "unknown"
+
+    Args:
+        receipt: Receipt payload.
+        state_dir: Resolved state directory (caller should supply to avoid
+                   double-resolution). Falls back to resolve_state_dir(__file__).
     """
     metadata = receipt.get("metadata") if isinstance(receipt.get("metadata"), dict) else {}
     terminal = str(receipt.get("terminal") or "unknown").strip()
@@ -391,7 +396,8 @@ def _resolve_session_id(receipt: Dict[str, Any]) -> str:
             return value
 
     # Priority 2: Per-terminal current_session file (DETERMINISTIC)
-    state_dir = resolve_state_dir(__file__)
+    if state_dir is None:
+        state_dir = resolve_state_dir(__file__)
     current_session_file = state_dir / f"current_session_{terminal}"
     if current_session_file.exists():
         try:
@@ -401,22 +407,18 @@ def _resolve_session_id(receipt: Dict[str, Any]) -> str:
         except Exception:
             pass
 
-    # Priority 3: Environment variables (provider-specific) with auto-create
-    env_mapping = {
-        "T0": "CLAUDE_SESSION_ID",
-        "T1": "CLAUDE_SESSION_ID",
-        "T2": "CLAUDE_SESSION_ID",
-        "T3": "CLAUDE_SESSION_ID",
-        "T-MANAGER": "CLAUDE_SESSION_ID",
+    # Priority 3: Environment variables (provider-specific) with auto-create.
+    # Use panes.json-resolved provider so a standard terminal (e.g. T3) running
+    # codex_cli or gemini_cli gets the correct session env var, not CLAUDE_SESSION_ID.
+    mp = _resolve_model_provider(terminal, state_dir)
+    provider = mp.get("provider", "unknown")
+    _PROVIDER_ENV_VAR: Dict[str, str] = {
+        "claude_code": "CLAUDE_SESSION_ID",
+        "gemini_cli": "GEMINI_SESSION_ID",
+        "codex_cli": "CODEX_SESSION_ID",
+        "kimi_cli": "KIMI_SESSION_ID",
     }
-
-    # Also check for provider-specific patterns in terminal name
-    if terminal.upper().startswith(("GEMINI", "GEM-")):
-        env_var = "GEMINI_SESSION_ID"
-    elif terminal.upper().startswith(("CODEX", "CODE-")):
-        env_var = "CODEX_SESSION_ID"
-    else:
-        env_var = env_mapping.get(terminal, "CLAUDE_SESSION_ID")
+    env_var = _PROVIDER_ENV_VAR.get(provider, "CLAUDE_SESSION_ID")
 
     env_value = os.environ.get(env_var)
     if env_value:
@@ -430,12 +432,18 @@ def _resolve_session_id(receipt: Dict[str, Any]) -> str:
                 pass  # Non-fatal, just optimization for future lookups
             return value
 
-    # Priority 4: Provider "current" session files (global)
-    provider_current_files = (
-        Path.home() / ".codex" / "sessions" / "current",
-        Path.home() / ".gemini" / "sessions" / "current",
-        Path.home() / ".claude" / "sessions" / "current",
-    )
+    # Priority 4: Provider "current" session files (global, preferred provider first).
+    # Resolved provider determines which file to try first so a Claude terminal does
+    # not accidentally pick up a Codex or Gemini session that happens to exist.
+    _PROVIDER_SESSION_FILES: Dict[str, Path] = {
+        "claude_code": Path.home() / ".claude" / "sessions" / "current",
+        "gemini_cli": Path.home() / ".gemini" / "sessions" / "current",
+        "codex_cli": Path.home() / ".codex" / "sessions" / "current",
+        "kimi_cli": Path.home() / ".kimi" / "sessions" / "current",
+    }
+    preferred_file = _PROVIDER_SESSION_FILES.get(provider)
+    other_files = [f for f in _PROVIDER_SESSION_FILES.values() if f != preferred_file]
+    provider_current_files = ([preferred_file] + other_files) if preferred_file else list(_PROVIDER_SESSION_FILES.values())
     for current_file in provider_current_files:
         try:
             if current_file.exists():
@@ -558,7 +566,7 @@ def _extract_session_token_usage(session_id: str, terminal: str) -> Optional[Dic
 def _build_session_metadata(receipt: Dict[str, Any], state_dir: Path) -> Dict[str, Any]:
     terminal = str(receipt.get("terminal") or "unknown").strip() or "unknown"
     model_provider = _resolve_model_provider(terminal, state_dir)
-    session_id = _resolve_session_id(receipt)
+    session_id = _resolve_session_id(receipt, state_dir)
     metadata: Dict[str, Any] = {
         "session_id": session_id,
         "terminal": terminal,
@@ -766,11 +774,11 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     except Exception as exc:
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
-    # Set open_items_created from the quality_advisory generated above.
-    # Must run after quality_advisory is populated so _count_quality_violations sees real items.
-    # This ensures the CQS DB UPDATE below stores the actual count, not 0.
+    # Register quality violations now and use the actual creation count (dedup-aware).
+    # _register_quality_open_items deduplicates against the open-items store, so repeated
+    # advisories for the same finding correctly return 0 rather than inflating CQS.
     if "open_items_created" not in enriched:
-        enriched["open_items_created"] = _count_quality_violations(enriched)
+        enriched["open_items_created"] = _register_quality_open_items(enriched)
 
     # Compute CQS and persist to dispatch_metadata (best-effort).
     # quality_advisory_json is stored so update_dispatch_cqs.py can round-trip it
@@ -1119,10 +1127,6 @@ def append_receipt_payload(
 
     # Best-effort post-append hooks (skipped for skip_enrichment=True lightweight events)
     if result is not None and result.status == "appended" and not skip_enrichment:
-        # DB registration runs outside lock (existing constraint preserved).
-        # Count is already embedded in the receipt above; do not overwrite.
-        _register_quality_open_items(receipt)
-
         _update_confidence_from_receipt(receipt)
 
         _emit_dispatch_register(receipt)

@@ -127,6 +127,91 @@ def test_append_receipt_session_id_falls_back_to_gemini_current_file(tmp_path: P
     assert stored["session"]["session_id"] == "gemini-session-abc"
 
 
+def test_session_id_uses_panes_json_provider_for_standard_terminal(tmp_path: Path):
+    """T3 mapped to codex_cli in panes.json must resolve CODEX_SESSION_ID, not CLAUDE_SESSION_ID.
+
+    Regression guard for Codex finding: env_mapping hard-coded all standard terminals
+    (T0-T3) to CLAUDE_SESSION_ID, ignoring the provider in panes.json.
+    """
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    panes_json = state_dir / "panes.json"
+    panes_json.write_text(
+        json.dumps({"T3": {"model": "gpt-5.2-codex", "provider": "codex_cli"}}),
+        encoding="utf-8",
+    )
+
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-PANES-CODEX-001",
+        "terminal": "T3",
+    }
+
+    result = _run_append(
+        tmp_path,
+        json.dumps(receipt),
+        extra_env={
+            "CODEX_SESSION_ID": "codex-panes-session-xyz",
+            "CLAUDE_SESSION_ID": "claude-should-not-be-used",
+        },
+    )
+    assert result.returncode == 0, f"append failed: {result.stderr}"
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert stored["session"]["session_id"] == "codex-panes-session-xyz", (
+        f"Expected codex session ID from panes.json provider, got {stored['session']['session_id']!r}. "
+        "Terminal T3 with codex_cli provider must read CODEX_SESSION_ID, not CLAUDE_SESSION_ID."
+    )
+
+
+def test_session_id_priority4_prefers_provider_session_file(tmp_path: Path, monkeypatch):
+    """Priority 4 must try the resolved-provider's session file before other providers.
+
+    T3 → codex_cli via panes.json: ~/.codex/sessions/current is checked before
+    ~/.gemini/sessions/current and ~/.claude/sessions/current.
+    Regression guard: old code had codex first globally, but that was a coincidence;
+    new code must be deterministic based on resolved provider.
+    """
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    panes_json = state_dir / "panes.json"
+    panes_json.write_text(
+        json.dumps({"T3": {"model": "gpt-5.2-codex", "provider": "codex_cli"}}),
+        encoding="utf-8",
+    )
+
+    home_dir = tmp_path / "home"
+    codex_current = home_dir / ".codex" / "sessions" / "current"
+    codex_current.parent.mkdir(parents=True, exist_ok=True)
+    codex_current.write_text("codex-file-session-abc\n", encoding="utf-8")
+    # Also write a Claude session file to verify it is NOT chosen
+    claude_current = home_dir / ".claude" / "sessions" / "current"
+    claude_current.parent.mkdir(parents=True, exist_ok=True)
+    claude_current.write_text("claude-file-session-wrong\n", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(home_dir))
+
+    receipt = {
+        "timestamp": "2026-04-28T12:00:01Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-PANES-CODEX-002",
+        "terminal": "T3",
+    }
+
+    result = _run_append(tmp_path, json.dumps(receipt))
+    assert result.returncode == 0, f"append failed: {result.stderr}"
+
+    receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
+    stored = json.loads(receipts_file.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert stored["session"]["session_id"] == "codex-file-session-abc", (
+        f"Expected codex file session for T3 with codex_cli provider, got {stored['session']['session_id']!r}."
+    )
+
+
 def test_append_receipt_skips_duplicate_idempotency_key(tmp_path: Path):
     receipt = _build_receipt(index=9)
     payload = json.dumps(receipt)

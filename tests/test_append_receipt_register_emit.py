@@ -728,12 +728,57 @@ def test_enrich_sets_open_items_created_internally(ar):
          patch.object(ar, "generate_quality_advisory", return_value=fake_advisory), \
          patch.object(ar, "_get_open_items_manager", return_value=MagicMock(count_items_closed_by_dispatch=lambda _: 0)), \
          patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch.object(ar, "_register_quality_open_items", return_value=3), \
          patch("pathlib.Path.exists", return_value=False):
         enriched = ar._enrich_completion_receipt(receipt)
 
     assert enriched.get("open_items_created") == 3, (
-        f"Expected 3 (from generate_quality_advisory result), got {enriched.get('open_items_created')!r}. "
-        "_enrich_completion_receipt must set open_items_created before the CQS DB write."
+        f"Expected 3 (from _register_quality_open_items return value), got {enriched.get('open_items_created')!r}. "
+        "_enrich_completion_receipt must use _register_quality_open_items return value before the CQS DB write."
+    )
+
+
+# ── Finding 2 regression: open_items_created uses registration count, not advisory count ──
+
+def test_enrich_open_items_created_uses_registration_count_not_advisory_count(ar):
+    """When _register_quality_open_items returns 0 (all already in OIM), open_items_created
+    is 0 even when quality_advisory has items. Regression guard: pre-fix code used
+    _count_quality_violations which ignores the OIM dedup state."""
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-DEDUP-REG-001",
+        "terminal": "T1",
+    }
+    advisory_dict = {
+        "version": "1.0",
+        "t0_recommendation": {
+            "open_items": [
+                {"check_id": "c1", "file": "a.py", "symbol": "", "severity": "blocker"},
+                {"check_id": "c2", "file": "b.py", "symbol": "", "severity": "warn"},
+            ]
+        },
+    }
+    fake_advisory = MagicMock()
+    fake_advisory.to_dict.return_value = advisory_dict
+
+    with patch.object(ar, "_build_git_provenance", return_value={"git_ref": "HEAD"}), \
+         patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
+         patch.object(ar, "enrich_receipt_provenance"), \
+         patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])), \
+         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
+         patch.object(ar, "get_changed_files", return_value=[Path("a.py"), Path("b.py")]), \
+         patch.object(ar, "generate_quality_advisory", return_value=fake_advisory), \
+         patch.object(ar, "_get_open_items_manager", return_value=MagicMock(count_items_closed_by_dispatch=lambda _: 0)), \
+         patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
+         patch.object(ar, "_register_quality_open_items", return_value=0), \
+         patch("pathlib.Path.exists", return_value=False):
+        enriched = ar._enrich_completion_receipt(receipt)
+
+    assert enriched.get("open_items_created") == 0, (
+        f"Expected 0 (all items already in OIM), got {enriched.get('open_items_created')!r}. "
+        "Regression: _count_quality_violations used instead of _register_quality_open_items."
     )
 
 
