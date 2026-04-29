@@ -215,10 +215,16 @@ _DP_INSTRUCTION_CONTENT=""
 
 # _pdp_resolve_target — determine target pane with MCP routing and pre-lease probe.
 # Sets _PDP_TARGET_PANE on success. Returns 1 if routing or probe blocks.
+# For tmux-routed terminals, only validates dispatch settings and probes input
+# mode — actual terminal I/O (context clear, model switch, mode activation) is
+# deferred to _pdp_apply_terminal_mode_setup, which must be called AFTER the
+# dispatch lease is acquired to avoid wiping a worker terminal on lease failure.
 _PDP_TARGET_PANE=""
+_PDP_NEEDS_MODE_SETUP=0  # 1 when tmux I/O setup is pending (post-lease)
 _pdp_resolve_target() {
     local dispatch_file="$1" track="$2" agent_role="$3"
     _PDP_TARGET_PANE=""
+    _PDP_NEEDS_MODE_SETUP=0
 
     local requires_mcp
     requires_mcp=$(vnx_dispatch_extract_requires_mcp "$dispatch_file")
@@ -262,11 +268,42 @@ _pdp_resolve_target() {
         fi
     fi
 
-    # RES-B2: Configure terminal mode; canonical failure on error.
-    if ! configure_terminal_mode "$target_pane" "$dispatch_file"; then
-        log_structured_failure "mode_configuration_failed" "Terminal mode configuration failed" \
+    # RES-B2: Validate dispatch settings and populate _CTM_* globals (read-only).
+    # Actual terminal I/O (context clear, model switch, mode activation) is deferred
+    # to _pdp_apply_terminal_mode_setup, called post-lease by dispatch_with_skill_activation.
+    if ! mode_pre_check "$target_pane" "$dispatch_file"; then
+        log_structured_failure "mode_pre_check_failed" "Terminal mode pre-check failed" \
             "pane=$target_pane dispatch=$(basename "$dispatch_file")" \
             "pre_mode_configuration" "$(basename "$dispatch_file")" "" ""
+        return 1
+    fi
+
+    _PDP_NEEDS_MODE_SETUP=1
+    _PDP_TARGET_PANE="$target_pane"
+    return 0
+}
+
+# _pdp_apply_terminal_mode_setup — apply deferred terminal I/O after lease is acquired.
+# Sends context-clear, model-switch, and mode-activation commands to the tmux pane.
+# Must only be called for tmux-routed terminals when _PDP_NEEDS_MODE_SETUP=1.
+# Requires _CTM_* globals set by the earlier mode_pre_check call in _pdp_resolve_target.
+_pdp_apply_terminal_mode_setup() {
+    local target_pane="$1" dispatch_file="$2"
+
+    if ! reset_terminal_context "$target_pane" "$_CTM_FORCE_NORMAL" "$_CTM_CLEAR_CONTEXT" "$_CTM_PROVIDER"; then
+        log_structured_failure "mode_configuration_failed" "Terminal context reset failed post-lease" \
+            "pane=$target_pane dispatch=$(basename "$dispatch_file")"
+        return 1
+    fi
+    if ! switch_terminal_model "$target_pane" "$_CTM_REQUIRES_MODEL" "$_CTM_REQUIRES_MODEL_STRENGTH" \
+            "$_CTM_PROVIDER" "$_CTM_TERMINAL_ID" "$dispatch_file"; then
+        log_structured_failure "mode_configuration_failed" "Terminal model switch failed post-lease" \
+            "pane=$target_pane dispatch=$(basename "$dispatch_file")"
+        return 1
+    fi
+    if ! activate_terminal_mode "$target_pane" "$_CTM_MODE" "$_CTM_PROVIDER"; then
+        log_structured_failure "mode_configuration_failed" "Terminal mode activation failed post-lease" \
+            "pane=$target_pane dispatch=$(basename "$dispatch_file")"
         return 1
     fi
 
@@ -276,7 +313,7 @@ _pdp_resolve_target() {
     tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
     sleep 0.5
 
-    _PDP_TARGET_PANE="$target_pane"
+    log "V8 MODE_CONTROL: Post-lease terminal setup complete pane=$target_pane"
     return 0
 }
 
