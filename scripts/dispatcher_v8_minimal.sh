@@ -375,18 +375,78 @@ execute_and_classify_dispatch() {
 }
 
 _cleanup_stuck_dispatches() {
-    while IFS= read -r stuck_file; do
-        if [ -f "$stuck_file" ]; then
-            log "V8: Moving stuck file to completed: $(basename "$stuck_file")"
-            if ! mv "$stuck_file" "$COMPLETED_DIR/" 2>/dev/null; then
-                log_structured_failure "stuck_file_move_failed" "Failed to move stuck file to completed" "file=$stuck_file"
-            fi
-        fi
-    done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
+    # Receipt-driven reconciliation. Moves a dispatch from active/ to
+    # completed/ only when a matching receipt exists in receipts/processed/.
+    # The pre-supervisor heuristic moved any *.md older than 60 minutes — file
+    # mtime is set at delivery time and never refreshed, so legitimate
+    # long-running tasks were silently misclassified as completed and hid live
+    # work from T0 state. Orphans without receipts are reported via the log
+    # but stay in active/ for a higher-level janitor / operator to decide on.
+    local janitor_script="$SCRIPT_DIR/lib/active_dispatch_janitor.py"
+    if [ ! -f "$janitor_script" ]; then
+        return 0
+    fi
+
+    local data_dir="${VNX_DATA_DIR:-}"
+    local receipts_processed_dir
+    if [ -n "$data_dir" ]; then
+        receipts_processed_dir="$data_dir/receipts/processed"
+    else
+        receipts_processed_dir="$DISPATCH_DIR/../receipts/processed"
+    fi
+    local stale_hours="${VNX_ACTIVE_STALE_HOURS:-24}"
+
+    local janitor_out janitor_rc=0
+    set +e
+    janitor_out=$(python3 "$janitor_script" \
+        --active-dir "$ACTIVE_DIR" \
+        --completed-dir "$COMPLETED_DIR" \
+        --receipts-processed-dir "$receipts_processed_dir" \
+        --stale-hours "$stale_hours" 2>&1)
+    janitor_rc=$?
+    set -e
+
+    if [ "$janitor_rc" -ne 0 ]; then
+        log_structured_failure "active_drain_janitor_failed" \
+            "active dispatch janitor exited non-zero" \
+            "rc=$janitor_rc out=${janitor_out//$'\n'/ | }"
+        return 0
+    fi
+
+    if [ -n "$janitor_out" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            log "V8 ACTIVE_DRAIN: $line"
+        done <<< "$janitor_out"
+    fi
+}
+
+# --- Unified supervisor: throttled runtime_supervise tick (SUP-PR3) ---
+# Invokes RuntimeSupervisor.supervise_all() at most once per 60s when
+# VNX_SUPERVISOR_MODE=unified. Default legacy mode is bit-identical.
+_maybe_runtime_supervise() {
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+    local interval="${VNX_RUNTIME_SUPERVISE_INTERVAL:-60}"
+    local state_file="$STATE_DIR/.last_runtime_supervise_ts"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last < interval )); then
+        return 0
+    fi
+    local log_file="$VNX_LOGS_DIR/runtime_supervise.log"
+    mkdir -p "$(dirname "$log_file")"
+    python3 "$VNX_DIR/scripts/lib/runtime_supervise.py" >> "$log_file" 2>&1 || true
+    echo "$now" > "$state_file"
 }
 
 process_dispatches() {
     local count=0
+    _maybe_runtime_supervise
     _cleanup_stuck_dispatches
 
     for dispatch in "$PENDING_DIR"/*.md; do

@@ -182,6 +182,51 @@ class TestReadEventsSinceIso:
         events = read_events(since_iso=ts)
         assert len(events) == 1
 
+    def test_since_iso_second_precision_cutoff_includes_microsecond_event(self, isolated_data_dir):
+        """Codex round-2 finding 1: lex-compare drops same-second events.
+
+        Writer emits microsecond-precision timestamps (``…00.123456Z``).
+        A caller passing a coarser cutoff (``…00Z``) used to silently
+        filter such events out because ``.`` (0x2E) sorts before ``Z`` (0x5A).
+        Datetime-aware compare must include events at or after the cutoff.
+        """
+        reg = _reg_path(isolated_data_dir)
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        micro_ts = "2026-04-29T12:00:00.123456Z"
+        reg.write_text(
+            json.dumps({"timestamp": micro_ts, "event": "dispatch_created", "dispatch_id": "d-1"}) + "\n"
+        )
+        # Same-second cutoff at second precision — must include the event.
+        events = read_events(since_iso="2026-04-29T12:00:00Z")
+        assert len(events) == 1, f"Same-second cutoff dropped microsecond event: {events!r}"
+        assert events[0]["dispatch_id"] == "d-1"
+
+    def test_since_iso_excludes_strictly_older_event_with_mixed_precision(self, isolated_data_dir):
+        """Mixed-precision compare must still exclude truly older events."""
+        reg = _reg_path(isolated_data_dir)
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        old_ts = "2026-04-29T11:59:59.999999Z"
+        new_ts = "2026-04-29T12:00:01.000000Z"
+        reg.write_text(
+            json.dumps({"timestamp": old_ts, "event": "dispatch_created"}) + "\n"
+            + json.dumps({"timestamp": new_ts, "event": "dispatch_promoted"}) + "\n"
+        )
+        events = read_events(since_iso="2026-04-29T12:00:00Z")
+        assert len(events) == 1
+        assert events[0]["event"] == "dispatch_promoted"
+
+    def test_since_iso_unparseable_falls_back_to_lexicographic(self, isolated_data_dir):
+        """When since_iso cannot be parsed, the filter falls back to lex compare
+        rather than silently disabling itself."""
+        reg = _reg_path(isolated_data_dir)
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        reg.write_text(
+            json.dumps({"timestamp": "aaa", "event": "dispatch_created"}) + "\n"
+            + json.dumps({"timestamp": "zzz", "event": "dispatch_promoted"}) + "\n"
+        )
+        events = read_events(since_iso="mmm")
+        assert [e["event"] for e in events] == ["dispatch_promoted"]
+
 
 # ---------------------------------------------------------------------------
 # 7. read_events skips invalid JSON silently
