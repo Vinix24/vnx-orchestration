@@ -250,6 +250,17 @@ test.describe('Console errors — all dashboard routes', () => {
 // This layer catches mis-wired route handlers and import errors in API routes.
 
 const apiNetworkRoutes: Array<{ path: string; label: string }> = [
+  // Core dashboard routes — these call /api/token-stats, /api/token-stats/sessions,
+  // and /api/conversations whose fetch errors are suppressed in the console-error
+  // listener above (graceful "Failed to load" banners). The 5xx check here ensures
+  // the routes themselves don't regress to server-side failures silently.
+  { path: '/', label: 'Overview' },
+  { path: '/models', label: 'Models' },
+  { path: '/terminals', label: 'Terminals' },
+  { path: '/tokens', label: 'Tokens' },
+  { path: '/usage', label: 'Usage' },
+  { path: '/conversations', label: 'Conversations' },
+  // Operator pages
   { path: '/operator/kanban', label: 'Kanban' },
   { path: '/operator/open-items', label: 'Open Items' },
   { path: '/operator', label: 'Session control' },
