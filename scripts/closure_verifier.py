@@ -941,7 +941,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--require-github-pr",
         action="store_true",
-        help="In --pr-id mode, also require a real GitHub PR for --branch with OPEN/CLEAN state and green CI",
+        help="In --pr-id mode, require a real GitHub PR + green checks for the branch (auto-enabled when --mode pre_merge).",
     )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--emit-receipt", action="store_true")
@@ -973,10 +973,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         branch = args.branch or _run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root
         ).stdout.strip() or None
-        # In pre_merge mode, --require-github-pr enforces a real GitHub PR with
-        # OPEN/CLEAN state and green CI; in post_merge mode the caller can still
-        # opt in but it is only meaningful pre-merge.
-        require_github_pr = bool(args.require_github_pr) and args.mode == "pre_merge"
+        # pre_merge mode auto-enables GitHub PR enforcement; --require-github-pr
+        # forces it explicitly in any mode (CFX-2).
+        require_github_pr = bool(args.require_github_pr or args.mode == "pre_merge")
         result = verify_pr_closure(
             pr_id=args.pr_id,
             project_root=project_root,
