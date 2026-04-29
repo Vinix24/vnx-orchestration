@@ -63,6 +63,26 @@ def _utc_now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _parse_iso(ts: str) -> Optional[_dt.datetime]:
+    """Parse ISO-8601 UTC timestamp tolerating both microsecond and second
+    precision and a trailing ``Z`` suffix. Returns ``None`` on failure.
+
+    Why: read_events compares record timestamps to ``since_iso`` cutoffs.
+    Lexicographic compare silently drops same-second events when the writer
+    uses microsecond precision (``…00.123456Z``) and the caller passes a
+    coarser cutoff (``…00Z``) — ``.`` (0x2E) sorts before ``Z`` (0x5A).
+    """
+    if not ts:
+        return None
+    s = ts
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return _dt.datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def append_event(
     event: str,
     *,
@@ -119,6 +139,11 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
     if not path.exists():
         return []
     events = []
+    cutoff_dt = _parse_iso(since_iso) if since_iso else None
+    # If the caller provided a since_iso we could not parse, fall back to the
+    # legacy lexicographic compare so behaviour stays predictable rather than
+    # silently disabling the filter.
+    cutoff_lex = since_iso if (since_iso and cutoff_dt is None) else None
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
@@ -132,11 +157,17 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
                 continue
             try:
                 rec = json.loads(line)
-                if since_iso and rec.get("timestamp", "") < since_iso:
-                    continue
-                events.append(rec)
             except json.JSONDecodeError:
                 continue
+            if cutoff_dt is not None:
+                rec_ts = rec.get("timestamp", "")
+                rec_dt = _parse_iso(rec_ts)
+                if rec_dt is None or rec_dt < cutoff_dt:
+                    continue
+            elif cutoff_lex is not None:
+                if rec.get("timestamp", "") < cutoff_lex:
+                    continue
+            events.append(rec)
     except Exception:
         return []
     return events

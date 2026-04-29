@@ -375,14 +375,50 @@ execute_and_classify_dispatch() {
 }
 
 _cleanup_stuck_dispatches() {
-    while IFS= read -r stuck_file; do
-        if [ -f "$stuck_file" ]; then
-            log "V8: Moving stuck file to completed: $(basename "$stuck_file")"
-            if ! mv "$stuck_file" "$COMPLETED_DIR/" 2>/dev/null; then
-                log_structured_failure "stuck_file_move_failed" "Failed to move stuck file to completed" "file=$stuck_file"
-            fi
-        fi
-    done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
+    # Receipt-driven reconciliation. Moves a dispatch from active/ to
+    # completed/ only when a matching receipt exists in receipts/processed/.
+    # The pre-supervisor heuristic moved any *.md older than 60 minutes — file
+    # mtime is set at delivery time and never refreshed, so legitimate
+    # long-running tasks were silently misclassified as completed and hid live
+    # work from T0 state. Orphans without receipts are reported via the log
+    # but stay in active/ for a higher-level janitor / operator to decide on.
+    local janitor_script="$SCRIPT_DIR/lib/active_dispatch_janitor.py"
+    if [ ! -f "$janitor_script" ]; then
+        return 0
+    fi
+
+    local data_dir="${VNX_DATA_DIR:-}"
+    local receipts_processed_dir
+    if [ -n "$data_dir" ]; then
+        receipts_processed_dir="$data_dir/receipts/processed"
+    else
+        receipts_processed_dir="$DISPATCH_DIR/../receipts/processed"
+    fi
+    local stale_hours="${VNX_ACTIVE_STALE_HOURS:-24}"
+
+    local janitor_out janitor_rc=0
+    set +e
+    janitor_out=$(python3 "$janitor_script" \
+        --active-dir "$ACTIVE_DIR" \
+        --completed-dir "$COMPLETED_DIR" \
+        --receipts-processed-dir "$receipts_processed_dir" \
+        --stale-hours "$stale_hours" 2>&1)
+    janitor_rc=$?
+    set -e
+
+    if [ "$janitor_rc" -ne 0 ]; then
+        log_structured_failure "active_drain_janitor_failed" \
+            "active dispatch janitor exited non-zero" \
+            "rc=$janitor_rc out=${janitor_out//$'\n'/ | }"
+        return 0
+    fi
+
+    if [ -n "$janitor_out" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            log "V8 ACTIVE_DRAIN: $line"
+        done <<< "$janitor_out"
+    fi
 }
 
 # --- Unified supervisor: throttled runtime_supervise tick (SUP-PR3) ---
