@@ -335,15 +335,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, _operator_get_agents())
             return
 
-        # Register stream SSE endpoints
+        # Register stream SSE endpoints — pass CANONICAL_STATE_DIR so the
+        # handler uses the same state dir as all other /state/* APIs, honoring
+        # VNX_STATE_DIR in non-default worktree / runtime configurations.
+        _register_file = CANONICAL_STATE_DIR / "dispatch_register.ndjson"
+
         if path == "/api/register-stream/archive":
-            handle_register_stream_archive(self)
+            handle_register_stream_archive(self, register_file=_register_file)
             return
 
         if path == "/api/register-stream":
             since_ts = params.get("since_ts", [None])[0]
             event_type_filter = params.get("event_type", [None])[0]
-            handle_register_stream(self, since_ts, event_type_filter)
+            handle_register_stream(self, since_ts, event_type_filter, register_file=_register_file)
             return
 
         # Agent stream SSE endpoints
