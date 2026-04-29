@@ -226,6 +226,74 @@ def _find_gate_result(
     return None
 
 
+# Request-side states for the optional Claude GitHub review gate that record
+# an explicit, intentional absence (writer: gate_request_handler).  These are
+# canonicalized in claude_github_receipt.INTENTIONALLY_ABSENT_STATES /
+# EVIDENCE_STATES; duplicated here to avoid an import cycle since
+# closure_verifier already pins sys.path on its own.
+_INTENTIONALLY_ABSENT_REQUEST_STATES = frozenset({"not_configured", "configured_dry_run"})
+_EVIDENCE_REQUEST_STATES = frozenset({"requested", "completed"})
+
+
+def _find_gate_request_payload(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """Locate a gate **request** payload as a fallback when no result exists.
+
+    For optional gates (notably ``claude_github_optional``), the explicit-absence
+    state (``not_configured``, ``configured_dry_run``) is recorded by
+    gate_request_handler in the requests directory only — no separate result
+    file is written.  This helper finds that payload and normalises legacy
+    ``status``-only writers into the same shape the closure verifier expects
+    (with ``state``/``contributed_evidence``/``was_intentionally_absent``).
+    """
+    requests_dir = results_dir.parent / "requests"
+    if not requests_dir.exists():
+        return None
+
+    pr_slug = pr_id.lower().replace("-", "")
+    candidates: List[Path] = []
+    contract_path = requests_dir / f"{pr_slug}-{gate}-contract.json"
+    if contract_path.exists():
+        candidates.append(contract_path)
+    candidates.extend(
+        path for path in requests_dir.glob(f"*-{gate}*.json")
+        if path not in candidates
+    )
+
+    for path in candidates:
+        try:
+            data = json.loads(_read_text(path))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("pr_id") and data["pr_id"] != pr_id:
+            continue
+        if data.get("gate") and data["gate"] != gate:
+            continue
+
+        # Normalise legacy `status`-only payloads (writer: _request_claude_github)
+        # so downstream checks can read `state` / contributed_evidence /
+        # was_intentionally_absent uniformly.
+        normalised = dict(data)
+        if "state" not in normalised and "status" in normalised:
+            normalised["state"] = normalised["status"]
+        state = normalised.get("state")
+        if isinstance(state, str):
+            normalised.setdefault(
+                "was_intentionally_absent",
+                state in _INTENTIONALLY_ABSENT_REQUEST_STATES,
+            )
+            normalised.setdefault(
+                "contributed_evidence",
+                state in _EVIDENCE_REQUEST_STATES,
+            )
+        normalised["__source"] = "request"
+        return normalised
+    return None
+
+
 def _validate_review_evidence(
     contract: ReviewContract,
     results_dir: Path,
@@ -261,6 +329,12 @@ def _validate_review_evidence(
         result = _find_gate_result(gate, contract.pr_id, results_dir)
 
         if gate == "claude_github_optional":
+            # Fallback: explicit-absence state for the optional gate is recorded
+            # in the requests directory by gate_request_handler — not as a
+            # separate result file — so a missing result is not by itself
+            # ambiguous.  Look there before declaring no evidence.
+            if result is None:
+                result = _find_gate_request_payload(gate, contract.pr_id, results_dir)
             if result is None:
                 checks.append(CheckResult(
                     f"gate_{gate}",
@@ -269,10 +343,11 @@ def _validate_review_evidence(
                 ))
             elif result.get("was_intentionally_absent") or result.get("contributed_evidence"):
                 state = result.get("state", "unknown")
+                source = result.get("__source", "result")
                 checks.append(CheckResult(
                     f"gate_{gate}",
                     "PASS",
-                    f"{gate} state explicit: {state}",
+                    f"{gate} state explicit: {state} (source: {source})",
                 ))
             else:
                 checks.append(CheckResult(
