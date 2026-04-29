@@ -384,3 +384,169 @@ class TestIdempotency:
         assert rc2 == 0
 
         assert digest_file.read_text() == content_after_1, "file unchanged on 2nd run"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Finding 1 — recent_closures eviction via closed_at / digest fallback
+# ---------------------------------------------------------------------------
+
+class TestRecentClosuresEviction:
+    """Regression tests for compact_state.py:241 — _is_stale() must handle entries that
+    carry no last_updated field, which is the production shape of recent_closures entries."""
+
+    def test_evicts_entry_with_old_closed_at(self, tmp_path: Path) -> None:
+        """recent_closures entries with closed_at >30d are evicted."""
+        state = _setup_state(tmp_path)
+        digest_file = state / "open_items_digest.json"
+        digest = {
+            "recent_closures": [
+                {"id": "C-001", "title": "Old closure", "closed_at": _iso(45)},
+                {"id": "C-002", "title": "Fresh closure", "closed_at": _iso(5)},
+            ],
+            "digest_generated": _iso(0),
+        }
+        digest_file.write_text(json.dumps(digest))
+
+        rc = cs.compact_open_items_digest(state)
+
+        assert rc == 0
+        result = json.loads(digest_file.read_text())
+        ids = [e["id"] for e in result["recent_closures"]]
+        assert "C-001" not in ids, "45d-old closure (closed_at) should be evicted"
+        assert "C-002" in ids, "5d-old closure (closed_at) should be retained"
+
+    def test_evicts_no_timestamp_entry_when_digest_is_old(self, tmp_path: Path) -> None:
+        """Entries without any per-entry timestamp use digest_generated as fallback.
+        This is the exact production shape before closed_at was added to the schema."""
+        state = _setup_state(tmp_path)
+        digest_file = state / "open_items_digest.json"
+        # Old format: {id, title, closed_reason} — no timestamp fields at all
+        digest = {
+            "recent_closures": [
+                {"id": "C-001", "title": "Old (no ts)", "closed_reason": "done"},
+                {"id": "C-002", "title": "Also old (no ts)", "closed_reason": "done"},
+            ],
+            "digest_generated": _iso(45),
+        }
+        digest_file.write_text(json.dumps(digest))
+
+        rc = cs.compact_open_items_digest(state)
+
+        assert rc == 0
+        result = json.loads(digest_file.read_text())
+        ids = [e["id"] for e in result["recent_closures"]]
+        assert "C-001" not in ids, "no-ts entry with stale digest_generated must be evicted"
+        assert "C-002" not in ids, "no-ts entry with stale digest_generated must be evicted"
+
+    def test_retains_no_timestamp_entry_when_digest_is_fresh(self, tmp_path: Path) -> None:
+        """Entries without per-entry timestamp are retained when digest_generated is recent."""
+        state = _setup_state(tmp_path)
+        digest_file = state / "open_items_digest.json"
+        digest = {
+            "recent_closures": [
+                {"id": "C-001", "title": "No ts but fresh digest", "closed_reason": "done"},
+            ],
+            "digest_generated": _iso(1),
+        }
+        digest_file.write_text(json.dumps(digest))
+        original = digest_file.read_text()
+
+        rc = cs.compact_open_items_digest(state)
+
+        assert rc == 0
+        assert digest_file.read_text() == original, "no-op: fresh digest_generated keeps no-ts entry"
+
+    def test_evicts_entry_with_old_updated_at(self, tmp_path: Path) -> None:
+        """recent_closures entries with updated_at (legacy fallback) are also evicted."""
+        state = _setup_state(tmp_path)
+        digest_file = state / "open_items_digest.json"
+        digest = {
+            "recent_closures": [
+                {"id": "C-001", "title": "Old via updated_at", "updated_at": _iso(35)},
+                {"id": "C-002", "title": "Fresh via updated_at", "updated_at": _iso(10)},
+            ],
+            "digest_generated": _iso(0),
+        }
+        digest_file.write_text(json.dumps(digest))
+
+        rc = cs.compact_open_items_digest(state)
+
+        assert rc == 0
+        result = json.loads(digest_file.read_text())
+        ids = [e["id"] for e in result["recent_closures"]]
+        assert "C-001" not in ids, "35d-old entry via updated_at should be evicted"
+        assert "C-002" in ids, "10d-old entry via updated_at should be retained"
+
+
+# ---------------------------------------------------------------------------
+# Regression: Finding 2 — two-phase write leaves no committed archive on failure
+# ---------------------------------------------------------------------------
+
+class TestTwoPhaseWrite:
+    """Regression tests for compact_state.py:103/152/183/204 — archive must NOT exist
+    at its final path when the live-file rewrite fails, so retries can succeed."""
+
+    def test_receipts_no_archive_committed_on_live_write_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        state = _setup_state(tmp_path)
+        live = state / "t0_receipts.ndjson"
+        live.write_text("".join(json.dumps({"seq": i}) + "\n" for i in range(15_000)))
+
+        monkeypatch.setattr(cs, "_atomic_write_text", lambda *_: (_ for _ in ()).throw(OSError("simulated live failure")))
+
+        rc = cs.compact_receipts(state)
+
+        assert rc == 1
+        archive_file = cs._archive_path(state, "t0_receipts")
+        assert not archive_file.exists(), "archive must not exist when live write failed"
+
+        archive_dir = state / "archive"
+        if archive_dir.exists():
+            orphans = list(archive_dir.glob(".tmp_archive_*"))
+            assert not orphans, f"staging temp not cleaned up: {orphans}"
+
+    def test_intelligence_archive_no_archive_committed_on_live_write_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cs, "INTELLIGENCE_ARCHIVE_MIN_MB", 0)
+
+        state = _setup_state(tmp_path)
+        live = state / "t0_intelligence_archive.ndjson"
+        now = time.time()
+        live.write_text("".join(_make_ndjson_line(now - 10 * 86400) for _ in range(10)))
+
+        monkeypatch.setattr(cs, "_atomic_write_text", lambda *_: (_ for _ in ()).throw(OSError("simulated live failure")))
+
+        rc = cs.compact_intelligence_archive(state)
+
+        assert rc == 1
+        archive_file = cs._archive_path(state, "t0_intelligence_archive")
+        assert not archive_file.exists(), "archive must not exist when live write failed"
+
+        archive_dir = state / "archive"
+        if archive_dir.exists():
+            orphans = list(archive_dir.glob(".tmp_archive_*"))
+            assert not orphans, f"staging temp not cleaned up: {orphans}"
+
+    def test_receipts_retry_succeeds_after_simulated_partial_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After a failed run that left no committed archive, a retry completes normally."""
+        state = _setup_state(tmp_path)
+        live = state / "t0_receipts.ndjson"
+        live.write_text("".join(json.dumps({"seq": i}) + "\n" for i in range(15_000)))
+
+        # First run: live write fails → archive not committed
+        monkeypatch.setattr(cs, "_atomic_write_text", lambda *_: (_ for _ in ()).throw(OSError("first-run failure")))
+        rc1 = cs.compact_receipts(state)
+        assert rc1 == 1
+
+        archive_file = cs._archive_path(state, "t0_receipts")
+        assert not archive_file.exists()
+
+        # Restore real write; retry should succeed
+        monkeypatch.undo()
+        rc2 = cs.compact_receipts(state)
+        assert rc2 == 0
+        assert archive_file.exists(), "archive created on successful retry"

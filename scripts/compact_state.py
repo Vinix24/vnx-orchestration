@@ -79,6 +79,29 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
         raise
 
 
+def _stage_bytes(directory: Path, content: bytes) -> Path:
+    """Write content to a temp file in directory; return path without committing to final name.
+
+    Caller must os.replace() the returned path to its final destination, or unlink() it on failure.
+    Using a staging temp instead of writing directly to the archive path ensures the archive
+    path only appears after a successful live-file write (see Finding 2).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp_archive_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return Path(tmp)
+
+
 def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> int:
     """Rotate t0_intelligence_archive.ndjson. Returns 0 on success, non-zero on error."""
     live_file = state_dir / "t0_intelligence_archive.ndjson"
@@ -101,6 +124,8 @@ def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> i
         return 0
 
     archive_file = _archive_path(state_dir, "t0_intelligence_archive")
+    # Check for an already-committed archive; a staging temp (.tmp_archive_*) does not count
+    # because it may be an orphan from a previous partial failure.
     if archive_file.exists():
         _emit(
             "INFO",
@@ -149,12 +174,26 @@ def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> i
     if dry_run:
         return 0
 
+    # Two-phase write: stage archive content to a temp path so the real archive path
+    # only appears after the live-file rewrite succeeds.  A partial failure leaves no
+    # committed archive, allowing safe retry.
+    archive_tmp: Path | None = None
     try:
-        _atomic_write_bytes(archive_file, gzip.compress("".join(archive).encode("utf-8")))
+        archive_tmp = _stage_bytes(
+            archive_file.parent, gzip.compress("".join(archive).encode("utf-8"))
+        )
         _atomic_write_text(live_file, "".join(keep))
+        os.replace(archive_tmp, archive_file)
+        archive_tmp = None
     except OSError as exc:
         _emit("ERROR", "intelligence_archive_io_error", error=str(exc))
         return 1
+    finally:
+        if archive_tmp is not None:
+            try:
+                os.unlink(archive_tmp)
+            except OSError:
+                pass
 
     _emit(
         "INFO",
@@ -181,6 +220,7 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
         return 0
 
     archive_file = _archive_path(state_dir, "t0_receipts")
+    # Check for an already-committed archive; staging temps do not count (partial-failure remnants).
     if archive_file.exists():
         _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
         return 0
@@ -201,12 +241,26 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
     if dry_run:
         return 0
 
+    # Two-phase write: stage archive content to a temp path so the real archive path
+    # only appears after the live-file rewrite succeeds.  A partial failure leaves no
+    # committed archive, allowing safe retry.
+    archive_tmp: Path | None = None
     try:
-        _atomic_write_bytes(archive_file, gzip.compress("".join(overflow).encode("utf-8")))
+        archive_tmp = _stage_bytes(
+            archive_file.parent, gzip.compress("".join(overflow).encode("utf-8"))
+        )
         _atomic_write_text(live_file, "".join(keep))
+        os.replace(archive_tmp, archive_file)
+        archive_tmp = None
     except OSError as exc:
         _emit("ERROR", "receipts_io_error", error=str(exc))
         return 1
+    finally:
+        if archive_tmp is not None:
+            try:
+                os.unlink(archive_tmp)
+            except OSError:
+                pass
 
     _emit(
         "INFO",
@@ -238,10 +292,22 @@ def compact_open_items_digest(state_dir: Path, *, dry_run: bool = False) -> int:
 
     cutoff = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=OPEN_ITEMS_STALE_DAYS)
 
-    def _is_stale(entry: object) -> bool:
+    # Digest-level timestamp used as fallback when a list entry carries no per-entry timestamp.
+    # recent_closures entries only have {id, title, closed_reason, closed_at}; older digests
+    # written before closed_at existed have no timestamp at all.  Using digest_generated ensures
+    # those entries are still evicted once the whole digest is stale.
+    digest_ts_fallback: str | None = digest.get("digest_generated") or digest.get("last_updated")
+
+    def _is_stale(entry: object, *, fallback_ts: str | None = None) -> bool:
         if not isinstance(entry, dict):
             return False
-        raw = entry.get("last_updated")
+        # Check common timestamp fields; closed_at and updated_at are used by recent_closures.
+        raw = (
+            entry.get("last_updated")
+            or entry.get("closed_at")
+            or entry.get("updated_at")
+            or fallback_ts
+        )
         if not raw:
             return False
         try:
@@ -257,7 +323,7 @@ def compact_open_items_digest(state_dir: Path, *, dry_run: bool = False) -> int:
 
     for key, value in digest.items():
         if isinstance(value, list):
-            fresh = [e for e in value if not _is_stale(e)]
+            fresh = [e for e in value if not _is_stale(e, fallback_ts=digest_ts_fallback)]
             evicted = len(value) - len(fresh)
             total_evicted += evicted
             new_digest[key] = fresh
