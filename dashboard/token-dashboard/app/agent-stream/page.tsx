@@ -203,9 +203,9 @@ export default function AgentStreamPage() {
 
     es.onerror = () => {
       setConnected(false);
+      setError('SSE connection failed — retrying…');
       es.close();
       eventSourceRef.current = null;
-      // Auto-reconnect after 2s
       setTimeout(() => {
         connect(term, lastTimestampRef.current);
       }, 2000);
@@ -367,6 +367,8 @@ export default function AgentStreamPage() {
       {/* Error state */}
       {error && (
         <div
+          data-testid="sse-error"
+          role="alert"
           style={{
             padding: '12px 16px',
             marginBottom: 16,
