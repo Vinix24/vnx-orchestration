@@ -25,8 +25,29 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
 from worker_health_monitor import WorkerHealthMonitor, HealthStatus, SLOW_THRESHOLD
+from cleanup_worker_exit import cleanup_worker_exit
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_active_dispatch_file(dispatch_id: str) -> Path | None:
+    """Locate the dispatch file in dispatches/active/ for cleanup_worker_exit.
+
+    Returns None when no matching file exists (e.g. file already moved by
+    another path).  Used by the deliver_with_recovery exit hooks.
+    """
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    base = (
+        Path(data_dir) / "dispatches" / "active"
+        if data_dir
+        else Path(__file__).resolve().parents[2] / ".vnx-data" / "dispatches" / "active"
+    )
+    if not base.is_dir():
+        return None
+    for path in base.iterdir():
+        if path.is_file() and dispatch_id in path.name:
+            return path
+    return None
 
 
 def _inject_permission_profile(terminal_id: str, role: str | None, instruction: str) -> str:
@@ -236,6 +257,81 @@ class _SubprocessResult(NamedTuple):
     session_id: str | None
     event_count: int
     manifest_path: str | None
+    # Repo-relative paths the worker explicitly wrote/edited via structured tool
+    # calls (Write/Edit/MultiEdit/NotebookEdit) during this dispatch.  Used by
+    # _auto_commit_changes / _auto_stash_changes to scope staging to *this*
+    # worker's writes, even in shared worktrees where concurrent terminals or
+    # the operator may produce additional dirty files during the dispatch
+    # window.  Empty frozenset() when no structured file writes occurred.
+    touched_files: frozenset[str] = frozenset()
+
+
+# Tool names whose ``input`` block names a file path the worker is modifying.
+# Read/Bash/Glob/Grep are deliberately excluded — they do not modify files
+# (or, in Bash's case, may modify them but cannot be reliably parsed).  Workers
+# that rely on Bash for file modifications must commit those changes manually.
+_FILE_WRITING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def _normalize_repo_path(path_str: str, repo_root: Path) -> str | None:
+    """Convert a tool-event file_path to a repo-relative POSIX string.
+
+    Returns None when ``path_str`` resolves outside ``repo_root`` or is empty
+    or unparseable.  The result is suitable for matching against
+    ``git status --porcelain`` output, which always uses POSIX-style
+    repo-relative paths.
+
+    Symlink-resolves both sides so a path like ``./foo/../bar.py`` collapses
+    to ``bar.py`` and a worktree-relative path matches the repo root.
+    """
+    if not path_str:
+        return None
+    try:
+        p = Path(path_str)
+        if not p.is_absolute():
+            p = repo_root / p
+        try:
+            resolved = p.resolve(strict=False)
+        except (OSError, RuntimeError):
+            resolved = p
+        try:
+            root_resolved = repo_root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            root_resolved = repo_root
+        rel = resolved.relative_to(root_resolved)
+        return rel.as_posix()
+    except (ValueError, OSError):
+        return None
+
+
+def _extract_touched_paths_from_event(event: "StreamEvent | object") -> list[str]:  # type: ignore[name-defined]
+    """Return raw ``file_path`` / ``notebook_path`` strings from a tool_use event.
+
+    Accepts a ``StreamEvent`` (or any object exposing ``.type`` + ``.data``).
+    Returns an empty list for non-tool_use events or tools that do not write
+    files.  Path normalization (repo-relative, in-repo filtering) is performed
+    by the caller via ``_normalize_repo_path``.
+    """
+    event_type = getattr(event, "type", None)
+    if event_type != "tool_use":
+        return []
+    data = getattr(event, "data", {}) or {}
+    name = data.get("name", "")
+    if name not in _FILE_WRITING_TOOLS:
+        return []
+    tool_input = data.get("input") or {}
+    if not isinstance(tool_input, dict):
+        return []
+    paths: list[str] = []
+    if name == "NotebookEdit":
+        candidate = tool_input.get("notebook_path") or tool_input.get("file_path")
+        if isinstance(candidate, str):
+            paths.append(candidate)
+    else:
+        candidate = tool_input.get("file_path")
+        if isinstance(candidate, str):
+            paths.append(candidate)
+    return paths
 
 
 def _get_dirty_files(cwd: Path) -> set[str]:
@@ -510,7 +606,18 @@ def deliver_via_subprocess(
         resume_session=resume_session,
     )
     if not result.success:
-        return _SubprocessResult(success=False, session_id=None, event_count=0, manifest_path=manifest_path)
+        return _SubprocessResult(
+            success=False,
+            session_id=None,
+            event_count=0,
+            manifest_path=manifest_path,
+            touched_files=frozenset(),
+        )
+
+    # Resolve repo root once for path normalization; agent_cwd may point into
+    # a sub-directory but the repo root anchors all git status output.
+    _repo_root = Path(__file__).resolve().parents[2]
+    _touched_files: set[str] = set()
 
     # Wire event_store into health_monitor so STUCK events are persisted to NDJSON
     if health_monitor is not None and health_monitor._event_store is None:
@@ -541,6 +648,13 @@ def deliver_via_subprocess(
             total_deadline=total_deadline,
         ):
             event_count += 1
+            # Track files written by this dispatch's structured tool calls so
+            # auto-commit / auto-stash can scope to *this* worker's writes,
+            # not whatever else became dirty in a shared worktree.
+            for raw_path in _extract_touched_paths_from_event(_event):
+                norm = _normalize_repo_path(raw_path, _repo_root)
+                if norm:
+                    _touched_files.add(norm)
             if health_monitor is not None:
                 health_monitor.update(_event)
                 # Log stuck warning at most once per SLOW_THRESHOLD window
@@ -568,6 +682,7 @@ def deliver_via_subprocess(
                 session_id=session_id,
                 event_count=event_count,
                 manifest_path=completed_manifest or manifest_path,
+                touched_files=frozenset(_touched_files),
             )
         # Fail-closed: timeout-terminated dispatches must not be classified as success.
         # stop() removes the process from _processes so returncode above is None,
@@ -583,6 +698,7 @@ def deliver_via_subprocess(
                 session_id=session_id,
                 event_count=event_count,
                 manifest_path=completed_manifest or manifest_path,
+                touched_files=frozenset(_touched_files),
             )
 
         # Only persist session_id once all fail-closed checks pass, so the next
@@ -600,10 +716,17 @@ def deliver_via_subprocess(
             session_id=session_id,
             event_count=event_count,
             manifest_path=completed_manifest or manifest_path,
+            touched_files=frozenset(_touched_files),
         )
     except Exception:
         logger.exception("deliver_via_subprocess failed for %s", terminal_id)
-        return _SubprocessResult(success=False, session_id=None, event_count=event_count, manifest_path=manifest_path)
+        return _SubprocessResult(
+            success=False,
+            session_id=None,
+            event_count=event_count,
+            manifest_path=manifest_path,
+            touched_files=frozenset(_touched_files),
+        )
     finally:
         if heartbeat_stop is not None:
             heartbeat_stop.set()
@@ -668,13 +791,27 @@ def _auto_commit_changes(
     terminal_id: str,
     gate: str = "",
     pre_dispatch_dirty: "set[str] | None" = None,
+    dispatch_touched_files: "frozenset[str] | set[str] | None" = None,
 ) -> bool:
     """Stage and commit changes introduced by this dispatch.
 
-    pre_dispatch_dirty is REQUIRED for safe operation: only files that became
-    dirty during the dispatch are staged.  When None is passed, the helper
-    refuses to commit anything (fail-safe) rather than sweeping unrelated
-    user/terminal changes into this worker's commit via ``git add -A``.
+    Two safety filters compose to determine the file set staged:
+
+    1. ``pre_dispatch_dirty`` — files dirty *before* the dispatch started.
+       Excluded from staging so pre-existing operator/agent edits are never
+       swept into this worker's commit.
+    2. ``dispatch_touched_files`` — files this dispatch's worker explicitly
+       wrote via structured tool calls (Write/Edit/MultiEdit/NotebookEdit).
+       In a *shared* or *concurrently-edited* worktree, files that became
+       dirty during the dispatch window may have been written by another
+       terminal or by the operator, not by this worker.  Intersecting with
+       this set prevents auto-commit from sweeping those concurrent edits.
+
+    Both kwargs are REQUIRED.  Passing ``None`` for either causes the helper
+    to refuse to commit (fail-safe) — better to leave changes uncommitted
+    than to sweep unrelated work into this worker's commit.  An empty set is
+    treated as "no eligible files" and is therefore also a no-op (correct: a
+    worker that performed no structured file writes should not auto-commit).
 
     Returns True if a commit was made, False otherwise.
     Never raises — all exceptions are logged and swallowed.
@@ -683,6 +820,13 @@ def _auto_commit_changes(
         logger.warning(
             "auto_commit: pre_dispatch_dirty=None — refusing to commit for dispatch %s "
             "(would otherwise sweep unrelated dirty files via git add -A)",
+            dispatch_id,
+        )
+        return False
+    if dispatch_touched_files is None:
+        logger.warning(
+            "auto_commit: dispatch_touched_files=None — refusing to commit for dispatch %s "
+            "(cannot distinguish this worker's writes from concurrent edits in a shared worktree)",
             dispatch_id,
         )
         return False
@@ -699,15 +843,32 @@ def _auto_commit_changes(
             logger.debug("auto_commit: working tree clean for dispatch %s", dispatch_id)
             return False
 
-        # Scope staging to files that became dirty during this dispatch.
+        # Scope staging to (files that became dirty during this dispatch) ∩
+        # (files this dispatch's worker explicitly wrote).  The intersection
+        # is the deepest scoping signal available: it filters out both
+        # pre-existing dirty files and concurrent-terminal edits that happen
+        # to land within the dispatch window.
         current_dirty = _get_dirty_files(cwd)
-        files_to_stage = sorted(current_dirty - pre_dispatch_dirty)
+        new_during_dispatch = current_dirty - pre_dispatch_dirty
+        touched = set(dispatch_touched_files)
+        files_to_stage = sorted(new_during_dispatch & touched)
         if not files_to_stage:
-            logger.debug(
-                "auto_commit: no new files to stage for dispatch %s "
-                "(all dirty files pre-existed the dispatch)",
-                dispatch_id,
-            )
+            ignored_dispatch_dirty = sorted(new_during_dispatch - touched)
+            if ignored_dispatch_dirty:
+                logger.warning(
+                    "auto_commit: %d dispatch-window dirty file(s) not in "
+                    "touched_files — refusing to commit (likely concurrent "
+                    "edits from another terminal). dispatch=%s files=%s",
+                    len(ignored_dispatch_dirty),
+                    dispatch_id,
+                    ignored_dispatch_dirty[:10],
+                )
+            else:
+                logger.debug(
+                    "auto_commit: no dispatch-touched files dirty for dispatch %s "
+                    "(all dirty files pre-existed the dispatch)",
+                    dispatch_id,
+                )
             return False
         add_cmd = ["git", "add", "--"] + files_to_stage
 
@@ -751,13 +912,25 @@ def _auto_stash_changes(
     dispatch_id: str,
     terminal_id: str,
     pre_dispatch_dirty: "set[str] | None" = None,
+    dispatch_touched_files: "frozenset[str] | set[str] | None" = None,
 ) -> bool:
     """Stash changes introduced by this dispatch after a failure (preserves but does not commit).
 
-    pre_dispatch_dirty is REQUIRED for safe operation: only files that became
-    dirty during the dispatch are stashed via ``git stash push -u -- <files>``.
-    When None is passed, the helper refuses to stash anything (fail-safe)
-    rather than hiding unrelated tracked/untracked edits from other terminals.
+    Two safety filters compose to determine the file set stashed:
+
+    1. ``pre_dispatch_dirty`` — files dirty *before* the dispatch started.
+       Excluded from the stash so pre-existing edits remain in the worktree
+       and are not hidden from the operator or other terminals.
+    2. ``dispatch_touched_files`` — files this dispatch's worker explicitly
+       wrote via structured tool calls.  In a shared worktree, files that
+       became dirty during the dispatch window may have been written by
+       another terminal — those must NOT be stashed under this dispatch's
+       name.
+
+    Both kwargs are REQUIRED.  Passing ``None`` for either causes the helper
+    to refuse to stash (fail-safe).  An empty ``dispatch_touched_files`` is
+    a legitimate "no structured writes happened" signal and also yields a
+    no-op stash.
 
     Returns True if a stash was created, False otherwise.
     Never raises — all exceptions are logged and swallowed.
@@ -766,6 +939,13 @@ def _auto_stash_changes(
         logger.warning(
             "auto_stash: pre_dispatch_dirty=None — refusing to stash for dispatch %s "
             "(would otherwise sweep unrelated dirty files into a global stash)",
+            dispatch_id,
+        )
+        return False
+    if dispatch_touched_files is None:
+        logger.warning(
+            "auto_stash: dispatch_touched_files=None — refusing to stash for dispatch %s "
+            "(cannot distinguish this worker's writes from concurrent edits in a shared worktree)",
             dispatch_id,
         )
         return False
@@ -783,13 +963,26 @@ def _auto_stash_changes(
         stash_name = f"vnx-auto-stash-{dispatch_id}"
 
         current_dirty = _get_dirty_files(cwd)
-        files_to_stash = sorted(current_dirty - pre_dispatch_dirty)
+        new_during_dispatch = current_dirty - pre_dispatch_dirty
+        touched = set(dispatch_touched_files)
+        files_to_stash = sorted(new_during_dispatch & touched)
         if not files_to_stash:
-            logger.debug(
-                "auto_stash: no new files to stash for dispatch %s "
-                "(all dirty files pre-existed the dispatch)",
-                dispatch_id,
-            )
+            ignored_dispatch_dirty = sorted(new_during_dispatch - touched)
+            if ignored_dispatch_dirty:
+                logger.warning(
+                    "auto_stash: %d dispatch-window dirty file(s) not in "
+                    "touched_files — refusing to stash (likely concurrent "
+                    "edits from another terminal). dispatch=%s files=%s",
+                    len(ignored_dispatch_dirty),
+                    dispatch_id,
+                    ignored_dispatch_dirty[:10],
+                )
+            else:
+                logger.debug(
+                    "auto_stash: no dispatch-touched files dirty for dispatch %s "
+                    "(all dirty files pre-existed the dispatch)",
+                    dispatch_id,
+                )
             return False
         # -u includes untracked files matching the specified paths so
         # newly-created files from the failed dispatch are also captured.
@@ -1149,6 +1342,7 @@ def deliver_with_recovery(
                 committed = _auto_commit_changes(
                     dispatch_id, terminal_id, gate=gate,
                     pre_dispatch_dirty=pre_dispatch_dirty,
+                    dispatch_touched_files=sub_result.touched_files,
                 )
                 if committed:
                     commit_missing = False
@@ -1186,6 +1380,18 @@ def deliver_with_recovery(
                 start_ts=dispatch_start_ts,
                 committed=committed,
             )
+
+            # Single-owner post-exit cleanup (SUP-PR1).  Idempotent — the bash
+            # caller's rc_release_lease may have already released the lease,
+            # which is fine; this records the worker state transition and
+            # dispatch_register audit event regardless.
+            cleanup_worker_exit(
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                exit_status="success",
+                lease_generation=lease_generation,
+                dispatch_file=_resolve_active_dispatch_file(dispatch_id),
+            )
             return True
 
         if attempt < max_retries:
@@ -1199,7 +1405,12 @@ def deliver_with_recovery(
             monitor.mark_completed()
             # Stash uncommitted changes from failed dispatch
             if auto_commit:
-                _auto_stash_changes(dispatch_id, terminal_id, pre_dispatch_dirty=pre_dispatch_dirty)
+                _auto_stash_changes(
+                    dispatch_id,
+                    terminal_id,
+                    pre_dispatch_dirty=pre_dispatch_dirty,
+                    dispatch_touched_files=sub_result.touched_files,
+                )
             _write_receipt(
                 dispatch_id, terminal_id, "failed",
                 event_count=sub_result.event_count,
@@ -1229,6 +1440,17 @@ def deliver_with_recovery(
                 success=False,
                 start_ts=dispatch_start_ts,
                 committed=False,
+            )
+
+            # Single-owner post-exit cleanup (SUP-PR1).  Routes failure-path
+            # disposition (move to rejected/failure/, transition worker to
+            # exited_bad, audit) through the same helper as the bash caller.
+            cleanup_worker_exit(
+                terminal_id=terminal_id,
+                dispatch_id=dispatch_id,
+                exit_status="failure",
+                lease_generation=lease_generation,
+                dispatch_file=_resolve_active_dispatch_file(dispatch_id),
             )
 
     return False
