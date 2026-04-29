@@ -237,6 +237,33 @@ class _SubprocessResult(NamedTuple):
     manifest_path: str | None
 
 
+def _get_dirty_files(cwd: Path) -> set[str]:
+    """Return the set of dirty (modified/untracked) file paths from git status --porcelain.
+
+    Handles rename lines ("old -> new") by capturing only the destination path.
+    Returns an empty set on any failure so callers can safely subtract.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+            cwd=cwd,
+        )
+        files: set[str] = set()
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            # git status --porcelain: XY<space>filename (or XY<space>old -> new)
+            path_part = line[3:].strip()
+            if " -> " in path_part:
+                path_part = path_part.split(" -> ", 1)[1]
+            files.add(path_part)
+        return files
+    except Exception as exc:
+        logger.debug("_get_dirty_files failed: %s", exc)
+        return set()
+
+
 def _get_commit_hash() -> str:
     """Return current HEAD commit hash, or empty string on failure."""
     try:
@@ -483,6 +510,12 @@ def deliver_via_subprocess(
     if not result.success:
         return _SubprocessResult(success=False, session_id=None, event_count=0, manifest_path=manifest_path)
 
+    # Wire event_store into health_monitor so STUCK events are persisted to NDJSON
+    if health_monitor is not None and health_monitor._event_store is None:
+        _es = adapter._get_event_store()
+        if _es is not None:
+            health_monitor._event_store = _es
+
     # Start heartbeat thread if lease generation is known
     heartbeat_stop: threading.Event | None = None
     heartbeat_thread: threading.Thread | None = None
@@ -518,14 +551,6 @@ def deliver_via_subprocess(
                         _last_stuck_log_time = _now
         session_id = adapter.get_session_id(terminal_id)
 
-        # Persist session_id for next dispatch to resume (VNX_SESSION_RESUME=1)
-        if session_id and os.environ.get("VNX_SESSION_RESUME", "0") == "1":
-            try:
-                from session_store import SessionStore as _SessionStore
-                _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
-            except Exception as _exc:
-                logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
-
         # Fail-closed: non-zero exit code means failure even when events were parsed.
         obs = adapter.observe(terminal_id)
         returncode = obs.transport_state.get("returncode")
@@ -557,6 +582,17 @@ def deliver_via_subprocess(
                 event_count=event_count,
                 manifest_path=completed_manifest or manifest_path,
             )
+
+        # Only persist session_id once all fail-closed checks pass, so the next
+        # dispatch (with VNX_SESSION_RESUME=1) cannot resume a failed or
+        # timeout-killed conversation.
+        if session_id and os.environ.get("VNX_SESSION_RESUME", "0") == "1":
+            try:
+                from session_store import SessionStore as _SessionStore
+                _SessionStore().save(terminal_id, session_id, dispatch_id=dispatch_id)
+            except Exception as _exc:
+                logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
+
         return _SubprocessResult(
             success=True,
             session_id=session_id,
@@ -625,29 +661,58 @@ def _check_commit_since(dispatch_start_ts: str) -> bool:
     return False
 
 
-def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> bool:
-    """Stage and commit any uncommitted changes after a successful dispatch.
+def _auto_commit_changes(
+    dispatch_id: str,
+    terminal_id: str,
+    gate: str = "",
+    pre_dispatch_dirty: "set[str] | None" = None,
+) -> bool:
+    """Stage and commit changes introduced by this dispatch.
+
+    pre_dispatch_dirty is REQUIRED for safe operation: only files that became
+    dirty during the dispatch are staged.  When None is passed, the helper
+    refuses to commit anything (fail-safe) rather than sweeping unrelated
+    user/terminal changes into this worker's commit via ``git add -A``.
 
     Returns True if a commit was made, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
+    if pre_dispatch_dirty is None:
+        logger.warning(
+            "auto_commit: pre_dispatch_dirty=None — refusing to commit for dispatch %s "
+            "(would otherwise sweep unrelated dirty files via git add -A)",
+            dispatch_id,
+        )
+        return False
     try:
+        cwd = Path(__file__).resolve().parents[2]
         # Check for uncommitted changes
         status_proc = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
         if not dirty_lines:
             logger.debug("auto_commit: working tree clean for dispatch %s", dispatch_id)
             return False
 
-        # Stage all changes (respects .gitignore — excludes .vnx-data/, .venv/, etc.)
+        # Scope staging to files that became dirty during this dispatch.
+        current_dirty = _get_dirty_files(cwd)
+        files_to_stage = sorted(current_dirty - pre_dispatch_dirty)
+        if not files_to_stage:
+            logger.debug(
+                "auto_commit: no new files to stage for dispatch %s "
+                "(all dirty files pre-existed the dispatch)",
+                dispatch_id,
+            )
+            return False
+        add_cmd = ["git", "add", "--"] + files_to_stage
+
         add_proc = subprocess.run(
-            ["git", "add", "-A"],
+            add_cmd,
             capture_output=True, text=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         if add_proc.returncode != 0:
             logger.warning("auto_commit: git add failed for %s: %s", dispatch_id, add_proc.stderr)
@@ -661,7 +726,7 @@ def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> 
         commit_proc = subprocess.run(
             ["git", "commit", "-m", commit_msg],
             capture_output=True, text=True, timeout=30,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         if commit_proc.returncode == 0:
             logger.info(
@@ -680,27 +745,58 @@ def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> 
         return False
 
 
-def _auto_stash_changes(dispatch_id: str, terminal_id: str) -> bool:
-    """Stash uncommitted changes after a failed dispatch (preserves but does not commit).
+def _auto_stash_changes(
+    dispatch_id: str,
+    terminal_id: str,
+    pre_dispatch_dirty: "set[str] | None" = None,
+) -> bool:
+    """Stash changes introduced by this dispatch after a failure (preserves but does not commit).
+
+    pre_dispatch_dirty is REQUIRED for safe operation: only files that became
+    dirty during the dispatch are stashed via ``git stash push -u -- <files>``.
+    When None is passed, the helper refuses to stash anything (fail-safe)
+    rather than hiding unrelated tracked/untracked edits from other terminals.
 
     Returns True if a stash was created, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
+    if pre_dispatch_dirty is None:
+        logger.warning(
+            "auto_stash: pre_dispatch_dirty=None — refusing to stash for dispatch %s "
+            "(would otherwise sweep unrelated dirty files into a global stash)",
+            dispatch_id,
+        )
+        return False
     try:
+        cwd = Path(__file__).resolve().parents[2]
         status_proc = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
         if not dirty_lines:
             return False
 
         stash_name = f"vnx-auto-stash-{dispatch_id}"
+
+        current_dirty = _get_dirty_files(cwd)
+        files_to_stash = sorted(current_dirty - pre_dispatch_dirty)
+        if not files_to_stash:
+            logger.debug(
+                "auto_stash: no new files to stash for dispatch %s "
+                "(all dirty files pre-existed the dispatch)",
+                dispatch_id,
+            )
+            return False
+        # -u includes untracked files matching the specified paths so
+        # newly-created files from the failed dispatch are also captured.
+        stash_cmd = ["git", "stash", "push", "-u", "-m", stash_name, "--"] + files_to_stash
+
         stash_proc = subprocess.run(
-            ["git", "stash", "save", stash_name],
+            stash_cmd,
             capture_output=True, text=True, timeout=30,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         if stash_proc.returncode == 0:
             logger.info(
@@ -733,6 +829,7 @@ def _write_receipt(
     commit_hash_before: str = "",
     commit_hash_after: str = "",
     manifest_path: str | None = None,
+    stuck_event_count: int = 0,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -764,6 +861,8 @@ def _write_receipt(
         receipt["failure_reason"] = failure_reason
     if commit_missing:
         receipt["commit_missing"] = True
+    if stuck_event_count:
+        receipt["stuck_event_count"] = stuck_event_count
 
     _scripts_dir = Path(__file__).resolve().parents[1]
     try:
@@ -1005,6 +1104,10 @@ def deliver_with_recovery(
 
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _get_commit_hash()
+    # Snapshot dirty files before dispatch so auto-commit/stash can scope to
+    # changes introduced by this dispatch only (not pre-existing dirty state).
+    _repo_cwd = Path(__file__).resolve().parents[2]
+    pre_dispatch_dirty = _get_dirty_files(_repo_cwd)
 
     # Capture dispatch parameters before execution
     _capture_dispatch_parameters(
@@ -1041,7 +1144,10 @@ def deliver_with_recovery(
             # Post-dispatch commit enforcement
             committed = commit_hash_before != commit_hash_after
             if auto_commit and commit_missing and not committed:
-                committed = _auto_commit_changes(dispatch_id, terminal_id, gate=gate)
+                committed = _auto_commit_changes(
+                    dispatch_id, terminal_id, gate=gate,
+                    pre_dispatch_dirty=pre_dispatch_dirty,
+                )
                 if committed:
                     commit_missing = False
                     commit_hash_after = _get_commit_hash()
@@ -1056,6 +1162,7 @@ def deliver_with_recovery(
                 commit_hash_before=commit_hash_before,
                 commit_hash_after=commit_hash_after,
                 manifest_path=sub_result.manifest_path,
+                stuck_event_count=monitor.stuck_count,
             )
 
             # Feedback loop: boost pattern confidence for successful dispatch
@@ -1090,7 +1197,7 @@ def deliver_with_recovery(
             monitor.mark_completed()
             # Stash uncommitted changes from failed dispatch
             if auto_commit:
-                _auto_stash_changes(dispatch_id, terminal_id)
+                _auto_stash_changes(dispatch_id, terminal_id, pre_dispatch_dirty=pre_dispatch_dirty)
             _write_receipt(
                 dispatch_id, terminal_id, "failed",
                 event_count=sub_result.event_count,
@@ -1099,6 +1206,7 @@ def deliver_with_recovery(
                 failure_reason=f"Exhausted {max_retries} retries",
                 commit_hash_before=commit_hash_before,
                 manifest_path=sub_result.manifest_path,
+                stuck_event_count=monitor.stuck_count,
             )
 
             # Feedback loop: decay pattern confidence for failed dispatch
