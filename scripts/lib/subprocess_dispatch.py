@@ -502,24 +502,37 @@ def _write_manifest(
         return None
 
 
-def _promote_manifest(dispatch_id: str) -> str | None:
-    """Copy manifest from active/ to completed/ after dispatch finishes.
+def _promote_manifest(dispatch_id: str, stage: str = "completed") -> str | None:
+    """Move manifest from active/ to <stage>/ after dispatch finishes.
 
-    Returns the completed manifest path as a string, or None on failure.
+    stage must be one of: "completed", "dead_letter".
+    The manifest is moved (not copied) so a failed dispatch never has a
+    parallel record in completed/ — there is exactly one terminal location.
+
+    Returns the destination manifest path as a string, or None on failure.
     """
+    if stage not in ("completed", "dead_letter"):
+        logger.warning("_promote_manifest: invalid stage %r", stage)
+        return None
     src_dir = _dispatch_manifest_dir("active", dispatch_id)
-    dst_dir = _dispatch_manifest_dir("completed", dispatch_id)
+    dst_dir = _dispatch_manifest_dir(stage, dispatch_id)
     src = src_dir / "manifest.json"
     if not src.exists():
         return None
     try:
         dst_dir.mkdir(parents=True, exist_ok=True)
         dst = dst_dir / "manifest.json"
-        shutil.copy2(src, dst)
-        logger.info("Manifest promoted: %s -> %s", src, dst)
+        shutil.move(str(src), str(dst))
+        # Best-effort: remove now-empty active dir so check_active_drain
+        # does not see it as in-flight.
+        try:
+            src_dir.rmdir()
+        except OSError:
+            pass
+        logger.info("Manifest moved to %s: %s -> %s", stage, src, dst)
         return str(dst)
     except Exception as exc:
-        logger.warning("_promote_manifest failed for %s: %s", dispatch_id, exc)
+        logger.warning("_promote_manifest(%s) failed for %s: %s", stage, dispatch_id, exc)
         return None
 
 
@@ -737,20 +750,22 @@ def deliver_via_subprocess(
         session_id = adapter.get_session_id(terminal_id)
 
         # Fail-closed: non-zero exit code means failure even when events were parsed.
+        # Manifest promotion is deferred until after all fail-closed checks so
+        # failed dispatches are routed to dead_letter/ rather than completed/.
         obs = adapter.observe(terminal_id)
         returncode = obs.transport_state.get("returncode")
-        completed_manifest = _promote_manifest(dispatch_id)
         if returncode is not None and returncode != 0:
             logger.warning(
                 "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
                 returncode,
                 terminal_id,
             )
+            dead_manifest = _promote_manifest(dispatch_id, stage="dead_letter")
             return _SubprocessResult(
                 success=False,
                 session_id=session_id,
                 event_count=event_count,
-                manifest_path=completed_manifest or manifest_path,
+                manifest_path=dead_manifest or manifest_path,
                 touched_files=frozenset(_touched_files),
             )
         # Fail-closed: timeout-terminated dispatches must not be classified as success.
@@ -762,13 +777,17 @@ def deliver_via_subprocess(
                 dispatch_id,
                 terminal_id,
             )
+            dead_manifest = _promote_manifest(dispatch_id, stage="dead_letter")
             return _SubprocessResult(
                 success=False,
                 session_id=session_id,
                 event_count=event_count,
-                manifest_path=completed_manifest or manifest_path,
+                manifest_path=dead_manifest or manifest_path,
                 touched_files=frozenset(_touched_files),
             )
+
+        # All fail-closed checks passed — promote manifest to completed/.
+        completed_manifest = _promote_manifest(dispatch_id, stage="completed")
 
         # Only persist session_id once all fail-closed checks pass, so the next
         # dispatch (with VNX_SESSION_RESUME=1) cannot resume a failed or
