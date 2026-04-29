@@ -753,3 +753,253 @@ class TestClosureVerifierContractEnforcement:
         assert result["verdict"] == "fail"
         failed = {c["name"] for c in result["checks"] if c["status"] == "FAIL"}
         assert "gate_claude_github_optional" in failed
+
+
+# ---------------------------------------------------------------------------
+# Round-1 codex finding regressions (PR #322 / CFX-3)
+# ---------------------------------------------------------------------------
+
+
+def _make_gate_artifact_payload(
+    *,
+    gate,
+    pr_id="PR-0",
+    contract_hash="abcdef1234567890",
+    report_path="",
+    blocking=None,
+    advisory=None,
+):
+    """Build a gate result payload that mirrors gate_artifacts.materialize_artifacts.
+
+    Crucially, this payload uses ``status="completed"`` and does NOT carry a
+    top-level ``verdict`` field — i.e. the exact production schema produced by
+    scripts/lib/gate_artifacts.py for a successful headless gate execution.
+    """
+    return {
+        "gate": gate,
+        "pr_id": pr_id,
+        "pr_number": None,
+        "status": "completed",
+        "summary": f"{gate} execution completed successfully",
+        "contract_hash": contract_hash,
+        "report_path": report_path,
+        "findings": (blocking or []) + (advisory or []),
+        "blocking_findings": blocking or [],
+        "advisory_findings": advisory or [],
+        "required_reruns": [],
+        "residual_risk": "",
+        "duration_seconds": 12.5,
+        "recorded_at": "2026-04-29T10:00:00Z",
+    }
+
+
+class TestClosureVerifierRoundOneCodexFindings:
+    """PR #322 codex round-1 findings — production-schema regressions.
+
+    Finding 1: closure verifier must accept the exact result payload produced
+    by gate_artifacts (status="completed", no top-level verdict, no
+    blocking_count) for both codex_gate and gemini_review.
+
+    Finding 2: closure verifier must locate explicit-absence state for
+    claude_github_optional in the requests directory when gate_request_handler
+    has not written a result file (its standard path).
+    """
+
+    def test_finding_1_codex_completed_payload_passes(self, verifier_env, monkeypatch, tmp_path):
+        """Codex gate result with production schema (status=completed) passes."""
+        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
+        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
+
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        codex_report = reports_dir / "codex.md"
+        codex_report.write_text("# Codex Gate\n\nclean run\n", encoding="utf-8")
+        gemini_report = reports_dir / "gemini.md"
+        gemini_report.write_text("# Gemini Review\n\nno findings\n", encoding="utf-8")
+
+        contract = _make_contract(
+            review_stack=["gemini_review", "codex_gate"],
+            risk_class="high",
+        )
+        results_dir = tmp_path / "results"
+        _write_gate_result(
+            results_dir, "gemini_review", "PR-0",
+            _make_gate_artifact_payload(gate="gemini_review", report_path=str(gemini_report)),
+        )
+        _write_gate_result(
+            results_dir, "codex_gate", "PR-0",
+            _make_gate_artifact_payload(gate="codex_gate", report_path=str(codex_report)),
+        )
+
+        result = cv.verify_closure(
+            project_root=verifier_env["project_root"],
+            feature_plan=verifier_env["feature_plan"],
+            pr_queue=verifier_env["pr_queue"],
+            branch="feature/demo",
+            mode="pre_merge",
+            claim_file=verifier_env["claim_file"],
+            review_contract=contract,
+            gate_results_dir=results_dir,
+        )
+
+        passed = {c["name"] for c in result["checks"] if c["status"] == "PASS"}
+        assert "gate_codex_gate" in passed, [c for c in result["checks"] if "codex" in c["name"]]
+        assert "gate_gemini_review" in passed, [c for c in result["checks"] if "gemini" in c["name"]]
+
+    def test_finding_1_codex_completed_with_blocking_finding_fails(
+        self, verifier_env, monkeypatch, tmp_path,
+    ):
+        """status=completed but with a blocking finding still fails — pass requires zero blocking."""
+        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
+        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
+
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        codex_report = reports_dir / "codex.md"
+        codex_report.write_text(
+            "# Codex Gate\n\n[BLOCKING] something is wrong\n",
+            encoding="utf-8",
+        )
+
+        contract = _make_contract(
+            review_stack=["codex_gate"],
+            risk_class="high",
+        )
+        results_dir = tmp_path / "results"
+        _write_gate_result(
+            results_dir, "codex_gate", "PR-0",
+            _make_gate_artifact_payload(
+                gate="codex_gate",
+                report_path=str(codex_report),
+                blocking=[{"severity": "blocking", "category": "correctness", "message": "x"}],
+            ),
+        )
+
+        result = cv.verify_closure(
+            project_root=verifier_env["project_root"],
+            feature_plan=verifier_env["feature_plan"],
+            pr_queue=verifier_env["pr_queue"],
+            branch="feature/demo",
+            mode="pre_merge",
+            claim_file=verifier_env["claim_file"],
+            review_contract=contract,
+            gate_results_dir=results_dir,
+        )
+
+        failed = {c["name"] for c in result["checks"] if c["status"] == "FAIL"}
+        assert "gate_codex_gate" in failed
+
+    def test_finding_2_claude_github_state_in_requests_dir_passes(
+        self, verifier_env, monkeypatch, tmp_path,
+    ):
+        """Explicit `not_configured` state in requests dir is accepted as evidence."""
+        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
+        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
+
+        # Mirror the production layout: results/ has nothing for the optional
+        # gate; requests/ has the contract-driven request payload that
+        # gate_request_handler.request_claude_github_with_contract writes.
+        results_dir = tmp_path / "review_gates" / "results"
+        results_dir.mkdir(parents=True)
+        requests_dir = tmp_path / "review_gates" / "requests"
+        requests_dir.mkdir(parents=True)
+        request_payload = {
+            "gate": "claude_github_optional",
+            "pr_id": "PR-0",
+            "state": "not_configured",
+            "contributed_evidence": False,
+            "was_intentionally_absent": True,
+            "contract_hash": "abcdef1234567890",
+            "branch": "feature/demo",
+            "review_mode": "per_pr",
+        }
+        (requests_dir / "pr0-claude_github_optional-contract.json").write_text(
+            json.dumps(request_payload), encoding="utf-8",
+        )
+
+        contract = _make_contract(review_stack=["claude_github_optional"])
+
+        result = cv.verify_closure(
+            project_root=verifier_env["project_root"],
+            feature_plan=verifier_env["feature_plan"],
+            pr_queue=verifier_env["pr_queue"],
+            branch="feature/demo",
+            mode="pre_merge",
+            claim_file=verifier_env["claim_file"],
+            review_contract=contract,
+            gate_results_dir=results_dir,
+        )
+
+        claude_check = next(
+            c for c in result["checks"] if c["name"] == "gate_claude_github_optional"
+        )
+        assert claude_check["status"] == "PASS", claude_check
+
+    def test_finding_2_legacy_status_only_request_normalised(
+        self, verifier_env, monkeypatch, tmp_path,
+    ):
+        """Legacy pr-number request payload (status only, no state) is normalised to pass."""
+        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
+        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
+
+        results_dir = tmp_path / "review_gates" / "results"
+        results_dir.mkdir(parents=True)
+        requests_dir = tmp_path / "review_gates" / "requests"
+        requests_dir.mkdir(parents=True)
+        # Legacy writer (gate_request_handler._request_claude_github) — only
+        # writes `status`, no `state` / `was_intentionally_absent` fields.
+        legacy_payload = {
+            "gate": "claude_github_optional",
+            "status": "configured_dry_run",
+            "branch": "feature/demo",
+            "pr_number": 45,
+        }
+        (requests_dir / "pr-45-claude_github_optional.json").write_text(
+            json.dumps(legacy_payload), encoding="utf-8",
+        )
+
+        contract = _make_contract(review_stack=["claude_github_optional"])
+
+        result = cv.verify_closure(
+            project_root=verifier_env["project_root"],
+            feature_plan=verifier_env["feature_plan"],
+            pr_queue=verifier_env["pr_queue"],
+            branch="feature/demo",
+            mode="pre_merge",
+            claim_file=verifier_env["claim_file"],
+            review_contract=contract,
+            gate_results_dir=results_dir,
+        )
+
+        claude_check = next(
+            c for c in result["checks"] if c["name"] == "gate_claude_github_optional"
+        )
+        assert claude_check["status"] == "PASS", claude_check
+
+    def test_finding_2_no_request_or_result_still_fails(
+        self, verifier_env, monkeypatch, tmp_path,
+    ):
+        """Total absence of any request or result still fails — fallback is not a free pass."""
+        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
+        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
+
+        results_dir = tmp_path / "review_gates" / "results"
+        results_dir.mkdir(parents=True)
+        # Sibling requests dir does not exist at all.
+
+        contract = _make_contract(review_stack=["claude_github_optional"])
+
+        result = cv.verify_closure(
+            project_root=verifier_env["project_root"],
+            feature_plan=verifier_env["feature_plan"],
+            pr_queue=verifier_env["pr_queue"],
+            branch="feature/demo",
+            mode="pre_merge",
+            claim_file=verifier_env["claim_file"],
+            review_contract=contract,
+            gate_results_dir=results_dir,
+        )
+
+        assert result["verdict"] == "fail"
+        failed = {c["name"] for c in result["checks"] if c["status"] == "FAIL"}
+        assert "gate_claude_github_optional" in failed
