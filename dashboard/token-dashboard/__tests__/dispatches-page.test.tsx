@@ -203,6 +203,24 @@ describe('DispatchesPage', () => {
     expect(svg!.getAttribute('style')).toMatch(/rgb\(34,\s*197,\s*94\)|#22c55e/);
   });
 
+  test('rejected stage tab is reachable and isolates rejected dispatches', () => {
+    // Regression guard: DispatchesResponse.stages is keyed by every member of
+    // DispatchStage, including 'rejected'. If the union or the envelope shape
+    // drifts, the fixture's Record<DispatchStage, ...> assignment breaks under
+    // strict tsc, and this runtime assertion breaks too.
+    const data = envelope([
+      card('p-1', 'pending'),
+      card('rej-1', 'rejected'),
+    ]);
+    mockResponse(data);
+    render(<DispatchesPage />);
+
+    fireEvent.click(screen.getByTestId('stage-tab-rejected'));
+
+    expect(screen.queryByTestId('dispatch-row-p-1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('dispatch-row-rej-1')).toBeInTheDocument();
+  });
+
   test('dispatch row links to the detail page with encoded id', () => {
     const id = '20260424-020100-f59-pr4-dashboard-viewer-C';
     const data = envelope([card(id, 'active')]);

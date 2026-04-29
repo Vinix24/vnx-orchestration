@@ -12,11 +12,18 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
-// Mock next/navigation — usePathname for sidebar, useSearchParams for domain filter
+// Mock next/navigation — usePathname for sidebar, useSearchParams for domain filter.
+// useSearchParams is parameterizable per-test via __setSearchParams(query) so we can
+// verify the page actually consults the URL for the domain filter.
+let __searchParamsQuery = '';
 jest.mock('next/navigation', () => ({
   usePathname: () => '/operator/kanban',
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(__searchParamsQuery),
 }));
+
+function setSearchParams(query: string) {
+  __searchParamsQuery = query;
+}
 
 // Mock SWR hooks — we test the page in isolation
 jest.mock('@/lib/hooks', () => ({
@@ -26,14 +33,14 @@ jest.mock('@/lib/hooks', () => ({
 
 import { useKanban, useProjects } from '@/lib/hooks';
 import KanbanPage from '@/app/operator/kanban/page';
-import type { KanbanEnvelope, ProjectsEnvelope } from '@/lib/types';
+import type { KanbanCard, KanbanEnvelope, ProjectsEnvelope } from '@/lib/types';
 
 const mockUseKanban = useKanban as jest.MockedFunction<typeof useKanban>;
 const mockUseProjects = useProjects as jest.MockedFunction<typeof useProjects>;
 
 // ---- Fixtures ----
 
-const CARD_A = {
+const CARD_A: KanbanCard = {
   id: 'dispatch-001',
   pr_id: 'PR-1',
   track: 'A',
@@ -50,7 +57,7 @@ const CARD_A = {
   receipt_status: null,
 };
 
-const CARD_B = {
+const CARD_B: KanbanCard = {
   id: 'dispatch-002',
   pr_id: 'PR-2',
   track: 'B',
@@ -67,7 +74,7 @@ const CARD_B = {
   receipt_status: 'success',
 };
 
-const CARD_C = {
+const CARD_C: KanbanCard = {
   id: 'dispatch-003',
   pr_id: 'PR-3',
   track: 'C',
@@ -161,6 +168,10 @@ function renderError() {
 // ============================================================
 // Tests
 // ============================================================
+
+beforeEach(() => {
+  setSearchParams('');
+});
 
 describe('KanbanPage — 5 columns', () => {
   test('renders all 5 column headers', () => {
@@ -401,5 +412,35 @@ describe('KanbanPage — project filter', () => {
     // Should have been called with both 'alpha' and then undefined
     expect(mockUseKanban).toHaveBeenCalledWith('alpha');
     expect(mockUseKanban).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('KanbanPage — URL ?domain= filter (useSearchParams integration)', () => {
+  // Regression guard: KanbanContent reads searchParams.get('domain') from
+  // next/navigation. If the mock or the call site drifts, these tests fail.
+  test('?domain=testing hides cards that are not in the testing domain', () => {
+    setSearchParams('domain=testing');
+    renderWithData(makeEnvelope({
+      stages: { active: [CARD_A], pending: [CARD_B] },
+      total: 2,
+    }));
+
+    // CARD_A.domain === 'coding' should be filtered out
+    const activeCol = screen.getByTestId('column-active');
+    expect(activeCol).not.toHaveTextContent('PR-1');
+    // CARD_B.domain === 'testing' should remain visible
+    const pendingCol = screen.getByTestId('column-pending');
+    expect(pendingCol).toHaveTextContent('PR-2');
+  });
+
+  test('no ?domain= param shows cards from all domains', () => {
+    setSearchParams('');
+    renderWithData(makeEnvelope({
+      stages: { active: [CARD_A], pending: [CARD_B] },
+      total: 2,
+    }));
+
+    expect(screen.getByTestId('column-active')).toHaveTextContent('PR-1');
+    expect(screen.getByTestId('column-pending')).toHaveTextContent('PR-2');
   });
 });
