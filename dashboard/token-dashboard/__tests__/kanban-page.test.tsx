@@ -12,9 +12,10 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
-// Mock next/navigation used indirectly (Link, usePathname in sidebar)
+// Mock next/navigation — usePathname for sidebar, useSearchParams for domain filter
 jest.mock('next/navigation', () => ({
   usePathname: () => '/operator/kanban',
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 // Mock SWR hooks — we test the page in isolation
