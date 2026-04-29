@@ -3,9 +3,8 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { RefreshCw, ChevronDown, ChevronRight, FileText, ExternalLink } from 'lucide-react';
-import { useReports, useReportContent, useProjects } from '@/lib/hooks';
+import { useReports, useReportContent } from '@/lib/hooks';
 import AgentSelector from '@/components/operator/agent-selector';
-import FreshnessBadge from '@/components/operator/freshness-badge';
 import BreadcrumbNav from '@/components/operator/breadcrumb-nav';
 import type { Report } from '@/lib/types';
 
