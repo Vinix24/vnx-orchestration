@@ -444,10 +444,33 @@ _maybe_runtime_supervise() {
     echo "$now" > "$state_file"
 }
 
+_unified_supervisor_lease_sweep_tick() {
+    # SUP-PR2: throttled lease_sweep tick. Activates only when
+    # VNX_SUPERVISOR_MODE=unified. Default (unset/legacy) = no behavior change.
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+
+    local state_file="$VNX_DATA_DIR/state/.last_lease_sweep_ts"
+    local interval="${VNX_LEASE_SWEEP_INTERVAL_SEC:-30}"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last >= interval )); then
+        mkdir -p "$VNX_LOGS_DIR" "$(dirname "$state_file")"
+        python3 "$SCRIPT_DIR/lib/lease_sweep.py" \
+            >> "$VNX_LOGS_DIR/lease_sweep.log" 2>&1 || true
+        echo "$now" > "$state_file"
+    fi
+}
+
 process_dispatches() {
     local count=0
     _maybe_runtime_supervise
     _cleanup_stuck_dispatches
+    _unified_supervisor_lease_sweep_tick
 
     for dispatch in "$PENDING_DIR"/*.md; do
         [ -f "$dispatch" ] || continue
