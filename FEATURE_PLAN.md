@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-04-29T03:53:23.332334+00:00
+**Last updated**: 2026-04-29T04:08:16.159874+00:00
 
 ## Active features
 
