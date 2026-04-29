@@ -25,6 +25,7 @@ from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
+from gate_status import is_pass as gate_is_pass, is_terminal as gate_is_terminal
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,74 @@ def _find_gate_result(
     return None
 
 
+# Request-side states for the optional Claude GitHub review gate that record
+# an explicit, intentional absence (writer: gate_request_handler).  These are
+# canonicalized in claude_github_receipt.INTENTIONALLY_ABSENT_STATES /
+# EVIDENCE_STATES; duplicated here to avoid an import cycle since
+# closure_verifier already pins sys.path on its own.
+_INTENTIONALLY_ABSENT_REQUEST_STATES = frozenset({"not_configured", "configured_dry_run"})
+_EVIDENCE_REQUEST_STATES = frozenset({"requested", "completed"})
+
+
+def _find_gate_request_payload(
+    gate: str,
+    pr_id: str,
+    results_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """Locate a gate **request** payload as a fallback when no result exists.
+
+    For optional gates (notably ``claude_github_optional``), the explicit-absence
+    state (``not_configured``, ``configured_dry_run``) is recorded by
+    gate_request_handler in the requests directory only — no separate result
+    file is written.  This helper finds that payload and normalises legacy
+    ``status``-only writers into the same shape the closure verifier expects
+    (with ``state``/``contributed_evidence``/``was_intentionally_absent``).
+    """
+    requests_dir = results_dir.parent / "requests"
+    if not requests_dir.exists():
+        return None
+
+    pr_slug = pr_id.lower().replace("-", "")
+    candidates: List[Path] = []
+    contract_path = requests_dir / f"{pr_slug}-{gate}-contract.json"
+    if contract_path.exists():
+        candidates.append(contract_path)
+    candidates.extend(
+        path for path in requests_dir.glob(f"*-{gate}*.json")
+        if path not in candidates
+    )
+
+    for path in candidates:
+        try:
+            data = json.loads(_read_text(path))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("pr_id") and data["pr_id"] != pr_id:
+            continue
+        if data.get("gate") and data["gate"] != gate:
+            continue
+
+        # Normalise legacy `status`-only payloads (writer: _request_claude_github)
+        # so downstream checks can read `state` / contributed_evidence /
+        # was_intentionally_absent uniformly.
+        normalised = dict(data)
+        if "state" not in normalised and "status" in normalised:
+            normalised["state"] = normalised["status"]
+        state = normalised.get("state")
+        if isinstance(state, str):
+            normalised.setdefault(
+                "was_intentionally_absent",
+                state in _INTENTIONALLY_ABSENT_REQUEST_STATES,
+            )
+            normalised.setdefault(
+                "contributed_evidence",
+                state in _EVIDENCE_REQUEST_STATES,
+            )
+        normalised["__source"] = "request"
+        return normalised
+    return None
+
+
 def _validate_review_evidence(
     contract: ReviewContract,
     results_dir: Path,
@@ -260,6 +329,12 @@ def _validate_review_evidence(
         result = _find_gate_result(gate, contract.pr_id, results_dir)
 
         if gate == "claude_github_optional":
+            # Fallback: explicit-absence state for the optional gate is recorded
+            # in the requests directory by gate_request_handler — not as a
+            # separate result file — so a missing result is not by itself
+            # ambiguous.  Look there before declaring no evidence.
+            if result is None:
+                result = _find_gate_request_payload(gate, contract.pr_id, results_dir)
             if result is None:
                 checks.append(CheckResult(
                     f"gate_{gate}",
@@ -268,10 +343,11 @@ def _validate_review_evidence(
                 ))
             elif result.get("was_intentionally_absent") or result.get("contributed_evidence"):
                 state = result.get("state", "unknown")
+                source = result.get("__source", "result")
                 checks.append(CheckResult(
                     f"gate_{gate}",
                     "PASS",
-                    f"{gate} state explicit: {state}",
+                    f"{gate} state explicit: {state} (source: {source})",
                 ))
             else:
                 checks.append(CheckResult(
@@ -290,8 +366,8 @@ def _validate_review_evidence(
                         f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
                     ))
                 else:
-                    verdict = result.get("verdict", "missing")
-                    if verdict == "pass":
+                    passed, reason = gate_is_pass(result)
+                    if passed:
                         checks.append(CheckResult(
                             f"gate_{gate}",
                             "PASS",
@@ -301,7 +377,7 @@ def _validate_review_evidence(
                         checks.append(CheckResult(
                             f"gate_{gate}",
                             "FAIL",
-                            f"codex gate verdict: {verdict}",
+                            f"codex gate not passing — {reason}",
                         ))
             else:
                 checks.append(CheckResult(
@@ -318,10 +394,9 @@ def _validate_review_evidence(
                     f"no gate result for required reviewer {gate}",
                 ))
             else:
-                status = result.get("status", "missing")
-                blocking_count = result.get("blocking_count", 0)
-                if status == "pass" and blocking_count == 0:
-                    advisory_count = result.get("advisory_count", 0)
+                passed, reason = gate_is_pass(result)
+                advisory_count = result.get("advisory_count", 0)
+                if passed:
                     checks.append(CheckResult(
                         f"gate_{gate}",
                         "PASS",
@@ -331,7 +406,7 @@ def _validate_review_evidence(
                     checks.append(CheckResult(
                         f"gate_{gate}",
                         "FAIL",
-                        f"gemini review status: {status}, {blocking_count} blocking finding(s)",
+                        f"gemini review not passing — {reason}",
                     ))
 
         else:
@@ -366,15 +441,7 @@ def _validate_review_evidence(
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir)
-        # Check both status and verdict fields independently to avoid the OR-priority escape:
-        # if status="requested" (truthy) but verdict="pass", the old OR logic would yield
-        # gate_status="requested" and skip report_path enforcement for a terminal verdict.
-        _terminal = ("pass", "fail")
-        _has_terminal = result is not None and (
-            (result.get("status") or "").lower() in _terminal
-            or (result.get("verdict") or "").lower() in _terminal
-        )
-        if _has_terminal:
+        if result is not None and gate_is_terminal(result):
             report_path = result.get("report_path", "")
             if not report_path:
                 checks.append(CheckResult(
@@ -612,14 +679,16 @@ def _detect_gate_report_contradictions(
         except OSError:
             continue
 
-        gate_status = result.get("status") or result.get("verdict") or "unknown"
+        passed, _reason = gate_is_pass(result)
         gate_blocking = result.get("blocking_count", 0)
+        if not isinstance(gate_blocking, int):
+            gate_blocking = len(result.get("blocking_findings") or [])
 
         # Count blocking-severity indicators in report
         report_blocking_indicators = _count_report_blocking_indicators(report_content)
 
         # Contradiction 1: gate says pass but report has blocking indicators
-        if gate_status == "pass" and report_blocking_indicators > 0:
+        if passed and report_blocking_indicators > 0:
             checks.append(CheckResult(
                 f"contradiction_{gate}",
                 "FAIL",
@@ -627,7 +696,7 @@ def _detect_gate_report_contradictions(
                 f"{report_blocking_indicators} blocking indicator(s) — evidence mismatch",
             ))
         # Contradiction 2: gate says fail/blocking but report has none
-        elif gate_status == "fail" and gate_blocking > 0 and report_blocking_indicators == 0:
+        elif (not passed) and gate_blocking > 0 and report_blocking_indicators == 0:
             checks.append(CheckResult(
                 f"contradiction_{gate}",
                 "FAIL",
