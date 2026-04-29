@@ -237,6 +237,33 @@ class _SubprocessResult(NamedTuple):
     manifest_path: str | None
 
 
+def _get_dirty_files(cwd: Path) -> set[str]:
+    """Return the set of dirty (modified/untracked) file paths from git status --porcelain.
+
+    Handles rename lines ("old -> new") by capturing only the destination path.
+    Returns an empty set on any failure so callers can safely subtract.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+            cwd=cwd,
+        )
+        files: set[str] = set()
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            # git status --porcelain: XY<space>filename (or XY<space>old -> new)
+            path_part = line[3:].strip()
+            if " -> " in path_part:
+                path_part = path_part.split(" -> ", 1)[1]
+            files.add(path_part)
+        return files
+    except Exception as exc:
+        logger.debug("_get_dirty_files failed: %s", exc)
+        return set()
+
+
 def _get_commit_hash() -> str:
     """Return current HEAD commit hash, or empty string on failure."""
     try:
@@ -631,29 +658,56 @@ def _check_commit_since(dispatch_start_ts: str) -> bool:
     return False
 
 
-def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> bool:
-    """Stage and commit any uncommitted changes after a successful dispatch.
+def _auto_commit_changes(
+    dispatch_id: str,
+    terminal_id: str,
+    gate: str = "",
+    pre_dispatch_dirty: "set[str] | None" = None,
+) -> bool:
+    """Stage and commit changes introduced by this dispatch.
+
+    When pre_dispatch_dirty is provided, only files that were NOT already dirty
+    before the dispatch started are staged.  This prevents sweeping concurrent or
+    pre-existing dirty files from other terminals into this worker's commit.
 
     Returns True if a commit was made, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
     try:
+        cwd = Path(__file__).resolve().parents[2]
         # Check for uncommitted changes
         status_proc = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
         if not dirty_lines:
             logger.debug("auto_commit: working tree clean for dispatch %s", dispatch_id)
             return False
 
-        # Stage all changes (respects .gitignore — excludes .vnx-data/, .venv/, etc.)
+        # Scope staging to files that became dirty during this dispatch
+        if pre_dispatch_dirty is not None:
+            current_dirty = _get_dirty_files(cwd)
+            files_to_stage = sorted(current_dirty - pre_dispatch_dirty)
+            if not files_to_stage:
+                logger.debug(
+                    "auto_commit: no new files to stage for dispatch %s "
+                    "(all dirty files pre-existed the dispatch)",
+                    dispatch_id,
+                )
+                return False
+            add_cmd = ["git", "add", "--"] + files_to_stage
+        else:
+            # Fallback: stage all current dirty files when pre-dispatch state is unknown.
+            # This is equivalent to the old git add -A behaviour and should only occur
+            # when _auto_commit_changes is called directly (not via deliver_with_recovery).
+            add_cmd = ["git", "add", "-A"]
+
         add_proc = subprocess.run(
-            ["git", "add", "-A"],
+            add_cmd,
             capture_output=True, text=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         if add_proc.returncode != 0:
             logger.warning("auto_commit: git add failed for %s: %s", dispatch_id, add_proc.stderr)
@@ -667,7 +721,7 @@ def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> 
         commit_proc = subprocess.run(
             ["git", "commit", "-m", commit_msg],
             capture_output=True, text=True, timeout=30,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         if commit_proc.returncode == 0:
             logger.info(
@@ -686,27 +740,57 @@ def _auto_commit_changes(dispatch_id: str, terminal_id: str, gate: str = "") -> 
         return False
 
 
-def _auto_stash_changes(dispatch_id: str, terminal_id: str) -> bool:
-    """Stash uncommitted changes after a failed dispatch (preserves but does not commit).
+def _auto_stash_changes(
+    dispatch_id: str,
+    terminal_id: str,
+    pre_dispatch_dirty: "set[str] | None" = None,
+) -> bool:
+    """Stash changes introduced by this dispatch after a failure (preserves but does not commit).
+
+    When pre_dispatch_dirty is provided, only files that were NOT dirty before
+    the dispatch started are stashed via ``git stash push -u -- <files>``.
+    This prevents hiding unrelated tracked edits from other terminals and ensures
+    untracked files created by the failed dispatch are also captured.
 
     Returns True if a stash was created, False otherwise.
     Never raises — all exceptions are logged and swallowed.
     """
     try:
+        cwd = Path(__file__).resolve().parents[2]
         status_proc = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
         if not dirty_lines:
             return False
 
         stash_name = f"vnx-auto-stash-{dispatch_id}"
+
+        if pre_dispatch_dirty is not None:
+            current_dirty = _get_dirty_files(cwd)
+            files_to_stash = sorted(current_dirty - pre_dispatch_dirty)
+            if not files_to_stash:
+                logger.debug(
+                    "auto_stash: no new files to stash for dispatch %s "
+                    "(all dirty files pre-existed the dispatch)",
+                    dispatch_id,
+                )
+                return False
+            # -u includes untracked files matching the specified paths so
+            # newly-created files from the failed dispatch are also captured.
+            stash_cmd = ["git", "stash", "push", "-u", "-m", stash_name, "--"] + files_to_stash
+        else:
+            # Fallback when pre-dispatch state is unknown: stash all tracked
+            # changes including untracked files (-u).  This replaces the old
+            # ``git stash save`` (no -u) which left untracked files behind.
+            stash_cmd = ["git", "stash", "push", "-u", "-m", stash_name]
+
         stash_proc = subprocess.run(
-            ["git", "stash", "save", stash_name],
+            stash_cmd,
             capture_output=True, text=True, timeout=30,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=cwd,
         )
         if stash_proc.returncode == 0:
             logger.info(
@@ -1014,6 +1098,10 @@ def deliver_with_recovery(
 
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _get_commit_hash()
+    # Snapshot dirty files before dispatch so auto-commit/stash can scope to
+    # changes introduced by this dispatch only (not pre-existing dirty state).
+    _repo_cwd = Path(__file__).resolve().parents[2]
+    pre_dispatch_dirty = _get_dirty_files(_repo_cwd)
 
     # Capture dispatch parameters before execution
     _capture_dispatch_parameters(
@@ -1050,7 +1138,10 @@ def deliver_with_recovery(
             # Post-dispatch commit enforcement
             committed = commit_hash_before != commit_hash_after
             if auto_commit and commit_missing and not committed:
-                committed = _auto_commit_changes(dispatch_id, terminal_id, gate=gate)
+                committed = _auto_commit_changes(
+                    dispatch_id, terminal_id, gate=gate,
+                    pre_dispatch_dirty=pre_dispatch_dirty,
+                )
                 if committed:
                     commit_missing = False
                     commit_hash_after = _get_commit_hash()
@@ -1100,7 +1191,7 @@ def deliver_with_recovery(
             monitor.mark_completed()
             # Stash uncommitted changes from failed dispatch
             if auto_commit:
-                _auto_stash_changes(dispatch_id, terminal_id)
+                _auto_stash_changes(dispatch_id, terminal_id, pre_dispatch_dirty=pre_dispatch_dirty)
             _write_receipt(
                 dispatch_id, terminal_id, "failed",
                 event_count=sub_result.event_count,
