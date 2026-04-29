@@ -72,8 +72,8 @@ test.describe('Network failures — Kanban board', () => {
     await page.goto('/operator/kanban');
     await page.waitForLoadState('domcontentloaded');
 
-    // During the 2-second delay skeleton cards (aria-hidden) are visible
-    await expect(page.locator('[aria-hidden="true"]').first()).toBeVisible({ timeout: 3000 });
+    // During the 2-second delay skeleton cards (aria-hidden divs) are visible
+    await expect(page.locator('div[aria-hidden="true"]').first()).toBeVisible({ timeout: 3000 });
 
     // After the delay the empty-column placeholders replace the skeleton
     await expect(page.locator('[data-testid^="empty-"]').first()).toBeVisible({ timeout: 8000 });
@@ -185,7 +185,7 @@ test.describe('Network failures — Governance digest', () => {
     await page.waitForLoadState('domcontentloaded');
 
     // Skeleton rows visible during the delay
-    await expect(page.locator('[aria-hidden="true"]').first()).toBeVisible({ timeout: 3000 });
+    await expect(page.locator('div[aria-hidden="true"]').first()).toBeVisible({ timeout: 3000 });
 
     // After delay: recurrence table renders in empty state
     await expect(page.locator('[data-testid="recurrence-table"]')).toBeVisible({ timeout: 8000 });
@@ -261,7 +261,7 @@ test.describe('Network failures — Open items', () => {
     await page.waitForLoadState('domcontentloaded');
 
     // Skeleton rows visible during the 2-second delay
-    await expect(page.locator('[aria-hidden="true"]').first()).toBeVisible({ timeout: 3000 });
+    await expect(page.locator('div[aria-hidden="true"]').first()).toBeVisible({ timeout: 3000 });
 
     // After delay: page heading and filter row are visible
     await expect(page.getByRole('heading', { name: /open items/i })).toBeVisible({ timeout: 8000 });
@@ -287,50 +287,57 @@ test.describe('Network failures — Open items', () => {
 // ---- Agent stream ----
 
 test.describe('Network failures — Agent stream', () => {
-  test('5xx on SSE endpoint shows Disconnected status, no white screen', async ({ page }) => {
+  test('5xx on SSE endpoint shows connection error banner, no white screen', async ({ page }) => {
     const errors: string[] = [];
     page.on('pageerror', (err) => errors.push(err.message));
     await stubApiError(page, '**/api/agent-stream/T1');
 
+    // Set up request listener before navigation so we don't miss the EventSource open
+    const sseRequestPromise = page.waitForRequest('**/api/agent-stream/T1');
     await page.goto('/agent-stream');
-    await page.waitForLoadState('networkidle');
+    await sseRequestPromise; // confirms SSE endpoint was actually called, not just initial UI
 
+    await expect(page.locator('[data-testid="sse-error"]')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('[data-testid="sse-error"]')).toContainText(/SSE connection failed/i);
     await expect(page).not.toHaveTitle(/error/i);
     await expect(page.getByRole('heading', { name: /agent stream/i })).toBeVisible();
-    await expect(page.getByText('Disconnected')).toBeVisible();
     expect(errors).toHaveLength(0);
   });
 
-  test('aborted SSE connection shows Disconnected status', async ({ page }) => {
+  test('aborted SSE connection shows connection error banner', async ({ page }) => {
     await stubApiAbort(page, '**/api/agent-stream/T1');
 
+    const sseRequestPromise = page.waitForRequest('**/api/agent-stream/T1');
     await page.goto('/agent-stream');
-    await page.waitForLoadState('networkidle');
+    await sseRequestPromise;
 
-    await expect(page.getByText('Disconnected')).toBeVisible();
+    await expect(page.locator('[data-testid="sse-error"]')).toBeVisible({ timeout: 5000 });
     await expect(page).not.toHaveTitle(/error/i);
   });
 
-  test('slow 3G on SSE: Disconnected during delay, Disconnected after timeout abort', async ({ page }) => {
+  test('slow 3G on SSE: error banner shown after timeout abort', async ({ page }) => {
     await page.route('**/api/agent-stream/T1', async (route) => {
       await new Promise<void>((resolve) => setTimeout(resolve, 2500));
       await route.abort('timedout');
     });
 
+    const sseRequestPromise = page.waitForRequest('**/api/agent-stream/T1');
     await page.goto('/agent-stream');
-    // Disconnected is the initial state and also the error state
-    await expect(page.getByText('Disconnected')).toBeVisible({ timeout: 6000 });
+    await sseRequestPromise; // SSE was opened; error banner appears after 2.5s abort
+
+    await expect(page.locator('[data-testid="sse-error"]')).toBeVisible({ timeout: 8000 });
     await expect(page).not.toHaveTitle(/error/i);
   });
 
-  test('partial failure: SSE fails but agent selector and controls remain functional', async ({ page }) => {
+  test('partial failure: SSE error shown, agent selector and controls remain functional', async ({ page }) => {
     await stubApiError(page, '**/api/agent-stream/T1');
 
+    const sseRequestPromise = page.waitForRequest('**/api/agent-stream/T1');
     await page.goto('/agent-stream');
-    await page.waitForLoadState('networkidle');
+    await sseRequestPromise;
 
-    // SSE error: Disconnected shown
-    await expect(page.getByText('Disconnected')).toBeVisible();
+    // Error banner proves SSE was attempted and failed — not just default UI
+    await expect(page.locator('[data-testid="sse-error"]')).toBeVisible({ timeout: 5000 });
 
     // UI controls unaffected by SSE failure
     await expect(page.locator('[data-testid="agent-selector"]')).toBeVisible();
