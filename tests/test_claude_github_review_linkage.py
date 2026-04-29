@@ -10,7 +10,7 @@ Quality gate: gate_pr4_claude_review_linkage
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -305,17 +305,29 @@ class TestRequestClaudeGitHubWithContract:
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
 
-        mock_proc = MagicMock()
-        mock_proc.returncode = 0
-        monkeypatch.setattr(rgm.subprocess, "run", lambda *a, **kw: mock_proc)
+        captured: Dict[str, list] = {"argv": []}
+
+        def _capture(cmd, *a, **kw):
+            captured["argv"] = list(cmd)
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            return mock_proc
+
+        monkeypatch.setattr(rgm.subprocess, "run", _capture)
 
         manager = rgm.ReviewGateManager()
-        receipt = manager.request_claude_github_with_contract(contract=sample_contract)
+        receipt = manager.request_claude_github_with_contract(
+            contract=sample_contract, pr_number=42,
+        )
 
         assert receipt.state == STATE_REQUESTED
         assert receipt.contributed_evidence() is True
         assert receipt.gh_comment_body == "@claude review"
         assert receipt.contract_hash == sample_contract.content_hash
+        # gh pr comment must target the real GitHub PR number, not the
+        # governance pr_id (e.g. "PR-4") which is not a valid PR ref.
+        assert "42" in captured["argv"]
+        assert "PR-4" not in captured["argv"]
 
     def test_blocked_when_trigger_set_but_gh_fails(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
@@ -329,11 +341,46 @@ class TestRequestClaudeGitHubWithContract:
         monkeypatch.setattr(rgm.subprocess, "run", lambda *a, **kw: mock_proc)
 
         manager = rgm.ReviewGateManager()
-        receipt = manager.request_claude_github_with_contract(contract=sample_contract)
+        receipt = manager.request_claude_github_with_contract(
+            contract=sample_contract, pr_number=42,
+        )
 
         assert receipt.state == STATE_BLOCKED
         assert receipt.contributed_evidence() is False
         assert receipt.reason == "claude_github_trigger_failed"
+
+    def test_blocked_when_trigger_set_but_pr_number_missing(
+        self, review_env, monkeypatch, sample_contract
+    ):
+        """Triggering gh pr comment without a real PR number must block, not
+        silently target the governance pr_id (e.g. "PR-4")."""
+        monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
+        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
+        monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
+        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+
+        # No ``gh pr comment`` call must be issued when pr_number is missing.
+        # Other subprocess.run calls (e.g. path resolution via ``git rev-parse``)
+        # are expected and unrelated to the gh trigger path.
+        gh_calls: list = []
+
+        def _trace_run(cmd, *a, **kw):
+            if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "gh":
+                gh_calls.append(list(cmd))
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.stdout = ""
+            mock_proc.stderr = ""
+            return mock_proc
+
+        monkeypatch.setattr(rgm.subprocess, "run", _trace_run)
+
+        manager = rgm.ReviewGateManager()
+        receipt = manager.request_claude_github_with_contract(contract=sample_contract)
+
+        assert gh_calls == []
+        assert receipt.state == STATE_BLOCKED
+        assert receipt.reason == "missing_github_pr_number"
 
     def test_request_persisted_to_disk_with_contract_hash(self, review_env, monkeypatch, sample_contract):
         monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
@@ -348,6 +395,29 @@ class TestRequestClaudeGitHubWithContract:
         assert saved["contract_hash"] == sample_contract.content_hash
         assert saved["pr_id"] == "PR-4"
         assert saved["state"] == STATE_NOT_CONFIGURED
+
+    def test_non_completed_state_mirrored_into_results_dir(
+        self, review_env, monkeypatch, sample_contract
+    ):
+        """Closure verifier reads optional-gate state from results/, not requests/.
+
+        Non-completed states (not_configured, configured_dry_run, requested,
+        blocked) must be mirrored into review_gates/results/ as a result record
+        so closure_verifier._find_gate_result can locate the explicit state.
+        """
+        monkeypatch.setattr(rgm, "emit_governance_receipt", lambda *a, **kw: None)
+        monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0")
+
+        manager = rgm.ReviewGateManager()
+        manager.request_claude_github_with_contract(contract=sample_contract)
+
+        result_file = manager.results_dir / "pr4-claude_github_optional-contract.json"
+        assert result_file.exists()
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["pr_id"] == "PR-4"
+        assert saved["state"] == STATE_NOT_CONFIGURED
+        assert saved["was_intentionally_absent"] is True
+        assert saved["contract_hash"] == sample_contract.content_hash
 
     def test_governance_receipt_emitted_with_contract_linkage(self, review_env, monkeypatch, sample_contract):
         receipts = []
