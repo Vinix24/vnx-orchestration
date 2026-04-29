@@ -233,19 +233,25 @@ rc_delivery_success() {
 _call_cleanup_worker_exit() {
     local terminal_id="$1" dispatch_id="$2" exit_status="$3"
     local generation="${4:-}"
+    local gen_args=()
+    [[ -n "$generation" ]] && gen_args=(--lease-generation "$generation")
     python3 "$VNX_DIR/scripts/lib/cleanup_worker_exit.py" \
         --terminal-id "$terminal_id" \
         --dispatch-id "$dispatch_id" \
         --exit-status "$exit_status" \
-        ${generation:+--lease-generation "$generation"} >/dev/null 2>&1 || true
+        "${gen_args[@]+"${gen_args[@]}"}" >/dev/null 2>&1 || true
     return 0
 }
 
 # Release canonical lease (leased -> idle).
 # Emits structured audit on success and uses log_structured_failure on error.
+# Optional 4th arg dispatch_exit_status (default "success") controls the exit
+# status forwarded to _call_cleanup_worker_exit.  Pass "failure" when calling
+# from a failed-dispatch fallback path so audit state is not corrupted.
 rc_release_lease() {
     local terminal_id="$1" generation="$2"
     local dispatch_id="${3:-unknown}"
+    local dispatch_exit_status="${4:-success}"
     _rc_enabled || return 0
     [[ -n "$generation" && "$generation" != "0" ]] || return 0
 
@@ -263,7 +269,7 @@ rc_release_lease() {
     log "V8 RUNTIME_CORE: lease released terminal=$terminal_id dispatch=$dispatch_id"
     emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
         "lease_released_on_failure" "true"
-    _call_cleanup_worker_exit "$terminal_id" "$dispatch_id" "success" "$generation"
+    _call_cleanup_worker_exit "$terminal_id" "$dispatch_id" "$dispatch_exit_status" "$generation"
 }
 
 # Release canonical lease and record delivery failure atomically.
@@ -287,8 +293,10 @@ rc_release_on_failure() {
         log_structured_failure "release_on_failure_cli_failed" \
             "release-on-failure CLI invocation failed — emitting direct lease release" \
             "dispatch=$dispatch_id terminal=$terminal_id"
-        # Fall back to direct release-lease so the lease is not stranded
-        rc_release_lease "$terminal_id" "$generation" "$dispatch_id"
+        # Fall back to direct release-lease so the lease is not stranded.
+        # Pass "failure" so _call_cleanup_worker_exit emits the correct exit
+        # status; this is a failed dispatch, not a successful one.
+        rc_release_lease "$terminal_id" "$generation" "$dispatch_id" "failure"
         return 1
     }
 
