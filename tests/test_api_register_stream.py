@@ -30,6 +30,8 @@ from api_register_stream import (
     handle_register_stream,
     handle_register_stream_archive,
     _read_new_events,
+    _read_new_events_after,
+    _resolve_start_index,
 )
 
 
@@ -554,3 +556,152 @@ class TestCaseF_MalformedJsonInStream:
             heartbeat_interval=9999,
             register_file=reg,
         )
+
+
+# ---------------------------------------------------------------------------
+# Case G: same-timestamp regression (codex regate finding for PR #304)
+#
+# A timestamp-only cursor silently dropped a second event whose timestamp
+# equalled the last-delivered event's timestamp. The line-index cursor
+# must deliver both records.
+# ---------------------------------------------------------------------------
+
+class TestCaseG_SameTimestampRegression:
+    def test_read_new_events_after_delivers_same_ts_appends(self, tmp_path):
+        """Two records sharing a timestamp must both be returned across polls."""
+        reg = tmp_path / "dispatch_register.ndjson"
+        same_ts = "2026-04-28T10:00:00.000000Z"
+        _write_events(reg, [_make_event("dispatch_created", same_ts)])
+
+        # First poll consumes the only record.
+        events1, idx1 = _read_new_events_after(reg, 0, None)
+        assert len(events1) == 1
+        assert events1[0]["event"] == "dispatch_created"
+        assert idx1 == 1
+
+        # Append a second record with the IDENTICAL timestamp.
+        _write_events(reg, [_make_event("dispatch_promoted", same_ts)])
+
+        # Second poll must return the new record despite ts collision.
+        events2, idx2 = _read_new_events_after(reg, idx1, None)
+        assert len(events2) == 1
+        assert events2[0]["event"] == "dispatch_promoted"
+        assert idx2 == 2
+
+    def test_read_new_events_wrapper_first_read_keeps_same_ts(self, tmp_path):
+        """The legacy wrapper's timestamp output cannot disambiguate same-ts
+        records — but the wrapper still uses the line-index reader internally,
+        so the FIRST poll returns both same-ts events together."""
+        reg = tmp_path / "dispatch_register.ndjson"
+        same_ts = "2026-04-28T10:00:00.000000Z"
+        _write_events(reg, [
+            _make_event("dispatch_created", same_ts),
+            _make_event("dispatch_promoted", same_ts),
+        ])
+
+        events, latest_ts = _read_new_events(reg, None, None)
+        assert len(events) == 2
+        assert latest_ts == same_ts
+
+    def test_handle_register_stream_delivers_same_ts_across_polls(self, tmp_path):
+        """End-to-end: streaming handler must deliver back-to-back same-ts
+        appends across consecutive polls (the codex repro)."""
+        reg = tmp_path / "dispatch_register.ndjson"
+        same_ts = "2026-04-28T10:00:00.000000Z"
+        _write_events(reg, [_make_event("dispatch_created", same_ts)])
+
+        handler = _make_handler()
+
+        # Run two polls: append between the first and second flush, then
+        # raise BrokenPipe to stop. The cursor inside the handler must
+        # advance by line index, not timestamp, so the second event is
+        # streamed despite sharing the first event's timestamp.
+        flush_count = 0
+
+        def staged_flush():
+            nonlocal flush_count
+            flush_count += 1
+            if flush_count == 1:
+                _write_events(reg, [_make_event("dispatch_promoted", same_ts)])
+                return
+            raise BrokenPipeError("test disconnect")
+
+        handler.wfile.flush = staged_flush
+        handle_register_stream(
+            handler,
+            since_ts=None,
+            event_type_filter=None,
+            poll_interval=0,
+            heartbeat_interval=9999,
+            register_file=reg,
+        )
+
+        lines = _sse_lines(handler)
+        assert len(lines) == 2
+        assert [l["event"] for l in lines] == ["dispatch_created", "dispatch_promoted"]
+
+    def test_resolve_start_index_basic(self, tmp_path):
+        reg = tmp_path / "dispatch_register.ndjson"
+        evs = [
+            _make_event("dispatch_created", "2026-04-28T10:00:00.000000Z"),
+            _make_event("dispatch_promoted", "2026-04-28T10:00:01.000000Z"),
+            _make_event("dispatch_started", "2026-04-28T10:00:02.000000Z"),
+        ]
+        _write_events(reg, evs)
+
+        # No since_ts → start at 0
+        assert _resolve_start_index(reg, None) == 0
+
+        # since_ts at first record → skip just the first
+        assert _resolve_start_index(reg, "2026-04-28T10:00:00.000000Z") == 1
+
+        # since_ts past everything → skip all
+        assert _resolve_start_index(reg, "2026-04-28T10:00:09.000000Z") == 3
+
+        # Missing file → 0
+        missing = tmp_path / "missing.ndjson"
+        assert _resolve_start_index(missing, "2026-04-28T10:00:00.000000Z") == 0
+
+    def test_resolve_start_index_groups_same_ts(self, tmp_path):
+        """If multiple records share a timestamp equal to since_ts, all of
+        them are treated as already seen (cursor advances past all of them).
+        Records strictly newer than since_ts are returned to the caller."""
+        reg = tmp_path / "dispatch_register.ndjson"
+        same_ts = "2026-04-28T10:00:00.000000Z"
+        next_ts = "2026-04-28T10:00:01.000000Z"
+        evs = [
+            _make_event("e1", same_ts),
+            _make_event("e2", same_ts),
+            _make_event("e3", next_ts),
+        ]
+        _write_events(reg, evs)
+
+        idx = _resolve_start_index(reg, same_ts)
+        assert idx == 2
+
+        events, new_idx = _read_new_events_after(reg, idx, None)
+        assert len(events) == 1
+        assert events[0]["event"] == "e3"
+        assert new_idx == 3
+
+    def test_read_new_events_after_advances_cursor_past_filtered(self, tmp_path):
+        """Filtered-out and malformed records still advance the cursor so
+        they aren't re-scanned on the next poll."""
+        reg = tmp_path / "dispatch_register.ndjson"
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        with open(reg, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(_make_event("dispatch_created", "2026-04-28T10:00:00.000000Z")) + "\n")
+            fh.write("not-json\n")
+            fh.write(json.dumps(_make_event("gate_passed", "2026-04-28T10:00:01.000000Z")) + "\n")
+
+        events, idx = _read_new_events_after(reg, 0, {"gate_passed"})
+        # Only gate_passed matches the filter, but the cursor advanced
+        # past all three slots (created, malformed, gate_passed).
+        assert len(events) == 1
+        assert events[0]["event"] == "gate_passed"
+        assert idx == 3
+
+        # Second poll on unchanged file returns nothing and keeps cursor.
+        events2, idx2 = _read_new_events_after(reg, idx, {"gate_passed"})
+        assert events2 == []
+        assert idx2 == 3

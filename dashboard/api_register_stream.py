@@ -34,45 +34,110 @@ def _register_file() -> Path:
     return resolve_state_dir(__file__) / "dispatch_register.ndjson"
 
 
+def _resolve_start_index(path: Path, since_ts: str | None) -> int:
+    """Convert a since_ts API parameter into a line-index cursor.
+
+    Returns the count of records (non-blank lines) whose timestamp is
+    less than or equal to since_ts. Records past this point are the
+    "new" events the caller wants delivered.
+
+    Records with no timestamp or with malformed JSON are treated as
+    already-seen (their slot is consumed by the cursor) so that the
+    line index stays in sync with file position regardless of content.
+
+    A None since_ts means "start from the beginning" → 0.
+    """
+    if not since_ts or not path.exists():
+        return 0
+    index = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    rec = json.loads(stripped)
+                except json.JSONDecodeError:
+                    index += 1
+                    continue
+                ts = rec.get("timestamp", "")
+                if ts and ts > since_ts:
+                    break
+                index += 1
+    except OSError:
+        return 0
+    return index
+
+
+def _read_new_events_after(
+    path: Path,
+    last_index: int,
+    event_types: set[str] | None,
+) -> tuple[list[dict], int]:
+    """Read records past line-index ``last_index``.
+
+    Returns ``(events, new_last_index)`` where ``new_last_index`` is the
+    record-slot count after the last consumed line (whether delivered,
+    filtered out, or malformed). Using a positional cursor instead of
+    timestamps means two events written with the same timestamp are
+    both delivered — the timestamp-only cursor previously dropped
+    same-ts records (codex regate finding, PR #304).
+    """
+    if not path.exists():
+        return [], last_index
+    events: list[dict] = []
+    new_index = last_index
+    current = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                current += 1
+                if current <= last_index:
+                    continue
+                # This slot is being consumed — advance the cursor even
+                # when the record is malformed or filtered out, so we
+                # never re-scan it on the next poll.
+                new_index = current
+                try:
+                    rec = json.loads(stripped)
+                except json.JSONDecodeError:
+                    print(
+                        f"[register-stream] WARNING: malformed JSON line skipped: {stripped[:80]}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if event_types and rec.get("event") not in event_types:
+                    continue
+                events.append(rec)
+    except OSError:
+        return [], last_index
+    return events, new_index
+
+
 def _read_new_events(
     path: Path,
     since_ts: str | None,
     event_types: set[str] | None,
 ) -> tuple[list[dict], str | None]:
-    """Read events from path that are strictly newer than since_ts.
+    """Backward-compatible wrapper around the line-indexed reader.
 
-    Returns (events, latest_timestamp) where latest_timestamp is the
-    maximum timestamp seen in the returned events (or since_ts if none).
-    Skips malformed JSON lines with a stderr warning.
+    Returns ``(events, latest_timestamp)`` where ``latest_timestamp`` is
+    the maximum timestamp seen in the returned events (or ``since_ts``
+    if none). Internally uses the line-index cursor to avoid the
+    same-timestamp-skip bug, but presents a timestamp-shaped result
+    for callers that have not migrated.
     """
-    if not path.exists():
-        return [], since_ts
-    events = []
+    start_index = _resolve_start_index(path, since_ts)
+    events, _new_index = _read_new_events_after(path, start_index, event_types)
     latest_ts = since_ts
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    print(
-                        f"[register-stream] WARNING: malformed JSON line skipped: {line[:80]}",
-                        file=sys.stderr,
-                    )
-                    continue
-                ts = rec.get("timestamp", "")
-                if since_ts and ts <= since_ts:
-                    continue
-                if event_types and rec.get("event") not in event_types:
-                    continue
-                events.append(rec)
-                if ts and (latest_ts is None or ts > latest_ts):
-                    latest_ts = ts
-    except OSError:
-        return [], since_ts
+    for rec in events:
+        ts = rec.get("timestamp", "")
+        if ts and (latest_ts is None or ts > latest_ts):
+            latest_ts = ts
     return events, latest_ts
 
 
@@ -91,8 +156,13 @@ def handle_register_stream(
     Sends a heartbeat comment every heartbeat_interval seconds to keep the
     connection alive. Stops when the client disconnects.
 
+    The cursor is a line index (count of records already delivered) so
+    that two events sharing a timestamp are both streamed — the previous
+    timestamp-only cursor silently dropped the second one.
+
     Query params (handled by caller, passed as args here):
-      since_ts    ISO8601 timestamp — replay only events strictly newer than this
+      since_ts    ISO8601 timestamp — replay only events strictly newer than this.
+                  Resolved once at session start to a line-index cursor.
       event_type  comma-separated event type filter (e.g. dispatch_created,gate_passed)
     """
     src = register_file if register_file is not None else _register_file()
@@ -108,12 +178,12 @@ def handle_register_stream(
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.end_headers()
 
-    last_ts = since_ts
+    last_index = _resolve_start_index(src, since_ts)
     last_heartbeat = time.monotonic()
 
     try:
         while True:
-            events, last_ts = _read_new_events(src, last_ts, event_types)
+            events, last_index = _read_new_events_after(src, last_index, event_types)
             for event in events:
                 line = f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
                 handler.wfile.write(line.encode("utf-8"))
