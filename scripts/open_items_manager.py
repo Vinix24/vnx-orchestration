@@ -415,7 +415,12 @@ def generate_digest():
         "top_warnings": top_warnings,
         "open_items": open_items,
         "recent_closures": [
-            {"id": i["id"], "title": i["title"], "closed_reason": i.get("closed_reason")}
+            {
+                "id": i["id"],
+                "title": i["title"],
+                "closed_reason": i.get("closed_reason"),
+                "closed_at": i.get("updated_at"),
+            }
             for i in recent_closures
         ],
         "last_updated": data.get("last_updated"),
