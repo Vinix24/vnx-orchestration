@@ -1,0 +1,3 @@
+{"type": "session_start", "id": "sess-v0119-stub-001", "model": "codex-1"}
+{"type": "agent_message", "text": "```json\n{\"verdict\": \"pass\", \"findings\": [], \"residual_risk\": \"none\"}\n```"}
+{"type": "token_usage", "input_tokens": 1000, "output_tokens": 100}

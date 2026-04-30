@@ -1,0 +1,3 @@
+{"type": "session_start", "id": "sess-v0118-failure-001", "model": "codex-1"}
+{"type": "agent_message", "text": "Reviewing the PR changes against the review contract...\n\nSeveral issues were found that block merge.\n\n```json\n{\"verdict\": \"fail\", \"findings\": [{\"severity\": \"critical\", \"message\": \"missing test coverage for error path in lease release\"}, {\"severity\": \"high\", \"message\": \"race condition in concurrent dispatch claim\"}], \"residual_risk\": \"untested concurrent writes under high load\"}\n```"}
+{"type": "token_usage", "input_tokens": 1601, "output_tokens": 344}
