@@ -63,11 +63,24 @@ mkdir -p "$(dirname "$LOG_FILE")"
 exec >> "$LOG_FILE" 2>&1
 
 # Cooldown tracking for invalid-skill dispatches.
-# Maps dispatch basename → unix timestamp of last warning log.
+# Stores last-warned unix timestamp per dispatch basename in a sanitized
+# variable name (_INVALID_SKILL_COOLDOWN_<sanitized_key>) accessed via bash
+# indirect expansion. Uses indirect expansion + printf -v instead of an
+# associative array, since /bin/bash 3.2 on macOS does not support the
+# associative-array shell option (codex round-2 finding 1).
 # Prevents log floods when a dispatch has [SKILL_INVALID] and is polled every 2s.
-declare -A _INVALID_SKILL_COOLDOWN
 # Seconds between repeated "invalid skill" warnings per dispatch (env-tunable).
 VNX_INVALID_SKILL_COOLDOWN="${VNX_INVALID_SKILL_COOLDOWN:-60}"
+
+# _invalid_skill_cooldown_var — return the sanitized variable name used to
+# track the last-warned timestamp for a dispatch key. Replaces every
+# non-alphanumeric character with `_` so the result is a valid bash identifier
+# under bash 3.2.
+_invalid_skill_cooldown_var() {
+    local _key="$1"
+    local _safe="${_key//[^a-zA-Z0-9]/_}"
+    printf '_INVALID_SKILL_COOLDOWN_%s' "$_safe"
+}
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dispatcher V8 MINIMAL starting..."
 
@@ -155,6 +168,11 @@ extract_requires_provider_strength() { vnx_dispatch_extract_requires_provider_st
 # ===== V8 CORE DISPATCH FUNCTION =====
 
 # dispatch_with_skill_activation — thin wrapper calling the 4 module functions.
+# Order: payload (validation + prompt build) → lease acquire → terminal mode
+# setup (post-lease, tmux only) → deliver → finalize.
+# Terminal mode I/O (context clear, model switch) is deferred until after the
+# lease is acquired so that a lease or validation failure cannot wipe a worker
+# terminal without a dispatch being delivered.
 dispatch_with_skill_activation() {
     local dispatch_file="$1" track="$2" agent_role="$3"
     local intelligence_data="${4:-}" dispatch_id="${5:-}"
@@ -164,6 +182,17 @@ dispatch_with_skill_activation() {
 
     acquire_dispatch_lease "$dispatch_file" "$track" \
         "$_DP_TERMINAL_ID" "$dispatch_id" "$_DP_SKILL_NAME" "$_DP_GATE" "$_DP_COMPLETE_PROMPT" || return 1
+
+    # Apply deferred terminal mode setup (tmux path only) now that the lease is held.
+    # Subprocess-routed terminals do not need this step (_PDP_NEEDS_MODE_SETUP=0).
+    if [[ "${_PDP_NEEDS_MODE_SETUP:-0}" == "1" ]]; then
+        _pdp_apply_terminal_mode_setup "$_DP_TARGET_PANE" "$dispatch_file" || {
+            rc_release_on_failure "$dispatch_id" "$_DL_RC_ATTEMPT_ID" \
+                "$_DP_TERMINAL_ID" "$_DL_RC_GENERATION" "terminal_mode_setup_failed"
+            release_terminal_claim "$_DP_TERMINAL_ID" "$dispatch_id" || true
+            return 1
+        }
+    fi
 
     deliver_dispatch_to_terminal "$dispatch_file" "$track" "$agent_role" "$dispatch_id" \
         "$_DP_TARGET_PANE" "$_DP_TERMINAL_ID" "$_DP_PROVIDER" \
@@ -185,15 +214,17 @@ _validate_stuck_files() {
     local agent_role="$2"
 
     if grep -q "\[SKILL_INVALID\]" "$dispatch"; then
-        local _dispatch_key _now _last_warned _elapsed
+        local _dispatch_key _now _last_warned _elapsed _cd_var
         _dispatch_key="$(basename "$dispatch" .md)"
         _now=$(date +%s)
-        _last_warned="${_INVALID_SKILL_COOLDOWN[$_dispatch_key]:-0}"
+        _cd_var="$(_invalid_skill_cooldown_var "$_dispatch_key")"
+        _last_warned="${!_cd_var:-0}"
         _elapsed=$(( _now - _last_warned ))
         if (( _elapsed < VNX_INVALID_SKILL_COOLDOWN )); then
             return 1  # still in cooldown — skip silently
         fi
-        _INVALID_SKILL_COOLDOWN[$_dispatch_key]=$_now
+        # Bash 3.2-safe assignment to a dynamic variable name via printf -v.
+        printf -v "$_cd_var" '%s' "$_now"
         log "V8 WARNING: Dispatch $(basename "$dispatch") blocked due to invalid skill (waiting for edit)"
         return 1
     fi
@@ -375,50 +406,42 @@ execute_and_classify_dispatch() {
 }
 
 _cleanup_stuck_dispatches() {
-    # Receipt-driven reconciliation. Moves a dispatch from active/ to
-    # completed/ only when a matching receipt exists in receipts/processed/.
-    # The pre-supervisor heuristic moved any *.md older than 60 minutes — file
-    # mtime is set at delivery time and never refreshed, so legitimate
-    # long-running tasks were silently misclassified as completed and hid live
-    # work from T0 state. Orphans without receipts are reported via the log
-    # but stay in active/ for a higher-level janitor / operator to decide on.
-    local janitor_script="$SCRIPT_DIR/lib/active_dispatch_janitor.py"
-    if [ ! -f "$janitor_script" ]; then
-        return 0
-    fi
+    while IFS= read -r stuck_file; do
+        [ -f "$stuck_file" ] || continue
+        local _stuck_dispatch_id
+        _stuck_dispatch_id="$(basename "$stuck_file" .md)"
+        log "V8: Stuck dispatch detected (>60min active): $_stuck_dispatch_id"
 
-    local data_dir="${VNX_DATA_DIR:-}"
-    local receipts_processed_dir
-    if [ -n "$data_dir" ]; then
-        receipts_processed_dir="$data_dir/receipts/processed"
-    else
-        receipts_processed_dir="$DISPATCH_DIR/../receipts/processed"
-    fi
-    local stale_hours="${VNX_ACTIVE_STALE_HOURS:-24}"
+        # Release terminal claim and canonical lease before marking complete so
+        # future dispatches are not blocked by a stranded lease/claim.
+        local _stuck_track _stuck_terminal
+        _stuck_track="$(extract_track "$stuck_file" 2>/dev/null || echo "")"
+        _stuck_terminal="$(track_to_terminal "$_stuck_track")"
 
-    local janitor_out janitor_rc=0
-    set +e
-    janitor_out=$(python3 "$janitor_script" \
-        --active-dir "$ACTIVE_DIR" \
-        --completed-dir "$COMPLETED_DIR" \
-        --receipts-processed-dir "$receipts_processed_dir" \
-        --stale-hours "$stale_hours" 2>&1)
-    janitor_rc=$?
-    set -e
+        if [ -n "$_stuck_terminal" ]; then
+            if ! release_terminal_claim "$_stuck_terminal" "$_stuck_dispatch_id"; then
+                log_structured_failure "stuck_claim_release_failed" \
+                    "Failed to release terminal claim for stuck dispatch" \
+                    "file=$(basename "$stuck_file") terminal=$_stuck_terminal"
+            fi
+            # release-on-receipt resolves the current lease generation internally;
+            # idempotent when the terminal is already idle.
+            python3 "$SCRIPT_DIR/runtime_core_cli.py" release-on-receipt \
+                --terminal "$_stuck_terminal" \
+                --dispatch-id "$_stuck_dispatch_id" > /dev/null 2>&1 || \
+                log_structured_failure "stuck_lease_release_failed" \
+                    "Failed to release canonical lease for stuck dispatch" \
+                    "file=$(basename "$stuck_file") terminal=$_stuck_terminal"
+        else
+            log "V8 WARN: Could not resolve terminal for stuck dispatch — lease may be stranded: $(basename "$stuck_file")"
+        fi
 
-    if [ "$janitor_rc" -ne 0 ]; then
-        log_structured_failure "active_drain_janitor_failed" \
-            "active dispatch janitor exited non-zero" \
-            "rc=$janitor_rc out=${janitor_out//$'\n'/ | }"
-        return 0
-    fi
-
-    if [ -n "$janitor_out" ]; then
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            log "V8 ACTIVE_DRAIN: $line"
-        done <<< "$janitor_out"
-    fi
+        log "V8: Moving stuck dispatch to completed: $(basename "$stuck_file")"
+        if ! mv "$stuck_file" "$COMPLETED_DIR/" 2>/dev/null; then
+            log_structured_failure "stuck_file_move_failed" "Failed to move stuck dispatch to completed" \
+                "file=$stuck_file"
+        fi
+    done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
 }
 
 # --- Unified supervisor: throttled runtime_supervise tick (SUP-PR3) ---
@@ -444,10 +467,33 @@ _maybe_runtime_supervise() {
     echo "$now" > "$state_file"
 }
 
+_unified_supervisor_lease_sweep_tick() {
+    # SUP-PR2: throttled lease_sweep tick. Activates only when
+    # VNX_SUPERVISOR_MODE=unified. Default (unset/legacy) = no behavior change.
+    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
+
+    local state_file="$VNX_DATA_DIR/state/.last_lease_sweep_ts"
+    local interval="${VNX_LEASE_SWEEP_INTERVAL_SEC:-30}"
+    local now last
+    now=$(date +%s)
+    last=0
+    if [[ -f "$state_file" ]]; then
+        last=$(cat "$state_file" 2>/dev/null || echo 0)
+        [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    fi
+    if (( now - last >= interval )); then
+        mkdir -p "$VNX_LOGS_DIR" "$(dirname "$state_file")"
+        python3 "$SCRIPT_DIR/lib/lease_sweep.py" \
+            >> "$VNX_LOGS_DIR/lease_sweep.log" 2>&1 || true
+        echo "$now" > "$state_file"
+    fi
+}
+
 process_dispatches() {
     local count=0
     _maybe_runtime_supervise
     _cleanup_stuck_dispatches
+    _unified_supervisor_lease_sweep_tick
 
     for dispatch in "$PENDING_DIR"/*.md; do
         [ -f "$dispatch" ] || continue
@@ -458,7 +504,12 @@ process_dispatches() {
         gather_dispatch_intelligence "$dispatch" "$agent_role" "$_PD_TRACK" "$_PD_DISPATCH_ID" "$_PD_GATE" || continue
         execute_and_classify_dispatch "$dispatch" "$_PD_TRACK" "$agent_role" "$_PD_INTEL_RESULT" "$_PD_DISPATCH_ID" || continue
 
-        ((count++))
+        # Use plain assignment for the increment — under `set -e`, a bare
+        # post-increment arithmetic command returns status 1 when the
+        # incoming value was 0 (the expression evaluates to the prior
+        # value), aborting the dispatcher loop after the first successful
+        # dispatch on bash 4.x and later. See codex round-2 finding 2.
+        count=$((count + 1))
         sleep 1  # Small delay between dispatches
     done
 
