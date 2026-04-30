@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vnx.conversation-analyzer</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${VNX_HOME}/scripts/conversation_analyzer_nightly.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/vnx-conversation-analyzer.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vnx-conversation-analyzer.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VNX_HOME</key>
+        <string>${VNX_HOME}</string>
+        <key>VNX_DATA_DIR</key>
+        <string>${VNX_HOME}/.vnx-data</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
