@@ -472,17 +472,19 @@ _ddt_handle_failure() {
 }
 
 # _ddt_subprocess_delivery — route dispatch via SubprocessAdapter instead of tmux.
-# Params: terminal_id dispatch_id complete_prompt model dispatch_file
+# Params: terminal_id dispatch_id complete_prompt model dispatch_file [agent_role]
 _ddt_subprocess_delivery() {
     local terminal_id="$1" dispatch_id="$2" complete_prompt="$3" model="$4" dispatch_file="$5"
+    local agent_role="${6:-}"
 
-    log "V8 DISPATCH: subprocess adapter route — terminal=$terminal_id dispatch=$dispatch_id model=$model"
+    log "V8 DISPATCH: subprocess adapter route — terminal=$terminal_id dispatch=$dispatch_id model=$model role=${agent_role:-<unset>}"
 
     if ! python3 "$VNX_DIR/scripts/lib/subprocess_dispatch.py" \
             --terminal-id "$terminal_id" \
             --instruction "$complete_prompt" \
             --model "$model" \
-            --dispatch-id "$dispatch_id"; then
+            --dispatch-id "$dispatch_id" \
+            ${agent_role:+--role "$agent_role"}; then
         log_structured_failure "subprocess_delivery_failed" \
             "SubprocessAdapter delivery failed" \
             "terminal=$terminal_id dispatch=$dispatch_id"
@@ -521,7 +523,7 @@ deliver_dispatch_to_terminal() {
 
     if [[ "$adapter_type" == "subprocess" ]]; then
         local model="${_CTM_REQUIRES_MODEL:-sonnet}"
-        _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file"
+        _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file" "$agent_role"
         return $?
     fi
 
