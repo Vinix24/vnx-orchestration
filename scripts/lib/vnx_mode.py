@@ -51,7 +51,7 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "intelligence-import", "init-feature", "bootstrap-skills",
     "bootstrap-terminals", "bootstrap-hooks", "regen-settings",
     "patch-agent-files", "register", "list-projects", "unregister",
-    "roadmap",
+    "roadmap", "insights",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
     "init-db",
 })
