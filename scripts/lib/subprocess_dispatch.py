@@ -492,7 +492,7 @@ def _write_manifest(
             "model": model,
             "role": role,
             "instruction_chars": len(instruction),
-            "instruction_sha256": hashlib.sha256(instruction.encode("utf-8")).hexdigest()[:16],
+            "instruction_sha256": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
         }
         manifest_path = manifest_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
