@@ -20,6 +20,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+try:
+    from .file_locking import file_locked_rmw
+except ImportError:  # pragma: no cover — direct-import fallback for sys.path callers
+    from file_locking import file_locked_rmw  # type: ignore[no-redef]
+
 logger = logging.getLogger(__name__)
 
 # Thresholds in seconds
@@ -200,23 +205,17 @@ class WorkerHealthMonitor:
             self._write_health_json()
 
     def _write_health_json(self) -> None:
-        """Write current status to events/worker_health.json (merge with others)."""
+        """Write current status to events/worker_health.json (merge with others).
+
+        Uses fcntl.LOCK_EX via ``file_locked_rmw`` to make the read-modify-write
+        atomic across concurrent workers; without locking, racing writers can
+        clobber each other's terminal_id keys or leave the file half-written.
+        """
         try:
             health_path = self._events_dir / "worker_health.json"
-            self._events_dir.mkdir(parents=True, exist_ok=True)
-
-            # Load existing data (other terminals may be writing)
-            existing: Dict[str, Any] = {}
-            if health_path.exists():
-                try:
-                    existing = json.loads(health_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    existing = {}
-
             h = self.health_status()
-            existing[self.terminal_id] = h.to_dict()
-
-            health_path.write_text(json.dumps(existing, indent=2))
+            with file_locked_rmw(health_path) as data:
+                data[self.terminal_id] = h.to_dict()
         except Exception as exc:
             logger.debug("worker_health_monitor: failed to write health json: %s", exc)
 
