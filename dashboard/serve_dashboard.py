@@ -116,6 +116,10 @@ from api_token_stats import (  # noqa: E402
     _query_token_sessions,
 )
 
+from api_health import (  # noqa: E402
+    _operator_get_health,
+)
+
 from api_operator import (  # noqa: E402
     _api_health,
     _jump_terminal,
@@ -333,6 +337,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/agents":
             _json_response(self, HTTPStatus.OK, _operator_get_agents())
+            return
+
+        if path == "/api/operator/health":
+            _json_response(self, HTTPStatus.OK, _operator_get_health())
             return
 
         # Register stream SSE endpoints — pass CANONICAL_STATE_DIR so the

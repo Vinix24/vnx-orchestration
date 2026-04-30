@@ -466,6 +466,26 @@ def cleanup_worker_exit(
         result=result,
     )
 
+    try:
+        from health_beacon import HealthBeacon
+        HealthBeacon(
+            resolved_state_dir.parent,
+            "cleanup_worker_exit",
+            expected_interval_seconds=None,
+        ).heartbeat(
+            status="ok" if not result.errors else "fail",
+            details={
+                "terminal_id": terminal_id,
+                "dispatch_id": dispatch_id,
+                "exit_status": exit_status,
+                "lease_released": result.lease_released,
+                "worker_transitioned": result.worker_transitioned,
+                "errors": list(result.errors),
+            },
+        )
+    except Exception:
+        pass
+
     return result
 
 
