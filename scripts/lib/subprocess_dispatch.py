@@ -24,6 +24,7 @@ from typing import NamedTuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
+from headless_context_tracker import HeadlessContextTracker
 from worker_health_monitor import WorkerHealthMonitor, HealthStatus, SLOW_THRESHOLD
 from cleanup_worker_exit import cleanup_worker_exit
 
@@ -579,6 +580,107 @@ def _load_agent_profile(config_path: Path) -> str:
     return "default"
 
 
+def _detect_pending_handover(terminal_id: str, handover_dir: Path) -> Path | None:
+    """Find most recent unprocessed handover for terminal_id.
+
+    Scans handover_dir for files matching *{terminal_id}*ROTATION-HANDOVER*.md
+    that do NOT have a .processed suffix. Returns most recent by mtime, or None.
+    """
+    if not handover_dir.exists():
+        return None
+
+    candidates = [
+        p for p in handover_dir.glob(f"*{terminal_id}*ROTATION-HANDOVER*.md")
+        if not p.name.endswith(".processed")
+    ]
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _build_continuation_prompt(handover_path: Path, original_instruction: str) -> str:
+    """Wrap instruction with handover context for seamless continuation.
+
+    Reads the handover markdown and prepends:
+    - "CONTINUATION: Resumed after context rotation."
+    - Completed work section from handover
+    - Remaining tasks section from handover
+    - Then the original instruction
+    """
+    handover_text = handover_path.read_text()
+
+    # Extract ## Status and ## Remaining Tasks sections from handover markdown
+    completed_section = ""
+    remaining_section = ""
+
+    lines = handover_text.splitlines()
+    current_section: str | None = None
+    section_lines: list[str] = []
+
+    for line in lines:
+        if line.startswith("## Status"):
+            if current_section == "status":
+                completed_section = "\n".join(section_lines).strip()
+            current_section = "status"
+            section_lines = []
+        elif line.startswith("## Remaining Tasks"):
+            if current_section == "status":
+                completed_section = "\n".join(section_lines).strip()
+            current_section = "remaining"
+            section_lines = []
+        elif line.startswith("## ") and current_section == "remaining":
+            remaining_section = "\n".join(section_lines).strip()
+            current_section = None
+            section_lines = []
+        else:
+            section_lines.append(line)
+
+    if current_section == "status":
+        completed_section = "\n".join(section_lines).strip()
+    elif current_section == "remaining":
+        remaining_section = "\n".join(section_lines).strip()
+
+    header = (
+        "CONTINUATION: Resumed after context rotation.\n\n"
+        f"## Completed Work (from handover)\n{completed_section}\n\n"
+        f"## Remaining Tasks (from handover)\n{remaining_section}\n\n"
+        "---\n\n"
+    )
+    return header + original_instruction
+
+
+def _write_rotation_handover(
+    terminal_id: str,
+    dispatch_id: str,
+    tracker: "HeadlessContextTracker",
+) -> None:
+    """Write a rotation handover markdown file to .vnx-data/rotation_handovers/."""
+    handover_dir = _default_state_dir().parent / "rotation_handovers"
+    try:
+        handover_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"{timestamp}-{terminal_id}-ROTATION-HANDOVER.md"
+        snapshot = tracker.snapshot()
+        content = (
+            f"# {terminal_id} Context Rotation Handover\n"
+            f"**Timestamp**: {timestamp}\n"
+            f"**Context Used**: {snapshot['context_used_pct']}%\n"
+            f"**Dispatch-ID**: {dispatch_id}\n"
+            "## Status\n"
+            "in-progress\n"
+            "## Remaining Tasks\n"
+            "[continuation needed]\n"
+        )
+        (handover_dir / filename).write_text(content)
+        logger.info(
+            "_write_rotation_handover: handover written to %s",
+            handover_dir / filename,
+        )
+    except Exception as exc:
+        logger.warning("_write_rotation_handover: failed to write handover: %s", exc)
+
+
 def deliver_via_subprocess(
     terminal_id: str,
     instruction: str,
@@ -624,6 +726,17 @@ def deliver_via_subprocess(
         total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
     except (KeyError, ValueError):
         pass
+
+    # Detect pending handover and wrap instruction for seamless continuation.
+    # Runs on every attempt (including retries) so continuation is always fresh.
+    handover_dir = _default_state_dir().parent / "rotation_handovers"
+    pending_handover = _detect_pending_handover(terminal_id, handover_dir)
+    if pending_handover is not None:
+        logger.info(
+            "deliver_via_subprocess: pending handover found for %s: %s",
+            terminal_id, pending_handover,
+        )
+        instruction = _build_continuation_prompt(pending_handover, instruction)
 
     # Append repo map to instruction before skill context wrapping
     if repo_map:
@@ -721,8 +834,10 @@ def deliver_via_subprocess(
         )
         heartbeat_thread.start()
 
+    tracker = HeadlessContextTracker(model_context_limit=200_000)
     event_count = 0
     _last_stuck_log_time = 0.0
+    rotation_triggered = False
     try:
         for _event in adapter.read_events_with_timeout(
             terminal_id,
@@ -737,6 +852,30 @@ def deliver_via_subprocess(
                 norm = _normalize_repo_path(raw_path, _repo_root)
                 if norm:
                     _touched_files.add(norm)
+            # Update the context tracker.  ``_event`` is a StreamEvent
+            # (dataclass with ``.type``/``.data`` attrs); HeadlessContextTracker
+            # accepts either a StreamEvent-like object or a plain dict thanks
+            # to its internal normalisation, so this call is type-safe even
+            # though the unit tests pass plain dicts.
+            tracker.update(_event)
+            # Detect rotation as soon as the threshold is crossed and write
+            # the handover exactly once — checking *inside* the loop avoids
+            # the prior bug where a brief late-stream context spike on a
+            # normally-completing dispatch flipped the post-loop
+            # ``should_rotate`` check and returned success=False.  Once
+            # rotation fires we stop the subprocess so the worker can resume
+            # via the handover on the next dispatch.
+            if not rotation_triggered and tracker.should_rotate:
+                rotation_triggered = True
+                _write_rotation_handover(terminal_id, dispatch_id, tracker)
+                try:
+                    adapter.stop(terminal_id)
+                except Exception as _exc:
+                    logger.debug(
+                        "deliver_via_subprocess: adapter.stop after rotation failed: %s",
+                        _exc,
+                    )
+                break
             if health_monitor is not None:
                 health_monitor.update(_event)
                 # Log stuck warning at most once per SLOW_THRESHOLD window
@@ -747,7 +886,23 @@ def deliver_via_subprocess(
                     if h.status == HealthStatus.STUCK:
                         health_monitor.log_stuck_event()
                         _last_stuck_log_time = _now
+
         session_id = adapter.get_session_id(terminal_id)
+
+        # Rotation is a graceful stop: surface as success=False so
+        # deliver_with_recovery's auto-stash protects partial work and the
+        # next dispatch (or the immediate retry) sees the handover.  We
+        # *only* take this branch when rotation was actually triggered
+        # mid-stream — never based on the post-loop tracker state alone.
+        if rotation_triggered:
+            completed_manifest = _promote_manifest(dispatch_id)
+            return _SubprocessResult(
+                success=False,
+                session_id=session_id,
+                event_count=event_count,
+                manifest_path=completed_manifest or manifest_path,
+                touched_files=frozenset(_touched_files),
+            )
 
         # Fail-closed: non-zero exit code means failure even when events were parsed.
         # Manifest promotion is deferred until after all fail-closed checks so
@@ -799,6 +954,20 @@ def deliver_via_subprocess(
             except Exception as _exc:
                 logger.debug("deliver_via_subprocess: session save failed: %s", _exc)
 
+        # Mark handover as processed after successful delivery (not rotation)
+        if pending_handover is not None and pending_handover.exists():
+            processed_path = pending_handover.with_suffix(pending_handover.suffix + ".processed")
+            try:
+                pending_handover.rename(processed_path)
+                logger.info(
+                    "deliver_via_subprocess: handover marked processed: %s",
+                    processed_path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "deliver_via_subprocess: failed to mark handover processed: %s", exc
+                )
+
         return _SubprocessResult(
             success=True,
             session_id=session_id,
@@ -836,13 +1005,53 @@ def deliver_via_subprocess(
         )
 
 
-def _check_commit_since(dispatch_start_ts: str) -> bool:
-    """Return True if no commits are found since dispatch_start_ts (commit_missing).
+def _check_commit_since(dispatch_start_ts: str, dispatch_id: str | None = None) -> bool:
+    """Return True if no commits attributable to this dispatch are found.
 
-    Uses GovernanceEnforcer.check("receipt_must_have_commit") when available.
-    Falls back to a direct git log check when the enforcer cannot be loaded.
+    When ``dispatch_id`` is provided, the check is *dispatch-scoped*: only
+    commits whose message contains ``Dispatch-ID: <dispatch_id>`` count as
+    "this dispatch committed".  This prevents another terminal's commit
+    landing during the dispatch window from being mis-attributed to this
+    dispatch — a real correctness risk in shared worktrees where multiple
+    headless workers operate concurrently.
+
+    When ``dispatch_id`` is None, falls back to the legacy time-window check
+    (any commit since ``dispatch_start_ts``) for backward compatibility with
+    callers that haven't been updated.
+
     Never raises.
     """
+    if dispatch_id:
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "log",
+                    "--all",
+                    f"--since={dispatch_start_ts}",
+                    f"--grep=Dispatch-ID: {dispatch_id}",
+                    "--oneline",
+                    "-5",
+                ],
+                capture_output=True, text=True, timeout=10,
+                cwd=Path(__file__).resolve().parents[2],
+            )
+            dispatch_commits = [l for l in proc.stdout.splitlines() if l.strip()]
+            if not dispatch_commits:
+                logger.warning(
+                    "receipt_must_have_commit: no commits with 'Dispatch-ID: %s' "
+                    "found since %s (commit attribution scoped to this dispatch)",
+                    dispatch_id, dispatch_start_ts,
+                )
+                return True
+            return False
+        except Exception as exc:
+            logger.debug(
+                "dispatch-scoped commit check failed for %s: %s — falling back to time-window check",
+                dispatch_id, exc,
+            )
+
+    # Legacy / fallback path: time-window check via GovernanceEnforcer
     try:
         from governance_enforcer import GovernanceEnforcer, DEFAULT_CONFIG_PATH  # noqa: PLC0415
         enforcer = GovernanceEnforcer()
@@ -872,6 +1081,34 @@ def _check_commit_since(dispatch_start_ts: str) -> bool:
     except Exception as exc:
         logger.debug("git log fallback failed: %s", exc)
     return False
+
+
+def _commit_belongs_to_dispatch(commit_hash: str, dispatch_id: str) -> bool:
+    """Return True if the given commit's message contains the dispatch_id marker.
+
+    Used by deliver_with_recovery to determine whether a HEAD change between
+    pre-dispatch and post-dispatch was actually produced by THIS dispatch
+    (vs. a concurrent commit from another terminal in a shared worktree).
+
+    Never raises.  Returns False on any error or empty input.
+    """
+    if not commit_hash or not dispatch_id:
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "log", "-1", "--pretty=%B", commit_hash],
+            capture_output=True, text=True, timeout=10,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+        if proc.returncode != 0:
+            return False
+        return f"Dispatch-ID: {dispatch_id}" in proc.stdout
+    except Exception as exc:
+        logger.debug(
+            "_commit_belongs_to_dispatch failed for %s/%s: %s",
+            commit_hash, dispatch_id, exc,
+        )
+        return False
 
 
 def _auto_commit_changes(
@@ -1523,10 +1760,21 @@ def deliver_with_recovery(
         if sub_result.success:
             monitor.mark_completed()
             commit_hash_after = _get_commit_hash()
-            commit_missing = _check_commit_since(dispatch_start_ts)
+            commit_missing = _check_commit_since(dispatch_start_ts, dispatch_id=dispatch_id)
 
-            # Post-dispatch commit enforcement
-            committed = commit_hash_before != commit_hash_after
+            # Post-dispatch commit enforcement.
+            #
+            # ``committed`` must mean "this dispatch produced a commit", not
+            # "HEAD moved during the dispatch window" — in a shared worktree
+            # another terminal can commit concurrently, which would otherwise
+            # be mis-attributed here.  We require BOTH (a) HEAD changed and
+            # (b) the new commit message references this dispatch_id.
+            head_moved = bool(
+                commit_hash_before and commit_hash_after and commit_hash_before != commit_hash_after
+            )
+            committed = head_moved and _commit_belongs_to_dispatch(
+                commit_hash_after, dispatch_id
+            )
             if auto_commit and commit_missing and not committed:
                 committed = _auto_commit_changes(
                     dispatch_id, terminal_id, gate=gate,
