@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.recommendation-aggregator</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>mkdir -p "$VNX_HOME/.vnx-data/logs" &amp;&amp; python3 "$VNX_HOME/scripts/lib/recommendation_aggregator.py" &gt;&gt; "$VNX_HOME/.vnx-data/logs/recommendation_aggregator.log" 2&gt;&amp;1</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key><string>/tmp/vnx-recommendation-aggregator.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-recommendation-aggregator.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
