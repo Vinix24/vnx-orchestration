@@ -17,6 +17,7 @@ Governance:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -50,6 +51,25 @@ EVIDENCE_THRESHOLDS = {
 
 # Selection priority order (highest first) — used for payload overflow trimming
 ITEM_CLASS_PRIORITY = ["proven_pattern", "failure_prevention", "recent_comparable"]
+
+# Pattern categories (see schemas/migrations/0011_add_pattern_category.sql).
+# Diversity rules consume these to demote governance signals out of the
+# proven_pattern slot and avoid repeating identical content across a batch.
+PATTERN_CATEGORY_CODE = "code"
+PATTERN_CATEGORY_GOVERNANCE = "governance"
+PATTERN_CATEGORY_PROCESS = "process"
+PATTERN_CATEGORY_ANTIPATTERN_EVIDENCE = "antipattern_evidence"
+
+# Maximum governance items per batch — they win the proven_pattern slot only
+# when no real code pattern is available, and never appear more than once
+# across a single injection.
+MAX_GOVERNANCE_PER_BATCH = 1
+
+# Confidence multiplier applied to governance proven_patterns so that, all else
+# equal, a code pattern with the same raw confidence wins. Pure penalty —
+# governance patterns are still allowed when they're the only candidates above
+# threshold.
+GOVERNANCE_CONFIDENCE_PENALTY = 0.7
 
 # Recent comparable window
 RECENT_COMPARABLE_DAYS = 14
@@ -107,6 +127,8 @@ class IntelligenceItem:
     scope_tags: List[str]
     source_refs: List[str] = field(default_factory=list)
     task_class_filter: List[str] = field(default_factory=list)
+    pattern_category: str = PATTERN_CATEGORY_CODE
+    content_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -120,7 +142,35 @@ class IntelligenceItem:
             "scope_tags": self.scope_tags,
             "source_refs": self.source_refs,
             "task_class_filter": self.task_class_filter,
+            "pattern_category": self.pattern_category,
+            "content_hash": self.content_hash,
         }
+
+
+def _normalize_for_hash(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _content_hash(*parts: str) -> str:
+    joined = "\n".join(_normalize_for_hash(p) for p in parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def classify_pattern_category(title: str, description: str) -> str:
+    """Mirror of pattern_dedup.classify_pattern, kept local to avoid import cycle.
+
+    Order matters: governance gate-pass shape wins over generic process tokens.
+    """
+    haystack = f"{_normalize_for_hash(title)} :: {_normalize_for_hash(description)}"
+    if "gate " in haystack and "passed" in haystack:
+        return PATTERN_CATEGORY_GOVERNANCE
+    if any(token in haystack for token in (
+        "receipt processor",
+        "dispatch lifecycle",
+        "lease release",
+    )):
+        return PATTERN_CATEGORY_PROCESS
+    return PATTERN_CATEGORY_CODE
 
 
 @dataclass
@@ -285,6 +335,21 @@ class IntelligenceSelector:
             self._quality_db.close()
             self._quality_db = None
 
+    def _has_column(self, table: str, column: str) -> bool:
+        """Cheap PRAGMA-based feature detection for migrations not yet applied."""
+        db = self._get_quality_db()
+        if db is None:
+            return False
+        try:
+            rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+        except sqlite3.Error:
+            return False
+        for row in rows:
+            name = row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+            if name == column:
+                return True
+        return False
+
     def _maybe_reconcile_confidence(self) -> None:
         """Run reconcile if the cached timestamp is older than the TTL.
 
@@ -358,9 +423,16 @@ class IntelligenceSelector:
         # Query candidates per class
         candidates = self._query_candidates(resolved_class, effective_scope)
 
+        # Apply pre-selection diversity: collapse byte-identical content_hash
+        # candidates and demote governance signals so they don't drown out
+        # real code patterns (audit 2026-04-30: 54/55 byte-identical injections).
+        candidates = self._apply_candidate_diversity(candidates, resolved_class)
+
         # Select best item per class
         selected: List[IntelligenceItem] = []
         suppressed: List[SuppressionRecord] = []
+        seen_hashes: set = set()
+        governance_used = 0
 
         for item_class in ITEM_CLASS_PRIORITY:
             class_candidates = candidates.get(item_class, [])
@@ -388,9 +460,50 @@ class IntelligenceSelector:
                 ))
                 continue
 
-            # Select highest confidence
-            best = max(eligible, key=lambda c: c.confidence)
+            # Diversity filters: drop already-seen content hashes and respect
+            # the per-batch governance cap.
+            diverse = []
+            dropped_dup = 0
+            dropped_gov = 0
+            for cand in eligible:
+                if cand.content_hash and cand.content_hash in seen_hashes:
+                    dropped_dup += 1
+                    continue
+                if (
+                    cand.pattern_category == PATTERN_CATEGORY_GOVERNANCE
+                    and governance_used >= MAX_GOVERNANCE_PER_BATCH
+                ):
+                    dropped_gov += 1
+                    continue
+                diverse.append(cand)
+
+            if not diverse:
+                reason_parts = []
+                if dropped_dup:
+                    reason_parts.append(
+                        f"{dropped_dup} duplicates removed by content hash"
+                    )
+                if dropped_gov:
+                    reason_parts.append(
+                        f"{dropped_gov} governance items past per-batch cap"
+                    )
+                reason = (
+                    "; ".join(reason_parts)
+                    if reason_parts
+                    else "no diverse candidates remain"
+                )
+                suppressed.append(SuppressionRecord(
+                    item_class=item_class,
+                    reason=f"diversity filter dropped all eligible items ({reason})",
+                ))
+                continue
+
+            best = max(diverse, key=lambda c: c.confidence)
             selected.append(best)
+            if best.content_hash:
+                seen_hashes.add(best.content_hash)
+            if best.pattern_category == PATTERN_CATEGORY_GOVERNANCE:
+                governance_used += 1
 
         # Enforce payload size limit (Section 2.3 step 6)
         selected = self._enforce_payload_limit(selected, suppressed)
@@ -652,6 +765,75 @@ class IntelligenceSelector:
             return
 
     # ------------------------------------------------------------------
+    # Diversity helpers
+    # ------------------------------------------------------------------
+
+    def _apply_candidate_diversity(
+        self,
+        candidates: Dict[str, List[IntelligenceItem]],
+        task_class: str,
+    ) -> Dict[str, List[IntelligenceItem]]:
+        """Collapse same-hash duplicates and re-rank governance vs. code.
+
+        Within each class:
+          * Patterns sharing a content_hash collapse to the single highest-
+            confidence representative. This protects the selector from
+            offering the same governance gate-pass payload N times under
+            different ids (the failure mode the audit caught).
+          * Governance-category proven_patterns get a confidence penalty so
+            that, all else equal, a real code pattern wins. The penalty is
+            applied to a copy so that downstream consumers reading
+            ``IntelligenceItem.confidence`` see the effective ranking score.
+        """
+        adjusted: Dict[str, List[IntelligenceItem]] = {}
+        for cls, items in candidates.items():
+            collapsed: Dict[str, IntelligenceItem] = {}
+            unhashed: List[IntelligenceItem] = []
+            for item in items:
+                if not item.content_hash:
+                    unhashed.append(item)
+                    continue
+                existing = collapsed.get(item.content_hash)
+                if existing is None or item.confidence > existing.confidence:
+                    collapsed[item.content_hash] = item
+            merged = list(collapsed.values()) + unhashed
+
+            if cls == "proven_pattern":
+                merged = [
+                    self._apply_governance_penalty(item, task_class)
+                    for item in merged
+                ]
+
+            merged.sort(key=lambda i: i.confidence, reverse=True)
+            adjusted[cls] = merged
+        return adjusted
+
+    def _apply_governance_penalty(
+        self,
+        item: IntelligenceItem,
+        task_class: str,
+    ) -> IntelligenceItem:
+        """Down-weight governance proven_patterns for code-context dispatches."""
+        if item.pattern_category != PATTERN_CATEGORY_GOVERNANCE:
+            return item
+        if task_class != "coding_interactive":
+            return item
+        return IntelligenceItem(
+            item_id=item.item_id,
+            item_class=item.item_class,
+            title=item.title,
+            content=item.content,
+            confidence=item.confidence * GOVERNANCE_CONFIDENCE_PENALTY,
+            evidence_count=item.evidence_count,
+            last_seen=item.last_seen,
+            scope_tags=item.scope_tags,
+            source_refs=item.source_refs,
+            task_class_filter=item.task_class_filter,
+            pattern_category=item.pattern_category,
+            content_hash=item.content_hash,
+        )
+
+    # ------------------------------------------------------------------
     # Candidate query methods
     # ------------------------------------------------------------------
 
@@ -689,11 +871,17 @@ class IntelligenceSelector:
         self._maybe_reconcile_confidence()
 
         items: List[IntelligenceItem] = []
+        has_pattern_cat = self._has_column("success_patterns", "pattern_category")
+        select_cols = (
+            "id, title, description, category, confidence_score, "
+            "usage_count, source_dispatch_ids, first_seen, last_used"
+        )
+        if has_pattern_cat:
+            select_cols += ", pattern_category"
         try:
             rows = db.execute(
-                """
-                SELECT id, title, description, category, confidence_score,
-                       usage_count, source_dispatch_ids, first_seen, last_used
+                f"""
+                SELECT {select_cols}
                 FROM success_patterns
                 WHERE (valid_until IS NULL OR valid_until > datetime('now'))
                 ORDER BY confidence_score DESC
@@ -718,13 +906,17 @@ class IntelligenceSelector:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            title = (row_d.get("title") or "Proven pattern")[:120]
             content = (row_d.get("description") or "")[:MAX_CONTENT_CHARS_PER_ITEM]
             last_seen = row_d.get("last_used") or row_d.get("first_seen") or _now_utc()
+
+            stored_cat = row_d.get("pattern_category")
+            pattern_category = stored_cat or classify_pattern_category(title, content)
 
             items.append(IntelligenceItem(
                 item_id=_stable_item_id("sp", str(row_d.get("id", ""))),
                 item_class="proven_pattern",
-                title=(row_d.get("title") or "Proven pattern")[:120],
+                title=title,
                 content=content,
                 confidence=float(row_d.get("confidence_score", 0.0)),
                 evidence_count=int(row_d.get("usage_count", 0)),
@@ -732,6 +924,8 @@ class IntelligenceSelector:
                 scope_tags=pattern_scope,
                 source_refs=source_refs[:5],
                 task_class_filter=[],
+                pattern_category=pattern_category,
+                content_hash=_content_hash(title, content),
             ))
 
         return items
@@ -790,10 +984,11 @@ class IntelligenceSelector:
             severity = row_d.get("severity", "medium")
             confidence = severity_confidence.get(severity, 0.5)
 
+            ap_title = (row_d.get("title") or "Failure prevention")[:120]
             items.append(IntelligenceItem(
                 item_id=_stable_item_id("ap", str(row_d.get("id", ""))),
                 item_class="failure_prevention",
-                title=(row_d.get("title") or "Failure prevention")[:120],
+                title=ap_title,
                 content=content,
                 confidence=confidence,
                 evidence_count=int(row_d.get("occurrence_count", 1)),
@@ -801,6 +996,8 @@ class IntelligenceSelector:
                 scope_tags=pattern_scope,
                 source_refs=[f"antipattern_{row_d['id']}"],
                 task_class_filter=[],
+                pattern_category=PATTERN_CATEGORY_ANTIPATTERN_EVIDENCE,
+                content_hash=_content_hash(ap_title, content),
             ))
 
         # Query prevention_rules
@@ -828,10 +1025,11 @@ class IntelligenceSelector:
 
             content = (row_d.get("recommendation") or row_d.get("description") or "")[:MAX_CONTENT_CHARS_PER_ITEM]
 
+            pr_title = (row_d.get("description") or "Prevention rule")[:120]
             items.append(IntelligenceItem(
                 item_id=_stable_item_id("pr", str(row_d.get("id", ""))),
                 item_class="failure_prevention",
-                title=(row_d.get("description") or "Prevention rule")[:120],
+                title=pr_title,
                 content=content,
                 confidence=float(row_d.get("confidence", 0.5)),
                 evidence_count=max(1, int(row_d.get("triggered_count", 1))),
@@ -839,6 +1037,8 @@ class IntelligenceSelector:
                 scope_tags=rule_scope,
                 source_refs=[f"prevention_rule_{row_d['id']}"],
                 task_class_filter=[],
+                pattern_category=PATTERN_CATEGORY_PROCESS,
+                content_hash=_content_hash(pr_title, content),
             ))
 
         return items
@@ -896,10 +1096,11 @@ class IntelligenceSelector:
 
             confidence = 0.7 if outcome == "success" else 0.45
 
+            dm_title = f"Recent: {skill} dispatch ({outcome})"[:120]
             items.append(IntelligenceItem(
                 item_id=_stable_item_id("dm", str(row_d.get("dispatch_id", ""))),
                 item_class="recent_comparable",
-                title=f"Recent: {skill} dispatch ({outcome})"[:120],
+                title=dm_title,
                 content=content,
                 confidence=confidence,
                 evidence_count=1,
@@ -907,6 +1108,8 @@ class IntelligenceSelector:
                 scope_tags=dispatch_scope,
                 source_refs=[row_d["dispatch_id"]],
                 task_class_filter=[],
+                pattern_category=PATTERN_CATEGORY_PROCESS,
+                content_hash=_content_hash(dm_title, content),
             ))
 
         return items
