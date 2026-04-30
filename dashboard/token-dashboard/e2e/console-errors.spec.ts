@@ -26,19 +26,21 @@ function attachErrorListeners(page: Page): ErrorCollector {
     if (msg.type() !== 'error') return;
     const text = msg.text();
 
-    // Next.js HMR / Fast Refresh — dev-server infrastructure, not application code
+    // FILTER: Next.js HMR / Fast Refresh — dev-server infrastructure reconnect noise (NOT a runtime error)
     if (/\[HMR\]|\[Fast Refresh\]|webpack-internal:\/\//.test(text)) return;
-    // Browser extension scripts injected into the page — outside app control
+    // FILTER: Browser extension scripts injected into the page — outside application control
     if (/chrome-extension:\/\/|moz-extension:\/\//.test(text)) return;
-    // React hydration warnings in dev mode — expected when SSR and client state diverge
-    if (/Hydration|hydration|did not match|validateDOMNesting/.test(text)) return;
-    // SWR throw-on-error messages for the external stats API (proxied at /api/token-stats).
-    // The app already shows a graceful "Failed to load data" banner in this case.
+    // FILTER: Next.js SSR→client hydration mismatch in dev mode — expected when server/client rendering diverges
+    // NOTE: validateDOMNesting is intentionally NOT filtered — it signals invalid HTML structure (real bug)
+    if (/Hydration|hydration|did not match/.test(text)) return;
+    // FILTER: SWR fetch-failure messages for the external stats API (/api/token-stats proxy)
+    // The app renders a graceful "Failed to load data" banner; these errors are expected in CI
     if (/Failed to fetch token stats|Failed to fetch sessions|Failed to fetch conversations/.test(text)) return;
-    // ResizeObserver loop errors from charting libraries when container dimensions are 0 in headless
+    // FILTER: ResizeObserver loop — charting library artefact in headless mode when container dimensions are 0
     if (/ResizeObserver loop limit exceeded|ResizeObserver was delivered/.test(text)) return;
-    // Next.js warns about styled-jsx prop in dev mode — implementation detail, not a bug
-    if (/styled-jsx|Warning: Each child in a list/.test(text)) return;
+    // FILTER: Next.js styled-jsx prop warning in dev mode — internal implementation detail, not a bug
+    // NOTE: "Warning: Each child in a list" (missing React key prop) is intentionally NOT filtered — it signals a real bug
+    if (/styled-jsx/.test(text)) return;
 
     collected.consoleErrors.push(`[console.error] ${text}`);
   });
