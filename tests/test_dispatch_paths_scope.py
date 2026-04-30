@@ -130,6 +130,7 @@ class TestAutoCommitManifestScope(unittest.TestCase):
             result = _auto_commit_changes(
                 "d-A", "T1",
                 pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(current_dirty),
                 manifest_paths=["scripts/lib/", "tests/"],
             )
 
@@ -160,6 +161,7 @@ class TestAutoCommitManifestScope(unittest.TestCase):
             result = _auto_commit_changes(
                 "d-D", "T1",
                 pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(current_dirty),
                 manifest_paths=["nonexistent/dir/"],
             )
 
@@ -197,6 +199,7 @@ class TestAutoStashManifestScope(unittest.TestCase):
             result = _auto_stash_changes(
                 "d-B", "T2",
                 pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(current_dirty),
                 manifest_paths=["scripts/lib/"],
             )
 
@@ -238,6 +241,7 @@ class TestLegacyModeNoManifest(unittest.TestCase):
             result = _auto_commit_changes(
                 "d-C", "T1",
                 pre_dispatch_dirty=pre_dirty,
+                dispatch_touched_files=frozenset(current_dirty),
                 manifest_paths=None,
             )
 
@@ -372,6 +376,7 @@ class TestParallelDispatchIsolation(unittest.TestCase):
             committed = _auto_commit_changes(
                 "d-A-parallel", "T1",
                 pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(current_dirty),
                 manifest_paths=["scripts/a/"],
             )
 
@@ -406,6 +411,7 @@ class TestParallelDispatchIsolation(unittest.TestCase):
             stashed = _auto_stash_changes(
                 "d-B-fail", "T2",
                 pre_dispatch_dirty=set(),
+                dispatch_touched_files=frozenset(current_dirty),
                 manifest_paths=["scripts/b/"],
             )
 
