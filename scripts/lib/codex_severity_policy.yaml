@@ -1,0 +1,22 @@
+# CFX-17: Codex severity policy
+#
+# Demote findings produced by codex review whose message matches one of the
+# patterns below. Used by codex_severity_translator.translate_findings before
+# blocking_findings are counted at the closure-gate layer. Compensates for
+# codex severity inflation when codex itself can't be tightened (or hasn't
+# propagated changes yet). Patterns are case-insensitive Python regex applied
+# against the finding's `message` field.
+
+demote_to_warning:
+  - pattern: "truncated.*hash"
+    rationale: "Truncated digest fields are intentional, not bugs"
+  - pattern: "hardcoded.*test.*url|hardcoded.*localhost"
+    rationale: "Test fixtures may have hardcoded test URLs"
+  - pattern: "stderr.*plain.*text"
+    rationale: "Plain-text stderr is acceptable for human reading"
+  - pattern: "out_of_scope|adjacent.*code"
+    rationale: "Out-of-scope findings should not block merge"
+
+demote_to_info:
+  - pattern: "style|formatting|indentation"
+    rationale: "Style is advisory"
