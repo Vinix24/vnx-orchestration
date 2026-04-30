@@ -27,7 +27,8 @@ VALID_EVENTS = {
     "gate_failed",              # gate completed with blocking findings
     "pr_opened",
     "pr_merged",
-    "runtime_anomaly_detected", # RuntimeSupervisor detected a stalled/zombie worker
+    "runtime_anomaly_detected",          # RuntimeSupervisor detected a stalled/zombie worker
+    "lease_released_on_failure_partial", # lease released but failure_recorded=False — incomplete cleanup
 }
 
 

@@ -347,6 +347,10 @@ rc_release_on_failure() {
                 "dispatch=$dispatch_id terminal=$terminal_id attempt_id=${attempt_id:-} failure_recorded=${failure_recorded:-} failure_error=${failure_error:-}"
             emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
                 "lease_released_broker_inconsistent" "false" "broker_failure_not_recorded"
+            if [[ "$failure_recorded" == "false" ]]; then
+                python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append lease_released_on_failure_partial \
+                    "dispatch_id=$dispatch_id" "terminal=$terminal_id" 2>/dev/null || true
+            fi
         else
             emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
                 "lease_released_on_failure" "true"
