@@ -18,6 +18,7 @@ if str(_SCRIPTS / "lib") not in sys.path:
 from check_active_drain import (  # noqa: E402
     DrainResult,
     build_receipt_index,
+    build_receipt_status_index,
     drain_active,
     drain_one,
     iter_active_dispatches,
@@ -61,14 +62,19 @@ def _make_active_dispatch(
     return d
 
 
-def _make_receipt(data: Path, dispatch_id: str, pid: int = 9999) -> Path:
+def _make_receipt(
+    data: Path,
+    dispatch_id: str,
+    pid: int = 9999,
+    status: str = "success",
+) -> Path:
     """Create a processed receipt for the given dispatch_id."""
     receipt = data / "receipts" / "processed" / f"1776{pid}-{dispatch_id[:12]}-{pid}.json"
     receipt.write_text(
         json.dumps({
             "dispatch_id": dispatch_id,
             "event_type": "task_complete",
-            "status": "success",
+            "status": status,
         }),
         encoding="utf-8",
     )
@@ -346,3 +352,108 @@ class TestDrainActive:
         results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
         assert all(r.action == "completed" for r in results)
         assert len(results) == 3
+
+
+# ---------------------------------------------------------------------------
+# CFX-1 round-1 finding: status-aware drain
+# ---------------------------------------------------------------------------
+
+class TestStatusAwareDrain:
+    """Codex round-1 PR #320: receipts with failure statuses must NOT cause
+    a dispatch to be drained as completed work."""
+
+    def test_status_index_classifies_success_and_failure(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        _make_receipt(data, "ok-dispatch", pid=1, status="success")
+        _make_receipt(data, "bad-dispatch", pid=2, status="failed")
+        _make_receipt(data, "err-dispatch", pid=3, status="error")
+        _make_receipt(data, "blocked-dispatch", pid=4, status="blocked")
+        _make_receipt(data, "weird-dispatch", pid=5, status="bananas")
+
+        idx = build_receipt_status_index(data / "receipts")
+        assert idx["ok-dispatch"] == "success"
+        assert idx["bad-dispatch"] == "failure"
+        assert idx["err-dispatch"] == "failure"
+        assert idx["blocked-dispatch"] == "failure"
+        assert idx["weird-dispatch"] == "unknown"
+
+    def test_status_index_failure_wins_over_success(self, tmp_path: Path) -> None:
+        """If two receipts disagree, the failure status must win — fail-closed."""
+        data = _make_data_dir(tmp_path)
+        _make_receipt(data, "split-dispatch", pid=10, status="success")
+        _make_receipt(data, "split-dispatch", pid=11, status="failed")
+
+        idx = build_receipt_status_index(data / "receipts")
+        assert idx["split-dispatch"] == "failure"
+
+    def test_legacy_build_receipt_index_still_returns_frozenset(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        _make_receipt(data, "legacy-dispatch", pid=20, status="success")
+        idx = build_receipt_index(data / "receipts")
+        assert isinstance(idx, frozenset)
+        assert "legacy-dispatch" in idx
+
+    def test_failed_receipt_routes_to_dead_letter(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        did = "20260429-failed-dispatch"
+        d = _make_active_dispatch(data, did, hours_old=2.0)
+        _make_receipt(data, did, pid=30, status="failed")
+
+        results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
+        assert len(results) == 1
+        assert results[0].action == "dead_letter"
+        assert "failure" in results[0].reason
+        assert (data / "dispatches" / "dead_letter" / did).exists()
+        assert not (data / "dispatches" / "completed" / did).exists()
+        # dispatch directory must be removed from active/
+        assert not d.exists()
+
+    def test_timeout_receipt_routes_to_dead_letter(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        did = "20260429-timeout-dispatch"
+        _make_active_dispatch(data, did, hours_old=2.0)
+        _make_receipt(data, did, pid=31, status="timeout")
+
+        results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
+        assert results[0].action == "dead_letter"
+
+    def test_unknown_status_routes_to_dead_letter(self, tmp_path: Path) -> None:
+        """Unrecognised statuses fail closed — never silently completed."""
+        data = _make_data_dir(tmp_path)
+        did = "20260429-mystery-dispatch"
+        _make_active_dispatch(data, did, hours_old=2.0)
+        _make_receipt(data, did, pid=32, status="surprise")
+
+        results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
+        assert results[0].action == "dead_letter"
+        assert "unrecognised" in results[0].reason
+
+    def test_success_receipt_still_routes_to_completed(self, tmp_path: Path) -> None:
+        data = _make_data_dir(tmp_path)
+        did = "20260429-happy-dispatch"
+        _make_active_dispatch(data, did, hours_old=2.0)
+        _make_receipt(data, did, pid=33, status="success")
+
+        results = drain_active(data_dir=data, older_than_hours=1.0, dry_run=False)
+        assert results[0].action == "completed"
+        assert "success" in results[0].reason
+
+    def test_drain_one_accepts_legacy_frozenset_index(self, tmp_path: Path) -> None:
+        """External callers passing the legacy frozenset must still get the
+        success-routing they previously relied on."""
+        data = _make_data_dir(tmp_path)
+        did = "legacy-frozenset"
+        d = _make_active_dispatch(data, did, hours_old=2.0)
+        from datetime import datetime, timedelta, timezone as _tz
+        ts = datetime.now(tz=_tz.utc) - timedelta(hours=2)
+        entry = DispatchEntry(dispatch_id=did, directory=d, timestamp=ts)
+
+        result = drain_one(
+            entry=entry,
+            receipt_index=frozenset({did}),
+            dispatches_dir=data / "dispatches",
+            now=datetime.now(tz=_tz.utc),
+            older_than_seconds=3600,
+            dry_run=False,
+        )
+        assert result.action == "completed"
