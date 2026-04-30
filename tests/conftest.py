@@ -21,6 +21,14 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register custom markers used by integration / canary suites."""
+    config.addinivalue_line(
+        "markers",
+        "integration: end-to-end integration tests (slower; opt-in via -m integration)",
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------
