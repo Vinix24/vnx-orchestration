@@ -626,7 +626,7 @@ def _build_session_metadata(receipt: Dict[str, Any], state_dir: Path) -> Dict[st
             if sha:
                 metadata["instruction_sha256"] = sha
         except (OSError, IOError, json.JSONDecodeError) as exc:
-            print(f"[append_receipt] warning: could not read instruction_sha256 from manifest {manifest_path}: {exc}", file=sys.stderr)
+            _emit("WARN", "manifest_sha256_read_failed", manifest_path=str(manifest_path), error=str(exc))
 
     return metadata
 
