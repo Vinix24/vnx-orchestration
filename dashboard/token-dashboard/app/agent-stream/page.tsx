@@ -143,6 +143,7 @@ export default function AgentStreamPage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTimestampRef = useRef<string | null>(null);
   const pausedRef = useRef(false);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep ref in sync with state for use in EventSource callbacks
   useEffect(() => {
@@ -170,6 +171,11 @@ export default function AgentStreamPage() {
 
   // Connect to SSE
   const connect = useCallback((term: Terminal, since: string | null) => {
+    // Cancel any pending retry before opening a new connection
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     // Close existing connection
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
@@ -206,7 +212,8 @@ export default function AgentStreamPage() {
       setError('SSE connection failed — retrying…');
       es.close();
       eventSourceRef.current = null;
-      setTimeout(() => {
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
         connect(term, lastTimestampRef.current);
       }, 2000);
     };
@@ -220,6 +227,10 @@ export default function AgentStreamPage() {
     connect(terminal, null);
 
     return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
