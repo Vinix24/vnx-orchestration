@@ -297,6 +297,7 @@ def _find_gate_request_payload(
 def _validate_review_evidence(
     contract: ReviewContract,
     results_dir: Path,
+    branch: Optional[str] = None,
 ) -> List[CheckResult]:
     """Validate review contract presence and gate results against the review stack.
 
@@ -307,6 +308,10 @@ def _validate_review_evidence(
     4. Optional gates have explicit state (contributed or intentionally absent)
     5. Content hash consistency between contract and gate receipts
     6. No unresolved error-severity deterministic findings
+
+    When ``branch`` is provided, gate results from a different branch are
+    rejected as stale evidence — preventing a result from a prior branch with
+    the same ``pr_id`` from satisfying current closure.
     """
     checks: List[CheckResult] = []
 
@@ -326,7 +331,7 @@ def _validate_review_evidence(
     ))
 
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
 
         if gate == "claude_github_optional":
             # Fallback: explicit-absence state for the optional gate is recorded
@@ -425,7 +430,7 @@ def _validate_review_evidence(
 
     # Content hash consistency
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
         if result and contract.content_hash:
             result_hash = result.get("contract_hash") or result.get("content_hash") or ""
             if result_hash and result_hash != contract.content_hash:
@@ -440,7 +445,7 @@ def _validate_review_evidence(
     # pass/fail gate result must carry a report_path pointing to a real file
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
         if result is not None and gate_is_terminal(result):
             report_path = result.get("report_path", "")
             if not report_path:
@@ -585,22 +590,37 @@ def verify_pr_closure(
     # 4. Review contract and gate evidence
     review_evidence_summary: Optional[Dict[str, Any]] = None
     if review_contract is not None:
-        effective_results_dir = gate_results_dir
-        if effective_results_dir is None:
-            effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
-        checks.extend(_validate_review_evidence(review_contract, effective_results_dir))
+        # Per-PR closure must reject a contract for a different PR — combining
+        # PR-A's queue state with PR-B's review evidence can falsely green.
+        if review_contract.pr_id and review_contract.pr_id != pr_id:
+            checks.append(CheckResult(
+                "review_contract_pr_match",
+                "FAIL",
+                f"review contract pr_id {review_contract.pr_id!r} does not match closure pr_id {pr_id!r}",
+            ))
+        else:
+            effective_results_dir = gate_results_dir
+            if effective_results_dir is None:
+                effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
+            checks.extend(
+                _validate_review_evidence(review_contract, effective_results_dir, branch=branch)
+            )
 
-        # 5. Gate result vs report contradiction detection
-        checks.extend(_detect_gate_report_contradictions(review_contract, effective_results_dir))
+            # 5. Gate result vs report contradiction detection
+            checks.extend(
+                _detect_gate_report_contradictions(
+                    review_contract, effective_results_dir, branch=branch
+                )
+            )
 
-        review_evidence_summary = {
-            "contract_pr_id": review_contract.pr_id,
-            "contract_hash": review_contract.content_hash,
-            "review_stack": review_contract.review_stack,
-            "risk_class": review_contract.risk_class,
-            "deterministic_finding_count": len(review_contract.deterministic_findings),
-            "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
-        }
+            review_evidence_summary = {
+                "contract_pr_id": review_contract.pr_id,
+                "contract_hash": review_contract.content_hash,
+                "review_stack": review_contract.review_stack,
+                "risk_class": review_contract.risk_class,
+                "deterministic_finding_count": len(review_contract.deterministic_findings),
+                "error_finding_count": len([f for f in review_contract.deterministic_findings if f.severity == "error"]),
+            }
     else:
         checks.append(CheckResult(
             "review_contract", "FAIL",
@@ -609,6 +629,9 @@ def verify_pr_closure(
 
     # 5. GitHub PR and CI checks (when branch is provided and explicitly required)
     # Local-only closure cannot pass merge readiness without a real GitHub PR + green checks.
+    # Per-PR mode must mirror the full-feature pre_merge guarantees: state == OPEN and
+    # mergeStateStatus == CLEAN, otherwise a draft, blocked, or merged-but-stale PR with
+    # green CI could be reported as merge-ready.
     github_pr: Optional[Dict[str, Any]] = None
     if branch and require_github_pr:
         github_pr = _find_branch_pr(branch)
@@ -618,6 +641,15 @@ def verify_pr_closure(
             f"GitHub PR {'found' if github_pr else 'missing'} for branch {branch}",
         ))
         if github_pr:
+            state = str(github_pr.get("state") or "").upper()
+            merge_state = str(github_pr.get("mergeStateStatus") or "").upper()
+            mergeable = state == "OPEN" and merge_state == "CLEAN"
+            checks.append(CheckResult(
+                "github_pr_mergeable",
+                "PASS" if mergeable else "FAIL",
+                f"PR state={state or 'unknown'} mergeStateStatus={merge_state or 'unknown'}"
+                + ("" if mergeable else " — PR must be OPEN and CLEAN for merge readiness"),
+            ))
             rollup = github_pr.get("statusCheckRollup") or []
             all_green = bool(rollup) and all(
                 item.get("status") == "COMPLETED" and item.get("conclusion") == "SUCCESS"
@@ -651,6 +683,7 @@ def verify_pr_closure(
 def _detect_gate_report_contradictions(
     contract: ReviewContract,
     results_dir: Path,
+    branch: Optional[str] = None,
 ) -> List[CheckResult]:
     """Detect contradictions between structured gate result JSON and normalized report content.
 
@@ -658,11 +691,15 @@ def _detect_gate_report_contradictions(
     - Gate result JSON says pass but report contains blocking findings
     - Gate result JSON says fail but report claims all clear
     - Gate result blocking_count disagrees with actual blocking findings in report
+
+    When ``branch`` is provided, gate results from a different branch are
+    rejected as stale evidence so contradiction detection always runs against
+    the current branch's payloads.
     """
     checks: List[CheckResult] = []
 
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
         if result is None:
             continue
 
@@ -848,7 +885,16 @@ def verify_closure(
         effective_results_dir = gate_results_dir
         if effective_results_dir is None:
             effective_results_dir = Path(paths["VNX_STATE_DIR"]) / "review_gates" / "results"
-        checks.extend(_validate_review_evidence(review_contract, effective_results_dir))
+        checks.extend(
+            _validate_review_evidence(review_contract, effective_results_dir, branch=branch)
+        )
+        # Gate result vs report contradiction detection — feature-level closure
+        # must catch a [BLOCKING] report shipped alongside a passing gate JSON.
+        checks.extend(
+            _detect_gate_report_contradictions(
+                review_contract, effective_results_dir, branch=branch
+            )
+        )
         review_evidence_summary = {
             "contract_pr_id": review_contract.pr_id,
             "contract_hash": review_contract.content_hash,
@@ -892,6 +938,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--review-contract", default=None, help="Path to review contract JSON")
     parser.add_argument("--gate-results-dir", default=None, help="Directory containing gate result JSONs")
     parser.add_argument("--pr-id", default=None, help="Per-PR closure mode: verify a single PR without requiring whole-feature completion")
+    parser.add_argument(
+        "--require-github-pr",
+        action="store_true",
+        help="In --pr-id mode, also require a real GitHub PR for --branch with OPEN/CLEAN state and green CI",
+    )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--emit-receipt", action="store_true")
     args = parser.parse_args(argv)
@@ -916,6 +967,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not Path(args.feature_plan).is_absolute()
             else Path(args.feature_plan)
         )
+        # Infer the current branch when --branch is omitted so the caller does
+        # not have to repeat themselves and so require_github_pr is reachable
+        # with just --pr-id + --mode pre_merge.
+        branch = args.branch or _run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root
+        ).stdout.strip() or None
+        # In pre_merge mode, --require-github-pr enforces a real GitHub PR with
+        # OPEN/CLEAN state and green CI; in post_merge mode the caller can still
+        # opt in but it is only meaningful pre-merge.
+        require_github_pr = bool(args.require_github_pr) and args.mode == "pre_merge"
         result = verify_pr_closure(
             pr_id=args.pr_id,
             project_root=project_root,
@@ -925,6 +986,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             state_dir=Path(paths["VNX_STATE_DIR"]),
             review_contract=contract,
             gate_results_dir=gate_results_dir,
+            branch=branch,
+            require_github_pr=require_github_pr,
         )
     else:
         branch = args.branch or _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root).stdout.strip()
