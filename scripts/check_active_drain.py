@@ -8,9 +8,15 @@ as a "currently in-flight" worklist.
 
 Rules
 -----
-* dispatch has a matching receipt in receipts/processed/  → move to completed/
+* dispatch has a matching SUCCESS receipt in receipts/processed/   → move to completed/
+* dispatch has a matching FAILURE receipt in receipts/processed/   → move to dead_letter/
 * dispatch has no receipt AND is older than --older-than-hours (default 1)   → move to dead_letter/
 * dispatch has no receipt AND is newer than the threshold                     → leave alone
+
+Failed dispatches must NEVER be drained as completed: the receipt's
+``status`` field is consulted (canonical sets in scripts/append_receipt.py)
+so that timeout/error/blocked outcomes route to dead_letter/ instead of
+masquerading as successful work.
 
 Exit codes
 ----------
@@ -69,24 +75,56 @@ class DrainResult(NamedTuple):
 # Receipt index
 # ---------------------------------------------------------------------------
 
+# Canonical status sets (kept in sync with scripts/append_receipt.py).
+SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", ""})
+FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "timeout"})
+
+
 def build_receipt_index(receipts_dir: Path) -> frozenset[str]:
-    """Return the set of dispatch_ids present in receipts/processed/."""
+    """Return the set of dispatch_ids present in receipts/processed/.
+
+    Kept for backwards compatibility — callers that need success/failure
+    discrimination should use build_receipt_status_index instead.
+    """
+    return frozenset(build_receipt_status_index(receipts_dir).keys())
+
+
+def build_receipt_status_index(receipts_dir: Path) -> dict[str, str]:
+    """Map dispatch_id → normalized status (\"success\" | \"failure\" | \"unknown\").
+
+    When multiple receipts exist for the same dispatch_id (e.g., a chain of
+    retries), a failure status wins over success — fail-closed semantics
+    ensure a partially-failed dispatch is never recorded as completed.
+    """
     processed = receipts_dir / "processed"
     if not processed.is_dir():
-        return frozenset()
+        return {}
 
-    ids: set[str] = set()
+    out: dict[str, str] = {}
     for path in processed.iterdir():
-        if not path.suffix == ".json":
+        if path.suffix != ".json":
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            did = data.get("dispatch_id", "")
-            if did and did != "unknown":
-                ids.add(did)
         except (json.JSONDecodeError, OSError):
             continue
-    return frozenset(ids)
+        did = data.get("dispatch_id", "")
+        if not did or did == "unknown":
+            continue
+        status_raw = str(data.get("status", "")).strip().lower()
+        if status_raw in FAILURE_STATUSES:
+            normalized = "failure"
+        elif status_raw in SUCCESS_STATUSES:
+            normalized = "success"
+        else:
+            normalized = "unknown"
+        # Fail-closed: failure beats success beats unknown.
+        prior = out.get(did)
+        if prior == "failure":
+            continue
+        if normalized == "failure" or prior is None or (prior == "unknown" and normalized == "success"):
+            out[did] = normalized
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -138,17 +176,33 @@ def iter_active_dispatches(dispatches_dir: Path) -> Iterator[DispatchEntry]:
 
 def drain_one(
     entry: DispatchEntry,
-    receipt_index: frozenset[str],
+    receipt_index: "frozenset[str] | dict[str, str]",
     dispatches_dir: Path,
     now: datetime,
     older_than_seconds: float,
     dry_run: bool,
 ) -> DrainResult:
-    has_receipt = entry.dispatch_id in receipt_index
+    # Accept either the legacy frozenset (success-implied) or the new
+    # status-aware dict to keep external callers working.
+    if isinstance(receipt_index, dict):
+        receipt_status = receipt_index.get(entry.dispatch_id)
+    elif entry.dispatch_id in receipt_index:
+        receipt_status = "success"
+    else:
+        receipt_status = None
 
-    if has_receipt:
-        dest_bucket = "completed"
-        reason = "receipt found"
+    if receipt_status is not None:
+        if receipt_status == "failure":
+            dest_bucket = "dead_letter"
+            reason = "receipt found with failure status"
+        elif receipt_status == "unknown":
+            # Receipt with an unrecognised status — treat as failure to
+            # avoid silently recording bad outcomes as completed work.
+            dest_bucket = "dead_letter"
+            reason = "receipt found with unrecognised status"
+        else:
+            dest_bucket = "completed"
+            reason = "receipt found with success status"
     else:
         if entry.timestamp is None:
             # No timestamp → treat as orphaned regardless of age
@@ -205,7 +259,7 @@ def drain_active(
     dispatches_dir = data_dir / "dispatches"
     receipts_dir = data_dir / "receipts"
 
-    receipt_index = build_receipt_index(receipts_dir)
+    receipt_index = build_receipt_status_index(receipts_dir)
     now = datetime.now(tz=timezone.utc)
     older_than_seconds = older_than_hours * 3600.0
 
