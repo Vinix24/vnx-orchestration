@@ -102,46 +102,37 @@ def _stage_bytes(directory: Path, content: bytes) -> Path:
     return Path(tmp)
 
 
-def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> int:
-    """Rotate t0_intelligence_archive.ndjson. Returns 0 on success, non-zero on error."""
-    live_file = state_dir / "t0_intelligence_archive.ndjson"
+def _cia_check_skip(live_file: Path, state_dir: Path) -> tuple[Path | None, str | None]:
+    """Check pre-conditions for intelligence archive rotation.
 
+    Returns (archive_file, None) to proceed or (None, skip_reason) to skip.
+    A staging temp (.tmp_archive_*) does not count as an existing archive.
+    """
     if not live_file.exists():
         _emit("INFO", "intelligence_archive_skip", reason="file_not_found", path=str(live_file))
-        return 0
-
+        return None, "file_not_found"
     size_bytes = live_file.stat().st_size
     min_bytes = INTELLIGENCE_ARCHIVE_MIN_MB * 1024 * 1024
-
     if size_bytes < min_bytes:
         _emit(
-            "INFO",
-            "intelligence_archive_skip",
+            "INFO", "intelligence_archive_skip",
             reason="below_threshold_mb",
             size_mb=round(size_bytes / 1024 / 1024, 2),
             threshold_mb=INTELLIGENCE_ARCHIVE_MIN_MB,
         )
-        return 0
-
+        return None, "below_threshold"
     archive_file = _archive_path(state_dir, "t0_intelligence_archive")
-    # Check for an already-committed archive; a staging temp (.tmp_archive_*) does not count
-    # because it may be an orphan from a previous partial failure.
     if archive_file.exists():
-        _emit(
-            "INFO",
-            "intelligence_archive_skip",
-            reason="archive_already_exists_today",
-            archive=str(archive_file),
-        )
-        return 0
+        _emit("INFO", "intelligence_archive_skip", reason="archive_already_exists_today",
+              archive=str(archive_file))
+        return None, "already_exists"
+    return archive_file, None
 
-    cutoff_ts = time.time() - INTELLIGENCE_ARCHIVE_KEEP_DAYS * 86400
-    raw = live_file.read_text(encoding="utf-8", errors="replace")
-    lines = raw.splitlines(keepends=True)
 
+def _cia_partition_lines(lines: list[str], cutoff_ts: float) -> tuple[list[str], list[str]]:
+    """Split NDJSON lines into keep (recent) and archive (old) lists by cutoff timestamp."""
     keep: list[str] = []
     archive: list[str] = []
-
     for line in lines:
         stripped = line.strip()
         if not stripped:
@@ -156,27 +147,14 @@ def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> i
                 keep.append(line)
         except (json.JSONDecodeError, ValueError, TypeError):
             keep.append(line)
+    return keep, archive
 
-    if not archive:
-        _emit("INFO", "intelligence_archive_skip", reason="all_records_within_7d", total_lines=len(lines))
-        return 0
 
-    _emit(
-        "INFO",
-        "intelligence_archive_rotating",
-        live_path=str(live_file),
-        archive_path=str(archive_file),
-        archive_lines=len(archive),
-        keep_lines=len(keep),
-        dry_run=dry_run,
-    )
+def _cia_write_atomic(live_file: Path, archive_file: Path, keep: list[str], archive: list[str]) -> int:
+    """Two-phase write: stage archive → rewrite live → promote archive. Returns 0 on success.
 
-    if dry_run:
-        return 0
-
-    # Two-phase write: stage archive content to a temp path so the real archive path
-    # only appears after the live-file rewrite succeeds.  A partial failure leaves no
-    # committed archive, allowing safe retry.
+    A partial failure leaves no committed archive path, allowing safe retry.
+    """
     archive_tmp: Path | None = None
     try:
         archive_tmp = _stage_bytes(
@@ -194,13 +172,42 @@ def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> i
                 os.unlink(archive_tmp)
             except OSError:
                 pass
+    return 0
+
+
+def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> int:
+    """Rotate t0_intelligence_archive.ndjson. Returns 0 on success, non-zero on error."""
+    live_file = state_dir / "t0_intelligence_archive.ndjson"
+
+    archive_file, skip_reason = _cia_check_skip(live_file, state_dir)
+    if skip_reason is not None:
+        return 0
+
+    cutoff_ts = time.time() - INTELLIGENCE_ARCHIVE_KEEP_DAYS * 86400
+    lines = live_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+
+    keep, archive = _cia_partition_lines(lines, cutoff_ts)
+
+    if not archive:
+        _emit("INFO", "intelligence_archive_skip", reason="all_records_within_7d", total_lines=len(lines))
+        return 0
 
     _emit(
-        "INFO",
-        "intelligence_archive_done",
-        archive=str(archive_file),
-        archive_lines=len(archive),
-        live_lines=len(keep),
+        "INFO", "intelligence_archive_rotating",
+        live_path=str(live_file), archive_path=str(archive_file),
+        archive_lines=len(archive), keep_lines=len(keep), dry_run=dry_run,
+    )
+
+    if dry_run:
+        return 0
+
+    rc = _cia_write_atomic(live_file, archive_file, keep, archive)
+    if rc != 0:
+        return rc
+
+    _emit(
+        "INFO", "intelligence_archive_done",
+        archive=str(archive_file), archive_lines=len(archive), live_lines=len(keep),
     )
     return 0
 

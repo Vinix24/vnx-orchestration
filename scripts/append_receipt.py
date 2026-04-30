@@ -391,6 +391,59 @@ def _build_git_provenance(repo_root: Path) -> Dict[str, Any]:
     return provenance
 
 
+_PROVIDER_ENV_VAR: Dict[str, str] = {
+    "claude_code": "CLAUDE_SESSION_ID",
+    "gemini_cli": "GEMINI_SESSION_ID",
+    "codex_cli": "CODEX_SESSION_ID",
+    "kimi_cli": "KIMI_SESSION_ID",
+}
+
+_PROVIDER_SESSION_FILES: Dict[str, Path] = {
+    "claude_code": Path.home() / ".claude" / "sessions" / "current",
+    "gemini_cli": Path.home() / ".gemini" / "sessions" / "current",
+    "codex_cli": Path.home() / ".codex" / "sessions" / "current",
+    "kimi_cli": Path.home() / ".kimi" / "sessions" / "current",
+}
+
+
+def _rsi_check_env_session(
+    terminal: str, state_dir: Path, current_session_file: Path
+) -> Optional[str]:
+    """Priority 3: check provider env var; auto-create per-terminal file if found."""
+    mp = _resolve_model_provider(terminal, state_dir)
+    provider = mp.get("provider", "unknown")
+    env_var = _PROVIDER_ENV_VAR.get(provider, "CLAUDE_SESSION_ID")
+    env_value = os.environ.get(env_var)
+    if env_value:
+        value = env_value.strip()
+        if value and value not in {"unknown", "null", "None"}:
+            try:
+                state_dir.mkdir(parents=True, exist_ok=True)
+                current_session_file.write_text(value, encoding="utf-8")
+            except Exception:
+                pass
+            return value
+    return None
+
+
+def _rsi_check_provider_files(terminal: str, state_dir: Path) -> Optional[str]:
+    """Priority 4: check provider session files in provider-priority order."""
+    mp = _resolve_model_provider(terminal, state_dir)
+    provider = mp.get("provider", "unknown")
+    preferred_file = _PROVIDER_SESSION_FILES.get(provider)
+    other_files = [f for f in _PROVIDER_SESSION_FILES.values() if f != preferred_file]
+    files = ([preferred_file] + other_files) if preferred_file else list(_PROVIDER_SESSION_FILES.values())
+    for current_file in files:
+        try:
+            if current_file.exists():
+                value = current_file.read_text(encoding="utf-8").strip()
+                if value and value not in {"unknown", "null", "None"}:
+                    return value
+        except Exception:
+            continue
+    return None
+
+
 def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = None) -> str:
     """Resolve session_id with deterministic priority chain (parallel-terminal safe).
 
@@ -410,12 +463,7 @@ def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = Non
     terminal = str(receipt.get("terminal") or "unknown").strip()
 
     # Priority 1: Report-provided session_id (explicit - RECOMMENDED)
-    report_values = (
-        metadata.get("session_id"),
-        metadata.get("session"),
-        receipt.get("session_id"),
-    )
-    for candidate in report_values:
+    for candidate in (metadata.get("session_id"), metadata.get("session"), receipt.get("session_id")):
         value = str(candidate or "").strip()
         if value and value not in {"unknown", "null", "None"}:
             return value
@@ -432,53 +480,16 @@ def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = Non
         except Exception:
             pass
 
-    # Priority 3: Environment variables (provider-specific) with auto-create.
-    # Use panes.json-resolved provider so a standard terminal (e.g. T3) running
-    # codex_cli or gemini_cli gets the correct session env var, not CLAUDE_SESSION_ID.
-    mp = _resolve_model_provider(terminal, state_dir)
-    provider = mp.get("provider", "unknown")
-    _PROVIDER_ENV_VAR: Dict[str, str] = {
-        "claude_code": "CLAUDE_SESSION_ID",
-        "gemini_cli": "GEMINI_SESSION_ID",
-        "codex_cli": "CODEX_SESSION_ID",
-        "kimi_cli": "KIMI_SESSION_ID",
-    }
-    env_var = _PROVIDER_ENV_VAR.get(provider, "CLAUDE_SESSION_ID")
+    # Priority 3: Environment variables (provider-specific) with auto-create
+    value = _rsi_check_env_session(terminal, state_dir, current_session_file)
+    if value:
+        return value
 
-    env_value = os.environ.get(env_var)
-    if env_value:
-        value = env_value.strip()
-        if value and value not in {"unknown", "null", "None"}:
-            # Auto-create per-terminal current_session file for next time
-            try:
-                state_dir.mkdir(parents=True, exist_ok=True)
-                current_session_file.write_text(value, encoding="utf-8")
-            except Exception:
-                pass  # Non-fatal, just optimization for future lookups
-            return value
+    # Priority 4: Provider "current" session files (preferred provider first)
+    value = _rsi_check_provider_files(terminal, state_dir)
+    if value:
+        return value
 
-    # Priority 4: Provider "current" session files (global, preferred provider first).
-    # Resolved provider determines which file to try first so a Claude terminal does
-    # not accidentally pick up a Codex or Gemini session that happens to exist.
-    _PROVIDER_SESSION_FILES: Dict[str, Path] = {
-        "claude_code": Path.home() / ".claude" / "sessions" / "current",
-        "gemini_cli": Path.home() / ".gemini" / "sessions" / "current",
-        "codex_cli": Path.home() / ".codex" / "sessions" / "current",
-        "kimi_cli": Path.home() / ".kimi" / "sessions" / "current",
-    }
-    preferred_file = _PROVIDER_SESSION_FILES.get(provider)
-    other_files = [f for f in _PROVIDER_SESSION_FILES.values() if f != preferred_file]
-    provider_current_files = ([preferred_file] + other_files) if preferred_file else list(_PROVIDER_SESSION_FILES.values())
-    for current_file in provider_current_files:
-        try:
-            if current_file.exists():
-                value = current_file.read_text(encoding="utf-8").strip()
-                if value and value not in {"unknown", "null", "None"}:
-                    return value
-        except Exception:
-            continue
-
-    # Priority 5: Fallback to "unknown"
     return "unknown"
 
 
