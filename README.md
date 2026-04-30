@@ -10,7 +10,7 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-Current release: `v0.9.0`
+Current release: `v0.10.0`
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
 ## The Problem
@@ -161,6 +161,35 @@ Agent hits 65% context → blocked from further tool calls
 ```
 
 Zero human intervention. Zero lost work. The receipt ledger maintains a complete chain across rotations.
+
+## What's new in v0.10.0 (April 2026)
+
+### Self-healing daemons
+Workers and processors now auto-respawn via wrapper supervisors. Kill `-9` a worker — `dispatcher_supervisor.sh` and `receipt_processor_supervisor.sh` bring it back with exponential backoff, clean up stale locks, and release leases through a single-owner helper. No more manual SQL `UPDATE terminal_leases SET state='idle'`.
+
+### Cryptographic dispatch chain
+Every dispatch now carries `instruction_sha256` from manifest through receipt. The chain is `dispatch_id → instruction_sha256 → manifest.json → receipt → audit event`. You can prove which prompt produced which output, end-to-end.
+
+### Smart codex review
+Codex final-gate prompt now uses strict severity rules — `error` is reserved for data loss, false PR closure, security breach, or cross-dispatch state corruption. Style, scope drift, and out-of-diff findings drop to `warning` or `info`. Result on the 2026-04-28 chain: 100% blocking → 25% blocking.
+
+### Bounded state
+Append-only logs no longer grow unbounded. `compact_state.py` runs nightly at 02:30:
+- `t0_intelligence_archive.ndjson` (was 391MB) → gzipped 7-day archives
+- `t0_receipts.ndjson` → cap at 10000 entries
+- `open_items_digest.json` → evict entries >30d
+
+### Real-time dashboard
+`/api/register-stream` SSE endpoint streams dispatch lifecycle events live (created → promoted → started → gate_passed → completed). Dashboard kanban no longer needs polling.
+
+### Frontend regression protection
+Three new Playwright suites + tsc strict for the dashboard:
+- Console + page errors per route (zero tolerance)
+- Network failure scenarios (offline / 5xx / slow 3G / timeout / partial)
+- Visual regression with 1% pixel-diff tolerance baselines
+
+### Cross-provider token tracking
+Codex and Gemini terminals now report token usage in receipts via `adapter.get_token_usage()`. Cost-per-feature aggregation works across all three providers.
 
 ## Install
 
@@ -335,7 +364,7 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 Active development. Priorities shift based on real usage patterns.
 
-### Recently landed (F46–F60, April 2026)
+### Recently landed (F46–F75, April 2026)
 
 - **F46** Intelligence extraction pipeline — learning loop writes success/anti-patterns to SQLite; intelligence selector returns real items per dispatch
 - **F47** T0 state feedback loop — receipt watcher, feature state machine, structured feature context in `t0_brief.json`
@@ -351,11 +380,13 @@ Active development. Priorities shift based on real usage patterns.
 - **F57** Karpathy-style dispatch parameter tracker + correlation analysis
 - **F58** Observability fixes — dispatch manifest, session/commit traceability in receipts, event archival, layered user-message architecture
 - **F60** Intelligence activation — SQL fixes, universal-scope patterns, retroactive backfill of 829 dispatch experiments
+- **F61–F75 (chain 2026-04-28→04-30)** State self-maintenance (compact_state nightly cron), headless audit parity (instruction_sha256, stuck-event tracking, token tracking, canonical gate schema), supervisor pack (cleanup_worker_exit + receipt_processor_supervisor), codex severity prompt tightening, dashboard frontend regression suites (Playwright visual + network + console).
 
 T0 orchestration hardening (2026-04-19 postmortem response) landed in `fix/t0-hardening-2026-04-19`: dispatch_guard cross-validates brief vs terminal_state, auto-recover expired leases, `canonical_state_views.py` restored.
 
 ### Next
 
+- **Roadmap Autopilot (P0)** — multi-feature orchestration with auto-feature handoff after merged + verified closure (see `roadmap/features/roadmap-autopilot/FEATURE_PLAN.md`)
 - **Task Control Surface** — live dispatch board, SSE streaming, one-click re-dispatch from dashboard
 - **Battle testing** — overnight soak + failure injection on the full autonomous loop
 - **Model-agnostic execution** — route headless dispatches to Gemini / Codex / Ollama using the F53 adapter layer (currently Claude-only in practice)
@@ -367,6 +398,7 @@ T0 orchestration hardening (2026-04-19 postmortem response) landed in `fix/t0-ha
 
 - **Headless context rotation** (F43 follow-up, tracked in OI-1073) — subprocess workers currently use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
 - **MCP server** — expose VNX state to external Claude sessions; not yet built.
+- **9 chain PRs deferred** (#300–#303 fix-loop convergence; #305, #311, #316, #317, #320, #321 merge conflicts after sequential merge wave) — branches alive on origin, see OI-1211 through OI-1236 for context.
 
 See [CHANGELOG.md](CHANGELOG.md) for what shipped recently.
 
