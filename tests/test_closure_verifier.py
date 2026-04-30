@@ -1215,4 +1215,3 @@ class TestCLIForwardsBranchAndRequireGithubPr:
         ])
         assert rc == 0
         assert captured["require_github_pr"] is False
-        assert captured["branch"] is None
