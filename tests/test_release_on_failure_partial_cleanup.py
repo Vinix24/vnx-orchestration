@@ -149,10 +149,19 @@ def _run_shell_rc_release_on_failure(
             return 0
         }}
 
-        # Source only the rc_release_on_failure function — avoid sourcing unresolvable deps
-        eval "$(grep -A 60 '^rc_release_on_failure()' \\
-            "{PROJECT_ROOT}/scripts/lib/dispatch_lifecycle.sh" \\
-            | head -60)"
+        # Source only the rc_release_on_failure function — avoid sourcing unresolvable deps.
+        # Use awk with brace-balancing so the extraction tracks function growth
+        # (round-3 expanded the body past the previous head -60 ceiling).
+        eval "$(awk '
+            /^rc_release_on_failure\\(\\)/ {{ inside=1 }}
+            inside {{
+                print
+                n += gsub(/\\{{/, "&")
+                n -= gsub(/\\}}/, "&")
+                if (started && n == 0) exit
+                if (n > 0) started = 1
+            }}
+        ' "{PROJECT_ROOT}/scripts/lib/dispatch_lifecycle.sh")"
 
         rc_release_on_failure "test-dispatch" "attempt-001" "T1" "5" "test reason"
     """)

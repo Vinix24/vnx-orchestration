@@ -204,7 +204,16 @@ rc_delivery_start() {
 rc_delivery_success() {
     local dispatch_id="$1" attempt_id="$2"
     _rc_enabled || return 0
-    [[ -n "$attempt_id" ]] || return 0
+    # When RC is enabled but no attempt_id is supplied the broker has nothing
+    # to transition — silently treating that as success would let
+    # finalize_dispatch_delivery move the dispatch to active/ while the broker
+    # remains in claimed/delivering. Fail-closed: refuse to confirm acceptance.
+    if [[ -z "$attempt_id" ]]; then
+        log_structured_failure "delivery_success_no_attempt_id" \
+            "rc_delivery_success invoked with empty attempt_id — broker cannot record acceptance" \
+            "dispatch=$dispatch_id"
+        return 1
+    fi
 
     local result
     if result=$(_rc_python delivery-success \
@@ -308,7 +317,7 @@ rc_release_on_failure() {
         return 1
     }
 
-    local lease_released cleanup_complete lease_error
+    local lease_released cleanup_complete lease_error failure_recorded failure_error
     lease_released=$(echo "$result" | python3 -c \
         'import sys,json; d=json.load(sys.stdin); print(str(d.get("lease_released","false")).lower())' \
         2>/dev/null || echo "false")
@@ -318,17 +327,26 @@ rc_release_on_failure() {
     lease_error=$(echo "$result" | python3 -c \
         'import sys,json; d=json.load(sys.stdin); print(d.get("lease_error","") or "")' \
         2>/dev/null || echo "")
+    failure_recorded=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(str(d.get("failure_recorded","false")).lower())' \
+        2>/dev/null || echo "false")
+    failure_error=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(d.get("failure_error","") or "")' \
+        2>/dev/null || echo "")
 
     if [[ "$lease_released" == "true" ]]; then
         log "V8 RUNTIME_CORE: lease released on delivery failure terminal=$terminal_id dispatch=$dispatch_id"
         if [[ "$cleanup_complete" != "true" ]]; then
             # Lease was released but broker did not record failed_delivery.
-            # Canonical broker state is inconsistent — surface explicitly so audit trail is truthful.
+            # Canonical broker state is inconsistent — emit a DISTINCT audit
+            # event_type so consumers cannot conflate this with a clean
+            # release. Filtering on `lease_released_on_failure` would have
+            # masked the inconsistency.
             log_structured_failure "failure_recording_missed" \
                 "Lease released but broker failed_delivery not recorded — broker state inconsistent" \
-                "dispatch=$dispatch_id terminal=$terminal_id"
+                "dispatch=$dispatch_id terminal=$terminal_id attempt_id=${attempt_id:-} failure_recorded=${failure_recorded:-} failure_error=${failure_error:-}"
             emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-                "lease_released_on_failure" "true" "broker_failure_not_recorded"
+                "lease_released_broker_inconsistent" "false" "broker_failure_not_recorded"
         else
             emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
                 "lease_released_on_failure" "true"
@@ -405,9 +423,31 @@ _adl_register_and_acquire() {
     if _rc_enabled; then
         _DL_RC_ATTEMPT_ID=$(rc_delivery_start "$dispatch_id" "$terminal_id")
         if [[ -z "$_DL_RC_ATTEMPT_ID" ]]; then
+            # Without an attempt_id the broker cannot record either delivery
+            # success or failure for this attempt — proceeding would leave
+            # broker state diverged from filesystem/progress state once
+            # finalize_dispatch_delivery runs (rc_delivery_success no-ops on
+            # empty attempt_id, so the dispatch would be moved to active/
+            # while the broker still says queued/claimed/delivering).
+            # Fail-closed: release the canonical lease and the legacy claim,
+            # emit a structured failure + blocked-dispatch audit, and refuse
+            # the dispatch.
             log_structured_failure "delivery_start_no_attempt" \
-                "delivery_start returned empty attempt_id — broker failure record will be lost" \
+                "delivery_start returned empty attempt_id — broker cannot record delivery; blocking dispatch" \
                 "dispatch=$dispatch_id terminal=$terminal_id"
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" \
+                "delivery_start_no_attempt" "dispatch_blocked"
+            if [[ -n "$_DL_RC_GENERATION" && "$_DL_RC_GENERATION" != "0" && "$_DL_RC_GENERATION" != "FAIL" ]]; then
+                rc_release_lease "$terminal_id" "$_DL_RC_GENERATION" "$dispatch_id" "failure" || true
+            fi
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" \
+                    "Failed to release claim after delivery_start_no_attempt" \
+                    "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            _DL_RC_GENERATION=""
+            _DL_RC_ATTEMPT_ID=""
+            return 1
         fi
     fi
 }
