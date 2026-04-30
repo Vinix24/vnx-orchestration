@@ -196,36 +196,53 @@ rc_delivery_start() {
 }
 
 # Record delivery success (broker: delivering -> accepted).
-# Idempotent: duplicate acceptance returns noop=true instead of failing.
+# Returns 0 when the broker confirms acceptance (real success or idempotent
+# no-op). Returns 1 when the broker rejects the transition (noop_rejected) or
+# the CLI invocation fails for any other reason — caller MUST treat both as
+# "broker state did not transition to accepted" and refuse to mark the
+# dispatch active locally.
 rc_delivery_success() {
     local dispatch_id="$1" attempt_id="$2"
     _rc_enabled || return 0
-    [[ -n "$attempt_id" ]] || return 0
+    # When RC is enabled but no attempt_id is supplied the broker has nothing
+    # to transition — silently treating that as success would let
+    # finalize_dispatch_delivery move the dispatch to active/ while the broker
+    # remains in claimed/delivering. Fail-closed: refuse to confirm acceptance.
+    if [[ -z "$attempt_id" ]]; then
+        log_structured_failure "delivery_success_no_attempt_id" \
+            "rc_delivery_success invoked with empty attempt_id — broker cannot record acceptance" \
+            "dispatch=$dispatch_id"
+        return 1
+    fi
 
     local result
     if result=$(_rc_python delivery-success \
         --dispatch-id "$dispatch_id" \
         --attempt-id "$attempt_id" 2>/dev/null); then
-        # Check if this was a no-op (duplicate acceptance)
+        # Exit 0 from runtime_core_cli: success OR idempotent noop (already accepted).
         local is_noop
         is_noop=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop","false"))' 2>/dev/null || echo "false")
         if [[ "$is_noop" == "True" || "$is_noop" == "true" ]]; then
             log "V8 RUNTIME_CORE: delivery-success idempotent no-op dispatch=$dispatch_id (already accepted/beyond)"
         fi
-    else
-        # Check if this was a terminal-state rejection vs real error
-        local is_rejected
-        is_rejected=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop_rejected","false"))' 2>/dev/null || echo "false")
-        if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
-            log "V8 RUNTIME_CORE: delivery-success rejected dispatch=$dispatch_id (terminal state)"
-        else
-            # RES-D2: Log structured failure when delivery_success recording fails.
-            # Broker will show 'delivering' instead of 'accepted' for this dispatch.
-            log_structured_failure "delivery_success_record_failed" \
-                "delivery-success recording failed — broker state may show delivering instead of accepted" \
-                "dispatch=$dispatch_id attempt=$attempt_id"
-        fi
+        return 0
     fi
+
+    # Non-zero exit: terminal-state rejection (noop_rejected) or hard CLI error.
+    # In both cases the broker has NOT recorded acceptance — fail closed.
+    local is_rejected
+    is_rejected=$(echo "$result" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("noop_rejected","false"))' 2>/dev/null || echo "false")
+    if [[ "$is_rejected" == "True" || "$is_rejected" == "true" ]]; then
+        log_structured_failure "delivery_success_rejected" \
+            "delivery-success rejected by broker — terminal state mismatch; refusing to mark dispatch active" \
+            "dispatch=$dispatch_id attempt=$attempt_id"
+    else
+        # RES-D2: structured failure when delivery_success recording fails.
+        log_structured_failure "delivery_success_record_failed" \
+            "delivery-success recording failed — broker state may show delivering instead of accepted" \
+            "dispatch=$dispatch_id attempt=$attempt_id"
+    fi
+    return 1
 }
 
 # Invoke the unified cleanup_worker_exit helper (SUP-PR1).  Best-effort —
@@ -300,7 +317,7 @@ rc_release_on_failure() {
         return 1
     }
 
-    local lease_released cleanup_complete lease_error
+    local lease_released cleanup_complete lease_error failure_recorded failure_error
     lease_released=$(echo "$result" | python3 -c \
         'import sys,json; d=json.load(sys.stdin); print(str(d.get("lease_released","false")).lower())' \
         2>/dev/null || echo "false")
@@ -310,11 +327,30 @@ rc_release_on_failure() {
     lease_error=$(echo "$result" | python3 -c \
         'import sys,json; d=json.load(sys.stdin); print(d.get("lease_error","") or "")' \
         2>/dev/null || echo "")
+    failure_recorded=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(str(d.get("failure_recorded","false")).lower())' \
+        2>/dev/null || echo "false")
+    failure_error=$(echo "$result" | python3 -c \
+        'import sys,json; d=json.load(sys.stdin); print(d.get("failure_error","") or "")' \
+        2>/dev/null || echo "")
 
     if [[ "$lease_released" == "true" ]]; then
         log "V8 RUNTIME_CORE: lease released on delivery failure terminal=$terminal_id dispatch=$dispatch_id"
-        emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
-            "lease_released_on_failure" "true"
+        if [[ "$cleanup_complete" != "true" ]]; then
+            # Lease was released but broker did not record failed_delivery.
+            # Canonical broker state is inconsistent — emit a DISTINCT audit
+            # event_type so consumers cannot conflate this with a clean
+            # release. Filtering on `lease_released_on_failure` would have
+            # masked the inconsistency.
+            log_structured_failure "failure_recording_missed" \
+                "Lease released but broker failed_delivery not recorded — broker state inconsistent" \
+                "dispatch=$dispatch_id terminal=$terminal_id attempt_id=${attempt_id:-} failure_recorded=${failure_recorded:-} failure_error=${failure_error:-}"
+            emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+                "lease_released_broker_inconsistent" "false" "broker_failure_not_recorded"
+        else
+            emit_lease_cleanup_audit "$dispatch_id" "$terminal_id" \
+                "lease_released_on_failure" "true"
+        fi
     else
         log_structured_failure "lease_release_failed" \
             "Canonical lease not released after delivery failure" \
@@ -387,9 +423,31 @@ _adl_register_and_acquire() {
     if _rc_enabled; then
         _DL_RC_ATTEMPT_ID=$(rc_delivery_start "$dispatch_id" "$terminal_id")
         if [[ -z "$_DL_RC_ATTEMPT_ID" ]]; then
+            # Without an attempt_id the broker cannot record either delivery
+            # success or failure for this attempt — proceeding would leave
+            # broker state diverged from filesystem/progress state once
+            # finalize_dispatch_delivery runs (rc_delivery_success no-ops on
+            # empty attempt_id, so the dispatch would be moved to active/
+            # while the broker still says queued/claimed/delivering).
+            # Fail-closed: release the canonical lease and the legacy claim,
+            # emit a structured failure + blocked-dispatch audit, and refuse
+            # the dispatch.
             log_structured_failure "delivery_start_no_attempt" \
-                "delivery_start returned empty attempt_id — broker failure record will be lost" \
+                "delivery_start returned empty attempt_id — broker cannot record delivery; blocking dispatch" \
                 "dispatch=$dispatch_id terminal=$terminal_id"
+            emit_blocked_dispatch_audit "$dispatch_id" "$terminal_id" \
+                "delivery_start_no_attempt" "dispatch_blocked"
+            if [[ -n "$_DL_RC_GENERATION" && "$_DL_RC_GENERATION" != "0" && "$_DL_RC_GENERATION" != "FAIL" ]]; then
+                rc_release_lease "$terminal_id" "$_DL_RC_GENERATION" "$dispatch_id" "failure" || true
+            fi
+            if ! release_terminal_claim "$terminal_id" "$dispatch_id"; then
+                log_structured_failure "claim_release_failed" \
+                    "Failed to release claim after delivery_start_no_attempt" \
+                    "terminal=$terminal_id dispatch=$dispatch_id"
+            fi
+            _DL_RC_GENERATION=""
+            _DL_RC_ATTEMPT_ID=""
+            return 1
         fi
     fi
 }
@@ -458,13 +516,58 @@ _fdd_log_dispatch_metadata() {
 # finalize_dispatch_delivery — broker success, progress state, heartbeat, metadata, move to active.
 # Params: dispatch_file track terminal_id dispatch_id pr_id gate agent_role instruction_content [intelligence_data]
 # Reads globals: _DL_RC_ATTEMPT_ID
+# Returns 0 on confirmed-accepted activation, 1 when the broker did not confirm
+# acceptance — in the latter case the dispatch file stays in pending/, no
+# dispatch_promoted is emitted, and dispatch_failed is appended to the register
+# so register-driven views see the rejection.
 finalize_dispatch_delivery() {
     local dispatch_file="$1" track="$2" terminal_id="$3" dispatch_id="$4"
     local pr_id="$5" gate="$6" agent_role="$7" instruction_content="$8"
     local intelligence_data="${9:-}"
 
-    rc_delivery_success "$dispatch_id" "$_DL_RC_ATTEMPT_ID"
+    # Fail closed: if the broker did not record `accepted`, refuse to mark the
+    # dispatch active locally. Otherwise local state would say `active` while
+    # the broker still says `delivering` (or has already rejected), which is
+    # exactly the inconsistency the runtime-core integration is meant to
+    # prevent (see Contract 90 §WF-5: delivery is complete only once
+    # `accepted` is recorded).
+    if ! rc_delivery_success "$dispatch_id" "$_DL_RC_ATTEMPT_ID"; then
+        log "V8 DISPATCH: delivery-success not confirmed — leaving dispatch in pending/ dispatch=$dispatch_id terminal=$terminal_id"
+        local _failed_rc=0
+        local _failed_stderr
+        set +e
+        _failed_stderr=$(python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_failed \
+            "dispatch_id=$dispatch_id" "terminal=$terminal_id" "extra.reason=delivery_success_unconfirmed" 2>&1 >/dev/null)
+        _failed_rc=$?
+        set -e
+        if [ "$_failed_rc" -ne 0 ]; then
+            log_structured_failure "register_emit_failed" \
+                "dispatch_failed emit to register failed after delivery-success failure — register-driven views will misclassify this dispatch" \
+                "dispatch=$dispatch_id terminal=$terminal_id rc=$_failed_rc stderr=${_failed_stderr}"
+        fi
+        return 1
+    fi
+
     log "V8 DISPATCH: Successfully sent dispatch to terminal $terminal_id"
+
+    # Emit dispatch_promoted BEFORE the pending→active mv so register-driven
+    # views never observe a dispatch in active/ without a matching canonical
+    # promotion event. Best-effort: emit failures are surfaced via
+    # log_structured_failure so the broker/register inconsistency is visible
+    # in audit, but they do not abort the mv — the broker has confirmed
+    # acceptance and the worker is already running.
+    local _promote_rc=0
+    local _promote_stderr
+    set +e
+    _promote_stderr=$(python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
+        "dispatch_id=$dispatch_id" "terminal=$terminal_id" 2>&1 >/dev/null)
+    _promote_rc=$?
+    set -e
+    if [ "$_promote_rc" -ne 0 ]; then
+        log_structured_failure "register_emit_failed" \
+            "dispatch_promoted emit failed — register-driven views may miss/misclassify this successfully delivered dispatch" \
+            "dispatch=$dispatch_id terminal=$terminal_id rc=$_promote_rc stderr=${_promote_stderr}"
+    fi
 
     _fdd_update_progress_state "$track" "$gate" "$dispatch_id"
 
@@ -478,5 +581,6 @@ finalize_dispatch_delivery() {
     local filename; filename=$(basename "$dispatch_file")
     mv "$dispatch_file" "$ACTIVE_DIR/$filename"
     log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
+
     return 0
 }
