@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vnx.receipt-classifier-batch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>${VNX_HOME}/scripts/lib/receipt_classifier_batch.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/vnx-receipt-classifier-batch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vnx-receipt-classifier-batch.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VNX_HOME</key>
+        <string>${VNX_HOME}</string>
+        <key>VNX_DATA_DIR</key>
+        <string>${VNX_HOME}/.vnx-data</string>
+        <key>VNX_STATE_DIR</key>
+        <string>${VNX_HOME}/.vnx-data/state</string>
+        <key>VNX_RECEIPT_CLASSIFIER_ENABLED</key>
+        <string>0</string>
+        <key>VNX_RECEIPT_CLASSIFIER_MODE</key>
+        <string>batch</string>
+        <key>VNX_RECEIPT_CLASSIFIER_PROVIDER</key>
+        <string>haiku</string>
+        <key>VNX_RECEIPT_CLASSIFIER_DAILY_COST_USD</key>
+        <string>0.20</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
