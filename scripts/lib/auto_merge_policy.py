@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 
 
-HIGH_RISK_PATH_MARKERS = (
+GOVERNANCE_PATH_MARKERS = (
     "scripts/dispatcher",
     "scripts/receipt_processor",
     "scripts/pr_queue_manager",
@@ -16,13 +16,35 @@ HIGH_RISK_PATH_MARKERS = (
     "scripts/closure_verifier",
     "scripts/review_gate_manager",
     "scripts/roadmap_manager",
+    "scripts/codex_final_gate",
     "scripts/lib/vnx_paths",
+    "scripts/lib/runtime_coordination",
+    "scripts/lib/dispatch_broker",
+    "scripts/lib/review_contract",
     "scripts/commands/start.sh",
     "scripts/commands/stop.sh",
     "scripts/commands/doctor.sh",
     "schemas/",
     ".github/workflows/",
 )
+
+# Backwards-compat alias — same path set, used by auto_merge_policy callers.
+HIGH_RISK_PATH_MARKERS = GOVERNANCE_PATH_MARKERS
+
+
+def is_governance_path(changed_files: Iterable[str]) -> bool:
+    """Return True when any changed file touches a governance/high-risk path.
+
+    Shared helper used by codex_final_gate and auto_merge_policy so both
+    classify governance-sensitive PRs identically. SQL files always count
+    as governance (schema changes).
+    """
+    for path in _normalize_paths(changed_files):
+        if any(marker in path for marker in GOVERNANCE_PATH_MARKERS):
+            return True
+        if path.endswith(".sql"):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -43,12 +65,7 @@ def _normalize_paths(changed_files: Iterable[str]) -> List[str]:
 
 
 def codex_final_gate_required(changed_files: Iterable[str]) -> bool:
-    for path in _normalize_paths(changed_files):
-        if any(marker in path for marker in HIGH_RISK_PATH_MARKERS):
-            return True
-        if path.endswith(".sql"):
-            return True
-    return False
+    return is_governance_path(changed_files)
 
 
 def evaluate_auto_merge_policy(
@@ -96,6 +113,9 @@ def evaluate_auto_merge_policy(
 
 __all__ = [
     "AutoMergeDecision",
+    "GOVERNANCE_PATH_MARKERS",
+    "HIGH_RISK_PATH_MARKERS",
     "codex_final_gate_required",
     "evaluate_auto_merge_policy",
+    "is_governance_path",
 ]

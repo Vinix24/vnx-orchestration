@@ -100,13 +100,27 @@ class GateRunner:
     def _resolve_prompt(
         self, gate: str, request_payload: Dict[str, Any], using_vertex: bool,
     ) -> str:
-        """Build or enrich the prompt for the given gate type."""
-        prompt = request_payload.get("prompt", "")
+        """Build or enrich the prompt for the given gate type.
+
+        build_gemini_prompt / build_codex_prompt already inline file contents.
+        When we build the prompt here we must NOT also append
+        collect_file_contents, or each ``--- FILE:`` section will be duplicated
+        in the Vertex prompt. We only enrich with file contents when the caller
+        supplied the prompt externally (e.g. a contract prompt) and the prompt
+        therefore does not yet carry the file bodies.
+        """
+        external_prompt = request_payload.get("prompt", "")
+        prompt = external_prompt
         if not prompt and gate == "gemini_review":
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        if using_vertex and gate == "gemini_review" and prompt:
+        if (
+            using_vertex
+            and gate == "gemini_review"
+            and prompt
+            and external_prompt
+        ):
             file_contents = _vtx.collect_file_contents(
                 request_payload, subprocess_run=subprocess.run,
             )
