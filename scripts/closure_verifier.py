@@ -25,6 +25,7 @@ from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
 from review_contract import ReviewContract
 from codex_final_gate import enforce_codex_gate
+from codex_severity_translator import translate_findings as translate_codex_findings
 from gate_status import is_pass as gate_is_pass, is_terminal as gate_is_terminal
 
 
@@ -328,6 +329,52 @@ def _find_gate_request_payload(
     return None
 
 
+def _apply_codex_severity_policy(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply CFX-17 codex severity policy to a codex_gate result.
+
+    Returns a new dict with ``blocking_findings`` reduced to those that
+    were not demoted by the policy, and ``blocking_count`` reset to match.
+    The original payload is left untouched. Demoted findings are preserved
+    on ``advisory_findings`` so audit/contradiction detection can still see
+    the rationale. A finding is considered demoted when translation
+    produced an ``original_severity`` field (warning or info now).
+    """
+    findings = result.get("blocking_findings")
+    if not isinstance(findings, list) or not findings:
+        return result
+    translated = translate_codex_findings(findings)
+    blocking = [f for f in translated if "original_severity" not in f]
+    advisory = [f for f in translated if "original_severity" in f]
+
+    new_result = dict(result)
+    new_result["blocking_findings"] = blocking
+    new_result["blocking_count"] = len(blocking)
+    if advisory:
+        existing_advisory = result.get("advisory_findings")
+        merged_advisory = list(existing_advisory) if isinstance(existing_advisory, list) else []
+        merged_advisory.extend(advisory)
+        new_result["advisory_findings"] = merged_advisory
+        # Track demotions explicitly so operators can audit what the policy did.
+        new_result["severity_demotions"] = [
+            {
+                "message": f.get("message", ""),
+                "original_severity": f.get("original_severity", ""),
+                "severity": f.get("severity", ""),
+                "demotion_reason": f.get("demotion_reason", ""),
+            }
+            for f in advisory
+            if f.get("original_severity")
+        ]
+    # When demotion clears the blocking set entirely, override a fail status so the
+    # gate evaluates as pass. Codex sets status=fail purely from blocking_count; once
+    # those findings are demoted to advisory, the status must follow or the gate-side
+    # policy is a no-op against codex severity inflation.
+    if not blocking and (result.get("status") or "").lower() in ("fail", "failed", "blocked"):
+        new_result["status"] = "pass"
+        new_result["status_overridden_by_severity_policy"] = True
+    return new_result
+
+
 def _gate_terminal_status(result: Dict[str, Any]) -> str:
     """Return canonical terminal status ("pass"/"fail") for a gate result, or empty when non-terminal.
 
@@ -445,13 +492,23 @@ def _validate_review_evidence(
                         f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
                     ))
                 else:
-                    passed, reason = gate_is_pass(result)
+                    # CFX-17: demote allowlisted findings before counting blocking.
+                    translated = _apply_codex_severity_policy(result)
+                    passed, reason = gate_is_pass(translated)
+                    demoted = len(translated.get("severity_demotions") or [])
                     if passed:
-                        checks.append(CheckResult(
-                            f"gate_{gate}",
-                            "PASS",
-                            "codex gate passed",
-                        ))
+                        if demoted:
+                            checks.append(CheckResult(
+                                f"gate_{gate}",
+                                "PASS",
+                                f"codex gate passed after demoting {demoted} finding(s) per severity policy",
+                            ))
+                        else:
+                            checks.append(CheckResult(
+                                f"gate_{gate}",
+                                "PASS",
+                                "codex gate passed",
+                            ))
                     else:
                         checks.append(CheckResult(
                             f"gate_{gate}",
@@ -818,6 +875,12 @@ def _detect_gate_report_contradictions(
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result is None:
             continue
+
+        # CFX-17: contradiction detection must see the same demoted view of codex
+        # findings the gate decision used, otherwise a successful demotion would
+        # be flagged as a gate/report mismatch.
+        if gate == "codex_gate":
+            result = _apply_codex_severity_policy(result)
 
         report_path_str = result.get("report_path", "")
         if not report_path_str:
