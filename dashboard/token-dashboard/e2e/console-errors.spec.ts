@@ -97,7 +97,7 @@ async function assertNoRuntimeErrorOverlay(page: Page): Promise<void> {
 
 // The agent-stream page opens an EventSource to /api/agent-stream/[terminal].
 // Without this mock, that connection keeps the page in a non-idle state forever.
-function mockSseEndpoints(page: Page): Promise<void> {
+function mockSseEndpoints(page: Page): ReturnType<typeof page.route> {
   return page.route('**/api/agent-stream/**', async (route) => {
     await route.fulfill({
       status: 200,

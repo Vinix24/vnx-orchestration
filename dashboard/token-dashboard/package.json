@@ -8,7 +8,9 @@
     "start": "next start --port 3100",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:lint:fixtures": "tsx scripts/validate_test_fixtures.ts",
+    "test:lint": "npm run test:lint:fixtures && npm run typecheck"
   },
   "dependencies": {
     "date-fns": "^4.1.0",
@@ -32,6 +34,7 @@
     "jest-environment-jsdom": "^30.3.0",
     "tailwindcss": "^4.0.0",
     "ts-jest": "^29.4.9",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.0"
   }
 }
