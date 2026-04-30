@@ -412,6 +412,12 @@ class RuntimeCore:
 
         Idempotent: terminal already in idle state returns released=True.
 
+        OI-1100 fix: when the lease has already been marked `expired` by the
+        reconciler (worker outlived the TTL but eventually delivered a completion
+        receipt), recover the lease so the next dispatch is not blocked by
+        `lease_expired_not_cleaned`. Release_lease() rejects state="expired";
+        recover() is the canonical transition expired → recovering → idle.
+
         Returns a structured dict with released/skipped/reason for audit logging.
         """
         try:
@@ -440,6 +446,27 @@ class RuntimeCore:
                 }
 
             generation = lease.generation
+
+            # OI-1100: if the lease was already expired by the reconciler, the
+            # standard release path is invalid (LEASE_TRANSITIONS forbids
+            # expired -> released). Recover it instead — the canonical
+            # expired -> recovering -> idle path resolves the same condition
+            # and emits auditable lease_recovering / lease_recovered events.
+            if lease.state == "expired":
+                self._lease_mgr.recover(
+                    terminal_id,
+                    actor="receipt_processor",
+                    reason=f"task_receipt_expired:{dispatch_id or 'unknown'}",
+                )
+                return {
+                    "released": True,
+                    "terminal_id": terminal_id,
+                    "generation": generation,
+                    "dispatch_id": dispatch_id,
+                    "reason": "receipt_triggered_recover_from_expired",
+                    "recovered": True,
+                }
+
             self._lease_mgr.release(
                 terminal_id,
                 generation,
