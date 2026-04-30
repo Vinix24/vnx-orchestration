@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RefreshCw, LayoutGrid, Activity } from 'lucide-react';
 import { useProjects, useTerminals, useOperatorSession } from '@/lib/hooks';
 import type { ActionOutcome } from '@/lib/types';
@@ -47,6 +47,13 @@ export default function OperatorPage() {
   const { data: terminalsEnv, isLoading: termLoading, mutate: mutateTerminals } = useTerminals();
   const { data: sessionEnv } = useOperatorSession();
   const [lastOutcome, setLastOutcome] = useState<ActionOutcome | null>(null);
+  const mutateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (mutateTimerRef.current) clearTimeout(mutateTimerRef.current);
+    };
+  }, []);
 
   function handleRefresh() {
     mutateProjects();
@@ -217,7 +224,11 @@ export default function OperatorPage() {
                   project={proj}
                   onActionComplete={outcome => {
                     setLastOutcome(outcome);
-                    setTimeout(() => mutateProjects(), 1500);
+                    if (mutateTimerRef.current) clearTimeout(mutateTimerRef.current);
+                    mutateTimerRef.current = setTimeout(() => {
+                      mutateTimerRef.current = null;
+                      mutateProjects();
+                    }, 1500);
                   }}
                 />
               ))}
