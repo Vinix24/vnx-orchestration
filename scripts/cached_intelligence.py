@@ -307,8 +307,14 @@ class CachedIntelligence:
             rules = []
 
             for row in cursor:
+                raw_combo = row['tag_combination'] or ""
+                try:
+                    parsed = json.loads(raw_combo) if raw_combo else []
+                    tags = parsed if isinstance(parsed, list) else ([str(parsed)] if parsed else [])
+                except (json.JSONDecodeError, TypeError):
+                    tags = [t.strip() for t in raw_combo.split(',') if t.strip()]
                 rules.append({
-                    'tags': row['tag_combination'].split(','),
+                    'tags': tags,
                     'type': row['rule_type'],
                     'description': row['description'],
                     'recommendation': row['recommendation'],
