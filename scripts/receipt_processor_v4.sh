@@ -161,16 +161,45 @@ extract_timestamp() {
     echo "$filename" | grep -oE '^[0-9]{8}-[0-9]{6}'
 }
 
+# Compute the cutoff epoch seconds for report age filtering based on current MODE.
+_spr_get_cutoff_seconds() {
+    if [ "$MODE" = "monitor" ]; then
+        # Monitor mode: use watermark-based processing.
+        # Only process reports newer than the last successfully processed report's mtime.
+        # On first run (no watermark), fall back to 24 hours to avoid replaying history.
+        if [ -f "$WATERMARK_FILE" ]; then
+            local cs
+            cs=$(cat "$WATERMARK_FILE" 2>/dev/null)
+            if ! [[ "$cs" =~ ^[0-9]+$ ]]; then
+                cs=$(($(date +%s) - 86400))
+            fi
+            echo "$cs"
+        else
+            echo "$(($(date +%s) - 86400))"
+        fi
+    elif [ "$MODE" = "manual" ] && [ -f "$WATERMARK_FILE" ]; then
+        # Manual mode: honor last-processed watermark (epoch seconds) when available
+        local cs
+        cs=$(cat "$WATERMARK_FILE" 2>/dev/null)
+        if ! [[ "$cs" =~ ^[0-9]+$ ]]; then
+            cs=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
+        fi
+        echo "$cs"
+    else
+        # Catchup mode (or manual with no prior watermark): process last N hours
+        echo "$(($(date +%s) - (MAX_AGE_HOURS * 3600)))"
+    fi
+}
+
 # Check if report should be processed
 should_process_report() {
     local report_file="$1"
-    local report_name=$(basename "$report_file")
+    local report_name
+    report_name=$(basename "$report_file")
 
     # PERMANENT FIX: Use file modification time, NOT filename timestamp
     # This prevents reports with old dispatch timestamps from being rejected
     # when they are actually created NOW
-
-    # Get file modification time in seconds since epoch (cross-platform)
     local file_mtime
     file_mtime=$(stat -c %Y "$report_file" 2>/dev/null || stat -f %m "$report_file" 2>/dev/null)
     if [ -z "$file_mtime" ]; then
@@ -178,32 +207,9 @@ should_process_report() {
         return 1
     fi
 
-    # Calculate cutoff time in seconds since epoch
     local cutoff_seconds
-    if [ "$MODE" = "monitor" ]; then
-        # Monitor mode: use watermark-based processing.
-        # Only process reports newer than the last successfully processed report's mtime.
-        # On first run (no watermark), fall back to 24 hours to avoid replaying history.
-        if [ -f "$WATERMARK_FILE" ]; then
-            cutoff_seconds=$(cat "$WATERMARK_FILE" 2>/dev/null)
-            if ! [[ "$cutoff_seconds" =~ ^[0-9]+$ ]]; then
-                cutoff_seconds=$(($(date +%s) - 86400))
-            fi
-        else
-            cutoff_seconds=$(($(date +%s) - 86400))
-        fi
-    elif [ "$MODE" = "manual" ] && [ -f "$WATERMARK_FILE" ]; then
-        # Manual mode: honor last-processed watermark (epoch seconds) when available
-        cutoff_seconds=$(cat "$WATERMARK_FILE" 2>/dev/null)
-        if ! [[ "$cutoff_seconds" =~ ^[0-9]+$ ]]; then
-            cutoff_seconds=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
-        fi
-    else
-        # Catchup mode (or manual with no prior watermark): process last N hours
-        cutoff_seconds=$(($(date +%s) - (MAX_AGE_HOURS * 3600)))
-    fi
+    cutoff_seconds=$(_spr_get_cutoff_seconds)
 
-    # Check if file is too old based on actual modification time
     if [ "$file_mtime" -lt "$cutoff_seconds" ]; then
         local age_minutes=$(( ($(date +%s) - file_mtime) / 60 ))
         log "DEBUG" "Report too old: $report_name (age: ${age_minutes}m)"
@@ -212,8 +218,8 @@ should_process_report() {
 
     log "DEBUG" "Report accepted: $report_name (age: $(( ($(date +%s) - file_mtime) / 60 ))m)"
 
-    # Check if already processed by hash
-    local report_hash=$(_sha256 "$report_file")
+    local report_hash
+    report_hash=$(_sha256 "$report_file")
     if grep -q "^$report_hash$" "$PROCESSED_HASHES" 2>/dev/null; then
         log "DEBUG" "Already processed: $report_name"
         return 1
@@ -729,6 +735,36 @@ _build_state_line() {
 📊 STATE: T1=$t1_st T2=$t2_st T3=$t3_st | Queue: pending=$q_pending active=$q_active"
 }
 
+# Compute OI delta string from open_items.json for a given new_count.
+# Echoes the formatted delta string or nothing on error.
+_bql_compute_oi_delta() {
+    local new_count="${1:-0}"
+    local oi_file="$STATE_DIR/open_items.json"
+    [ ! -f "$oi_file" ] && return 0
+    python3 -c "
+import json, sys
+try:
+    with open('$oi_file') as f:
+        items = json.load(f)
+    if not isinstance(items, list):
+        items = items.get('items', [])
+    total_open = sum(1 for i in items if i.get('status', '') not in ('done', 'resolved', 'closed'))
+    resolved = sum(1 for i in items if i.get('status', '') in ('done', 'resolved', 'closed'))
+    print(f' | OI: +${new_count} new, {resolved} resolved ({total_open} open)')
+except Exception:
+    pass
+" 2>/dev/null
+}
+
+# Fetch up to 5 finding detail lines from quality sidecar for tmux display.
+_bql_fetch_findings() {
+    local quality_sidecar="$1"
+    local findings_count
+    findings_count=$(jq -r '.findings | length' "$quality_sidecar" 2>/dev/null || echo "0")
+    [ "$findings_count" -gt 0 ] || return 0
+    jq -r '.findings[:5][] | "  → [\(.severity)] \(.file)\(if .symbol then ":\(.symbol)" else "" end) — \(.message)"' "$quality_sidecar" 2>/dev/null
+}
+
 # Sub-helper: Build quality line from sidecar (dispatch_id must match)
 _build_quality_line() {
     local dispatch_id="$1"
@@ -747,25 +783,8 @@ _build_quality_line() {
     qs_new_count=$(jq -r '.new_items // 0' "$quality_sidecar" 2>/dev/null)
     qs_new_ids=$(jq -r '.new_item_ids // [] | join(", ")' "$quality_sidecar" 2>/dev/null)
 
-    # Build OI delta: resolved count and total open from open_items.json
-    local oi_delta=""
-    local oi_file="$STATE_DIR/open_items.json"
-    if [ -f "$oi_file" ]; then
-        oi_delta=$(python3 -c "
-import json, sys
-try:
-    with open('$oi_file') as f:
-        items = json.load(f)
-    if not isinstance(items, list):
-        items = items.get('items', [])
-    total_open = sum(1 for i in items if i.get('status', '') not in ('done', 'resolved', 'closed'))
-    resolved = sum(1 for i in items if i.get('status', '') in ('done', 'resolved', 'closed'))
-    new_count = ${qs_new_count:-0}
-    print(f' | OI: +{new_count} new, {resolved} resolved ({total_open} open)')
-except Exception:
-    pass
-" 2>/dev/null)
-    fi
+    local oi_delta
+    oi_delta=$(_bql_compute_oi_delta "$qs_new_count")
 
     if [ "$qs_blocker" -gt 0 ] || [ "$qs_warn" -gt 0 ] 2>/dev/null; then
         local qs_parts=""
@@ -774,21 +793,11 @@ except Exception:
             [ -n "$qs_parts" ] && qs_parts="${qs_parts}, "
             qs_parts="${qs_parts}${qs_warn} warn"
         fi
-
-        # Build findings detail lines (max 5 for tmux readability)
-        local qs_findings=""
-        local findings_count
-        findings_count=$(jq -r '.findings | length' "$quality_sidecar" 2>/dev/null || echo "0")
-        if [ "$findings_count" -gt 0 ]; then
-            qs_findings=$(jq -r '.findings[:5][] | "  → [\(.severity)] \(.file)\(if .symbol then ":\(.symbol)" else "" end) — \(.message)"' "$quality_sidecar" 2>/dev/null)
-        fi
-
+        local qs_findings
+        qs_findings=$(_bql_fetch_findings "$quality_sidecar")
         echo "
 ⚠️ QUALITY [${qs_decision}|risk:${qs_risk}]: ${qs_parts}${oi_delta}"
-        # Append finding details if available
-        if [ -n "$qs_findings" ]; then
-            echo "$qs_findings"
-        fi
+        [ -n "$qs_findings" ] && echo "$qs_findings"
     else
         echo "
 ✅ QUALITY [${qs_decision}|risk:${qs_risk}]: clean${oi_delta}"
@@ -812,6 +821,27 @@ check_provenance_quality() {
     fi
 }
 
+# Map receipt status to a human-readable next action string.
+_drtp_get_next_action() {
+    case "$1" in
+        "success") echo "Progress to next gate" ;;
+        "failure"|"error") echo "Investigate failure" ;;
+        "blocked") echo "Resolve blocker" ;;
+        *) echo "Review report" ;;
+    esac
+}
+
+# Build the git warning line for DIRTY_HIGH provenance; echo nothing for CLEAN/DIRTY_LOW.
+_drtp_build_git_line() {
+    local receipt_json="$1"
+    local git_quality
+    git_quality=$(check_provenance_quality "$receipt_json")
+    [ "$git_quality" != "DIRTY_HIGH" ] && return 0
+    local git_ref
+    git_ref=$(echo "$receipt_json" | jq -r '.provenance.git_ref // "?"' 2>/dev/null)
+    printf '\n⚠️ Git: %s (ref:%s)' "$git_quality" "${git_ref:0:8}"
+}
+
 # Section F (inner): Build enriched receipt message and paste to T0 tmux pane.
 # Returns 0 on success, 1 if pane unreachable or paste failed.
 # Reads _rf_* variables set by extract_receipt_fields().
@@ -830,39 +860,23 @@ _deliver_receipt_to_t0_pane() {
             ;;
     esac
 
-    local t0_pane=$(get_pane_id_smart "T0" 2>/dev/null)
+    local t0_pane
+    t0_pane=$(get_pane_id_smart "T0" 2>/dev/null)
     if [ -z "$t0_pane" ]; then
         log "ERROR" "Could not find T0 pane - get_pane_id_smart returned empty"
         return 1
     fi
 
     local report_path="${_rf_report_path:-no-report}"
-
-    # Determine next action based on status
-    local next_action="Review report"
-    case "$_rf_status" in
-        "success") next_action="Progress to next gate" ;;
-        "failure"|"error") next_action="Investigate failure" ;;
-        "blocked") next_action="Resolve blocker" ;;
-    esac
-
-    # Map status: use "done" instead of "success" in footer (NDJSON unchanged)
+    local next_action
+    next_action=$(_drtp_get_next_action "$_rf_status")
     local footer_status="$_rf_status"
     [ "$footer_status" = "success" ] && footer_status="done"
 
-    local state_line=$(_build_state_line "$terminal")
-    local quality_line=$(_build_quality_line "$dispatch_id")
-
-    # Git line: only show for DIRTY_HIGH (actionable); skip CLEAN and DIRTY_LOW
-    local git_quality
-    git_quality=$(check_provenance_quality "$receipt_json")
-    local git_line=""
-    if [ "$git_quality" = "DIRTY_HIGH" ]; then
-        local git_ref
-        git_ref=$(echo "$receipt_json" | jq -r '.provenance.git_ref // "?"' 2>/dev/null)
-        git_line="
-⚠️ Git: ${git_quality} (ref:${git_ref:0:8})"
-    fi
+    local state_line quality_line git_line
+    state_line=$(_build_state_line "$terminal")
+    quality_line=$(_build_quality_line "$dispatch_id")
+    git_line=$(_drtp_build_git_line "$receipt_json")
 
     local receipt_msg="/t0-orchestrator 📨 RECEIPT:${terminal}:${footer_status} | ID: ${dispatch_id} | Next: ${next_action}${quality_line}${state_line}${git_line}
 Report: ${report_path}"
