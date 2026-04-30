@@ -503,12 +503,63 @@ def _write_manifest(
         return None
 
 
+def _safe_remove_active_dir(src_dir: Path) -> bool:
+    """Remove ``src_dir`` recursively iff it lives under ``dispatches/active/``.
+
+    Safety contract (CFX-7):
+      * The directory itself must not be a symlink — refuse to follow.
+      * ``src_dir.parent.name`` must be ``"active"`` and the grandparent
+        must be named ``"dispatches"``.  This anchors the removal to the
+        intended layout and rejects any caller-supplied path that escapes
+        the active bucket.
+      * Missing directory is a successful no-op (idempotent).
+
+    Returns True when the directory was removed (or was already gone),
+    False when removal was refused or failed.  Never raises.
+    """
+    try:
+        if src_dir.is_symlink():
+            logger.warning(
+                "_safe_remove_active_dir: refusing symlinked path %s", src_dir
+            )
+            return False
+        if not src_dir.exists():
+            return True
+        if not src_dir.is_dir():
+            logger.warning(
+                "_safe_remove_active_dir: refusing non-directory %s", src_dir
+            )
+            return False
+        parent = src_dir.parent
+        grandparent = parent.parent
+        if parent.name != "active" or grandparent.name != "dispatches":
+            logger.warning(
+                "_safe_remove_active_dir: refusing %s — not under dispatches/active/",
+                src_dir,
+            )
+            return False
+        shutil.rmtree(src_dir)
+        return True
+    except FileNotFoundError:
+        return True
+    except Exception as exc:
+        logger.warning("_safe_remove_active_dir failed for %s: %s", src_dir, exc)
+        return False
+
+
 def _promote_manifest(dispatch_id: str, stage: str = "completed") -> str | None:
     """Move manifest from active/ to <stage>/ after dispatch finishes.
 
     stage must be one of: "completed", "dead_letter".
     The manifest is moved (not copied) so a failed dispatch never has a
     parallel record in completed/ — there is exactly one terminal location.
+
+    After the manifest move succeeds, the originating ``active/<id>/``
+    directory is removed via :func:`_safe_remove_active_dir` so any
+    ancillary files (bundle.json, dispatch copies, etc.) that other
+    components write alongside the manifest do not orphan the bucket.
+    The check_active_drain.py janitor remains a backstop for paths that
+    bypass this primary cleanup.
 
     Returns the destination manifest path as a string, or None on failure.
     """
@@ -519,17 +570,19 @@ def _promote_manifest(dispatch_id: str, stage: str = "completed") -> str | None:
     dst_dir = _dispatch_manifest_dir(stage, dispatch_id)
     src = src_dir / "manifest.json"
     if not src.exists():
+        # Already promoted (or never written) — make the cleanup
+        # idempotent: still remove a stray active/<id>/ shell if one
+        # remains.  This is what makes re-running cleanup a true no-op.
+        _safe_remove_active_dir(src_dir)
         return None
     try:
         dst_dir.mkdir(parents=True, exist_ok=True)
         dst = dst_dir / "manifest.json"
         shutil.move(str(src), str(dst))
-        # Best-effort: remove now-empty active dir so check_active_drain
-        # does not see it as in-flight.
-        try:
-            src_dir.rmdir()
-        except OSError:
-            pass
+        # CFX-7: rmtree the active/<id>/ dir so leftover sibling files
+        # do not cause check_active_drain to flag the dispatch as
+        # in-flight.  Safety-checked via _safe_remove_active_dir.
+        _safe_remove_active_dir(src_dir)
         logger.info("Manifest moved to %s: %s -> %s", stage, src, dst)
         return str(dst)
     except Exception as exc:
