@@ -1235,6 +1235,9 @@ def main():
     analyzer = ConversationAnalyzer(DB_PATH)
     analyzer.connect()
 
+    rc = 0
+    run_status = "ok"
+    run_error: Optional[str] = None
     try:
         analyzer.run(
             max_sessions=args.max_sessions,
@@ -1243,12 +1246,27 @@ def main():
             project_filter=args.project_filter,
             terminal_filter=args.terminal_filter,
         )
-        return 0
     except Exception as e:
         log("ERROR", f"Analysis failed: {e}")
-        return 1
+        run_status = "fail"
+        run_error = str(e)
+        rc = 1
     finally:
         analyzer.close()
+        try:
+            from health_beacon import HealthBeacon
+            details = {"max_sessions": args.max_sessions, "dry_run": args.dry_run}
+            if run_error:
+                details["error"] = run_error
+            HealthBeacon(
+                Path(PATHS["VNX_DATA_DIR"]),
+                "conversation_analyzer",
+                expected_interval_seconds=86400,
+            ).heartbeat(status=run_status, details=details)
+        except Exception:
+            pass
+
+    return rc
 
 
 if __name__ == "__main__":

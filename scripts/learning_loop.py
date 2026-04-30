@@ -866,6 +866,27 @@ class LearningLoop:
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
+        try:
+            from health_beacon import HealthBeacon
+            from vnx_paths import ensure_env as _hb_ensure_env
+            _hb_paths = _hb_ensure_env()
+            HealthBeacon(
+                Path(_hb_paths["VNX_DATA_DIR"]),
+                "learning_loop",
+                expected_interval_seconds=86400,
+            ).heartbeat(
+                status="ok",
+                details={
+                    "elapsed_seconds": round(elapsed, 2),
+                    "patterns_tracked": len(self.pattern_metrics),
+                    "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
+                    "new_prevention_rules": len(new_rules),
+                    "patterns_archived": self.learning_stats.get("patterns_archived", 0),
+                },
+            )
+        except Exception:
+            pass
+
         return report
 
 
