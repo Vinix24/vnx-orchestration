@@ -11,6 +11,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
+source "$SCRIPT_DIR/lib/dispatch_project_guard.sh"
 source "$SCRIPT_DIR/lib/provider_routing.sh"
 source "$SCRIPT_DIR/lib/model_routing.sh"
 source "$SCRIPT_DIR/lib/input_mode_guard.sh"
@@ -66,6 +67,26 @@ TERMINALS_DIR="$CLAUDE_DIR/terminals"
 LOG_FILE="$VNX_LOGS_DIR/dispatcher_v8.log"
 PROGRESS_FILE="$STATE_DIR/progress.yaml"
 RUN_ID=$(date +%s)
+
+# OI-1067: Cross-project isolation invariant.
+# DISPATCH_DIR must resolve under VNX_DATA_DIR so a stray VNX_DISPATCH_DIR
+# override pointing at a sibling project cannot make this dispatcher read or
+# write into another tenant's pending/active queues. Fail-closed at startup
+# rather than silently processing foreign-project dispatches.
+if ! vnx_dispatch_assert_dir_under "$DISPATCH_DIR" "$VNX_DATA_DIR"; then
+    echo "FATAL: VNX_DISPATCH_DIR='$DISPATCH_DIR' is not under VNX_DATA_DIR='$VNX_DATA_DIR'" >&2
+    echo "Refusing to start — cross-project contamination guard (OI-1067)." >&2
+    exit 1
+fi
+
+# OI-1067: Resolve the dispatcher's bound project_id once at startup.
+# Validates against the same allowlist regex as scripts/lib/project_scope.py.
+if ! _VNX_DISPATCHER_PROJECT_ID="$(vnx_dispatch_resolve_project_id)"; then
+    echo "FATAL: Invalid VNX_PROJECT_ID='${VNX_PROJECT_ID:-}'" >&2
+    echo "Must match /^[a-z][a-z0-9-]{1,31}$/ — see scripts/lib/project_scope.py" >&2
+    exit 1
+fi
+export _VNX_DISPATCHER_PROJECT_ID
 
 # Colors for output
 RED='\033[0;31m'
@@ -130,6 +151,7 @@ extract_phase() { vnx_dispatch_extract_phase "$1"; }
 extract_new_gate() { vnx_dispatch_extract_new_gate "$1"; }
 extract_task_id() { vnx_dispatch_extract_task_id "$1" "$2"; }
 extract_pr_id() { vnx_dispatch_extract_pr_id "$1"; }
+extract_project_id() { vnx_dispatch_extract_project_id "$1"; }
 
 # ===== MODE CONTROL FUNCTIONS (from V7 Track 2b) =====
 
@@ -368,6 +390,42 @@ _validate_dispatch_fields() {
     return 0
 }
 
+# _validate_project_id — OI-1067 cross-project contamination guard.
+# Delegates to vnx_dispatch_validate_project_id (scripts/lib/dispatch_project_guard.sh)
+# and translates the printed status into structured log lines.
+# Returns 1 to signal caller to skip; 0 to proceed.
+_validate_project_id() {
+    local dispatch="$1"
+    local status rc=0
+    set +e
+    status="$(vnx_dispatch_validate_project_id "$dispatch" "$_VNX_DISPATCHER_PROJECT_ID" "$REJECTED_DIR")"
+    rc=$?
+    set -e
+
+    case "$status" in
+        match) return 0 ;;
+        legacy)
+            log "V8 PROJECT_ID: legacy dispatch (no Project-ID stamp) — accepting under expected='$_VNX_DISPATCHER_PROJECT_ID': $(basename "$dispatch")"
+            return 0
+            ;;
+        reject)
+            log "V8 ERROR: Cross-project dispatch rejected — expected='$_VNX_DISPATCHER_PROJECT_ID' file=$(basename "$dispatch")"
+            return 1
+            ;;
+        fatal)
+            log_structured_failure "project_id_guard_fatal" \
+                "Cross-project guard called with malformed expected project_id" \
+                "expected=$_VNX_DISPATCHER_PROJECT_ID rc=$rc"
+            return 1
+            ;;
+        *)
+            log_structured_failure "project_id_guard_unknown_status" \
+                "Cross-project guard returned unknown status" "status=$status rc=$rc"
+            return 1
+            ;;
+    esac
+}
+
 # validate_dispatch_preconditions — pre-delivery guard: skill/role/agent validation + metadata.
 # Sets: _PD_TRACK _PD_COGNITION _PD_PRIORITY _PD_GATE _PD_DISPATCH_ID _PD_TARGET_TERMINAL
 # Returns 1 (caller should continue) if dispatch should be skipped.
@@ -377,6 +435,9 @@ validate_dispatch_preconditions() {
     agent_role=$(extract_agent_role "$dispatch")
     log "V8: Processing dispatch: $(basename "$dispatch") (Role: $agent_role)"
 
+    # OI-1067: cross-project contamination guard runs FIRST so a foreign-tenant
+    # dispatch can't trigger skill/agent validation noise on the wrong project.
+    _validate_project_id "$dispatch" || return 1
     _validate_stuck_files "$dispatch" "$agent_role" || return 1
     _validate_agent_intelligence "$dispatch" "$agent_role" || return 1
     _validate_dispatch_fields "$dispatch" || return 1
