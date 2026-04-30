@@ -144,6 +144,9 @@ Commands:
   update --latest        Update ignoring version.lock
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
+                       review --weekly  Aggregate last 7d suggestions by target file
+  insights           Read-only F57 dispatch parameter + behavioral intelligence signals
+                       --json           Machine-readable JSON output
 
 Intelligence commands (git-tracked project knowledge):
   intelligence-export  Export SQLite + state to canonical .vnx-intelligence/ (NDJSON)
@@ -1867,6 +1870,9 @@ main() {
       ;;
     suggest)
       python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
+      ;;
+    insights)
+      python3 "$VNX_HOME/scripts/vnx_insights_cli.py" "$@"
       ;;
     gate-check)
       python3 "$VNX_HOME/scripts/pre_merge_gate.py" "$@"
