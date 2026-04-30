@@ -27,7 +27,10 @@ def _coerce_status(result: Dict[str, Any]) -> Tuple[str, bool]:
 
     Uses ``status`` when present and non-empty. Falls back to legacy
     ``verdict`` for old files written before CFX-3 — this is graceful
-    migration, not a permanent contract.
+    migration, not a permanent contract.  Also handles the
+    ``claude_github_optional`` format where terminal outcome is recorded
+    as ``state="completed"`` + ``result_status="pass"|"fail"`` rather than
+    top-level ``status``/``verdict``.
     """
     status = result.get("status")
     if isinstance(status, str) and status:
@@ -41,6 +44,10 @@ def _coerce_status(result: Dict[str, Any]) -> Tuple[str, bool]:
             stacklevel=3,
         )
         return verdict.lower(), True
+    if (result.get("state") or "").lower() == "completed":
+        rs = (result.get("result_status") or "").lower()
+        if rs:
+            return rs, False
     return "", False
 
 
