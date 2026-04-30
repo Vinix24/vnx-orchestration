@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""T5-PR3: instruction_sha256 surfaced in receipt session metadata.
+"""T5-PR3 / CFX-10: instruction_sha256 surfaced in receipt session metadata.
 
 Covers:
-  A. Receipt with valid manifest_path → instruction_sha256 in session metadata
+  A. Receipt with valid manifest_path (legacy 16-char) → instruction_sha256 in metadata (backward-compat: reader accepts any length)
   B. Receipt without manifest_path → field absent, no crash
   C. Manifest file missing → field absent, warning logged to stderr
   D. Malformed manifest JSON → field absent, warning logged to stderr
   E. Existing receipt enrichment (token usage etc.) unaffected
+  F. subprocess_completion event → instruction_sha256 surfaces via full append path
+  G. subprocess_completion must NOT overwrite quality_advisory_json/cqs
+  H. real task_complete still triggers quality_advisory + CQS persistence
+  I. New manifests with 64-char sha256 are read correctly
 """
 
 from __future__ import annotations
@@ -99,6 +103,34 @@ def test_valid_manifest_surfaces_instruction_sha256(ar, tmp_path):
 
     assert "instruction_sha256" in metadata
     assert metadata["instruction_sha256"] == "abcdef1234567890"
+
+
+# ── Case I: new manifest with full 64-char sha256 → surfaces correctly ───────
+
+def test_full_64char_sha256_surfaces_in_session_metadata(ar, tmp_path):
+    """CFX-10: reader handles full 64-char sha256 from new manifests."""
+    import hashlib as _hashlib
+    instruction = "Full SHA-256 instruction text"
+    full_sha = _hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+    assert len(full_sha) == 64
+
+    manifest = {
+        "dispatch_id": "DISP-IH-I01",
+        "instruction_sha256": full_sha,
+        "instruction_chars": len(instruction),
+    }
+    manifest_file = tmp_path / "manifest_full.json"
+    manifest_file.write_text(json.dumps(manifest))
+
+    receipt = _make_receipt(manifest_path=str(manifest_file))
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    metadata, _ = _call_build_session(ar, receipt, state_dir)
+
+    assert "instruction_sha256" in metadata
+    assert metadata["instruction_sha256"] == full_sha
+    assert len(metadata["instruction_sha256"]) == 64
 
 
 # ── Case B: no manifest_path → field absent, no crash ────────────────────────

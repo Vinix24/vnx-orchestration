@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""T5-PR2: instruction_sha256 field in dispatch manifest.
+"""T5-PR2 / CFX-10: instruction_sha256 field in dispatch manifest.
 
 Covers:
-  A. Known instruction → manifest.json contains expected sha256[:16]
+  A. Known instruction → manifest.json contains full 64-char sha256
   B. Unicode instruction → hash computed correctly
-  C. Empty instruction → hash present (sha256 of empty string)
+  C. Empty instruction → hash present (sha256 of empty string, 64 chars)
   D. Existing manifest fields preserved (regression)
 """
 
@@ -43,25 +43,28 @@ def _write_manifest(tmp_path: Path, instruction: str, dispatch_id: str = "test-d
 
 def test_manifest_has_instruction_sha256_for_known_instruction(tmp_path):
     instruction = "Do something important"
-    expected = hashlib.sha256(instruction.encode("utf-8")).hexdigest()[:16]
+    expected = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
     data = _write_manifest(tmp_path, instruction)
     assert "instruction_sha256" in data
     assert data["instruction_sha256"] == expected
+    assert len(data["instruction_sha256"]) == 64
 
 
 def test_manifest_instruction_sha256_unicode(tmp_path):
     instruction = "Execute: café résumé naïve 你好 🚀"
-    expected = hashlib.sha256(instruction.encode("utf-8")).hexdigest()[:16]
+    expected = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
     data = _write_manifest(tmp_path, instruction, dispatch_id="test-dispatch-B")
     assert data["instruction_sha256"] == expected
+    assert len(data["instruction_sha256"]) == 64
 
 
 def test_manifest_instruction_sha256_empty_instruction(tmp_path):
     instruction = ""
-    expected = hashlib.sha256(b"").hexdigest()[:16]
+    expected = hashlib.sha256(b"").hexdigest()
     data = _write_manifest(tmp_path, instruction, dispatch_id="test-dispatch-C")
     assert "instruction_sha256" in data
     assert data["instruction_sha256"] == expected
+    assert len(data["instruction_sha256"]) == 64
 
 
 def test_manifest_existing_fields_preserved(tmp_path):
