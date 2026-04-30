@@ -36,7 +36,7 @@ After any system crash or tmux session restart, if `t0_state.json` shows anomali
    ls .vnx-data/dispatches/active/
    ```
    If any exist: read the dispatch, check if worker has uncommitted changes, decide re-dispatch or resume.
-4. Verify pane IDs match live tmux:
+4. Verify pane IDs match live tmux (tmux fallback only — skip when dispatching via subprocess):
    ```bash
    tmux list-panes -a -F "#{pane_id} #{pane_current_path}"
    ```
@@ -65,10 +65,14 @@ Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
 
 - ALLOWED: `Read`, `Grep`, `Glob`
 - ALLOWED: `Bash` only for orchestration/state commands
-- DENIED: `Write`, `Edit`, `Task`, and implementation execution
-- OUTPUT: promote staged dispatches only; do NOT print dispatch instructions to terminal
-- Manager blocks to terminal are ONLY for accidental dispatches (no staged dispatch exists) or operator-requested manual delivery
-- Promoting from staging IS the delivery mechanism — smart tap picks up from pending/ automatically
+- ALLOWED: `Write`/`Edit` ONLY for:
+  - `/tmp/*.txt` or `/tmp/*.sh` instruction files for worker dispatches (ephemeral scratch)
+  - `claudedocs/*` analysis reports (audit/research output)
+- DENIED: `Write`/`Edit` for scripts/, dashboard/, docs/manifesto/ — those go through dispatch+PR
+- DENIED: direct commits to main branch
+- DENIED: production state in `.vnx-data/state/` — use `dispatch_register`, `append_receipt`, or `open_items_manager` APIs
+- OUTPUT: dispatch via `subprocess_dispatch.py` (primary) or promote staged dispatch (when template exists)
+- Manager blocks to terminal are ONLY for accidental dispatches or operator-requested manual delivery
 
 ## Core Responsibilities
 
@@ -76,7 +80,7 @@ Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
 2. Evaluate quality advisory before deciding next action.
 3. Check open items and close only evidence-backed items.
 4. Complete PRs when all gates passed and no blockers remain.
-5. Promote staged dispatches before crafting manual dispatches.
+5. Prefer staged dispatch templates when they exist; use `subprocess_dispatch.py` for ad-hoc dispatches.
 6. Open new open items when new out-of-scope risks/issues are discovered.
 7. Dispatch one block at a time and keep queue state consistent.
 8. Request required headless review gates and verify their report + receipt evidence before closure.
@@ -141,7 +145,8 @@ python3 scripts/runtime_core_cli.py release-on-failure --terminal <T> --dispatch
 
 ## Headless T1 Dispatch
 
-T1 is a headless backend-developer. Dispatch via:
+T1 is a headless backend-developer. This is the **dominant dispatch path** — not a special case.
+Dispatch via:
 - Set VNX_ADAPTER_T1=subprocess in the dispatcher environment (default since F32)
 - Or call directly: `python3 scripts/lib/subprocess_dispatch.py --terminal-id T1 --dispatch-id <id> --model sonnet --instruction "<task>"`
 
@@ -178,5 +183,87 @@ python3 scripts/validate_skill.py --list
 ## Feature Plan Path
 
 Use `FEATURE_PLAN.md` in repo root.
+
+## Operator Policies (Default Behavior)
+
+These defaults apply unless the operator overrides for the current session.
+Cite the policy code (A1, B2, etc) when invoking.
+
+### Codex availability
+- **A1**: Codex CLI rate-limited → wait for reset (default 5h+, max 5d acceptable). NEVER fall back unless explicitly authorized this session as Option B.
+- **A2 (Option B fallback, opt-in only)**: When operator explicitly says "Option B" or "gemini-only OK": merge with gemini PASS + CI green; file codex re-audit OI per merge. Use template:
+  ```
+  python3 scripts/open_items_manager.py add \
+    --title "Codex re-audit pending PR #N (merged with codex unavailable)" \
+    --severity info --pr N --dispatch "20260430-codex-rate-limit-mayX" \
+    --details "..."
+  ```
+
+### Gate findings handling
+- **B1 (gemini stall)**: Gemini stall ≥180s with 0 partial output → merge anyway (infra issue, not finding). Operator-approved pattern.
+- **B2 (pre-existing main bug)**: Codex blocking that's about lines NOT in this PR's diff → file OI, push merge.
+- **B3 (PR-introduced finding)**: Fix in same PR, retry gates ONCE. After 1 retry still dirty → defer with OI. Don't iterate.
+- **B4 (CI red after fix)**: 1 retry, then skip+OI.
+
+### CI failure rules (hard)
+- CI red on a known check (Profile A/B/C, secret scan, Trace Token Validation) is **NEVER acceptable for merge**. ALWAYS investigate root cause:
+  1. Read failure log: `gh run view <RUN_ID> --log-failed`
+  2. Decide: gate-bug (fix the workflow) vs code-bug (fix the code)
+  3. Resolve and re-CI before merge
+- "Other PRs were merged with red" is NOT precedent. Bypass requires explicit operator override.
+
+### Worker dispatch & retry
+- **C1**: Worker fails twice on same task → skip task, file OI.
+- **C2**: F60 / overnight feature work → run autonomous if operator approved, otherwise pause at sunrise.
+- **C3**: New worktrees OK without check-in (operator approved).
+
+### Open items
+- **D1**: Close OIs with concrete code/test evidence. No premature close.
+- **D2**: File new OIs liberally — operator-approved.
+
+### Stop conditions (wake operator)
+- **E1**: main branch broken after merge.
+- **E2**: Data loss risk (db migration, file deletion >100 lines).
+- **E3**: Secrets in logs/PRs.
+- **E4**: GitHub auth/quota fully dead (cannot proceed).
+- **E5**: Codex unavailable >5h consecutive (covers A1 escalation).
+- **E6**: Three consecutive PRs blocked by same recurring CI/gate issue (suggests systemic problem).
+
+## Worker Dispatch Standards
+
+Every dispatch instruction MUST include the following footer (codified — don't repeat per-dispatch):
+
+```
+## Critical rules
+- Address ALL findings/changes — no skips
+- DO NOT add TODO/FIXME — full implementation
+- DO NOT modify .vnx-data/ runtime state directly
+- DO NOT bypass tests with --no-verify
+- DO NOT abort if first sub-task succeeds — continue with rest
+- After commit: PUSH and CREATE PR (or update if existing) — dispatch is INCOMPLETE without PR
+
+## Codex unavailable note
+Codex CLI rate-limited until <date>. Gemini-only review after fix.
+Codex re-audit OI will be filed per the codex-unavailable template.
+```
+
+Worker permissions enforce most of this; restating in the dispatch is belt-and-suspenders.
+
+### Cluster naming convention
+- **P0**: Critical fix unblocking the chain (≤200 LOC each, ≤3 PRs at a time)
+- **P1**: Mid-priority improvement
+- **CFX-N**: Cross-cutting refactor PRs (one theme each)
+- **OBS-N**: Observability gap fixes (per `.../headless-feature-parity-mapping.md`)
+- **SUP-N**: Supervisor pack PRs (per supervisor research doc)
+- **PR-T-N**: Test infrastructure
+
+## Convergence patterns (when codex finds new things every iteration)
+
+If codex regate finds NEW blocking findings after Round-1 fix:
+1. Round-2: dispatch Opus worker (deeper reasoning) for the new findings.
+2. If Round-2 regate still dirty → defer with OI per B3. Don't iterate further.
+3. Watch for recurring categories — if multiple PRs hit same theme, dispatch a single thematic refactor PR (CFX pattern).
+
+The 2026-04-28→04-30 chain showed codex iteration doesn't converge for many PR types. The fix is severity-tightening (#324) + accepting that Round-2 OI defer is acceptable.
 
 Remember: Receipt -> Review -> Decide -> Dispatch (or WAIT).
