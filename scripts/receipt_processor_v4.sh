@@ -945,75 +945,55 @@ _retry_pending_receipts() {
 
 # ─── Main orchestrator ───────────────────────────────────────────────────────
 
-# Process a single report — orchestrates extracted sub-functions.
-process_single_report() {
-    local report_path="$1"
-    local report_name=$(basename "$report_path")
-
-    log "INFO" "Processing: $report_name"
-
-    # A. Extract terminal from filename or metadata fallback
+# Extract terminal from report name with metadata fallback.
+_psr_extract_terminal() {
+    local report_name="$1" report_path="$2"
     local terminal
     terminal="$(vnx_receipt_terminal_from_report_name "$report_name")"
     if [ -z "$terminal" ]; then
-        local parsed_terminal=$(python3 "$SCRIPTS_DIR/report_parser.py" "$report_path" 2>/dev/null | jq -r '.terminal // empty')
+        local parsed_terminal
+        parsed_terminal=$(python3 "$SCRIPTS_DIR/report_parser.py" "$report_path" 2>/dev/null | jq -r '.terminal // empty')
         if [ -n "$parsed_terminal" ]; then
-            terminal="$parsed_terminal"
-            log "DEBUG" "Extracted terminal from metadata: $terminal"
+            log "DEBUG" "Extracted terminal from metadata: $parsed_terminal"
+            echo "$parsed_terminal"
         else
             log "WARN" "Could not determine terminal for: $report_name (skipping)"
             return 1
         fi
+    else
+        echo "$terminal"
     fi
+}
 
-    # B. Parse report and generate receipt JSON
-    local receipt_json=$(python3 "$SCRIPTS_DIR/report_parser.py" "$report_path" 2>/dev/null)
+# Parse report file into receipt JSON via report_parser.py.
+_psr_parse_receipt_json() {
+    local report_path="$1" report_name="$2"
+    local receipt_json
+    receipt_json=$(python3 "$SCRIPTS_DIR/report_parser.py" "$report_path" 2>/dev/null)
     if [ $? -ne 0 ] || [ -z "$receipt_json" ]; then
         log_structured_failure "receipt_parse_failed" "report_parser.py failed to generate receipt JSON" "report=$report_name"
         log "ERROR" "Failed to parse report: $report_name"
         return 1
     fi
+    echo "$receipt_json"
+}
 
-    # Fill missing dispatch identity from active track state when report metadata is incomplete.
-    receipt_json=$(_hydrate_receipt_identity "$receipt_json" "$terminal")
-
-    # Append receipt, track patterns, mark processed
-    append_and_track_receipt "$report_path" "$report_name" "$receipt_json"
-    local append_rc=$?
-
-    if [ $append_rc -eq 1 ]; then
-        return 1  # Hard failure
+# Release canonical lease when event type warrants it (non-fatal).
+# Skips no_confirmation timeouts: the terminal stays blocked to prevent immediate re-dispatch.
+_psr_release_lease_on_event() {
+    local event_type="$1" status="$2" terminal="$3" dispatch_id="$4"
+    if [ "$event_type" = "task_complete" ] || [ "$event_type" = "task_failed" ] \
+       || { [ "$event_type" = "task_timeout" ] && [ "$status" != "no_confirmation" ]; }; then
+        _auto_release_lease_on_receipt "$terminal" "$dispatch_id"
     fi
+}
 
-    # Extract common fields once for all downstream functions
-    extract_receipt_fields "$receipt_json"
-
-    # On duplicate (rc=2): skip downstream processing and T0 notification
-    if [ $append_rc -eq 2 ]; then
-        log "INFO" "Skipping downstream processing for duplicate: $report_name"
-        return 0
-    fi
-
-    # C. Shadow write terminal state (non-fatal)
-    update_receipt_shadow_state "$terminal"
-
-    # C2. Move dispatch from active/ → completed/ on task finish (non-fatal)
-    _move_dispatch_to_completed
-
-    # C2b. Auto-release canonical lease on terminal receipt events (non-fatal).
-    # Eliminates the need for manual `release-on-failure` after every worker receipt.
-    # release-on-receipt looks up the current generation internally; idempotent.
-    # Skip auto-release for no_confirmation timeouts: Section C intentionally keeps
-    # the terminal blocked (canonical lease held) to prevent immediate re-dispatch.
-    # Releasing the lease here would conflict with the blocked shadow state.
-    if [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] \
-       || { [ "$_rf_event_type" = "task_timeout" ] && [ "$_rf_status" != "no_confirmation" ]; }; then
-        _auto_release_lease_on_receipt "$terminal" "$_rf_dispatch_id"
-    fi
-
-    # C3. Update dispatch_metadata outcome in quality DB (non-fatal)
-    if [ -n "$_rf_dispatch_id" ] && { [ "$_rf_event_type" = "task_complete" ] || [ "$_rf_event_type" = "task_failed" ] || [ "$_rf_event_type" = "task_timeout" ]; }; then
-        python3 -c "
+# Update dispatch outcome in quality_intelligence.db and recompute CQS (non-fatal).
+_psr_update_dispatch_outcome() {
+    local dispatch_id="$1" event_type="$2" status="$3" report_path="$4" timestamp="$5"
+    [ -n "$dispatch_id" ] || return 0
+    case "$event_type" in task_complete|task_failed|task_timeout) ;; *) return 0 ;; esac
+    python3 -c "
 import sqlite3, sys
 from pathlib import Path
 sys.path.insert(0, str(Path('$SCRIPTS_DIR') / 'lib'))
@@ -1024,128 +1004,141 @@ if not db.exists(): sys.exit(0)
 conn = sqlite3.connect(str(db))
 conn.execute(
     'UPDATE dispatch_metadata SET outcome_status=?, outcome_report_path=?, completed_at=? WHERE dispatch_id=? AND outcome_status IS NULL',
-    ('$_rf_status', '${report_path:-}', '$_rf_timestamp', '$_rf_dispatch_id')
+    ('$3', '${4:-}', '$5', '$1')
 )
 conn.commit()
 conn.close()
 " 2>/dev/null || log "WARN" "Failed to update dispatch_metadata outcome (non-fatal)"
+    python3 "$SCRIPTS_DIR/update_dispatch_cqs.py" --dispatch-id "$dispatch_id" 2>/dev/null \
+        || log "WARN" "Failed to update dispatch CQS (non-fatal)"
+}
 
-        # C3b. Compute and store CQS (non-fatal)
-        python3 "$SCRIPTS_DIR/update_dispatch_cqs.py" --dispatch-id "$_rf_dispatch_id" 2>/dev/null \
-            || log "WARN" "Failed to update dispatch CQS (non-fatal)"
+# Verify dispatch contract claims on task_complete (non-fatal, Phase 2a).
+_psr_verify_contract() {
+    local dispatch_id="$1" event_type="$2"
+    [ -n "$dispatch_id" ] && [ "$event_type" = "task_complete" ] || return 0
+    local verify_result verify_rc verdict
+    verify_result=$(python3 "$SCRIPTS_DIR/verify_claims.py" --dispatch-id "$dispatch_id" --store 2>/dev/null)
+    verify_rc=$?
+    if [ $verify_rc -eq 0 ]; then
+        verdict=$(echo "$verify_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','unknown'))" 2>/dev/null)
+        case "$verdict" in
+            pass)        log "INFO"  "CONTRACT VERIFIED: dispatch=$dispatch_id verdict=pass" ;;
+            no_contract) log "DEBUG" "No contract block in dispatch=$dispatch_id (Phase 2a: skip)" ;;
+            *)           log "INFO"  "CONTRACT RESULT: dispatch=$dispatch_id verdict=$verdict" ;;
+        esac
+    elif [ $verify_rc -eq 1 ]; then
+        log "WARN" "CONTRACT FAILED: dispatch=$dispatch_id — one or more claims failed"
+    else
+        log "WARN" "Contract verification error for dispatch=$dispatch_id (rc=$verify_rc, non-fatal)"
+    fi
+}
+
+# Record pattern adoption signals for completed dispatches (non-fatal, A-5).
+_psr_record_adoption() {
+    local dispatch_id="$1" terminal="$2" report_path="$3" event_type="$4"
+    [ -n "$dispatch_id" ] && [ "$event_type" = "task_complete" ] || return 0
+    python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
+        "$dispatch_id" "${terminal:-unknown}" "$report_path" 2>/dev/null \
+        || log "DEBUG" "Pattern adoption recording skipped (non-fatal)"
+}
+
+# Process a single report — orchestrates extracted sub-functions.
+process_single_report() {
+    local report_path="$1"
+    local report_name=$(basename "$report_path")
+
+    log "INFO" "Processing: $report_name"
+
+    local terminal
+    terminal="$(_psr_extract_terminal "$report_name" "$report_path")" || return 1
+
+    local receipt_json
+    receipt_json="$(_psr_parse_receipt_json "$report_path" "$report_name")" || return 1
+    receipt_json=$(_hydrate_receipt_identity "$receipt_json" "$terminal")
+
+    append_and_track_receipt "$report_path" "$report_name" "$receipt_json"
+    local append_rc=$?
+    [ $append_rc -eq 1 ] && return 1
+
+    extract_receipt_fields "$receipt_json"
+
+    if [ $append_rc -eq 2 ]; then
+        log "INFO" "Skipping downstream processing for duplicate: $report_name"
+        return 0
     fi
 
-    # D. Attach PR evidence on success (non-fatal)
+    update_receipt_shadow_state "$terminal"
+    _move_dispatch_to_completed
+    _psr_release_lease_on_event "$_rf_event_type" "$_rf_status" "$terminal" "$_rf_dispatch_id"
+    _psr_update_dispatch_outcome "$_rf_dispatch_id" "$_rf_event_type" "$_rf_status" "$report_path" "$_rf_timestamp"
     attach_pr_evidence "$receipt_json" "$report_path"
-
-    # D2. Contract verification (Phase 2a: conditional on contract presence, non-fatal)
-    # Runs lightweight claim checks only when the dispatch contains a ## Contract block.
-    # Does NOT trigger test suites — only file existence, pattern, and git-diff checks.
-    if [ -n "$_rf_dispatch_id" ] && [ "$_rf_event_type" = "task_complete" ]; then
-        local verify_result
-        verify_result=$(python3 "$SCRIPTS_DIR/verify_claims.py" --dispatch-id "$_rf_dispatch_id" --store 2>/dev/null)
-        local verify_rc=$?
-        if [ $verify_rc -eq 0 ]; then
-            local verdict
-            verdict=$(echo "$verify_result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','unknown'))" 2>/dev/null)
-            if [ "$verdict" = "pass" ]; then
-                log "INFO" "CONTRACT VERIFIED: dispatch=$_rf_dispatch_id verdict=pass"
-            elif [ "$verdict" = "no_contract" ]; then
-                log "DEBUG" "No contract block in dispatch=$_rf_dispatch_id (Phase 2a: skip)"
-            else
-                log "INFO" "CONTRACT RESULT: dispatch=$_rf_dispatch_id verdict=$verdict"
-            fi
-        elif [ $verify_rc -eq 1 ]; then
-            log "WARN" "CONTRACT FAILED: dispatch=$_rf_dispatch_id — one or more claims failed"
-        else
-            log "WARN" "Contract verification error for dispatch=$_rf_dispatch_id (rc=$verify_rc, non-fatal)"
-        fi
-    fi
-
-    # E. Update progress state for tracked terminals (non-fatal)
+    _psr_verify_contract "$_rf_dispatch_id" "$_rf_event_type"
     update_track_progress "$receipt_json" "$terminal"
-
-    # F. Send enriched receipt to T0
     send_receipt_to_t0 "$receipt_json" "$terminal"
 
-    # G. Update cost metrics (non-fatal, best-effort)
     python3 "$SCRIPTS_DIR/cost_tracker.py" 2>/dev/null \
         || log "WARN" "Failed to update cost metrics (non-fatal)"
 
-    # H. Record pattern adoption signals for feedback loop (non-fatal, A-5)
-    if [ -n "$_rf_dispatch_id" ] && [ "$_rf_event_type" = "task_complete" ]; then
-        python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
-            "$_rf_dispatch_id" "${terminal:-unknown}" "$report_path" 2>/dev/null \
-            || log "DEBUG" "Pattern adoption recording skipped (non-fatal)"
-    fi
+    _psr_record_adoption "$_rf_dispatch_id" "$terminal" "$report_path" "$_rf_event_type"
 
     return 0
 }
 
-# Process pending reports with rate limiting
-process_pending_reports() {
-    local processed_count=0
-    local queue_count=0
-    local cutoff=$(get_cutoff_time)
-
-    log "INFO" "Scanning for reports newer than: $cutoff"
-
-    # Scan unified_reports/ only — gate reports under headless/ are recorded
-    # separately in $VNX_STATE_DIR/review_gates/results/ and the gate runner returns
-    # structured JSON synchronously. Scanning them here produces ghost
-    # "RECEIPT:unknown:unknown" pings because they have no dispatch_id metadata.
-    local pending_reports=()
+# Collect pending reports into _PPR_PENDING_REPORTS[] and _PPR_QUEUE_COUNT globals.
+# Scans unified_reports/ only — headless/ gate reports are recorded separately via
+# review_gates/results/ and produce ghost pings if scanned here.
+_ppr_collect_pending() {
+    _PPR_PENDING_REPORTS=()
+    _PPR_QUEUE_COUNT=0
     for report in "$UNIFIED_REPORTS"/*.md; do
         [ -f "$report" ] || continue
         if should_process_report "$report"; then
-            pending_reports+=("$report")
-            ((queue_count++))
+            _PPR_PENDING_REPORTS+=("$report")
+            ((_PPR_QUEUE_COUNT++))
         fi
     done
+}
 
-    # Check flood protection
-    if ! check_flood_protection "$queue_count"; then
-        log "ERROR" "Aborting due to flood protection"
-        return 1
-    fi
-
-    if [ "$queue_count" -eq 0 ]; then
-        log "INFO" "No pending reports to process"
-        return 0
-    fi
-
-    log "INFO" "Processing $queue_count pending reports..."
-
-    # Process with rate limiting
+# Process reports (passed as "$@") with rate limiting and watermark update.
+_ppr_process_rate_limited() {
+    local processed_count=0
     local MAX_PROCESSED_MTIME=0
-    for report in "${pending_reports[@]}"; do
-        # Rate limiting check
+    for report in "$@"; do
         if [ "$processed_count" -ge "$RATE_LIMIT" ]; then
             log "INFO" "Rate limit reached ($RATE_LIMIT/min), pausing..."
             sleep 60
             processed_count=0
         fi
-
         if process_single_report "$report"; then
             ((processed_count++))
             local _mtime
             _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
-            if [ -n "$_mtime" ] && [ "$_mtime" -gt "$MAX_PROCESSED_MTIME" ]; then
-                MAX_PROCESSED_MTIME=$_mtime
-            fi
+            [ -n "$_mtime" ] && [ "$_mtime" -gt "$MAX_PROCESSED_MTIME" ] && MAX_PROCESSED_MTIME=$_mtime
         fi
-
-        # Small delay between reports
         sleep 0.5
     done
-
-    # Update watermark once with the highest mtime seen this sweep so that
-    # non-chronological processing order cannot cause older files to be skipped.
-    if [ "$MAX_PROCESSED_MTIME" -gt 0 ]; then
-        echo "$MAX_PROCESSED_MTIME" > "$WATERMARK_FILE"
-    fi
-
+    # Update watermark once with the highest mtime seen so non-chronological processing
+    # order cannot cause older files to be skipped on the next sweep.
+    [ "$MAX_PROCESSED_MTIME" -gt 0 ] && echo "$MAX_PROCESSED_MTIME" > "$WATERMARK_FILE"
     log "INFO" "Processed $processed_count reports successfully"
+}
+
+# Process all pending reports with flood protection and rate limiting.
+process_pending_reports() {
+    local cutoff=$(get_cutoff_time)
+    log "INFO" "Scanning for reports newer than: $cutoff"
+    _ppr_collect_pending
+    if ! check_flood_protection "$_PPR_QUEUE_COUNT"; then
+        log "ERROR" "Aborting due to flood protection"
+        return 1
+    fi
+    if [ "$_PPR_QUEUE_COUNT" -eq 0 ]; then
+        log "INFO" "No pending reports to process"
+        return 0
+    fi
+    log "INFO" "Processing $_PPR_QUEUE_COUNT pending reports..."
+    _ppr_process_rate_limited "${_PPR_PENDING_REPORTS[@]}"
 }
 
 # Monitor mode - watch for new reports only
@@ -1183,15 +1176,8 @@ _poll_new_reports() {
     done
 }
 
-# Watch for new reports via fswatch (preferred) or polling fallback.
-# On startup, performs a quick catchup scan for reports created in the last
-# 10 minutes to cover the gap between process restart and fswatch activation.
-monitor_new_reports() {
-    log "INFO" "Starting MONITOR mode - only new reports will be processed"
-    date '+%Y%m%d-%H%M%S' > "$LAST_PROCESSED"
-
-    # Startup catchup: process any reports from the last 10 minutes that
-    # may have been written while the receipt processor was down (restart gap).
+# Process any reports from the last 10 minutes created while the processor was down.
+_mnr_startup_catchup() {
     local catchup_count=0
     local now=$(date +%s)
     for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
@@ -1204,62 +1190,26 @@ monitor_new_reports() {
         fi
     done
     [ "$catchup_count" -gt 0 ] && log "INFO" "Startup catchup complete: $catchup_count reports processed"
+}
 
-    # Startup: deliver any receipts that were pending when this process was last down
+# ── fswatch (disabled) ────────────────────────────────────────────────────────
+# Previously used fswatch for sub-second file detection. Disabled because:
+#   - Orphan fswatch processes surviving parent death (PPID → 1)
+#   - Duplicate watchers from singleton race under memory pressure
+#   - fseventsd memory bloat (5+ GB observed with multiple watchers)
+#   - macOS FSEvents silently dropping rapid create+close events
+# Polling at 5s is effectively free and eliminates all of the above.
+# To re-enable: set VNX_USE_FSWATCH=1; see git history for the original code block.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Watch for new reports via polling. On startup, performs a catchup scan and
+# delivers any receipts pending since the last shutdown.
+monitor_new_reports() {
+    log "INFO" "Starting MONITOR mode - only new reports will be processed"
+    date '+%Y%m%d-%H%M%S' > "$LAST_PROCESSED"
+    _mnr_startup_catchup
     _retry_pending_receipts
-
-    # Polling mode — simple, no external processes, no orphan risk.
     _poll_new_reports
-
-    # ── fswatch (disabled) ────────────────────────────────────────────
-    # Previously used fswatch for sub-second file detection. Disabled
-    # because the external process caused:
-    #   - Orphan fswatch processes surviving parent death (PPID → 1)
-    #   - Duplicate watchers from singleton race under memory pressure
-    #   - fseventsd memory bloat (5+ GB observed with multiple watchers)
-    #   - macOS FSEvents silently dropping rapid create+close events
-    # Polling at 5s is effectively free and eliminates all of the above.
-    # To re-enable: set VNX_USE_FSWATCH=1 and uncomment the block below.
-    #
-    # if [ "${VNX_USE_FSWATCH:-0}" = "1" ] && command -v fswatch >/dev/null 2>&1; then
-    #     log "INFO" "Using fswatch for real-time monitoring"
-    #     local fail_count=0
-    #     while true; do
-    #         local fifo="$STATE_DIR/.fswatch_fifo.$$"
-    #         rm -f "$fifo"
-    #         mkfifo "$fifo"
-    #         fswatch -0 "$UNIFIED_REPORTS" > "$fifo" &
-    #         local fswatch_pid=$!
-    #         local last_sweep=$(date +%s)
-    #         while true; do
-    #             local path=""
-    #             if IFS= read -r -d '' -t 5 path <&3; then
-    #                 [[ "$path" == *.md ]] && should_process_report "$path" && process_single_report "$path"
-    #             fi
-    #             local now_ts=$(date +%s)
-    #             if [ $((now_ts - last_sweep)) -ge 30 ]; then
-    #                 for report in "$UNIFIED_REPORTS"/*.md; do
-    #                     [ -f "$report" ] || continue
-    #                     should_process_report "$report" && process_single_report "$report"
-    #                 done
-    #                 last_sweep=$now_ts
-    #             fi
-    #             if ! kill -0 "$fswatch_pid" 2>/dev/null; then
-    #                 break
-    #             fi
-    #         done 3< "$fifo"
-    #         wait "$fswatch_pid" 2>/dev/null
-    #         local exit_code=$?
-    #         rm -f "$fifo"
-    #         fail_count=$((fail_count + 1))
-    #         log "WARN" "fswatch exited (code=$exit_code). Failures: $fail_count/$FSWATCH_RETRIES"
-    #         if [ "$fail_count" -ge "$FSWATCH_RETRIES" ]; then
-    #             log "WARN" "fswatch unstable; falling back to polling mode"
-    #             _poll_new_reports; return
-    #         fi
-    #         sleep "$FSWATCH_BACKOFF"
-    #     done
-    # fi
 }
 
 # Cleanup on exit - gracefully stop child processes (fswatch, subshells) to prevent orphans.
