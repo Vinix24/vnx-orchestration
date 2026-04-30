@@ -63,6 +63,21 @@ CREATE TABLE IF NOT EXISTS antipatterns (
     last_seen DATETIME
 );
 
+CREATE TABLE IF NOT EXISTS pattern_usage (
+    pattern_id TEXT PRIMARY KEY,
+    pattern_title TEXT NOT NULL,
+    pattern_hash TEXT NOT NULL,
+    used_count INTEGER DEFAULT 0,
+    ignored_count INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failure_count INTEGER DEFAULT 0,
+    last_used TIMESTAMP,
+    last_offered TIMESTAMP,
+    confidence REAL DEFAULT 1.0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS confidence_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dispatch_id TEXT NOT NULL,
@@ -150,22 +165,29 @@ def test_success_boosts_confidence(tmp_path):
 
     assert result["boosted"] == 1
     assert result["decayed"] == 0
+    # Beta(success+1, failure+1)/(total+2): first success → (1+1)/(1+0+2) = 2/3
     new_conf = _get_confidence(db, pattern_id)
-    assert abs(new_conf - 0.65) < 1e-6, f"Expected 0.65, got {new_conf}"
-    # usage_count should increment
+    assert abs(new_conf - 2 / 3) < 1e-4, f"Expected 0.667, got {new_conf}"
+    # usage_count should increment on success
     assert _get_usage_count(db, pattern_id) == 2
 
 
 def test_success_boost_caps_at_1(tmp_path):
+    """Beta posterior never reaches 1.0 — Laplace smoothing keeps the score
+    strictly below 1 even after a long success streak.
+    """
     db = _make_db(tmp_path)
     dispatch_id = "dispatch-cap-test"
     pattern_id = _insert_pattern(db, dispatch_id, confidence=0.98)
 
-    update_confidence_from_outcome(db, dispatch_id, "T1", "success")
+    # Run many successes in a row.
+    for _ in range(50):
+        update_confidence_from_outcome(db, dispatch_id, "T1", "success")
 
     new_conf = _get_confidence(db, pattern_id)
-    assert new_conf <= 1.0
-    assert abs(new_conf - 1.0) < 1e-6
+    assert new_conf < 1.0
+    # 50 successes / 0 failures → 51/52 ≈ 0.981
+    assert abs(new_conf - 51 / 52) < 1e-4
 
 
 def test_success_no_matching_patterns_returns_zero(tmp_path):
@@ -188,20 +210,26 @@ def test_failure_decays_confidence(tmp_path):
 
     assert result["decayed"] == 1
     assert result["boosted"] == 0
+    # Beta first failure → (0+1)/(0+1+2) = 1/3
     new_conf = _get_confidence(db, pattern_id)
-    assert abs(new_conf - 0.6) < 1e-6, f"Expected 0.6, got {new_conf}"
+    assert abs(new_conf - 1 / 3) < 1e-4, f"Expected 0.333, got {new_conf}"
 
 
 def test_failure_decay_floors_at_0(tmp_path):
+    """Beta posterior never reaches 0.0 — Laplace smoothing keeps the score
+    strictly above 0 even after a long failure streak.
+    """
     db = _make_db(tmp_path)
     dispatch_id = "dispatch-floor-test"
     pattern_id = _insert_pattern(db, dispatch_id, confidence=0.05)
 
-    update_confidence_from_outcome(db, dispatch_id, "T1", "failure")
+    for _ in range(50):
+        update_confidence_from_outcome(db, dispatch_id, "T1", "failure")
 
     new_conf = _get_confidence(db, pattern_id)
-    assert new_conf >= 0.0
-    assert abs(new_conf - 0.0) < 1e-6
+    assert new_conf > 0.0
+    # 0 successes / 50 failures → 1/52 ≈ 0.019
+    assert abs(new_conf - 1 / 52) < 1e-4
 
 
 def test_confidence_event_written(tmp_path):

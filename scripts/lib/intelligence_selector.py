@@ -285,6 +285,26 @@ class IntelligenceSelector:
             self._quality_db.close()
             self._quality_db = None
 
+    def _maybe_reconcile_confidence(self) -> None:
+        """Run reconcile if the cached timestamp is older than the TTL.
+
+        Best-effort safety net: failures are swallowed so a broken reconcile
+        never blocks dispatch creation.  The reconcile opens its own SQLite
+        connection and commits before returning, so subsequent SELECT
+        statements on ``self._quality_db`` observe the new values without
+        needing to re-open the cached reader connection.
+        """
+        if self._quality_db_path is None:
+            return
+        try:
+            from confidence_reconcile import maybe_reconcile
+        except ImportError:
+            return
+        try:
+            maybe_reconcile(self._quality_db_path)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -586,6 +606,11 @@ class IntelligenceSelector:
         scope_tags: List[str],
     ) -> List[IntelligenceItem]:
         """Query success_patterns for proven_pattern candidates."""
+        # Safety net: if the daily learning_loop reconcile has not run
+        # recently, sync pattern_usage learning state into
+        # success_patterns.confidence_score before reading it.
+        self._maybe_reconcile_confidence()
+
         items: List[IntelligenceItem] = []
         try:
             rows = db.execute(
