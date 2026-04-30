@@ -107,19 +107,36 @@ def _build_intelligence_section(dispatch_id: str, role: str | None) -> str:
     """Return formatted intelligence items as markdown, or empty string (best-effort).
 
     Calls IntelligenceSelector to gather antipatterns, success patterns, and
-    recent comparable dispatches from quality_intelligence.db.  Any import or
-    DB failure is caught and logged — dispatch proceeds without intelligence.
+    recent comparable dispatches from quality_intelligence.db.  After selecting,
+    emits the coordination event and records the injection (intelligence_injections
+    + pattern_usage + dispatch_pattern_offered) so the post-dispatch confidence
+    feedback loop has dispatch-scoped rows to update.  Any import or DB failure
+    is caught and logged — dispatch proceeds without intelligence.
     """
     try:
         from intelligence_selector import IntelligenceSelector  # noqa: PLC0415
-        quality_db_path = _default_state_dir() / "quality_intelligence.db"
-        selector = IntelligenceSelector(quality_db_path=quality_db_path)
+        state_dir = _default_state_dir()
+        quality_db_path = state_dir / "quality_intelligence.db"
+        selector = IntelligenceSelector(
+            quality_db_path=quality_db_path,
+            coord_db_state_dir=state_dir,
+        )
         try:
             result = selector.select(
                 dispatch_id=dispatch_id,
                 injection_point="dispatch_create",
                 skill_name=role or "",
             )
+            # Persist the selection so the feedback loop can find which patterns
+            # were offered for this dispatch.  Best-effort — never raises.
+            try:
+                selector.emit_event(result, coord_state_dir=state_dir)
+            except Exception as exc:
+                logger.debug("emit_event failed for %s: %s", dispatch_id, exc)
+            try:
+                selector.record_injection(result, coord_state_dir=state_dir)
+            except Exception as exc:
+                logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
         finally:
             selector.close()
         if not result.items:
@@ -332,6 +349,19 @@ def _extract_touched_paths_from_event(event: "StreamEvent | object") -> list[str
         if isinstance(candidate, str):
             paths.append(candidate)
     return paths
+
+
+def _parse_dirty_files(porcelain_output: str) -> frozenset:
+    """Parse 'git status --porcelain' output into a frozenset of relative file paths."""
+    files: set[str] = set()
+    for line in porcelain_output.splitlines():
+        if not line.strip():
+            continue
+        path_part = line[3:]
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        files.add(path_part.strip())
+    return frozenset(files)
 
 
 def _get_dirty_files(cwd: Path) -> set[str]:
@@ -995,8 +1025,9 @@ def _auto_stash_changes(
         )
         if stash_proc.returncode == 0:
             logger.info(
-                "Stashed uncommitted changes from failed dispatch %s (terminal=%s, stash=%s)",
-                dispatch_id, terminal_id, stash_name,
+                "Stashed %d dispatch-produced file(s) from failed dispatch %s "
+                "(terminal=%s, stash=%s)",
+                len(files_to_stash), dispatch_id, terminal_id, stash_name,
             )
             return True
         else:
@@ -1172,13 +1203,22 @@ def _update_pattern_confidence(
     status: str,
     db_path: "Path",
 ) -> int:
-    """Update confidence for patterns that were injected in this dispatch.
+    """Update confidence for patterns that were OFFERED in this dispatch.
 
-    Looks up pattern_usage rows where dispatch_id matches, then:
+    Looks up dispatch_pattern_offered (or legacy pattern_usage.dispatch_id) rows
+    matching this dispatch, then:
     - success: boosts success_patterns.confidence_score + 0.05 (cap 1.0) and
-               increments pattern_usage.success_count + used_count
+               touches pattern_usage.last_used + updated_at
     - failure: decays success_patterns.confidence_score - 0.10 (floor 0.0) and
-               increments pattern_usage.failure_count + used_count
+               touches pattern_usage.last_used + updated_at
+
+    NOTE: pattern_usage.used_count must NOT be incremented here.  Existing
+    consumers treat used_count > 0 as evidence that a worker actually consumed
+    a pattern, not merely that it was offered.  Likewise success_count and
+    failure_count are reserved for confirmed worker usage outcomes.  The
+    legacy fallback only increments success_count when usage is unknown; the
+    offered-only feedback loop touches timestamps and the confidence_score in
+    success_patterns instead.
 
     Linkage is by title: pattern_usage.pattern_title → success_patterns.title.
     Returns count of pattern_usage rows updated.  Never raises.
@@ -1197,10 +1237,26 @@ def _update_pattern_confidence(
         conn = _sqlite3.connect(str(db_path))
         conn.row_factory = _sqlite3.Row
 
-        injected = conn.execute(
-            "SELECT pattern_id, pattern_title FROM pattern_usage WHERE dispatch_id = ?",
-            (dispatch_id,),
-        ).fetchall()
+        # Query dispatch_pattern_offered (isolated per-dispatch junction table) so that
+        # patterns offered to multiple concurrent dispatches are not misattributed.
+        # Falls back to pattern_usage.dispatch_id for DBs that predate the junction table.
+        offered_table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='dispatch_pattern_offered'"
+        ).fetchone()
+
+        if offered_table_exists:
+            injected = conn.execute(
+                "SELECT pattern_id, pattern_title FROM dispatch_pattern_offered "
+                "WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchall()
+        else:
+            injected = conn.execute(
+                "SELECT pattern_id, pattern_title FROM pattern_usage "
+                "WHERE dispatch_id = ?",
+                (dispatch_id,),
+            ).fetchall()
 
         for row in injected:
             pattern_id = row["pattern_id"]
@@ -1211,22 +1267,22 @@ def _update_pattern_confidence(
                     """
                     UPDATE success_patterns
                     SET confidence_score = MIN(confidence_score + 0.05, 1.0),
-                        usage_count      = usage_count + 1,
                         last_used        = ?
                     WHERE title = ?
                     """,
                     (now, title),
                 )
+                # Offered-only path: do NOT touch used_count, success_count, or
+                # failure_count here.  Those are reserved for confirmed worker
+                # usage signals (see learning_loop.update_confidence_scores).
                 conn.execute(
                     """
                     UPDATE pattern_usage
-                    SET used_count    = used_count + 1,
-                        success_count = success_count + 1,
-                        last_used     = ?,
-                        updated_at    = ?
-                    WHERE dispatch_id = ? AND pattern_id = ?
+                    SET last_used  = ?,
+                        updated_at = ?
+                    WHERE pattern_id = ?
                     """,
-                    (now, now, dispatch_id, pattern_id),
+                    (now, now, pattern_id),
                 )
             else:
                 conn.execute(
@@ -1240,13 +1296,11 @@ def _update_pattern_confidence(
                 conn.execute(
                     """
                     UPDATE pattern_usage
-                    SET used_count     = used_count + 1,
-                        failure_count  = failure_count + 1,
-                        last_used      = ?,
-                        updated_at     = ?
-                    WHERE dispatch_id = ? AND pattern_id = ?
+                    SET last_used  = ?,
+                        updated_at = ?
+                    WHERE pattern_id = ?
                     """,
-                    (now, now, dispatch_id, pattern_id),
+                    (now, now, pattern_id),
                 )
             updated += 1
 
@@ -1362,16 +1416,12 @@ def deliver_with_recovery(
             )
 
             # Feedback loop: boost pattern confidence for successful dispatch
+            # update_confidence_from_outcome is handled by append_receipt_payload (VNX-R4)
             _quality_db = _default_state_dir() / "quality_intelligence.db"
             _patt_updated = _update_pattern_confidence(dispatch_id, "success", _quality_db)
             logger.debug(
                 "Feedback boost: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
             )
-            try:
-                from intelligence_persist import update_confidence_from_outcome as _upcf
-                _upcf(_quality_db, dispatch_id, terminal_id, "success")
-            except Exception as _exc:
-                logger.debug("update_confidence_from_outcome(success) failed: %s", _exc)
 
             # Capture outcome after receipt is written
             _capture_dispatch_outcome(
@@ -1423,16 +1473,12 @@ def deliver_with_recovery(
             )
 
             # Feedback loop: decay pattern confidence for failed dispatch
+            # update_confidence_from_outcome is handled by append_receipt_payload (VNX-R4)
             _quality_db = _default_state_dir() / "quality_intelligence.db"
             _patt_updated = _update_pattern_confidence(dispatch_id, "failure", _quality_db)
             logger.debug(
                 "Feedback decay: dispatch=%s patterns_updated=%d", dispatch_id, _patt_updated
             )
-            try:
-                from intelligence_persist import update_confidence_from_outcome as _upcf
-                _upcf(_quality_db, dispatch_id, terminal_id, "failure")
-            except Exception as _exc:
-                logger.debug("update_confidence_from_outcome(failure) failed: %s", _exc)
 
             # Capture failed outcome
             _capture_dispatch_outcome(

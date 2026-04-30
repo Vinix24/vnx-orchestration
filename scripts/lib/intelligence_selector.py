@@ -189,8 +189,27 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _item_id() -> str:
-    return f"intel_{uuid.uuid4().hex[:12]}"
+def _stable_item_id(prefix: str, source_key: str) -> str:
+    """Build a deterministic, content-derived item_id.
+
+    Patterns offered to multiple dispatches must share the SAME item_id so that
+    pattern_usage rows aggregate (one row per underlying pattern) instead of
+    fragmenting into a fresh row per offering.  Random UUIDs broke that
+    invariant — see codex regate finding for PR #311.
+
+    The id encodes the originating table via *prefix* (e.g. ``sp`` for
+    success_patterns, ``ap`` for antipatterns, ``pr`` for prevention_rules,
+    ``dm`` for dispatch_metadata) and a stable per-row key (the row PK or
+    dispatch_id).
+    """
+    safe_key = str(source_key).strip().lower().replace(" ", "_")
+    return f"intel_{prefix}_{safe_key}"
+
+
+def _item_hash(item_id: str) -> str:
+    """SHA1 of item_id, matching learning_loop.hash_pattern() convention."""
+    import hashlib
+    return hashlib.sha1(item_id.encode("utf-8")).hexdigest()
 
 
 def resolve_task_class(
@@ -465,38 +484,71 @@ class IntelligenceSelector:
     def _record_pattern_usage(self, result: InjectionResult) -> None:
         """Write one pattern_usage row per injected item so feedback can find them later.
 
-        Uses item_id as pattern_id, item title as pattern_title, and dispatch_id
-        from result.  Only writes for proven_pattern items (sourced from
-        success_patterns); other item classes are noted with a class prefix title.
+        Identity model:
+          - ``pattern_id`` is the *stable* per-pattern id derived from the
+            originating row (see :func:`_stable_item_id`).  The same pattern
+            offered to multiple dispatches collapses onto the same row via
+            ON CONFLICT(pattern_id) DO UPDATE.  This restores deduplication —
+            random ids fragmented one underlying pattern across many rows.
+          - ``pattern_hash`` is SHA1(item_id), following the convention used by
+            ``learning_loop.hash_pattern``.  Hash and pattern_id must NOT be
+            the same string; consumers may rely on the hash to detect
+            content-level identity independently of the id.
+
+        Per-dispatch attribution is recorded in the ``dispatch_pattern_offered``
+        junction table (one row per dispatch+pattern pair) so that concurrent
+        dispatches offering the same pattern do not overwrite each other.
         """
         db = self._get_quality_db()
         if db is None:
             return
         now = _now_utc()
         try:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dispatch_pattern_offered (
+                    dispatch_id   TEXT NOT NULL,
+                    pattern_id    TEXT NOT NULL,
+                    pattern_title TEXT NOT NULL,
+                    offered_at    TEXT NOT NULL,
+                    PRIMARY KEY (dispatch_id, pattern_id)
+                )
+                """
+            )
             for item in result.items:
+                pattern_hash = _item_hash(item.item_id)
                 db.execute(
                     """
                     INSERT INTO pattern_usage
                         (pattern_id, pattern_title, pattern_hash, used_count,
                          ignored_count, success_count, failure_count,
-                         last_offered, confidence, created_at, updated_at, dispatch_id)
-                    VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?)
+                         last_offered, confidence, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
                     ON CONFLICT(pattern_id) DO UPDATE SET
-                        last_offered = excluded.last_offered,
-                        updated_at   = excluded.updated_at,
-                        dispatch_id  = excluded.dispatch_id
+                        pattern_title = excluded.pattern_title,
+                        pattern_hash  = excluded.pattern_hash,
+                        last_offered  = excluded.last_offered,
+                        updated_at    = excluded.updated_at
                     """,
                     (
                         item.item_id,
                         item.title[:255],
-                        item.item_id,   # hash = item_id for injected items
+                        pattern_hash,
                         now,
                         item.confidence,
                         now,
                         now,
-                        result.dispatch_id,
                     ),
+                )
+                db.execute(
+                    """
+                    INSERT INTO dispatch_pattern_offered
+                        (dispatch_id, pattern_id, pattern_title, offered_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
+                        offered_at = excluded.offered_at
+                    """,
+                    (result.dispatch_id, item.item_id, item.title[:255], now),
                 )
             db.commit()
         except Exception:
@@ -568,7 +620,7 @@ class IntelligenceSelector:
             last_seen = row_d.get("last_used") or row_d.get("first_seen") or _now_utc()
 
             items.append(IntelligenceItem(
-                item_id=_item_id(),
+                item_id=_stable_item_id("sp", str(row_d.get("id", ""))),
                 item_class="proven_pattern",
                 title=(row_d.get("title") or "Proven pattern")[:120],
                 content=content,
@@ -637,7 +689,7 @@ class IntelligenceSelector:
             confidence = severity_confidence.get(severity, 0.5)
 
             items.append(IntelligenceItem(
-                item_id=_item_id(),
+                item_id=_stable_item_id("ap", str(row_d.get("id", ""))),
                 item_class="failure_prevention",
                 title=(row_d.get("title") or "Failure prevention")[:120],
                 content=content,
@@ -675,7 +727,7 @@ class IntelligenceSelector:
             content = (row_d.get("recommendation") or row_d.get("description") or "")[:MAX_CONTENT_CHARS_PER_ITEM]
 
             items.append(IntelligenceItem(
-                item_id=_item_id(),
+                item_id=_stable_item_id("pr", str(row_d.get("id", ""))),
                 item_class="failure_prevention",
                 title=(row_d.get("description") or "Prevention rule")[:120],
                 content=content,
@@ -743,7 +795,7 @@ class IntelligenceSelector:
             confidence = 0.7 if outcome == "success" else 0.45
 
             items.append(IntelligenceItem(
-                item_id=_item_id(),
+                item_id=_stable_item_id("dm", str(row_d.get("dispatch_id", ""))),
                 item_class="recent_comparable",
                 title=f"Recent: {skill} dispatch ({outcome})"[:120],
                 content=content,
