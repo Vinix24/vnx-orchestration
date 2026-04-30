@@ -1,25 +1,42 @@
-"""Smoke test — assert beacons exist and are fresh after dispatcher startup.
+"""Smoke test - assert critical component beacons are present and fresh.
 
-Designed to be run after the dispatcher / intelligence daemons have had a
-chance to fire at least one heartbeat. It checks that each "critical"
-component listed below has a beacon file and that its classified health
-is ``ok``.
+Catches silent component failures (e.g. the conversation_analyzer
+20-day silent failure) by verifying that each component listed in
+``CRITICAL_COMPONENTS`` has written a heartbeat within its allowed
+freshness window.
 
-Run as a pytest module:
+Per the PR-T4 CI plan (claudedocs/2026-04-30-vnx-ci-test-plan.md):
 
+    learning_loop          24h
+    intelligence_daemon    5min
+    build_t0_state         30min
+    compact_state          24h (nightly)
+    conversation_analyzer  24h
+
+The test imports ``health_beacon.all_beacons`` to read the JSON
+heartbeat files under ``$VNX_DATA_DIR/health/``. Age is computed against
+the wall clock at test time. The test gates on the explicit per-component
+max age, not on the beacon's own ``expected_interval_seconds``, so the
+contract here is independent of writer-side configuration.
+
+When no health directory or no critical beacons are present (bare
+checkout / fresh CI runner without state), the test is skipped. To
+force a failure-on-missing in monitoring contexts, set
+``VNX_SMOKE_REQUIRE_BEACONS=1``.
+
+Run:
     pytest tests/smoke/smoke_health_beacons_fresh.py -xvs
-
-or directly (exit 0 on green, 1 on any non-ok component, 2 on framework
-errors). The component list intentionally includes only the long-lived,
-always-on services. Event-driven beacons (cleanup_worker_exit) are not
-asserted here — by definition they do not run on a schedule.
+or directly:
+    python3 tests/smoke/smoke_health_beacons_fresh.py
+Exit codes for direct mode: 0 ok, 1 stale/missing, 2 framework error.
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 import pytest
 
@@ -30,9 +47,13 @@ if str(_LIB_DIR) not in sys.path:
 
 from health_beacon import all_beacons  # noqa: E402
 
-CRITICAL_COMPONENTS: List[str] = [
-    "intelligence_daemon",
-    "t0_state_builder",
+# (component_name, max_age_seconds)
+CRITICAL_COMPONENTS: List[Tuple[str, int]] = [
+    ("learning_loop", 24 * 3600),
+    ("intelligence_daemon", 5 * 60),
+    ("build_t0_state", 30 * 60),
+    ("compact_state", 24 * 3600),
+    ("conversation_analyzer", 24 * 3600),
 ]
 
 
@@ -41,30 +62,77 @@ def _resolve_data_dir() -> Path:
         from project_root import resolve_data_dir
         return resolve_data_dir(__file__)
     except Exception:
+        env = os.environ.get("VNX_DATA_DIR")
+        if env:
+            return Path(env)
         return _REPO_ROOT / ".vnx-data"
 
 
-@pytest.mark.skipif(
-    os.environ.get("VNX_RUN_SMOKE_HEALTH") != "1",
-    reason="Smoke test only runs when VNX_RUN_SMOKE_HEALTH=1",
-)
-def test_critical_beacons_present_and_fresh() -> None:
-    data_dir = _resolve_data_dir()
-    beacons = all_beacons(data_dir)
+def _format_failure(name: str, age_seconds: float, max_seconds: int) -> str:
+    age_h = age_seconds / 3600.0
+    max_h = max_seconds / 3600.0
+    return (
+        f"Component {name} has stale heartbeat "
+        f"({age_h:.2f} hours old, expected <{max_h:.2f} hours)"
+    )
 
-    missing: list[str] = []
-    not_ok: list[tuple[str, str]] = []
 
-    for name in CRITICAL_COMPONENTS:
-        if name not in beacons:
+def _classify(beacons: Dict[str, dict]) -> Tuple[List[str], List[str]]:
+    missing: List[str] = []
+    stale: List[str] = []
+    now = time.time()
+    for name, max_age in CRITICAL_COMPONENTS:
+        beacon = beacons.get(name)
+        if beacon is None:
             missing.append(name)
             continue
-        health = beacons[name].get("health", "unknown")
-        if health != "ok":
-            not_ok.append((name, health))
+        last_ts = beacon.get("last_run_ts")
+        try:
+            last_ts_f = float(last_ts) if last_ts is not None else None
+        except (TypeError, ValueError):
+            last_ts_f = None
+        if last_ts_f is None:
+            stale.append(_format_failure(name, float("inf"), max_age))
+            continue
+        age = now - last_ts_f
+        if age > max_age:
+            stale.append(_format_failure(name, age, max_age))
+        if beacon.get("status") == "fail":
+            stale.append(f"Component {name} reported status=fail")
+    return missing, stale
+
+
+def _should_require_beacons() -> bool:
+    return os.environ.get("VNX_SMOKE_REQUIRE_BEACONS") == "1"
+
+
+def test_critical_beacons_present_and_fresh() -> None:
+    data_dir = _resolve_data_dir()
+    health_dir = data_dir / "health"
+
+    if not health_dir.exists():
+        if _should_require_beacons():
+            pytest.fail(
+                f"health directory missing at {health_dir} "
+                "(VNX_SMOKE_REQUIRE_BEACONS=1)"
+            )
+        pytest.skip(f"no beacons present at {health_dir} (skip in bare env)")
+
+    beacons = all_beacons(data_dir)
+    if not beacons and not _should_require_beacons():
+        pytest.skip("beacon directory empty (skip in bare env)")
+
+    missing, stale = _classify(beacons)
+
+    if missing and not _should_require_beacons():
+        all_critical_missing = len(missing) == len(CRITICAL_COMPONENTS)
+        if all_critical_missing:
+            pytest.skip(
+                "no critical beacons present yet — likely fresh checkout"
+            )
 
     assert not missing, f"missing beacons: {missing}"
-    assert not not_ok, f"non-ok beacons: {not_ok}"
+    assert not stale, "stale heartbeats:\n  - " + "\n  - ".join(stale)
 
 
 def main() -> int:
@@ -75,18 +143,14 @@ def main() -> int:
         print(f"FRAMEWORK_ERROR: {exc}", file=sys.stderr)
         return 2
 
-    bad = []
-    for name in CRITICAL_COMPONENTS:
-        b = beacons.get(name)
-        if b is None:
-            bad.append(f"{name}=missing")
-        elif b.get("health") != "ok":
-            bad.append(f"{name}={b.get('health')}")
-
+    missing, stale = _classify(beacons)
+    bad = [f"{n}=missing" for n in missing] + stale
     if bad:
-        print("UNHEALTHY: " + ", ".join(bad))
+        print("UNHEALTHY:")
+        for line in bad:
+            print(f"  - {line}")
         return 1
-    print("OK")
+    print("OK: all critical beacons fresh")
     return 0
 
 

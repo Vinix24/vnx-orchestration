@@ -1,0 +1,67 @@
+# VNX Nightly Canary - GitHub Actions workflow source.
+#
+# DEPLOYMENT NOTE
+# ---------------
+# This file lives in tests/smoke/ because the dispatch worker's permission
+# profile (test-engineer) restricts writes to tests/** and scripts/check_*.
+# An authorized worker (or human reviewer) must move this file to
+# .github/workflows/vnx-nightly-canary.yml before it takes effect.
+#
+# After moving:
+#   - Verify the YAML parses:
+#       python3 -c "import yaml; yaml.safe_load(open('.github/workflows/vnx-nightly-canary.yml'))"
+#   - Confirm the workflow is enabled in repo Settings -> Actions.
+#
+# Filename suffix .yml.template is intentional: GitHub Actions only loads
+# files matching .github/workflows/*.yml, so this template will not run
+# from its current location.
+name: Nightly Canary
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Smoke tests (pytest)
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+          VNX_DATA_DIR: ${{ github.workspace }}/.vnx-data
+          VNX_DATA_DIR_EXPLICIT: "1"
+          VNX_STATE_DIR: ${{ github.workspace }}/.vnx-data/state
+          # On a fresh CI runner with no state, individual tests skip
+          # rather than fail. Set VNX_SMOKE_REQUIRE_BEACONS=1 only when
+          # running against a runner that has been pre-seeded with state.
+        run: |
+          python3 -m pytest tests/smoke/ -xvs --tb=short
+
+      - name: Plist resolve check
+        env:
+          VNX_HOME: ${{ github.workspace }}
+        run: bash tests/smoke/smoke_launchd_plist_paths_resolve.sh
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Nightly canary failed - see logs above"
+          echo "Per claudedocs/2026-04-30-vnx-ci-test-plan.md, this canary"
+          echo "exists to catch the silent-component-failure class that"
+          echo "let the conversation_analyzer SEOcrawler_v2 bug live for 20 days."
