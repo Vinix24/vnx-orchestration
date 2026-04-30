@@ -405,21 +405,9 @@ def _validate_review_evidence(
             elif (result.get("state") or "").lower() == "completed":
                 # Completed Claude review: terminal outcome lives in result_status, not status/verdict.
                 # contributed_evidence=true alone must NOT mask a fail outcome or blocking findings.
-                terminal = _gate_terminal_status(result)
-                blocking_count = int(result.get("blocking_count") or 0)
-                if terminal == "fail":
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        f"{gate} completed with result_status=fail",
-                    ))
-                elif blocking_count > 0:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        f"{gate} completed with {blocking_count} blocking finding(s)",
-                    ))
-                elif terminal == "pass":
+                # gate_is_pass() handles state/result_status via gate_status._coerce_status (CFX-12).
+                passed, reason = gate_is_pass(result)
+                if passed:
                     advisory_count = int(result.get("advisory_count") or 0)
                     checks.append(CheckResult(
                         f"gate_{gate}",
@@ -430,7 +418,7 @@ def _validate_review_evidence(
                     checks.append(CheckResult(
                         f"gate_{gate}",
                         "FAIL",
-                        f"{gate} state=completed but result_status is missing or unknown",
+                        f"{gate} completed: {reason}",
                     ))
             elif result.get("was_intentionally_absent") or result.get("contributed_evidence"):
                 state = result.get("state", "unknown")
@@ -507,25 +495,31 @@ def _validate_review_evidence(
                     "FAIL",
                     "no ci_gate result found",
                 ))
+            elif not gate_is_terminal(result):
+                status = result.get("status", "unknown")
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    f"ci_gate checks still {status} — incomplete evidence",
+                ))
             else:
-                status = result.get("status", "missing")
-                blocking_count = result.get("blocking_count", 0)
                 contract_hash = result.get("contract_hash", "")
                 report_path = result.get("report_path", "")
-                if status in ("pass", "fail"):
-                    if not contract_hash:
-                        checks.append(CheckResult(
-                            f"gate_{gate}",
-                            "FAIL",
-                            "ci_gate result is missing required contract_hash field",
-                        ))
-                    elif not report_path:
-                        checks.append(CheckResult(
-                            f"gate_{gate}",
-                            "FAIL",
-                            "ci_gate result is missing required report_path field",
-                        ))
-                    elif status == "pass" and blocking_count == 0:
+                if not contract_hash:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        "ci_gate result is missing required contract_hash field",
+                    ))
+                elif not report_path:
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        "ci_gate result is missing required report_path field",
+                    ))
+                else:
+                    passed, reason = gate_is_pass(result)
+                    if passed:
                         advisory_count = result.get("advisory_count", 0)
                         checks.append(CheckResult(
                             f"gate_{gate}",
@@ -533,23 +527,12 @@ def _validate_review_evidence(
                             f"ci_gate passed ({advisory_count} advisory, 0 blocking)",
                         ))
                     else:
+                        blocking_count = result.get("blocking_count", 0)
                         checks.append(CheckResult(
                             f"gate_{gate}",
                             "FAIL",
-                            f"ci_gate status: {status}, {blocking_count} blocking check(s)",
+                            f"ci_gate not passing — {reason}",
                         ))
-                elif status == "running":
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        "ci_gate checks still running — incomplete evidence",
-                    ))
-                else:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        f"ci_gate status: {status}, {blocking_count} blocking check(s)",
-                    ))
 
         else:
             if result is None:
