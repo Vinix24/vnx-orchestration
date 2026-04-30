@@ -198,12 +198,17 @@ def update_confidence_from_outcome(
 ) -> Dict[str, int]:
     """Update pattern confidence scores based on dispatch outcome.
 
-    On success: boost confidence by 0.05 (cap 1.0) for patterns linked to this
-    dispatch, and increment their used_count.
-    On failure: decay confidence by 0.1 (floor 0.0) for patterns linked to this
-    dispatch.
+    Uses Beta(success+1, failure+1) Laplace smoothing instead of fixed
+    +0.05 / -0.1 deltas so the score reflects total usage volume rather
+    than the number of consecutive boosts.  Each outcome increments
+    success_count or failure_count on the matching pattern_usage row, then
+    the new Beta posterior is written back to success_patterns.confidence_score.
 
     Linkage is via success_patterns.source_dispatch_ids (JSON array).
+    pattern_usage rows are matched / created using the stable
+    "intel_sp_<id>" id convention so the daily reconcile and the
+    per-dispatch update read and write the same row.
+
     A confidence_events row is written for audit/learning-summary queries.
 
     Args:
@@ -218,49 +223,90 @@ def update_confidence_from_outcome(
     if not db_path.exists():
         return {"boosted": 0, "decayed": 0}
 
+    # Local import to keep the module standalone-importable.
+    from confidence_reconcile import beta_score, SUCCESS_PATTERN_PREFIX
+
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     now = datetime.now(timezone.utc).isoformat()
     boosted = 0
     decayed = 0
+    net_change = 0.0
 
     try:
         rows = conn.execute(
-            "SELECT id, confidence_score, usage_count FROM success_patterns "
+            "SELECT id, confidence_score, usage_count, title FROM success_patterns "
             "WHERE source_dispatch_ids LIKE ?",
             (f"%{dispatch_id}%",),
         ).fetchall()
 
         is_success = status == "success"
-        delta = 0.05 if is_success else -0.1
 
         for row in rows:
+            sp_id = row["id"]
+            pattern_id = f"{SUCCESS_PATTERN_PREFIX}{sp_id}"
+            title = (row["title"] or f"success_pattern_{sp_id}")[:255]
+            pattern_hash = _sha1(pattern_id)
+
+            usage = conn.execute(
+                "SELECT success_count, failure_count, used_count "
+                "FROM pattern_usage WHERE pattern_id = ?",
+                (pattern_id,),
+            ).fetchone()
+
+            if usage is None:
+                succ = 1 if is_success else 0
+                fail = 0 if is_success else 1
+                used = 1 if is_success else 0
+                conn.execute(
+                    "INSERT INTO pattern_usage "
+                    "(pattern_id, pattern_title, pattern_hash, used_count, "
+                    " ignored_count, success_count, failure_count, "
+                    " last_used, confidence, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                    (pattern_id, title, pattern_hash, used,
+                     succ, fail, now, beta_score(succ, fail), now, now),
+                )
+            else:
+                succ = int(usage["success_count"] or 0) + (1 if is_success else 0)
+                fail = int(usage["failure_count"] or 0) + (0 if is_success else 1)
+                used = int(usage["used_count"] or 0) + (1 if is_success else 0)
+                conn.execute(
+                    "UPDATE pattern_usage SET success_count = ?, "
+                    "failure_count = ?, used_count = ?, "
+                    "confidence = ?, last_used = ?, updated_at = ? "
+                    "WHERE pattern_id = ?",
+                    (succ, fail, used, beta_score(succ, fail), now, now, pattern_id),
+                )
+
             old_conf = float(row["confidence_score"] or 0.0)
-            new_conf = max(0.0, min(1.0, old_conf + delta))
+            new_conf = round(beta_score(succ, fail), 6)
+            net_change += new_conf - old_conf
+
             if is_success:
-                new_usage = (row["usage_count"] or 0) + 1
+                new_usage_count = (row["usage_count"] or 0) + 1
                 conn.execute(
                     "UPDATE success_patterns SET confidence_score = ?, "
                     "usage_count = ?, last_used = ? WHERE id = ?",
-                    (new_conf, new_usage, now, row["id"]),
+                    (new_conf, new_usage_count, now, sp_id),
                 )
                 boosted += 1
             else:
                 conn.execute(
                     "UPDATE success_patterns SET confidence_score = ? WHERE id = ?",
-                    (new_conf, row["id"]),
+                    (new_conf, sp_id),
                 )
                 decayed += 1
 
         # Record a confidence_events audit row (best-effort — table may not exist yet)
-        net_change = round((boosted * 0.05) + (decayed * -0.1), 4)
         try:
             conn.execute(
                 "INSERT INTO confidence_events "
                 "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
                 " confidence_change, occurred_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (dispatch_id, terminal, status, boosted, decayed, net_change, now),
+                (dispatch_id, terminal, status, boosted, decayed,
+                 round(net_change, 4), now),
             )
         except sqlite3.OperationalError:
             pass  # Table not yet migrated in older DBs
@@ -273,6 +319,11 @@ def update_confidence_from_outcome(
         conn.close()
 
     return {"boosted": boosted, "decayed": decayed}
+
+
+def _sha1(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
 def _append_to_json_list(existing_json: Optional[str], new_item: str) -> str:

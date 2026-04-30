@@ -843,6 +843,17 @@ class LearningLoop:
         if superseded:
             print(f"  ✓ Superseded {superseded} stale patterns")
 
+        # 5.7 Close the feedback loop: sync pattern_usage stats back to
+        # success_patterns.confidence_score so intelligence_selector reads
+        # the current learning state rather than the static initial value.
+        print("\n🔁 Step 5.7: Reconciling confidence scores...")
+        try:
+            from confidence_reconcile import reconcile_pattern_confidence
+            reconciled = reconcile_pattern_confidence(self.db_path)
+            print(f"  ✓ Reconciled {reconciled} success_patterns rows")
+        except Exception as e:
+            print(f"❌ Error reconciling confidence: {e}")
+
         # 6. Generate report
         print("\n📈 Step 6: Generating learning report...")
         report = self.generate_learning_report()
