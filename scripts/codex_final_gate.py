@@ -20,7 +20,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from review_contract import ReviewContract
-from auto_merge_policy import codex_final_gate_required
+from auto_merge_policy import (
+    GOVERNANCE_PATH_MARKERS,
+    codex_final_gate_required,
+    is_governance_path,
+)
 from governance_receipts import emit_governance_receipt, utc_now_iso
 from result_contract import EXIT_IO, EXIT_OK, EXIT_VALIDATION
 
@@ -28,26 +32,6 @@ from result_contract import EXIT_IO, EXIT_OK, EXIT_VALIDATION
 # ---------------------------------------------------------------------------
 # Gate enforcement
 # ---------------------------------------------------------------------------
-
-GOVERNANCE_PATH_MARKERS = (
-    "scripts/dispatcher",
-    "scripts/receipt_processor",
-    "scripts/pr_queue_manager",
-    "scripts/pre_merge_gate",
-    "scripts/closure_verifier",
-    "scripts/review_gate_manager",
-    "scripts/roadmap_manager",
-    "scripts/codex_final_gate",
-    "scripts/lib/vnx_paths",
-    "scripts/lib/runtime_coordination",
-    "scripts/lib/dispatch_broker",
-    "scripts/lib/review_contract",
-    "scripts/commands/start.sh",
-    "scripts/commands/stop.sh",
-    "scripts/commands/doctor.sh",
-    "schemas/",
-    ".github/workflows/",
-)
 
 RUNTIME_PATH_MARKERS = (
     "scripts/lib/runtime_coordination",
@@ -58,13 +42,7 @@ RUNTIME_PATH_MARKERS = (
 
 
 def _touches_governance_paths(changed_files: List[str]) -> bool:
-    for path in changed_files:
-        p = str(path).strip()
-        if any(marker in p for marker in GOVERNANCE_PATH_MARKERS):
-            return True
-        if p.endswith(".sql"):
-            return True
-    return False
+    return is_governance_path(changed_files)
 
 
 def _touches_runtime_paths(changed_files: List[str]) -> bool:
@@ -450,11 +428,15 @@ def check_gate_clearance(
     if receipt.rerun_required:
         blockers.append("codex_gate_rerun_required")
 
-    if receipt.content_hash and contract.content_hash:
-        if receipt.content_hash != contract.content_hash:
-            blockers.append("codex_gate_stale_receipt")
+    if not receipt.content_hash or not contract.content_hash:
+        blockers.append("codex_gate_stale_receipt")
+    elif receipt.content_hash != contract.content_hash:
+        blockers.append("codex_gate_stale_receipt")
 
-    error_findings = [f for f in receipt.findings if f.get("severity") == "error"]
+    error_findings = [
+        f for f in receipt.findings
+        if str(f.get("severity") or "").strip().lower() in {"error", "blocker"}
+    ]
     if error_findings:
         blockers.append(f"codex_gate_unresolved_errors_{len(error_findings)}")
 
