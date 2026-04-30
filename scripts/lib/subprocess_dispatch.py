@@ -351,6 +351,19 @@ def _extract_touched_paths_from_event(event: "StreamEvent | object") -> list[str
     return paths
 
 
+def _parse_dirty_files(porcelain_output: str) -> frozenset:
+    """Parse 'git status --porcelain' output into a frozenset of relative file paths."""
+    files: set[str] = set()
+    for line in porcelain_output.splitlines():
+        if not line.strip():
+            continue
+        path_part = line[3:]
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        files.add(path_part.strip())
+    return frozenset(files)
+
+
 def _get_dirty_files(cwd: Path) -> set[str]:
     """Return the set of dirty (modified/untracked) file paths from git status --porcelain.
 

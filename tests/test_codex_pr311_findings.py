@@ -109,6 +109,7 @@ class TestAutoCommitIsolation:
             committed = _auto_commit_changes(
                 "dispatch-002", "T1", gate="test",
                 pre_dispatch_dirty=pre_existing,
+                dispatch_touched_files=frozenset(["scripts/new_dispatch.py"]),
             )
 
         assert committed is True
@@ -135,7 +136,10 @@ class TestAutoCommitIsolation:
             return result
 
         with patch("subprocess_dispatch.subprocess.run", side_effect=fake_run):
-            committed = _auto_commit_changes("dispatch-003", "T1", pre_dispatch_dirty=frozenset())
+            committed = _auto_commit_changes(
+                "dispatch-003", "T1", pre_dispatch_dirty=frozenset(),
+                dispatch_touched_files=frozenset(["scripts/a.py", "scripts/b.py"]),
+            )
 
         assert committed is True
         add_calls = [c for c in git_calls if len(c) > 1 and c[1] == "add"]
@@ -194,12 +198,15 @@ class TestAutoStashIsolation:
             return result
 
         with patch("subprocess_dispatch.subprocess.run", side_effect=fake_run):
-            stashed = _auto_stash_changes("dispatch-011", "T1", pre_dispatch_dirty=frozenset())
+            stashed = _auto_stash_changes(
+                "dispatch-011", "T1", pre_dispatch_dirty=frozenset(),
+                dispatch_touched_files=frozenset(["scripts/new_untracked.py"]),
+            )
 
         assert stashed is True
         stash_calls = [c for c in git_calls if len(c) > 1 and c[1] == "stash"]
         assert len(stash_calls) == 1
-        assert "--include-untracked" in stash_calls[0]
+        assert "--include-untracked" in stash_calls[0] or "-u" in stash_calls[0]
 
     def test_stash_only_paths_from_dispatch(self):
         """Only dispatch-new files appear in the stash -- path argument."""
@@ -220,7 +227,8 @@ class TestAutoStashIsolation:
 
         with patch("subprocess_dispatch.subprocess.run", side_effect=fake_run):
             stashed = _auto_stash_changes(
-                "dispatch-012", "T1", pre_dispatch_dirty=pre_existing
+                "dispatch-012", "T1", pre_dispatch_dirty=pre_existing,
+                dispatch_touched_files=frozenset(["scripts/dispatch_new.py"]),
             )
 
         assert stashed is True
@@ -247,7 +255,10 @@ class TestAutoStashIsolation:
             return result
 
         with patch("subprocess_dispatch.subprocess.run", side_effect=fake_run):
-            _auto_stash_changes("dispatch-013", "T1", pre_dispatch_dirty=frozenset())
+            _auto_stash_changes(
+                "dispatch-013", "T1", pre_dispatch_dirty=frozenset(),
+                dispatch_touched_files=frozenset(["scripts/file.py"]),
+            )
 
         stash_calls = [c for c in git_calls if len(c) > 1 and c[1] == "stash"]
         assert stash_calls, "stash call expected"
