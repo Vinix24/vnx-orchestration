@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-04-29T04:08:16.159874+00:00
+**Last updated**: 2026-04-30T19:49:51.451173+00:00
 
 ## Active features
 
@@ -9,17 +9,14 @@ _No active features._
 
 ## Completed
 
-### F32
-All PRs merged. (#240 + #241)
+### F43
+All PRs merged. (#303)
 
-### F34–F42
-All PRs merged. (#189 + #190 + #191 + 14 more)
+### F57
+All PRs merged. (#347)
 
-### F44–F46
-All PRs merged. (#218 + #220 + #221 + 1 more)
-
-### F59
-All PRs merged. (#265 + #266)
+### F59–F60
+All PRs merged. (#265 + #266 + #305 + 2 more)
 
 ## Planned (from ROADMAP.yaml)
 
