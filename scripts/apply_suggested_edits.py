@@ -17,7 +17,8 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 _UTC = timezone.utc
 from pathlib import Path
@@ -100,8 +101,88 @@ def _parse_ids(id_str: str) -> List[int]:
     return ids
 
 
-def cmd_review():
+def cmd_review_weekly():
+    """Show weekly aggregated view of suggestions grouped by target file."""
+    now = datetime.now(tz=_UTC)
+    cutoff = now - timedelta(days=7)
+
+    history = _load_history()
+    recent_history = []
+    for entry in history:
+        applied_at_str = entry.get("applied_at", "")
+        if applied_at_str:
+            try:
+                ts = datetime.fromisoformat(applied_at_str.replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_UTC)
+                if ts >= cutoff:
+                    recent_history.append(entry)
+            except ValueError:
+                pass
+
+    data = _load_pending()
+    pending = data.get("edits", [])
+
+    all_entries = [{**e, "_source": "pending"} for e in pending]
+    all_entries += [{**e, "_source": "history"} for e in recent_history]
+
+    if not all_entries:
+        print("No suggestions in the last 7 days.")
+        return 0
+
+    by_target: dict = defaultdict(list)
+    for entry in all_entries:
+        by_target[entry.get("target", "unknown")].append(entry)
+
+    print(f"\n{Colors.BOLD}Weekly Suggestions Summary (last 7 days){Colors.RESET}")
+    print(f"Targets with suggestions: {len(by_target)}\n")
+
+    for target, entries in sorted(by_target.items(), key=lambda kv: -len(kv[1])):
+        count = len(entries)
+        confidences = [float(e.get("confidence", 0)) for e in entries if e.get("confidence") is not None]
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+
+        print(f"  {Colors.BOLD}{target}{Colors.RESET} "
+              f"— {count} suggestion(s), avg confidence: {avg_conf:.2f}")
+
+        for entry in entries:
+            eid = entry.get("id", "?")
+            status = entry.get("status", "pending")
+            content = entry.get("content", "")
+            content_preview = content.strip().split("\n")[0][:80] if content else ""
+            source = entry.get("_source", "pending")
+
+            if source == "history":
+                status_label = f"[{Colors.GREEN}applied{Colors.RESET}]"
+            elif status == "pending":
+                status_label = f"[{Colors.YELLOW}pending{Colors.RESET}]"
+            elif status == "accepted":
+                status_label = f"[{Colors.GREEN}accepted{Colors.RESET}]"
+            else:
+                status_label = f"[{Colors.RED}{status}{Colors.RESET}]"
+
+            if count > 1:
+                print(f"    Pattern detected ({count} occurrences, last 7d): {content_preview}")
+            else:
+                print(f"    #{eid} {status_label} {content_preview}")
+
+        pending_ids = [
+            str(e["id"])
+            for e in entries
+            if e.get("_source") == "pending" and e.get("status") == "pending" and e.get("id") is not None
+        ]
+        if pending_ids:
+            print(f"    Accept batch: vnx suggest accept {','.join(pending_ids)}")
+        print()
+
+    return 0
+
+
+def cmd_review(weekly: bool = False):
     """Show all pending edits."""
+    if weekly:
+        return cmd_review_weekly()
+
     data = _load_pending()
     edits = data.get("edits", [])
 
@@ -422,7 +503,11 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    subparsers.add_parser("review", help="Show all pending edits")
+    review_parser = subparsers.add_parser("review", help="Show all pending edits")
+    review_parser.add_argument(
+        "--weekly", action="store_true",
+        help="Aggregate last 7 days of suggestions grouped by target file",
+    )
 
     accept_parser = subparsers.add_parser("accept", help="Accept edits by ID")
     accept_parser.add_argument("ids", help="Comma-separated edit IDs (e.g., 1,3,5)")
@@ -441,7 +526,7 @@ def main():
         return 1
 
     if args.command == "review":
-        return cmd_review()
+        return cmd_review(weekly=getattr(args, "weekly", False))
     elif args.command == "accept":
         return cmd_accept(args.ids)
     elif args.command == "reject":
