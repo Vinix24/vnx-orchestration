@@ -90,6 +90,80 @@ def ensure_pattern_category_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# 16-char prefix of SHA-256 — enough entropy to avoid collisions across the
+# population of success_patterns rows we expect to ever see (millions before
+# collision risk reaches 1%) while keeping pattern_id readable.
+CONTENT_HASH_PREFIX_LEN = 16
+
+
+def _short_content_hash(*parts: Optional[str]) -> str:
+    """Stable 16-char prefix of the normalized SHA-256 used by the selector.
+
+    Selector ``IntelligenceItem.content_hash`` is the full SHA-256 hex string,
+    but the on-row column is the 16-char prefix so the canonical-id lookup
+    can use a short index without sacrificing collision resistance.
+    """
+    return content_hash(*parts)[:CONTENT_HASH_PREFIX_LEN]
+
+
+def ensure_content_hash_column(conn: sqlite3.Connection) -> None:
+    """Apply migration 0012 idempotently.
+
+    Adds ``content_hash`` (TEXT) to ``success_patterns`` plus the supporting
+    composite index on (content_hash, project_id). Backfill of existing rows
+    is delegated to :func:`backfill_content_hash` so a fresh DB acquires the
+    column without paying for hashing work it doesn't need yet.
+
+    SQLite has no SHA-256 builtin, hence the column is added empty here and
+    populated by the Python helper. The index is non-unique because legacy
+    duplicates may share a hash until ``dedup_success_patterns --apply``
+    collapses them; ``pattern_dedup`` enforces application-level uniqueness
+    after the collapse.
+    """
+    if not _column_exists(conn, "success_patterns", "content_hash"):
+        conn.execute(
+            "ALTER TABLE success_patterns ADD COLUMN content_hash TEXT"
+        )
+    # project_id arrived in migration 0010; older snapshots may pre-date it,
+    # so fall back to a single-column index when the project_id column is
+    # missing rather than failing the whole migration.
+    if _column_exists(conn, "success_patterns", "project_id"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_success_patterns_content_hash "
+            "ON success_patterns (content_hash, project_id)"
+        )
+    else:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_success_patterns_content_hash "
+            "ON success_patterns (content_hash)"
+        )
+    conn.commit()
+
+
+def backfill_content_hash(conn: sqlite3.Connection) -> int:
+    """Populate ``content_hash`` for rows where it is NULL.
+
+    Returns the count of rows updated. Idempotent — rows whose hash is
+    already populated are skipped, so re-running is a no-op.
+    """
+    ensure_content_hash_column(conn)
+    rows = conn.execute(
+        "SELECT id, title, description FROM success_patterns "
+        "WHERE content_hash IS NULL OR content_hash = ''"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        h = _short_content_hash(row[1], row[2])
+        conn.execute(
+            "UPDATE success_patterns SET content_hash = ? WHERE id = ?",
+            (h, row[0]),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -203,6 +277,8 @@ def dedup_success_patterns(
     conn.row_factory = sqlite3.Row
     try:
         ensure_pattern_category_columns(conn)
+        ensure_content_hash_column(conn)
+        backfill_content_hash(conn)
         groups = _group_duplicates(conn)
         report: Dict[str, int] = {}
         for hash_key, members in groups.items():
@@ -378,6 +454,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run pattern_category classification on every row.",
     )
+    parser.add_argument(
+        "--backfill-content-hash",
+        action="store_true",
+        help="Populate the content_hash column for rows missing it (idempotent).",
+    )
     return parser
 
 
@@ -397,6 +478,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             ensure_pattern_category_columns(conn)
             counts = backfill_pattern_category(conn)
         print(f"[pattern_dedup] backfill counts: {counts}")
+
+    if args.backfill_content_hash:
+        with sqlite3.connect(str(args.db)) as conn:
+            updated = backfill_content_hash(conn)
+        print(f"[pattern_dedup] content_hash backfill: {updated} rows updated")
 
     report = dedup_success_patterns(args.db, apply=args.apply)
     if not report:
