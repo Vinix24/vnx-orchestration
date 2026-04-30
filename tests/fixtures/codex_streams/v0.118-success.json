@@ -1,0 +1,3 @@
+{"type": "session_start", "id": "sess-v0118-success-001", "model": "codex-1"}
+{"type": "agent_message", "text": "Reviewing the PR changes against the review contract...\n\nAll deliverables are complete. Tests pass. No blocking issues found.\n\n```json\n{\"verdict\": \"pass\", \"findings\": [], \"residual_risk\": \"monitoring not yet proven in production\"}\n```"}
+{"type": "token_usage", "input_tokens": 1482, "output_tokens": 287}
