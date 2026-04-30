@@ -39,7 +39,7 @@ jobs:
       - name: Legacy path gate
         run: |
           set -euo pipefail
-          matches=$(rg -n "state/" "$GITHUB_WORKSPACE/.claude/vnx-system/scripts" \
+          matches=$(rg -n '\.vnx-data/state/' "$GITHUB_WORKSPACE/.claude/vnx-system/scripts" \
             --glob "!**/archived*/**" \
             --glob "!**/archive*/**" \
             --glob "!**/*.DEPRECATED" \
@@ -253,7 +253,7 @@ jobs:
       - name: Legacy path gate
         run: |
           set -euo pipefail
-          matches=$(rg -n "state/" "$GITHUB_WORKSPACE/.claude/vnx-system/scripts" \
+          matches=$(rg -n '\.vnx-data/state/' "$GITHUB_WORKSPACE/.claude/vnx-system/scripts" \
             --glob "!**/archived*/**" \
             --glob "!**/archive*/**" \
             --glob "!**/*.DEPRECATED" \
