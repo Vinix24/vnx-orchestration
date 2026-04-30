@@ -274,6 +274,120 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 
 ---
 
+## Phase 11: Governance Hardening Chain and Intelligence Closure (v0.10.0)
+
+**Problem**
+- Headless audit trail still had gaps (~40% parity): tokens uncounted, STUCK events not archived, no cryptographic reproducibility.
+- Supervisor daemons (dispatcher, receipt processor) would die silently under load — no auto-respawn.
+- The intelligence loop was open-circuit: pattern confidence stores for the selector and learner diverged independently, and `dispatch_id` was never stamped at injection time, so failure decay never propagated.
+- Frontend regressions were caught manually — no automated visual baseline.
+- Codex gate severity was too noisy (100% blocking rate on chain regate).
+
+**What changed (27 PRs, 2026-04-28 → 2026-04-30)**
+
+**Headless audit parity (40% → 90%)**
+- `instruction_sha256` stamped in manifest + receipt: dispatches are cryptographically reproducible.
+- `WorkerHealthMonitor` STUCK events archived to `EventStore` + `stuck_event_count` in receipt.
+- Cross-provider token tracking (`codex_adapter`, `gemini_adapter`) via `adapter.get_token_usage()`.
+- Canonical gate result schema: `gate_status.is_pass()` replaces ad-hoc string comparisons.
+
+**Supervisor pack**
+- `cleanup_worker_exit`: single-owner exit cleanup — lease release + state transition + audit event, idempotent.
+- `receipt_processor_supervisor.sh`: auto-respawn with exponential backoff, stale-lock cleanup, SIGTERM/KILL escalation.
+- `lease_sweep` and `runtime_supervise` ticking in dispatcher prelude (30s/60s intervals).
+- `docs/operations/UNIFIED_SUPERVISOR.md`: operator guide for opt-in per-project cutover.
+
+**State self-maintenance**
+- `compact_state.py` + nightly cron: auto-rotate intelligence_archive (7d), receipts (cap 10k), open_items_digest (>30d evict).
+
+**P0 intelligence loop fixes**
+- Reconcile pattern confidence stores: closes open-circuit between `intelligence_selector` and `learning_loop`.
+- Stamp `dispatch_id` at injection time: unblocks failure decay propagation.
+- Activate T0 decision log + outcome reconciliation: T0 introspection wired end-to-end for the first time.
+
+**Representative implementations**
+- `scripts/compact_state.py`, `scripts/install_nightly_crons.sh`
+- `scripts/lib/cleanup_worker_exit.py`
+- `scripts/receipt_processor_supervisor.sh`
+- `scripts/lib/gate_status.py`
+- `dashboard/api_register_stream.py`
+
+**Outcome**
+- Headless audit trail approaches interactive parity.
+- Daemons self-heal without operator intervention.
+- Intelligence loop is closed: patterns can actually learn from failures.
+- Codex gate noise reduced ~75%, making gate enforcement sustainable at scale.
+
+---
+
+## The Operator's Journey: From 4 tmux Panes to Headless Orchestrator
+
+This section traces how the *experience of running VNX* changed for the human operator — independent of the technical phases above, which describe what was built. These phases describe what it felt like.
+
+### Phase A — Manual Queue + 4 tmux Panes (Early)
+
+**What the operator did**
+Four tmux panes open simultaneously: T0 orchestrator, T1 primary worker, T2 testing, T3 review. The operator read each dispatch markdown file manually, evaluated it, and typed an approval command to promote it from `pending/` to active. Each step required a deliberate human action — there was no autonomous advancement.
+
+**The experience**
+High visibility. Every decision was explicit and operator-driven. The system had a "ChatGPT-as-orchestrator" feel: T0 was essentially a well-prompted interactive session, and the operator was the state machine connecting the pieces. Mistakes were caught early because the operator was in the loop at every step.
+
+**The cost**
+Exhausting for any chain longer than 3-4 PRs. The operator had to stay focused across all four panes, approve each dispatch, watch for completions, and manually trigger the next step. Context switching between panes was constant.
+
+### Phase B — Headless Workers (T1, T2)
+
+**What changed**
+`SubprocessAdapter` (F32, PR #189) made T1 and T2 invisible: `claude -p --output-format stream-json` spawned as child processes. Workers no longer needed visible terminal panes. The operator still ran T0 interactively, but T1/T2 ran silently in the background, writing to a per-terminal NDJSON ring buffer.
+
+**The experience**
+The cognitive load dropped significantly. The operator no longer needed to watch T1/T2 panes — they just waited for receipts. The dashboard became the primary interface for monitoring worker progress instead of eyeballing tmux output.
+
+**The cost**
+Debugging got harder. When a headless worker stalled or failed, the operator had to read event archives (`events/archive/{terminal}/{dispatch_id}.ndjson`) instead of the live pane. The "silent failure" surface area increased.
+
+### Phase C — Headless Review Gates
+
+**What changed**
+Codex and Gemini review gates moved from "operator reads the review output and decides" to headless `codex exec` / `gemini` subprocesses running autonomously. Triple-gate enforcement (codex pass + gemini pass + CI green = merge) became machine-enforced rather than human-remembered.
+
+**The experience**
+The operator's role shifted from decision-maker to exception handler. Gates ran without prompting; the operator only intervened on failures. A chain of 10 PRs could land while the operator was doing other work.
+
+**The cost**
+Gate false positives became a real problem. When codex flagged everything as `error`-severity, the operator had to manually override or retune prompts. The #323/#324 severity tightening in v0.10.0 was a direct response to this: blocking rates dropped ~75%.
+
+### Phase D — Self-Improvement Loop Attempt
+
+**What changed**
+`learning_loop.py`, `intelligence_selector`, and a success-patterns SQLite DB were introduced. The idea: patterns from past dispatches would inject context into future ones. Confidence scores would rise for patterns that correlated with successful outcomes.
+
+**The experience**
+Theoretically transformative; practically inert. The loop was open-circuit until the v0.10.0 P0 fixes: the selector and learner maintained separate confidence stores that never reconciled, and `dispatch_id` was never stamped at injection time, so failure decay never propagated. From the operator's perspective, the intelligence panel showed data, but dispatch quality didn't observably improve.
+
+**Note**: Per `claudedocs/2026-04-30-self-learning-loop-audit.md`, the loop was open-circuit until PRs #326–#328 in v0.10.0 addressed the root causes. Whether the closed loop produces measurable quality improvement remains to be evaluated.
+
+### Phase E — Supervisor + State Self-Maintenance (v0.10.0)
+
+**What changed**
+Daemons became self-healing. `receipt_processor_supervisor.sh` auto-respawns the receipt processor on crash. `dispatcher_supervisor.sh` does the same for the dispatcher. `lease_sweep` runs every 30s to release stale leases before they block the queue. `compact_state.py` runs nightly to prevent state directories from growing unbounded.
+
+**The experience**
+The operator no longer needs to check "is the receipt processor still running?" at the start of each session. The system maintains itself. Long-running chains (20+ PRs over multiple days) became operationally viable without babysitting.
+
+**The cost**
+More moving parts. Diagnosing *why* a supervisor restarted requires reading the supervisor log, not just the dispatcher log. The operational surface area is wider even though the operator burden is lower.
+
+### Phase F — Cryptographic Audit Chain (v0.10.0)
+
+**What changed**
+`instruction_sha256` stamps the dispatch instruction hash in the manifest and receipt. Token usage (codex, gemini) is tracked per gate invocation. The audit trail is now cryptographically complete: every dispatch can be reproduced, every gate invocation costed, every worker event counted.
+
+**The experience**
+The operator can answer questions that previously required guesswork: "Did this receipt come from this exact instruction?" and "How many tokens did the codex gate consume on this chain?". The audit trail transitioned from "good enough for debugging" to "good enough for billing and compliance audit".
+
+---
+
 ## What Is Mature Today
 
 - Receipt-led governance and append-only audit trail
@@ -285,6 +399,10 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 - T0 decision framework benchmarked at 73–100% accuracy by scenario tier
 - Dashboard with unified domain visibility and reports browser
 - Multi-model operation with model-agnostic orchestration core
+- Supervisor pack: daemons auto-respawn, state auto-rotates nightly
+- Cryptographic audit trail: instruction_sha256, token tracking, canonical gate schema
+- Headless audit parity at ~90% (was 40% at v0.9.0)
+- Intelligence loop closed: selector-learner reconciled, T0 decision log active
 - Public packaging and CI hygiene suitable for external evaluation
 
 ---

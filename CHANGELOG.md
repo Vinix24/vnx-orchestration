@@ -2,30 +2,55 @@
 
 ## v0.10.0 — 2026-04-30
 
-### Added
-- `scripts/compact_state.py` + `scripts/install_nightly_crons.sh` — auto-rotation of intelligence archive (7d), receipts (cap 10k), open_items_digest (>30d evict)
-- `scripts/lib/cleanup_worker_exit.py` — single-owner worker-exit cleanup (lease release + state transition + audit event, idempotent, mode-agnostic)
-- `scripts/receipt_processor_supervisor.sh` — wrapper-respawn with backoff, stale-lock cleanup, SIGTERM/KILL escalation
-- `dashboard/api_register_stream.py` — `/api/register-stream` SSE endpoint for live dispatch_register events
-- Playwright frontend regression suites: console errors, network failures, visual regression
-- Cross-provider token tracking (codex_adapter, gemini_adapter)
-- `scripts/lib/gate_status.py` — canonical gate result interpretation
-- `docs/operations/UNIFIED_SUPERVISOR.md` — operator guide + per-project cutover
+Chain summary: 27 PRs landed across governance hardening, headless audit parity, supervisor pack, CFX thematic refactors, P0 intelligence loop fixes.
 
-### Improved
-- Codex final-gate severity prompt: `error` reserved for data loss / false closure / security / cross-dispatch corruption (100% → 25% blocking on chain regate)
-- Headless dispatch audit parity raised from ~40% to ~90% (instruction_sha256, stuck event tracking, token tracking, canonical schema)
-- WorkerHealthMonitor STUCK events now persist to EventStore + receipt `stuck_event_count`
-- TypeScript strict mode tightened (noUnusedLocals, noImplicitOverride, noImplicitReturns) + npm typecheck script
+### Added — State self-maintenance
+- `compact_state.py` + `install_nightly_crons.sh` (#299, #313): auto-rotate intelligence_archive (7d), receipts cap (10k), open_items_digest (>30d evict)
+- (cleanup) Removed legacy postmerge audit scripts (#314)
 
-### Fixed
-- compact_state.py round-2 bugs (idempotency on partial failure, real-data digest schema)
-- closure_verifier hard-blocks on codex-failed gate (was advisory)
-- 14 governance + observability fixes across the 2026-04-28 chain
+### Added — Headless audit parity (was 40% → 90%)
+- `instruction_sha256` in manifest + receipt (#309): cryptographic reproducibility
+- WorkerHealthMonitor STUCK → EventStore + receipt `stuck_event_count` (#310)
+- Codex+Gemini token tracking via `adapter.get_token_usage()` (#307)
+- Canonical gate result schema with `gate_status.is_pass()` (#322)
+
+### Added — Real-time observability
+- `/api/register-stream` SSE endpoint (#304)
+
+### Added — Supervisor pack (auto-respawn)
+- `cleanup_worker_exit` single-owner exit cleanup (#315)
+- `receipt_processor_supervisor.sh` wrapper-respawn (#319)
+- `lease_sweep` + dispatcher prelude tick (#316)
+- `runtime_supervise` + 60s tick (#317)
+- Operator guide `docs/operations/UNIFIED_SUPERVISOR.md` (#318)
+
+### Added — Frontend regression protection
+- Playwright visual regression suite (#312)
+- tsc strict + npm typecheck (#306)
+- Playwright network failure scenarios (#308)
+- Console error detection per route (#305)
+
+### Added — CFX thematic refactors
+- Subprocess dispatch git-scope manifest (#320)
+- `closure_verifier` CLI flag forwarding + E2E coverage (#321)
+
+### Improved — Codex review intelligence
+- Severity prompt tightening (#323, #324): `error` reserved for data loss / false closure / security; ~75% reduction in blocking findings noise
+- `closure_verifier` hard-blocks on codex-failed gate (#300)
+- Round-3 fixes for ci_gate (#301), dispatch_register (#302), F43 context-rotation (#303), confidence dedup (#311)
+
+### Added — P0 intelligence loop fixes
+- Reconcile pattern confidence stores (#327): closes selector-vs-learner open-circuit
+- Stamp `dispatch_id` at injection time (#326): unblocks failure decay
+- Activate T0 decision log + outcome reconciliation (#328): T0 introspection finally wired
 
 ### Reports
-- `claudedocs/2026-04-29-unified-supervisor-research.md` (905 LOC supervisor architecture)
-- `claudedocs/2026-04-29-codex-findings-synthesis.md` (28 codex runs analyzed, 17 follow-up OIs)
+- `claudedocs/2026-04-29-unified-supervisor-research.md`
+- `claudedocs/2026-04-29-codex-findings-synthesis.md`
+- `claudedocs/2026-04-30-state-memory-audit.md`
+- `claudedocs/2026-04-30-intelligence-system-audit.md`
+- `claudedocs/2026-04-30-self-learning-loop-audit.md`
+- `claudedocs/VNX_feature_breakdown.md` (blog team feature catalogue)
 
 ## Unreleased
 
