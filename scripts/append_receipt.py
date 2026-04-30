@@ -1242,6 +1242,8 @@ def append_receipt_payload(
 
         _maybe_trigger_state_rebuild(receipt)
 
+        _trigger_receipt_classifier(receipt)
+
     return result
 
 
@@ -1282,6 +1284,25 @@ def _update_confidence_from_receipt(receipt: Dict[str, Any]) -> None:
         update_confidence_from_outcome(db_path, dispatch_id, terminal, outcome)
     except Exception as exc:
         _emit("WARN", "confidence_update_failed", error=str(exc))
+
+
+def _trigger_receipt_classifier(receipt: Dict[str, Any]) -> None:
+    """Best-effort fire of the adaptive receipt classifier (ARC-3).
+
+    Disabled by default; opt-in via VNX_RECEIPT_CLASSIFIER_ENABLED=1. Never
+    raises — the receipt writer must remain on its happy path even if the
+    classifier import or subprocess spawn fails.
+    """
+    if os.environ.get("VNX_RECEIPT_CLASSIFIER_ENABLED", "0") != "1":
+        return
+    try:
+        sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+        from receipt_classifier import trigger_receipt_classifier_async
+        action = trigger_receipt_classifier_async(receipt)
+        if action:
+            _emit("INFO", "receipt_classifier_action", action=action)
+    except Exception as exc:
+        _emit("WARN", "receipt_classifier_trigger_failed", error=str(exc))
 
 
 def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
