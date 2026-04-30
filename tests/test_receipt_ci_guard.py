@@ -15,6 +15,7 @@ APPROVED_WRITERS = {
     "receipt_processor_v4.sh",
     "report_watcher.sh",
     "heartbeat_ack_monitor.py",
+    "check_active_drain.py",
 }
 
 APPEND_HELPER_MARKERS = (
