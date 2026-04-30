@@ -447,12 +447,39 @@ class IntelligenceDaemon:
                 self.dashboard_builder.write_intelligence_health()  # Write to dedicated file (PR #8 Fix)
                 self.dashboard_builder.write_health_status()  # Update dashboard every cycle for live sync
 
+                try:
+                    from health_beacon import HealthBeacon
+                    _hb_paths = ensure_env()
+                    HealthBeacon(
+                        Path(_hb_paths["VNX_DATA_DIR"]),
+                        "intelligence_daemon",
+                        expected_interval_seconds=300,
+                    ).heartbeat(
+                        status="ok",
+                        details={
+                            "uptime_seconds": self.health_status.get("uptime_seconds", 0),
+                            "daemon_status": self.health_status.get("status", "running"),
+                        },
+                    )
+                except Exception:
+                    pass
+
                 # Sleep for 60 seconds
                 time.sleep(60)
 
             except Exception as e:
                 logger.error(f"Error in daemon loop: {e}")
                 self.health_status['status'] = 'error'
+                try:
+                    from health_beacon import HealthBeacon
+                    _hb_paths = ensure_env()
+                    HealthBeacon(
+                        Path(_hb_paths["VNX_DATA_DIR"]),
+                        "intelligence_daemon",
+                        expected_interval_seconds=300,
+                    ).heartbeat(status="fail", details={"error": str(e)})
+                except Exception:
+                    pass
                 time.sleep(60)  # Continue after error
 
         # Graceful shutdown

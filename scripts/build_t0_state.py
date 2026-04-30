@@ -967,6 +967,23 @@ def main() -> int:
         except Exception:
             pass
 
+    try:
+        from health_beacon import HealthBeacon
+        HealthBeacon(
+            _DATA_DIR,
+            "t0_state_builder",
+            expected_interval_seconds=1800,
+        ).heartbeat(
+            status="ok" if _build_succeeded else "fail",
+            details={
+                "format": args.format,
+                "output": str(output_path),
+                "elapsed_seconds": round(elapsed, 3),
+            },
+        )
+    except Exception:
+        pass
+
     return 0  # Always exit 0
 
 
