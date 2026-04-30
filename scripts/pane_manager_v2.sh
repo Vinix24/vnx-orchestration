@@ -163,101 +163,95 @@ discover_pane_interactive() {
     return 1
 }
 
-# Main discovery function with caching
-get_pane_id_smart() {
-    local terminal="$1"
-
-    # Normalize terminal name
-    terminal=$(echo "$terminal" | tr '[:lower:]' '[:upper:]')
-
-    # Validate terminal name
+# Normalize and validate a terminal name; echo canonical name or return 1.
+_gps_validate_terminal() {
+    local terminal
+    terminal=$(echo "$1" | tr '[:lower:]' '[:upper:]')
     case "$terminal" in
-        T0|T1|T2|T3) ;;
+        T0|T1|T2|T3) echo "$terminal" ;;
         *)
             _pm_log "ERROR: Invalid terminal name: $terminal"
             return 1
             ;;
     esac
+}
 
-    # Check cache first
+# Return cached pane_id for terminal if cache is still fresh and pane still exists.
+# Handles cross-project invalidation and attached-session preference.
+# Returns 0 + echoes pane_id on hit; returns 1 on miss (no output).
+_gps_check_cache() {
+    local terminal="$1"
     local cache_file="$PANE_CACHE/${terminal}.pane"
-    if [ -f "$cache_file" ]; then
-        local cache_age=$(( $(date +%s) - $(stat -f%m "$cache_file" 2>/dev/null || stat -c%Y "$cache_file" 2>/dev/null || echo 0) ))
-        if [ "$cache_age" -lt "$CACHE_TTL" ]; then
-            local cached_pane=$(cat "$cache_file")
-            # Verify pane still exists
-            if tmux list-panes -a -F "#{pane_id}" 2>/dev/null | grep -q "^${cached_pane}$"; then
-                # Invalidate cache if the cached pane's cwd does not belong to PROJECT_ROOT.
-                # Prevents stale cross-project cache entries from a prior unscoped fallback.
-                if [ -n "${PROJECT_ROOT:-}" ]; then
-                    local cached_path
-                    cached_path=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
-                        awk -v p="$cached_pane" '$1==p {print $2; exit}')
-                    case "$cached_path" in
-                        "${PROJECT_ROOT}"/*) : ;;
-                        *)
-                            _pm_log "Cached pane $cached_pane path ($cached_path) outside PROJECT_ROOT; invalidating"
-                            rm -f "$cache_file"
-                            cached_pane=""
-                            ;;
-                    esac
-                fi
-                if [ -n "$cached_pane" ]; then
-                    # If an attached-session pane exists for this terminal path, prefer it.
-                    # This avoids routing to stale panes in detached duplicate sessions.
-                    local attached_preferred=""
-                    if [ -n "${PROJECT_ROOT:-}" ]; then
-                        local terminal_path="${PROJECT_ROOT}/.claude/terminals/${terminal}"
-                        attached_preferred=$(tmux list-panes -a -F "#{pane_id} #{session_attached} #{pane_current_path}" 2>/dev/null | \
-                            awk -v p="$terminal_path" '$2=="1" && $3==p {print $1; exit}')
-                    fi
-                    if [ -n "$attached_preferred" ] && [ "$attached_preferred" != "$cached_pane" ]; then
-                        _pm_log "Cached pane $cached_pane for $terminal is stale; using attached pane $attached_preferred"
-                        echo "$attached_preferred" > "$cache_file"
-                        echo "$attached_preferred"
-                        return 0
-                    fi
-                    echo "$cached_pane"
-                    return 0
-                fi
-            else
-                _pm_log "Cached pane $cached_pane no longer exists, rediscovering..."
+    [ ! -f "$cache_file" ] && return 1
+
+    local cache_age=$(( $(date +%s) - $(stat -f%m "$cache_file" 2>/dev/null || stat -c%Y "$cache_file" 2>/dev/null || echo 0) ))
+    [ "$cache_age" -ge "$CACHE_TTL" ] && return 1
+
+    local cached_pane
+    cached_pane=$(cat "$cache_file")
+    if ! tmux list-panes -a -F "#{pane_id}" 2>/dev/null | grep -q "^${cached_pane}$"; then
+        _pm_log "Cached pane $cached_pane no longer exists, rediscovering..."
+        rm -f "$cache_file"
+        return 1
+    fi
+
+    # Invalidate cache if the cached pane's cwd does not belong to PROJECT_ROOT.
+    # Prevents stale cross-project cache entries from a prior unscoped fallback.
+    if [ -n "${PROJECT_ROOT:-}" ]; then
+        local cached_path
+        cached_path=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
+            awk -v p="$cached_pane" '$1==p {print $2; exit}')
+        case "$cached_path" in
+            "${PROJECT_ROOT}"/*) : ;;
+            *)
+                _pm_log "Cached pane $cached_pane path ($cached_path) outside PROJECT_ROOT; invalidating"
                 rm -f "$cache_file"
-            fi
+                return 1
+                ;;
+        esac
+
+        # If an attached-session pane exists for this terminal path, prefer it.
+        # This avoids routing to stale panes in detached duplicate sessions.
+        local terminal_path="${PROJECT_ROOT}/.claude/terminals/${terminal}"
+        local attached_preferred
+        attached_preferred=$(tmux list-panes -a -F "#{pane_id} #{session_attached} #{pane_current_path}" 2>/dev/null | \
+            awk -v p="$terminal_path" '$2=="1" && $3==p {print $1; exit}')
+        if [ -n "$attached_preferred" ] && [ "$attached_preferred" != "$cached_pane" ]; then
+            _pm_log "Cached pane $cached_pane for $terminal is stale; using attached pane $attached_preferred"
+            echo "$attached_preferred" > "$cache_file"
+            echo "$attached_preferred"
+            return 0
         fi
     fi
 
-    # Create cache directory if needed
+    echo "$cached_pane"
+    return 0
+}
+
+# Main discovery function with caching
+get_pane_id_smart() {
+    local terminal="$1"
+    terminal=$(_gps_validate_terminal "$terminal") || return 1
+
+    local cached_pane
+    if cached_pane=$(_gps_check_cache "$terminal"); then
+        echo "$cached_pane"
+        return 0
+    fi
+
     mkdir -p "$PANE_CACHE"
-
-    # Try discovery methods in order
     local pane_id=""
-
-    # Method 1: By path (project-aware, most reliable)
-    if [ -z "$pane_id" ]; then
-        pane_id=$(discover_pane_by_path "$terminal")
-    fi
-
-    # Method 2: By title
-    if [ -z "$pane_id" ]; then
-        pane_id=$(discover_pane_by_title "$terminal")
-    fi
-
-    # Method 3: By window position
-    if [ -z "$pane_id" ]; then
-        pane_id=$(discover_pane_by_window "$terminal")
-    fi
-
-    # Method 4: Interactive (last resort)
+    [ -z "$pane_id" ] && pane_id=$(discover_pane_by_path "$terminal")
+    [ -z "$pane_id" ] && pane_id=$(discover_pane_by_title "$terminal")
+    [ -z "$pane_id" ] && pane_id=$(discover_pane_by_window "$terminal")
     if [ -z "$pane_id" ]; then
         discover_pane_interactive "$terminal"
         return 1
     fi
 
-    # Cache the successful discovery
+    local cache_file="$PANE_CACHE/${terminal}.pane"
     echo "$pane_id" > "$cache_file"
     _pm_log "Cached pane $pane_id for $terminal"
-
     echo "$pane_id"
     return 0
 }
@@ -360,71 +354,70 @@ get_pane_id() {
     get_pane_id_smart "$terminal"
 }
 
+# Lookup terminal by panes.json entry; echo terminal or return 1.
+_gtfp_by_panes_json() {
+    local pane_id="$1" panes_file="$2"
+    [ ! -f "$panes_file" ] || ! command -v jq >/dev/null 2>&1 && return 1
+    local terminal
+    terminal=$(jq -r "to_entries[] | select(.value.pane_id == \"$pane_id\") | .key" "$panes_file" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    [ -n "$terminal" ] && echo "$terminal" && return 0
+    return 1
+}
+
+# Lookup terminal by pane working directory; echo terminal or return 1.
+_gtfp_by_working_dir() {
+    local pane_id="$1"
+    local terminal_path terminal
+    terminal_path=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | grep "^${pane_id} " | awk '{print $2}')
+    [ -z "$terminal_path" ] && return 1
+    if echo "$terminal_path" | grep -qE "/terminals/(T[0-3]|T-MANAGER)"; then
+        terminal=$(echo "$terminal_path" | grep -oE "(T[0-3]|T-MANAGER)" | head -1)
+        [ -n "$terminal" ] && echo "$terminal" && return 0
+    fi
+    return 1
+}
+
+# Lookup terminal by pane title; echo terminal or return 1.
+_gtfp_by_pane_title() {
+    local pane_id="$1"
+    local pane_title terminal
+    pane_title=$(tmux list-panes -a -F "#{pane_id} #{pane_title}" 2>/dev/null | grep "^${pane_id} " | awk '{print $2}')
+    [ -z "$pane_title" ] && return 1
+    if echo "$pane_title" | grep -qE "T[0-3]"; then
+        terminal=$(echo "$pane_title" | grep -oE "T[0-3]" | head -1)
+        [ -n "$terminal" ] && echo "$terminal" && return 0
+    fi
+    return 1
+}
+
 # Reverse lookup: Get terminal name from pane ID
 get_terminal_from_pane() {
     local pane_id="$1"
     local panes_file="${2:-$VNX_STATE_DIR/panes.json}"
 
-    # Validate pane_id format
     if [ -z "$pane_id" ]; then
         _pm_log "ERROR: Empty pane_id provided to get_terminal_from_pane"
         return 1
     fi
 
-    # Method 1: Check panes.json if available
-    if [ -f "$panes_file" ] && command -v jq >/dev/null 2>&1; then
-        local terminal
-        terminal=$(jq -r "to_entries[] | select(.value.pane_id == \"$pane_id\") | .key" "$panes_file" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    local terminal
+    terminal=$(_gtfp_by_panes_json "$pane_id" "$panes_file") && { echo "$terminal"; return 0; }
+    terminal=$(_gtfp_by_working_dir "$pane_id") && { echo "$terminal"; return 0; }
+    terminal=$(_gtfp_by_pane_title "$pane_id") && { echo "$terminal"; return 0; }
 
-        if [ -n "$terminal" ]; then
-            echo "$terminal"
-            return 0
-        fi
-    fi
-
-    # Method 2: Check by working directory
-    local terminal_path
-    terminal_path=$(tmux list-panes -a -F "#{pane_id} #{pane_current_path}" 2>/dev/null | \
-        grep "^${pane_id} " | \
-        awk '{print $2}')
-
-    if [ -n "$terminal_path" ]; then
-        # Extract terminal name from path (e.g., /path/to/terminals/T1 -> T1)
-        if echo "$terminal_path" | grep -qE "/terminals/(T[0-3]|T-MANAGER)"; then
-            terminal=$(echo "$terminal_path" | grep -oE "(T[0-3]|T-MANAGER)" | head -1)
-            if [ -n "$terminal" ]; then
-                echo "$terminal"
-                return 0
-            fi
-        fi
-    fi
-
-    # Method 3: Check by pane title
-    local pane_title
-    pane_title=$(tmux list-panes -a -F "#{pane_id} #{pane_title}" 2>/dev/null | \
-        grep "^${pane_id} " | \
-        awk '{print $2}')
-
-    if [ -n "$pane_title" ]; then
-        # Extract terminal from title (e.g., "T1-WORKER" -> T1)
-        if echo "$pane_title" | grep -qE "T[0-3]"; then
-            terminal=$(echo "$pane_title" | grep -oE "T[0-3]" | head -1)
-            if [ -n "$terminal" ]; then
-                echo "$terminal"
-                return 0
-            fi
-        fi
-    fi
-
-    # Failed to identify terminal
     _pm_log "WARNING: Could not identify terminal for pane $pane_id"
     return 1
 }
 
 # Export functions for use in other scripts
 export -f _pm_log
+export -f _gps_validate_terminal
+export -f _gps_check_cache
 export -f get_pane_id_smart
 export -f get_pane_id
+export -f _gtfp_by_panes_json
+export -f _gtfp_by_working_dir
+export -f _gtfp_by_pane_title
 export -f get_terminal_from_pane
 export -f setup_pane_titles
 export -f check_pane_health
