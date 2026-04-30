@@ -239,6 +239,11 @@ class GateRequestHandlerMixin:
         contract id — target the wrong PR. Treat that as BLOCKED rather than
         silently issuing a bogus call.
 
+        ``pr_number`` must be a positive ``int``. Any other value (including
+        strings that look numeric, ``0``, or negative values) is rejected as a
+        misuse — passing ``contract.pr_id`` here would silently target the
+        wrong PR.
+
         Returns (state, reason, stderr_detail) tuple.
         """
         if not configured:
@@ -255,8 +260,16 @@ class GateRequestHandlerMixin:
                 f"governance pr_id {contract_pr_id!r} is not a valid PR ref",
             )
 
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+            return (
+                STATE_BLOCKED,
+                "invalid_github_pr_number",
+                f"pr_number must be a positive int (got {pr_number!r}); "
+                f"the governance pr_id {contract_pr_id!r} is not a valid PR ref",
+            )
+
         proc = subprocess.run(
-            ["gh", "pr", "comment", str(int(pr_number)), "--body", comment_body],
+            ["gh", "pr", "comment", str(pr_number), "--body", comment_body],
             capture_output=True,
             text=True,
             check=False,

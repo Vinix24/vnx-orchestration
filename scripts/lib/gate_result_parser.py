@@ -79,7 +79,7 @@ class GateResultParserMixin:
 
         self._emit_claude_github_receipt(
             receipt, status=status, pr_id=pr_id, branch=branch,
-            summary=summary, contract_hash=contract_hash,
+            summary=summary, contract_hash=effective_contract_hash,
         )
         return receipt
 

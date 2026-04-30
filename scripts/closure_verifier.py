@@ -107,6 +107,40 @@ def _remote_branch_exists(branch: str, project_root: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _rollup_all_green(rollup: List[Dict[str, Any]]) -> bool:
+    """Decide whether a GitHub statusCheckRollup represents an all-green CI state.
+
+    Handles both ``CheckRun`` (GitHub Actions) entries with ``status``/``conclusion``
+    fields, and ``StatusContext`` (commit status) entries with a ``state`` field.
+    A rollup containing only ``StatusContext`` entries must be evaluated against
+    the ``state`` field — filtering to ``CheckRun`` only would produce an empty
+    generator and silently treat failing/pending commit statuses as passing.
+
+    A rollup with no recognised entries (or empty rollup) is NOT green: callers
+    that require CI evidence should treat absent evidence as failure.
+    """
+    if not rollup:
+        return False
+
+    recognised = 0
+    for item in rollup:
+        typename = item.get("__typename") or ""
+        if typename == "CheckRun":
+            recognised += 1
+            if item.get("status") != "COMPLETED" or item.get("conclusion") != "SUCCESS":
+                return False
+        elif typename == "StatusContext":
+            recognised += 1
+            if (item.get("state") or "").upper() != "SUCCESS":
+                return False
+        else:
+            # Unknown entry type — be conservative and treat as not-green so
+            # we never silently approve an unrecognised rollup shape.
+            return False
+
+    return recognised > 0
+
+
 def _merge_commit_on_main(oid: str, project_root: Path) -> bool:
     _run(["git", "fetch", "origin", "main", "--quiet"], cwd=project_root)
     result = _run(["git", "merge-base", "--is-ancestor", oid, "origin/main"], cwd=project_root)
@@ -353,7 +387,7 @@ def _validate_review_evidence(
     ))
 
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
 
         if gate == "claude_github_optional":
             # Fallback: explicit-absence state for the optional gate is recorded
@@ -533,7 +567,7 @@ def _validate_review_evidence(
 
     # Content hash consistency
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result and contract.content_hash:
             result_hash = result.get("contract_hash") or result.get("content_hash") or ""
             if result_hash and result_hash != contract.content_hash:
@@ -548,11 +582,8 @@ def _validate_review_evidence(
     # pass/fail gate result must carry a report_path pointing to a real file
     # under $VNX_DATA_DIR/unified_reports/.
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
-        # Treat status/verdict AND state="completed" + result_status as terminal so completed
-        # Claude reviews cannot bypass report_path enforcement (they never set status/verdict).
-        _has_terminal = result is not None and bool(_gate_terminal_status(result))
-        if _has_terminal:
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
+        if result is not None and gate_is_terminal(result):
             report_path = result.get("report_path", "")
             if not report_path:
                 checks.append(CheckResult(
@@ -757,11 +788,7 @@ def verify_pr_closure(
                 + ("" if mergeable else " — PR must be OPEN and CLEAN for merge readiness"),
             ))
             rollup = github_pr.get("statusCheckRollup") or []
-            all_green = bool(rollup) and all(
-                item.get("status") == "COMPLETED" and item.get("conclusion") == "SUCCESS"
-                for item in rollup
-                if item.get("__typename") == "CheckRun"
-            )
+            all_green = _rollup_all_green(rollup)
             checks.append(CheckResult(
                 "github_checks",
                 "PASS" if all_green else "FAIL",
@@ -805,7 +832,7 @@ def _detect_gate_report_contradictions(
     checks: List[CheckResult] = []
 
     for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=branch)
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result is None:
             continue
 
@@ -953,11 +980,7 @@ def verify_closure(
                 )
             )
             rollup = pr.get("statusCheckRollup") or []
-            all_green = bool(rollup) and all(
-                item.get("status") == "COMPLETED" and item.get("conclusion") == "SUCCESS"
-                for item in rollup
-                if item.get("__typename") == "CheckRun"
-            )
+            all_green = _rollup_all_green(rollup)
             checks.append(
                 CheckResult(
                     "github_checks",
