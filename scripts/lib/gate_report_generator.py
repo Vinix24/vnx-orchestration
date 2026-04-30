@@ -70,6 +70,7 @@ class GateReportGeneratorMixin:
             "gemini_review": "VNX_GEMINI_REVIEW_ENABLED",
             "codex_gate": "VNX_CODEX_HEADLESS_ENABLED",
             "claude_github_optional": "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
+            "ci_gate": "VNX_CI_GATE_REQUIRED",
         }
         env_var = env_flags.get(gate, "")
         record = {

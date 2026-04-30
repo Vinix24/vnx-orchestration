@@ -18,12 +18,14 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "gemini_review": "VNX_GEMINI_REVIEW_ENABLED",
     "codex_gate": "VNX_CODEX_HEADLESS_ENABLED",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
+    "ci_gate": "VNX_CI_GATE_REQUIRED",
 }
 
 _GATE_BINARIES: Dict[str, str] = {
     "gemini_review": "gemini",
     "codex_gate": "codex",
     "claude_github_optional": "gh",
+    "ci_gate": "gh",
 }
 
 # Infrastructure/execution failures — NOT semantic gate verdicts.

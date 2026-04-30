@@ -79,7 +79,7 @@ class GateResultParserMixin:
 
         self._emit_claude_github_receipt(
             receipt, status=status, pr_id=pr_id, branch=branch,
-            summary=summary, contract_hash=contract_hash,
+            summary=summary, contract_hash=effective_contract_hash,
         )
         return receipt
 
@@ -222,9 +222,10 @@ class GateResultParserMixin:
             "gemini_review": ("VNX_GEMINI_REVIEW_ENABLED", "1"),
             "codex_gate": ("VNX_CODEX_HEADLESS_ENABLED", "1"),
             "claude_github_optional": ("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0"),
+            "ci_gate": ("VNX_CI_GATE_REQUIRED", "0"),
         }
         env_var, default = env_flags.get(gate, ("", "0"))
-        disabled = env_var and os.environ.get(env_var, default) == "0"
+        disabled = env_var and os.environ.get(env_var, default) != "1" if gate == "ci_gate" else env_var and os.environ.get(env_var, default) == "0"
         binary_found = shutil.which(binary_name) is not None
 
         if disabled and not binary_found:

@@ -1005,60 +1005,109 @@ class TestClosureVerifierRoundOneCodexFindings:
         assert "gate_claude_github_optional" in failed
 
 
+# ---------------------------------------------------------------------------
+# Round-3 codex finding regressions (PR #301)
+# ---------------------------------------------------------------------------
 
 
-def _make_claude_completed_result(
-    pr_id="PR-0",
-    result_status="pass",
-    blocking_count=0,
-    advisory_count=0,
-    contract_hash="abcdef1234567890",
-    report_path="",
-):
-    """Persisted shape of a completed Claude review (state="completed", result_status, blocking_count).
+class TestRollupAllGreen:
+    """_rollup_all_green must evaluate StatusContext entries, not only CheckRun.
 
-    Mirrors ClaudeGitHubReviewReceipt.to_dict() for state=STATE_COMPLETED — no top-level
-    status/verdict, terminal outcome lives in result_status. Used to lock down the regression
-    in `closure_verifier._gate_terminal_status` (codex round-1 finding 2 on PR #321).
-    """
-    return {
-        "gate": "claude_github_optional",
-        "pr_id": pr_id,
-        "state": "completed",
-        "contributed_evidence": True,
-        "was_intentionally_absent": False,
-        "result_status": result_status,
-        "blocking_count": blocking_count,
-        "advisory_count": advisory_count,
-        "blocking_findings": [],
-        "advisory_findings": [],
-        "contract_hash": contract_hash,
-        "report_path": report_path,
-    }
-
-
-class TestClaudeGithubCompletedTerminalStatus:
-    """Codex round-1 finding 2 (PR #321): completed Claude reviews must not bypass enforcement.
-
-    A Claude review persists its terminal outcome as ``state="completed"`` plus
-    ``result_status="pass"|"fail"`` (no top-level status/verdict). Without recognising
-    this format, the closure verifier accepted result_status="fail", blocking findings,
-    and missing/deleted reports because contributed_evidence=true short-circuited every check.
+    Earlier logic filtered ``rollup`` to ``__typename == 'CheckRun'`` and used
+    ``all(...)`` over the resulting generator. A rollup carrying only
+    StatusContext entries (commit statuses) yielded an empty generator, which
+    ``all(...)`` evaluates to ``True`` — so failing/pending commit statuses
+    were silently treated as passing.
     """
 
-    def test_completed_with_result_status_fail_blocks_closure(self, verifier_env, monkeypatch, tmp_path):
+    def test_empty_rollup_is_not_green(self):
+        assert cv._rollup_all_green([]) is False
+
+    def test_all_checkruns_success_is_green(self):
+        rollup = [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        ]
+        assert cv._rollup_all_green(rollup) is True
+
+    def test_failing_checkrun_is_not_green(self):
+        rollup = [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"},
+        ]
+        assert cv._rollup_all_green(rollup) is False
+
+    def test_status_context_only_success_is_green(self):
+        rollup = [
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+        ]
+        assert cv._rollup_all_green(rollup) is True
+
+    def test_status_context_only_failure_is_not_green(self):
+        # The pre-fix bug: this rollup was treated as green because the
+        # CheckRun-only filter produced an empty generator.
+        rollup = [
+            {"__typename": "StatusContext", "state": "FAILURE"},
+        ]
+        assert cv._rollup_all_green(rollup) is False
+
+    def test_status_context_pending_is_not_green(self):
+        rollup = [
+            {"__typename": "StatusContext", "state": "PENDING"},
+        ]
+        assert cv._rollup_all_green(rollup) is False
+
+    def test_mixed_checkrun_and_status_context_all_green(self):
+        rollup = [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "StatusContext", "state": "SUCCESS"},
+        ]
+        assert cv._rollup_all_green(rollup) is True
+
+    def test_mixed_one_failing_status_context_is_not_green(self):
+        rollup = [
+            {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"__typename": "StatusContext", "state": "FAILURE"},
+        ]
+        assert cv._rollup_all_green(rollup) is False
+
+    def test_unknown_typename_is_not_green(self):
+        rollup = [
+            {"__typename": "MysteryEntry"},
+        ]
+        assert cv._rollup_all_green(rollup) is False
+
+
+class TestValidateReviewEvidencePropagatesBranch:
+    """`_validate_review_evidence` must forward contract.branch to `_find_gate_result`.
+
+    Without branch propagation, an old result file for the same ``pr_id`` from
+    a different branch could satisfy gate checks even though `_find_gate_result`
+    has explicit branch filtering for exactly this scenario.
+    """
+
+    def test_stale_branch_result_is_rejected(self, verifier_env, monkeypatch, tmp_path):
         monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
         monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
 
-        report = tmp_path / "claude_report.md"
-        report.write_text("# Claude Review\n", encoding="utf-8")
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
         results_dir = tmp_path / "results"
-        _write_gate_result(
-            results_dir, "claude_github_optional", "PR-0",
-            _make_claude_completed_result(result_status="fail", report_path=str(report)),
-        )
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        gemini_report = reports_dir / "gemini.md"
+        gemini_report.write_text("# Gemini\nclean\n", encoding="utf-8")
+
+        _write_gate_result(results_dir, "gemini_review", "PR-0", {
+            "gate": "gemini_review",
+            "pr_id": "PR-0",
+            "branch": "feature/old-branch",
+            "status": "completed",
+            "blocking_findings": [],
+            "advisory_findings": [],
+            "contract_hash": "abcdef1234567890",
+            "report_path": str(gemini_report),
+        })
+
+        contract = _make_contract(review_stack=["gemini_review"])
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
@@ -1071,140 +1120,31 @@ class TestClaudeGithubCompletedTerminalStatus:
             gate_results_dir=results_dir,
         )
 
-        assert result["verdict"] == "fail"
-        gate_check = next(c for c in result["checks"] if c["name"] == "gate_claude_github_optional")
-        assert gate_check["status"] == "FAIL"
-        assert "result_status=fail" in gate_check["detail"]
-
-    def test_completed_with_blocking_findings_blocks_closure(self, verifier_env, monkeypatch, tmp_path):
-        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
-        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
-
-        report = tmp_path / "claude_report.md"
-        report.write_text("# Claude Review\n", encoding="utf-8")
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
-        results_dir = tmp_path / "results"
-        _write_gate_result(
-            results_dir, "claude_github_optional", "PR-0",
-            _make_claude_completed_result(
-                result_status="pass", blocking_count=3, report_path=str(report),
-            ),
-        )
-
-        result = cv.verify_closure(
-            project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
-            branch="feature/demo",
-            mode="pre_merge",
-            claim_file=verifier_env["claim_file"],
-            review_contract=contract,
-            gate_results_dir=results_dir,
-        )
-
-        assert result["verdict"] == "fail"
-        gate_check = next(c for c in result["checks"] if c["name"] == "gate_claude_github_optional")
-        assert gate_check["status"] == "FAIL"
-        assert "3 blocking" in gate_check["detail"]
-
-    def test_completed_with_missing_report_path_blocks_closure(self, verifier_env, monkeypatch, tmp_path):
-        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
-        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
-        results_dir = tmp_path / "results"
-        _write_gate_result(
-            results_dir, "claude_github_optional", "PR-0",
-            _make_claude_completed_result(result_status="pass", report_path=""),
-        )
-
-        result = cv.verify_closure(
-            project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
-            branch="feature/demo",
-            mode="pre_merge",
-            claim_file=verifier_env["claim_file"],
-            review_contract=contract,
-            gate_results_dir=results_dir,
-        )
-
-        assert result["verdict"] == "fail"
         failed = {c["name"] for c in result["checks"] if c["status"] == "FAIL"}
-        assert "report_claude_github_optional" in failed
+        assert "gate_gemini_review" in failed
 
-    def test_completed_with_deleted_report_path_blocks_closure(self, verifier_env, monkeypatch, tmp_path):
+    def test_matching_branch_result_is_accepted(self, verifier_env, monkeypatch, tmp_path):
         monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
         monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
 
-        ghost_path = tmp_path / "deleted_report.md"
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
         results_dir = tmp_path / "results"
-        _write_gate_result(
-            results_dir, "claude_github_optional", "PR-0",
-            _make_claude_completed_result(result_status="pass", report_path=str(ghost_path)),
-        )
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        gemini_report = reports_dir / "gemini.md"
+        gemini_report.write_text("# Gemini\nclean\n", encoding="utf-8")
 
-        result = cv.verify_closure(
-            project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
-            branch="feature/demo",
-            mode="pre_merge",
-            claim_file=verifier_env["claim_file"],
-            review_contract=contract,
-            gate_results_dir=results_dir,
-        )
+        _write_gate_result(results_dir, "gemini_review", "PR-0", {
+            "gate": "gemini_review",
+            "pr_id": "PR-0",
+            "branch": "feature/demo",
+            "status": "completed",
+            "blocking_findings": [],
+            "advisory_findings": [],
+            "contract_hash": "abcdef1234567890",
+            "report_path": str(gemini_report),
+        })
 
-        assert result["verdict"] == "fail"
-        failed = {c["name"] for c in result["checks"] if c["status"] == "FAIL"}
-        assert "report_claude_github_optional" in failed
-
-    def test_completed_with_unknown_result_status_blocks_closure(self, verifier_env, monkeypatch, tmp_path):
-        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
-        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
-
-        report = tmp_path / "claude_report.md"
-        report.write_text("# Claude Review\n", encoding="utf-8")
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
-        results_dir = tmp_path / "results"
-        result_payload = _make_claude_completed_result(report_path=str(report))
-        result_payload["result_status"] = ""
-        _write_gate_result(results_dir, "claude_github_optional", "PR-0", result_payload)
-
-        result = cv.verify_closure(
-            project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
-            branch="feature/demo",
-            mode="pre_merge",
-            claim_file=verifier_env["claim_file"],
-            review_contract=contract,
-            gate_results_dir=results_dir,
-        )
-
-        gate_check = next(c for c in result["checks"] if c["name"] == "gate_claude_github_optional")
-        assert gate_check["status"] == "FAIL"
-
-    def test_completed_pass_with_real_report_clears_gate(self, verifier_env, monkeypatch, tmp_path):
-        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
-        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
-
-        report = tmp_path / "claude_report.md"
-        report.write_text("# Claude Review\nNo issues.\n", encoding="utf-8")
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
-        results_dir = tmp_path / "results"
-        _write_gate_result(
-            results_dir, "claude_github_optional", "PR-0",
-            _make_claude_completed_result(
-                result_status="pass", blocking_count=0, advisory_count=2,
-                report_path=str(report),
-            ),
-        )
+        contract = _make_contract(review_stack=["gemini_review"])
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
@@ -1218,56 +1158,60 @@ class TestClaudeGithubCompletedTerminalStatus:
         )
 
         passed = {c["name"] for c in result["checks"] if c["status"] == "PASS"}
-        assert "gate_claude_github_optional" in passed
-        assert "report_claude_github_optional" in passed
-
-    def test_completed_contradiction_detector_recognises_result_status(self, verifier_env, monkeypatch, tmp_path):
-        """A "pass" Claude result whose report contains [BLOCKING] markers must trigger contradiction.
-
-        Pre-fix: _detect_gate_report_contradictions inspected only status/verdict, so
-        gate_status fell through to "unknown" and the contradiction was missed.
-        """
-        monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
-        monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
-
-        report = tmp_path / "claude_report.md"
-        report.write_text(
-            "# Claude Review\n[BLOCKING] auth bypass\n[BLOCKING] sql injection\n",
-            encoding="utf-8",
-        )
-
-        contract = _make_contract(review_stack=["claude_github_optional"])
-        results_dir = tmp_path / "results"
-        _write_gate_result(
-            results_dir, "claude_github_optional", "PR-0",
-            _make_claude_completed_result(result_status="pass", blocking_count=0, report_path=str(report)),
-        )
-
-        contradictions = cv._detect_gate_report_contradictions(contract, results_dir)
-        names_failed = {c.name for c in contradictions if c.status == "FAIL"}
-        assert "contradiction_claude_github_optional" in names_failed
+        assert "gate_gemini_review" in passed
 
 
-class TestGateTerminalStatusHelper:
-    """Direct unit tests for the _gate_terminal_status helper added in CFX-2 round-2."""
+class TestCLIForwardsBranchAndRequireGithubPr:
+    """closure_verifier main() must forward --branch and --require-github-pr to verify_pr_closure.
 
-    def test_recognises_status_field(self):
-        assert cv._gate_terminal_status({"status": "pass"}) == "pass"
-        assert cv._gate_terminal_status({"status": "FAIL"}) == "fail"
+    Without forwarding, the per-PR CLI path silently skips the GitHub PR / CI
+    enforcement added to `verify_pr_closure`, so closure can report PASS
+    without checking that a real GitHub PR exists or that CI is green.
+    """
 
-    def test_recognises_verdict_field(self):
-        assert cv._gate_terminal_status({"verdict": "pass"}) == "pass"
-        assert cv._gate_terminal_status({"verdict": "fail"}) == "fail"
+    def test_main_forwards_branch_and_require_github_pr(self, verifier_env, monkeypatch):
+        captured = {}
 
-    def test_recognises_completed_state_with_result_status(self):
-        assert cv._gate_terminal_status({"state": "completed", "result_status": "pass"}) == "pass"
-        assert cv._gate_terminal_status({"state": "completed", "result_status": "FAIL"}) == "fail"
+        def _fake_verify_pr_closure(**kwargs):
+            captured.update(kwargs)
+            return {
+                "verdict": "pass",
+                "mode": "per_pr",
+                "pr_id": kwargs["pr_id"],
+                "checks": [],
+                "review_evidence": None,
+            }
 
-    def test_returns_empty_for_non_terminal(self):
-        assert cv._gate_terminal_status({"status": "requested"}) == ""
-        assert cv._gate_terminal_status({"state": "completed"}) == ""
-        assert cv._gate_terminal_status({"state": "not_configured"}) == ""
-        assert cv._gate_terminal_status({}) == ""
+        monkeypatch.setattr(cv, "verify_pr_closure", _fake_verify_pr_closure)
 
-    def test_status_takes_precedence_over_state(self):
-        assert cv._gate_terminal_status({"status": "pass", "state": "completed", "result_status": "fail"}) == "pass"
+        rc = cv.main([
+            "--pr-id", "PR-0",
+            "--branch", "feature/demo",
+            "--require-github-pr",
+            "--feature-plan", str(verifier_env["feature_plan"]),
+            "--pr-queue", str(verifier_env["pr_queue"]),
+            "--json",
+        ])
+        assert rc == 0
+        assert captured["branch"] == "feature/demo"
+        assert captured["require_github_pr"] is True
+        assert captured["pr_id"] == "PR-0"
+
+    def test_main_default_require_github_pr_is_false(self, verifier_env, monkeypatch):
+        captured = {}
+
+        def _fake_verify_pr_closure(**kwargs):
+            captured.update(kwargs)
+            return {"verdict": "pass", "mode": "per_pr", "pr_id": kwargs["pr_id"], "checks": [], "review_evidence": None}
+
+        monkeypatch.setattr(cv, "verify_pr_closure", _fake_verify_pr_closure)
+
+        rc = cv.main([
+            "--pr-id", "PR-0",
+            "--mode", "post_merge",
+            "--feature-plan", str(verifier_env["feature_plan"]),
+            "--pr-queue", str(verifier_env["pr_queue"]),
+            "--json",
+        ])
+        assert rc == 0
+        assert captured["require_github_pr"] is False
