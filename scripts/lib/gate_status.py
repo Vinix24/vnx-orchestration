@@ -2,7 +2,8 @@
 
 Single source of truth for "is this gate result a pass?" across closure
 verification, postmerge audit summaries, and any other consumer of files
-under ``.vnx-data/state/review_gates/results/``.
+under ``${VNX_STATE_DIR}/review_gates/results/`` (resolved via
+``scripts/lib/vnx_paths``).
 
 Schema drift fixed here:
 - writers populate ``status`` with values from one canonical set
