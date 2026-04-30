@@ -256,6 +256,22 @@ def _stable_item_id(prefix: str, source_key: str) -> str:
     return f"intel_{prefix}_{safe_key}"
 
 
+# Length of the content_hash prefix stored in success_patterns.content_hash
+# (CFX-5 / migration 0012). Matches scripts/lib/pattern_dedup.CONTENT_HASH_PREFIX_LEN.
+SUCCESS_PATTERN_CONTENT_HASH_LEN = 16
+
+
+def _short_content_hash(*parts: str) -> str:
+    """16-char prefix of the normalized SHA-256, matching the on-row column.
+
+    Used to derive a *content-addressable* canonical id for success_patterns
+    rows that lack a stored ``content_hash`` (e.g. legacy rows on databases
+    where migration 0012 has been applied but ``backfill_content_hash`` has
+    not yet run).
+    """
+    return _content_hash(*parts)[:SUCCESS_PATTERN_CONTENT_HASH_LEN]
+
+
 def _item_hash(item_id: str) -> str:
     """SHA1 of item_id, matching learning_loop.hash_pattern() convention."""
     import hashlib
@@ -872,12 +888,15 @@ class IntelligenceSelector:
 
         items: List[IntelligenceItem] = []
         has_pattern_cat = self._has_column("success_patterns", "pattern_category")
+        has_content_hash_col = self._has_column("success_patterns", "content_hash")
         select_cols = (
             "id, title, description, category, confidence_score, "
             "usage_count, source_dispatch_ids, first_seen, last_used"
         )
         if has_pattern_cat:
             select_cols += ", pattern_category"
+        if has_content_hash_col:
+            select_cols += ", content_hash"
         try:
             rows = db.execute(
                 f"""
@@ -890,6 +909,8 @@ class IntelligenceSelector:
             ).fetchall()
         except Exception:
             return items
+
+        canonical_id_cache: Dict[str, str] = {}
 
         for row in rows:
             row_d = dict(row)
@@ -913,8 +934,24 @@ class IntelligenceSelector:
             stored_cat = row_d.get("pattern_category")
             pattern_category = stored_cat or classify_pattern_category(title, content)
 
+            # Resolve the canonical row id for this pattern's content. CFX-5:
+            # when the same content lives under multiple rows (legacy
+            # duplication or pre-dedup state), every row emits the *same*
+            # item_id so pattern_usage aggregates instead of fragmenting.
+            stored_short_hash = (
+                row_d.get("content_hash") if has_content_hash_col else None
+            )
+            short_hash = stored_short_hash or _short_content_hash(title, content)
+            canonical_key = self._resolve_canonical_id(
+                db,
+                short_hash,
+                fallback_id=row_d.get("id"),
+                cache=canonical_id_cache,
+                has_content_hash_col=has_content_hash_col,
+            )
+
             items.append(IntelligenceItem(
-                item_id=_stable_item_id("sp", str(row_d.get("id", ""))),
+                item_id=_stable_item_id("sp", canonical_key),
                 item_class="proven_pattern",
                 title=title,
                 content=content,
@@ -929,6 +966,46 @@ class IntelligenceSelector:
             ))
 
         return items
+
+    def _resolve_canonical_id(
+        self,
+        db: sqlite3.Connection,
+        short_hash: str,
+        *,
+        fallback_id: Any,
+        cache: Dict[str, str],
+        has_content_hash_col: bool,
+    ) -> str:
+        """Return the canonical (smallest-id) row key for a given content hash.
+
+        Consult the on-row ``content_hash`` index when available so that
+        ``intel_sp_<id>`` collapses across duplicate rows. When the column is
+        absent (pre-migration 0012) or no row matches the hash yet, fall back
+        to the row's own primary key — preserving the legacy ``intel_sp_<id>``
+        format and the backward-compatibility guarantee in the dispatch.
+        """
+        fallback_key = str(fallback_id) if fallback_id is not None else ""
+        if not short_hash or not has_content_hash_col:
+            return fallback_key
+        if short_hash in cache:
+            return cache[short_hash]
+        try:
+            row = db.execute(
+                "SELECT MIN(id) FROM success_patterns WHERE content_hash = ?",
+                (short_hash,),
+            ).fetchone()
+        except sqlite3.Error:
+            cache[short_hash] = fallback_key
+            return fallback_key
+        canonical_id = None
+        if row is not None:
+            canonical_id = row[0] if not isinstance(row, sqlite3.Row) else row[0]
+        if canonical_id is None:
+            cache[short_hash] = fallback_key
+            return fallback_key
+        canonical_key = str(canonical_id)
+        cache[short_hash] = canonical_key
+        return canonical_key
 
     def _query_failure_prevention(
         self,
