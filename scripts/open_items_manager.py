@@ -256,10 +256,37 @@ def close_item(args):
         pr_id=item.get("pr_id")
     )
 
+    _log_oi_close_decision(
+        oi_id=args.item_id,
+        status=args.status,
+        reason=args.reason,
+        dispatch_id=item.get("origin_dispatch_id"),
+    )
+
     print(f"✅ Closed {args.item_id} as {args.status}")
     print(f"   Reason: {args.reason}")
 
     generate_digest()
+
+
+def _log_oi_close_decision(*, oi_id: str, status: str, reason: str,
+                           dispatch_id: Optional[str]) -> None:
+    """Best-effort decision-log fan-out for OI closures.
+
+    Failure here must never block close_item — the audit log is the
+    primary source of truth, the decision log is a governance overlay.
+    """
+    try:
+        from t0_decision_log import log_decision
+    except Exception:
+        return
+    log_decision(
+        decision_type="oi_closed",
+        oi_id=oi_id,
+        status=status,
+        reasoning=reason or "",
+        dispatch_id=dispatch_id,
+    )
 
 def list_items(args):
     """List open items with optional filtering"""

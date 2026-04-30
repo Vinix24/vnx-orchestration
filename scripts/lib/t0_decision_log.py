@@ -206,6 +206,98 @@ def write_decision(record: dict[str, Any], log_file: Path | None = None) -> None
 
 
 # ---------------------------------------------------------------------------
+# Activation helper: kwargs-based logger for governance call sites
+# ---------------------------------------------------------------------------
+
+# decision_type → action mapping for the canonical schema's `action` field.
+# Activation call sites use richer decision_type names; we keep the existing
+# action vocabulary stable and store the original type in `decision_type`.
+_DECISION_TYPE_TO_ACTION: dict[str, str] = {
+    "dispatch_created": "dispatch",
+    "gate_verdict": "advance_gate",
+    "pr_merge": "approve",
+    "oi_closed": "close_oi",
+}
+
+# Activation call sites whose outcomes are settled at write time (no
+# downstream signal to reconcile). Anything else is left pending.
+_TERMINAL_DECISION_TYPES: frozenset = frozenset({"oi_closed", "pr_merge"})
+
+
+def log_decision(
+    *,
+    decision_type: str,
+    dispatch_id: str | None = None,
+    terminal: str | None = None,
+    role: str | None = None,
+    risk_score: float | None = None,
+    reasoning: str = "",
+    expected_outcome: str | None = None,
+    gate: str | None = None,
+    verdict: str | None = None,
+    blocking_count: int | None = None,
+    pr_number: int | None = None,
+    dispatches_in_pr: list | None = None,
+    oi_id: str | None = None,
+    status: str | None = None,
+    log_file: Path | None = None,
+    timestamp: str | None = None,
+) -> bool:
+    """Best-effort kwargs-based decision logger for governance call sites.
+
+    Builds a record conforming to the canonical schema (timestamp,
+    session_summary_at, action, dispatch_id, track, reasoning,
+    open_items_actions, next_expected) and adds activation-specific
+    metadata (decision_type, terminal, role, risk_score, gate, verdict,
+    blocking_count, pr_number, dispatches_in_pr, oi_id, status,
+    expected_outcome, outcome_pending) so reconciliation can resolve
+    outcomes later.
+
+    Returns True on success, False on any failure. Never raises — call
+    sites are passive sinks that must not break governance flow.
+    """
+    try:
+        action = _DECISION_TYPE_TO_ACTION.get(decision_type, decision_type)
+        track = _TERMINAL_TO_TRACK.get((terminal or "").upper())
+        record = build_record(
+            action=action,
+            reasoning=reasoning,
+            dispatch_id=dispatch_id,
+            track=track,
+            timestamp=timestamp,
+        )
+        record["decision_type"] = decision_type
+        if terminal is not None:
+            record["terminal"] = terminal
+        if role is not None:
+            record["role"] = role
+        if risk_score is not None:
+            record["risk_score"] = risk_score
+        if expected_outcome is not None:
+            record["expected_outcome"] = expected_outcome
+        if gate is not None:
+            record["gate"] = gate
+        if verdict is not None:
+            record["verdict"] = verdict
+        if blocking_count is not None:
+            record["blocking_count"] = blocking_count
+        if pr_number is not None:
+            record["pr_number"] = pr_number
+        if dispatches_in_pr is not None:
+            record["dispatches_in_pr"] = list(dispatches_in_pr)
+        if oi_id is not None:
+            record["oi_id"] = oi_id
+        if status is not None:
+            record["status"] = status
+        record["outcome_pending"] = decision_type not in _TERMINAL_DECISION_TYPES
+
+        write_decision(record, log_file)
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Cursor tracking
 # ---------------------------------------------------------------------------
 

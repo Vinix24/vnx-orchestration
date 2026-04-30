@@ -125,9 +125,65 @@ def append_event(
         with path.open("a", encoding="utf-8") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        _mirror_to_decision_log(event, record, extra=extra)
         return True
     except Exception:
         return False
+
+
+def _mirror_to_decision_log(event: str, record: dict, *, extra: Optional[dict] = None) -> None:
+    """Best-effort fan-out to the T0 decision log for governance-relevant events.
+
+    Captures dispatch_created, gate_passed, gate_failed, pr_merged so T0
+    has structured introspection on its own decisions. Never raises — a
+    decision-log write failure must not break dispatch_register.
+    """
+    try:
+        from t0_decision_log import log_decision
+    except Exception:
+        return
+
+    dispatch_id = record.get("dispatch_id")
+    pr_number = record.get("pr_number")
+    terminal = record.get("terminal")
+    gate = record.get("gate") or None
+    extra_dict = extra if isinstance(extra, dict) else {}
+
+    if event == "dispatch_created":
+        log_decision(
+            decision_type="dispatch_created",
+            dispatch_id=dispatch_id,
+            terminal=terminal,
+            role=extra_dict.get("role"),
+            risk_score=extra_dict.get("risk_score"),
+            reasoning=extra_dict.get("reasoning", ""),
+            expected_outcome=extra_dict.get("expected_outcome"),
+            timestamp=record.get("timestamp"),
+        )
+    elif event in ("gate_passed", "gate_failed"):
+        verdict = "passed" if event == "gate_passed" else "failed"
+        log_decision(
+            decision_type="gate_verdict",
+            dispatch_id=dispatch_id,
+            pr_number=pr_number,
+            gate=gate,
+            verdict=verdict,
+            blocking_count=extra_dict.get("blocking_count"),
+            reasoning=extra_dict.get("reasoning", ""),
+            timestamp=record.get("timestamp"),
+        )
+    elif event == "pr_merged":
+        log_decision(
+            decision_type="pr_merge",
+            pr_number=pr_number,
+            dispatches_in_pr=extra_dict.get("dispatches_in_pr"),
+            reasoning=extra_dict.get("reasoning", ""),
+            timestamp=record.get("timestamp"),
+        )
+    # Other lifecycle events (dispatch_promoted, dispatch_started,
+    # dispatch_completed, etc.) are recorded in the register but are
+    # outcome signals rather than T0 decisions; reconciliation reads
+    # them to resolve pending decisions.
 
 
 def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
