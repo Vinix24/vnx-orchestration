@@ -291,3 +291,26 @@ jobs:
           export VNX_HOME="$SNAPSHOT_REPO/.claude/vnx-system"
           export VNX_DATA_DIR="$SNAPSHOT_REPO/.claude/vnx-system"
           python3 .claude/vnx-system/tests/test_pr_recommendation_integration.py
+
+  dashboard-lint:
+    name: Dashboard TS Lint (fixture-gate + typecheck)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/token-dashboard/package-lock.json
+
+      - name: Install dashboard deps
+        working-directory: dashboard/token-dashboard
+        run: npm ci
+
+      - name: Run dashboard lint (fixture gate + typecheck)
+        working-directory: dashboard/token-dashboard
+        run: npm run test:lint
