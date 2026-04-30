@@ -570,9 +570,86 @@ class IntelligenceSelector:
                     """,
                     (result.dispatch_id, item.item_id, item.title[:255], now),
                 )
+                self._stamp_source_dispatch_id(db, item, result.dispatch_id)
             db.commit()
         except Exception:
             pass
+
+    def _stamp_source_dispatch_id(
+        self,
+        db: sqlite3.Connection,
+        item: IntelligenceItem,
+        dispatch_id: str,
+    ) -> None:
+        """Append dispatch_id to source_dispatch_ids on the item's source row.
+
+        This restores the injection-time linkage that
+        ``intelligence_persist.update_confidence_from_outcome`` relies on
+        (``WHERE source_dispatch_ids LIKE '%dispatch_id%'``). Without it,
+        failure decay never finds patterns offered to the failing dispatch
+        unless ``pattern_extractor`` clusters them post-hoc.
+
+        Idempotent: a dispatch_id already present in the JSON array is not
+        re-appended. Pre-existing entries are preserved (we extend, never
+        clobber). The list is capped at the most recent 20 entries to match
+        the ``intelligence_persist._append_to_json_list`` convention.
+
+        Currently stamps:
+          - ``proven_pattern`` items   → ``success_patterns.source_dispatch_ids``
+          - ``failure_prevention`` items from antipatterns
+            → ``antipatterns.source_dispatch_ids`` (when item_id has ``intel_ap_`` prefix)
+        """
+        if not dispatch_id:
+            return
+
+        item_id = item.item_id or ""
+        if item.item_class == "proven_pattern" and item_id.startswith("intel_sp_"):
+            table = "success_patterns"
+            row_key = item_id[len("intel_sp_"):]
+        elif item.item_class == "failure_prevention" and item_id.startswith("intel_ap_"):
+            table = "antipatterns"
+            row_key = item_id[len("intel_ap_"):]
+        else:
+            return
+
+        try:
+            row_id = int(row_key)
+        except (ValueError, TypeError):
+            return
+
+        try:
+            row = db.execute(
+                f"SELECT source_dispatch_ids FROM {table} WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return
+
+        if row is None:
+            return
+
+        existing_json = row["source_dispatch_ids"] if isinstance(row, sqlite3.Row) else row[0]
+        ids: List[str] = []
+        if existing_json:
+            try:
+                parsed = json.loads(existing_json)
+                if isinstance(parsed, list):
+                    ids = [str(x) for x in parsed]
+            except (json.JSONDecodeError, TypeError):
+                ids = []
+
+        if dispatch_id in ids:
+            return
+
+        ids.append(dispatch_id)
+        ids = ids[-20:]
+        try:
+            db.execute(
+                f"UPDATE {table} SET source_dispatch_ids = ? WHERE id = ?",
+                (json.dumps(ids), row_id),
+            )
+        except sqlite3.Error:
+            return
 
     # ------------------------------------------------------------------
     # Candidate query methods
