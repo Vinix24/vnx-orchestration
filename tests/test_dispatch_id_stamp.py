@@ -33,6 +33,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from intelligence_selector import IntelligenceSelector  # noqa: E402
 from intelligence_persist import update_confidence_from_outcome  # noqa: E402
+from confidence_reconcile import beta_score  # noqa: E402
 from runtime_coordination import init_schema  # noqa: E402
 
 
@@ -240,7 +241,12 @@ class DispatchIdStampTests(unittest.TestCase):
         after = _read_confidence(self._quality_db_path, pattern_id)
         self.assertEqual(result["decayed"], 1)
         self.assertLess(after, before)
-        self.assertAlmostEqual(after, before - 0.1, places=6)
+        # Beta(success=0, failure=1) posterior with Laplace smoothing
+        # = (0 + 1) / (0 + 1 + 2) = 1/3. update_confidence_from_outcome
+        # rebuilds confidence_score from pattern_usage counts (#327
+        # reconcile), so the post-decay value is independent of the
+        # seeded confidence and follows the Beta posterior.
+        self.assertAlmostEqual(after, beta_score(0, 1), places=6)
 
     # ------------------------------------------------------------------
     # Case E
