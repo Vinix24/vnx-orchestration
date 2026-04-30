@@ -31,7 +31,14 @@ from gate_result_parser import GateResultParserMixin
 from gate_report_generator import GateReportGeneratorMixin
 
 
-DEFAULT_REVIEW_STACK = ["gemini_review", "codex_gate", "claude_github_optional"]
+def _build_default_review_stack() -> List[str]:
+    stack = ["gemini_review", "codex_gate", "claude_github_optional"]
+    if os.environ.get("VNX_CI_GATE_REQUIRED", "0") == "1":
+        stack.append("ci_gate")
+    return stack
+
+
+DEFAULT_REVIEW_STACK = _build_default_review_stack()
 
 
 def _utc_now() -> str:
