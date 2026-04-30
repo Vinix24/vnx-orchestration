@@ -31,6 +31,11 @@ from runtime_coordination import (  # noqa: E402
     get_connection,
     init_schema,
 )
+from project_id_migration import (  # noqa: E402
+    RUNTIME_SCHEMA_VERSION,
+    run_quality_intelligence_migration,
+    run_runtime_coordination_migration,
+)
 
 
 class Colors:
@@ -202,6 +207,31 @@ def main() -> int:
         return 1
     except Exception as exc:
         log("ERROR", f"Schema init failed: {exc}")
+        return 1
+
+    # Apply migration 0010: project_id columns (Phase 0 single-VNX).
+    # Idempotent — safe to rerun after init_schema on every invocation.
+    log("INFO", f"Applying migration 0010 (project_id, v{RUNTIME_SCHEMA_VERSION})...")
+    try:
+        runtime_result = run_runtime_coordination_migration(db)
+        for table, status in runtime_result.get("results", {}).items():
+            if status == "added":
+                log("SUCCESS", f"  runtime_coordination.{table}: project_id added")
+            elif status == "skipped_missing":
+                log("WARNING", f"  runtime_coordination.{table}: not present, skipped")
+
+        qi_db = Path(state_dir) / "quality_intelligence.db"
+        qi_result = run_quality_intelligence_migration(qi_db)
+        if qi_result.get("status") == "skipped_no_db":
+            log("INFO", f"  quality_intelligence.db not found at {qi_db}; skipping")
+        else:
+            for table, status in qi_result.get("results", {}).items():
+                if status == "added":
+                    log("SUCCESS", f"  quality_intelligence.{table}: project_id added")
+                elif status == "skipped_missing":
+                    log("WARNING", f"  quality_intelligence.{table}: not present, skipped")
+    except Exception as exc:
+        log("ERROR", f"Migration 0010 failed: {exc}")
         return 1
 
     # Verify
