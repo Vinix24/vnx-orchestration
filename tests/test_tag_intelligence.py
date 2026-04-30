@@ -721,6 +721,125 @@ class TestDatabaseIntegrity(unittest.TestCase):
         db.close()
 
 
+class TestTagCombinationFormat(unittest.TestCase):
+    """CFX-6: tag_combination column is stored and read as JSON array."""
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        self.temp_db.close()
+        self.engine = TagIntelligenceEngine(Path(self.temp_db.name))
+
+    def tearDown(self):
+        self.engine.close()
+        Path(self.temp_db.name).unlink()
+
+    def test_writer_emits_json_array(self):
+        """prevention_rules.tag_combination is stored as JSON array, not comma-list."""
+        tags = ['validation-error', 'api-component']
+        self.engine.analyze_multi_tag_patterns(tags)
+        self.engine.analyze_multi_tag_patterns(tags)
+
+        db = sqlite3.connect(self.temp_db.name)
+        db.row_factory = sqlite3.Row
+        rows = db.execute("SELECT tag_combination FROM prevention_rules").fetchall()
+        db.close()
+
+        self.assertGreater(len(rows), 0)
+        for row in rows:
+            raw = row['tag_combination']
+            parsed = json.loads(raw)
+            self.assertIsInstance(parsed, list, f"tag_combination should be JSON array, got: {raw!r}")
+
+    def test_roundtrip_identical(self):
+        """Write tags, read back via query_prevention_rules — tag_combination is identical."""
+        tags = ['crawler-component', 'performance-issue']
+        self.engine.analyze_multi_tag_patterns(tags)
+        self.engine.analyze_multi_tag_patterns(tags)
+
+        rules = self.engine.query_prevention_rules(tags=tags, min_confidence=0.0)
+        self.assertTrue(len(rules) > 0)
+        for rule in rules:
+            tc = rule['tag_combination']
+            self.assertIsInstance(tc, (list, tuple))
+            for t in tc:
+                self.assertIsInstance(t, str)
+
+    def _migration_db(self) -> sqlite3.Connection:
+        """Fresh in-memory DB with minimal prevention_rules schema for migration tests."""
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute(
+            "CREATE TABLE prevention_rules "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, tag_combination TEXT)"
+        )
+        db.commit()
+        return db
+
+    def _run_migration(self, db: sqlite3.Connection) -> None:
+        migration_path = (
+            Path(__file__).parent.parent
+            / "schemas" / "migrations" / "0013_normalize_tag_combination.sql"
+        )
+        db.executescript(migration_path.read_text())
+        db.commit()
+
+    def test_migration_idempotent_json_row_unchanged(self):
+        """Rows already in JSON array format are not re-migrated."""
+        db = self._migration_db()
+        db.execute(
+            'INSERT INTO prevention_rules (tag_combination) VALUES (?)',
+            ('["architect","Track-C"]',)
+        )
+        db.commit()
+
+        self._run_migration(db)
+
+        row = db.execute("SELECT tag_combination FROM prevention_rules").fetchone()
+        db.close()
+        self.assertEqual(row['tag_combination'], '["architect","Track-C"]')
+
+    def test_migration_converts_comma_list(self):
+        """Comma-list rows are converted to JSON array by migration."""
+        db = self._migration_db()
+        test_cases = [
+            ("architect,Track-C", ["architect", "Track-C"]),
+            ("any", ["any"]),
+            ("backend-developer, testing-phase", ["backend-developer", "testing-phase"]),
+        ]
+        for raw, _ in test_cases:
+            db.execute('INSERT INTO prevention_rules (tag_combination) VALUES (?)', (raw,))
+        db.commit()
+
+        self._run_migration(db)
+
+        rows = db.execute(
+            "SELECT tag_combination FROM prevention_rules ORDER BY id"
+        ).fetchall()
+        db.close()
+
+        for row, (_, expected) in zip(rows, test_cases):
+            parsed = json.loads(row['tag_combination'])
+            self.assertEqual(sorted(parsed), sorted(expected),
+                             f"After migration: {row['tag_combination']!r}")
+
+    def test_migration_leaves_null_and_empty_unchanged(self):
+        """NULL and empty tag_combination rows are not touched by migration."""
+        db = self._migration_db()
+        db.execute("INSERT INTO prevention_rules (tag_combination) VALUES (NULL)")
+        db.execute("INSERT INTO prevention_rules (tag_combination) VALUES ('')")
+        db.commit()
+
+        self._run_migration(db)
+
+        rows = db.execute(
+            "SELECT tag_combination FROM prevention_rules ORDER BY id"
+        ).fetchall()
+        db.close()
+
+        self.assertIsNone(rows[0]['tag_combination'])
+        self.assertEqual(rows[1]['tag_combination'], '')
+
+
 def run_tests():
     """Run all tests and report results"""
     loader = unittest.TestLoader()
@@ -734,6 +853,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestRecommendationManager))
     suite.addTests(loader.loadTestsFromTestCase(TestStatistics))
     suite.addTests(loader.loadTestsFromTestCase(TestDatabaseIntegrity))
+    suite.addTests(loader.loadTestsFromTestCase(TestTagCombinationFormat))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

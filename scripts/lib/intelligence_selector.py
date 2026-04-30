@@ -1017,8 +1017,15 @@ class IntelligenceSelector:
 
         for row in rule_rows:
             row_d = dict(row)
-            tag_combo = row_d.get("tag_combination", "")
-            rule_scope = tag_combo.split(",") if tag_combo else []
+            tag_combo = row_d.get("tag_combination", "") or ""
+            if not tag_combo:
+                rule_scope = []
+            else:
+                try:
+                    parsed = json.loads(tag_combo)
+                    rule_scope = parsed if isinstance(parsed, list) else ([str(parsed)] if parsed else [])
+                except (json.JSONDecodeError, TypeError):
+                    rule_scope = [t.strip() for t in tag_combo.split(",") if t.strip()]
 
             if not _scope_matches(rule_scope, scope_tags):
                 continue

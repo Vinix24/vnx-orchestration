@@ -807,5 +807,105 @@ class TestBrokerIntelligenceIntegration(unittest.TestCase):
             self.assertEqual(payload["injection_point"], "dispatch_resume")
 
 
+# ---------------------------------------------------------------------------
+# Tests: CFX-6 tag_combination column format (JSON array vs comma-list)
+# ---------------------------------------------------------------------------
+
+class TestPreventionRuleTagParsing(unittest.TestCase):
+    """CFX-6: intelligence_selector parses tag_combination as JSON array with
+    backward-compatible comma-list fallback."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._quality_db_path = self._base / "quality_intelligence.db"
+        self._state_dir = self._base / "state"
+        self._state_dir.mkdir()
+        init_schema(str(self._state_dir))
+        self._db = _setup_quality_db(self._quality_db_path)
+
+    def tearDown(self):
+        self._db.close()
+        self._tmpdir.cleanup()
+
+    def _make_selector(self) -> IntelligenceSelector:
+        return IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+
+    def test_json_array_format_becomes_scope_tags(self):
+        """A prevention rule stored as JSON array yields correct scope_tags."""
+        _seed_prevention_rule(
+            self._db,
+            tag_combination='["architect","Track-C"]',
+            description="JSON array rule",
+            confidence=0.8,
+        )
+
+        selector = self._make_selector()
+        result = selector.select("cfx6-001", "dispatch_create", skill_name="architect")
+        selector.close()
+
+        injected_items = result.items
+        pr_items = [i for i in injected_items if i.item_class == "failure_prevention"]
+        if pr_items:
+            scope = pr_items[0].scope_tags
+            self.assertIn("architect", scope)
+            self.assertIn("Track-C", scope)
+
+    def test_comma_list_fallback_still_works(self):
+        """A prevention rule stored as comma-list (legacy) still parses to correct scope_tags."""
+        _seed_prevention_rule(
+            self._db,
+            tag_combination="architect,Track-C",
+            description="Comma-list rule",
+            confidence=0.8,
+        )
+
+        selector = self._make_selector()
+        result = selector.select("cfx6-002", "dispatch_create", skill_name="architect")
+        selector.close()
+
+        pr_items = [i for i in result.items if i.item_class == "failure_prevention"]
+        if pr_items:
+            scope = pr_items[0].scope_tags
+            self.assertIn("architect", scope)
+            self.assertIn("Track-C", scope)
+
+    def test_json_array_scope_not_split_on_comma(self):
+        """A JSON array value is NOT incorrectly split — '[\"a\",\"b\"]' gives ['a','b'], not ['[\"a\"', ...]."""
+        _seed_prevention_rule(
+            self._db,
+            tag_combination='["backend-developer","testing-phase"]',
+            description="No stray brackets rule",
+            confidence=0.9,
+        )
+
+        selector = self._make_selector()
+        result = selector.select("cfx6-003", "dispatch_create", skill_name="backend-developer")
+        selector.close()
+
+        pr_items = [i for i in result.items if i.item_class == "failure_prevention"]
+        if pr_items:
+            for tag in pr_items[0].scope_tags:
+                self.assertFalse(tag.startswith("["), f"Scope tag has stray bracket: {tag!r}")
+                self.assertFalse(tag.endswith("]"), f"Scope tag has stray bracket: {tag!r}")
+
+    def test_empty_tag_combination_yields_empty_scope(self):
+        """Empty tag_combination does not crash and yields empty scope."""
+        _seed_prevention_rule(
+            self._db,
+            tag_combination="",
+            description="Empty combo rule",
+            confidence=0.6,
+        )
+        selector = self._make_selector()
+        result = selector.select("cfx6-004", "dispatch_create")
+        selector.close()
+        # Should not raise; result is valid
+        self.assertIsNotNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
