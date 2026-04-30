@@ -43,8 +43,9 @@ class TestWriteReceiptStuckEventCount(unittest.TestCase):
             return _Ctx()
 
         # Force the fallback path by making append_receipt_payload raise ImportError
+        # _write_receipt lives in dispatch_receipt after the OI-1205/OI-1201 split.
         with patch.dict("sys.modules", {"append_receipt": None}):
-            with patch("subprocess_dispatch._default_state_dir") as mock_state_dir:
+            with patch("dispatch_receipt._default_state_dir") as mock_state_dir:
                 tmpdir = Path(tempfile.mkdtemp())
                 mock_state_dir.return_value = tmpdir
                 _write_receipt(

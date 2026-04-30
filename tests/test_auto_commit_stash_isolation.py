@@ -19,6 +19,8 @@ if SCRIPTS_LIB not in sys.path:
     sys.path.insert(0, SCRIPTS_LIB)
 
 import subprocess_dispatch
+import dispatch_git_ops
+import dispatch_git_query
 from subprocess_dispatch import (
     _auto_commit_changes,
     _auto_stash_changes,
@@ -32,7 +34,8 @@ from subprocess_dispatch import (
 
 class TestGetDirtyFiles(unittest.TestCase):
     def _run(self, stdout: str) -> set:
-        with patch("subprocess_dispatch.subprocess") as mock_sp:
+        # _get_dirty_files lives in dispatch_git_query — patch subprocess there.
+        with patch("dispatch_git_query.subprocess") as mock_sp:
             proc = MagicMock()
             proc.stdout = stdout
             mock_sp.run.return_value = proc
@@ -62,7 +65,7 @@ class TestGetDirtyFiles(unittest.TestCase):
         self.assertEqual(result, {"a.py", "b.py", "c.py"})
 
     def test_returns_empty_set_on_subprocess_exception(self):
-        with patch("subprocess_dispatch.subprocess") as mock_sp:
+        with patch("dispatch_git_query.subprocess") as mock_sp:
             mock_sp.run.side_effect = OSError("git not found")
             result = _get_dirty_files(Path("/fake/repo"))
         self.assertEqual(result, set())
@@ -101,8 +104,8 @@ class TestAutoCommitIsolation(unittest.TestCase):
         status_lines = [" M old_file.py", " M new_file.py"]
 
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp), \
-             patch("subprocess_dispatch._get_dirty_files", return_value={"old_file.py", "new_file.py"}):
+        with patch("dispatch_git_ops.subprocess", mock_sp), \
+             patch("dispatch_git_ops._get_dirty_files", return_value={"old_file.py", "new_file.py"}):
             result = _auto_commit_changes(
                 "d-001", "T1",
                 pre_dispatch_dirty=pre,
@@ -124,8 +127,8 @@ class TestAutoCommitIsolation(unittest.TestCase):
         status_lines = [" M already_dirty.py"]
 
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp), \
-             patch("subprocess_dispatch._get_dirty_files", return_value={"already_dirty.py"}):
+        with patch("dispatch_git_ops.subprocess", mock_sp), \
+             patch("dispatch_git_ops._get_dirty_files", return_value={"already_dirty.py"}):
             result = _auto_commit_changes(
                 "d-002", "T1",
                 pre_dispatch_dirty=pre,
@@ -144,7 +147,7 @@ class TestAutoCommitIsolation(unittest.TestCase):
         in a dirty or shared worktree, breaking dispatch isolation."""
         status_lines = [" M some_file.py"]
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp):
+        with patch("dispatch_git_ops.subprocess", mock_sp):
             result = _auto_commit_changes(
                 "d-003", "T1",
                 pre_dispatch_dirty=None,
@@ -158,7 +161,7 @@ class TestAutoCommitIsolation(unittest.TestCase):
     def test_returns_false_on_clean_tree(self):
         """Returns False without calling add/commit when tree is clean."""
         mock_sp = self._mock_subprocess([])
-        with patch("subprocess_dispatch.subprocess", mock_sp):
+        with patch("dispatch_git_ops.subprocess", mock_sp):
             result = _auto_commit_changes(
                 "d-004", "T1",
                 pre_dispatch_dirty=set(),
@@ -173,8 +176,8 @@ class TestAutoCommitIsolation(unittest.TestCase):
         pre = set()
         status_lines = [" M foo.py"]
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp), \
-             patch("subprocess_dispatch._get_dirty_files", return_value={"foo.py"}):
+        with patch("dispatch_git_ops.subprocess", mock_sp), \
+             patch("dispatch_git_ops._get_dirty_files", return_value={"foo.py"}):
             _auto_commit_changes(
                 "dispatch-xyz-123", "T2",
                 pre_dispatch_dirty=pre,
@@ -215,8 +218,8 @@ class TestAutoStashIsolation(unittest.TestCase):
         status_lines = [" M pre_existing.py", "?? new_untracked.py"]
 
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp), \
-             patch("subprocess_dispatch._get_dirty_files",
+        with patch("dispatch_git_ops.subprocess", mock_sp), \
+             patch("dispatch_git_ops._get_dirty_files",
                    return_value={"pre_existing.py", "new_untracked.py"}):
             result = _auto_stash_changes(
                 "d-010", "T1",
@@ -244,8 +247,8 @@ class TestAutoStashIsolation(unittest.TestCase):
         status_lines = [" M already_there.py"]
 
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp), \
-             patch("subprocess_dispatch._get_dirty_files", return_value={"already_there.py"}):
+        with patch("dispatch_git_ops.subprocess", mock_sp), \
+             patch("dispatch_git_ops._get_dirty_files", return_value={"already_there.py"}):
             result = _auto_stash_changes(
                 "d-011", "T1",
                 pre_dispatch_dirty=pre,
@@ -264,7 +267,7 @@ class TestAutoStashIsolation(unittest.TestCase):
         hide unrelated edits from other terminals into this dispatch's stash."""
         status_lines = [" M some.py"]
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp):
+        with patch("dispatch_git_ops.subprocess", mock_sp):
             result = _auto_stash_changes(
                 "d-012", "T1",
                 pre_dispatch_dirty=None,
@@ -278,7 +281,7 @@ class TestAutoStashIsolation(unittest.TestCase):
     def test_returns_false_on_clean_tree(self):
         """Returns False without calling stash when tree is clean."""
         mock_sp = self._mock_subprocess([])
-        with patch("subprocess_dispatch.subprocess", mock_sp):
+        with patch("dispatch_git_ops.subprocess", mock_sp):
             result = _auto_stash_changes(
                 "d-013", "T1",
                 pre_dispatch_dirty=set(),
@@ -293,8 +296,8 @@ class TestAutoStashIsolation(unittest.TestCase):
         pre = set()
         status_lines = [" M bar.py"]
         mock_sp = self._mock_subprocess(status_lines)
-        with patch("subprocess_dispatch.subprocess", mock_sp), \
-             patch("subprocess_dispatch._get_dirty_files", return_value={"bar.py"}):
+        with patch("dispatch_git_ops.subprocess", mock_sp), \
+             patch("dispatch_git_ops._get_dirty_files", return_value={"bar.py"}):
             _auto_stash_changes(
                 "dispatch-abc-789", "T3",
                 pre_dispatch_dirty=pre,

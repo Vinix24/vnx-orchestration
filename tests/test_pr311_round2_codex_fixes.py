@@ -194,7 +194,7 @@ class TestSubprocessInjectionPersists:
         _seed_proven_pattern(db_path, title="Stable pattern A",
                              confidence=0.9, usage_count=4)
 
-        with patch("subprocess_dispatch._default_state_dir", return_value=state_dir):
+        with patch("dispatch_context._default_state_dir", return_value=state_dir):
             section = _build_intelligence_section("d-r2-002", "backend-developer")
 
         # Section may be empty depending on coord-DB availability; what we
@@ -482,12 +482,14 @@ class TestSourceLevelGuards:
     """Cheap source-level checks that protect against regressions."""
 
     def test_subprocess_dispatch_calls_record_injection(self):
-        src = (SCRIPTS_LIB / "subprocess_dispatch.py").read_text(encoding="utf-8")
+        # record_injection and emit_event live in dispatch_context.py after the
+        # subprocess_dispatch.py split (OI-1205).  Check there instead.
+        src = (SCRIPTS_LIB / "dispatch_context.py").read_text(encoding="utf-8")
         assert "record_injection(" in src, (
-            "Finding 1: subprocess_dispatch.py must call record_injection()"
+            "Finding 1: dispatch_context.py must call record_injection()"
         )
         assert "emit_event(" in src, (
-            "Finding 1: subprocess_dispatch.py must call emit_event()"
+            "Finding 1: dispatch_context.py must call emit_event()"
         )
 
     def test_intelligence_selector_uses_stable_item_id(self):

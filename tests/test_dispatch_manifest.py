@@ -27,10 +27,15 @@ import pytest
 
 # ── path setup ────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIB_DIR = REPO_ROOT / "scripts" / "lib"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+LIB_DIR = SCRIPTS_DIR / "lib"
 sys.path.insert(0, str(LIB_DIR))
+sys.path.insert(0, str(SCRIPTS_DIR))
 
+import append_receipt as ar
 import subprocess_dispatch as sd
+import dispatch_manifest as dm
+import dispatch_git_ops
 from subprocess_adapter import SubprocessAdapter, StreamEvent
 
 
@@ -39,6 +44,20 @@ from subprocess_adapter import SubprocessAdapter, StreamEvent
 def _fake_git_hash(val: str):
     """Patch _get_commit_hash to return val."""
     return patch.object(sd, "_get_commit_hash", return_value=val)
+
+
+def _make_fake_append(state_dir: Path):
+    """Return a fake append_receipt_payload that writes to state_dir."""
+    def fake_append(payload):
+        receipt_path = state_dir / "t0_receipts.ndjson"
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(receipt_path, "a") as f:
+            f.write(json.dumps(payload) + "\n")
+        result = MagicMock()
+        result.receipts_file = receipt_path
+        result.status = "ok"
+        return result
+    return fake_append
 
 
 def _fake_branch(val: str = "feat/test-branch"):
@@ -143,7 +162,7 @@ def test_receipt_has_commit_hash_and_session(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
 
-    with patch.object(sd, "_default_state_dir", return_value=state_dir):
+    with patch.object(ar, "append_receipt_payload", side_effect=_make_fake_append(state_dir)):
         sd._write_receipt(
             "20260414-120002-f58-test-A",
             "T1",
@@ -200,7 +219,7 @@ def test_committed_flag_true_when_new_commit(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
 
-    with patch.object(sd, "_default_state_dir", return_value=state_dir):
+    with patch.object(ar, "append_receipt_payload", side_effect=_make_fake_append(state_dir)):
         sd._write_receipt(
             "20260414-120004-f58-test-A",
             "T1",
@@ -219,7 +238,7 @@ def test_committed_flag_false_when_no_new_commit(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
 
-    with patch.object(sd, "_default_state_dir", return_value=state_dir):
+    with patch.object(ar, "append_receipt_payload", side_effect=_make_fake_append(state_dir)):
         sd._write_receipt(
             "20260414-120005-f58-test-A",
             "T1",
@@ -240,13 +259,14 @@ def test_auto_commit_message_contains_dispatch_id(tmp_path):
     dispatch_id = "20260414-120006-f58-test-A"
 
     # Simulate: git status shows dirty, git add succeeds, git commit succeeds
+    # Git porcelain format: XY<space>path — 3-char prefix before the filename.
+    # " M scripts/lib/foo.py" = space(X) + M(Y) + space + path (unstaged modification).
     def fake_run(cmd, **kwargs):
         result = MagicMock()
         result.returncode = 0
         if "status" in cmd:
-            result.stdout = "M scripts/lib/foo.py\n"
+            result.stdout = " M scripts/lib/foo.py\n"
         elif "commit" in cmd:
-            # Capture the commit message
             msg_idx = cmd.index("-m") + 1
             fake_run._captured_msg = cmd[msg_idx]
             result.stdout = "[feat/f58 abc1234] auto-commit\n"
@@ -257,9 +277,12 @@ def test_auto_commit_message_contains_dispatch_id(tmp_path):
 
     fake_run._captured_msg = ""
 
-    with patch("subprocess_dispatch.subprocess.run", side_effect=fake_run):
-        with patch.object(sd, "_resolve_agent_cwd", return_value=None):
-            result = sd._auto_commit_changes(dispatch_id, "T1", gate="f58-pr1")
+    with patch("dispatch_git_ops.subprocess.run", side_effect=fake_run):
+        result = sd._auto_commit_changes(
+            dispatch_id, "T1", gate="f58-pr1",
+            pre_dispatch_dirty=set(),
+            dispatch_touched_files=frozenset({"scripts/lib/foo.py"}),
+        )
 
     assert result is True
     assert f"Dispatch-ID: {dispatch_id}" in fake_run._captured_msg
