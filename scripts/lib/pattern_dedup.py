@@ -359,8 +359,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--db",
         type=Path,
-        default=Path(".vnx-data/state/quality_intelligence.db"),
-        help="Path to quality_intelligence.db (default: %(default)s)",
+        default=None,
+        help="Path to quality_intelligence.db (default: ${VNX_STATE_DIR}/quality_intelligence.db via vnx_paths)",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument(
@@ -383,6 +383,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_arg_parser().parse_args(argv)
+
+    if args.db is None:
+        from project_root import resolve_state_dir
+        args.db = resolve_state_dir() / "quality_intelligence.db"
 
     if not args.db.exists():
         print(f"[pattern_dedup] DB not found: {args.db}", file=sys.stderr)
