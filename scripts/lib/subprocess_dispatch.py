@@ -22,10 +22,21 @@ truncated before the next dispatch begins writing.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# OI-1107: Extract Role: header from instruction text when --role is not passed.
+_ROLE_HEADER_RE = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
+_ROLE_FALLBACK = "backend-developer"
+
+
+def _extract_role_from_instruction(instruction: str) -> str | None:
+    """Return the role from a 'Role: <name>' header in the instruction, or None."""
+    m = _ROLE_HEADER_RE.search(instruction)
+    return m.group(1) if m else None
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -88,6 +99,7 @@ from subprocess_dispatch_internals.state_paths import (
 )
 
 __all__ = [
+    "_extract_role_from_instruction",
     "SubprocessAdapter",
     "HeadlessContextTracker",
     "WorkerHealthMonitor",
@@ -156,6 +168,10 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+
+    # OI-1107: fall back to Role: header in instruction, then to a documented default.
+    if args.role is None:
+        args.role = _extract_role_from_instruction(args.instruction) or _ROLE_FALLBACK
 
     if args.dispatch_paths.strip():
         from dispatch_paths import write_manifest as _write_dispatch_paths_manifest

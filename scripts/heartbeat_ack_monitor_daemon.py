@@ -24,6 +24,7 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 from heartbeat_ack_monitor import HeartbeatACKMonitor
+from project_scope import project_socket_path
 
 paths = ensure_env()
 log_dir = Path(paths["VNX_LOGS_DIR"])
@@ -62,9 +63,11 @@ def main():
     monitor = HeartbeatACKMonitor()
 
     # Start socket server for dispatch notifications.
-    # Socket lives in VNX_DATA_DIR (per-project) to prevent cross-project collisions.
-    data_dir = Path(paths["VNX_DATA_DIR"])
-    socket_path = str(data_dir / "heartbeat_ack_monitor.sock")
+    # OI-1079: Socket lives in VNX_DATA_DIR/sockets/ (via project_socket_path) so
+    # concurrent VNX projects on the same host never share this socket.
+    socket_dir = Path(paths["VNX_DATA_DIR"]) / "sockets"
+    socket_dir.mkdir(parents=True, exist_ok=True)
+    socket_path = str(project_socket_path("heartbeat_ack_monitor.sock"))
     monitor.start_socket_server(socket_path)
 
     logger.info("[DAEMON] Socket server started, ready to receive dispatch notifications")
