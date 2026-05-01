@@ -377,7 +377,7 @@ class SubprocessAdapter:
                 (event_type == "system" and event_subtype == "init")
                 or event_type == "init"
             )
-            if is_init and session_id and terminal_id not in self._session_ids:
+            if is_init and session_id:
                 self._session_ids[terminal_id] = session_id
 
             # Normalize CLI event to dashboard-friendly format
@@ -475,7 +475,7 @@ class SubprocessAdapter:
                 (event_type == "system" and event_subtype == "init")
                 or event_type == "init"
             )
-            if is_init and session_id and terminal_id not in self._session_ids:
+            if is_init and session_id:
                 self._session_ids[terminal_id] = session_id
 
             # Normalize and yield
