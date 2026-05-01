@@ -177,6 +177,39 @@ class TestReceiptProcessorLeaseReleaseRegressionGuard(unittest.TestCase):
         self.assertNotIn("recovered", result)
         self.assertEqual(self.lease_mgr.get("T1").state, "idle")
 
+    def test_lease_released_on_success_receipt(self):
+        """task_complete path: lease must transition leased -> idle."""
+        _acquire(self.lease_mgr, self.state_dir, "T1", "d-success-001")
+        self.assertEqual(self.lease_mgr.get("T1").state, "leased")
+
+        result = self.core.release_on_receipt("T1", dispatch_id="d-success-001")
+
+        self.assertTrue(result["released"], f"expected released=True: {result}")
+        self.assertNotIn("recovered", result)
+        self.assertEqual(self.lease_mgr.get("T1").state, "idle")
+
+    def test_lease_released_on_failure_receipt(self):
+        """task_failed path: lease must still be released (not only on success)."""
+        _acquire(self.lease_mgr, self.state_dir, "T2", "d-failure-001")
+        self.assertEqual(self.lease_mgr.get("T2").state, "leased")
+
+        result = self.core.release_on_receipt("T2", dispatch_id="d-failure-001")
+
+        self.assertTrue(result["released"], f"failure receipt must release lease: {result}")
+        self.assertNotIn("recovered", result)
+        self.assertEqual(self.lease_mgr.get("T2").state, "idle")
+
+    def test_lease_released_on_timeout_receipt(self):
+        """task_timeout path (non-no_confirmation): lease must be released."""
+        _acquire(self.lease_mgr, self.state_dir, "T3", "d-timeout-001")
+        self.assertEqual(self.lease_mgr.get("T3").state, "leased")
+
+        result = self.core.release_on_receipt("T3", dispatch_id="d-timeout-001")
+
+        self.assertTrue(result["released"], f"timeout receipt must release lease: {result}")
+        self.assertNotIn("recovered", result)
+        self.assertEqual(self.lease_mgr.get("T3").state, "idle")
+
 
 if __name__ == "__main__":
     unittest.main()

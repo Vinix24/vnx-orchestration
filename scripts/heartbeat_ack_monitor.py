@@ -224,6 +224,10 @@ class HeartbeatACKMonitor:
 
         if self._is_subprocess_terminal(terminal):
             logger.debug(f"[MONITOR] Skipping subprocess-adapter terminal {terminal} for {dispatch_id}")
+            # OI-1104: clean up active state before returning so dispatch_id is
+            # not left permanently in active_dispatches / polling_threads.
+            self.active_dispatches.pop(dispatch_id, None)
+            self.polling_threads.pop(dispatch_id, None)
             return
         sent_time = dispatch_info['sent_time']
         timeout_time = dispatch_info['timeout_time']
