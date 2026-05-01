@@ -7,7 +7,8 @@ or dispatch-promotion events (via state_rebuild_trigger).
 Schema: typed sections in MEMORY.md style. ≤100 lines.
 """
 from __future__ import annotations
-import json, sys
+import json
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
 

@@ -27,21 +27,21 @@ import logging
 import os
 import re
 import subprocess
+import sys as _sys
 from typing import Optional
 
-logger = logging.getLogger(__name__)
-
-import sys as _sys
 _LIB = str(__file__).rsplit("/", 1)[0] if "/" in __file__ else "."
 if _LIB not in _sys.path:
     _sys.path.insert(0, _LIB)
 
-from auto_report_contract import (
+from auto_report_contract import (  # noqa: E402  # sys.path adjusted above
     Complexity,
     ContentType,
     ExtractionResult,
     HaikuClassification,
 )
+
+logger = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 

@@ -12,11 +12,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
-
 from governance_receipts import utc_now_iso
 import gate_recorder
 from codex_parser import parse_codex_findings
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

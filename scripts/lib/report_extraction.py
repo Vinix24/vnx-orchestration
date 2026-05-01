@@ -22,24 +22,24 @@ import json
 import logging
 import re
 import subprocess
+import sys as _sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
-
 # Import PR-0 contract schemas
-import sys as _sys
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in _sys.path:
     _sys.path.insert(0, _LIB)
 
-from auto_report_contract import (
+from auto_report_contract import (  # noqa: E402  # sys.path adjusted above
     EventMetrics,
     ExtractionResult,
     GitProvenance,
     TestResults,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Git Extraction ──────────────────────────────────────────────────────────

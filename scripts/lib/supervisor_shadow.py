@@ -46,7 +46,7 @@ _SCRIPTS_LIB = _HERE.parent
 if str(_SCRIPTS_LIB) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_LIB))
 
-from incident_log import (
+from incident_log import (  # noqa: E402  # sys.path adjusted above for standalone invocation
     consume_budget,
     create_incident,
     detect_repeated_failure_loop,
@@ -55,7 +55,7 @@ from incident_log import (
     is_shadow_mode,
     resolve_incident,
 )
-from incident_taxonomy import IncidentClass, REPEATED_FAILURE_THRESHOLD
+from incident_taxonomy import IncidentClass, REPEATED_FAILURE_THRESHOLD  # noqa: E402
 
 logger = logging.getLogger("vnx.supervisor_shadow")
 
