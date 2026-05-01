@@ -239,6 +239,7 @@ def _auto_commit_changes(
     pre_dispatch_dirty: "set[str] | None" = None,
     dispatch_touched_files: "frozenset[str] | set[str] | None" = None,
     manifest_paths: "list[str] | None" = None,
+    model: "str | None" = None,
 ) -> bool:
     """Stage and commit dispatch-introduced changes (returns True on commit).
 
@@ -272,15 +273,38 @@ def _auto_commit_changes(
             )
             return False
         return _stage_and_commit(
-            cwd, files_to_stage, gate or dispatch_id[:12], dispatch_id, terminal_id,
+            cwd, files_to_stage, gate or dispatch_id[:12],
+            dispatch_id, terminal_id, model=model,
         )
     except Exception as exc:
         logger.warning("auto_commit: unexpected error for dispatch %s: %s", dispatch_id, exc)
         return False
 
 
+def _build_commit_message(
+    gate_tag: str, dispatch_id: str, terminal_id: str, model: "str | None",
+) -> str:
+    """Compose the auto-commit message including worker-attribution trailers.
+
+    OI-1198: subprocess workers commit under the operator's git identity,
+    so the commit message must record that the change was machine-authored
+    on a worker terminal.  Trailers are emitted in git-trailer style so that
+    ``git interpret-trailers`` and downstream analytics can parse them.
+    """
+    lines = [
+        f"feat({gate_tag}): auto-commit from headless worker {terminal_id}",
+        "",
+        f"Dispatch-ID: {dispatch_id}",
+        f"Worker-Terminal: {terminal_id}",
+    ]
+    if model:
+        lines.append(f"Worker-Model: {model}")
+    return "\n".join(lines)
+
+
 def _stage_and_commit(
-    cwd: Path, files_to_stage: list[str], gate_tag: str, dispatch_id: str, terminal_id: str,
+    cwd: Path, files_to_stage: list[str], gate_tag: str,
+    dispatch_id: str, terminal_id: str, *, model: "str | None" = None,
 ) -> bool:
     """Run git add + git commit for the in-scope file set.  Returns True on commit."""
     import subprocess_dispatch as _sd
@@ -293,10 +317,7 @@ def _stage_and_commit(
         logger.warning("auto_commit: git add failed for %s: %s", dispatch_id, add_proc.stderr)
         return False
 
-    commit_msg = (
-        f"feat({gate_tag}): auto-commit from headless worker {terminal_id}\n\n"
-        f"Dispatch-ID: {dispatch_id}"
-    )
+    commit_msg = _build_commit_message(gate_tag, dispatch_id, terminal_id, model)
     commit_proc = _sd.subprocess.run(
         ["git", "commit", "-m", commit_msg],
         capture_output=True, text=True, timeout=30,
@@ -349,7 +370,8 @@ def _auto_stash_changes(
         if not files_to_stash:
             _log_no_eligible_files(
                 "auto_stash", dispatch_id, cwd,
-                )
+                pre_dispatch_dirty, dispatch_touched_files,
+            )
             return False
 
         return _run_stash_push(cwd, files_to_stash, dispatch_id, terminal_id)
