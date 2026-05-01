@@ -88,6 +88,8 @@ class SubprocessAdapter:
         self._dispatch_ids: Dict[str, str] = {}
         # Set of terminal_ids that were killed by chunk/total timeout
         self._timed_out: set = set()
+        # terminal_id -> final returncode captured by stop() or EOF (OI-1120)
+        self._returncode_cache: Dict[str, int] = {}
         # Lazy-loaded EventStore (optional dependency)
         self._event_store = None
         self._event_store_loaded = False
@@ -146,10 +148,18 @@ class SubprocessAdapter:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    process.wait(timeout=5)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass  # process in D-state; can't do more
             except (OSError, ProcessLookupError):
                 # Process already gone — treat as success
                 pass
+
+        # Cache returncode before removing tracking reference (OI-1120)
+        rc = process.poll()
+        if rc is not None:
+            self._returncode_cache[terminal_id] = rc
 
         self._processes.pop(terminal_id, None)
         return StopResult(success=True, was_running=was_running)
@@ -426,6 +436,7 @@ class SubprocessAdapter:
 
         start_time = time.time()
         fd = process.stdout.fileno()
+        line_buffer = b""  # accumulate bytes until a full line is available (OI-1123)
 
         while True:
             elapsed = time.time() - start_time
@@ -450,47 +461,61 @@ class SubprocessAdapter:
                 self.stop(terminal_id)
                 break
 
-            raw_line = process.stdout.readline()
-            if not raw_line:
-                break  # EOF — process exited
-
-            line = raw_line.decode("utf-8", errors="replace").rstrip("\n")
-            if not line:
-                continue
+            # Non-blocking raw read: select() says data is available, but readline()
+            # would block waiting for '\n' if only a partial line arrived (OI-1123).
+            # os.read() consumes whatever bytes are ready without blocking.
             try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "subprocess_adapter: malformed NDJSON line for %s (skipped): %r",
-                    terminal_id, line[:200],
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break  # fd closed (process killed)
+
+            if not chunk:
+                # EOF: process exited; cache returncode (OI-1120)
+                rc = process.poll()
+                if rc is not None:
+                    self._returncode_cache[terminal_id] = rc
+                break
+
+            line_buffer += chunk
+            while b"\n" in line_buffer:
+                raw_line, line_buffer = line_buffer.split(b"\n", 1)
+                line = raw_line.decode("utf-8", errors="replace")
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "subprocess_adapter: malformed NDJSON line for %s (skipped): %r",
+                        terminal_id, line[:200],
+                    )
+                    continue
+
+                # Extract session_id before normalization
+                event_type = payload.get("type", "")
+                event_subtype = payload.get("subtype", "")
+                session_id: Optional[str] = payload.get("session_id")
+
+                is_init = (
+                    (event_type == "system" and event_subtype == "init")
+                    or event_type == "init"
                 )
-                continue
+                if is_init and session_id:
+                    self._session_ids[terminal_id] = session_id
 
-            # Extract session_id before normalization
-            event_type = payload.get("type", "")
-            event_subtype = payload.get("subtype", "")
-            session_id: Optional[str] = payload.get("session_id")
+                # Normalize and yield
+                normalized_events = self._normalize_cli_event(payload)
+                dispatch_id = self._dispatch_ids.get(terminal_id, "")
+                es = self._get_event_store()
 
-            is_init = (
-                (event_type == "system" and event_subtype == "init")
-                or event_type == "init"
-            )
-            if is_init and session_id:
-                self._session_ids[terminal_id] = session_id
-
-            # Normalize and yield
-            normalized_events = self._normalize_cli_event(payload)
-            dispatch_id = self._dispatch_ids.get(terminal_id, "")
-            es = self._get_event_store()
-
-            for norm in normalized_events:
-                if es is not None:
-                    es.append(terminal_id, norm, dispatch_id=dispatch_id)
-                yield StreamEvent(
-                    type=norm["type"],
-                    data=norm.get("data", {}),
-                    session_id=session_id if is_init else None,
-                )
+                for norm in normalized_events:
+                    if es is not None:
+                        es.append(terminal_id, norm, dispatch_id=dispatch_id)
+                    yield StreamEvent(
+                        type=norm["type"],
+                        data=norm.get("data", {}),
+                        session_id=session_id if is_init else None,
+                    )
 
     def get_session_id(self, terminal_id: str) -> Optional[str]:
         """Return session_id extracted from the init event, or None.
