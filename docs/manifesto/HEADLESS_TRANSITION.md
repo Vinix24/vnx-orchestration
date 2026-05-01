@@ -37,6 +37,74 @@ The system worked, but it required continuous attention. A chain of 10 PRs meant
 
 ---
 
+## Four Run Modes
+
+VNX supports four adapter configurations. Each terminal (T0/T1/T2/T3) independently selects `tmux` (interactive) or `subprocess` (headless):
+
+| Mode | T0 | Workers (T1/T2/T3) | When to use |
+|------|----|--------------------|-------------|
+| 1. All interactive | tmux | tmux | Live operator session, visible 2×2 grid |
+| 2. Interactive T0 + headless workers | tmux | subprocess | Operator drives, workers run in background |
+| 3. All headless | subprocess | subprocess | CI/cron, autonomous overnight chains |
+| 4. Headless T0 + interactive workers | subprocess | tmux | Edge case — operator wants to inspect worker panes |
+
+### Configuration
+
+```bash
+VNX_ADAPTER_T0=subprocess     # headless T0
+VNX_ADAPTER_T1=subprocess     # headless T1
+VNX_ADAPTER_T2=subprocess     # headless T2
+VNX_ADAPTER_T3=subprocess     # headless T3
+# Default (unset): tmux for all
+```
+
+**Mode 2 (recommended for solo dev):**
+```bash
+VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VNX_ADAPTER_T3=subprocess vnx start
+```
+
+**Mode 3 (fully headless):**
+```bash
+VNX_ADAPTER_T0=subprocess VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VNX_ADAPTER_T3=subprocess \
+  python3 scripts/headless_orchestrator.py
+```
+
+### What stays identical across modes
+
+- Receipt schema (append-only NDJSON)
+- Quality gate enforcement (codex + gemini + CI)
+- Provenance chain (instruction_sha256 → manifest → receipt → audit)
+- Open items lifecycle
+- Pattern intelligence DB
+
+### What differs
+
+| Aspect | Interactive (tmux) | Headless (subprocess) |
+|--------|--------------------|-----------------------|
+| Tmux pane | yes | no |
+| Event stream | basic | full per-dispatch in `events/T<n>.ndjson` |
+| Context rotation | Claude Code /clear | F43 explicit handover |
+| Crash recovery | tmux session restore | `dispatcher_supervisor.sh` wrapper |
+| Memory hooks | Claude Code native | Receipt-driven post-hooks (ARC-3) |
+
+### When to choose which mode
+
+- **Mode 1**: First-time setup, debugging, or when you want to watch every agent decision live.
+- **Mode 2**: Daily development. You approve dispatches; workers run silently and produce receipts. Low cognitive overhead.
+- **Mode 3**: Overnight chains, CI pipelines, or any context where no human is present between dispatch approval cycles.
+- **Mode 4**: Rare. Useful when you want T0 to operate headlessly (e.g., driven by a webhook) while keeping worker panes open for manual inspection.
+
+### Migration path from interactive-only
+
+If you've been running Mode 1 and want to try Mode 2:
+
+1. Set `VNX_ADAPTER_T1=subprocess` for one terminal first
+2. Run a dispatch and verify the receipt appears identically
+3. Gradually enable T2, then T3
+4. Consider Mode 3 once comfortable with event-archive debugging
+
+---
+
 ## The Transition: What Changed and When
 
 ### Step 1 — SubprocessAdapter (F32, March 2026)
@@ -158,3 +226,12 @@ A 27-PR chain (like the v0.10.0 chain) landed over two days with the operator ma
 **Gate noise is an operator tax, not a worker tax.** When codex blocks 100% of chain PRs as `error`, it's the operator who has to manually evaluate and override each one. Severity calibration (#323, #324) was necessary for sustainable headless gate operation — it's not a shortcut, it's a prerequisite.
 
 **The approval gate is intentional governance, not a scaling bottleneck.** The operator still approves each dispatch before it goes active. This is not a bug. The approval gate is the system's primary human checkpoint — the point where an operator's judgment replaces automated logic. Removing it would make the system fully autonomous, which requires a different trust model.
+
+---
+
+## See Also
+
+- [docs/comparisons/headless_vs_interactive.md](../comparisons/headless_vs_interactive.md) — detailed side-by-side comparison
+- [docs/operations/SUBPROCESS_ADAPTER_FEATURE_FLAG.md](../operations/SUBPROCESS_ADAPTER_FEATURE_FLAG.md) — env var reference for all terminals
+- [docs/operations/EVENT_STREAMS.md](../operations/EVENT_STREAMS.md) — per-terminal NDJSON structure
+- [README.md §"Adapter mode matrix"](../../README.md) — quick-start matrix in the project overview
