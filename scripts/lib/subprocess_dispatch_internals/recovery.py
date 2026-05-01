@@ -128,6 +128,7 @@ def _handle_success(
         commit_hash_after=commit_hash_after,
         model=model,
     )
+    _sd._ensure_unified_report(dispatch_id, terminal_id, "done")
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
         event_count=sub_result.event_count,

@@ -21,7 +21,7 @@ source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/process_lifecycle.sh"
 
 VNX_DIR="$VNX_HOME"
-DISPATCHER_SCRIPT="$SCRIPT_DIR/dispatcher_v8_minimal.sh"
+DISPATCHER_SCRIPT="${VNX_DISPATCHER_SCRIPT:-$SCRIPT_DIR/dispatcher_v8_minimal.sh}"
 SUPERVISOR_NAME="dispatcher_supervisor"
 DISPATCHER_NAME="dispatcher_v8_minimal"
 
