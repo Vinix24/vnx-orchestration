@@ -1,0 +1,70 @@
+# .geminiignore — files/directories excluded from Gemini review context.
+#
+# OI-1154: Dashboard SOURCE files must NOT be excluded. Only exclude build
+# artifacts, generated outputs, and large binary/vendor directories.
+#
+# Rule: never add a bare "dashboard/" or "dashboard/**" pattern here.
+# Use scoped sub-paths like "dashboard/node_modules/" instead.
+
+# Python bytecode & caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend build artifacts
+node_modules/
+dashboard/node_modules/
+dashboard/.next/
+dashboard/dist/
+dashboard/build/
+dashboard/.cache/
+dashboard/token-dashboard/node_modules/
+dashboard/token-dashboard/.next/
+dashboard/token-dashboard/dist/
+dashboard/token-dashboard/build/
+
+# Generated and compiled outputs
+*.min.js
+*.min.css
+*.map
+*.lock
+dist/
+build/
+
+# VNX runtime state (never part of a review)
+.vnx-data/
+state/
+logs/
+pids/
+locks/
+receipts/
+unified_reports/
+dispatches/
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Large binary and archive files
+*.tar.gz
+*.zip
+*.whl
+*.egg-info/
+
+# IDE and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
