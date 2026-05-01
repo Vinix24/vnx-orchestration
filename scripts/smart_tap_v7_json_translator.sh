@@ -27,6 +27,11 @@ LOG_FILE="$VNX_LOGS_DIR/tap.log"
 PID_DIR="$VNX_PIDS_DIR"
 PID_FILE="$PID_DIR/smart_tap.pid"
 
+# Project-scoped scratch dir for tempfiles (OI-1067 / W4G).
+# Lives under VNX_DATA_DIR so concurrent projects never share /tmp/*.tmp paths.
+VNX_TMP_DIR="${VNX_DATA_DIR}/tmp"
+mkdir -p "$VNX_TMP_DIR"
+
 # Singleton is now handled by enforce_singleton function above
 # No need for manual PID file handling
 echo "[SMART_TAP] Process management handled by singleton enforcer"
@@ -127,7 +132,8 @@ EOF
 # Function to translate Markdown dispatch to JSON
 markdown_to_json() {
     local markdown_content="$1"
-    local temp_file="/tmp/md_to_json_${RANDOM}.tmp"
+    local temp_file
+    temp_file=$(mktemp "${VNX_TMP_DIR}/md_to_json.XXXXXX.tmp")
     echo "$markdown_content" > "$temp_file"
 
     # Extract fields from Markdown using pattern matching
@@ -192,7 +198,8 @@ EOF
 # Function to handle format detection and basic cleaning (no conversion needed)
 process_dispatch_content() {
     local content="$1"
-    local temp_file="/tmp/dispatch_${RANDOM}.tmp"
+    local temp_file
+    temp_file=$(mktemp "${VNX_TMP_DIR}/dispatch.XXXXXX.tmp")
 
     echo "$content" > "$temp_file"
 
@@ -204,8 +211,9 @@ process_dispatch_content() {
 # Function to extract ALL manager blocks from captured content
 extract_all_manager_blocks() {
     local content="$1"
-    local temp_file="/tmp/block_extract_$$.txt"
-    
+    local temp_file
+    temp_file=$(mktemp "${VNX_TMP_DIR}/block_extract.XXXXXX.txt")
+
     # Write content to temp file for processing
     echo "$content" > "$temp_file"
     
@@ -387,7 +395,8 @@ save_to_queue() {
     # Clean markdown for workers (they prefer markdown)
     if is_json "$block"; then
         log "Processing JSON dispatch, converting to Markdown for worker"
-        local temp_file="/tmp/json_block_${RANDOM}.tmp"
+        local temp_file
+        temp_file=$(mktemp "${VNX_TMP_DIR}/json_block.XXXXXX.tmp")
         echo "$block" > "$temp_file"
         processed_block=$(json_to_markdown "$temp_file")
         rm -f "$temp_file"
