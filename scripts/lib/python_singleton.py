@@ -48,21 +48,23 @@ def enforce_python_singleton(
         log(f"[SINGLETON] Lock acquired for {name} (PID: {os.getpid()})")
 
     def _cleanup() -> None:
+        # Unlink while still holding the flock so no contender can open
+        # the file and acquire the lock between unlink and LOCK_UN.
         try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_path.unlink(missing_ok=True)
         except OSError:
             pass
         try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        try:
             lock_handle.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
         try:
             if pid_path.exists() and pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
                 pid_path.unlink()
-        except OSError:
-            pass
-        try:
-            lock_path.unlink(missing_ok=True)
         except OSError:
             pass
 
