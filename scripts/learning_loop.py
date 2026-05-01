@@ -239,7 +239,7 @@ class LearningLoop:
 
             metric = self.pattern_metrics[pattern_id]
             metric.used_count += len(dispatch_ids)
-            metric.last_used = datetime.now()
+            metric.last_used = datetime.now(timezone.utc)
 
             # Boost confidence (cap at 2.0)
             old_confidence = metric.confidence

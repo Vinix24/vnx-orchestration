@@ -70,11 +70,11 @@ def _out(data: dict, exit_code: int = 0) -> None:
 
 
 def _require_core() -> RuntimeCore:
-    """Return RuntimeCore or exit 1 if not available."""
+    """Return RuntimeCore or emit legacy disabled marker (exit 0) if not available."""
     state_dir, dispatch_dir = _get_dirs()
     core = load_runtime_core(state_dir, dispatch_dir)
     if core is None:
-        _out({"ok": False, "error": "VNX_RUNTIME_PRIMARY=0, runtime core disabled"}, 1)
+        _out({"status": "legacy_disabled", "reason": "VNX_RUNTIME_PRIMARY=0, runtime core disabled"}, 0)
     return core  # type: ignore[return-value]  # _out exits
 
 

@@ -4,19 +4,25 @@ Notify Dispatch - Signal heartbeat_ack_monitor.py about new dispatches
 Usage: python notify_dispatch.py <dispatch_id> <terminal> <task_id> [pr_id]
 """
 
+import os
 import sys
 import socket
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 def notify_dispatch(dispatch_id: str, terminal: str, task_id: str, pr_id: str = ''):
     """Send dispatch notification to heartbeat monitor via Unix socket"""
 
-    # Project-scoped socket to prevent cross-project receipt contamination
-    import os
-    project_root = os.environ.get('PROJECT_ROOT', os.getcwd())
-    project_name = os.path.basename(project_root)
-    socket_path = f'/tmp/heartbeat_ack_monitor_{project_name}.sock'
+    # Derive socket path from VNX_DATA_DIR (project-scoped, matches daemon).
+    # Falls back to project-name slug in /tmp when VNX_DATA_DIR is unset.
+    vnx_data_dir = os.environ.get('VNX_DATA_DIR', '')
+    if vnx_data_dir:
+        socket_path = str(Path(vnx_data_dir) / 'heartbeat_ack_monitor.sock')
+    else:
+        project_root = os.environ.get('PROJECT_ROOT', os.getcwd())
+        project_name = os.path.basename(project_root)
+        socket_path = f'/tmp/heartbeat_ack_monitor_{project_name}.sock'
 
     message = {
         'action': 'track_dispatch',

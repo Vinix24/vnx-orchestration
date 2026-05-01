@@ -61,8 +61,10 @@ def main():
     # Create monitor instance (reads config from environment)
     monitor = HeartbeatACKMonitor()
 
-    # Start socket server for dispatch notifications
-    socket_path = '/tmp/heartbeat_ack_monitor.sock'
+    # Start socket server for dispatch notifications.
+    # Socket lives in VNX_DATA_DIR (per-project) to prevent cross-project collisions.
+    data_dir = Path(paths["VNX_DATA_DIR"])
+    socket_path = str(data_dir / "heartbeat_ack_monitor.sock")
     monitor.start_socket_server(socket_path)
 
     logger.info("[DAEMON] Socket server started, ready to receive dispatch notifications")
