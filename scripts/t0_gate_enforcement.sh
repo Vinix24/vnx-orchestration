@@ -11,8 +11,8 @@ vnx_resolve_dispatch_dir
 export VNX_CODEX_HEADLESS_ENABLED=1
 export VNX_GEMINI_REVIEW_ENABLED=1
 
-RESULT=$(python3 scripts/review_gate_manager.py request-and-execute "$@" 2>&1)
-RC=$?
+RC=0
+RESULT=$(python3 scripts/review_gate_manager.py request-and-execute "$@" 2>&1) || RC=$?
 
 echo "$RESULT"
 
@@ -22,7 +22,7 @@ if [ $RC -ne 0 ]; then
 fi
 
 # Verify artifacts exist
-PR_NUM=$(echo "$@" | grep -oP '(?<=--pr )\d+')
+PR_NUM=$(echo "$@" | sed -nE 's/.*--pr ([0-9]+).*/\1/p')
 for gate_type in gemini_review codex_gate; do
     REQUEST_FILE="$VNX_STATE_DIR/review_gates/requests/pr-${PR_NUM}-${gate_type}.json"
     RESULT_FILE="$VNX_STATE_DIR/review_gates/results/pr-${PR_NUM}-${gate_type}.json"
