@@ -103,23 +103,68 @@ def _gather_changed_files(files: List[str], subprocess_run: Callable) -> List[st
         return []
 
 
-def _inline_file_contents(files: List[str], max_bytes: int) -> str:
-    """Read and inline file contents up to max_bytes total."""
+def _read_file_from_branch(
+    path: str,
+    branch: str,
+    subprocess_run: Callable,
+) -> str | None:
+    """Return file content as committed on `branch` via `git show branch:path`.
+
+    Returns None when the file is not present on the branch, the path is
+    absolute (and therefore not a tracked path), or git is unavailable.
+    """
+    if not branch or os.path.isabs(path):
+        return None
+    try:
+        result = subprocess_run(
+            ["git", "show", f"{branch}:{path}"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, Exception):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _inline_file_contents(
+    files: List[str],
+    max_bytes: int,
+    *,
+    branch: str = "",
+    subprocess_run: Callable | None = None,
+) -> str:
+    """Read and inline file contents up to max_bytes total.
+
+    When `branch` is provided, file content is resolved via `git show branch:path`
+    so that gates review the PR-branch version regardless of which worktree the
+    gate runs in. Falls back to filesystem read when the file is absent on the
+    branch (e.g., uncommitted local edits) or when no branch is supplied.
+    """
     content = ""
     bytes_used = 0
     for f in files:
-        if not os.path.exists(f):
-            continue
         remaining = max_bytes - bytes_used
         if remaining <= 0:
             break
-        try:
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                chunk = fh.read(remaining)
-            content += f"\n--- FILE: {f} ---\n{chunk}"
-            bytes_used += len(chunk.encode("utf-8"))
-        except OSError:
-            continue
+
+        chunk: str | None = None
+        if branch and subprocess_run is not None:
+            branch_content = _read_file_from_branch(f, branch, subprocess_run)
+            if branch_content is not None:
+                chunk = branch_content[:remaining]
+
+        if chunk is None:
+            if not os.path.exists(f):
+                continue
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    chunk = fh.read(remaining)
+            except OSError:
+                continue
+
+        content += f"\n--- FILE: {f} ---\n{chunk}"
+        bytes_used += len(chunk.encode("utf-8"))
     return content
 
 
@@ -152,7 +197,9 @@ def build_gemini_prompt(
         "}\n"
         "```\n"
     )
-    file_content = _inline_file_contents(files, max_bytes)
+    file_content = _inline_file_contents(
+        files, max_bytes, branch=branch, subprocess_run=subprocess_run,
+    )
     return f"{review_instructions}\n{file_content}"
 
 
@@ -169,8 +216,11 @@ def collect_file_contents(
     files = _gather_changed_files(
         request_payload.get("changed_files", []), subprocess_run
     )
+    branch = request_payload.get("branch", "")
     max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
-    return _inline_file_contents(files, max_bytes)
+    return _inline_file_contents(
+        files, max_bytes, branch=branch, subprocess_run=subprocess_run,
+    )
 
 
 def build_codex_prompt(
@@ -190,7 +240,9 @@ def build_codex_prompt(
     files = _gather_changed_files(
         request_payload.get("changed_files", []), subprocess_run
     )
-    file_contents = _inline_file_contents(files, max_bytes)
+    file_contents = _inline_file_contents(
+        files, max_bytes, branch=branch, subprocess_run=subprocess_run,
+    )
 
     return (
         f"Review the following code changes on branch {branch} (risk: {risk}).\n\n"
