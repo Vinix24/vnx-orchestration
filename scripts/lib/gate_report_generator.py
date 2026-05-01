@@ -24,6 +24,7 @@ class GateReportGeneratorMixin:
         reason: str,
         reason_detail: str,
         contract_hash: str = "",
+        dispatch_id: str = "",
     ) -> Dict[str, Any]:
         """Write a not_executable result record (GATE-4)."""
         from review_gate_manager import _utc_now
@@ -45,6 +46,8 @@ class GateReportGeneratorMixin:
             "residual_risk": "Gate evidence not available. Compensating evidence required.",
             "recorded_at": now,
         }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
         if pr_id:
             result_file = self._contract_result_path(gate, pr_id)
         elif pr_number is not None:
