@@ -1,7 +1,7 @@
 # PRD — VNX Universal Headless Orchestration Harness
 
 **Document ID:** PRD-VNX-UH-001
-**Version:** 1.1 (Draft)
+**Version:** 1.3 (Draft)
 **Date:** 2026-05-01
 **Author:** T0 (Opus 4.7, 1M)
 **Owner:** Vincent van Deth (operator)
@@ -10,6 +10,8 @@
 **Changelog:**
 - v1.0 — initial draft synthesizing multi-orchestrator + universal-harness research
 - v1.1 — adds §7.6 architecture mode matrix; adds §7.7 + FR-11 provider-failover at orchestrator level; updates FR-7 to note provider-interchangeability; updates OD-1 scope; adds R11 (cross-provider state continuity)
+- v1.2 — separates behavior (`BEHAVIOR.md` + provider symlinks) from skills (`skills/<task>.md` invocable prompts). FR-4 fully rewritten. Closes the conceptual conflation of "agent prompt" vs "skill" in v1.1.
+- v1.3 — adds FR-12 (agent registry + dispatch routing). Clarifies that orchestrators don't compose worker prompts; they pick from a registry built by folder-discovery from `BEHAVIOR.md` YAML frontmatter. Worker prompt = worker's own BEHAVIOR.md + orch's instruction (+ optional skill).
 
 **Companion research:**
 - `claudedocs/2026-05-01-multi-orchestrator-research.md` — multi-orchestrator hierarchy + session continuity
@@ -161,74 +163,133 @@ class CanonicalEvent:
 
 Tier 1 = full streaming (Claude, Codex, Gemini-new); Tier 2 = text-only streaming (Kimi, Ollama legacy); Tier 3 = final-result-only (batch APIs). Receipt records the tier; governance variant declares minimum tier required.
 
-### FR-4 — Folder-based agents (single-source SKILL.md + provider symlinks)
+### FR-4 — Folder-based agents (behavior + skills, two distinct concepts)
 
-#### 4.1 Layout
+#### 4.1 Conceptual model
+
+Three layers compose every dispatch's prompt:
+
+| Layer | What | Lifetime | File |
+|-------|------|----------|------|
+| **Behavior** | Persona, conventions, allowed/denied actions, "what you must never do" | Persistent — same every dispatch | `BEHAVIOR.md` (single source) + `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` symlinks |
+| **Skill** | Invocable task template (e.g. "plan-feature", "review-pr"). Optional — only present if the agent has named recurring tasks. | Per-invocation — loaded only when that skill is named | `skills/<task>.md` (one file per skill) |
+| **Dispatch instruction** | The specific ask for *this* invocation: "implement F50, branch fix/x, deadline Y" | Per-dispatch | `dispatch.json` field, or operator-typed in interactive mode |
+
+In headless mode, VNX assembles all three layers into one prompt. In interactive mode, the provider CLI auto-loads behavior, the operator invokes skills via `/<skill-name>` if registered, and types the dispatch instruction freely. Same files, different invocation mechanism.
+
+#### 4.2 Layout
 
 ```
 .claude/agents/
 ├── orchestrators/
 │   ├── tech-lead/
-│   │   ├── SKILL.md             ← single source of truth (operator edits this)
-│   │   ├── CLAUDE.md → SKILL.md ← symlink (Claude CLI auto-loads)
-│   │   ├── AGENTS.md → SKILL.md ← symlink (Codex CLI auto-loads)
-│   │   ├── GEMINI.md → SKILL.md ← symlink (Gemini CLI auto-loads)
-│   │   ├── permissions.yaml
-│   │   ├── governance.yaml      ← variant: coding-strict OR business-light
-│   │   ├── guardrails.yaml      ← model whitelist, max risk class, gate stack
-│   │   ├── runtime.yaml         ← provider chain (FR-11)
+│   │   ├── BEHAVIOR.md              ← single source: persona, conventions, rules
+│   │   ├── CLAUDE.md → BEHAVIOR.md  ← symlink (Claude CLI auto-loads)
+│   │   ├── AGENTS.md → BEHAVIOR.md  ← symlink (Codex CLI auto-loads)
+│   │   ├── GEMINI.md → BEHAVIOR.md  ← symlink (Gemini CLI auto-loads)
+│   │   ├── permissions.yaml         ← allowed_tools / denied_tools
+│   │   ├── governance.yaml          ← variant: coding-strict OR business-light
+│   │   ├── guardrails.yaml          ← model whitelist, max risk class, gate stack
+│   │   ├── runtime.yaml             ← provider chain (FR-11)
+│   │   ├── workers.yaml             ← which worker pool this orch owns
 │   │   ├── hooks/
-│   │   └── workers.yaml         ← which worker pool this orch owns
+│   │   │   ├── pre_dispatch.sh
+│   │   │   └── post_receipt.sh
+│   │   └── skills/                  ← invocable task prompts (orch-specific)
+│   │       ├── plan-feature.md
+│   │       ├── review-pr.md
+│   │       ├── handoff-mission.md
+│   │       └── decide-merge.md
 │   └── marketing-lead/
-│       └── ...
+│       └── ... (same structure, different skills/)
 └── workers/
     ├── backend-developer/
-    │   ├── SKILL.md
-    │   ├── CLAUDE.md → SKILL.md
-    │   ├── AGENTS.md → SKILL.md
-    │   ├── GEMINI.md → SKILL.md
+    │   ├── BEHAVIOR.md              ← persona only — workers usually need just behavior
+    │   ├── CLAUDE.md → BEHAVIOR.md
+    │   ├── AGENTS.md → BEHAVIOR.md
+    │   ├── GEMINI.md → BEHAVIOR.md
     │   ├── permissions.yaml
     │   ├── runtime.yaml
-    │   └── tools.yaml
-    └── ...
+    │   └── tools.yaml               ← MCP tool grants (no skills/ folder needed)
+    └── code-reviewer/
+        ├── BEHAVIOR.md
+        ├── ...
+        └── skills/                  ← workers CAN have skills if their role is multi-task
+            ├── security-review.md
+            └── perf-review.md
 ```
 
-**Single source of truth: `SKILL.md`.** The three provider-named files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) are symlinks pointing back at `SKILL.md`. Drift between providers is impossible because all three reference the *same inode* on disk. Operator edits one file; all providers see identical content.
+**Two distinct file types, two distinct purposes:**
 
-#### 4.2 Why symlinks (not tri-file, not converter)
+- **`BEHAVIOR.md` (with provider symlinks):** The agent's identity. Loaded every time the agent runs. "You are a tech lead at a software company. You always check tests pass before merging. You never use TODO comments."
+- **`skills/<task>.md`:** Task-specific invocable templates. Loaded only when that skill is named (in headless, by `dispatch.skill_ref`; in interactive, by `/<skill-name>` if Claude Code's skill loader is wired). "Plan-feature: read FEATURE_PLAN.md, decompose into PR-sized chunks, write a dispatch tree with dependencies."
 
-Three options were considered:
+**Why the symlinks are still on `BEHAVIOR.md` only:**
+
+The behavior layer is what every provider's CLI auto-loads (CLAUDE.md / AGENTS.md / GEMINI.md). Skills are provider-neutral text loaded by VNX's dispatcher — provider CLIs don't auto-load skill files. So skills live as plain `.md` files; only behavior gets the symlink trio.
+
+#### 4.3 Why symlinks for BEHAVIOR.md (not tri-file, not converter)
+
+Three options for behavior file management:
 
 | Option | LOC | Drift risk | Provider-specific divergence supported |
 |--------|-----|------------|----------------------------------------|
-| Tri-file manual (3 separate `.md` files) | 0 | High — operator must sync | Yes |
-| Single `SKILL.md` + auto-converter | ~300 | Low — generated on save | Yes (via `<provider:claude>...</provider>` tags) |
-| **Single `SKILL.md` + symlinks** (chosen) | ~10 | Zero — same file | No (acceptable trade-off) |
+| Tri-file manual (3 separate behavior files) | 0 | High — operator must sync | Yes |
+| Single `BEHAVIOR.md` + auto-converter | ~300 | Low — generated on save | Yes (via `<provider:claude>...</provider>` tags) |
+| **Single `BEHAVIOR.md` + symlinks** (chosen) | ~10 | Zero — same file | No (acceptable trade-off) |
 
-Provider-specific divergence in the prompt content turns out to be **rare in practice**: VNX's permission profile (allowed-tools list) is already provider-specific via `permissions.yaml`, and tool-naming differences (e.g. Claude's `Edit` vs Codex's `update_file`) are handled by the **adapter layer**, not by the skill prompt. The skill prompt itself can be provider-neutral.
+Behavior content is rarely provider-specific in practice. Tool-naming differences (Claude's `Edit` vs Codex's `update_file`) are handled by the **adapter layer**, not by behavior text. If divergence is ever needed, upgrading to the converter is a one-time migration, not blocking for v1.
 
-If divergence ever becomes necessary later, upgrade to the converter (Option B) is a one-time migration, not blocking work for v1.
+#### 4.4 Loading semantics by mode
 
-#### 4.3 Loading semantics
+| Mode | Behavior loaded by | Skill loaded by | Dispatch instruction loaded by |
+|------|-------------------|-----------------|-------------------------------|
+| **Headless** | VNX reads `BEHAVIOR.md` from agent folder | IF `dispatch.skill_ref` set: VNX reads `skills/<ref>.md`; else: empty | `dispatch.instruction` field |
+| **Interactive** | Provider CLI auto-loads via `cd folder && claude` (resolves CLAUDE.md → BEHAVIOR.md symlink) | Operator types `/<skill-name>` if Claude Code's skill loader is wired (registered separately) | Operator types freely in TTY |
 
-| Mode | What VNX does |
-|------|---------------|
-| **Headless (default)** | VNX dispatcher reads `SKILL.md` from the agent folder, builds the prompt, pipes it to the provider CLI via `--instruction` or stdin. The provider CLI's auto-loading conventions are bypassed (we drive the prompt entirely). The 3 symlinks exist but are not read in this mode — they are insurance for the interactive escape hatch. |
-| **Interactive (escape hatch)** | Operator runs `vnx interactive --agent <role>` which `cd`s into the folder and spawns `claude` (or `codex` / `gemini`) without `-p`. The provider CLI auto-loads its provider-specific filename — which resolves through the symlink to `SKILL.md`. Operator gets the same skill content the headless flow would have used. |
+**Same files, different invocation mechanism.** No special-casing per mode; the file system is unified.
 
-**This means the skill folder is genuinely unified across modes.** No separate paths, no special-casing, no "headless gets injection / interactive gets folder-load." Same file system → same content → same behavior.
+#### 4.5 Skill resolution detail (headless)
 
-#### 4.4 Boot-time symlink creation
+A `dispatch.skill_ref` field is optional on every dispatch:
 
-A boot helper in `scripts/lib/agent_folder_loader.py` (~30 LOC of the W8 estimate) ensures the three provider-named symlinks exist for every agent folder containing a `SKILL.md`. Idempotent: if symlinks already exist and point to `SKILL.md`, no-op. If they point elsewhere or are stale, repair.
+```json
+{
+  "dispatch_id": "...",
+  "agent": "orchestrators/tech-lead",
+  "skill_ref": "plan-feature",     ← optional
+  "instruction": "Plan F50: feature flag rollout...",
+  "...": "other fields"
+}
+```
 
-Operator can also commit the symlinks to git directly — git tracks symlinks as "links to a path." Either way, after first boot every folder is consistent.
+If `skill_ref` is set:
+- VNX reads `.claude/agents/orchestrators/tech-lead/skills/plan-feature.md`
+- Composes prompt: `BEHAVIOR.md content + "\n\n## Active skill: plan-feature\n" + skill content + "\n\n## Task\n" + dispatch.instruction`
+- Pipes to provider CLI
 
-#### 4.5 Migration path
+If `skill_ref` is null:
+- VNX reads `BEHAVIOR.md` only
+- Composes prompt: `BEHAVIOR.md content + "\n\n## Task\n" + dispatch.instruction`
 
-- Existing `.claude/skills/<role>/CLAUDE.md` → rename to `.claude/agents/workers/<role>/SKILL.md`, create the three symlinks.
-- Existing `_inject_skill_context()` in `subprocess_dispatch_internals/skill_injection.py:228-247` keeps working as legacy fallback behind `VNX_FOLDER_AGENTS=0` for backward-compat during migration.
-- Once `VNX_FOLDER_AGENTS=1` is the default and all dispatches use it, injection path is removed in W14.
+This matches Claude Code's native skill model (skills are invocable, not always-loaded) while letting VNX drive the invocation in headless mode.
+
+#### 4.6 Boot-time symlink creation
+
+A boot helper in `scripts/lib/agent_folder_loader.py` (~30 LOC of the W8 estimate) ensures the three provider-named symlinks exist for every agent folder containing a `BEHAVIOR.md`. Idempotent: if symlinks already exist and point to `BEHAVIOR.md`, no-op. If they point elsewhere or are stale, repair.
+
+Operator can also commit the symlinks to git — git tracks symlinks as "links to a path." Either way, after first boot every folder is consistent.
+
+#### 4.7 Migration path from current `.claude/skills/<role>/SKILL.md`
+
+Today's `.claude/skills/<role>/SKILL.md` is a naming collision: it contains the agent's *behavior* (persona + rules), not an invocable skill in Claude Code's sense. Migration:
+
+1. Rename `.claude/skills/<role>/SKILL.md` → `.claude/agents/workers/<role>/BEHAVIOR.md` (or `.claude/agents/orchestrators/<role>/BEHAVIOR.md` for orchestrators).
+2. Create `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` symlinks pointing at `BEHAVIOR.md`.
+3. Existing `.claude/skills/` symlink stays as legacy fallback.
+4. New `skills/` subfolder is added per agent ONLY when a recurring multi-task pattern emerges (defer until at least one agent has 2+ named skills).
+5. Existing `_inject_skill_context()` in `subprocess_dispatch_internals/skill_injection.py:228-247` keeps working as legacy fallback behind `VNX_FOLDER_AGENTS=0`.
+6. Once `VNX_FOLDER_AGENTS=1` is default and all dispatches use it, injection path removed in W14.
 
 ### FR-5 — Capability token trust chain
 
@@ -457,6 +518,159 @@ If a failover happened during the dispatch:
 - Receipt schema additions (`provider_chain_at_dispatch`, `failover_events`) (~30 LOC)
 - Tests + docs (~150 LOC)
 - **Total: ~480 LOC. New wave: W7.5 (between streaming drainer and folder agents).**
+
+### FR-12 — Agent registry + dispatch routing
+
+**Orchestrators do not compose worker prompts.** Each worker's behavior is locked in its own folder's `BEHAVIOR.md`. Orchestrators select a worker by name from a registry, attach a per-task instruction, and let VNX assemble the full prompt.
+
+#### 12.1 Registry: agent folder YAML frontmatter
+
+Every `BEHAVIOR.md` declares its metadata via YAML frontmatter (matches Claude Code's native subagent format):
+
+```markdown
+---
+name: backend-developer
+description: Implements backend features in Python following SOLID principles.
+                Invoke for: API endpoints, database models, service-layer logic.
+                Do NOT invoke for: frontend UI, infra/IaC, ML model training.
+inputs_expected:
+  - feature_plan_path  (markdown plan document)
+  - branch_name        (target git branch)
+  - dispatch_id
+outputs:
+  - committed_code
+  - receipt
+supported_providers: [claude, codex]
+preferred_model: sonnet
+risk_class: medium
+typical_duration_minutes: 15
+---
+
+# Backend Developer
+
+You are a senior backend engineer ...
+[behavior content continues]
+```
+
+#### 12.2 Registry build
+
+`scripts/lib/agent_registry.py` (NEW, ~150 LOC) walks `.claude/agents/{orchestrators,workers}/*/BEHAVIOR.md` at startup, parses frontmatter, builds an in-memory + JSON-serialized registry at `.vnx-data/state/agent_registry.json`:
+
+```json
+{
+  "workers": {
+    "backend-developer": {
+      "folder": ".claude/agents/workers/backend-developer",
+      "description": "...",
+      "inputs_expected": [...],
+      "supported_providers": ["claude", "codex"],
+      "preferred_model": "sonnet",
+      "available_skills": []
+    },
+    "code-reviewer": {
+      "folder": ".claude/agents/workers/code-reviewer",
+      "available_skills": ["security-review", "perf-review"]
+    }
+  },
+  "orchestrators": {
+    "tech-lead": {
+      "folder": ".claude/agents/orchestrators/tech-lead",
+      "available_skills": ["plan-feature", "review-pr", "handoff-mission", "decide-merge"],
+      "workers_pool": ["backend-developer", "code-reviewer", "qa-engineer"]
+    }
+  }
+}
+```
+
+The registry rebuilds on boot and on filesystem changes (file watcher optional). Operator can also force-rebuild via `vnx registry rebuild`.
+
+#### 12.3 Orchestrator's view of the library
+
+When the orchestrator boots, it gets injected (in its own prompt) a **library section** describing only the workers IT can dispatch — the subset declared in its `workers.yaml`:
+
+```markdown
+## Available workers (from your pool, defined in workers.yaml)
+
+You can dispatch to any of the following:
+
+- **backend-developer** — Implements backend features in Python following SOLID principles.
+  Invoke for: API endpoints, database models, service-layer logic.
+  Inputs you must provide: feature_plan_path, branch_name, dispatch_id.
+  Supported providers: claude, codex (sonnet preferred).
+
+- **code-reviewer** — Reviews PRs for correctness, security, performance.
+  Available skills: security-review, perf-review.
+  Inputs you must provide: pr_number, branch_name, focus_areas.
+  Supported providers: claude.
+
+- **qa-engineer** — Writes integration + e2e tests.
+  ...
+
+To dispatch, write a `dispatch.json` in `.vnx-data/dispatches/pending/<dispatch_id>/` with `agent: "workers/<name>"`, `instruction: "<your task description>"`, optional `skill_ref: "<name>"`, and other required fields.
+```
+
+Note: the orchestrator does NOT see the full `BEHAVIOR.md` of each worker. Just the library summary (frontmatter-derived). This:
+
+- Keeps the orchestrator's context window lean
+- Prevents the orch from "second-guessing" the worker's behavior
+- Makes the worker the single source of truth for its own behavior
+
+#### 12.4 Dispatch composition (headless)
+
+When orch writes a `dispatch.json`:
+
+```json
+{
+  "dispatch_id": "20260501-be-dev-42",
+  "agent": "workers/backend-developer",
+  "skill_ref": null,
+  "instruction": "Implement the user_provision endpoint per claudedocs/2026-05-01-user-provision-spec.md. Branch: fix/be-user-provision. Run pytest tests/test_user_provision.py before commit.",
+  "inputs": {
+    "feature_plan_path": "claudedocs/2026-05-01-user-provision-spec.md",
+    "branch_name": "fix/be-user-provision",
+    "dispatch_id": "20260501-be-dev-42"
+  },
+  "...": "other fields"
+}
+```
+
+VNX's dispatcher composes the worker's full prompt:
+
+```
+<contents of .claude/agents/workers/backend-developer/BEHAVIOR.md>
+
+## Inputs
+- feature_plan_path: claudedocs/2026-05-01-user-provision-spec.md
+- branch_name: fix/be-user-provision
+- dispatch_id: 20260501-be-dev-42
+
+## Task
+Implement the user_provision endpoint per claudedocs/2026-05-01-user-provision-spec.md.
+Branch: fix/be-user-provision. Run pytest tests/test_user_provision.py before commit.
+```
+
+If `skill_ref` set, VNX inserts the skill content between Inputs and Task sections.
+
+#### 12.5 Validation at dispatch time
+
+Before VNX accepts a dispatch in `pending/`:
+
+1. `agent` value must resolve to a folder in the registry. Else: reject with `unknown_agent`.
+2. If orch is sub-orchestrator, `agent` must be in the orch's `workers.yaml` pool. Else: reject with `worker_not_in_pool`.
+3. All `inputs_expected` from the worker's frontmatter must appear as keys in `dispatch.inputs`. Else: reject with `missing_input: <name>`.
+4. `skill_ref` if set must match a file in `<agent_folder>/skills/`. Else: reject with `unknown_skill`.
+5. Worker's `supported_providers` must include the orch's chosen provider for that worker. Else: reject with `provider_unsupported_by_worker`.
+
+Validation runs in `scripts/lib/dispatch_validator.py` before pending → active.
+
+#### 12.6 LOC estimate
+
+- `scripts/lib/agent_registry.py` (build + read) — ~150 LOC
+- `scripts/lib/dispatch_validator.py` (validation rules) — ~120 LOC
+- `scripts/lib/agent_library_renderer.py` (renders library into orch prompt) — ~80 LOC
+- Receipt schema field `agent_registry_version` — ~20 LOC
+- Tests — ~200 LOC
+- **Total: ~570 LOC, folded into W8 (folder-based agents).**
 
 ---
 
