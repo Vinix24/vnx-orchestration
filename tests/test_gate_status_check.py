@@ -29,6 +29,26 @@ def _write_gate_result(results_dir: Path, pr_number: int, gate: str, status: str
     return f
 
 
+def _write_gate_result_extra(
+    results_dir: Path,
+    pr_number: int,
+    gate: str,
+    status: str,
+    *,
+    blocking_findings: list | None = None,
+    blocking_count: int | None = None,
+) -> Path:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"gate": gate, "pr_number": pr_number, "status": status}
+    if blocking_findings is not None:
+        payload["blocking_findings"] = blocking_findings
+    if blocking_count is not None:
+        payload["blocking_count"] = blocking_count
+    f = results_dir / f"pr-{pr_number}-{gate}.json"
+    f.write_text(json.dumps(payload), encoding="utf-8")
+    return f
+
+
 def _make_event(dispatch_id: str) -> "object":
     """Build a minimal LoopEvent-like object for _check_all_gates_passed."""
     from headless_orchestrator import LoopEvent
@@ -111,6 +131,57 @@ class TestCheckAllGatesPassed:
             orch._check_all_gates_passed(_make_event("20260424-f42-pr3-some-feature-A"))
 
         assert not logged
+
+    def test_fails_when_blocking_findings_present(self, tmp_path: Path) -> None:
+        """status=pass but blocking_findings non-empty — is_pass() must block unblocking (OI-1139)."""
+        orch = _make_orchestrator(tmp_path)
+        results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_result_extra(
+            results_dir, 60, "codex_gate", "pass",
+            blocking_findings=["critical: hardcoded secret detected"],
+        )
+        _write_gate_result(results_dir, 60, "gemini_review", "pass")
+
+        logged: list[dict] = []
+        with patch("headless_orchestrator._log_loop_event", side_effect=lambda _d, rec: logged.append(rec)):
+            orch._check_all_gates_passed(_make_event("20260424-f60-pr1-feature-A"))
+
+        assert not any(r.get("event_type") == "feature_gates_complete" for r in logged), (
+            "feature_gates_complete must not fire when codex_gate has blocking findings"
+        )
+
+    def test_fails_when_blocking_count_nonzero(self, tmp_path: Path) -> None:
+        """status=completed but blocking_count=2 — is_pass() must block unblocking (OI-1139)."""
+        orch = _make_orchestrator(tmp_path)
+        results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_result(results_dir, 61, "codex_gate", "completed")
+        _write_gate_result_extra(
+            results_dir, 61, "gemini_review", "completed",
+            blocking_count=2,
+        )
+
+        logged: list[dict] = []
+        with patch("headless_orchestrator._log_loop_event", side_effect=lambda _d, rec: logged.append(rec)):
+            orch._check_all_gates_passed(_make_event("20260424-f61-pr1-feature-A"))
+
+        assert not any(r.get("event_type") == "feature_gates_complete" for r in logged), (
+            "feature_gates_complete must not fire when gemini_review has blocking_count > 0"
+        )
+
+    def test_passes_when_status_is_approve(self, tmp_path: Path) -> None:
+        """status=approve is in gate_status.PASS_STATES — must emit feature_gates_complete (OI-1139)."""
+        orch = _make_orchestrator(tmp_path)
+        results_dir = orch.state_dir / "review_gates" / "results"
+        _write_gate_result(results_dir, 62, "codex_gate", "approve")
+        _write_gate_result(results_dir, 62, "gemini_review", "approve")
+
+        logged: list[dict] = []
+        with patch("headless_orchestrator._log_loop_event", side_effect=lambda _d, rec: logged.append(rec)):
+            orch._check_all_gates_passed(_make_event("20260424-f62-pr1-feature-A"))
+
+        assert any(r.get("event_type") == "feature_gates_complete" for r in logged), (
+            "feature_gates_complete must fire for status=approve (canonical pass state)"
+        )
 
 
 class TestLatestPrScopedToCurrentFeature:
