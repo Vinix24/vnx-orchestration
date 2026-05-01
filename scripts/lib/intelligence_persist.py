@@ -20,6 +20,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from project_scope import current_project_id
+except ImportError:  # pragma: no cover - lib path bootstrap
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from project_scope import current_project_id
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        name = row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+        if name == column:
+            return True
+    return False
+
 
 def persist_signals_to_db(
     signals: List[Any],
@@ -96,12 +115,21 @@ def _upsert_success_pattern(
     """Insert or update a success_pattern from a gate_success signal."""
     title = content[:120] if content else "Gate passed"
     category = "governance"
+    project_id = current_project_id()
+    has_project = _has_column(conn, "success_patterns", "project_id")
 
-    existing = conn.execute(
-        "SELECT id, usage_count, source_dispatch_ids FROM success_patterns "
-        "WHERE title = ? AND category = ?",
-        (title, category),
-    ).fetchone()
+    if has_project:
+        existing = conn.execute(
+            "SELECT id, usage_count, source_dispatch_ids FROM success_patterns "
+            "WHERE title = ? AND category = ? AND project_id = ?",
+            (title, category, project_id),
+        ).fetchone()
+    else:
+        existing = conn.execute(
+            "SELECT id, usage_count, source_dispatch_ids FROM success_patterns "
+            "WHERE title = ? AND category = ?",
+            (title, category),
+        ).fetchone()
 
     if existing:
         row = dict(existing)
@@ -115,14 +143,27 @@ def _upsert_success_pattern(
         )
     else:
         source_ids = json.dumps([dispatch_id]) if dispatch_id else "[]"
-        conn.execute(
-            "INSERT INTO success_patterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("approach", category, title, content[:500], json.dumps({"source": "governance_signal"}),
-             0.55, 1, source_ids, now, now),
-        )
+        if has_project:
+            conn.execute(
+                "INSERT INTO success_patterns "
+                "(pattern_type, category, title, description, pattern_data, "
+                " confidence_score, usage_count, source_dispatch_ids, "
+                " first_seen, last_used, project_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("approach", category, title, content[:500],
+                 json.dumps({"source": "governance_signal"}),
+                 0.55, 1, source_ids, now, now, project_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO success_patterns "
+                "(pattern_type, category, title, description, pattern_data, "
+                " confidence_score, usage_count, source_dispatch_ids, first_seen, last_used) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("approach", category, title, content[:500],
+                 json.dumps({"source": "governance_signal"}),
+                 0.55, 1, source_ids, now, now),
+            )
 
     return 1
 
@@ -139,12 +180,21 @@ def _upsert_antipattern(
     """Insert or update an antipattern from a gate_failure or queue_anomaly signal."""
     title = content[:120] if content else f"{sig_type} detected"
     category = "governance"
+    project_id = current_project_id()
+    has_project = _has_column(conn, "antipatterns", "project_id")
 
-    existing = conn.execute(
-        "SELECT id, occurrence_count, source_dispatch_ids FROM antipatterns "
-        "WHERE title = ? AND category = ?",
-        (title, category),
-    ).fetchone()
+    if has_project:
+        existing = conn.execute(
+            "SELECT id, occurrence_count, source_dispatch_ids FROM antipatterns "
+            "WHERE title = ? AND category = ? AND project_id = ?",
+            (title, category, project_id),
+        ).fetchone()
+    else:
+        existing = conn.execute(
+            "SELECT id, occurrence_count, source_dispatch_ids FROM antipatterns "
+            "WHERE title = ? AND category = ?",
+            (title, category),
+        ).fetchone()
 
     if existing:
         row = dict(existing)
@@ -160,17 +210,30 @@ def _upsert_antipattern(
         db_severity = "high" if severity == "blocker" else severity
         if db_severity not in ("critical", "high", "medium", "low"):
             db_severity = "medium"
-        conn.execute(
-            "INSERT INTO antipatterns "
-            "(pattern_type, category, title, description, pattern_data, "
-            " why_problematic, severity, occurrence_count, "
-            " source_dispatch_ids, first_seen, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("approach", category, title, content[:500],
-             json.dumps({"source": "governance_signal", "defect_family": defect_family}),
-             content[:500], db_severity, 1,
-             source_ids, now, now),
-        )
+        if has_project:
+            conn.execute(
+                "INSERT INTO antipatterns "
+                "(pattern_type, category, title, description, pattern_data, "
+                " why_problematic, severity, occurrence_count, "
+                " source_dispatch_ids, first_seen, last_seen, project_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("approach", category, title, content[:500],
+                 json.dumps({"source": "governance_signal", "defect_family": defect_family}),
+                 content[:500], db_severity, 1,
+                 source_ids, now, now, project_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO antipatterns "
+                "(pattern_type, category, title, description, pattern_data, "
+                " why_problematic, severity, occurrence_count, "
+                " source_dispatch_ids, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("approach", category, title, content[:500],
+                 json.dumps({"source": "governance_signal", "defect_family": defect_family}),
+                 content[:500], db_severity, 1,
+                 source_ids, now, now),
+            )
 
     return 1
 
@@ -181,12 +244,24 @@ def _update_dispatch_outcome(
     outcome: str,
     now: str,
 ) -> int:
-    """Update dispatch_metadata outcome_status if the row exists."""
-    cur = conn.execute(
-        "UPDATE dispatch_metadata SET outcome_status = ?, completed_at = ? "
-        "WHERE dispatch_id = ? AND outcome_status IS NULL",
-        (outcome, now, dispatch_id),
-    )
+    """Update dispatch_metadata outcome_status if the row exists.
+
+    Scoped to ``current_project_id()`` so a dispatch_id collision across
+    tenants does not let one project overwrite another's outcome.
+    """
+    if _has_column(conn, "dispatch_metadata", "project_id"):
+        cur = conn.execute(
+            "UPDATE dispatch_metadata SET outcome_status = ?, completed_at = ? "
+            "WHERE dispatch_id = ? AND outcome_status IS NULL "
+            "AND project_id = ?",
+            (outcome, now, dispatch_id, current_project_id()),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE dispatch_metadata SET outcome_status = ?, completed_at = ? "
+            "WHERE dispatch_id = ? AND outcome_status IS NULL",
+            (outcome, now, dispatch_id),
+        )
     return cur.rowcount
 
 
@@ -232,13 +307,24 @@ def update_confidence_from_outcome(
     boosted = 0
     decayed = 0
     net_change = 0.0
+    project_id = current_project_id()
+    sp_has_project = _has_column(conn, "success_patterns", "project_id")
+    pu_has_project = _has_column(conn, "pattern_usage", "project_id")
+    ce_has_project = _has_column(conn, "confidence_events", "project_id")
 
     try:
-        rows = conn.execute(
-            "SELECT id, confidence_score, usage_count, title FROM success_patterns "
-            "WHERE source_dispatch_ids LIKE ?",
-            (f"%{dispatch_id}%",),
-        ).fetchall()
+        if sp_has_project:
+            rows = conn.execute(
+                "SELECT id, confidence_score, usage_count, title FROM success_patterns "
+                "WHERE source_dispatch_ids LIKE ? AND project_id = ?",
+                (f"%{dispatch_id}%", project_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, confidence_score, usage_count, title FROM success_patterns "
+                "WHERE source_dispatch_ids LIKE ?",
+                (f"%{dispatch_id}%",),
+            ).fetchall()
 
         is_success = status == "success"
 
@@ -258,15 +344,27 @@ def update_confidence_from_outcome(
                 succ = 1 if is_success else 0
                 fail = 0 if is_success else 1
                 used = 1 if is_success else 0
-                conn.execute(
-                    "INSERT INTO pattern_usage "
-                    "(pattern_id, pattern_title, pattern_hash, used_count, "
-                    " ignored_count, success_count, failure_count, "
-                    " last_used, confidence, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
-                    (pattern_id, title, pattern_hash, used,
-                     succ, fail, now, beta_score(succ, fail), now, now),
-                )
+                if pu_has_project:
+                    conn.execute(
+                        "INSERT INTO pattern_usage "
+                        "(pattern_id, pattern_title, pattern_hash, used_count, "
+                        " ignored_count, success_count, failure_count, "
+                        " last_used, confidence, created_at, updated_at, project_id) "
+                        "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                        (pattern_id, title, pattern_hash, used,
+                         succ, fail, now, beta_score(succ, fail), now, now,
+                         project_id),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO pattern_usage "
+                        "(pattern_id, pattern_title, pattern_hash, used_count, "
+                        " ignored_count, success_count, failure_count, "
+                        " last_used, confidence, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+                        (pattern_id, title, pattern_hash, used,
+                         succ, fail, now, beta_score(succ, fail), now, now),
+                    )
             else:
                 succ = int(usage["success_count"] or 0) + (1 if is_success else 0)
                 fail = int(usage["failure_count"] or 0) + (0 if is_success else 1)
@@ -300,14 +398,24 @@ def update_confidence_from_outcome(
 
         # Record a confidence_events audit row (best-effort — table may not exist yet)
         try:
-            conn.execute(
-                "INSERT INTO confidence_events "
-                "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
-                " confidence_change, occurred_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (dispatch_id, terminal, status, boosted, decayed,
-                 round(net_change, 4), now),
-            )
+            if ce_has_project:
+                conn.execute(
+                    "INSERT INTO confidence_events "
+                    "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
+                    " confidence_change, occurred_at, project_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (dispatch_id, terminal, status, boosted, decayed,
+                     round(net_change, 4), now, project_id),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO confidence_events "
+                    "(dispatch_id, terminal, outcome, patterns_boosted, patterns_decayed, "
+                    " confidence_change, occurred_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (dispatch_id, terminal, status, boosted, decayed,
+                     round(net_change, 4), now),
+                )
         except sqlite3.OperationalError:
             pass  # Table not yet migrated in older DBs
 

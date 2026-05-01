@@ -26,6 +26,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from project_scope import current_project_id, project_filter_enabled
+except ImportError:  # pragma: no cover - lib path bootstrap
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from project_scope import current_project_id, project_filter_enabled
+
 # ---------------------------------------------------------------------------
 # Constants from FP-C Intelligence Contract
 # ---------------------------------------------------------------------------
@@ -298,6 +306,39 @@ def _scope_matches(item_scope_tags: List[str], query_scope_tags: List[str]) -> b
     if not item_scope_tags or not query_scope_tags:
         return True
     return bool(set(item_scope_tags) & set(query_scope_tags))
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """PRAGMA-based column probe on an arbitrary connection.
+
+    Mirrors :meth:`IntelligenceSelector._has_column` for write paths that
+    operate on the coordination DB rather than the lazily-cached quality DB.
+    """
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        name = row[1] if not isinstance(row, sqlite3.Row) else row["name"]
+        if name == column:
+            return True
+    return False
+
+
+def _project_scope_clause(column_present: bool) -> tuple[str, tuple]:
+    """Return the ``AND project_id = ?`` fragment + bind params, or empty.
+
+    Two safety gates:
+      1. The caller has detected the ``project_id`` column on the target
+         table. Pre-Phase-0 DBs (or stripped-down test fixtures) skip the
+         filter so reads do not crash.
+      2. ``project_filter_enabled()`` is true (it is unless
+         ``VNX_PROJECT_FILTER`` is set to a falsy value). This is the
+         opt-out for cross-tenant analytics queries.
+    """
+    if not column_present or not project_filter_enabled():
+        return "", ()
+    return "AND project_id = ?", (current_project_id(),)
 
 
 def _task_class_matches(item_filter: List[str], task_class: str) -> bool:
@@ -599,29 +640,56 @@ class IntelligenceSelector:
         injection_id = _new_id()
         items_json = json.dumps([item.to_dict() for item in result.items])
         suppressed_json = json.dumps([s.to_dict() for s in result.suppressed])
+        project_id = current_project_id()
 
         try:
             with get_connection(state_dir) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO intelligence_injections
-                        (injection_id, dispatch_id, injection_point, task_class,
-                         items_injected, items_suppressed, payload_chars,
-                         items_json, suppressed_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        injection_id,
-                        result.dispatch_id,
-                        result.injection_point,
-                        result.task_class,
-                        result.items_injected,
-                        result.items_suppressed,
-                        result.payload_chars,
-                        items_json,
-                        suppressed_json,
-                    ),
+                has_project = _table_has_column(
+                    conn, "intelligence_injections", "project_id"
                 )
+                if has_project:
+                    conn.execute(
+                        """
+                        INSERT INTO intelligence_injections
+                            (injection_id, dispatch_id, injection_point, task_class,
+                             items_injected, items_suppressed, payload_chars,
+                             items_json, suppressed_json, project_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            injection_id,
+                            result.dispatch_id,
+                            result.injection_point,
+                            result.task_class,
+                            result.items_injected,
+                            result.items_suppressed,
+                            result.payload_chars,
+                            items_json,
+                            suppressed_json,
+                            project_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO intelligence_injections
+                            (injection_id, dispatch_id, injection_point, task_class,
+                             items_injected, items_suppressed, payload_chars,
+                             items_json, suppressed_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            injection_id,
+                            result.dispatch_id,
+                            result.injection_point,
+                            result.task_class,
+                            result.items_injected,
+                            result.items_suppressed,
+                            result.payload_chars,
+                            items_json,
+                            suppressed_json,
+                        ),
+                    )
                 conn.commit()
         except Exception:
             pass
@@ -652,6 +720,9 @@ class IntelligenceSelector:
         if db is None:
             return
         now = _now_utc()
+        project_id = current_project_id()
+        pu_has_project = self._has_column("pattern_usage", "project_id")
+        dpo_has_project = self._has_column("dispatch_pattern_offered", "project_id")
         try:
             db.execute(
                 """
@@ -664,41 +735,89 @@ class IntelligenceSelector:
                 )
                 """
             )
+            # Re-probe after CREATE — a freshly created table won't have project_id.
+            dpo_has_project = self._has_column("dispatch_pattern_offered", "project_id")
             for item in result.items:
                 pattern_hash = _item_hash(item.item_id)
-                db.execute(
-                    """
-                    INSERT INTO pattern_usage
-                        (pattern_id, pattern_title, pattern_hash, used_count,
-                         ignored_count, success_count, failure_count,
-                         last_offered, confidence, created_at, updated_at)
-                    VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
-                    ON CONFLICT(pattern_id) DO UPDATE SET
-                        pattern_title = excluded.pattern_title,
-                        pattern_hash  = excluded.pattern_hash,
-                        last_offered  = excluded.last_offered,
-                        updated_at    = excluded.updated_at
-                    """,
-                    (
-                        item.item_id,
-                        item.title[:255],
-                        pattern_hash,
-                        now,
-                        item.confidence,
-                        now,
-                        now,
-                    ),
-                )
-                db.execute(
-                    """
-                    INSERT INTO dispatch_pattern_offered
-                        (dispatch_id, pattern_id, pattern_title, offered_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
-                        offered_at = excluded.offered_at
-                    """,
-                    (result.dispatch_id, item.item_id, item.title[:255], now),
-                )
+                if pu_has_project:
+                    db.execute(
+                        """
+                        INSERT INTO pattern_usage
+                            (pattern_id, pattern_title, pattern_hash, used_count,
+                             ignored_count, success_count, failure_count,
+                             last_offered, confidence, created_at, updated_at,
+                             project_id)
+                        VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?)
+                        ON CONFLICT(pattern_id) DO UPDATE SET
+                            pattern_title = excluded.pattern_title,
+                            pattern_hash  = excluded.pattern_hash,
+                            last_offered  = excluded.last_offered,
+                            updated_at    = excluded.updated_at
+                        """,
+                        (
+                            item.item_id,
+                            item.title[:255],
+                            pattern_hash,
+                            now,
+                            item.confidence,
+                            now,
+                            now,
+                            project_id,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """
+                        INSERT INTO pattern_usage
+                            (pattern_id, pattern_title, pattern_hash, used_count,
+                             ignored_count, success_count, failure_count,
+                             last_offered, confidence, created_at, updated_at)
+                        VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?)
+                        ON CONFLICT(pattern_id) DO UPDATE SET
+                            pattern_title = excluded.pattern_title,
+                            pattern_hash  = excluded.pattern_hash,
+                            last_offered  = excluded.last_offered,
+                            updated_at    = excluded.updated_at
+                        """,
+                        (
+                            item.item_id,
+                            item.title[:255],
+                            pattern_hash,
+                            now,
+                            item.confidence,
+                            now,
+                            now,
+                        ),
+                    )
+                if dpo_has_project:
+                    db.execute(
+                        """
+                        INSERT INTO dispatch_pattern_offered
+                            (dispatch_id, pattern_id, pattern_title, offered_at,
+                             project_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
+                            offered_at = excluded.offered_at
+                        """,
+                        (
+                            result.dispatch_id,
+                            item.item_id,
+                            item.title[:255],
+                            now,
+                            project_id,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """
+                        INSERT INTO dispatch_pattern_offered
+                            (dispatch_id, pattern_id, pattern_title, offered_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(dispatch_id, pattern_id) DO UPDATE SET
+                            offered_at = excluded.offered_at
+                        """,
+                        (result.dispatch_id, item.item_id, item.title[:255], now),
+                    )
                 self._stamp_source_dispatch_id(db, item, result.dispatch_id)
             db.commit()
         except Exception:
@@ -897,15 +1016,20 @@ class IntelligenceSelector:
             select_cols += ", pattern_category"
         if has_content_hash_col:
             select_cols += ", content_hash"
+        scope_clause, scope_params = _project_scope_clause(
+            self._has_column("success_patterns", "project_id")
+        )
         try:
             rows = db.execute(
                 f"""
                 SELECT {select_cols}
                 FROM success_patterns
                 WHERE (valid_until IS NULL OR valid_until > datetime('now'))
+                  {scope_clause}
                 ORDER BY confidence_score DESC
                 LIMIT 20
                 """,
+                scope_params,
             ).fetchall()
         except Exception:
             return items
@@ -1017,15 +1141,19 @@ class IntelligenceSelector:
         items: List[IntelligenceItem] = []
 
         # Query antipatterns
+        ap_scope_clause, ap_scope_params = _project_scope_clause(
+            self._has_column("antipatterns", "project_id")
+        )
         try:
             rows = db.execute(
-                """
+                f"""
                 SELECT id, title, description, category, severity,
                        why_problematic, better_alternative,
                        occurrence_count, first_seen, last_seen
                 FROM antipatterns
                 WHERE occurrence_count >= 1
                   AND (valid_until IS NULL OR valid_until > datetime('now'))
+                  {ap_scope_clause}
                 ORDER BY
                     CASE severity
                         WHEN 'critical' THEN 4
@@ -1037,6 +1165,7 @@ class IntelligenceSelector:
                     occurrence_count DESC
                 LIMIT 5
                 """,
+                ap_scope_params,
             ).fetchall()
         except Exception:
             rows = []
@@ -1078,16 +1207,21 @@ class IntelligenceSelector:
             ))
 
         # Query prevention_rules
+        pr_scope_clause, pr_scope_params = _project_scope_clause(
+            self._has_column("prevention_rules", "project_id")
+        )
         try:
             rule_rows = db.execute(
-                """
+                f"""
                 SELECT id, tag_combination, rule_type, description,
                        recommendation, confidence, triggered_count, last_triggered
                 FROM prevention_rules
                 WHERE (valid_until IS NULL OR valid_until > datetime('now'))
+                  {pr_scope_clause}
                 ORDER BY confidence DESC
                 LIMIT 10
                 """,
+                pr_scope_params,
             ).fetchall()
         except Exception:
             rule_rows = []
@@ -1137,19 +1271,23 @@ class IntelligenceSelector:
         items: List[IntelligenceItem] = []
         cutoff = (datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)).isoformat()
 
+        dm_scope_clause, dm_scope_params = _project_scope_clause(
+            self._has_column("dispatch_metadata", "project_id")
+        )
         try:
             rows = db.execute(
-                """
+                f"""
                 SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
                        prevention_rule_count
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL
+                  {dm_scope_clause}
                 ORDER BY dispatched_at DESC
                 LIMIT 20
                 """,
-                (cutoff,),
+                (cutoff, *dm_scope_params),
             ).fetchall()
         except Exception:
             return items

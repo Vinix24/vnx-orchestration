@@ -16,8 +16,20 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
     from vnx_paths import ensure_env
+    from project_scope import current_project_id
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row[1] == column:
+            return True
+    return False
 
 PATHS = ensure_env()
 DB_PATH = Path(PATHS["VNX_STATE_DIR"]) / "quality_intelligence.db"
@@ -56,31 +68,60 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    cur.execute("""
-        INSERT OR REPLACE INTO dispatch_metadata (
-            dispatch_id, terminal, track, role, skill_name, gate,
-            cognition, priority, pr_id,
-            pattern_count, prevention_rule_count, intelligence_json,
-            instruction_char_count, context_file_count, target_open_items, dispatched_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        args.dispatch_id,
-        args.terminal,
-        args.track,
-        args.role or None,
-        args.skill_name or None,
-        args.gate or None,
-        args.cognition,
-        args.priority,
-        args.pr_id or None,
-        args.pattern_count,
-        args.prevention_rule_count,
-        args.intelligence_json or None,
-        args.instruction_char_count,
-        args.context_file_count,
-        args.target_open_items,
-        datetime.utcnow().isoformat(),
-    ))
+    if _has_column(conn, "dispatch_metadata", "project_id"):
+        cur.execute("""
+            INSERT OR REPLACE INTO dispatch_metadata (
+                dispatch_id, terminal, track, role, skill_name, gate,
+                cognition, priority, pr_id,
+                pattern_count, prevention_rule_count, intelligence_json,
+                instruction_char_count, context_file_count, target_open_items,
+                dispatched_at, project_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            args.dispatch_id,
+            args.terminal,
+            args.track,
+            args.role or None,
+            args.skill_name or None,
+            args.gate or None,
+            args.cognition,
+            args.priority,
+            args.pr_id or None,
+            args.pattern_count,
+            args.prevention_rule_count,
+            args.intelligence_json or None,
+            args.instruction_char_count,
+            args.context_file_count,
+            args.target_open_items,
+            datetime.utcnow().isoformat(),
+            current_project_id(),
+        ))
+    else:
+        cur.execute("""
+            INSERT OR REPLACE INTO dispatch_metadata (
+                dispatch_id, terminal, track, role, skill_name, gate,
+                cognition, priority, pr_id,
+                pattern_count, prevention_rule_count, intelligence_json,
+                instruction_char_count, context_file_count, target_open_items, dispatched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            args.dispatch_id,
+            args.terminal,
+            args.track,
+            args.role or None,
+            args.skill_name or None,
+            args.gate or None,
+            args.cognition,
+            args.priority,
+            args.pr_id or None,
+            args.pattern_count,
+            args.prevention_rule_count,
+            args.intelligence_json or None,
+            args.instruction_char_count,
+            args.context_file_count,
+            args.target_open_items,
+            datetime.utcnow().isoformat(),
+        ))
     conn.commit()
     conn.close()
     print(f"Logged dispatch metadata: {args.dispatch_id}")

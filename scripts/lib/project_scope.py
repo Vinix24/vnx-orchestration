@@ -21,9 +21,14 @@ import re
 
 DEFAULT_PROJECT = "vnx-dev"
 ENV_VAR = "VNX_PROJECT_ID"
+FILTER_ENV_VAR = "VNX_PROJECT_FILTER"
 
 # Migration plan §3.2 — strict allowlist for project_id values.
 _PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+
+# Truthy/falsy parsing for VNX_PROJECT_FILTER. Default ON (filter applied)
+# so that selectors do not bleed cross-tenant data without explicit opt-out.
+_FALSY = frozenset({"0", "false", "no", "off"})
 
 
 def _validate(project_id: str) -> str:
@@ -47,6 +52,21 @@ def current_project_id() -> str:
     if not raw:
         return DEFAULT_PROJECT
     return _validate(raw)
+
+
+def project_filter_enabled() -> bool:
+    """Return True when per-project filtering should be applied to reads.
+
+    Phase 1 contract: the env var ``VNX_PROJECT_FILTER`` controls whether
+    selectors restrict reads to ``current_project_id()``. Default is ON
+    (filter applied) — multi-tenant safety is the priority. Set to ``0``,
+    ``false``, ``no`` or ``off`` to disable, e.g. for cross-tenant analytics
+    backfills.
+    """
+    raw = os.environ.get(FILTER_ENV_VAR)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _FALSY
 
 
 def scoped_query(base_sql: str, project_id: str | None = None) -> str:
