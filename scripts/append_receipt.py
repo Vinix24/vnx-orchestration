@@ -23,6 +23,7 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
     from vnx_paths import ensure_env
     from project_root import resolve_state_dir
+    from project_scope import current_project_id
     from quality_advisory import generate_quality_advisory, get_changed_files
     from terminal_snapshot import collect_terminal_snapshot
     from cqs_calculator import calculate_cqs
@@ -663,6 +664,11 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     paths = ensure_env()
     state_dir = Path(paths.get("VNX_STATE_DIR", ".")).resolve()
 
+    # Stamp project_id on the receipt for cross-DB attribution.
+    # current_project_id() falls back to 'vnx-dev' so vnx-dev call sites are
+    # unchanged from Phase 0.
+    enriched.setdefault("project_id", current_project_id())
+
     # Inject git provenance metadata (best-effort).
     if "provenance" not in enriched:
         try:
@@ -817,10 +823,24 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
             if db_path_oi.exists():
                 import sqlite3 as _sqlite3_oi
                 conn_oi = _sqlite3_oi.connect(str(db_path_oi))
-                row = conn_oi.execute(
-                    "SELECT target_open_items FROM dispatch_metadata WHERE dispatch_id=?",
-                    (dispatch_id_for_oi,),
-                ).fetchone()
+                try:
+                    cols = conn_oi.execute(
+                        "PRAGMA table_info(dispatch_metadata)"
+                    ).fetchall()
+                    has_project_oi = any(c[1] == "project_id" for c in cols)
+                except _sqlite3_oi.Error:
+                    has_project_oi = False
+                if has_project_oi:
+                    row = conn_oi.execute(
+                        "SELECT target_open_items FROM dispatch_metadata "
+                        "WHERE dispatch_id=? AND project_id=?",
+                        (dispatch_id_for_oi, current_project_id()),
+                    ).fetchone()
+                else:
+                    row = conn_oi.execute(
+                        "SELECT target_open_items FROM dispatch_metadata WHERE dispatch_id=?",
+                        (dispatch_id_for_oi,),
+                    ).fetchone()
                 conn_oi.close()
                 if row and row[0]:
                     try:
@@ -849,22 +869,51 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
                 enriched["cqs"] = cqs_result
                 import sqlite3
                 conn = sqlite3.connect(str(db_path))
-                conn.execute(
-                    """UPDATE dispatch_metadata
-                       SET cqs=?, normalized_status=?, cqs_components=?,
-                           open_items_created=?, open_items_resolved=?,
-                           quality_advisory_json=?
-                       WHERE dispatch_id=?""",
-                    (
-                        cqs_result["cqs"],
-                        cqs_result["normalized_status"],
-                        json.dumps(cqs_result["components"]),
-                        enriched.get("open_items_created", 0),
-                        enriched.get("open_items_resolved", 0),
-                        json.dumps(enriched.get("quality_advisory") or {}),
-                        dispatch_id,
-                    ),
-                )
+                # Scope by project_id when the column exists so cross-tenant
+                # dispatch_id collisions cannot stomp another tenant's CQS.
+                has_project = False
+                try:
+                    rows = conn.execute(
+                        "PRAGMA table_info(dispatch_metadata)"
+                    ).fetchall()
+                    has_project = any(r[1] == "project_id" for r in rows)
+                except sqlite3.Error:
+                    has_project = False
+                if has_project:
+                    conn.execute(
+                        """UPDATE dispatch_metadata
+                           SET cqs=?, normalized_status=?, cqs_components=?,
+                               open_items_created=?, open_items_resolved=?,
+                               quality_advisory_json=?
+                           WHERE dispatch_id=? AND project_id=?""",
+                        (
+                            cqs_result["cqs"],
+                            cqs_result["normalized_status"],
+                            json.dumps(cqs_result["components"]),
+                            enriched.get("open_items_created", 0),
+                            enriched.get("open_items_resolved", 0),
+                            json.dumps(enriched.get("quality_advisory") or {}),
+                            dispatch_id,
+                            current_project_id(),
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE dispatch_metadata
+                           SET cqs=?, normalized_status=?, cqs_components=?,
+                               open_items_created=?, open_items_resolved=?,
+                               quality_advisory_json=?
+                           WHERE dispatch_id=?""",
+                        (
+                            cqs_result["cqs"],
+                            cqs_result["normalized_status"],
+                            json.dumps(cqs_result["components"]),
+                            enriched.get("open_items_created", 0),
+                            enriched.get("open_items_resolved", 0),
+                            json.dumps(enriched.get("quality_advisory") or {}),
+                            dispatch_id,
+                        ),
+                    )
                 conn.commit()
                 conn.close()
     except Exception as exc:
