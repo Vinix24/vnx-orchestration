@@ -37,7 +37,7 @@ from business_light_policy import (
     business_light_policy,
 )
 from governance_profile_selector import (
-    GovernanceProfile,
+    GovernanceProfileEnum,
     ProfileSelection,
     ProfileVisibility,
     build_visibility,
@@ -157,12 +157,12 @@ class TestGovernanceProfileSelector:
     def test_coding_scope_always_gets_coding_strict(self) -> None:
         scope = coding_worktree_scope("/tmp/coding")
         selection = select_profile(scope)
-        assert selection.profile == GovernanceProfile.CODING_STRICT
+        assert selection.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_business_scope_gets_business_light_when_requested(self) -> None:
         scope = business_folder_scope("/tmp/business")
-        selection = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert selection.profile == GovernanceProfile.BUSINESS_LIGHT
+        selection = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert selection.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
     def test_coding_strict_is_authoritative(self) -> None:
         scope = coding_worktree_scope("/tmp/coding")
@@ -171,23 +171,23 @@ class TestGovernanceProfileSelector:
 
     def test_business_light_not_authoritative(self) -> None:
         scope = business_folder_scope("/tmp/business")
-        selection = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        selection = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         assert not selection.is_authoritative()
 
     def test_coding_scope_cannot_be_overridden_to_business(self) -> None:
         scope = coding_worktree_scope("/tmp/coding")
-        selection = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert selection.profile == GovernanceProfile.CODING_STRICT
+        selection = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert selection.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_selection_is_immutable(self) -> None:
         scope = coding_worktree_scope("/tmp/coding")
         selection = select_profile(scope)
         with pytest.raises(AttributeError):
-            selection.profile = GovernanceProfile.BUSINESS_LIGHT  # type: ignore[misc]
+            selection.profile = GovernanceProfileEnum.BUSINESS_LIGHT  # type: ignore[misc]
 
     def test_visibility_surface_informative(self) -> None:
         scope = business_folder_scope("/tmp/business")
-        selection = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        selection = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         visibility = build_visibility(selection, open_items=[])
         assert isinstance(visibility, ProfileVisibility)
 
@@ -230,7 +230,7 @@ class TestCrossProfileIsolation:
 class TestContractAlignment:
 
     def test_two_governance_profiles_exist(self) -> None:
-        assert len(list(GovernanceProfile)) == 2
+        assert len(list(GovernanceProfileEnum)) == 2
 
     def test_two_primary_scope_types(self) -> None:
         assert ScopeType.CODING_WORKTREE is not None

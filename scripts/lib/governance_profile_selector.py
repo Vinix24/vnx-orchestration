@@ -6,7 +6,7 @@ scopes while preserving coding_strict as the default authoritative profile.
 Coding scopes cannot be overridden to business_light by construction.
 
 Components:
-  GovernanceProfile     — CODING_STRICT | BUSINESS_LIGHT
+  GovernanceProfileEnum — CODING_STRICT | BUSINESS_LIGHT (enum; renamed from GovernanceProfile, OI-1160)
   ProfileSelection      — immutable result of a governance profile selection
   ProfileVisibility     — operator-readable status surface for a selection
   ProfileSelector       — core profile selection engine
@@ -26,13 +26,13 @@ Design invariants:
 
 Usage (select profile for a scope):
     scope = business_folder_scope("/work/crm")
-    sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-    assert sel.profile == GovernanceProfile.BUSINESS_LIGHT
+    sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+    assert sel.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
 Usage (coding scope ignores requested profile):
     scope = coding_worktree_scope("/dev/vnx-wt")
-    sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-    assert sel.profile == GovernanceProfile.CODING_STRICT  # override blocked
+    sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+    assert sel.profile == GovernanceProfileEnum.CODING_STRICT  # override blocked
 
 Usage (operator visibility):
     vis = build_visibility(sel, open_items=[...], note="sprint review")
@@ -52,7 +52,7 @@ from folder_scope import FolderScope, ScopeType
 # Governance profile
 # ---------------------------------------------------------------------------
 
-class GovernanceProfile(Enum):
+class GovernanceProfileEnum(Enum):
     """Governance profile classification.
 
     CODING_STRICT  — the default authoritative profile for all coding scopes.
@@ -78,18 +78,18 @@ class ProfileSelection:
         selection_id: Identifier for this selection event (for audit trail).
         note:        Human-readable note explaining the selection.
     """
-    profile: GovernanceProfile
+    profile: GovernanceProfileEnum
     scope_type: ScopeType
     selection_id: str = ""
     note: str = ""
 
     def is_authoritative(self) -> bool:
         """True when profile is CODING_STRICT."""
-        return self.profile == GovernanceProfile.CODING_STRICT
+        return self.profile == GovernanceProfileEnum.CODING_STRICT
 
     def is_business_light(self) -> bool:
         """True when profile is BUSINESS_LIGHT."""
-        return self.profile == GovernanceProfile.BUSINESS_LIGHT
+        return self.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
     def to_audit_line(self) -> str:
         """Produce a single-line audit string for this selection."""
@@ -184,7 +184,7 @@ class ProfileSelector:
     def select(
         self,
         scope: FolderScope,
-        requested: Optional[GovernanceProfile] = None,
+        requested: Optional[GovernanceProfileEnum] = None,
         selection_id: str = "",
     ) -> ProfileSelection:
         """Select the effective governance profile for a scope.
@@ -193,21 +193,21 @@ class ProfileSelector:
         """
         if scope.is_coding_scope():
             return ProfileSelection(
-                profile=GovernanceProfile.CODING_STRICT,
+                profile=GovernanceProfileEnum.CODING_STRICT,
                 scope_type=scope.scope_type,
                 selection_id=selection_id,
-                note=_CODING_SCOPE_NOTE if requested == GovernanceProfile.BUSINESS_LIGHT
+                note=_CODING_SCOPE_NOTE if requested == GovernanceProfileEnum.BUSINESS_LIGHT
                      else _DEFAULT_NOTE,
             )
-        if requested == GovernanceProfile.BUSINESS_LIGHT:
+        if requested == GovernanceProfileEnum.BUSINESS_LIGHT:
             return ProfileSelection(
-                profile=GovernanceProfile.BUSINESS_LIGHT,
+                profile=GovernanceProfileEnum.BUSINESS_LIGHT,
                 scope_type=scope.scope_type,
                 selection_id=selection_id,
                 note=_BUSINESS_LIGHT_NOTE,
             )
         return ProfileSelection(
-            profile=GovernanceProfile.CODING_STRICT,
+            profile=GovernanceProfileEnum.CODING_STRICT,
             scope_type=scope.scope_type,
             selection_id=selection_id,
             note=_DEFAULT_NOTE,
@@ -217,9 +217,9 @@ class ProfileSelector:
         """True only for non-coding scopes (business_light can be requested)."""
         return scope.is_business_scope()
 
-    def default_profile(self) -> GovernanceProfile:
+    def default_profile(self) -> GovernanceProfileEnum:
         """Return the default governance profile."""
-        return GovernanceProfile.CODING_STRICT
+        return GovernanceProfileEnum.CODING_STRICT
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ class ProfileSelector:
 
 def select_profile(
     scope: FolderScope,
-    requested: Optional[GovernanceProfile] = None,
+    requested: Optional[GovernanceProfileEnum] = None,
     selection_id: str = "",
 ) -> ProfileSelection:
     """Stateless helper: select the effective profile for a scope."""
@@ -259,7 +259,7 @@ def coding_strict_selection(
 ) -> ProfileSelection:
     """Return a CODING_STRICT ProfileSelection for the given scope."""
     return ProfileSelection(
-        profile=GovernanceProfile.CODING_STRICT,
+        profile=GovernanceProfileEnum.CODING_STRICT,
         scope_type=scope.scope_type,
         selection_id=selection_id,
         note=_DEFAULT_NOTE,
@@ -281,7 +281,7 @@ def business_light_selection(
             f"{scope.root!r}. Coding scopes always use coding_strict."
         )
     return ProfileSelection(
-        profile=GovernanceProfile.BUSINESS_LIGHT,
+        profile=GovernanceProfileEnum.BUSINESS_LIGHT,
         scope_type=scope.scope_type,
         selection_id=selection_id,
         note=_BUSINESS_LIGHT_NOTE,
