@@ -26,9 +26,13 @@ Usage
 
 Environment (GitHub Actions compatible)
 ---------------------------------------
-  GITHUB_HEAD_REF      current PR branch name
+  GITHUB_EVENT_NAME    event type (e.g. ``pull_request`` or ``push``)
+  GITHUB_HEAD_REF      PR source branch (set only on ``pull_request`` events)
+  GITHUB_REF_NAME      ref name for ``push`` events (e.g. ``main``)
   GITHUB_BASE_REF      target/base branch name
   VNX_SLUG_ENFORCEMENT "1" = block on failure (default shadow/warn)
+  VNX_DEFAULT_BRANCHES comma-separated list of default branches to skip on
+                       push events (default: ``main,master``)
 """
 from __future__ import annotations
 
@@ -375,21 +379,77 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+DEFAULT_BRANCH_NAMES = ("main", "master")
+
+
+def _default_branches() -> tuple[str, ...]:
+    import os
+    raw = os.environ.get("VNX_DEFAULT_BRANCHES", "")
+    if not raw.strip():
+        return DEFAULT_BRANCH_NAMES
+    return tuple(b.strip() for b in raw.split(",") if b.strip())
+
+
+def resolve_branch_name(args_branch_name: str | None) -> tuple[str, bool]:
+    """Resolve the branch name and detect push-to-default-branch events.
+
+    Returns (branch_name, skip_push_default).
+
+    Resolution order:
+      1. Explicit ``--branch-name`` argument (overrides everything)
+      2. ``GITHUB_HEAD_REF`` (set on ``pull_request`` events)
+      3. ``GITHUB_REF_NAME`` (set on ``push`` events; previously the gate
+         left this empty and silently passed)
+      4. ``git rev-parse --abbrev-ref HEAD``
+
+    When the resolved branch is a default branch (e.g. ``main``) and the
+    event is a ``push`` (or no PR head ref is available), the gate is
+    skipped: the dispatch-id-vs-branch invariant only meaningfully
+    applies on PR/topic branches.
+    """
     import os
 
+    if args_branch_name:
+        return args_branch_name, False
+
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+    head_ref = os.environ.get("GITHUB_HEAD_REF", "").strip()
+    ref_name = os.environ.get("GITHUB_REF_NAME", "").strip()
+
+    if head_ref:
+        return head_ref, False
+
+    if ref_name:
+        is_push = event_name == "push" or event_name == ""
+        if is_push and ref_name in _default_branches():
+            return ref_name, True
+        return ref_name, False
+
+    branch = current_branch()
+    if event_name == "push" and branch in _default_branches():
+        return branch, True
+    return branch, False
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    branch_name = args.branch_name
-    if not branch_name:
-        branch_name = os.environ.get("GITHUB_HEAD_REF", "")
-    if not branch_name:
-        try:
-            branch_name = current_branch()
-        except RuntimeError as exc:
-            print(f"[ERROR] Cannot determine branch: {exc}", file=sys.stderr)
-            return 2
+    try:
+        branch_name, skip_push_default = resolve_branch_name(args.branch_name)
+    except RuntimeError as exc:
+        print(f"[ERROR] Cannot determine branch: {exc}", file=sys.stderr)
+        return 2
+
+    if skip_push_default:
+        _bar()
+        print(" VNX CI — Dispatch-ID Slug-Match Gate")
+        print(f" Branch : {branch_name}")
+        print(" Mode   : SKIPPED (push event on default branch)")
+        _bar()
+        print()
+        print("RESULT: SKIP (gate only meaningful on PR/topic branches)")
+        return 0
 
     return run_gate(
         base_ref=args.base_ref,
