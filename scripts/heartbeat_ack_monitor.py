@@ -42,6 +42,11 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 try:
+    from project_scope import project_socket_path
+except Exception as exc:
+    raise SystemExit(f"Failed to load project_scope: {exc}")
+
+try:
     from terminal_state_shadow import TerminalUpdate, default_lease_expires, update_terminal_state
     SHADOW_TERMINAL_STATE_AVAILABLE = True
 except Exception as exc:
@@ -782,8 +787,17 @@ class HeartbeatACKMonitor:
             except Exception as e:
                 logger.error(f"[SOCKET] Error handling connection: {e}")
 
-    def start_socket_server(self, socket_path: str = '/tmp/heartbeat_ack_monitor.sock'):
-        """Start socket server in background thread"""
+    def start_socket_server(self, socket_path: Optional[str] = None):
+        """Start socket server in background thread.
+
+        ``socket_path`` defaults to the project-scoped path under
+        ``$VNX_DATA_DIR/sockets/heartbeat_ack_monitor.sock`` so concurrent
+        VNX projects on the same host never share a listener.
+        """
+        if socket_path is None:
+            socket_path = str(project_socket_path("heartbeat_ack_monitor.sock"))
+
+        Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
 
         thread = threading.Thread(
             target=self._socket_server,
@@ -865,10 +879,10 @@ def _run_production_mode() -> int:
     logger.info("Heartbeat-Based ACK Monitor - PRODUCTION MODE")
     logger.info("=" * 60)
 
-    # Start socket server to receive dispatch notifications from dispatcher
-    # Project-scoped socket to prevent cross-project receipt contamination
-    project_name = os.path.basename(monitor.project_root) if hasattr(monitor, 'project_root') else 'default'
-    socket_path = f'/tmp/heartbeat_ack_monitor_{project_name}.sock'
+    # Start socket server to receive dispatch notifications from dispatcher.
+    # Socket lives under $VNX_DATA_DIR/sockets/ so concurrent VNX projects
+    # on the same host never share a listener (OI-1067 / W4G).
+    socket_path = str(project_socket_path("heartbeat_ack_monitor.sock"))
     monitor.start_socket_server(socket_path)
 
     logger.info(f"[READY] ACK monitor ready to receive dispatches via {socket_path}")

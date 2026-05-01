@@ -549,7 +549,7 @@ TSJSON
         _other_vnx_home="$_other_root/.claude"/"vnx-system"
       fi
       if [ -n "$_other_vnx_home" ]; then
-        _other_cmd="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR; export PROJECT_ROOT='$_other_root' VNX_HOME='$_other_vnx_home' VNX_DATA_DIR='$_other_root/.vnx-data'; bash '$_other_vnx_home/scripts/queue_ui_enhanced.sh'"
+        _other_cmd="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_SOCKETS_DIR VNX_REPORTS_DIR VNX_DB_DIR; export PROJECT_ROOT='$_other_root' VNX_HOME='$_other_vnx_home' VNX_DATA_DIR='$_other_root/.vnx-data'; bash '$_other_vnx_home/scripts/queue_ui_enhanced.sh'"
         tmux set-option -t "$_other_session" @vnx_popup_cmd "$_other_cmd" 2>/dev/null || true
         log "Backfilled @vnx_popup_cmd on session: $_other_session (project: $_other_root)"
       fi
@@ -558,7 +558,10 @@ TSJSON
     # Create resolver script that reads @vnx_popup_cmd from the current client session.
     # Falls back to scanning all sessions by pane path if the current session has no cmd set.
     # Keep this compatible with tmux variants that do not support `run-shell -F`.
-    local resolver="/tmp/vnx_popup_resolver.sh"
+    # Project-scoped path (OI-1067 / W4G): each project owns its own resolver
+    # under VNX_DATA_DIR/sockets/, so concurrent VNX projects don't clobber.
+    mkdir -p "$VNX_DATA_DIR/sockets"
+    local resolver="$VNX_DATA_DIR/sockets/vnx_popup_resolver.sh"
     cat > "$resolver" <<'RESOLVER'
 #!/usr/bin/env bash
 session=""
@@ -614,7 +617,7 @@ RESOLVER
   # via Python to stay in sync. Falls back to hardcoded list if Python unavailable.
   local _vnx_vars_list
   _vnx_vars_list="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" python3 -c "from vnx_start_runtime import VNX_VARS; print(' '.join(VNX_VARS))" 2>/dev/null)" \
-    || _vnx_vars_list="PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
+    || _vnx_vars_list="PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_SOCKETS_DIR VNX_REPORTS_DIR VNX_DB_DIR"
   for _vnx_var in $_vnx_vars_list; do
     tmux set-environment -g -u "$_vnx_var" 2>/dev/null || true
   done

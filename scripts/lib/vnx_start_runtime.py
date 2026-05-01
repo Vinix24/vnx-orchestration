@@ -47,6 +47,7 @@ VNX_VARS: Tuple[str, ...] = (
     "VNX_SKILLS_DIR",
     "VNX_PIDS_DIR",
     "VNX_LOCKS_DIR",
+    "VNX_SOCKETS_DIR",
     "VNX_REPORTS_DIR",
     "VNX_DB_DIR",
 )
