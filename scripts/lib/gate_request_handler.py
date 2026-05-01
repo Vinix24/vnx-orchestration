@@ -43,6 +43,26 @@ class GateRequestHandlerMixin:
     def _ci_gate_available(self) -> bool:
         return os.environ.get("VNX_CI_GATE_REQUIRED", "0") == "1" and shutil.which("gh") is not None
 
+    def _dispatch_one_review(
+        self,
+        gate: str,
+        pr_number: int,
+        branch: str,
+        risk_class: str,
+        changed_files: List[str],
+        mode: str,
+        dispatch_id: str,
+    ) -> Dict[str, Any]:
+        if gate == "gemini_review":
+            return self._request_gemini(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "codex_gate":
+            return self._request_codex(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "claude_github_optional":
+            return self._request_claude_github(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "ci_gate":
+            return self._request_ci_gate(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}
+
     def request_reviews(
         self,
         *,
@@ -61,21 +81,7 @@ class GateRequestHandlerMixin:
         requested: List[Dict[str, Any]] = []
 
         for gate in review_stack_list:
-            if gate == "gemini_review":
-                payload = self._request_gemini(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
-            elif gate == "codex_gate":
-                payload = self._request_codex(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
-            elif gate == "claude_github_optional":
-                payload = self._request_claude_github(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
-            elif gate == "ci_gate":
-                payload = self._request_ci_gate(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
-            else:
-                payload = {
-                    "gate": gate,
-                    "status": "blocked",
-                    "reason": "unknown_review_gate",
-                }
-
+            payload = self._dispatch_one_review(gate, pr_number, branch, risk_class, changed_files, mode, dispatch_id)
             requested.append(payload)
             emit_governance_receipt(
                 "review_gate_request",
@@ -157,26 +163,15 @@ class GateRequestHandlerMixin:
         self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
-    def request_gemini_with_contract(
+    def _build_gemini_contract_payload(
         self,
-        *,
         contract: ReviewContract,
-        mode: str = "per_pr",
-        dispatch_id: str = "",
+        mode: str,
+        dispatch_id: str,
+        available: bool,
+        requested_at: str,
+        prompt: str,
     ) -> Dict[str, Any]:
-        """Request a Gemini review driven by a canonical ReviewContract.
-
-        Renders a deliverable-aware prompt from the contract and persists the
-        request payload including the rendered prompt text and contract hash.
-
-        Raises:
-            MissingContractFieldError: when the contract is missing required fields.
-        """
-        from review_gate_manager import _utc_now, emit_governance_receipt
-
-        prompt = render_gemini_prompt(contract)
-        available = self._gemini_available()
-        requested_at = _utc_now()
         payload: Dict[str, Any] = {
             "gate": "gemini_review",
             "status": "requested" if available else "not_executable",
@@ -204,6 +199,29 @@ class GateRequestHandlerMixin:
                 pr_number=None, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
             )
+        return payload
+
+    def request_gemini_with_contract(
+        self,
+        *,
+        contract: ReviewContract,
+        mode: str = "per_pr",
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        """Request a Gemini review driven by a canonical ReviewContract.
+
+        Renders a deliverable-aware prompt from the contract and persists the
+        request payload including the rendered prompt text and contract hash.
+
+        Raises:
+            MissingContractFieldError: when the contract is missing required fields.
+        """
+        from review_gate_manager import _utc_now, emit_governance_receipt
+
+        prompt = render_gemini_prompt(contract)
+        available = self._gemini_available()
+        requested_at = _utc_now()
+        payload = self._build_gemini_contract_payload(contract, mode, dispatch_id, available, requested_at, prompt)
 
         request_file = self._contract_request_path("gemini_review", contract.pr_id)
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -222,6 +240,38 @@ class GateRequestHandlerMixin:
             dispatch_id=dispatch_id,
         )
         return payload
+
+    def _validate_pr_number_for_github(
+        self,
+        pr_number: Optional[int],
+        contract_pr_id: str,
+    ) -> Optional[tuple]:
+        if pr_number is None:
+            return (
+                STATE_BLOCKED,
+                "missing_github_pr_number",
+                "gh pr comment requires a real GitHub PR number; "
+                f"governance pr_id {contract_pr_id!r} is not a valid PR ref",
+            )
+        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
+            return (
+                STATE_BLOCKED,
+                "invalid_github_pr_number",
+                f"pr_number must be a positive int (got {pr_number!r}); "
+                f"the governance pr_id {contract_pr_id!r} is not a valid PR ref",
+            )
+        return None
+
+    def _trigger_github_comment(self, pr_number: int, comment_body: str) -> tuple:
+        proc = subprocess.run(
+            ["gh", "pr", "comment", str(pr_number), "--body", comment_body],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return (STATE_REQUESTED, None, None)
+        return (STATE_BLOCKED, "claude_github_trigger_failed", proc.stderr.strip())
 
     def _determine_claude_github_state(
         self,
@@ -248,35 +298,103 @@ class GateRequestHandlerMixin:
         """
         if not configured:
             return (STATE_NOT_CONFIGURED, "claude_github_not_configured", None)
-
         if os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") != "1":
             return (STATE_CONFIGURED_DRY_RUN, None, None)
+        invalid = self._validate_pr_number_for_github(pr_number, contract_pr_id)
+        if invalid is not None:
+            return invalid
+        return self._trigger_github_comment(pr_number, comment_body)
 
-        if pr_number is None:
-            return (
-                STATE_BLOCKED,
-                "missing_github_pr_number",
-                "gh pr comment requires a real GitHub PR number; "
-                f"governance pr_id {contract_pr_id!r} is not a valid PR ref",
-            )
-
-        if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
-            return (
-                STATE_BLOCKED,
-                "invalid_github_pr_number",
-                f"pr_number must be a positive int (got {pr_number!r}); "
-                f"the governance pr_id {contract_pr_id!r} is not a valid PR ref",
-            )
-
-        proc = subprocess.run(
-            ["gh", "pr", "comment", str(pr_number), "--body", comment_body],
-            capture_output=True,
-            text=True,
-            check=False,
+    def _build_claude_github_payload(
+        self,
+        receipt: ClaudeGitHubReviewReceipt,
+        contract: ReviewContract,
+        mode: str,
+        dispatch_id: str,
+        requested_at: str,
+        stderr_detail: Optional[str],
+    ) -> Dict[str, Any]:
+        payload = receipt.to_dict()
+        if stderr_detail:
+            payload["stderr"] = stderr_detail
+        payload["review_mode"] = mode
+        payload["risk_class"] = contract.risk_class
+        payload["changed_files"] = contract.changed_files
+        payload["report_path"] = self._build_report_path(
+            gate="claude_github_optional",
+            requested_at=requested_at,
+            pr_id=contract.pr_id,
         )
-        if proc.returncode == 0:
-            return (STATE_REQUESTED, None, None)
-        return (STATE_BLOCKED, "claude_github_trigger_failed", proc.stderr.strip())
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        return payload
+
+    def _persist_claude_github_files(
+        self,
+        payload: Dict[str, Any],
+        contract: ReviewContract,
+        requested_at: str,
+    ) -> None:
+        request_file = self._contract_request_path("claude_github_optional", contract.pr_id)
+        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        # Persist the explicit state as a result record so closure_verifier can
+        # observe optional-gate state via review_gates/results/ — without this
+        # mirror, no_op / dry_run / requested / blocked configurations are
+        # invisible to the verifier and break closure for normal optional-gate
+        # paths.
+        result_file = self._contract_result_path("claude_github_optional", contract.pr_id)
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_payload = dict(payload)
+        result_payload["gate"] = "claude_github_optional"
+        result_payload["recorded_at"] = requested_at
+        result_file.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+
+    def _build_claude_github_receipt(
+        self,
+        contract: ReviewContract,
+        state: str,
+        reason: Optional[str],
+        requested_at: str,
+        pr_number: Optional[int],
+        comment_body: str,
+    ) -> ClaudeGitHubReviewReceipt:
+        return ClaudeGitHubReviewReceipt(
+            pr_id=contract.pr_id,
+            state=state,
+            contract_hash=contract.content_hash,
+            branch=contract.branch,
+            pr_number=pr_number,
+            gh_comment_body=comment_body if state == STATE_REQUESTED else "",
+            reason=reason,
+            requested_at=requested_at,
+        )
+
+    def _emit_claude_github_request_receipt(
+        self,
+        contract: ReviewContract,
+        mode: str,
+        dispatch_id: str,
+        state: str,
+        receipt: ClaudeGitHubReviewReceipt,
+    ) -> None:
+        from review_gate_manager import emit_governance_receipt
+
+        emit_governance_receipt(
+            "review_gate_request",
+            status=state,
+            terminal="T0",
+            pr_id=contract.pr_id,
+            branch=contract.branch,
+            gate="claude_github_optional",
+            review_mode=mode,
+            risk_class=contract.risk_class,
+            contract_hash=contract.content_hash,
+            changed_files=contract.changed_files,
+            contributed_evidence=receipt.contributed_evidence(),
+            was_intentionally_absent=receipt.was_intentionally_absent(),
+            dispatch_id=dispatch_id,
+        )
 
     def request_claude_github_with_contract(
         self,
@@ -298,7 +416,7 @@ class GateRequestHandlerMixin:
         the state is always materialised as a result record (not just a
         request) to keep the optional-gate evidence loop closed.
         """
-        from review_gate_manager import _utc_now, emit_governance_receipt
+        from review_gate_manager import _utc_now
 
         configured = self._claude_github_configured()
         requested_at = _utc_now()
@@ -308,61 +426,10 @@ class GateRequestHandlerMixin:
             configured, contract.pr_id, comment_body, pr_number=pr_number,
         )
 
-        receipt = ClaudeGitHubReviewReceipt(
-            pr_id=contract.pr_id,
-            state=state,
-            contract_hash=contract.content_hash,
-            branch=contract.branch,
-            pr_number=pr_number,
-            gh_comment_body=comment_body if state == STATE_REQUESTED else "",
-            reason=reason,
-            requested_at=requested_at,
-        )
-
-        payload = receipt.to_dict()
-        if stderr_detail:
-            payload["stderr"] = stderr_detail
-        payload["review_mode"] = mode
-        payload["risk_class"] = contract.risk_class
-        payload["changed_files"] = contract.changed_files
-        payload["report_path"] = self._build_report_path(
-            gate="claude_github_optional",
-            requested_at=requested_at,
-            pr_id=contract.pr_id,
-        )
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-
-        request_file = self._contract_request_path("claude_github_optional", contract.pr_id)
-        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        # Persist the explicit state as a result record so closure_verifier can
-        # observe optional-gate state via review_gates/results/ — without this
-        # mirror, no_op / dry_run / requested / blocked configurations are
-        # invisible to the verifier and break closure for normal optional-gate
-        # paths.
-        result_file = self._contract_result_path("claude_github_optional", contract.pr_id)
-        result_file.parent.mkdir(parents=True, exist_ok=True)
-        result_payload = dict(payload)
-        result_payload["gate"] = "claude_github_optional"
-        result_payload["recorded_at"] = requested_at
-        result_file.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
-
-        emit_governance_receipt(
-            "review_gate_request",
-            status=state,
-            terminal="T0",
-            pr_id=contract.pr_id,
-            branch=contract.branch,
-            gate="claude_github_optional",
-            review_mode=mode,
-            risk_class=contract.risk_class,
-            contract_hash=contract.content_hash,
-            changed_files=contract.changed_files,
-            contributed_evidence=receipt.contributed_evidence(),
-            was_intentionally_absent=receipt.was_intentionally_absent(),
-            dispatch_id=dispatch_id,
-        )
+        receipt = self._build_claude_github_receipt(contract, state, reason, requested_at, pr_number, comment_body)
+        payload = self._build_claude_github_payload(receipt, contract, mode, dispatch_id, requested_at, stderr_detail)
+        self._persist_claude_github_files(payload, contract, requested_at)
+        self._emit_claude_github_request_receipt(contract, mode, dispatch_id, state, receipt)
         return receipt
 
     def _request_codex(
@@ -405,6 +472,29 @@ class GateRequestHandlerMixin:
         self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
+    def _apply_claude_github_configured_state(
+        self,
+        payload: Dict[str, Any],
+        pr_number: int,
+    ) -> None:
+        payload["status"] = "queued"
+        if os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") == "1":
+            comment = os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
+            proc = subprocess.run(
+                ["gh", "pr", "comment", str(pr_number), "--body", comment],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                payload["status"] = "requested"
+            else:
+                payload["status"] = "blocked"
+                payload["reason"] = "claude_github_trigger_failed"
+                payload["stderr"] = proc.stderr.strip()
+        else:
+            payload["status"] = "configured_dry_run"
+
     def _request_claude_github(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
         dispatch_id: str = "",
@@ -432,23 +522,7 @@ class GateRequestHandlerMixin:
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         if configured:
-            payload["status"] = "queued"
-            if os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "0") == "1":
-                comment = os.environ.get("VNX_CLAUDE_GITHUB_REVIEW_COMMENT", "@claude review")
-                proc = subprocess.run(
-                    ["gh", "pr", "comment", str(pr_number), "--body", comment],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if proc.returncode == 0:
-                    payload["status"] = "requested"
-                else:
-                    payload["status"] = "blocked"
-                    payload["reason"] = "claude_github_trigger_failed"
-                    payload["stderr"] = proc.stderr.strip()
-            else:
-                payload["status"] = "configured_dry_run"
+            self._apply_claude_github_configured_state(payload, pr_number)
         self._request_path("claude_github_optional", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
@@ -486,30 +560,15 @@ class GateRequestHandlerMixin:
         self._request_path("ci_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
-    def request_ci_gate_with_contract(
+    def _build_ci_gate_contract_payload(
         self,
-        *,
         contract: "ReviewContract",
         pr_number: int,
-        mode: str = "per_pr",
-        dispatch_id: str = "",
+        mode: str,
+        dispatch_id: str,
+        available: bool,
+        requested_at: str,
     ) -> Dict[str, Any]:
-        """Request a ci_gate execution driven by a canonical ReviewContract.
-
-        Writes a contract-scoped request file ({pr_slug}-ci_gate-contract.json)
-        with the canonical pr_id and the contract's content_hash.  This enables
-        closure_verifier._find_gate_result to locate the result via the contract
-        path and ensures the result's contract_hash matches ReviewContract.content_hash.
-
-        ``pr_number`` is the real GitHub PR number used by ``gh pr checks``.
-        """
-        from review_gate_manager import _utc_now, emit_governance_receipt
-
-        if not contract.pr_id:
-            raise ValueError("contract.pr_id is required for ci_gate contract request")
-
-        available = self._ci_gate_available()
-        requested_at = _utc_now()
         payload: Dict[str, Any] = {
             "gate": "ci_gate",
             "status": "requested" if available else "not_executable",
@@ -536,13 +595,20 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
             )
+        return payload
 
-        request_file = self._contract_request_path("ci_gate", contract.pr_id)
-        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    def _emit_ci_gate_contract_receipt(
+        self,
+        contract: "ReviewContract",
+        mode: str,
+        dispatch_id: str,
+        status: str,
+    ) -> None:
+        from review_gate_manager import emit_governance_receipt
 
         emit_governance_receipt(
             "review_gate_request",
-            status=payload["status"],
+            status=status,
             terminal="T0",
             pr_id=contract.pr_id,
             branch=contract.branch,
@@ -553,4 +619,35 @@ class GateRequestHandlerMixin:
             changed_files=contract.changed_files,
             dispatch_id=dispatch_id,
         )
+
+    def request_ci_gate_with_contract(
+        self,
+        *,
+        contract: "ReviewContract",
+        pr_number: int,
+        mode: str = "per_pr",
+        dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        """Request a ci_gate execution driven by a canonical ReviewContract.
+
+        Writes a contract-scoped request file ({pr_slug}-ci_gate-contract.json)
+        with the canonical pr_id and the contract's content_hash.  This enables
+        closure_verifier._find_gate_result to locate the result via the contract
+        path and ensures the result's contract_hash matches ReviewContract.content_hash.
+
+        ``pr_number`` is the real GitHub PR number used by ``gh pr checks``.
+        """
+        from review_gate_manager import _utc_now
+
+        if not contract.pr_id:
+            raise ValueError("contract.pr_id is required for ci_gate contract request")
+
+        available = self._ci_gate_available()
+        requested_at = _utc_now()
+        payload = self._build_ci_gate_contract_payload(contract, pr_number, mode, dispatch_id, available, requested_at)
+
+        request_file = self._contract_request_path("ci_gate", contract.pr_id)
+        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        self._emit_ci_gate_contract_receipt(contract, mode, dispatch_id, payload["status"])
         return payload
