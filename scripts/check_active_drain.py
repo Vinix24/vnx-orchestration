@@ -281,14 +281,24 @@ def drain_active(
 # CLI
 # ---------------------------------------------------------------------------
 
+def _non_negative_hours(s: str) -> float:
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {s!r}")
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"--older-than-hours must be >= 0, got {v}")
+    return v
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Drain stale dispatches from active/ to completed/ or dead_letter/.",
     )
     p.add_argument("--dry-run", action="store_true", help="Report what would be moved without moving.")
     p.add_argument("--data-dir", metavar="PATH", help="Override VNX data dir (default: auto-resolved .vnx-data).")
-    p.add_argument("--older-than-hours", type=float, default=1.0, metavar="N",
-                   help="Dead-letter threshold: orphan dispatches older than N hours (default: 1.0).")
+    p.add_argument("--older-than-hours", type=_non_negative_hours, default=1.0, metavar="N",
+                   help="Dead-letter threshold: orphan dispatches older than N hours (default: 1.0). Must be >= 0.")
     return p
 
 

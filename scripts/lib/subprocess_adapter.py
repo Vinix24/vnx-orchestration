@@ -22,8 +22,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-logger = logging.getLogger(__name__)
-
 from adapter_types import (
     CAPABILITY_DELIVER,
     CAPABILITY_HEALTH,
@@ -38,6 +36,8 @@ from adapter_types import (
     SpawnResult,
     StopResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 

@@ -14,10 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from auto_merge_policy import codex_final_gate_required
 from review_contract import ReviewContract
-from gemini_prompt_renderer import (
-    MissingContractFieldError,
-    render_gemini_prompt,
-)
+from gemini_prompt_renderer import render_gemini_prompt
 from claude_github_receipt import (
     ClaudeGitHubReviewReceipt,
     STATE_NOT_CONFIGURED,
@@ -214,7 +211,7 @@ class GateRequestHandlerMixin:
         request payload including the rendered prompt text and contract hash.
 
         Raises:
-            MissingContractFieldError: when the contract is missing required fields.
+            gemini_prompt_renderer.MissingContractFieldError: when the contract is missing required fields.
         """
         from review_gate_manager import _utc_now, emit_governance_receipt
 
