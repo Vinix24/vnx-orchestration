@@ -61,6 +61,12 @@ DISPATCH_ID_RE = re.compile(
 DISPATCH_ID_EXTRACT_RE = re.compile(
     r"^(\d{8})-(\d{6})-(.+)-([A-C])$"
 )
+# Legacy format: YYYYMMDD-<slug> (no time component, no track letter).
+# Negative lookahead prevents matching full-format IDs that are merely missing
+# their track letter (e.g. "20260423-230100-slug" must not match here).
+DISPATCH_ID_EXTRACT_LEGACY_RE = re.compile(
+    r"^(\d{8})-(?!\d{6}-)(.+)$"
+)
 DISPATCH_ID_LINE_RE = re.compile(
     r"^Dispatch-ID:\s*(\S+)", re.MULTILINE
 )
@@ -89,12 +95,18 @@ def branch_slug(branch_name: str) -> str:
 def dispatch_id_slug(dispatch_id: str) -> str | None:
     """Extract the slug from a dispatch ID string.
 
-    Returns None if the format is invalid.
+    Accepts both the full format ``YYYYMMDD-HHMMSS-<slug>-[A-C]`` and the
+    legacy format ``YYYYMMDD-<slug>`` (no time component, no track letter).
+    Returns None if the string matches neither format.
     """
-    m = DISPATCH_ID_EXTRACT_RE.match(dispatch_id.strip())
-    if not m:
-        return None
-    return m.group(3).lower().replace("_", "-")
+    did = dispatch_id.strip()
+    m = DISPATCH_ID_EXTRACT_RE.match(did)
+    if m:
+        return m.group(3).lower().replace("_", "-")
+    m = DISPATCH_ID_EXTRACT_LEGACY_RE.match(did)
+    if m:
+        return m.group(2).lower().replace("_", "-")
+    return None
 
 
 def slugs_match(a: str, b: str) -> bool:

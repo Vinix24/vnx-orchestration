@@ -69,6 +69,7 @@ from subprocess_dispatch_internals.pattern_confidence import (
 from subprocess_dispatch_internals.receipt_writer import (
     _auto_commit_changes,
     _auto_stash_changes,
+    _ensure_unified_report,
     _write_receipt,
 )
 from subprocess_dispatch_internals.recovery import deliver_with_recovery
@@ -121,6 +122,7 @@ __all__ = [
     "_build_continuation_prompt",
     "_write_rotation_handover",
     "_write_receipt",
+    "_ensure_unified_report",
     "_auto_commit_changes",
     "_auto_stash_changes",
     "_capture_dispatch_parameters",

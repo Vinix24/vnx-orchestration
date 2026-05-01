@@ -157,7 +157,7 @@ printf '%s\\n' "${{result[@]}}"
 class TestOnceMode:
     def _make_always_exit_script(self, tmp_dir: str, exit_code: int = 0) -> str:
         """Write a fake dispatcher script that exits immediately."""
-        path = os.path.join(tmp_dir, "fake_dispatcher.sh")
+        path = os.path.join(tmp_dir, "fake_dispatcher_v8_minimal.sh")
         with open(path, "w") as f:
             f.write(f"#!/bin/bash\nexit {exit_code}\n")
         os.chmod(path, 0o755)
@@ -168,38 +168,16 @@ class TestOnceMode:
         with tempfile.TemporaryDirectory() as tmp_dir:
             _make_dirs(tmp_dir)
             env = _vnx_env(tmp_dir)
-
-            # Point DISPATCHER_SCRIPT at a fake that exits immediately
             fake = self._make_always_exit_script(tmp_dir, exit_code=0)
-            env["VNX_SUPERVISOR_BACKOFF_INIT"] = "1"
+            env["VNX_DISPATCHER_SCRIPT"] = fake
 
-            # Patch: run the supervisor with its script replaced inline
-            inline = f"""
-set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-source "$SCRIPT_DIR/lib/vnx_paths.sh"
-
-LOG_FILE="$VNX_LOGS_DIR/dispatcher_supervisor.log"
-PID_FILE="$VNX_PIDS_DIR/dispatcher_supervisor.pid"
-BACKOFF_INIT="${{VNX_SUPERVISOR_BACKOFF_INIT:-2}}"
-
-mkdir -p "$(dirname "$LOG_FILE")" "$VNX_PIDS_DIR" "$VNX_LOCKS_DIR"
-echo $$ > "$PID_FILE"
-
-bash "{fake}" &
-child=$!
-wait "$child"; rc=$?
-rm -f "$PID_FILE"
-exit "$rc"
-"""
             result = subprocess.run(
-                ["bash", "-c", inline],
+                ["bash", str(SUPERVISOR_SH), "--once"],
                 capture_output=True,
                 text=True,
                 env=env,
                 cwd=str(REPO_ROOT / "scripts"),
-                timeout=15,
+                timeout=20,
             )
         assert result.returncode == 0, f"Expected exit 0, got {result.returncode}\n{result.stderr}"
 
@@ -209,31 +187,15 @@ exit "$rc"
             _make_dirs(tmp_dir)
             env = _vnx_env(tmp_dir)
             fake = self._make_always_exit_script(tmp_dir, exit_code=42)
+            env["VNX_DISPATCHER_SCRIPT"] = fake
 
-            inline = f"""
-set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-source "$SCRIPT_DIR/lib/vnx_paths.sh"
-
-LOG_FILE="$VNX_LOGS_DIR/dispatcher_supervisor.log"
-PID_FILE="$VNX_PIDS_DIR/dispatcher_supervisor.pid"
-mkdir -p "$(dirname "$LOG_FILE")" "$VNX_PIDS_DIR" "$VNX_LOCKS_DIR"
-echo $$ > "$PID_FILE"
-
-bash "{fake}" &
-child=$!
-set +e; wait "$child"; rc=$?; set -e
-rm -f "$PID_FILE"
-exit "$rc"
-"""
             result = subprocess.run(
-                ["bash", "-c", inline],
+                ["bash", str(SUPERVISOR_SH), "--once"],
                 capture_output=True,
                 text=True,
                 env=env,
                 cwd=str(REPO_ROOT / "scripts"),
-                timeout=15,
+                timeout=20,
             )
         assert result.returncode == 42
 
