@@ -125,6 +125,7 @@ def resolve_paths() -> Dict[str, str]:
         "VNX_LOGS_DIR": str(Path(os.environ.get("VNX_LOGS_DIR") or (vnx_data_dir / "logs")).expanduser()),
         "VNX_PIDS_DIR": str(Path(os.environ.get("VNX_PIDS_DIR") or (vnx_data_dir / "pids")).expanduser()),
         "VNX_LOCKS_DIR": str(Path(os.environ.get("VNX_LOCKS_DIR") or (vnx_data_dir / "locks")).expanduser()),
+        "VNX_SOCKETS_DIR": str(Path(os.environ.get("VNX_SOCKETS_DIR") or (vnx_data_dir / "sockets")).expanduser()),
         "VNX_REPORTS_DIR": str(Path(os.environ.get("VNX_REPORTS_DIR") or (vnx_data_dir / "unified_reports")).expanduser()),
         "VNX_DB_DIR": str(Path(os.environ.get("VNX_DB_DIR") or (vnx_data_dir / "database")).expanduser()),
     }

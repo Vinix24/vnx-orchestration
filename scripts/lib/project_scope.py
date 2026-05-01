@@ -12,12 +12,25 @@ Usage::
     pid = current_project_id()                          # 'vnx-dev' default
     sql = "SELECT * FROM success_patterns WHERE 1=1"
     sql = scoped_query(sql)                             # opt-in filter
+
+Filesystem scoping (W4G / OI-1067)
+-----------------------------------
+Sockets, lock files, and OS tmpfiles must not collide across concurrent
+VNX projects on the same host. The helpers below route those state
+surfaces through ``VNX_DATA_DIR`` (already project-scoped) or stamp a
+short project hash into legacy ``/tmp`` paths::
+
+    sock = project_socket_path("heartbeat_ack_monitor.sock")
+    lock = project_lock_path("dispatcher.lock")
+    prefix = project_tmpfile_prefix("dispatch")  # → 'vnx-<hash>-dispatch-'
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+from pathlib import Path
 
 DEFAULT_PROJECT = "vnx-dev"
 ENV_VAR = "VNX_PROJECT_ID"
@@ -81,3 +94,71 @@ def scoped_query(base_sql: str, project_id: str | None = None) -> str:
     """
     pid = _validate(project_id) if project_id else current_project_id()
     return base_sql + f" AND project_id = '{pid}'"
+
+
+# ---------------------------------------------------------------------------
+# Filesystem scoping helpers (OI-1067 / W4G)
+# ---------------------------------------------------------------------------
+
+
+def _vnx_data_dir() -> Path:
+    """Return the runtime data dir, resolving via vnx_paths if env is unset."""
+    env = os.environ.get("VNX_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    # Fall back to the resolver — keeps single-process scripts honest even
+    # when the caller forgot to source vnx_paths.sh first.
+    try:
+        from vnx_paths import resolve_paths  # type: ignore
+    except Exception:
+        return Path.cwd() / ".vnx-data"
+    return Path(resolve_paths()["VNX_DATA_DIR"])
+
+
+def project_hash(seed: str | None = None) -> str:
+    """Stable 8-char hash of the project root for namespacing /tmp resources.
+
+    Defaults to the resolved ``PROJECT_ROOT`` (or current working directory
+    when unset). Two concurrent VNX projects always produce different
+    hashes; the same project always produces the same hash, so cleanup
+    (``find /tmp -name 'vnx-<hash>-*'``) is straightforward per-project.
+    """
+    if seed is None:
+        seed = os.environ.get("PROJECT_ROOT") or str(Path.cwd())
+    return hashlib.md5(seed.encode("utf-8")).hexdigest()[:8]
+
+
+def project_socket_path(name: str) -> Path:
+    """Return a project-scoped Unix socket path under VNX_DATA_DIR/sockets.
+
+    Concurrent VNX projects never share a socket because VNX_DATA_DIR is
+    always project-scoped. Caller is responsible for ``mkdir(parents=True)``
+    on the parent before binding.
+    """
+    if not name or "/" in name:
+        raise ValueError(f"socket name must be a bare filename, got {name!r}")
+    return _vnx_data_dir() / "sockets" / name
+
+
+def project_lock_path(name: str) -> Path:
+    """Return a project-scoped lock file path under VNX_DATA_DIR/locks."""
+    if not name or "/" in name:
+        raise ValueError(f"lock name must be a bare filename, got {name!r}")
+    env = os.environ.get("VNX_LOCKS_DIR")
+    base = Path(env).expanduser() if env else _vnx_data_dir() / "locks"
+    return base / name
+
+
+def project_tmpfile_prefix(prefix: str) -> str:
+    """Stamp a short project hash into a tmpfile prefix.
+
+    Use when a caller genuinely needs ``/tmp`` (e.g. shell scripts that
+    can't depend on VNX_DATA_DIR being on the same filesystem). The
+    returned prefix never collides across concurrent projects::
+
+        >>> project_tmpfile_prefix("dispatch")
+        'vnx-3a1f9c0e-dispatch-'
+    """
+    if not prefix:
+        raise ValueError("prefix must be non-empty")
+    return f"vnx-{project_hash()}-{prefix}-"

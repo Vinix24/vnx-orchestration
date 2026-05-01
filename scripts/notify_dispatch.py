@@ -11,18 +11,20 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-def notify_dispatch(dispatch_id: str, terminal: str, task_id: str, pr_id: str = ''):
-    """Send dispatch notification to heartbeat monitor via Unix socket"""
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
-    # Derive socket path from VNX_DATA_DIR (project-scoped, matches daemon).
-    # Falls back to project-name slug in /tmp when VNX_DATA_DIR is unset.
-    vnx_data_dir = os.environ.get('VNX_DATA_DIR', '')
-    if vnx_data_dir:
-        socket_path = str(Path(vnx_data_dir) / 'heartbeat_ack_monitor.sock')
-    else:
-        project_root = os.environ.get('PROJECT_ROOT', os.getcwd())
-        project_name = os.path.basename(project_root)
-        socket_path = f'/tmp/heartbeat_ack_monitor_{project_name}.sock'
+from project_scope import project_socket_path  # noqa: E402
+
+
+def notify_dispatch(dispatch_id: str, terminal: str, task_id: str, pr_id: str = ''):
+    """Send dispatch notification to heartbeat monitor via Unix socket.
+
+    Socket path is project-scoped via ``$VNX_DATA_DIR/sockets/`` so concurrent
+    VNX projects on the same host can never cross-talk (OI-1067 / W4G).
+    """
+
+    socket_path = str(project_socket_path("heartbeat_ack_monitor.sock"))
 
     message = {
         'action': 'track_dispatch',
