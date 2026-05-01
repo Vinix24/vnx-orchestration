@@ -295,6 +295,31 @@ class TestDrainOne:
         )
         assert result.action == "completed"
 
+    def test_drain_skips_when_destination_exists(self, tmp_path: Path) -> None:
+        """OI-1127: shutil.move raises when dest exists; drain must skip idempotently."""
+        data = _make_data_dir(tmp_path)
+        did = "20260501-dest-exists-A"
+        d = _make_active_dispatch(data, did, hours_old=5.0)
+        receipt_index = frozenset({did})
+
+        # Pre-create the destination to simulate a prior partial run
+        dest = data / "dispatches" / "completed" / did
+        dest.mkdir(parents=True)
+
+        ts = self._now() - timedelta(hours=5)
+        entry = DispatchEntry(dispatch_id=did, directory=d, timestamp=ts)
+
+        result = drain_one(
+            entry=entry,
+            receipt_index=receipt_index,
+            dispatches_dir=data / "dispatches",
+            now=self._now(),
+            older_than_seconds=3600,
+            dry_run=False,
+        )
+        assert result.action == "completed"
+        assert "[skip]" in result.reason
+
 
 # ---------------------------------------------------------------------------
 # drain_active (integration)

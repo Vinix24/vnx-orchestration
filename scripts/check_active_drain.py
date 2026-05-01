@@ -232,6 +232,13 @@ def drain_one(
     dest_dir = dispatches_dir / dest_bucket
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / entry.directory.name
+    if dest.exists():
+        return DrainResult(
+            dispatch_id=entry.dispatch_id,
+            action=dest_bucket,
+            reason=f"[skip] destination already exists: {dest.name}",
+            dry_run=False,
+        )
     try:
         shutil.move(str(entry.directory), str(dest))
     except (OSError, shutil.Error) as exc:
