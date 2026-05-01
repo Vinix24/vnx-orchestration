@@ -187,6 +187,9 @@ def _parse_haiku_output(stdout: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return _build_fallback("Haiku summarization failed: invalid JSON response")
 
+    if not isinstance(outer, dict):
+        return _build_fallback("Haiku summarization failed: outer JSON is not a dict")
+
     result_str = outer.get("result", "")
     if not result_str:
         return _build_fallback("Haiku summarization failed: empty result")
@@ -195,6 +198,9 @@ def _parse_haiku_output(stdout: str) -> dict[str, Any]:
         record = json.loads(_strip_code_fences(result_str))
     except json.JSONDecodeError:
         return _build_fallback("Haiku summarization failed: invalid inner JSON")
+
+    if not isinstance(record, dict):
+        return _build_fallback("Haiku summarization failed: inner JSON is not a dict")
 
     _apply_record_defaults(record)
     return record

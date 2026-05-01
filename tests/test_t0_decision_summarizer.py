@@ -190,6 +190,23 @@ class TestParseHaikuOutput:
         assert record["next_expected"] == ""
         assert "timestamp" in record
 
+    def test_parse_haiku_handles_non_dict_layers(self):
+        # OI-1103: non-dict JSON at outer or inner layer must not crash
+        # list at top level — outer.get() would AttributeError without guard
+        record = _parse_haiku_output(json.dumps(["a", "b", "c"]))
+        assert record["action"] == "wait"
+        assert "Haiku summarization failed" in record["reasoning"]
+
+        # inner JSON is null — _apply_record_defaults(None) would AttributeError
+        record = _parse_haiku_output(json.dumps({"result": json.dumps(None)}))
+        assert record["action"] == "wait"
+        assert "Haiku summarization failed" in record["reasoning"]
+
+        # inner JSON is a string — _apply_record_defaults("str") would AttributeError
+        record = _parse_haiku_output(json.dumps({"result": json.dumps("just a string")}))
+        assert record["action"] == "wait"
+        assert "Haiku summarization failed" in record["reasoning"]
+
 
 # ---------------------------------------------------------------------------
 # summarize_with_haiku

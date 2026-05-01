@@ -17,14 +17,14 @@ import re
 from pathlib import Path
 from typing import Optional
 
-_SAFE_RUN_ID = re.compile(r'^[A-Za-z0-9_\-.]+$')
+_SAFE_RUN_ID = re.compile(r'^[A-Za-z0-9_][A-Za-z0-9_\-.]*$')
 
 
 def _assert_safe_run_id(run_id: str) -> str:
     """Validate run_id is filesystem-safe — raises ValueError if not."""
-    if not run_id or not _SAFE_RUN_ID.match(run_id) or ".." in run_id:
+    if not run_id or not _SAFE_RUN_ID.match(run_id):
         raise ValueError(
-            f"invalid run_id: {run_id!r} (must match [A-Za-z0-9_\\-.]+ and not contain ..)"
+            f"invalid run_id: {run_id!r} (must start with [A-Za-z0-9_] and match [A-Za-z0-9_\\-.]*)"
         )
     return run_id
 
