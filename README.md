@@ -92,6 +92,27 @@ The same governance applies regardless of mode. Receipts, quality gates, and pro
 
 Typical use cases: overnight feature execution, CI/CD integration, shadow testing of new agent configurations.
 
+### Adapter mode matrix (Operator mode)
+
+Within Operator mode, each terminal (T0/T1/T2/T3) can independently use tmux (interactive) or subprocess (headless) adapter:
+
+| Mode | T0 | Workers (T1/T2/T3) | When to use |
+|------|----|--------------------|-------------|
+| 2×2 grid | tmux | tmux | Live operator session |
+| Hybrid | tmux | subprocess | Operator drives, workers background |
+| Fully headless | subprocess | subprocess | CI/cron/autonomous |
+
+```bash
+# Hybrid (recommended for solo dev)
+VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VNX_ADAPTER_T3=subprocess vnx start
+
+# Fully headless
+VNX_ADAPTER_T0=subprocess VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VNX_ADAPTER_T3=subprocess \
+  python3 scripts/headless_orchestrator.py
+```
+
+See [HEADLESS_TRANSITION.md](docs/manifesto/HEADLESS_TRANSITION.md) for the architectural narrative and migration guide.
+
 ## Why CLI Subprocess — Not OAuth, Not API
 
 Anthropic's April 2026 policy bans third-party tools from using OAuth tokens obtained through Pro/Max subscriptions. OpenClaw (340K+ stars) and similar "harness" tools were affected. **VNX was not.**
