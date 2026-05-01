@@ -84,6 +84,46 @@ def _parse_iso(ts: str) -> Optional[_dt.datetime]:
         return None
 
 
+def _resolve_register_path() -> Path:
+    path = _register_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _build_event_record(
+    event: str,
+    dispatch_id: str,
+    pr_number: Optional[int],
+    feature_id: str,
+    terminal: str,
+    gate: str,
+    extra: Optional[dict],
+) -> dict:
+    record: dict = {
+        "timestamp": _utc_now_iso(),
+        "event": event,
+    }
+    if dispatch_id:
+        record["dispatch_id"] = dispatch_id
+    if pr_number is not None:
+        record["pr_number"] = pr_number
+    if feature_id:
+        record["feature_id"] = feature_id
+    if terminal:
+        record["terminal"] = terminal
+    if gate:
+        record["gate"] = gate
+    if extra and isinstance(extra, dict):
+        record["extra"] = extra
+    return record
+
+
+def _write_event_locked(path: Path, record: dict) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
 def append_event(
     event: str,
     *,
@@ -104,32 +144,50 @@ def append_event(
     # Require at least one identifying field — register is canonical source, must be queryable
     if not dispatch_id and pr_number is None and not feature_id:
         return False
-    record = {
-        "timestamp": _utc_now_iso(),
-        "event": event,
-    }
-    if dispatch_id:
-        record["dispatch_id"] = dispatch_id
-    if pr_number is not None:
-        record["pr_number"] = pr_number
-    if feature_id:
-        record["feature_id"] = feature_id
-    if terminal:
-        record["terminal"] = terminal
-    if gate:
-        record["gate"] = gate
-    if extra and isinstance(extra, dict):
-        record["extra"] = extra
+    record = _build_event_record(event, dispatch_id, pr_number, feature_id, terminal, gate, extra)
     try:
-        path = _register_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        _write_event_locked(_resolve_register_path(), record)
         _mirror_to_decision_log(event, record, extra=extra)
         return True
     except Exception:
         return False
+
+
+def _log_dispatch_created(log_fn, record: dict, extra_dict: dict) -> None:
+    log_fn(
+        decision_type="dispatch_created",
+        dispatch_id=record.get("dispatch_id"),
+        terminal=record.get("terminal"),
+        role=extra_dict.get("role"),
+        risk_score=extra_dict.get("risk_score"),
+        reasoning=extra_dict.get("reasoning", ""),
+        expected_outcome=extra_dict.get("expected_outcome"),
+        timestamp=record.get("timestamp"),
+    )
+
+
+def _log_gate_verdict(log_fn, event: str, record: dict, extra_dict: dict) -> None:
+    verdict = "passed" if event == "gate_passed" else "failed"
+    log_fn(
+        decision_type="gate_verdict",
+        dispatch_id=record.get("dispatch_id"),
+        pr_number=record.get("pr_number"),
+        gate=record.get("gate") or None,
+        verdict=verdict,
+        blocking_count=extra_dict.get("blocking_count"),
+        reasoning=extra_dict.get("reasoning", ""),
+        timestamp=record.get("timestamp"),
+    )
+
+
+def _log_pr_merged(log_fn, record: dict, extra_dict: dict) -> None:
+    log_fn(
+        decision_type="pr_merge",
+        pr_number=record.get("pr_number"),
+        dispatches_in_pr=extra_dict.get("dispatches_in_pr"),
+        reasoning=extra_dict.get("reasoning", ""),
+        timestamp=record.get("timestamp"),
+    )
 
 
 def _mirror_to_decision_log(event: str, record: dict, *, extra: Optional[dict] = None) -> None:
@@ -143,48 +201,26 @@ def _mirror_to_decision_log(event: str, record: dict, *, extra: Optional[dict] =
         from t0_decision_log import log_decision
     except Exception:
         return
-
-    dispatch_id = record.get("dispatch_id")
-    pr_number = record.get("pr_number")
-    terminal = record.get("terminal")
-    gate = record.get("gate") or None
     extra_dict = extra if isinstance(extra, dict) else {}
-
     if event == "dispatch_created":
-        log_decision(
-            decision_type="dispatch_created",
-            dispatch_id=dispatch_id,
-            terminal=terminal,
-            role=extra_dict.get("role"),
-            risk_score=extra_dict.get("risk_score"),
-            reasoning=extra_dict.get("reasoning", ""),
-            expected_outcome=extra_dict.get("expected_outcome"),
-            timestamp=record.get("timestamp"),
-        )
+        _log_dispatch_created(log_decision, record, extra_dict)
     elif event in ("gate_passed", "gate_failed"):
-        verdict = "passed" if event == "gate_passed" else "failed"
-        log_decision(
-            decision_type="gate_verdict",
-            dispatch_id=dispatch_id,
-            pr_number=pr_number,
-            gate=gate,
-            verdict=verdict,
-            blocking_count=extra_dict.get("blocking_count"),
-            reasoning=extra_dict.get("reasoning", ""),
-            timestamp=record.get("timestamp"),
-        )
+        _log_gate_verdict(log_decision, event, record, extra_dict)
     elif event == "pr_merged":
-        log_decision(
-            decision_type="pr_merge",
-            pr_number=pr_number,
-            dispatches_in_pr=extra_dict.get("dispatches_in_pr"),
-            reasoning=extra_dict.get("reasoning", ""),
-            timestamp=record.get("timestamp"),
-        )
+        _log_pr_merged(log_decision, record, extra_dict)
     # Other lifecycle events (dispatch_promoted, dispatch_started,
     # dispatch_completed, etc.) are recorded in the register but are
     # outcome signals rather than T0 decisions; reconciliation reads
     # them to resolve pending decisions.
+
+
+def _read_register_locked(path: Path) -> str:
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        try:
+            return fh.read()
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
@@ -202,12 +238,7 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
     # silently disabling the filter.
     cutoff_lex = since_iso if (since_iso and cutoff_dt is None) else None
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
-            try:
-                content = fh.read()
-            finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        content = _read_register_locked(path)
         for line in content.splitlines():
             line = line.strip()
             if not line:
