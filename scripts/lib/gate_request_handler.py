@@ -69,7 +69,23 @@ class GateRequestHandlerMixin:
         if gate == "codex_gate":
             return self._request_codex(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         if gate == "claude_github_optional":
-            return self._request_claude_github(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+            from review_contract import ReviewContract
+            contract = ReviewContract(
+                pr_id=str(pr_number),
+                branch=branch,
+                risk_class=risk_class,
+                changed_files=list(changed_files),
+                dispatch_id=dispatch_id,
+            )
+            receipt = self.request_claude_github_with_contract(
+                contract=contract,
+                mode=mode,
+                dispatch_id=dispatch_id,
+                pr_number=pr_number,
+            )
+            payload = receipt.to_dict()
+            payload["status"] = receipt.state  # backwards compat for emit_governance_receipt
+            return payload
         if gate == "ci_gate":
             return self._request_ci_gate(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
         return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}

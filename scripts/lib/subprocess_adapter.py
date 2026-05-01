@@ -100,8 +100,9 @@ class SubprocessAdapter:
         iteration to classify outcome as failure rather than success."""
         return terminal_id in self._timed_out
 
-    def _get_event_store(self):
-        """Lazy-load EventStore. Returns None if not available."""
+    @property
+    def event_store(self):
+        """Public accessor for the lazy-loaded EventStore. Returns None if not available."""
         if not self._event_store_loaded:
             self._event_store_loaded = True
             try:
@@ -111,6 +112,10 @@ class SubprocessAdapter:
             except ImportError:
                 logger.debug("subprocess_adapter: EventStore not available (optional)")
         return self._event_store
+
+    def _get_event_store(self):
+        """Deprecated alias for the event_store property. Use event_store instead."""
+        return self.event_store
 
     def adapter_type(self) -> str:
         return "subprocess"
@@ -216,6 +221,9 @@ class SubprocessAdapter:
         }
         if cwd is not None:
             popen_kwargs["cwd"] = str(cwd)
+
+        # Clear stale session_id before spawning; updated when the init event arrives.
+        self._session_ids.pop(terminal_id, None)
 
         try:
             process = subprocess.Popen(cmd, **popen_kwargs)
