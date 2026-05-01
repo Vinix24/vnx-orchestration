@@ -18,8 +18,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
     from vnx_paths import ensure_env
+    from report_findings_migration import ensure_report_findings_table
 except Exception as exc:
-    raise SystemExit(f"Failed to load vnx_paths: {exc}")
+    raise SystemExit(f"Failed to load vnx_paths or report_findings_migration: {exc}")
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -135,6 +136,11 @@ def main():
         return 1
 
     conn = sqlite3.connect(DB_PATH)
+
+    # Ensure report_findings exists even if Phase 0 (quality_db_init.py) failed.
+    created = ensure_report_findings_table(conn)
+    if created:
+        print("  Migrated: created report_findings table (was missing)")
 
     print("=== Nightly Session-Dispatch Linkage ===")
 
