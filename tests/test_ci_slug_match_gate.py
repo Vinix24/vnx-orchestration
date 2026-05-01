@@ -27,6 +27,7 @@ from check_ci_slug_match import (
     branch_slug,
     dispatch_id_slug,
     main,
+    resolve_branch_name,
     run_gate,
     scan_commits,
     slugs_match,
@@ -407,3 +408,128 @@ class TestMainCLI:
              patch("check_ci_slug_match.commits_since", return_value=commits):
             rc = main(["--branch-name", "fix/ci-slug-match-gate", "--base-ref", "main"])
         assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# OI-1130: Push-event branch resolution + default-branch skip
+# ---------------------------------------------------------------------------
+
+
+class TestResolveBranchName:
+    """Branch resolution must prefer GITHUB_HEAD_REF on PR events and fall
+    back to GITHUB_REF_NAME on push events. Without this, push events on
+    default branches left branch_name='' and the gate passed spuriously.
+    """
+
+    def test_explicit_arg_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("GITHUB_HEAD_REF", "fix/from-env")
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        branch, skip = resolve_branch_name("feat/explicit-arg")
+        assert branch == "feat/explicit-arg"
+        assert skip is False
+
+    def test_pull_request_uses_head_ref(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("GITHUB_HEAD_REF", "fix/pr-branch")
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        branch, skip = resolve_branch_name(None)
+        assert branch == "fix/pr-branch"
+        assert skip is False
+
+    def test_push_event_with_empty_head_ref_uses_ref_name(self, monkeypatch):
+        # Reproduces OI-1130: push event leaves GITHUB_HEAD_REF empty.
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "fix/topic-branch")
+        branch, skip = resolve_branch_name(None)
+        assert branch == "fix/topic-branch"
+        assert skip is False
+
+    def test_push_event_on_default_branch_is_skipped(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        branch, skip = resolve_branch_name(None)
+        assert branch == "main"
+        assert skip is True
+
+    def test_push_event_on_master_default_is_skipped(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "master")
+        branch, skip = resolve_branch_name(None)
+        assert skip is True
+
+    def test_custom_default_branches_via_env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "develop")
+        monkeypatch.setenv("VNX_DEFAULT_BRANCHES", "develop,trunk")
+        branch, skip = resolve_branch_name(None)
+        assert skip is True
+
+    def test_falls_back_to_current_branch(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.delenv("GITHUB_REF_NAME", raising=False)
+        with patch("check_ci_slug_match.current_branch", return_value="fix/local"):
+            branch, skip = resolve_branch_name(None)
+        assert branch == "fix/local"
+        assert skip is False
+
+
+class TestPushEventGateSkip:
+    """End-to-end: push-event-on-default-branch must SKIP without running
+    commits_since. Previously the check ran against an empty branch name
+    and passed silently.
+    """
+
+    def test_push_to_main_skips_gate(self, monkeypatch, capsys):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        with patch("check_ci_slug_match.commits_since") as commits_mock, \
+             patch("check_ci_slug_match.resolve_base_ref") as base_mock:
+            rc = main([])
+        assert rc == 0
+        commits_mock.assert_not_called()
+        base_mock.assert_not_called()
+        out = capsys.readouterr().out
+        assert "SKIP" in out
+
+    def test_push_to_topic_branch_runs_gate(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "fix/ci-slug-match-gate")
+        commits = [
+            ("sha55555", "feat: ok\n\nDispatch-ID: 20260423-230100-ci-slug-match-gate-B\n"),
+        ]
+        with patch("check_ci_slug_match.resolve_base_ref", return_value="main"), \
+             patch("check_ci_slug_match.commits_since", return_value=commits):
+            rc = main([])
+        assert rc == 0
+
+    def test_pr_event_runs_gate_with_head_ref(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("GITHUB_HEAD_REF", "fix/ci-slug-match-gate")
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        commits = [
+            ("sha66666", "feat: ok\n\nDispatch-ID: 20260423-230100-ci-slug-match-gate-B\n"),
+        ]
+        with patch("check_ci_slug_match.resolve_base_ref", return_value="main"), \
+             patch("check_ci_slug_match.commits_since", return_value=commits):
+            rc = main([])
+        assert rc == 0
+
+    def test_push_to_main_does_not_pass_spuriously_with_bad_commits(self, monkeypatch):
+        # Regression: previously commits with mismatched dispatch ids on a
+        # push to main would be evaluated against an empty branch slug and
+        # silently pass. With the fix, we skip without evaluating.
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        with patch("check_ci_slug_match.commits_since") as commits_mock:
+            rc = main(["--enforce"])
+        assert rc == 0
+        commits_mock.assert_not_called()
