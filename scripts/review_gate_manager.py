@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -70,15 +71,32 @@ class ReviewGateManager(
             return ""
 
         path = Path(report_path)
+        data_dir = Path(self.paths["VNX_DATA_DIR"]).resolve()
+        project_root = Path(self.paths["PROJECT_ROOT"]).resolve()
+
         if path.is_absolute():
-            return str(path)
+            resolved = path.resolve()
+            allowed_roots = (
+                data_dir,
+                project_root,
+                self.headless_reports_dir.resolve(),
+                self.reports_dir.resolve(),
+            )
+            if not any(resolved.is_relative_to(root) for root in allowed_roots):
+                raise ValueError(f"report_path escapes allowed directory: {report_path!r}")
+            return str(resolved)
 
         if path.parts and path.parts[0] == ".vnx-data":
-            data_root = Path(self.paths["VNX_DATA_DIR"]).resolve().parent
-            return str((data_root / path).resolve())
+            data_parent = data_dir.parent
+            resolved = (data_parent / path).resolve()
+            if not resolved.is_relative_to(data_dir):
+                raise ValueError(f"report_path escapes .vnx-data directory: {report_path!r}")
+            return str(resolved)
 
-        project_root = Path(self.paths["PROJECT_ROOT"])
-        return str((project_root / path).resolve())
+        resolved = (project_root / path).resolve()
+        if not resolved.is_relative_to(project_root):
+            raise ValueError(f"report_path escapes project root: {report_path!r}")
+        return str(resolved)
 
     def _request_path(self, gate: str, pr_number: int) -> Path:
         return self.requests_dir / f"pr-{pr_number}-{gate}.json"
@@ -118,7 +136,8 @@ class ReviewGateManager(
     ) -> str:
         ts = self._report_timestamp_slug(requested_at)
         pr_slug = self._report_pr_slug(pr_number=pr_number, pr_id=pr_id)
-        filename = f"{ts}-HEADLESS-{gate}-{pr_slug}.md"
+        rand = secrets.token_hex(3)
+        filename = f"{ts}-HEADLESS-{gate}-{pr_slug}-{rand}.md"
         return str((self.headless_reports_dir / filename).resolve())
 
     def _load_request_payload(self, gate: str, pr_number: int) -> Dict[str, Any]:
