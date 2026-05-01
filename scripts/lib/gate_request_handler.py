@@ -25,6 +25,20 @@ from claude_github_receipt import (
 )
 
 
+def _get_head_commit_sha() -> str:
+    """Return the HEAD commit SHA via git rev-parse. Returns empty string on failure."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return ""
+
+
 class GateRequestHandlerMixin:
     """Mixin providing gate request creation methods for ReviewGateManager."""
 
@@ -109,6 +123,7 @@ class GateRequestHandlerMixin:
         pr_number: Optional[int],
         pr_id: str,
         contract_hash: str = "",
+        dispatch_id: str = "",
     ) -> None:
         """Record unavailability in payload and write skip/result records."""
         reason, detail = self._classify_unavailable(gate, binary_name)
@@ -119,6 +134,7 @@ class GateRequestHandlerMixin:
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             reason=reason, reason_detail=detail,
             contract_hash=contract_hash,
+            dispatch_id=dispatch_id,
         )
         self._write_skip_rationale(
             gate=gate, pr_id=pr_id or str(pr_number),
@@ -144,6 +160,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
+            "commit_sha": _get_head_commit_sha(),
             "report_path": self._build_report_path(
                 gate="gemini_review",
                 requested_at=requested_at,
@@ -156,6 +173,7 @@ class GateRequestHandlerMixin:
             self._mark_gate_unavailable(
                 payload, gate="gemini_review", binary_name="gemini",
                 pr_number=pr_number, pr_id="",
+                dispatch_id=dispatch_id,
             )
         self._request_path("gemini_review", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -182,19 +200,20 @@ class GateRequestHandlerMixin:
             "contract_hash": contract.content_hash,
             "prompt": prompt,
             "requested_at": requested_at,
+            "commit_sha": _get_head_commit_sha(),
+            "dispatch_id": dispatch_id,
             "report_path": self._build_report_path(
                 gate="gemini_review",
                 requested_at=requested_at,
                 pr_id=contract.pr_id,
             ),
         }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
                 payload, gate="gemini_review", binary_name="gemini",
                 pr_number=None, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
+                dispatch_id=dispatch_id,
             )
         return payload
 
@@ -317,13 +336,13 @@ class GateRequestHandlerMixin:
         payload["review_mode"] = mode
         payload["risk_class"] = contract.risk_class
         payload["changed_files"] = contract.changed_files
+        payload["commit_sha"] = _get_head_commit_sha()
+        payload["dispatch_id"] = dispatch_id
         payload["report_path"] = self._build_report_path(
             gate="claude_github_optional",
             requested_at=requested_at,
             pr_id=contract.pr_id,
         )
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
         return payload
 
     def _persist_claude_github_files(
@@ -453,6 +472,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
+            "commit_sha": _get_head_commit_sha(),
             "report_path": self._build_report_path(
                 gate="codex_gate",
                 requested_at=requested_at,
@@ -465,6 +485,7 @@ class GateRequestHandlerMixin:
             self._mark_gate_unavailable(
                 payload, gate="codex_gate", binary_name="codex",
                 pr_number=pr_number, pr_id="",
+                dispatch_id=dispatch_id,
             )
         self._request_path("codex_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -510,6 +531,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
+            "commit_sha": _get_head_commit_sha(),
             "report_path": self._build_report_path(
                 gate="claude_github_optional",
                 requested_at=requested_at,
@@ -541,6 +563,7 @@ class GateRequestHandlerMixin:
             "risk_class": risk_class,
             "changed_files": changed_files,
             "requested_at": requested_at,
+            "commit_sha": _get_head_commit_sha(),
             "report_path": self._build_report_path(
                 gate="ci_gate",
                 requested_at=requested_at,
@@ -553,6 +576,7 @@ class GateRequestHandlerMixin:
             self._mark_gate_unavailable(
                 payload, gate="ci_gate", binary_name="gh",
                 pr_number=pr_number, pr_id="",
+                dispatch_id=dispatch_id,
             )
         self._request_path("ci_gate", pr_number).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
@@ -578,19 +602,20 @@ class GateRequestHandlerMixin:
             "changed_files": contract.changed_files,
             "contract_hash": contract.content_hash,
             "requested_at": requested_at,
+            "commit_sha": _get_head_commit_sha(),
+            "dispatch_id": dispatch_id,
             "report_path": self._build_report_path(
                 gate="ci_gate",
                 requested_at=requested_at,
                 pr_id=contract.pr_id,
             ),
         }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
         if not available:
             self._mark_gate_unavailable(
                 payload, gate="ci_gate", binary_name="gh",
                 pr_number=pr_number, pr_id=contract.pr_id,
                 contract_hash=contract.content_hash,
+                dispatch_id=dispatch_id,
             )
         return payload
 
