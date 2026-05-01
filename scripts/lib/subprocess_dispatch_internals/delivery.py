@@ -192,7 +192,7 @@ def _wire_event_store_into_health(adapter, health_monitor) -> None:
     """Wire event_store into health_monitor so STUCK events persist to NDJSON."""
     if health_monitor is None or health_monitor._event_store is not None:
         return
-    es = adapter._get_event_store()
+    es = adapter.event_store
     if es is not None:
         health_monitor._event_store = es
 
@@ -283,7 +283,7 @@ def _cleanup_dispatch_resources(
         heartbeat_stop.set()
     if heartbeat_thread is not None:
         heartbeat_thread.join(timeout=5)
-    event_store = adapter._get_event_store()
+    event_store = adapter.event_store
     if event_store is not None:
         try:
             event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)
