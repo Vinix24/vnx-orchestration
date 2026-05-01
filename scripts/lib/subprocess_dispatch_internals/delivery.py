@@ -235,6 +235,9 @@ def _classify_completion(
         )
     obs = adapter.observe(terminal_id)
     returncode = obs.transport_state.get("returncode")
+    if returncode is None:
+        # Fallback: stop() caches returncode before removing the process (OI-1120)
+        returncode = getattr(adapter, "_returncode_cache", {}).get(terminal_id)
     if returncode is not None and returncode != 0:
         logger.warning(
             "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
