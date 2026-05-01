@@ -148,6 +148,35 @@ def _build_fallback(reason: str = "Haiku summarization failed") -> dict[str, Any
     }
 
 
+def _strip_code_fences(text: str) -> str:
+    """Remove leading/trailing markdown code fences from a string."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    inner_lines = []
+    for i, line in enumerate(lines):
+        if i == 0 and line.startswith("```"):
+            continue
+        if i == len(lines) - 1 and line.strip() == "```":
+            continue
+        inner_lines.append(line)
+    return "\n".join(inner_lines)
+
+
+def _apply_record_defaults(record: dict[str, Any]) -> None:
+    """Fill missing fields in a decision record with safe defaults."""
+    now = _now_iso()
+    record.setdefault("timestamp", now)
+    record.setdefault("session_summary_at", now)
+    record.setdefault("action", "wait")
+    record.setdefault("dispatch_id", None)
+    record.setdefault("track", None)
+    record.setdefault("reasoning", "")
+    record.setdefault("open_items_actions", [])
+    record.setdefault("next_expected", "")
+
+
 def _parse_haiku_output(stdout: str) -> dict[str, Any]:
     """Parse haiku --output-format json response into a decision record.
 
@@ -162,34 +191,12 @@ def _parse_haiku_output(stdout: str) -> dict[str, Any]:
     if not result_str:
         return _build_fallback("Haiku summarization failed: empty result")
 
-    # Strip markdown code fences if present
-    stripped = result_str.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        inner_lines = []
-        for i, line in enumerate(lines):
-            if i == 0 and line.startswith("```"):
-                continue
-            if i == len(lines) - 1 and line.strip() == "```":
-                continue
-            inner_lines.append(line)
-        stripped = "\n".join(inner_lines)
-
     try:
-        record = json.loads(stripped)
+        record = json.loads(_strip_code_fences(result_str))
     except json.JSONDecodeError:
         return _build_fallback("Haiku summarization failed: invalid inner JSON")
 
-    now = _now_iso()
-    record.setdefault("timestamp", now)
-    record.setdefault("session_summary_at", now)
-    record.setdefault("action", "wait")
-    record.setdefault("dispatch_id", None)
-    record.setdefault("track", None)
-    record.setdefault("reasoning", "")
-    record.setdefault("open_items_actions", [])
-    record.setdefault("next_expected", "")
-
+    _apply_record_defaults(record)
     return record
 
 
@@ -307,13 +314,8 @@ def load_recent_decisions(
 # ---------------------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point.
-
-    Returns:
-        0 on success (including empty/no-text events — no work to do)
-        1 on fatal errors (events file not found)
-    """
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build and return the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Summarize T0 session events into a structured decision log entry."
     )
@@ -334,7 +336,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print decision record to stdout without writing to log",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.
+
+    Returns:
+        0 on success (including empty/no-text events — no work to do)
+        1 on fatal errors (events file not found)
+    """
+    args = _build_arg_parser().parse_args(argv)
 
     try:
         events = load_events(args.events_file)
