@@ -30,3 +30,27 @@ def test_run_id_empty_rejected():
 
 def test_run_id_valid_accepted():
     assert _assert_safe_run_id("abc-123_v2") == "abc-123_v2"
+
+
+# OI-1117: bare-dot and dot-prefixed run_ids must be rejected
+def test_run_id_bare_dot_rejected():
+    with pytest.raises(ValueError):
+        _assert_safe_run_id(".")
+
+
+def test_run_id_double_dot_rejected():
+    with pytest.raises(ValueError):
+        _assert_safe_run_id("..")
+
+
+def test_run_id_dot_prefix_rejected():
+    with pytest.raises(ValueError):
+        _assert_safe_run_id(".log")
+
+
+def test_run_id_interior_dot_allowed():
+    assert _assert_safe_run_id("a.b") == "a.b"
+
+
+def test_run_id_alnum_allowed():
+    assert _assert_safe_run_id("abc") == "abc"
