@@ -20,20 +20,18 @@ import json
 import logging
 import os
 import re
+import sys as _sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
-logger = logging.getLogger(__name__)
-
 # ── PR-0 / PR-2 imports ───────────────────────────────────────────────────────
-import sys as _sys
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in _sys.path:
     _sys.path.insert(0, _LIB)
 
-from auto_report_contract import (
+from auto_report_contract import (  # noqa: E402  # sys.path adjusted above
     AutoDerivedTags,
     AutoReport,
     AutoReportMetadata,
@@ -49,8 +47,10 @@ from auto_report_contract import (
     render_markdown,
     validate_auto_report,
 )
-from report_extraction import run_extraction
-from report_classifier import classify_report
+from report_extraction import run_extraction  # noqa: E402
+from report_classifier import classify_report  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Assembly Result ──────────────────────────────────────────────────────────

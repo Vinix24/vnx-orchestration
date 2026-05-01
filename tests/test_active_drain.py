@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -457,3 +458,49 @@ class TestStatusAwareDrain:
             dry_run=False,
         )
         assert result.action == "completed"
+
+
+# ---------------------------------------------------------------------------
+# OI-1126: --older-than-hours must reject negative values
+# ---------------------------------------------------------------------------
+
+class TestOlderThanHoursValidation:
+    _SCRIPT = str(Path(__file__).resolve().parent.parent / "scripts" / "check_active_drain.py")
+
+    def test_rejects_negative_hours(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--older-than-hours", "-1"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= 0" in result.stderr
+
+    def test_rejects_negative_float(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--older-than-hours", "-0.5"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
+        assert "must be >= 0" in result.stderr
+
+    def test_accepts_zero(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--older-than-hours", "0", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        # Should not fail with argparse error (may exit 0 or 2 based on data dir)
+        assert "must be >= 0" not in result.stderr
+
+    def test_accepts_positive(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--older-than-hours", "2.5", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        assert "must be >= 0" not in result.stderr
+
+    def test_rejects_non_numeric(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--older-than-hours", "abc"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0

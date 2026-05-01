@@ -140,10 +140,13 @@ def _parse_changed_files(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _compute_changed_files(branch: str) -> List[str]:
+def _compute_changed_files(branch: str, *, strict: bool = False) -> List[str]:
     """Auto-compute changed files by diffing branch against origin/main or main.
 
-    Raises ValueError when both bases fail — callers must handle or pass --changed-files explicitly.
+    When strict=True (review-gate context): raises RuntimeError on git failure so the
+    caller is forced to handle missing scope data rather than silently proceeding.
+    When strict=False (best-effort): logs a warning and raises ValueError — caller
+    should catch and either abort or pass --changed-files explicitly.
     """
     last_err = None
     for base in ("origin/main", "main"):
@@ -161,6 +164,11 @@ def _compute_changed_files(branch: str) -> List[str]:
         f"Pass --changed-files explicitly to proceed. ({last_err})",
         file=sys.stderr,
     )
+    if strict:
+        raise RuntimeError(
+            f"cannot auto-compute changed_files for branch {branch!r}: {last_err}. "
+            "Pass --changed-files explicitly or ensure git access."
+        )
     raise ValueError(f"cannot auto-compute changed_files for branch {branch!r}")
 
 
@@ -220,8 +228,8 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
     changed_files = _parse_changed_files(args.changed_files)
     if not changed_files and args.branch:
         try:
-            changed_files = _compute_changed_files(args.branch)
-        except ValueError as exc:
+            changed_files = _compute_changed_files(args.branch, strict=True)
+        except (ValueError, RuntimeError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
     result = manager.request_and_execute(
@@ -277,8 +285,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         changed_files = _parse_changed_files(args.changed_files)
         if not changed_files and args.branch:
             try:
-                changed_files = _compute_changed_files(args.branch)
-            except ValueError as exc:
+                changed_files = _compute_changed_files(args.branch, strict=True)
+            except (ValueError, RuntimeError) as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
                 return 2
         result = manager.request_reviews(

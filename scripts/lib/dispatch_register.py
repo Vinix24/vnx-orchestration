@@ -10,7 +10,11 @@ Future consumers (separate PRs):
 - build_t0_state.py: full register-canonical pr_progress aggregation (PR-4c)
 """
 from __future__ import annotations
-import datetime as _dt, json, os, fcntl, sys
+import datetime as _dt
+import fcntl
+import json
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 

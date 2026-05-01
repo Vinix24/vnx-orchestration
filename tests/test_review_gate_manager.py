@@ -273,8 +273,8 @@ def test_changed_files_override_preserves_explicit(review_env, monkeypatch):
     assert "should/not/appear.py" not in captured_changed_files
 
 
-def test_compute_changed_files_raises_on_both_bases_fail(review_env, monkeypatch):
-    """_compute_changed_files raises ValueError when both origin/main and main bases fail."""
+def test_compute_changed_files_raises_value_error_best_effort(review_env, monkeypatch):
+    """_compute_changed_files raises ValueError (best-effort mode) when both bases fail."""
     import subprocess as sp
 
     def fake_run_fail(cmd, **kwargs):
@@ -284,6 +284,36 @@ def test_compute_changed_files_raises_on_both_bases_fail(review_env, monkeypatch
 
     with pytest.raises(ValueError, match="cannot auto-compute"):
         rgm._compute_changed_files("feature/broken-branch")
+
+
+def test_compute_changed_files_strict_raises_runtime_error(review_env, monkeypatch):
+    """_compute_changed_files raises RuntimeError in strict (review-gate) mode when both bases fail."""
+    import subprocess as sp
+
+    def fake_run_fail(cmd, **kwargs):
+        raise sp.CalledProcessError(128, cmd)
+
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run_fail)
+
+    with pytest.raises(RuntimeError, match="cannot auto-compute"):
+        rgm._compute_changed_files("feature/broken-branch", strict=True)
+
+
+def test_compute_changed_files_strict_returns_files_on_success(review_env, monkeypatch):
+    """_compute_changed_files with strict=True returns file list when git succeeds."""
+    import subprocess as sp
+
+    class FakeProc:
+        returncode = 0
+        stdout = "scripts/foo.py\nscripts/bar.py\n"
+
+    def fake_run_ok(cmd, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run_ok)
+
+    files = rgm._compute_changed_files("feature/ok-branch", strict=True)
+    assert files == ["scripts/foo.py", "scripts/bar.py"]
 
 
 def test_main_handles_compute_failure_gracefully(review_env, monkeypatch):
