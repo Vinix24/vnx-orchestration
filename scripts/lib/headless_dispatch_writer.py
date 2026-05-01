@@ -5,6 +5,11 @@ Provides write_dispatch() and generate_dispatch_id() for headless T0 to
 create dispatch files in .vnx-data/dispatches/pending/ without manual
 operator intervention.
 
+Known consumers of this module:
+  - scripts/lib/decision_executor.py  — imports write_dispatch + generate_dispatch_id
+  - scripts/commands/dispatch.sh      — imports generate_dispatch_id via python3 -c
+  - scripts/commands/dispatch-agent.sh — imports generate_dispatch_id via python3 -c
+
 Design invariants:
   - Only T1/T2/T3 may receive dispatches (T0 cannot dispatch to itself).
   - Role validation checks .claude/skills/<role>/ directory existence.
