@@ -71,6 +71,7 @@ def _maybe_auto_commit(
     touched_files,
     manifest_paths,
     commit_hash_after: str,
+    model: "str | None" = None,
 ) -> tuple[bool, bool, str]:
     """Run auto_commit on the success path and refresh post-commit state."""
     import subprocess_dispatch as _sd
@@ -81,6 +82,7 @@ def _maybe_auto_commit(
         pre_dispatch_dirty=pre_dispatch_dirty,
         dispatch_touched_files=touched_files,
         manifest_paths=manifest_paths,
+        model=model,
     )
     if committed:
         commit_missing = False
@@ -109,6 +111,7 @@ def _handle_success(
     dispatch_start_ts: str,
     pre_sha: str,
     lease_generation: "int | None",
+    model: "str | None" = None,
 ) -> None:
     """Run the success branch: write receipt, feedback, outcome capture, cleanup."""
     import subprocess_dispatch as _sd
@@ -123,6 +126,7 @@ def _handle_success(
         touched_files=sub_result.touched_files,
         manifest_paths=manifest_paths,
         commit_hash_after=commit_hash_after,
+        model=model,
     )
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
@@ -361,6 +365,7 @@ def deliver_with_recovery(
                 dispatch_start_ts=dispatch_start_ts,
                 pre_sha=pre_sha,
                 lease_generation=lease_generation,
+                model=model,
             )
             return True
         _backoff_or_fail(

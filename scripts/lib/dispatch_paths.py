@@ -73,6 +73,20 @@ def read_manifest(state_dir: Path, dispatch_id: str) -> Optional[List[str]]:
     return [str(x) for x in paths]
 
 
+def paths_for_dispatch(dispatch_id: str) -> Optional[List[str]]:
+    """Convenience wrapper: read manifest using the default VNX state dir.
+
+    Returns None when no manifest exists or it is unreadable; an empty
+    list when the manifest exists but declares no paths.
+    """
+    try:
+        from subprocess_dispatch_internals.state_paths import _default_state_dir
+    except Exception as exc:  # pragma: no cover - import-time safety net
+        logger.warning("dispatch_paths: state-dir resolver unavailable: %s", exc)
+        return None
+    return read_manifest(_default_state_dir(), dispatch_id)
+
+
 def filter_paths(files: List[str], allowed_paths: List[str]) -> List[str]:
     """Return only those files that match any allowed path.
 
