@@ -1,11 +1,15 @@
 # PRD — VNX Universal Headless Orchestration Harness
 
 **Document ID:** PRD-VNX-UH-001
-**Version:** 1.0 (Draft)
+**Version:** 1.1 (Draft)
 **Date:** 2026-05-01
 **Author:** T0 (Opus 4.7, 1M)
 **Owner:** Vincent van Deth (operator)
 **Status:** Draft — pending operator approval of open decisions
+
+**Changelog:**
+- v1.0 — initial draft synthesizing multi-orchestrator + universal-harness research
+- v1.1 — adds §7.6 architecture mode matrix; adds §7.7 + FR-11 provider-failover at orchestrator level; updates FR-7 to note provider-interchangeability; updates OD-1 scope; adds R11 (cross-provider state continuity)
 
 **Companion research:**
 - `claudedocs/2026-05-01-multi-orchestrator-research.md` — multi-orchestrator hierarchy + session continuity
@@ -157,37 +161,74 @@ class CanonicalEvent:
 
 Tier 1 = full streaming (Claude, Codex, Gemini-new); Tier 2 = text-only streaming (Kimi, Ollama legacy); Tier 3 = final-result-only (batch APIs). Receipt records the tier; governance variant declares minimum tier required.
 
-### FR-4 — Folder-based agents
+### FR-4 — Folder-based agents (single-source SKILL.md + provider symlinks)
+
+#### 4.1 Layout
 
 ```
 .claude/agents/
 ├── orchestrators/
 │   ├── tech-lead/
-│   │   ├── CLAUDE.md
-│   │   ├── AGENTS.md
-│   │   ├── GEMINI.md
+│   │   ├── SKILL.md             ← single source of truth (operator edits this)
+│   │   ├── CLAUDE.md → SKILL.md ← symlink (Claude CLI auto-loads)
+│   │   ├── AGENTS.md → SKILL.md ← symlink (Codex CLI auto-loads)
+│   │   ├── GEMINI.md → SKILL.md ← symlink (Gemini CLI auto-loads)
 │   │   ├── permissions.yaml
-│   │   ├── governance.yaml      # variant: coding-strict
-│   │   ├── guardrails.yaml      # model whitelist, max risk class, gate stack
+│   │   ├── governance.yaml      ← variant: coding-strict OR business-light
+│   │   ├── guardrails.yaml      ← model whitelist, max risk class, gate stack
+│   │   ├── runtime.yaml         ← provider chain (FR-11)
 │   │   ├── hooks/
-│   │   └── workers.yaml         # which worker pool this orch owns
+│   │   └── workers.yaml         ← which worker pool this orch owns
 │   └── marketing-lead/
 │       └── ...
 └── workers/
     ├── backend-developer/
-    │   ├── CLAUDE.md
-    │   ├── AGENTS.md
-    │   ├── GEMINI.md
+    │   ├── SKILL.md
+    │   ├── CLAUDE.md → SKILL.md
+    │   ├── AGENTS.md → SKILL.md
+    │   ├── GEMINI.md → SKILL.md
     │   ├── permissions.yaml
+    │   ├── runtime.yaml
     │   └── tools.yaml
     └── ...
 ```
 
-Loading semantics:
-1. **Boot phase:** orchestrator startup reads its own folder; provider-specific file picked by runtime.
-2. **Dispatch phase:** dispatcher reads target worker's folder, attaches permissions, signs token, passes the *folder path* via `--cwd` + `VNX_AGENT_DIR` env. Worker reads its own folder. Injection is gone.
+**Single source of truth: `SKILL.md`.** The three provider-named files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) are symlinks pointing back at `SKILL.md`. Drift between providers is impossible because all three reference the *same inode* on disk. Operator edits one file; all providers see identical content.
 
-Existing `_inject_skill_context()` in `subprocess_dispatch_internals/skill_injection.py:228-247` is kept as a legacy fallback behind `VNX_FOLDER_AGENTS=0` for backward-compat during migration.
+#### 4.2 Why symlinks (not tri-file, not converter)
+
+Three options were considered:
+
+| Option | LOC | Drift risk | Provider-specific divergence supported |
+|--------|-----|------------|----------------------------------------|
+| Tri-file manual (3 separate `.md` files) | 0 | High — operator must sync | Yes |
+| Single `SKILL.md` + auto-converter | ~300 | Low — generated on save | Yes (via `<provider:claude>...</provider>` tags) |
+| **Single `SKILL.md` + symlinks** (chosen) | ~10 | Zero — same file | No (acceptable trade-off) |
+
+Provider-specific divergence in the prompt content turns out to be **rare in practice**: VNX's permission profile (allowed-tools list) is already provider-specific via `permissions.yaml`, and tool-naming differences (e.g. Claude's `Edit` vs Codex's `update_file`) are handled by the **adapter layer**, not by the skill prompt. The skill prompt itself can be provider-neutral.
+
+If divergence ever becomes necessary later, upgrade to the converter (Option B) is a one-time migration, not blocking work for v1.
+
+#### 4.3 Loading semantics
+
+| Mode | What VNX does |
+|------|---------------|
+| **Headless (default)** | VNX dispatcher reads `SKILL.md` from the agent folder, builds the prompt, pipes it to the provider CLI via `--instruction` or stdin. The provider CLI's auto-loading conventions are bypassed (we drive the prompt entirely). The 3 symlinks exist but are not read in this mode — they are insurance for the interactive escape hatch. |
+| **Interactive (escape hatch)** | Operator runs `vnx interactive --agent <role>` which `cd`s into the folder and spawns `claude` (or `codex` / `gemini`) without `-p`. The provider CLI auto-loads its provider-specific filename — which resolves through the symlink to `SKILL.md`. Operator gets the same skill content the headless flow would have used. |
+
+**This means the skill folder is genuinely unified across modes.** No separate paths, no special-casing, no "headless gets injection / interactive gets folder-load." Same file system → same content → same behavior.
+
+#### 4.4 Boot-time symlink creation
+
+A boot helper in `scripts/lib/agent_folder_loader.py` (~30 LOC of the W8 estimate) ensures the three provider-named symlinks exist for every agent folder containing a `SKILL.md`. Idempotent: if symlinks already exist and point to `SKILL.md`, no-op. If they point elsewhere or are stale, repair.
+
+Operator can also commit the symlinks to git directly — git tracks symlinks as "links to a path." Either way, after first boot every folder is consistent.
+
+#### 4.5 Migration path
+
+- Existing `.claude/skills/<role>/CLAUDE.md` → rename to `.claude/agents/workers/<role>/SKILL.md`, create the three symlinks.
+- Existing `_inject_skill_context()` in `subprocess_dispatch_internals/skill_injection.py:228-247` keeps working as legacy fallback behind `VNX_FOLDER_AGENTS=0` for backward-compat during migration.
+- Once `VNX_FOLDER_AGENTS=1` is the default and all dispatches use it, injection path is removed in W14.
 
 ### FR-5 — Capability token trust chain
 
@@ -246,7 +287,9 @@ business-light:
 
 `scripts/lib/gate_stack_resolver.py` (new, ~150 LOC) reads the variant per dispatch and resolves the gate stack accordingly.
 
-### FR-7 — Multi-tier orchestrator hierarchy
+### FR-7 — Multi-tier orchestrator hierarchy (provider-interchangeable)
+
+**An orchestrator at any tier is provider-interchangeable.** Main, sub-orchestrators, and workers are not Claude-locked: each runs on whatever provider its folder declares as primary, with declared fallbacks for resilience (see FR-11). The default orchestrator stack is **Opus → Codex → Gemini** but the operator can override per orchestrator folder.
 
 ```
 Operator
@@ -300,6 +343,120 @@ vnx interactive --agent backend-developer
 Interactive sessions carry **no capability token** (operator is physically driving). When the session ends, a `session_summary` event is appended to `events/T{n}.ndjson` so observability surface stays uniform. Driver = "human" instead of "orchestrator."
 
 This preserves the standing memory note `feedback_hybrid_interactive_headless.md`: tmux paths are permanent.
+
+### FR-11 — Provider failover at orchestrator level
+
+**Every orchestrator (main, sub) declares a primary provider plus an ordered list of fallbacks.** On primary unavailability, the orchestrator restarts on the next available fallback with state recovered from a summary checkpoint. Workers also support failover, but with a more conservative policy (because mid-task switching is risky).
+
+#### 11.1 Per-orchestrator runtime config
+
+```yaml
+# .claude/agents/orchestrators/main/runtime.yaml
+provider_chain:
+  primary: { provider: claude, model: opus }
+  fallbacks:
+    - { provider: codex,  model: gpt-5.3-codex }
+    - { provider: gemini, model: gemini-2.5-pro }
+
+failover:
+  trigger: on_unavailable     # OR on_error_5xx, on_timeout, manual
+  health_check_interval: 60s
+  consecutive_failures_before_flip: 3
+  cooldown_before_reflip: 300s
+  state_handoff: summary_checkpoint   # OR fresh (lossy), warn_operator (block)
+```
+
+Same schema applies to sub-orchestrators (in their own folder) and workers (in `.claude/agents/workers/<role>/runtime.yaml`).
+
+#### 11.2 Health-check probe
+
+A lightweight per-provider probe runs every `health_check_interval` (default 60s):
+
+| Provider | Probe |
+|----------|-------|
+| Claude   | `claude --version` + `claude -p --dry-run "ping"` (no API call if dry-run honored) |
+| Codex    | `codex --version` + cached `codex auth status` |
+| Gemini   | `gemini --version` + `gemini --dry-run` if available |
+| Ollama   | `curl -fsS http://localhost:11434/api/tags` |
+| LiteLLM bridge | `litellm --health-check` |
+
+Probe results land in `.vnx-data/state/provider_health.ndjson` (NDJSON ring buffer + archive, mirroring existing `events/` pattern).
+
+#### 11.3 Failover state-handoff strategies
+
+| Strategy | What happens at failover | When to use |
+|----------|--------------------------|-------------|
+| **`summary_checkpoint`** (recommended) | Orchestrator periodically writes a `.vnx-data/missions/<mission_id>/checkpoints/<timestamp>.md` summary. On failover, new provider starts fresh with `--instruction "$(cat latest_checkpoint.md)"`. | Default for orchestrators. Loses live context but preserves intent. |
+| **`fresh`** | Drop the in-flight dispatch. Operator restarts manually. | Workers, where mid-task switching corrupts the artifact. |
+| **`warn_operator`** | Block until operator acknowledges. Mission state goes to `paused`. | High-stakes coding-strict missions where any state loss must be human-reviewed. |
+
+#### 11.4 Provider-agnostic trust chain
+
+Capability tokens are **signed by the orchestrator's ed25519 key, not by a provider session**. Therefore:
+
+- Main on Opus signs token → Tech Lead receives token → Opus goes down → Tech Lead's *Codex* fallback can dispatch workers using the *same* token chain (signature still verifies; trust anchor unchanged).
+- A worker dispatched by orch-on-Opus is verifiable by the worker even if that orch later runs on Codex (same signing key, no provider re-handshake needed).
+
+This is a key property of the cap-token design and is **only true if** the orchestrator's signing key persists across provider switches — which it does, because the key lives in `.vnx-data/state/keys/orchestrator_<id>_ed25519.priv`, not in any provider's session state.
+
+#### 11.5 Cross-provider session continuity (limits)
+
+| What survives failover | What does not |
+|-----------------------|---------------|
+| Capability token chain (key-based) | Provider's internal `session_id` (Opus session ≠ Codex session) |
+| Mission state in `.vnx-data/missions/<id>.json` | Live conversation context inside the LLM |
+| Receipts and dispatch register | Tool-call history within the prior provider's session |
+| Orchestrator's signing key | F43 context-rotation handover summaries (need to be re-built per provider) |
+
+The pragmatic answer: failover is **always lossy at the conversation level**, but **never lossy at the trust level**. The summary-checkpoint pattern minimizes conversation loss to ≤1 checkpoint interval (default: every 10 turns or 5 minutes, whichever first).
+
+#### 11.6 Provider-pair compatibility matrix (orchestrator role)
+
+| Primary → Fallback | Skill file pair | Tool-use semantics | Compatibility | Notes |
+|-------------------|----------------|---------------------|---------------|-------|
+| Opus → Codex      | CLAUDE.md → AGENTS.md | both support tool_use natively | ✅ Full | Default recommended pair |
+| Opus → Gemini     | CLAUDE.md → GEMINI.md | both support function-calling | ✅ Full | Gemini-CLI v0.11+ required for streaming parity |
+| Codex → Gemini    | AGENTS.md → GEMINI.md | both function-calling | ✅ Full | Operator-validated provider-pair |
+| Opus → Ollama (Llama) | CLAUDE.md → CLAUDE.md (Llama uses Claude-style prompt OK) | Llama tool-use is text-pattern-based | ⚠️ Tier-2 observability | Acceptable for low-risk orchestrators |
+| Any → Kimi 2.6    | CLAUDE.md → AGENTS.md or KIMI.md | OpenAI-compatible | ✅ Full | Future, requires KimiAdapter |
+
+#### 11.7 Failover events in receipt
+
+Receipt envelope gets two new optional fields:
+
+```json
+{
+  "...existing...":,
+  "provider_chain_at_dispatch": ["claude/opus", "codex/gpt-5.3-codex"],
+  "active_provider_at_completion": "claude/opus",
+  "failover_events": []
+}
+```
+
+If a failover happened during the dispatch:
+
+```json
+{
+  "failover_events": [
+    {
+      "ts": "2026-05-01T12:34:56Z",
+      "from": "claude/opus",
+      "to": "codex/gpt-5.3-codex",
+      "trigger": "on_unavailable",
+      "checkpoint_path": ".vnx-data/missions/M-001/checkpoints/20260501-123450.md"
+    }
+  ]
+}
+```
+
+#### 11.8 LOC estimate
+
+- `scripts/lib/provider_health.py` — health-check probe + ring buffer (~120 LOC)
+- `scripts/lib/provider_chain.py` — chain resolver + failover decision (~100 LOC)
+- `scripts/lib/checkpoint_writer.py` — summary checkpoint writer for orchestrators (~80 LOC)
+- Receipt schema additions (`provider_chain_at_dispatch`, `failover_events`) (~30 LOC)
+- Tests + docs (~150 LOC)
+- **Total: ~480 LOC. New wave: W7.5 (between streaming drainer and folder agents).**
 
 ---
 
@@ -455,6 +612,60 @@ CREATE TABLE worker_registry (
 );
 ```
 
+### 7.6 Architecture mode matrix (interactive ⇄ headless at every level)
+
+The dual architecture (interactive + headless) is preserved at **every tier** of the hierarchy. Every node in the tree below can run in either mode, independently of its parent or children.
+
+|                         | Interactive (tmux pane / TTY)                        | Headless (subprocess only)                      |
+|-------------------------|------------------------------------------------------|-------------------------------------------------|
+| **Operator**            | always interactive (it's a human)                    | n/a                                              |
+| **Main Orchestrator**   | current T0 — operator drives directly                | dispatched via cron / mission-trigger / webhook |
+| **Sub-Orchestrator**    | opt-in via `vnx attach <orchestrator_id>` (own pane) | default — subprocess in pool, observable via events archive |
+| **Worker**              | `vnx interactive --agent <role>` (operator drives, no token) | default — dispatched by (sub-)orchestrator, full token chain |
+
+**Properties of this matrix:**
+
+1. **Mode is a per-node attribute, not a tree-wide attribute.** Main can be interactive while sub-orchestrators are headless and workers are headless. Or main can be headless (cron-triggered) while one sub-orchestrator is interactive for operator inspection.
+2. **Cap-token chain is mode-agnostic.** Headless and interactive nodes both verify against the same trust root. Interactive sessions just don't *consume* a token (operator is the driver).
+3. **Observability is mode-uniform.** Every node — interactive or headless — emits events to its own archive. Interactive sessions emit `session_summary` on close.
+4. **The 4-mode matrix from `docs/manifesto/HEADLESS_TRANSITION.md` generalizes:** what was "T0 interactive + workers headless" etc becomes "any-tier interactive + any-tier headless" with the per-node opt-in flag.
+
+This matrix is the unified design that obsoletes the static T0/T1/T2/T3 model — any node, any mode, any provider (per FR-11).
+
+### 7.7 Provider-failover summary diagram
+
+```
+   ┌────────────────────────────────────────────────────────┐
+   │ orchestrator boot                                      │
+   │   reads runtime.yaml: primary=opus, fallbacks=[codex,..]│
+   │   spawns provider probe loop (60s)                     │
+   └────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ normal operation on primary (opus)                     │
+   │   periodically writes summary checkpoint to            │
+   │   .vnx-data/missions/<id>/checkpoints/<ts>.md          │
+   └─────────┬──────────────────────────────────────────────┘
+             │ probe detects 3 consecutive failures
+             ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ failover decision                                       │
+   │   - log to provider_health.ndjson                      │
+   │   - emit failover_event                                │
+   │   - cap-token chain UNCHANGED (same orch key)          │
+   └─────────┬──────────────────────────────────────────────┘
+             │
+             ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ restart on next available fallback (codex)             │
+   │   instruction = latest checkpoint summary              │
+   │   workers continue under same token chain              │
+   └────────────────────────────────────────────────────────┘
+```
+
+The trust chain survives the provider switch because cap-tokens are signed by the orchestrator's persistent ed25519 key, not by any provider's session.
+
 ---
 
 ## 8. Migration Strategy & Phasing
@@ -465,7 +676,8 @@ CREATE TABLE worker_registry (
 |------|-------|-----|-------|-------------|---------|
 | **W6/F43** | F43 context rotation revival + single-system migration P1-P6 | ~1500 | 2-3 | (none) | State must consolidate before sub-orchestrators |
 | **W7** | Streaming drainer + Canonical event schema + Tier-1/2/3 labels | ~290 + ~200 tests | 1 | W6 | Cheapest win; closes governance hole; reused everywhere below |
-| **W8** | Folder-based agents Phase A+B | ~900 | 3 | W7 | Enables N workers without renaming; dispatcher learns folders |
+| **W7.5** | Provider-failover (FR-11): health probe + provider chain + summary checkpoints | ~480 | 1-2 | W7 | Without this, "Opus down" = full halt. Mandatory before sub-orchestrators land. |
+| **W8** | Folder-based agents Phase A+B (single SKILL.md + 3 symlinks per folder) | ~900 | 3 | W7.5 | Enables N workers without renaming; dispatcher learns folders; symlinks created at boot |
 | **W9** | Universal `WorkerProvider` interface | ~400 | 2 | W8 | Refactor `ProviderAdapter` → `WorkerProvider`; add `models()`, lifecycle |
 | **W10** | Capability tokens + governance variants | ~600 | 2-3 | W9 | Trust chain MUST land before multi-orchestrator |
 | **W11** | Workers=N rename + lease polymorphism | ~600 | 2 | W10 | Now scope is signed and folders carry config; drop T0..T3 |
@@ -511,6 +723,8 @@ W7 is one PR per sub-step, mergeable independently. Estimated total ~640 LOC of 
 | R8 | Interactive sessions emit no token; operator forgets they're "off-system" and treats output as audited | Low | Medium | `session_summary` event explicitly tagged `driver=human`; receipt processor can flag. |
 | R9 | LiteLLM bridge introduces dep that pulls 50 transitive packages | High | Medium | Wrap LiteLLM behind a minimal `litellm-cli` shim subprocess; main VNX dep tree stays clean. |
 | R10 | ed25519 signature verification overhead on hot dispatch path | Low | Low | Benchmarked at <1ms; well within NFR-4. |
+| R11 | Cross-provider state continuity at failover loses live conversation context | Medium | Medium | Summary-checkpoint pattern (FR-11.3) bounds loss to ≤1 checkpoint interval. Cap-token chain survives unchanged so trust isn't lost. Document for operator: failover is conversation-lossy by design; mission state survives. |
+| R12 | Symlink-based SKILL.md breaks on filesystems that don't support symlinks (Windows w/o developer mode, some FUSE mounts) | Low | Medium | Boot helper detects symlink support; falls back to copying SKILL.md content into 3 sibling files (with a "DO NOT EDIT" header) if symlinks unavailable. Preserves headless path; interactive may show drift warning. |
 
 ---
 
@@ -518,14 +732,18 @@ W7 is one PR per sub-step, mergeable independently. Estimated total ~640 LOC of 
 
 These decisions block the start of W7. Please answer in the same order:
 
-### OD-1 — Codex priority
+### OD-1 — Codex (and Gemini) scope (REVISED v1.1)
 
-> Is Codex going to be a *worker* (full streaming required) or stay a *gate* (final-result-only sufficient)?
+> Are Codex and Gemini going to be *workers only*, or also *fallback orchestrators*?
 
-If **worker**: W7-C is blocking for any feature that routes Codex as the implementer.
-If **gate-only**: W7-C is governance-hygiene; can defer 2 weeks if needed.
+The v1.1 vision (per FR-11) makes Codex and Gemini **first-class fallback orchestrators**. This means they need full per-event observability AND the ability to load orchestrator skills and sign capability tokens — same as Opus.
 
-**Recommendation:** worker. Operator's "any CLI model" vision implies all providers are worker-capable.
+| Scope | What it implies |
+|-------|-----------------|
+| Worker only | W7 streaming-drainer fix sufficient. Skill folders only need worker-role markdown. |
+| Worker + fallback orchestrator (recommended) | Same W7 streaming fix + Codex/Gemini get orchestrator skills + `runtime.yaml` provider chain enforced |
+
+**Recommendation:** Worker + fallback orchestrator. Aligns with the "providers down" resilience requirement; tri-symlinked SKILL.md works for both worker and orchestrator roles uniformly.
 
 ### OD-2 — Capability-token signing key location
 
@@ -539,16 +757,19 @@ If **gate-only**: W7-C is governance-hygiene; can defer 2 weeks if needed.
 
 **Recommendation:** laptop file for v1; hardware-backed in v2 if/when operator runs sensitive customer code.
 
-### OD-3 — Tri-file authoring strategy
+### OD-3 — Skill file strategy (REVISED v1.1)
 
-> Maintain `CLAUDE.md` + `AGENTS.md` + `GEMINI.md` per agent (3× the markdown to keep in sync), or invest in a single-source `worker.md` + auto-converter?
+> How do we keep the skill prompt unified across providers?
 
-| Option | LOC | Maintenance |
-|--------|-----|-------------|
-| Tri-file manual | 0 extra | Operator edits 3 files; risks drift. |
-| Single-source + converter | ~300 LOC | Operator edits 1 file; converter regenerates on save (file watcher) or pre-commit hook. |
+**Decision: single `SKILL.md` + 3 provider-named symlinks (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) per agent folder.** See FR-4.2 for the trade-off table.
 
-**Recommendation:** single-source. The operator's existing memory `project_model_agnostic_flow.md` already flags this as needed: *"Tri-file (CLAUDE/AGENTS/GEMINI.md) exists in docs but dispatch always uses CLAUDE.md; needs converter for multi-provider."*
+| Option | LOC | Drift risk | Status |
+|--------|-----|------------|--------|
+| Tri-file manual | 0 | High | **Rejected** — drift unavoidable |
+| Single `SKILL.md` + auto-converter | ~300 | Low | Deferred — only needed if provider-specific prompt divergence becomes a real requirement |
+| **Single `SKILL.md` + symlinks** | ~10 | Zero | **Accepted** — simplest, drift-impossible, headless-and-interactive unified |
+
+This decision **closes** OD-3 in v1.1 — operator no longer needs to choose; the symlink approach gives single-source-of-truth without the converter LOC. If provider divergence is ever needed later, upgrade to converter is a one-time migration.
 
 ### OD-4 — Sub-orchestrator approval gates
 
