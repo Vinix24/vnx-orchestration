@@ -951,3 +951,110 @@ def test_duplicate_receipt_does_not_mutate_open_items_store(tmp_path: Path, ar):
         f"_register_quality_open_items must run once (post-append) and NOT again on duplicate. "
         f"Got register calls: {register_calls!r}"
     )
+
+
+# ── OI-1074 / OI-1105: NDJSON-first ordering + flag consistency ──────────────
+
+
+def test_ndjson_written_when_oi_register_fails(tmp_path: Path, ar):
+    """OI-1105: NDJSON record must land even when _register_quality_open_items raises.
+
+    Pre-fix: the exception propagated through _run_post_append_hooks to
+    append_receipt_payload, masking a successful NDJSON write as a failure.
+    Post-fix: each post-append hook is wrapped in its own try/except so the
+    durable NDJSON record is never at risk from downstream side-effects.
+    """
+    receipts_file = tmp_path / "receipts_oi_fail.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI-FAIL-001",
+        "terminal": "T1",
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "severity": "blocker", "item": "missing tests"},
+                ]
+            }
+        },
+    }
+
+    def _passthrough_enrich(r, repo_root=None):
+        enriched = dict(r)
+        enriched.setdefault("open_items_created", 1)
+        return enriched
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=_passthrough_enrich), \
+         patch.object(ar, "_register_quality_open_items",
+                      side_effect=RuntimeError("OI store unavailable")), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register", return_value=False), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert result.status == "appended", (
+        f"Expected 'appended'; got {result.status!r}. "
+        "OI-1105: _register_quality_open_items failure must not prevent NDJSON write."
+    )
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1, (
+        f"NDJSON must contain exactly one record even when OI registration fails; got {len(lines)}"
+    )
+    persisted = json.loads(lines[0])
+    assert persisted["dispatch_id"] == "DISP-OI-FAIL-001"
+
+
+def test_open_items_flag_consistent_with_ndjson(tmp_path: Path, ar):
+    """OI-1074: open_items_created in NDJSON must match actual OI registration count.
+
+    The dry-run count set during enrichment and the count returned by
+    _register_quality_open_items must agree for a clean (non-racing) receipt.
+    """
+    receipts_file = tmp_path / "receipts_consistent.ndjson"
+    receipt = {
+        "timestamp": "2026-04-28T12:00:00Z",
+        "event_type": "task_complete",
+        "status": "success",
+        "dispatch_id": "DISP-OI-CONSISTENT-001",
+        "terminal": "T1",
+        "quality_advisory": {
+            "t0_recommendation": {
+                "open_items": [
+                    {"check_id": "c1", "file": "a.py", "severity": "blocker", "item": "x"},
+                    {"check_id": "c2", "file": "b.py", "severity": "warn", "item": "y"},
+                ]
+            }
+        },
+    }
+    register_counts: list = []
+
+    def _passthrough_enrich(r, repo_root=None):
+        enriched = dict(r)
+        enriched["open_items_created"] = 2
+        return enriched
+
+    def _fake_register(r):
+        count = 2
+        register_counts.append(count)
+        return count
+
+    with patch.object(ar, "_enrich_completion_receipt", side_effect=_passthrough_enrich), \
+         patch.object(ar, "_register_quality_open_items", side_effect=_fake_register), \
+         patch.object(ar, "_update_confidence_from_receipt"), \
+         patch.object(ar, "_emit_dispatch_register", return_value=False), \
+         patch.object(ar, "_maybe_trigger_state_rebuild"):
+        result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_file))
+
+    assert result.status == "appended"
+    assert register_counts == [2], (
+        f"_register_quality_open_items must run exactly once; got calls: {register_counts!r}"
+    )
+    lines = [l for l in receipts_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+    persisted = json.loads(lines[0])
+    actual_count = register_counts[0]
+    assert persisted.get("open_items_created") == actual_count, (
+        f"OI-1074: open_items_created in NDJSON ({persisted.get('open_items_created')!r}) "
+        f"must match actual registration count ({actual_count}). "
+        "Flag must be consistent with the durable NDJSON record."
+    )
