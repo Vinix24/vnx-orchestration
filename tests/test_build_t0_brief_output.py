@@ -163,7 +163,7 @@ class TestFormatBriefOutputPath:
         state_path = state_dir / "t0_state.json"
         assert state_path.exists(), "t0_state.json must be written when --format state"
         data = json.loads(state_path.read_text())
-        assert data.get("schema_version") == "2.0"
+        assert data.get("schema_version") == "2.1"
 
 
 # ---------------------------------------------------------------------------

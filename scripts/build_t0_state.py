@@ -8,8 +8,18 @@ reconcile_terminal_state.py). Called by SessionStart hook.
 Usage:
     python3 scripts/build_t0_state.py [--output PATH] [--format {state,brief}]
 
-Output schema: schema_version "2.0" (t0_state.json)
+Output schema: schema_version "2.1" (t0_state.json)
 With --format brief: schema 1.0 backward-compat (t0_brief.json format)
+
+Schema 2.1 changes (W4E / OI-1199):
+  - feature_state union-merges register-canonical aggregation with the
+    FEATURE_PLAN.md fallback fields (current_pr/next_task/assigned_track/
+    assigned_role/completion_pct/total_prs/completed_prs/feature_name) so
+    consumers see a single stable shape regardless of register population.
+  - feature_state aggregation accepts events identified by any single ID
+    (dispatch_id OR pr_number OR feature_id), matching the writer
+    contract in dispatch_register.append_event. Events with no
+    identifying fields are still dropped.
 
 Index/detail split (Sprint 4a):
   - t0_index.json: cheap always-loaded index (≤50 fields, ≤5KB)
@@ -273,30 +283,75 @@ _EVENT_TO_STATUS: Dict[str, str] = {
     "gate_requested": "active",
     "gate_passed": "active",
     "dispatch_created": "queued",
+    "pr_opened": "active",
+    "pr_merged": "completed",
 }
+
+
+# Keys contributed by the FEATURE_PLAN.md fallback. The register-canonical path
+# union-merges these into its own output so consumers see one stable shape
+# regardless of whether dispatch_register.ndjson has been populated yet
+# (W4E / OI-1199).
+_FEATURE_PLAN_KEYS: tuple[str, ...] = (
+    "feature_name",
+    "current_pr",
+    "next_task",
+    "assigned_track",
+    "assigned_role",
+    "completion_pct",
+    "total_prs",
+    "completed_prs",
+)
 
 
 def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Build feature_state from dispatch_register.ndjson (register-canonical).
 
     Aggregation contract:
-    - Group events by dispatch_id (primary key)
-    - Per-dispatch status: latest-event-wins (recency)
-    - Per-PR/feature: most-recently-active dispatch supplies status
-    - FEATURE_PLAN.md fallback when register has no data
+    - Group events by dispatch_id when present; events lacking a dispatch_id
+      but identified by pr_number or feature_id are aggregated directly into
+      the PR/feature rollups (mirrors dispatch_register.append_event, which
+      requires only one of dispatch_id/pr_number/feature_id).
+    - Per-dispatch status: latest-event-wins (recency).
+    - Per-PR/feature: most-recently-active source (dispatch record or
+      dispatch-less event) wins.
+    - Events with no identifying field at all are dropped.
+    - FEATURE_PLAN.md fields (current_pr/next_task/assigned_track/
+      assigned_role/completion_pct/total_prs/completed_prs/feature_name)
+      are union-merged into the result so the schema is stable across the
+      empty-register and populated-register code paths.
 
-    Refs: synthesis 2026-04-28 §D Sprint 3 split 3/3, codex findings PR #276 r1+r2.
+    Schema (schema_version 2.1):
+      source: "dispatch_register" | "feature_plan_md" (primary origin)
+      feature_plan_status: status reported by FEATURE_PLAN.md parser
+        ("planned" | "in_progress" | "completed") — only present when
+        register is populated; the top-level "status" key is reserved for
+        the FEATURE_PLAN.md fallback to preserve backward compatibility
+        with consumers that read it from the empty-register path.
+      dispatches/pr_status/feature_status/register_event_count: only
+        present when register is populated.
+      current_pr/next_task/assigned_track/assigned_role/completion_pct/
+        total_prs/completed_prs/feature_name: always present.
+
+    Refs: synthesis 2026-04-28 §D Sprint 3 split 3/3, codex findings
+    PR #276 r1+r2; W4E / OI-1199 schema split + any-ID filter.
     """
     register_events = _read_register_events(state_dir=state_dir)
+    feature_plan_part = _build_feature_state_from_feature_plan()
     if not register_events:
-        return _build_feature_state_from_feature_plan()
+        return feature_plan_part
 
     by_dispatch: Dict[str, list] = {}
+    dispatchless_events: list[dict] = []
     for ev in register_events:
-        did = ev.get("dispatch_id", "").strip()
-        if not did:
-            continue
-        by_dispatch.setdefault(did, []).append(ev)
+        did = (ev.get("dispatch_id") or "").strip()
+        pr_number = ev.get("pr_number")
+        feature_id = (ev.get("feature_id") or "").strip()
+        if did:
+            by_dispatch.setdefault(did, []).append(ev)
+        elif pr_number is not None or feature_id:
+            dispatchless_events.append(ev)
+        # else: event lacks any identifying field — drop it.
 
     dispatch_records: Dict[str, Any] = {}
     for did, events in by_dispatch.items():
@@ -331,13 +386,47 @@ def _build_feature_state(state_dir: Optional[Path] = None) -> Dict[str, Any]:
             if existing is None or rec["latest_event_ts"] > existing["latest_event_ts"]:
                 by_feature[f_key] = rec
 
-    return {
-        "source": "dispatch_register",
-        "dispatches": dispatch_records,
-        "pr_status": by_pr,
-        "feature_status": by_feature,
-        "register_event_count": len(register_events),
-    }
+    # Roll up dispatch-less events (pr_number-only or feature_id-only).
+    # These come from writers that record PR-level lifecycle (pr_opened,
+    # pr_merged) without an originating dispatch_id.
+    for ev in dispatchless_events:
+        latest_event = ev.get("event", "")
+        ts = ev.get("timestamp", "")
+        synthetic = {
+            "status": _EVENT_TO_STATUS.get(latest_event, "unknown"),
+            "latest_event": latest_event,
+            "latest_event_ts": ts,
+            "pr_number": ev.get("pr_number"),
+            "feature_id": (ev.get("feature_id") or "").strip(),
+            "event_count": 1,
+            "dispatch_id": None,
+        }
+        if synthetic["pr_number"] is not None:
+            pr_key = str(synthetic["pr_number"])
+            existing = by_pr.get(pr_key)
+            if existing is None or ts > existing["latest_event_ts"]:
+                by_pr[pr_key] = synthetic
+        if synthetic["feature_id"]:
+            f_key = synthetic["feature_id"]
+            existing = by_feature.get(f_key)
+            if existing is None or ts > existing["latest_event_ts"]:
+                by_feature[f_key] = synthetic
+
+    # Union-merge: start with FEATURE_PLAN.md fields, then overlay register
+    # aggregation. The FEATURE_PLAN "status" field is preserved as
+    # "feature_plan_status" because the top-level key isn't currently used
+    # in the register-canonical path and we don't want to introduce a name
+    # collision that would change consumer behavior unexpectedly.
+    merged: Dict[str, Any] = {}
+    for key in _FEATURE_PLAN_KEYS:
+        merged[key] = feature_plan_part.get(key)
+    merged["feature_plan_status"] = feature_plan_part.get("status")
+    merged["source"] = "dispatch_register"
+    merged["dispatches"] = dispatch_records
+    merged["pr_status"] = by_pr
+    merged["feature_status"] = by_feature
+    merged["register_event_count"] = len(register_events)
+    return merged
 
 
 def _build_feature_state_from_feature_plan() -> Dict[str, Any]:
@@ -686,7 +775,7 @@ def build_t0_state(
     system_health = _build_system_health(state_dir, db_ok)
 
     return {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "generated_at": _now_iso(),
         "staleness_seconds": 0,
         "terminals": terminals,
