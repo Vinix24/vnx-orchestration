@@ -44,12 +44,34 @@ def _maybe_reroute_to_gate_stream(receipt: Dict[str, Any], receipts_file: Option
 
 
 def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
-    """Best-effort hooks fired after a receipt is successfully appended."""
-    facade._register_quality_open_items(receipt)
-    facade._update_confidence_from_receipt(receipt)
-    facade._emit_dispatch_register(receipt)
-    facade._maybe_trigger_state_rebuild(receipt)
-    facade._trigger_receipt_classifier(receipt)
+    """Best-effort hooks fired after a receipt is successfully appended.
+
+    Each hook is isolated: a failure in one does not prevent the others from
+    running, and no exception is propagated to the caller. The NDJSON record
+    is already durable at this point.
+    """
+    try:
+        facade._register_quality_open_items(receipt)
+    except Exception as exc:
+        _emit("WARN", "oi_registration_post_hook_failed",
+              dispatch_id=str(receipt.get("dispatch_id") or ""),
+              error=str(exc))
+    try:
+        facade._update_confidence_from_receipt(receipt)
+    except Exception as exc:
+        _emit("WARN", "confidence_post_hook_failed", error=str(exc))
+    try:
+        facade._emit_dispatch_register(receipt)
+    except Exception as exc:
+        _emit("WARN", "dispatch_register_post_hook_failed", error=str(exc))
+    try:
+        facade._maybe_trigger_state_rebuild(receipt)
+    except Exception:
+        pass
+    try:
+        facade._trigger_receipt_classifier(receipt)
+    except Exception:
+        pass
 
 
 def append_receipt_payload(
