@@ -165,7 +165,9 @@ class TestCommitShaInPayloads:
                 dispatch_id="test-sha-claude-gh",
             )
 
-        req_file = manager_env["requests_dir"] / "pr-4-claude_github_optional.json"
+        # OI-1307: claude_github_optional now routes through contract-based path
+        # _contract_slug("4") = "4", so file is "4-claude_github_optional-contract.json"
+        req_file = manager_env["requests_dir"] / "4-claude_github_optional-contract.json"
         assert req_file.exists()
         payload = json.loads(req_file.read_text())
         assert "commit_sha" in payload, "claude_github_optional payload must contain commit_sha"
