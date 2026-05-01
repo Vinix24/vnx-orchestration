@@ -100,12 +100,12 @@ def _detect_profile(project_path: Path) -> Optional[str]:
     """
     try:
         from folder_scope import resolve_scope
-        from governance_profile_selector import GovernanceProfile, select_profile
+        from governance_profile_selector import GovernanceProfileEnum, select_profile
 
         coding_roots = [str(project_path)] if (project_path / ".vnx").is_dir() else []
         scope = resolve_scope(str(project_path), coding_roots=coding_roots)
         if scope.is_business_scope():
-            selection = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+            selection = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         else:
             selection = select_profile(scope)
         return selection.profile.value

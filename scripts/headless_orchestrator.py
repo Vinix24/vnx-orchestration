@@ -399,9 +399,6 @@ class HeadlessOrchestrator:
                 feature_id, result.get("pr_number"), result.get("gates"),
             )
 
-    # Gate result statuses that indicate a gate executed successfully (OI-1139).
-    _GATE_PASSING_STATUSES: frozenset = frozenset({"completed", "pass"})
-
     def _check_all_gates_passed(self, event: LoopEvent) -> None:
         """When a gate event arrives, check if all required gates have passed."""
         ctx = _flatten_context(event.context)
@@ -448,6 +445,8 @@ class HeadlessOrchestrator:
         # Verify each required gate's result JSON reports a passing status.
         # File presence alone is insufficient — a failed gate still produces a
         # result file with status "failed", which must block feature unblocking.
+        # is_pass() also enforces blocking_findings and blocking_count (OI-1139).
+        from gate_status import is_pass  # noqa: PLC0415
         failed_gates: List[str] = []
         for gate_name in required:
             result_file = gate_results_dir / f"pr-{latest_pr}-{gate_name}.json"
@@ -456,9 +455,9 @@ class HeadlessOrchestrator:
             except Exception as exc:
                 logger.warning("Could not read gate result %s: %s", result_file, exc)
                 return
-            status = result_data.get("status", "")
-            if status not in self._GATE_PASSING_STATUSES:
-                failed_gates.append(f"{gate_name}(status={status!r})")
+            passed, reason = is_pass(result_data)
+            if not passed:
+                failed_gates.append(f"{gate_name}({reason})")
 
         if failed_gates:
             logger.warning(

@@ -2,7 +2,7 @@
 """Tests for governance profile selector and visibility surface (Feature 20, PR-3).
 
 Covers:
-  1. GovernanceProfile    — enum values and semantics
+  1. GovernanceProfileEnum — enum values and semantics
   2. ProfileSelection     — construction, is_authoritative, to_audit_line, to_dict
   3. ProfileVisibility    — counts, to_summary, is_blocked
   4. ProfileSelector      — select() for coding/business scopes
@@ -30,7 +30,7 @@ from folder_scope import (
     coding_worktree_scope,
 )
 from governance_profile_selector import (
-    GovernanceProfile,
+    GovernanceProfileEnum,
     ProfileSelection,
     ProfileSelector,
     ProfileVisibility,
@@ -56,22 +56,22 @@ class _NonBlockingItem:
 
 
 # ---------------------------------------------------------------------------
-# 1. GovernanceProfile
+# 1. GovernanceProfileEnum
 # ---------------------------------------------------------------------------
 
-class TestGovernanceProfile:
+class TestGovernanceProfileEnum:
 
     def test_coding_strict_value(self) -> None:
-        assert GovernanceProfile.CODING_STRICT.value == "coding_strict"
+        assert GovernanceProfileEnum.CODING_STRICT.value == "coding_strict"
 
     def test_business_light_value(self) -> None:
-        assert GovernanceProfile.BUSINESS_LIGHT.value == "business_light"
+        assert GovernanceProfileEnum.BUSINESS_LIGHT.value == "business_light"
 
     def test_profiles_are_distinct(self) -> None:
-        assert GovernanceProfile.CODING_STRICT != GovernanceProfile.BUSINESS_LIGHT
+        assert GovernanceProfileEnum.CODING_STRICT != GovernanceProfileEnum.BUSINESS_LIGHT
 
     def test_exactly_two_profiles(self) -> None:
-        assert len(list(GovernanceProfile)) == 2
+        assert len(list(GovernanceProfileEnum)) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ class TestProfileSelection:
 
     def _coding_sel(self) -> ProfileSelection:
         return ProfileSelection(
-            profile=GovernanceProfile.CODING_STRICT,
+            profile=GovernanceProfileEnum.CODING_STRICT,
             scope_type=ScopeType.CODING_WORKTREE,
             selection_id="s-001",
             note="test",
@@ -90,13 +90,13 @@ class TestProfileSelection:
 
     def _biz_sel(self) -> ProfileSelection:
         return ProfileSelection(
-            profile=GovernanceProfile.BUSINESS_LIGHT,
+            profile=GovernanceProfileEnum.BUSINESS_LIGHT,
             scope_type=ScopeType.BUSINESS_FOLDER,
             selection_id="s-002",
         )
 
     def test_profile_preserved(self) -> None:
-        assert self._coding_sel().profile == GovernanceProfile.CODING_STRICT
+        assert self._coding_sel().profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_scope_type_preserved(self) -> None:
         assert self._coding_sel().scope_type == ScopeType.CODING_WORKTREE
@@ -108,7 +108,7 @@ class TestProfileSelection:
         assert self._coding_sel().note == "test"
 
     def test_note_default_empty(self) -> None:
-        s = ProfileSelection(profile=GovernanceProfile.CODING_STRICT,
+        s = ProfileSelection(profile=GovernanceProfileEnum.CODING_STRICT,
                              scope_type=ScopeType.CODING_WORKTREE)
         assert s.note == ""
 
@@ -146,7 +146,7 @@ class TestProfileSelection:
     def test_selection_is_frozen(self) -> None:
         s = self._coding_sel()
         with pytest.raises(Exception):
-            s.profile = GovernanceProfile.BUSINESS_LIGHT  # type: ignore[misc]
+            s.profile = GovernanceProfileEnum.BUSINESS_LIGHT  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +155,7 @@ class TestProfileSelection:
 
 class TestProfileVisibility:
 
-    def _sel(self, profile: GovernanceProfile = GovernanceProfile.BUSINESS_LIGHT) -> ProfileSelection:
+    def _sel(self, profile: GovernanceProfileEnum = GovernanceProfileEnum.BUSINESS_LIGHT) -> ProfileSelection:
         return ProfileSelection(profile=profile, scope_type=ScopeType.BUSINESS_FOLDER)
 
     def test_profile_name_returns_value(self) -> None:
@@ -203,7 +203,7 @@ class TestProfileVisibility:
         assert summary["note"] == "sprint review"
 
     def test_to_summary_coding_strict_is_authoritative(self) -> None:
-        sel = self._sel(GovernanceProfile.CODING_STRICT)
+        sel = self._sel(GovernanceProfileEnum.CODING_STRICT)
         vis = ProfileVisibility(selection=sel)
         assert vis.to_summary()["is_authoritative"] is True
 
@@ -225,34 +225,34 @@ class TestProfileSelector:
         self.biz_scope = business_folder_scope("/work/crm")
 
     def test_default_profile_is_coding_strict(self) -> None:
-        assert self.selector.default_profile() == GovernanceProfile.CODING_STRICT
+        assert self.selector.default_profile() == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_scope_no_request_returns_coding_strict(self) -> None:
         sel = self.selector.select(self.coding_scope)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_scope_request_business_light_returns_coding_strict(self) -> None:
         sel = self.selector.select(self.coding_scope,
-                                   requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+                                   requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_scope_always_authoritative(self) -> None:
         sel = self.selector.select(self.coding_scope,
-                                   requested=GovernanceProfile.BUSINESS_LIGHT)
+                                   requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         assert sel.is_authoritative() is True
 
     def test_business_scope_default_returns_coding_strict(self) -> None:
         sel = self.selector.select(self.biz_scope)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_business_scope_request_business_light_returns_business_light(self) -> None:
         sel = self.selector.select(self.biz_scope,
-                                   requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert sel.profile == GovernanceProfile.BUSINESS_LIGHT
+                                   requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert sel.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
     def test_business_scope_business_light_not_authoritative(self) -> None:
         sel = self.selector.select(self.biz_scope,
-                                   requested=GovernanceProfile.BUSINESS_LIGHT)
+                                   requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         assert sel.is_authoritative() is False
 
     def test_is_overrideable_true_for_business_scope(self) -> None:
@@ -267,7 +267,7 @@ class TestProfileSelector:
 
     def test_coding_override_note_mentions_business_light(self) -> None:
         sel = self.selector.select(self.coding_scope,
-                                   requested=GovernanceProfile.BUSINESS_LIGHT)
+                                   requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         assert "business_light" in sel.note.lower()
 
 
@@ -280,27 +280,27 @@ class TestStatelessHelpers:
     def test_select_profile_coding_scope(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
         sel = select_profile(scope)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_select_profile_business_light_for_biz_scope(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert sel.profile == GovernanceProfile.BUSINESS_LIGHT
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert sel.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
     def test_select_profile_coding_scope_override_blocked(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_build_visibility_no_items(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         vis = build_visibility(sel)
         assert vis.open_item_count() == 0
 
     def test_build_visibility_with_items(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         vis = build_visibility(sel, open_items=[_BlockingItem(), _NonBlockingItem()])
         assert vis.open_item_count() == 2
         assert vis.blocking_item_count() == 1
@@ -327,7 +327,7 @@ class TestFactoryFunctions:
     def test_coding_strict_selection_profile(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
         sel = coding_strict_selection(scope)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_strict_selection_scope_type(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
@@ -337,13 +337,13 @@ class TestFactoryFunctions:
     def test_coding_strict_selection_for_business_scope(self) -> None:
         scope = business_folder_scope("/work/crm")
         sel = coding_strict_selection(scope)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
         assert sel.scope_type == ScopeType.BUSINESS_FOLDER
 
     def test_business_light_selection_for_business_scope(self) -> None:
         scope = business_folder_scope("/work/crm")
         sel = business_light_selection(scope)
-        assert sel.profile == GovernanceProfile.BUSINESS_LIGHT
+        assert sel.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
     def test_business_light_selection_scope_type(self) -> None:
         scope = business_folder_scope("/work/crm")
@@ -369,16 +369,16 @@ class TestFactoryFunctions:
 class TestCodingStrictDefault:
 
     def test_selector_default_is_coding_strict(self) -> None:
-        assert ProfileSelector().default_profile() == GovernanceProfile.CODING_STRICT
+        assert ProfileSelector().default_profile() == GovernanceProfileEnum.CODING_STRICT
 
     def test_no_request_yields_coding_strict_for_coding_scope(self) -> None:
         sel = select_profile(coding_worktree_scope("/dev/vnx-wt"))
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_no_request_yields_coding_strict_for_business_scope(self) -> None:
         """Without a specific request, business scopes also default to coding_strict."""
         sel = select_profile(business_folder_scope("/work/crm"))
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_strict_is_always_authoritative(self) -> None:
         for scope in [coding_worktree_scope("/dev/vnx-wt"),
@@ -396,13 +396,13 @@ class TestIsolationGuarantees:
     def test_coding_scope_cannot_get_business_light_via_selector(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
         sel = ProfileSelector().select(scope,
-                                       requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+                                       requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_scope_cannot_get_business_light_via_helper(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert sel.profile == GovernanceProfile.CODING_STRICT
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert sel.profile == GovernanceProfileEnum.CODING_STRICT
 
     def test_coding_scope_cannot_get_business_light_via_factory(self) -> None:
         scope = coding_worktree_scope("/dev/vnx-wt")
@@ -411,15 +411,15 @@ class TestIsolationGuarantees:
 
     def test_business_light_selection_is_not_authoritative(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         assert sel.is_authoritative() is False
 
     def test_two_scopes_independent_profiles(self) -> None:
         coding_sel = select_profile(coding_worktree_scope("/dev/vnx-wt"))
         biz_sel = select_profile(business_folder_scope("/work/crm"),
-                                  requested=GovernanceProfile.BUSINESS_LIGHT)
-        assert coding_sel.profile == GovernanceProfile.CODING_STRICT
-        assert biz_sel.profile == GovernanceProfile.BUSINESS_LIGHT
+                                  requested=GovernanceProfileEnum.BUSINESS_LIGHT)
+        assert coding_sel.profile == GovernanceProfileEnum.CODING_STRICT
+        assert biz_sel.profile == GovernanceProfileEnum.BUSINESS_LIGHT
 
     def test_is_overrideable_coding_scope_false(self) -> None:
         assert not ProfileSelector().is_overrideable(coding_worktree_scope("/dev/vnx-wt"))
@@ -436,7 +436,7 @@ class TestBusinessLightVisibility:
 
     def setup_method(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         self.vis = build_visibility(sel, note="operator view")
 
     def test_profile_is_business_light(self) -> None:
@@ -453,13 +453,13 @@ class TestBusinessLightVisibility:
 
     def test_no_blocker_items_not_blocked(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         vis = build_visibility(sel, open_items=[_NonBlockingItem()])
         assert vis.is_blocked() is False
 
     def test_blocker_item_shows_blocked(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         vis = build_visibility(sel, open_items=[_BlockingItem()])
         assert vis.is_blocked() is True
 
@@ -479,7 +479,7 @@ class TestAuditability:
 
     def test_audit_line_produced_for_business_light(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT,
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT,
                               selection_id="s-200")
         line = sel.to_audit_line()
         assert "s-200" in line
@@ -487,12 +487,12 @@ class TestAuditability:
 
     def test_audit_line_shows_authoritative_false_for_business_light(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT)
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT)
         assert "authoritative=False" in sel.to_audit_line()
 
     def test_to_dict_is_serializable(self) -> None:
         scope = business_folder_scope("/work/crm")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT,
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT,
                               selection_id="s-42")
         d = sel.to_dict()
         # All values are JSON-serializable types
@@ -502,7 +502,7 @@ class TestAuditability:
     def test_coding_override_attempt_is_auditable(self) -> None:
         """Even a blocked override attempt produces an auditable selection."""
         scope = coding_worktree_scope("/dev/vnx-wt")
-        sel = select_profile(scope, requested=GovernanceProfile.BUSINESS_LIGHT,
+        sel = select_profile(scope, requested=GovernanceProfileEnum.BUSINESS_LIGHT,
                               selection_id="blocked-001")
         line = sel.to_audit_line()
         assert "blocked-001" in line
