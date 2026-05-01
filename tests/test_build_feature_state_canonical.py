@@ -267,3 +267,134 @@ class TestDispatchFailed:
         result = _build_feature_state(state_dir=state_dir)
         assert result["pr_status"] == {}
         assert result["feature_status"] == {}
+
+
+# ---------------------------------------------------------------------------
+# 11. Schema split (W4E / OI-1199): FEATURE_PLAN.md fields union-merged
+# ---------------------------------------------------------------------------
+
+class TestSchemaSplitUnionMerge:
+    """Register-canonical output must include the FEATURE_PLAN.md fallback
+    fields so consumers see one stable shape regardless of register state."""
+
+    _UNION_KEYS = (
+        "feature_name",
+        "current_pr",
+        "next_task",
+        "assigned_track",
+        "assigned_role",
+        "completion_pct",
+        "total_prs",
+        "completed_prs",
+    )
+
+    def test_populated_register_includes_feature_plan_fields(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_register(state_dir, [
+            _ev("dispatch_completed", "d001", "2026-04-28T10:00:00.000000Z"),
+        ])
+        result = _build_feature_state(state_dir=state_dir)
+        # Register-canonical aggregation present
+        assert result["source"] == "dispatch_register"
+        assert "dispatches" in result
+        # And FEATURE_PLAN.md fields are NOT silently dropped
+        for key in self._UNION_KEYS:
+            assert key in result, f"feature_state missing {key!r} field"
+
+    def test_empty_register_includes_feature_plan_fields(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        result = _build_feature_state(state_dir=state_dir)
+        assert result["source"] == "feature_plan_md"
+        for key in self._UNION_KEYS:
+            assert key in result, f"feature_state missing {key!r} field"
+
+    def test_feature_plan_status_separate_from_dispatch_status(self, tmp_path):
+        """Top-level 'status' from FEATURE_PLAN.md is exposed as
+        feature_plan_status when register is populated, so the key doesn't
+        collide with potential future 'status' aggregations."""
+        state_dir = tmp_path / "state"
+        _write_register(state_dir, [
+            _ev("dispatch_completed", "d001", "2026-04-28T10:00:00.000000Z"),
+        ])
+        result = _build_feature_state(state_dir=state_dir)
+        assert "feature_plan_status" in result
+
+
+# ---------------------------------------------------------------------------
+# 12. Any-ID filter (W4E / OI-1199): pr_number-only / feature_id-only events
+# ---------------------------------------------------------------------------
+
+class TestAnyIDFilter:
+    """Writers (dispatch_register.append_event) require only one of
+    dispatch_id/pr_number/feature_id. Reader must mirror that contract."""
+
+    def test_pr_number_only_event_appears_in_pr_status(self, tmp_path):
+        state_dir = tmp_path / "state"
+        ev = {
+            "timestamp": "2026-04-28T10:00:00.000000Z",
+            "event": "pr_merged",
+            "pr_number": 99,
+        }
+        _write_register(state_dir, [ev])
+        result = _build_feature_state(state_dir=state_dir)
+        assert "99" in result["pr_status"], (
+            f"pr_number-only event was dropped; pr_status={result['pr_status']}"
+        )
+        assert result["pr_status"]["99"]["status"] == "completed"
+        assert result["pr_status"]["99"]["dispatch_id"] is None
+
+    def test_feature_id_only_event_appears_in_feature_status(self, tmp_path):
+        state_dir = tmp_path / "state"
+        ev = {
+            "timestamp": "2026-04-28T10:00:00.000000Z",
+            "event": "pr_opened",
+            "feature_id": "F50",
+        }
+        _write_register(state_dir, [ev])
+        result = _build_feature_state(state_dir=state_dir)
+        assert "F50" in result["feature_status"]
+        assert result["feature_status"]["F50"]["dispatch_id"] is None
+
+    def test_event_without_any_id_is_dropped(self, tmp_path):
+        state_dir = tmp_path / "state"
+        # Event with NO identifying field at all — should be discarded.
+        ev = {"timestamp": "2026-04-28T10:00:00.000000Z", "event": "pr_opened"}
+        _write_register(state_dir, [ev])
+        result = _build_feature_state(state_dir=state_dir)
+        assert result["dispatches"] == {}
+        assert result["pr_status"] == {}
+        assert result["feature_status"] == {}
+
+    def test_dispatch_with_id_and_orphan_pr_event_coexist(self, tmp_path):
+        """A dispatch-anchored record and a later orphan pr_merged on the
+        same PR: the more recent timestamp wins the rollup."""
+        state_dir = tmp_path / "state"
+        _write_register(state_dir, [
+            _ev("dispatch_started", "d001", "2026-04-28T09:00:00.000000Z", pr_number=42),
+            {
+                "timestamp": "2026-04-28T11:00:00.000000Z",
+                "event": "pr_merged",
+                "pr_number": 42,
+            },
+        ])
+        result = _build_feature_state(state_dir=state_dir)
+        assert result["pr_status"]["42"]["status"] == "completed"
+        assert result["pr_status"]["42"]["latest_event"] == "pr_merged"
+        # Dispatch record still present in dispatches map
+        assert "d001" in result["dispatches"]
+
+    def test_orphan_event_does_not_overwrite_more_recent_dispatch(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_register(state_dir, [
+            {
+                "timestamp": "2026-04-28T08:00:00.000000Z",
+                "event": "pr_opened",
+                "pr_number": 42,
+            },
+            _ev("dispatch_completed", "d001", "2026-04-28T10:00:00.000000Z", pr_number=42),
+        ])
+        result = _build_feature_state(state_dir=state_dir)
+        # Dispatch record (more recent) wins
+        assert result["pr_status"]["42"]["status"] == "completed"
+        assert result["pr_status"]["42"].get("dispatch_id", "d001") in (None, "d001")
