@@ -352,9 +352,11 @@ Loader becomes `~/.vnx-data/strategy/<project_id>/` where `project_id` comes fro
 
 ### 5.2 In `claudedocs/` (today)
 
+> **Operator override (2026-05-06):** strategic PRDs and competitive-design docs stay INTERNAL in `claudedocs/` (gitignored) because the repo is public. ADRs (principles) and reusable scripts go public; PRDs do not. The table below is a *categorisation* — for PRD-VNX-UH-001 the actual destination is `claudedocs/PRD-VNX-UH-001-universal-headless-orchestration-harness.md` (internal). Other research files can move per the table.
+
 | File | Classification | Action |
 |---|---|---|
-| `PRD-VNX-UH-001-universal-headless-orchestration-harness.md` | Strategic — active PRD | Move to `docs/prds/PRD-VNX-UH-001.md` (proper docs location). Add to `strategy/prd_index.json` as `status: active, version: 1.0`. claudedocs is wrong; docs is right. |
+| `PRD-VNX-UH-001-universal-headless-orchestration-harness.md` | Strategic — active PRD | **Stays in `claudedocs/`** (internal per operator decision). Add to `strategy/prd_index.json` as `status: active, version: 1.3, location: claudedocs/`. |
 | `2026-04-30-single-vnx-migration-plan.md` | Strategic — active plan | Move to `docs/plans/2026-04-30-single-vnx-migration-plan.md`. Add `open_plans.json` entry: `{plan_id: CENTRAL-MIGRATION, state: planning}`. Add to `strategy/decisions.ndjson` as the deciding entry that selected Model B. |
 | `2026-04-30-state-memory-audit.md` | Research — supports strategy | Move to `docs/research/`. Reference from `roadmap.yaml` notes. |
 | `2026-04-30-adaptive-receipt-classifier-research.md` | Research | Move to `docs/research/`. |
