@@ -1,0 +1,848 @@
+# VNX Roadmap — machine-readable, COMMITTED sequence with deps
+# Authoritative when in conflict with ROADMAP.md (the human-readable companion).
+# Schema: see .vnx-data/state/PROJECT_STATE_DESIGN.md §Layer-1
+# Update protocol: hand-edit OK; once Phase 2 (W-state-3) lands, current_state.md projector auto-syncs from this.
+#
+# Roadmap vs backlog:
+#   - This file = committed work with dependencies, LOC estimates, acceptance criteria.
+#   - .vnx-data/strategy/backlog.yaml = unscheduled queue, ideas, content missions, future projects.
+#   - Items graduate backlog → roadmap when operator commits and deps are clear.
+
+schema_version: 1
+roadmap_id: vnx-master-roadmap
+title: VNX Universal Headless Orchestration Harness — Master Roadmap
+generated_at: 2026-05-02T00:00:00Z
+
+# ============================================================
+# PHASES — coarse-grained groupings; waves below
+# ============================================================
+phases:
+  - phase_id: 0
+    title: Operator UX quick wins
+    waves: [w-ux-1, w-ux-2, w-ux-3, w-ux-4, w-ux-5]
+    estimated_loc: 340
+    estimated_weeks: 0.5
+    blocked_on: []
+    rationale: "Make T0 know what's going on after /clear. No OD blockers. Includes vnx init strategy bootstrap so new projects get this same setup."
+
+  - phase_id: 1
+    title: Open work cleanup
+    waves: [merge-pr-395, merge-pr-396, replay-codex-audits]
+    estimated_loc: 0
+    estimated_weeks: 0.5
+    blocked_on: [gemini_quota_recovery, codex_quota_recovery_2026-05-05]
+
+  - phase_id: 2
+    title: Strategic state foundation (Layer 1)
+    waves: [w-state-1, w-state-2, w-state-3, w-state-4, w-state-5]
+    estimated_loc: 740
+    estimated_weeks: 1
+    blocked_on: [phase_0_complete]
+
+  - phase_id: 3
+    title: Universal harness W7 — streaming drainer parity
+    waves: [w7-a, w7-b, w7-c, w7-d, w7-e, w7-f, w7-g]
+    estimated_loc: 640
+    estimated_weeks: 1
+    blocked_on: []
+    notes: "Can run parallel with Phase 4."
+
+  - phase_id: 4
+    title: F43 context rotation revival + community giveaway
+    waves: [w6a, w6b, w6c, w6d, w6e]
+    estimated_loc: 1450
+    estimated_weeks: 2
+    blocked_on: []
+    notes: "Parallel with Phase 3."
+
+  - phase_id: 5
+    title: W7.5 Provider failover at orchestrator level
+    waves: [w7-5]
+    estimated_loc: 480
+    estimated_weeks: 1.5
+    blocked_on: [phase_3]
+
+  - phase_id: 6
+    title: Single-system migration P1-P6
+    waves: [w6-p1, w6-p2, w6-p3, w6-p4, w6-p5, w6-p6]
+    estimated_loc: 1380
+    estimated_weeks: 2.5
+    blocked_on: []
+    notes: "Parallel with Phase 3-5. P0 already done (PRs #334 + #358)."
+
+  - phase_id: 7
+    title: W8 Folder-based agents + agent registry
+    waves: [w8-a, w8-b, w8-fr12]
+    estimated_loc: 1270
+    estimated_weeks: 3
+    blocked_on: [phase_3]
+    notes: "Recommended after phase_2 too (uses strategy/ patterns)."
+
+  - phase_id: 8
+    title: W9 Universal WorkerProvider interface
+    waves: [w9]
+    estimated_loc: 400
+    estimated_weeks: 2
+    blocked_on: [phase_7]
+
+  - phase_id: 9
+    title: W10 Capability tokens + governance variants
+    waves: [w10]
+    estimated_loc: 600
+    estimated_weeks: 2.5
+    blocked_on: [phase_8, od_2_answered]
+
+  - phase_id: 10
+    title: W11 Workers=N rename
+    waves: [w11]
+    estimated_loc: 600
+    estimated_weeks: 2
+    blocked_on: [phase_9]
+
+  - phase_id: 11
+    title: W12 Sub-orchestrator pools + missions + Assistant
+    waves: [w12]
+    estimated_loc: 800
+    estimated_weeks: 3
+    blocked_on: [phase_10]
+
+  - phase_id: 12
+    title: Memory layer + cross-domain learning (Layer 2)
+    waves: [w-mem-1, w-mem-2, w-mem-3, w-mem-4]
+    estimated_loc: 1340
+    estimated_weeks: 2.5
+    blocked_on: [phase_10]
+
+  - phase_id: 13
+    title: W13 LiteLLM bridge + Ollama parity + 1st PyPI live
+    waves: [w13]
+    estimated_loc: 400
+    estimated_weeks: 1
+    blocked_on: [phase_8]
+
+  - phase_id: 14
+    title: W14 Folder-based agents Phase C cutover
+    waves: [w14]
+    estimated_loc: 200
+    estimated_weeks: 1
+    blocked_on: [phase_13]
+
+  - phase_id: 15
+    title: W15 Roadmap autopilot integration
+    waves: [w15-pr0, w15-pr1, w15-pr2, w15-pr3]
+    estimated_loc: 0  # already estimated in existing ROADMAP.yaml
+    estimated_weeks: 2
+    blocked_on: [phase_14]
+
+  - phase_id: 16
+    title: Business-domain bootstrap (marketing / sales / content)
+    waves: [w16-1, w16-2, w16-3, w16-4, w16-5, w16-6, w16-7, w16-8]
+    estimated_loc: 1150
+    estimated_weeks: 2
+    blocked_on: [phase_7, phase_9, phase_12]
+    rationale: "VNX as a single-operator multi-domain orchestration framework. Same machinery, different agent folders + governance variant. Marketing-lead/sales-lead orchestrators with their own worker pools. Per-domain memory partition. Demonstrates the Universal Selling Point: one operator running engineering AND content AND sales via one orchestration system with audit-grade governance per domain."
+
+# ============================================================
+# WAVES — fine-grained units; each maps to 1 PR or PR group
+# ============================================================
+waves:
+  # ----- Phase 0 -----
+  - wave_id: w-ux-1
+    title: Bootstrap strategy/ folder + roadmap.yaml + .gitignore exception
+    phase_id: 0
+    status: in_progress  # we are doing this RIGHT NOW
+    estimated_loc: 50
+    branch_name: docs/strategy-bootstrap
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: []
+
+  - wave_id: w-ux-2
+    title: current_state.md auto-projector + retire vestigial state files
+    phase_id: 0
+    status: planned
+    estimated_loc: 150
+    branch_name: feat/strategy-current-state-projector
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-ux-1]
+    plan_path: roadmap/features/w-ux-2/FEATURE_PLAN.md
+
+  - wave_id: w-ux-3
+    title: vnx status CLI dashboard
+    phase_id: 0
+    status: planned
+    estimated_loc: 80
+    branch_name: feat/vnx-status-cli
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-ux-2]
+
+  - wave_id: w-ux-4
+    title: GC retention policy in build_t0_state.py
+    phase_id: 0
+    status: planned
+    estimated_loc: 30
+    branch_name: fix/t0-state-gc-retention
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-ux-1]
+
+  - wave_id: w-ux-5
+    title: vnx init strategy + agent folders bootstrap
+    phase_id: 0
+    status: planned
+    estimated_loc: 80
+    branch_name: feat/vnx-init-strategy-bootstrap
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-ux-1, w-ux-2]
+    plan_path: roadmap/features/w-ux-5/FEATURE_PLAN.md
+    rationale: |
+      Extend `vnx init <project>` to also create:
+      - .vnx-data/strategy/ (roadmap.yaml + decisions.ndjson + current_state.md skeleton)
+      - .claude/agents/orchestrators/main/BEHAVIOR.md template
+      - .claude/agents/workers/<role>/BEHAVIOR.md per role-type the operator picks
+      Prompt: "What kind of project? [code / content / sales / mixed / custom]"
+      → seeds appropriate agent folders + governance variant + roadmap template.
+
+  # ----- Phase 1 -----
+  - wave_id: merge-pr-395
+    title: Merge PR #395 (ADRs + threshold cleanup script)
+    phase_id: 1
+    status: in_progress
+    pr_number: 395
+    blocked_on: [gemini_quota_recovery]
+    depends_on: []
+
+  - wave_id: merge-pr-396
+    title: Merge PR #396 (UR-001 dead duplicate)
+    phase_id: 1
+    status: in_progress
+    pr_number: 396
+    blocked_on: [gemini_quota_recovery]
+    depends_on: []
+
+  - wave_id: replay-codex-audits
+    title: Batch-replay ~75 codex re-audit OIs after May 5 quota reset
+    phase_id: 1
+    status: planned
+    estimated_loc: 0  # script exists; just running
+    blocked_on: [codex_quota_recovery_2026-05-05]
+    depends_on: []
+
+  # ----- Phase 2 — Strategic state foundation -----
+  - wave_id: w-state-1
+    title: roadmap.yaml schema + reader/writer Python module
+    phase_id: 2
+    status: planned
+    estimated_loc: 180
+    branch_name: feat/strategy-roadmap-module
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w-ux-1]
+
+  - wave_id: w-state-2
+    title: decisions.ndjson append-only log + writer
+    phase_id: 2
+    status: planned
+    estimated_loc: 140
+    branch_name: feat/strategy-decisions-log
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-state-1]
+
+  - wave_id: w-state-3
+    title: current_state.md auto-projector (formal version, replaces W-UX-2)
+    phase_id: 2
+    status: planned
+    estimated_loc: 210
+    branch_name: feat/strategy-state-projector
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w-state-1, w-state-2]
+
+  - wave_id: w-state-4
+    title: prd_index.json + adr_index.json
+    phase_id: 2
+    status: planned
+    estimated_loc: 110
+    branch_name: feat/strategy-doc-indexes
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-state-1]
+
+  - wave_id: w-state-5
+    title: build_t0_state.py extension to load strategy/
+    phase_id: 2
+    status: planned
+    estimated_loc: 100
+    branch_name: feat/build-t0-state-strategy-load
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w-state-1, w-state-2, w-state-3]
+
+  # ----- Phase 3 — W7 streaming drainer (full breakdown in PRD §8.2) -----
+  - wave_id: w7-a
+    title: CanonicalEvent schema + EventStore observability_tier field
+    phase_id: 3
+    status: planned
+    estimated_loc: 80
+    branch_name: feat/w7a-canonical-event-schema
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: []
+
+  - wave_id: w7-b
+    title: _streaming_drainer.py mixin
+    phase_id: 3
+    status: planned
+    estimated_loc: 120
+    branch_name: feat/w7b-streaming-drainer-mixin
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w7-a]
+
+  - wave_id: w7-c
+    title: Codex adapter migration to streaming
+    phase_id: 3
+    status: planned
+    estimated_loc: 115
+    branch_name: feat/w7c-codex-streaming-migration
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w7-b]
+
+  - wave_id: w7-d
+    title: Gemini-CLI adapter migration to streaming
+    phase_id: 3
+    status: planned
+    estimated_loc: 55
+    branch_name: feat/w7d-gemini-streaming-migration
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w7-b]
+
+  - wave_id: w7-e
+    title: LiteLLMAdapter proof-of-concept
+    phase_id: 3
+    status: planned
+    estimated_loc: 150
+    branch_name: feat/w7e-litellm-adapter
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w7-b]
+
+  - wave_id: w7-f
+    title: OllamaAdapter audit + streaming refactor
+    phase_id: 3
+    status: planned
+    estimated_loc: 70
+    branch_name: feat/w7f-ollama-streaming
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w7-b]
+
+  - wave_id: w7-g
+    title: Tier-1/2/3 labeling in receipt + governance-variant gating
+    phase_id: 3
+    status: planned
+    estimated_loc: 50
+    branch_name: feat/w7g-observability-tier-gating
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w7-a, w7-c, w7-d]
+
+  # ----- Phase 4 — F43 revival + giveaway -----
+  - wave_id: w6a
+    title: F43 context rotation revival into main
+    phase_id: 4
+    status: planned
+    estimated_loc: 750
+    branch_name: feat/w6a-f43-context-rotation-revival
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: high
+    depends_on: []
+
+  - wave_id: w6b
+    title: Carve out scripts/lib/context_rotation/ standalone package
+    phase_id: 4
+    status: planned
+    estimated_loc: 400
+    branch_name: feat/w6b-context-rotation-package-extract
+    review_stack: [gemini_review]
+    risk_class: medium
+    depends_on: [w6a]
+
+  - wave_id: w6c
+    title: Create separate GitHub repo + sync script
+    phase_id: 4
+    status: planned
+    estimated_loc: 200
+    branch_name: feat/w6c-context-rotation-standalone-repo
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w6b]
+    notes: "Operator owns GitHub repo creation."
+
+  - wave_id: w6d
+    title: PyPI publish (pyproject.toml + GitHub Actions release)
+    phase_id: 4
+    status: planned
+    estimated_loc: 100
+    branch_name: feat/w6d-context-rotation-pypi-publish
+    review_stack: [gemini_review]
+    risk_class: medium
+    depends_on: [w6c]
+    notes: "Operator owns PyPI account."
+
+  - wave_id: w6e
+    title: Reddit/HN/LinkedIn community launch
+    phase_id: 4
+    status: planned
+    estimated_loc: 0  # content only
+    review_stack: [content_review]
+    risk_class: low
+    depends_on: [w6d]
+    notes: "Operator-driven; T0 can draft."
+
+  # ----- Phase 5 — W7.5 -----
+  - wave_id: w7-5
+    title: Provider failover at orchestrator level
+    phase_id: 5
+    status: planned
+    estimated_loc: 480
+    branch_name: feat/w7-5-provider-failover
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: high
+    depends_on: [w7-c, w7-d, w7-g]
+
+  # ----- Phase 6 — Single-system migration P1-P6 -----
+  - wave_id: w6-p1
+    title: Read-only federation aggregator
+    phase_id: 6
+    status: planned
+    estimated_loc: 300
+    branch_name: feat/w6-p1-federation-aggregator
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: []
+
+  - wave_id: w6-p2
+    title: Identity layer + per-project worker registry
+    phase_id: 6
+    status: planned
+    estimated_loc: 250
+    branch_name: feat/w6-p2-identity-layer
+    review_stack: [gemini_review, codex_gate]
+    risk_class: high
+    depends_on: [w6-p1]
+
+  - wave_id: w6-p3
+    title: Receipt + register envelope per-project paths
+    phase_id: 6
+    status: planned
+    estimated_loc: 280
+    branch_name: feat/w6-p3-event-envelopes
+    review_stack: [gemini_review, codex_gate]
+    risk_class: high
+    depends_on: [w6-p2]
+
+  - wave_id: w6-p4
+    title: One-shot data import script (HIGH RISK)
+    phase_id: 6
+    status: planned
+    estimated_loc: 280
+    branch_name: feat/w6-p4-data-import
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: critical
+    depends_on: [w6-p3]
+    notes: "Operator MUST review migration script + dry-run output before run."
+
+  - wave_id: w6-p5
+    title: Reader cutover, central install symlinks
+    phase_id: 6
+    status: planned
+    estimated_loc: 190
+    branch_name: feat/w6-p5-reader-cutover
+    review_stack: [gemini_review, codex_gate]
+    risk_class: high
+    depends_on: [w6-p4]
+
+  - wave_id: w6-p6
+    title: Per-project DB retirement after verification
+    phase_id: 6
+    status: planned
+    estimated_loc: 80
+    branch_name: feat/w6-p6-db-retirement
+    review_stack: [gemini_review]
+    risk_class: medium
+    depends_on: [w6-p5]
+
+  # ----- Phase 7 — W8 Folder agents -----
+  - wave_id: w8-a
+    title: .claude/agents/ skeleton + migrate 8 existing skills to BEHAVIOR.md + symlinks
+    phase_id: 7
+    status: planned
+    estimated_loc: 400
+    branch_name: feat/w8a-folder-agents-skeleton
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w7-a, w-state-2]
+
+  - wave_id: w8-b
+    title: governance.yaml + guardrails.yaml + permissions.yaml per agent + dispatcher reads these
+    phase_id: 7
+    status: planned
+    estimated_loc: 500
+    branch_name: feat/w8b-folder-agents-config
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w8-a]
+
+  - wave_id: w8-fr12
+    title: Agent registry + dispatch validator + library renderer
+    phase_id: 7
+    status: planned
+    estimated_loc: 370
+    branch_name: feat/w8fr12-agent-registry
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w8-b]
+
+  # ----- Phase 8 — W9 -----
+  - wave_id: w9
+    title: Universal WorkerProvider Protocol refactor
+    phase_id: 8
+    status: planned
+    estimated_loc: 400
+    branch_name: feat/w9-worker-provider-protocol
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w8-fr12, w7-e]
+
+  # ----- Phase 9 — W10 -----
+  - wave_id: w10
+    title: Capability tokens + governance variants
+    phase_id: 9
+    status: planned
+    estimated_loc: 600
+    branch_name: feat/w10-cap-tokens-governance
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: high
+    depends_on: [w9]
+    blocked_on: [od_2_answered]
+
+  # ----- Phase 10 — W11 -----
+  - wave_id: w11
+    title: Workers=N rename + lease polymorphism
+    phase_id: 10
+    status: planned
+    estimated_loc: 600
+    branch_name: feat/w11-workers-n-rename
+    review_stack: [gemini_review, codex_gate]
+    risk_class: high
+    depends_on: [w10]
+
+  # ----- Phase 11 — W12 -----
+  - wave_id: w12
+    title: Sub-orchestrator pools + missions + Assistant orchestrator
+    phase_id: 11
+    status: planned
+    estimated_loc: 800
+    branch_name: feat/w12-sub-orchestrators
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: high
+    depends_on: [w11]
+
+  # ----- Phase 12 — Memory layer -----
+  - wave_id: w-mem-1
+    title: sqlite-vec + nomic-embed setup + schema migration
+    phase_id: 12
+    status: planned
+    estimated_loc: 200
+    branch_name: feat/w-mem-1-vector-store-setup
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w11]
+
+  - wave_id: w-mem-2
+    title: artifact_index table + embedding pipeline
+    phase_id: 12
+    status: planned
+    estimated_loc: 350
+    branch_name: feat/w-mem-2-artifact-indexer
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w-mem-1]
+
+  - wave_id: w-mem-3
+    title: Domain partitioning + retrieval API (CLI + programmatic)
+    phase_id: 12
+    status: planned
+    estimated_loc: 400
+    branch_name: feat/w-mem-3-retrieval-api
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w-mem-2]
+
+  - wave_id: w-mem-4
+    title: Auto-injection at dispatch + feedback_*.md sync
+    phase_id: 12
+    status: planned
+    estimated_loc: 390
+    branch_name: feat/w-mem-4-auto-injection
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w-mem-3]
+
+  # ----- Phase 13 — W13 -----
+  - wave_id: w13
+    title: LiteLLM bridge + Ollama parity + 1st PyPI module live
+    phase_id: 13
+    status: planned
+    estimated_loc: 400
+    branch_name: feat/w13-litellm-ollama-pypi
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w9, w6d]
+
+  # ----- Phase 14 — W14 -----
+  - wave_id: w14
+    title: Folder-based agents Phase C cutover (remove legacy injection)
+    phase_id: 14
+    status: planned
+    estimated_loc: 200
+    branch_name: feat/w14-folder-agents-cutover
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w13]
+
+  # ----- Phase 15 — W15 (existing roadmap-autopilot feature) -----
+  - wave_id: w15-pr0
+    title: Roadmap registry and materialization
+    phase_id: 15
+    status: planned
+    estimated_loc: 400
+    branch_name: feature/roadmap-autopilot-pr0
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: high
+    depends_on: [w14]
+    plan_path: roadmap/features/roadmap-autopilot/FEATURE_PLAN.md
+
+  - wave_id: w15-pr1
+    title: Review gate stack (formalised)
+    phase_id: 15
+    status: planned
+    branch_name: feature/roadmap-autopilot-pr1
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: medium
+    depends_on: [w15-pr0]
+
+  - wave_id: w15-pr2
+    title: Closure verifier + auto-merge policy
+    phase_id: 15
+    status: planned
+    branch_name: feature/roadmap-autopilot-pr2
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: medium
+    depends_on: [w15-pr1]
+
+  - wave_id: w15-pr3
+    title: Auto-advance + drift fix-up insertion
+    phase_id: 15
+    status: planned
+    branch_name: feature/roadmap-autopilot-pr3
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    risk_class: medium
+    depends_on: [w15-pr1, w15-pr2]
+
+  # ----- Phase 16 — Business-domain bootstrap -----
+  - wave_id: w16-1
+    title: business-light governance variant + permissions templates
+    phase_id: 16
+    status: planned
+    estimated_loc: 100
+    branch_name: feat/w16-1-business-light-governance
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w8-b]
+    rationale: |
+      Define business-light governance variant (no codex_gate, no PR_size_limit,
+      content_review only, auto_merge: true). Permissions template for content
+      workers (allowed: Read, Write, WebFetch; denied: Bash, code execution).
+
+  - wave_id: w16-2
+    title: marketing-lead orchestrator agent folder
+    phase_id: 16
+    status: planned
+    estimated_loc: 200
+    branch_name: feat/w16-2-marketing-lead-orchestrator
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w16-1, w-mem-3]
+    rationale: |
+      .claude/agents/orchestrators/marketing-lead/ with BEHAVIOR.md (persona),
+      governance.yaml (variant: business-light), runtime.yaml (provider chain
+      claude→gemini, no codex), workers.yaml ([blog-writer, linkedin-writer,
+      seo-analyst, ga4-analyst]), skills/ (plan-content-calendar, kies-onderwerp,
+      analyseer-performance).
+
+  - wave_id: w16-3
+    title: blog-writer worker agent folder
+    phase_id: 16
+    status: planned
+    estimated_loc: 150
+    branch_name: feat/w16-3-blog-writer
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w16-1]
+    rationale: |
+      .claude/agents/workers/blog-writer/ with BEHAVIOR.md (operator-tone,
+      voorkeurs-lengte, structure conventions), permissions.yaml (Read, Write,
+      WebFetch — no Bash), skills/ (draft-post, edit-for-tone, add-seo-meta).
+
+  - wave_id: w16-4
+    title: linkedin-writer worker agent folder
+    phase_id: 16
+    status: planned
+    estimated_loc: 120
+    branch_name: feat/w16-4-linkedin-writer
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w16-1]
+    rationale: |
+      .claude/agents/workers/linkedin-writer/ with BEHAVIOR.md (LinkedIn-specific
+      tone + length + hook conventions), skills/ (draft-post, draft-carousel,
+      respond-to-comment).
+
+  - wave_id: w16-5
+    title: seo-analyst worker agent folder + brave-search MCP grant
+    phase_id: 16
+    status: planned
+    estimated_loc: 130
+    branch_name: feat/w16-5-seo-analyst
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w16-1]
+    rationale: |
+      .claude/agents/workers/seo-analyst/ with BEHAVIOR.md, tools.yaml (MCP
+      grants: brave-search, context7), skills/ (keyword-research,
+      competitor-content-audit, on-page-audit).
+
+  - wave_id: w16-6
+    title: ga4-analyst worker agent folder + GA4 MCP server (custom)
+    phase_id: 16
+    status: planned
+    estimated_loc: 450
+    branch_name: feat/w16-6-ga4-analyst
+    review_stack: [gemini_review, codex_gate]
+    risk_class: medium
+    depends_on: [w16-1]
+    rationale: |
+      Custom MCP server wrapping GA4 Data API (~300 LOC, separate concern).
+      Plus .claude/agents/workers/ga4-analyst/ with BEHAVIOR.md, tools.yaml
+      (MCP grant: ga4-data), skills/ (funnel-analysis, traffic-source-mix,
+      content-performance, weekly-snapshot). Could be its own giveaway repo —
+      see backlog BL-2026-05-008.
+
+  - wave_id: w16-7
+    title: per-domain memory partition for marketing/sales
+    phase_id: 16
+    status: planned
+    estimated_loc: 100
+    branch_name: feat/w16-7-business-memory-partitions
+    review_stack: [gemini_review]
+    risk_class: low
+    depends_on: [w-mem-3, w16-2]
+    rationale: |
+      Bootstrap vec_artifacts_marketing + vec_artifacts_sales tables. Hard
+      partition (queries from marketing-lead context cannot retrieve code-domain
+      artifacts and vice versa). Operator-pref shared cross-domain via
+      vec_operator_prefs.
+
+  - wave_id: w16-8
+    title: smoke-test mission "schrijf 1 blog van begin tot eind"
+    phase_id: 16
+    status: planned
+    estimated_loc: 50
+    branch_name: feat/w16-8-business-smoke-test
+    review_stack: [content_review]
+    risk_class: low
+    depends_on: [w16-2, w16-3, w16-5, w16-7]
+    rationale: |
+      End-to-end mission: operator → main → marketing-lead → research-topic
+      (seo-analyst) → draft-post (blog-writer) → review (marketing-lead self) →
+      commit as markdown. Validates the full Phase 16 stack works. After this,
+      Phase 16 acceptance is met.
+
+# ============================================================
+# OPERATOR DECISIONS (referenced as blocked_on in waves)
+# ============================================================
+operator_decisions:
+  - decision_id: od_1
+    title: Codex worker (full streaming) or gate-only
+    status: open
+    recommendation: worker
+    blocking_waves: [w7-c]  # gate-only would defer this, but worker recommended
+
+  - decision_id: od_2
+    title: Capability-token signing key location (laptop / Keychain / YubiKey)
+    status: open
+    recommendation: laptop_file_v1_then_hardware_v2
+    blocking_waves: [w10]
+
+  - decision_id: od_3
+    title: Tri-file vs single-source authoring
+    status: closed
+    closed_at: 2026-05-01
+    decision: single_source_BEHAVIOR_md_plus_symlinks
+    rationale: "PRD v1.2 — drift impossible, ~10 LOC vs 300 for converter"
+
+  - decision_id: od_4
+    title: Sub-orchestrator approval inheritance vs strict
+    status: open
+    recommendation: inherit_with_conservative_caveats
+    blocking_waves: [w12]
+
+  - decision_id: od_5
+    title: Sub-orchestrators tmux pane vs subprocess-only
+    status: open
+    recommendation: virtual_default_opt_in_pane
+    blocking_waves: [w12]
+
+  - decision_id: od_6
+    title: Worker pool size limit per orchestrator
+    status: open
+    recommendation: default_8_hard_cap_32
+    blocking_waves: [w11]
+
+# ============================================================
+# COMPLETED PRIOR WORK (historical reference, not actionable)
+# ============================================================
+completed_history:
+  - sprint: 2026-05-01-consolidation-sprint
+    pr_count: 30
+    pr_range: "#366..#394"
+    description: "Refactored 4 hottest modules + shipped multi-tenant project_id Phase 0 + closed cross-project contamination"
+    status: completed
+
+  - sprint: 2026-04-30-night-w1-w3
+    description: "F43-precursor work; cap_token research; codex gate iterations"
+    status: partially_completed
+
+  - sprint: 2026-04-28-29-codex-iterations
+    description: "PRs #299..#322; multiple codex gate fixes and overrides"
+    status: completed
+
+# ============================================================
+# CROSS-CUTTING NOTES
+# ============================================================
+notes:
+  total_estimated_loc: 13320
+  estimated_calendar_weeks_sequential: 27
+  estimated_calendar_weeks_parallel: 15
+  public_vs_internal_policy: "Strategy state is git-tracked via .gitignore exception. Memory artifacts stay gitignored."
+  backward_compat_window: "T0..T3 aliases ≥6 months post W11. _inject_skill_context() until W14."
+  highest_risk_single_pr: "w6-p4 (one-shot data import)"
+  highest_blast_radius: "w10 (cap tokens) — wrong implementation = trust chain insecurity"

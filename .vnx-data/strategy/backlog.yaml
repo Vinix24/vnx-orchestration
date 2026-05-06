@@ -1,0 +1,254 @@
+# VNX Backlog — universal queue of unscheduled work
+# Schema: items are append-only ideas. No dependencies enforced.
+# Lifecycle: backlog → (promote) → roadmap.yaml waves OR (drop) → wontfix.
+# Companion: roadmap.yaml (committed, sequenced) — backlog.yaml (queued, unsorted).
+#
+# Update protocol:
+#   - Operator and T0 can both add items.
+#   - Status: queued | in_review | promoted | wontfix
+#   - Domain: code | content | sales | ops | research | giveaway | other
+#   - Priority: low | medium | high (operator-set)
+#   - Estimated_effort: tshirt size (XS / S / M / L / XL) — coarse, not LOC
+#   - When promoting: copy to roadmap.yaml as a wave with deps + LOC, set backlog status: promoted with promoted_to: <wave_id>
+#   - When dropping: set status: wontfix with rationale
+
+schema_version: 1
+backlog_id: vnx-backlog
+generated_at: 2026-05-06T00:00:00Z
+
+items:
+  # ============================================================
+  # CONTENT — blogs, LinkedIn, marketing collateral
+  # ============================================================
+  - id: BL-2026-05-001
+    domain: content
+    priority: medium
+    estimated_effort: M
+    status: queued
+    title: "Blog series: how VNX governance caught a multi-day hallucination"
+    notes: |
+      Real story from this session: gemini hallucinated a heartbeat socket
+      mismatch on PR #386 that didn't exist. Triple-gate caught it. Material
+      for a 1500-2000 word post on why audit trails matter for AI workflows.
+    source: this-session-2026-05-01
+
+  - id: BL-2026-05-002
+    domain: content
+    priority: high
+    estimated_effort: L
+    status: queued
+    title: "Show HN launch post for headless-context-rotation PyPI package"
+    notes: |
+      When W6D lands (PyPI publish), draft Show-HN post focused on the
+      technical bit — token tracking + handover prompt design.
+      Coordinate with W6E (community launch).
+    blocked_on_roadmap: w6d
+    source: ADR-002-F43-packaging
+
+  - id: BL-2026-05-003
+    domain: content
+    priority: medium
+    estimated_effort: S
+    status: queued
+    title: "LinkedIn carousel: 4-mode interactive/headless matrix explained"
+    notes: |
+      Visual explainer of the architecture mode matrix in PRD §7.6.
+      Good operator-credibility content. 6-8 slides.
+
+  - id: BL-2026-05-004
+    domain: content
+    priority: low
+    estimated_effort: XL
+    status: queued
+    title: "Quarterly business retrospective with GA4 + intelligence-DB pull"
+    notes: |
+      Once Phase 16 lands and ga4-analyst worker exists, automate quarterly
+      retrospective: traffic + conversion data + content performance. Output
+      goes to operator's email + LinkedIn carousel.
+    blocked_on_roadmap: phase_16
+    domain_secondary: ops
+
+  # ============================================================
+  # CODE — refactoring, infrastructure, tooling
+  # ============================================================
+  - id: BL-2026-05-005
+    domain: code
+    priority: low
+    estimated_effort: M
+    status: queued
+    title: "Tri-file authoring upgrade: single-source converter (per-provider divergence)"
+    notes: |
+      OD-3 was closed in favor of symlinks (FR-4). If a real provider-divergence
+      need surfaces (e.g. Codex needs different tool-naming syntax in BEHAVIOR),
+      upgrade to <provider:claude>...</provider> tagged converter (~300 LOC).
+      Estimated effort kept low because: not blocking, only when needed.
+    source: PRD-VNX-UH-001-FR4-OD3
+
+  - id: BL-2026-05-006
+    domain: code
+    priority: medium
+    estimated_effort: S
+    status: queued
+    title: "Hardware-backed signing key (YubiKey/Touch ID) for cap tokens"
+    notes: |
+      OD-2 chose laptop file for v1. v2: hardware-backed when operator runs
+      sensitive customer code. Replace ed25519 file with YubiKey FIDO2 or
+      macOS Keychain Touch-ID prompt.
+    source: PRD-VNX-UH-001-OD2-v2-followup
+    blocked_on_roadmap: w10
+
+  - id: BL-2026-05-007
+    domain: code
+    priority: low
+    estimated_effort: M
+    status: queued
+    title: "Vertex AI streaming-via-REST adapter (streamGenerateContent SSE)"
+    notes: |
+      Per PRD §3.2 non-goals — explicitly out of scope for v1. Re-evaluate
+      when an operator workflow needs Vertex without going through gemini-CLI.
+    source: PRD-VNX-UH-001-non-goals
+
+  - id: BL-2026-05-008
+    domain: code
+    priority: medium
+    estimated_effort: M
+    status: queued
+    title: "GA4 MCP server (custom)"
+    notes: |
+      Phase 16 ga4-analyst worker needs a custom MCP server that wraps the
+      GA4 Data API. ~300 LOC. Could be its own giveaway repo (community
+      benefit: many people want this).
+    blocked_on_roadmap: phase_16
+    domain_secondary: giveaway
+
+  # ============================================================
+  # GIVEAWAY — extracted standalone packages for community
+  # ============================================================
+  - id: BL-2026-05-009
+    domain: giveaway
+    priority: low
+    estimated_effort: L
+    status: queued
+    title: "streaming-drainer as standalone PyPI package"
+    notes: |
+      W7-B mixin is generic enough to extract as `pip install streaming-drainer`
+      after F43 launch is proven. Adapter pattern works for any subprocess CLI
+      that emits NDJSON. Reach: people running headless Codex/Gemini/Ollama.
+    blocked_on_roadmap: w7b
+    domain_secondary: code
+
+  - id: BL-2026-05-010
+    domain: giveaway
+    priority: low
+    estimated_effort: L
+    status: queued
+    title: "cap-token-macaroons as standalone PyPI package"
+    notes: |
+      W10 capability token implementation is reusable for any agent system
+      that needs delegated authority with attenuation. ~250 LOC + tests.
+      Reach: agentic frameworks that haven't solved trust chain yet.
+    blocked_on_roadmap: w10
+
+  # ============================================================
+  # OPS — operational improvements
+  # ============================================================
+  - id: BL-2026-05-011
+    domain: ops
+    priority: medium
+    estimated_effort: S
+    status: queued
+    title: "vnx doctor extended: strategy/ folder validation"
+    notes: |
+      When strategy/ folder lands, vnx_doctor should validate roadmap.yaml
+      schema, decisions.ndjson append-only invariant, and current_state.md
+      freshness (warn if >24h old).
+
+  - id: BL-2026-05-012
+    domain: ops
+    priority: low
+    estimated_effort: M
+    status: queued
+    title: "Garbage-collect old worktrees (88 currently exist)"
+    notes: |
+      `git worktree list` shows 88 worktrees, most are orphaned from past
+      PRs. Auto-prune script: any worktree on a branch that's merged or
+      deleted on origin → safe to remove. Saves disk + reduces operator
+      mental clutter.
+
+  # ============================================================
+  # SALES — outreach, lead gen
+  # ============================================================
+  - id: BL-2026-05-013
+    domain: sales
+    priority: low
+    estimated_effort: M
+    status: queued
+    title: "sales-outreach worker: cold LinkedIn DM drafting"
+    notes: |
+      Phase 16 follow-up: a sales-outreach worker that drafts personalized
+      cold DMs from LinkedIn profile data. Per-recipient memory in
+      vec_artifacts_sales. Phase 16 prerequisite for sales-lead orchestrator.
+    blocked_on_roadmap: phase_16
+
+  # ============================================================
+  # RESEARCH — deeper investigations
+  # ============================================================
+  - id: BL-2026-05-014
+    domain: research
+    priority: low
+    estimated_effort: L
+    status: queued
+    title: "Investigate Letta/MemGPT memory pages for VNX Layer 2"
+    notes: |
+      Layer 2 design landed on sqlite-vec + nomic-embed. Letta has a
+      different model (memory pages with self-edit). May be worth a
+      second comparison once W-mem-3 is in operator hands.
+    blocked_on_roadmap: w-mem-3
+
+  - id: BL-2026-05-015
+    domain: research
+    priority: low
+    estimated_effort: M
+    status: queued
+    title: "Research multi-tenant orchestration when operator has consultants"
+    notes: |
+      Today VNX = single-operator. If operator hires a contractor who
+      should see only sales-domain, capability tokens get a second purpose:
+      multi-user (not just multi-domain). Research how to model human
+      identities in the trust chain.
+
+  # ============================================================
+  # OTHER — unsorted
+  # ============================================================
+  - id: BL-2026-05-016
+    domain: other
+    priority: low
+    estimated_effort: XS
+    status: queued
+    title: "Operator playbook: 'morning routine with VNX'"
+    notes: |
+      Once Phase 0 lands and `vnx status` works: write a 1-page playbook
+      for what operator does first thing (run vnx status, check OIs,
+      pick wave, dispatch). Internal — onboarding for self after long
+      breaks.
+
+# ============================================================
+# PROMOTION HISTORY (audit trail of items that graduated to roadmap)
+# ============================================================
+promotion_history: []
+  # Format when entries appear:
+  # - backlog_id: BL-2026-05-XXX
+  #   promoted_to: w-7-c
+  #   promoted_at: 2026-MM-DDTHH:MM:SSZ
+  #   promoted_by: operator   # or t0
+  #   rationale: "..."
+
+# ============================================================
+# WONTFIX (audit trail of items that were dropped)
+# ============================================================
+wontfix_history: []
+  # Format:
+  # - backlog_id: BL-2026-05-XXX
+  #   dropped_at: 2026-MM-DDTHH:MM:SSZ
+  #   dropped_by: operator
+  #   rationale: "Out of scope; superseded by X; never made business sense"

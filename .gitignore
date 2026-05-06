@@ -1,5 +1,9 @@
-# VNX runtime artifacts (local only)
-.vnx-data/
+# VNX runtime artifacts (local only) — with exceptions for strategic docs
+.vnx-data/*
+!.vnx-data/strategy/                           # tracked: strategic state (roadmap, decisions, current_state)
+!.vnx-data/state/                              # partially tracked: just the design doc, not runtime files
+.vnx-data/state/*
+!.vnx-data/state/PROJECT_STATE_DESIGN.md       # tracked: design rationale for strategy/ folder
 state/
 state_archive_*/
 state_archive/
