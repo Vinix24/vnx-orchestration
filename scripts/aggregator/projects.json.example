@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "name": "vnx-roadmap-autopilot",
+      "project_id": "vnx-dev",
+      "path": "/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt",
+      "layout": "vnx-data-state",
+      "registered_at": "2026-04-03T12:53:57.796283+00:00"
+    },
+    {
+      "name": "mission-control",
+      "project_id": "mc",
+      "path": "/Users/vincentvandeth/Desktop/BUSINESS/development/mission-control",
+      "layout": "vnx-data-state",
+      "registered_at": "2026-05-06T00:00:00+00:00"
+    },
+    {
+      "name": "sales-copilot",
+      "project_id": "sales-copilot",
+      "path": "/Users/vincentvandeth/Desktop/BUSINESS/development/sales-copilot",
+      "layout": "vnx-data-state",
+      "registered_at": "2026-05-06T00:00:00+00:00"
+    },
+    {
+      "name": "SEOcrawler_v2",
+      "project_id": "seocrawler-v2",
+      "path": "/Users/vincentvandeth/Development/SEOcrawler_v2",
+      "layout": "vnx-data-state",
+      "registered_at": "2026-05-06T00:00:00+00:00"
+    }
+  ]
+}
