@@ -235,19 +235,40 @@ def _merge_source_dispatch_ids(values: List[Optional[str]]) -> str:
 
 def _group_duplicates(
     conn: sqlite3.Connection,
-) -> Dict[str, List[sqlite3.Row]]:
-    rows = conn.execute(
-        """
-        SELECT id, title, description, usage_count, source_dispatch_ids,
-               first_seen, last_used, confidence_score
-        FROM   success_patterns
-        ORDER  BY id ASC
-        """
-    ).fetchall()
-    groups: Dict[str, List[sqlite3.Row]] = {}
+) -> Dict[Tuple[str, str], List[sqlite3.Row]]:
+    """Group success_patterns rows for dedup.
+
+    Phase 1.5 PR-2 / OI-1315 / OI-1321: dedup keys are
+    ``(project_id, content_hash)`` — NOT ``content_hash`` alone — so that
+    two tenants with identical pattern text never collapse into a single
+    canonical row. When ``project_id`` does not exist on the table (pre-
+    migration-0010 DBs), the grouping degrades to ``("", content_hash)`` so
+    legacy single-tenant deployments keep working.
+    """
+    has_project_id = _column_exists(conn, "success_patterns", "project_id")
+    if has_project_id:
+        rows = conn.execute(
+            """
+            SELECT id, title, description, usage_count, source_dispatch_ids,
+                   first_seen, last_used, confidence_score, project_id
+            FROM   success_patterns
+            ORDER  BY id ASC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, title, description, usage_count, source_dispatch_ids,
+                   first_seen, last_used, confidence_score
+            FROM   success_patterns
+            ORDER  BY id ASC
+            """
+        ).fetchall()
+    groups: Dict[Tuple[str, str], List[sqlite3.Row]] = {}
     for row in rows:
-        h = content_hash(row["title"], row["description"])
-        groups.setdefault(h, []).append(row)
+        project_id = row["project_id"] if has_project_id else ""
+        key = (str(project_id or ""), content_hash(row["title"], row["description"]))
+        groups.setdefault(key, []).append(row)
     return groups
 
 
@@ -281,12 +302,16 @@ def dedup_success_patterns(
         backfill_content_hash(conn)
         groups = _group_duplicates(conn)
         report: Dict[str, int] = {}
-        for hash_key, members in groups.items():
+        for group_key, members in groups.items():
             if len(members) <= 1:
                 continue
             canonical = members[0]
             duplicates = members[1:]
-            short_key = hash_key[:12]
+            project_id_part, hash_part = group_key
+            short_hash = hash_part[:12]
+            short_key = (
+                f"{project_id_part}:{short_hash}" if project_id_part else short_hash
+            )
             report[short_key] = len(duplicates)
 
             if not apply:
@@ -407,16 +432,32 @@ def _redirect_dispatch_pattern_offered(
 ) -> None:
     if not _table_exists(conn, "dispatch_pattern_offered"):
         return
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO dispatch_pattern_offered
-            (dispatch_id, pattern_id, pattern_title, offered_at)
-        SELECT dispatch_id, ?, pattern_title, offered_at
-        FROM   dispatch_pattern_offered
-        WHERE  pattern_id = ?
-        """,
-        (canonical_pattern_id, duplicate_pattern_id),
-    )
+    # Phase 1.5 PR-2 fix-forward: carry the source row's project_id through
+    # the redirect insert. Without this, the re-inserted canonical row falls
+    # back to the table default ('vnx-dev' from migration 0010) and a tenant-
+    # scoped offering can be silently rebound to the wrong project.
+    if _column_exists(conn, "dispatch_pattern_offered", "project_id"):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
+            SELECT dispatch_id, ?, pattern_title, offered_at, project_id
+            FROM   dispatch_pattern_offered
+            WHERE  pattern_id = ?
+            """,
+            (canonical_pattern_id, duplicate_pattern_id),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at)
+            SELECT dispatch_id, ?, pattern_title, offered_at
+            FROM   dispatch_pattern_offered
+            WHERE  pattern_id = ?
+            """,
+            (canonical_pattern_id, duplicate_pattern_id),
+        )
     conn.execute(
         "DELETE FROM dispatch_pattern_offered WHERE pattern_id = ?",
         (duplicate_pattern_id,),
