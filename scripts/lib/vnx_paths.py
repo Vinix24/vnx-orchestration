@@ -152,6 +152,23 @@ def resolve_paths() -> Dict[str, str]:
     return paths
 
 
+def resolve_central_data_dir(project_id: str) -> Path:
+    """Return ~/.vnx-data/<project_id> — the per-project namespace in the central store.
+
+    Phase 6 P3: dual-write paths land here in addition to the per-project path.
+    Per-project remains source-of-truth until w6-p5 reader cutover.
+
+    Raises ValueError when project_id violates the VNX id format.
+    """
+    import re as _re
+    _ID_RE = _re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+    if not _ID_RE.match(project_id):
+        raise ValueError(
+            f"invalid project_id {project_id!r}: must match {_ID_RE.pattern}"
+        )
+    return Path.home() / ".vnx-data" / project_id
+
+
 def ensure_env() -> Dict[str, str]:
     """Populate os.environ with any missing VNX path defaults."""
     paths = resolve_paths()
