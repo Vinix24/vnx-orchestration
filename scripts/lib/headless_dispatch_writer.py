@@ -21,12 +21,18 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Ensure lib dir (this file's directory) is on sys.path for project_scope import
+_lib_dir = str(Path(__file__).resolve().parent)
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from project_scope import current_project_id as _current_project_id  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -77,20 +83,8 @@ VALID_TRACKS = {"A", "B", "C"}
 
 
 def _get_project_id() -> str:
-    """Return project ID from VNX_PROJECT_ID env, falling back to git root basename."""
-    pid = os.environ.get("VNX_PROJECT_ID", "").strip()
-    if pid:
-        return pid
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if result.returncode == 0:
-            return Path(result.stdout.strip()).name
-    except Exception:
-        pass
-    return "vnx-dev"
+    """Return project ID — delegates to project_scope.current_project_id (OI-1342)."""
+    return _current_project_id()
 
 
 # ---------------------------------------------------------------------------
