@@ -496,6 +496,12 @@ def _validate_review_evidence(
                         "FAIL",
                         f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
                     ))
+                elif gate_is_terminal(result) and not result.get("report_path", ""):
+                    checks.append(CheckResult(
+                        f"gate_{gate}",
+                        "FAIL",
+                        "codex_gate result is missing required report_path field",
+                    ))
                 else:
                     # CFX-17: demote allowlisted findings before counting blocking.
                     translated = _apply_codex_severity_policy(result)
