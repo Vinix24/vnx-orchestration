@@ -74,6 +74,37 @@ def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
         pass
 
 
+def _stamp_identity(receipt: Dict[str, Any]) -> None:
+    """Backfill the four-tuple identity fields on a receipt in place.
+
+    Phase 6 P2: every NDJSON line should be attributable to
+    {operator, project, orchestrator, agent}. Resolution is best-effort —
+    when ``vnx_identity.try_resolve_identity()`` returns None (no env,
+    no ``.vnx-project-id``, no registry hit), the receipt is written
+    without identity fields rather than blocking the durability path.
+    Caller-supplied values are never overwritten. Fields with no value
+    are NOT serialized (we do not stamp ``"operator_id": null``).
+    """
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        from vnx_identity import try_resolve_identity
+    except Exception:
+        return
+
+    identity = try_resolve_identity()
+    if identity is None:
+        return
+
+    if not receipt.get("operator_id"):
+        receipt["operator_id"] = identity.operator_id
+    if not receipt.get("project_id"):
+        receipt["project_id"] = identity.project_id
+    if not receipt.get("orchestrator_id") and identity.orchestrator_id:
+        receipt["orchestrator_id"] = identity.orchestrator_id
+    if not receipt.get("agent_id") and identity.agent_id:
+        receipt["agent_id"] = identity.agent_id
+
+
 def append_receipt_payload(
     receipt: Dict[str, Any],
     *,
@@ -83,6 +114,8 @@ def append_receipt_payload(
 ) -> AppendResult:
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
+
+    _stamp_identity(receipt)
 
     if not skip_enrichment:
         receipt = facade._enrich_completion_receipt(receipt)
