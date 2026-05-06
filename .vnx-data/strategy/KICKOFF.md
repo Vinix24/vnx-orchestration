@@ -24,7 +24,11 @@ After reading those 6 files, you have full strategic + tactical context. Confirm
 Phase 0 is 5 waves (W-UX-1 through W-UX-5). All have full FEATURE_PLAN.md specs. No operator decisions block Phase 0. Total ~340 LOC of source work + tests.
 
 Sequence:
-1. **W-UX-1** is essentially DONE — strategic state folder bootstrap landed via PR #398 (currently open, awaiting gemini-gate). Once that merges, W-UX-1 is closed automatically. If #398 hasn't merged yet, retry the gemini gate (gemini quota should have recovered today). Codex quota also recovered as of 2026-05-05; you can replay the ~75 codex re-audit OIs as a batch in parallel.
+1. **W-UX-1 is DONE** — PR #398 (strategic state folder + 17 phase FEATURE_PLAN.md files) MERGED on main as of 2026-05-06 (commit 8b1387e). All FEATURE_PLAN.md files are at `roadmap/features/phase-XX-*/FEATURE_PLAN.md`. Verify via `git log --oneline origin/main | head -3`.
+   **Phase 1 work that needs immediate attention as Phase 0 starts:**
+   - PR #395 (ADRs No-Redis + F43 packaging + threshold-OI cleanup script): OPEN, gemini-gate stalled 5× on 2026-05-06. CI is GREEN, mergeable=CLEAN. Retry the gate; if still stalls, run gate from main worktree directly. Content was operator-approved.
+   - PR #396 (UR-001 dead duplicate `_maybe_reroute_ghost_receipt` removal): OPEN, same gemini-stall pattern. Tiny diff (-22 lines, no source code added). Retry + merge.
+   - ~75 codex re-audit OIs: codex quota recovered 2026-05-05; replay as batch. They'll either close or open structured fix-forward OIs.
 2. **W-UX-2** (current_state.md projector, ~150 LOC, Sonnet T2) — dispatch via `init_feature_batch`. Plan already at `.vnx-data/strategy/dispatch_plans/W-UX-2-current-state-projector.md`.
 3. **W-UX-3** (vnx status CLI, ~80 LOC, Sonnet T3) — depends on W-UX-2.
 4. **W-UX-4** (GC retention in build_t0_state.py, ~30 LOC, Sonnet) — independent of W-UX-2/3, can run parallel.
@@ -101,6 +105,6 @@ End-of-session protocol:
 
 ## Begin
 
-Read the 6 files. Confirm context. Then start with W-UX-2 (since W-UX-1 is in PR #398 already). Be autonomous. Be safe (cap-tokens land in Phase 9; until then, trust is operator-monitored). Be fast (don't over-plan; the FEATURE_PLAN.md's are the plan).
+Read the 6 files. Confirm context. Then start with W-UX-2 (W-UX-1 is already merged via PR #398). Be autonomous. Be safe (cap-tokens land in Phase 9; until then, trust is operator-monitored). Be fast (don't over-plan; the FEATURE_PLAN.md's are the plan).
 
 Operator may not respond between waves. That's fine — keep going through Phase 0. Schedule wakeups for ~15-min checkpoints when workers are in flight.
