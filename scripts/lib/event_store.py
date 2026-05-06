@@ -58,13 +58,17 @@ class EventStore:
         self,
         terminal: str,
         event: "Union[Dict[str, Any], CanonicalEvent]",
-        dispatch_id: str = "",
+        dispatch_id: Optional[str] = None,
     ) -> None:
         """Append a single event as an atomic NDJSON line.
 
         Accepts both legacy dict events and CanonicalEvent instances.
         Uses LOCK_EX for write safety. The line is written in a single write()
         call including the trailing newline to prevent partial reads.
+
+        dispatch_id precedence: explicit kwarg (when not None) wins over the
+        event's own dispatch_id field. Omitting the kwarg (None) falls back to
+        the event's field. Fixes OI-1349.
         """
         from canonical_event import CanonicalEvent as _CE  # local import avoids circular dep at module load
 
@@ -72,10 +76,11 @@ class EventStore:
         path = self._terminal_path(terminal)
 
         if isinstance(event, _CE):
+            effective_dispatch_id = dispatch_id if dispatch_id is not None else event.dispatch_id
             envelope: Dict[str, Any] = {
                 "type": event.event_type,
                 "timestamp": event.timestamp,
-                "dispatch_id": event.dispatch_id or dispatch_id,
+                "dispatch_id": effective_dispatch_id,
                 "terminal": terminal,
                 "sequence": self._next_sequence(terminal),
                 "data": event.data,
@@ -86,11 +91,12 @@ class EventStore:
                 "provider_meta": event.provider_meta,
             }
         else:
+            effective_dispatch_id = dispatch_id if dispatch_id is not None else event.get("dispatch_id", "")
             # Legacy dict path — default tier 2 (buffered) for backwards compat
             envelope = {
                 "type": event.get("type", "unknown"),
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                "dispatch_id": dispatch_id or event.get("dispatch_id", ""),
+                "dispatch_id": effective_dispatch_id,
                 "terminal": terminal,
                 "sequence": self._next_sequence(terminal),
                 "data": event.get("data", event),
