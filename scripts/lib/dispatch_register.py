@@ -102,6 +102,10 @@ def _build_event_record(
     terminal: str,
     gate: str,
     extra: Optional[dict],
+    operator_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    orchestrator_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> dict:
     record: dict = {
         "timestamp": _utc_now_iso(),
@@ -117,9 +121,37 @@ def _build_event_record(
         record["terminal"] = terminal
     if gate:
         record["gate"] = gate
+    if operator_id:
+        record["operator_id"] = operator_id
+    if project_id:
+        record["project_id"] = project_id
+    if orchestrator_id:
+        record["orchestrator_id"] = orchestrator_id
+    if agent_id:
+        record["agent_id"] = agent_id
     if extra and isinstance(extra, dict):
         record["extra"] = extra
     return record
+
+
+def _resolve_identity_for_register() -> dict:
+    """Best-effort identity resolution for register events. Never raises."""
+    try:
+        scripts_lib = str(_REPO_ROOT / "scripts" / "lib")
+        if scripts_lib not in sys.path:
+            sys.path.insert(0, scripts_lib)
+        from vnx_identity import try_resolve_identity
+    except Exception:
+        return {}
+    identity = try_resolve_identity()
+    if identity is None:
+        return {}
+    return {
+        "operator_id": identity.operator_id,
+        "project_id": identity.project_id,
+        "orchestrator_id": identity.orchestrator_id,
+        "agent_id": identity.agent_id,
+    }
 
 
 def _write_event_locked(path: Path, record: dict) -> None:
@@ -137,18 +169,43 @@ def append_event(
     terminal: str = "",
     gate: str = "",
     extra: Optional[dict] = None,
+    operator_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    orchestrator_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> bool:
     """Append a lifecycle event. Returns True on success, False on any failure.
 
     Best-effort: never raises. Intended for use as a fire-and-forget hook
     where caller flow must not break on register write failure.
+
+    Optional ``operator_id`` / ``project_id`` / ``orchestrator_id`` /
+    ``agent_id`` arguments stamp a four-tuple identity onto the event.
+    When omitted, the helper falls back to ``vnx_identity.try_resolve_identity``;
+    if resolution fails the event is written without those fields (legacy
+    behaviour). Existing callers that pass none of these arguments continue
+    to work unchanged.
     """
     if event not in VALID_EVENTS:
         return False
     # Require at least one identifying field — register is canonical source, must be queryable
     if not dispatch_id and pr_number is None and not feature_id:
         return False
-    record = _build_event_record(event, dispatch_id, pr_number, feature_id, terminal, gate, extra)
+
+    if not (operator_id or project_id or orchestrator_id or agent_id):
+        identity = _resolve_identity_for_register()
+        operator_id = operator_id or identity.get("operator_id")
+        project_id = project_id or identity.get("project_id")
+        orchestrator_id = orchestrator_id or identity.get("orchestrator_id")
+        agent_id = agent_id or identity.get("agent_id")
+
+    record = _build_event_record(
+        event, dispatch_id, pr_number, feature_id, terminal, gate, extra,
+        operator_id=operator_id,
+        project_id=project_id,
+        orchestrator_id=orchestrator_id,
+        agent_id=agent_id,
+    )
     try:
         _write_event_locked(_resolve_register_path(), record)
         _mirror_to_decision_log(event, record, extra=extra)

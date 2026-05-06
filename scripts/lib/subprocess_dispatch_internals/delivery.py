@@ -20,6 +20,35 @@ from .path_utils import _extract_touched_paths_from_event, _normalize_repo_path
 logger = logging.getLogger(__name__)
 
 
+def _build_worker_identity_env(terminal_id: str) -> dict[str, str]:
+    """Resolve the orchestrator's identity and project it onto the worker env.
+
+    The worker's ``resolve_identity()`` call will pick these up at the head of
+    its resolution chain so receipts written from inside the subprocess are
+    attributed back to the correct {operator, project, orchestrator, agent}.
+    The ``agent_id`` slot is filled with the worker's terminal label
+    (``t1``/``t2``/``t3``) when the orchestrator does not have a fixed
+    agent_id of its own — agents are per-terminal, not per-orchestrator.
+    Resolution failures are non-fatal: we return an empty mapping so the
+    spawn still happens (legacy behaviour).
+    """
+    import subprocess_dispatch as _sd  # noqa: F401  (kept for facade parity)
+    try:
+        from vnx_identity import try_resolve_identity, ENV_AGENT
+    except Exception:
+        return {}
+    identity = try_resolve_identity()
+    if identity is None:
+        return {}
+    env = dict(identity.to_env())
+    if ENV_AGENT not in env and terminal_id:
+        agent_label = terminal_id.lower()
+        from vnx_identity import ID_REGEX
+        if ID_REGEX.match(agent_label):
+            env[ENV_AGENT] = agent_label
+    return env
+
+
 def _apply_runtime_overrides(chunk_timeout: float, total_deadline: float) -> tuple[float, float]:
     """Honor VNX_CHUNK_TIMEOUT / VNX_TOTAL_DEADLINE env overrides."""
     try:
@@ -396,10 +425,12 @@ def deliver_via_subprocess(
 
     resume_session = _load_resume_session(terminal_id)
     adapter = _sd.SubprocessAdapter()
+    extra_env = _build_worker_identity_env(terminal_id)
     result = adapter.deliver(
         terminal_id, dispatch_id,
         instruction=instruction, model=model,
         cwd=agent_cwd, resume_session=resume_session,
+        extra_env=extra_env,
     )
     if not result.success:
         return _SubprocessResult(
