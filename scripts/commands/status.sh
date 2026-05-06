@@ -284,22 +284,25 @@ cmd_status() {
         cat <<HELP
 Usage: vnx status [OPTIONS]
 
-Show VNX system status: terminals, dispatch queue, and gate results.
+Show VNX operator status dashboard: strategic overview + live terminal health.
 
 Options:
-  --terminals   Show only terminal health
-  --dispatches  Show only dispatch queue
-  --gates       Show only gate results
+  --terminals   Show only terminal health (legacy view)
+  --dispatches  Show only dispatch queue (legacy view)
+  --gates       Show only gate results (legacy view)
   --workers     Show live worker health (subprocess dispatches)
-  --json        Output raw t0_state.json as machine-readable JSON
+  --json        Machine-readable JSON (schema: vnx_status/1.0)
+                Keys: schema, focus, active_waves, open_prs, terminals,
+                      recent_decisions, queues, strategy_available,
+                      t0_state_available
   -h, --help    Show this help
 
 Examples:
   vnx status
+  vnx status --json | python3 -m json.tool
   vnx status --terminals
   vnx status --gates
   vnx status --workers
-  vnx status --json
 HELP
         return 0 ;;
       *)
@@ -309,20 +312,22 @@ HELP
     shift
   done
 
-  if [ "$json_out" -eq 1 ]; then
-    # Refresh t0_state and emit JSON
-    if command -v python3 >/dev/null 2>&1 && [ -f "$VNX_HOME/scripts/build_t0_state.py" ]; then
-      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-        python3 "$VNX_HOME/scripts/build_t0_state.py" 2>/dev/null \
-        || cat "${VNX_STATE_DIR}/t0_state.json" 2>/dev/null \
-        || printf '{}'
-    else
-      cat "${VNX_STATE_DIR}/t0_state.json" 2>/dev/null || printf '{}'
+  # W-UX-3: Route default view and --json through the Python dashboard.
+  # Specialized filter flags (--terminals, --dispatches, --gates, --workers)
+  # retain the legacy bash implementation below for backward compatibility.
+  if [ "$mode" = "all" ] || [ "$json_out" -eq 1 ]; then
+    local _status_py="${VNX_HOME}/scripts/cli/vnx_status.py"
+    if command -v python3 >/dev/null 2>&1 && [ -f "$_status_py" ]; then
+      local _py_args=()
+      [ "$json_out" -eq 1 ] && _py_args+=("--json")
+      PYTHONPATH="${VNX_HOME}/scripts/lib:${PYTHONPATH:-}" \
+        python3 "$_status_py" "${_py_args[@]+"${_py_args[@]}"}"
+      return $?
     fi
-    return 0
+    # Fallback if vnx_status.py unavailable: continue to legacy bash path below.
   fi
 
-  # Refresh t0_state (best-effort, non-blocking)
+  # Legacy bash paths for filter flags and fallback.
   if command -v python3 >/dev/null 2>&1 && [ -f "$VNX_HOME/scripts/build_t0_state.py" ]; then
     PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
       python3 "$VNX_HOME/scripts/build_t0_state.py" >/dev/null 2>&1 || true
