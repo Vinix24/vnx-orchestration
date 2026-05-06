@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && python3 \"$ROOT/scripts/build_current_state.py\" 2>/dev/null; exit 0'"
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && python3 \"$ROOT/scripts/build_current_state.py\" 2>/dev/null && python3 \"$ROOT/scripts/build_doc_indexes.py\" 2>/dev/null; exit 0'"
           }
         ]
       }
