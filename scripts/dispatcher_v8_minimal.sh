@@ -306,6 +306,7 @@ _validate_agent_intelligence() {
     local agent_role="$2"
 
     if [ -z "$agent_role" ] || [ "$agent_role" = "none" ] || [ "$agent_role" = "None" ]; then
+        _PD_MAPPED_ROLE=""
         return 0
     fi
 
@@ -352,6 +353,7 @@ _validate_agent_intelligence() {
         return 1
     fi
 
+    _PD_MAPPED_ROLE="$_mapped_role"
     log "V8: Agent validated: $agent_role (mapped='$_mapped_role')"
     return 0
 }
@@ -444,7 +446,8 @@ validate_dispatch_preconditions() {
     return 0
 }
 
-# Global set by gather_dispatch_intelligence
+# Globals set by validate_dispatch_preconditions / gather_dispatch_intelligence
+_PD_MAPPED_ROLE=""
 _PD_INTEL_RESULT=""
 
 # gather_dispatch_intelligence — gather intelligence for dispatch (V7.4).
@@ -606,7 +609,7 @@ process_dispatches() {
         agent_role=$(extract_agent_role "$dispatch")
 
         validate_dispatch_preconditions "$dispatch" || continue
-        gather_dispatch_intelligence "$dispatch" "$agent_role" "$_PD_TRACK" "$_PD_DISPATCH_ID" "$_PD_GATE" || continue
+        gather_dispatch_intelligence "$dispatch" "${_PD_MAPPED_ROLE:-$agent_role}" "$_PD_TRACK" "$_PD_DISPATCH_ID" "$_PD_GATE" || continue
         execute_and_classify_dispatch "$dispatch" "$_PD_TRACK" "$agent_role" "$_PD_INTEL_RESULT" "$_PD_DISPATCH_ID" || continue
 
         # Use plain assignment for the increment — under `set -e`, a bare
