@@ -196,3 +196,93 @@ class TestIntegrationKeyPresent:
         events = state["dispatch_register_events"]
         assert len(events) == 5
         assert events[0]["dispatch_id"] == written[0]["dispatch_id"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Regression: state_dir override blocks central-store contamination (FIX 2)
+# ---------------------------------------------------------------------------
+
+class TestStateDirOverrideBlocksCentralContamination:
+    """Regression for codex finding: _read_register_events and _build_recent_receipts
+    called _central_state_dir() (ambient env) instead of deriving from state_dir arg.
+    When tests pass a tmpdir as state_dir, the ambient central path must NOT be read.
+    """
+
+    def test_central_store_not_read_when_state_dir_is_override(self, tmp_path, monkeypatch):
+        """Events in the central store are ignored when state_dir is an explicit override."""
+        import build_t0_state as bts
+
+        override_state = tmp_path / "override-state"
+        override_state.mkdir(parents=True)
+        central_state = tmp_path / "central-state"
+        central_state.mkdir(parents=True)
+
+        # Write 5 events only in the central store
+        central_events = _write_events(central_state, 5)
+        # Override state has only 2 events
+        _write_events(override_state, 2)
+
+        # Patch _central_state_dir to return central_state when called
+        # (simulating production env with VNX_PROJECT_ID set)
+        with patch.object(bts, "_central_state_dir", return_value=central_state):
+            result = _build_register_events(state_dir=override_state)
+
+        # Must return exactly the 2 override events — central's 5 must not bleed in
+        assert len(result) == 2, (
+            f"Expected 2 events from override state_dir (got {len(result)}): "
+            "central contamination via _central_state_dir() detected"
+        )
+
+    def test_feature_state_not_contaminated_by_central(self, tmp_path, monkeypatch):
+        """_build_feature_state with override state_dir must not read central events."""
+        import build_t0_state as bts
+        from build_t0_state import _build_feature_state
+
+        override_state = tmp_path / "override-state"
+        override_state.mkdir(parents=True)
+        central_state = tmp_path / "central-state"
+        central_state.mkdir(parents=True)
+
+        # Central has a completed dispatch, override has only a created one
+        (central_state / "dispatch_register.ndjson").write_text(
+            '{"timestamp":"2026-05-01T00:00:00Z","event":"dispatch_completed",'
+            '"dispatch_id":"central-001","feature_id":"f99"}\n',
+            encoding="utf-8",
+        )
+        _write_events(override_state, 1)
+
+        with patch.object(bts, "_central_state_dir", return_value=central_state):
+            result = _build_feature_state(state_dir=override_state)
+
+        # Should only see 1 event from override — central's "completed" must not appear
+        count = result.get("register_event_count", 0)
+        assert count == 1, (
+            f"register_event_count={count}: central dispatch_completed bled into "
+            "override state_dir read — _central_state_dir_for() fix not applied"
+        )
+
+    def test_recent_receipts_not_contaminated_by_central(self, tmp_path, monkeypatch):
+        """_build_recent_receipts with override state_dir must not merge central receipts."""
+        import build_t0_state as bts
+        from build_t0_state import _build_recent_receipts
+
+        override_state = tmp_path / "override-state"
+        override_state.mkdir(parents=True)
+        central_state = tmp_path / "central-state"
+        central_state.mkdir(parents=True)
+
+        # Write a receipt only in central
+        (central_state / "t0_receipts.ndjson").write_text(
+            '{"terminal":"T1","status":"success","event_type":"task_complete",'
+            '"timestamp":"2026-05-01T00:00:00Z","dispatch_id":"central-r001"}\n',
+            encoding="utf-8",
+        )
+        # Override state has no receipts file
+
+        with patch.object(bts, "_central_state_dir", return_value=central_state):
+            result = _build_recent_receipts(override_state, n=10)
+
+        assert result == [], (
+            f"Expected no receipts from empty override state (got {result}): "
+            "central contamination via _central_state_dir() detected"
+        )

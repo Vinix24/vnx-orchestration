@@ -174,8 +174,18 @@ def _central_register_path(project_id: str) -> Optional[Path]:
         return None
 
 
-def _write_central_register(record: dict, project_id: Optional[str]) -> None:
-    """Best-effort mirror of a register event to the central path. Never raises."""
+def _write_central_register(
+    record: dict,
+    project_id: Optional[str],
+    *,
+    _primary_path: Optional[Path] = None,
+) -> None:
+    """Best-effort mirror of a register event to the central path. Never raises.
+
+    Skips the write when the resolved central path is the same file as
+    _primary_path — prevents double-logging at P5 cutover when
+    _resolve_register_path() already points to the central store.
+    """
     if not project_id:
         project_id = os.environ.get("VNX_PROJECT_ID") or None
     if not project_id:
@@ -183,6 +193,8 @@ def _write_central_register(record: dict, project_id: Optional[str]) -> None:
     try:
         path = _central_register_path(project_id)
         if path is not None:
+            if _primary_path is not None and path.resolve() == _primary_path.resolve():
+                return
             _write_event_locked(path, record)
     except Exception:
         pass
@@ -234,14 +246,17 @@ def append_event(
         orchestrator_id=orchestrator_id,
         agent_id=agent_id,
     )
+    primary_path = _resolve_register_path()
     try:
-        _write_event_locked(_resolve_register_path(), record)
+        _write_event_locked(primary_path, record)
         _mirror_to_decision_log(event, record, extra=extra)
     except Exception:
         return False
     # Phase 6 P3: best-effort dual-write to central per-project path.
+    # _primary_path guard prevents double-logging at P5 cutover when primary
+    # already resolves to the central store.
     try:
-        _write_central_register(record, project_id)
+        _write_central_register(record, project_id, _primary_path=primary_path)
     except Exception:
         pass
     return True

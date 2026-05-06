@@ -157,3 +157,47 @@ class TestDualWrite:
 
         assert len(per_project.read_text().strip().splitlines()) == 3
         assert len(central_path.read_text().strip().splitlines()) == 3
+
+
+class TestNoDoubleLogAtP5Cutover:
+    """Regression: at P5 cutover, _resolve_register_path() points to central.
+    append_event must write exactly once — not once via primary + once via mirror.
+    """
+
+    def test_single_record_when_primary_is_central(self, tmp_path, monkeypatch):
+        """Simulate P5 cutover: route primary path to the central file."""
+        central_home = tmp_path / "central_home"
+        central_state = central_home / ".vnx-data" / "vnx-dev" / "state"
+        central_state.mkdir(parents=True)
+        central_reg = central_state / "dispatch_register.ndjson"
+
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: central_home))
+
+        # Make _resolve_register_path() return the central file directly,
+        # simulating the P5 environment where per-project IS central.
+        with patch.object(dispatch_register, "_resolve_register_path", return_value=central_reg):
+            ok = append_event("dispatch_created", dispatch_id="p5-test-001", terminal="T1")
+
+        assert ok is True
+        lines = [l for l in central_reg.read_text().splitlines() if l.strip()]
+        assert len(lines) == 1, (
+            f"Expected exactly 1 record at P5 cutover (got {len(lines)}): double-log bug"
+        )
+        record = json.loads(lines[0])
+        assert record["dispatch_id"] == "p5-test-001"
+
+    def test_single_record_when_central_and_primary_differ(self, tmp_path, monkeypatch, isolated_dirs):
+        """Normal dual-write: per-project ≠ central → both files get one record each."""
+        central_home = tmp_path / "central_home"
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: central_home))
+
+        ok = append_event("dispatch_created", dispatch_id="normal-dual-001", terminal="T1")
+        assert ok is True
+
+        per_project = _reg_path(isolated_dirs)
+        central_path = central_home / ".vnx-data" / "vnx-dev" / "state" / "dispatch_register.ndjson"
+
+        assert len(per_project.read_text().strip().splitlines()) == 1
+        assert len(central_path.read_text().strip().splitlines()) == 1

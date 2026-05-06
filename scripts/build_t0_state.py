@@ -92,6 +92,23 @@ def _central_state_dir() -> Optional[Path]:
         return None
 
 
+def _central_state_dir_for(state_dir: Optional[Path]) -> Optional[Path]:
+    """Return central state dir only when state_dir matches the module-level default.
+
+    When state_dir is an explicit non-default path (test/override context),
+    returns None so that the ambient env-resolved central path cannot
+    contaminate an isolated state_dir.  In production, state_dir==_STATE_DIR
+    so the central merge still occurs normally.
+    """
+    effective = state_dir if state_dir is not None else _STATE_DIR
+    try:
+        if effective.resolve() != _STATE_DIR.resolve():
+            return None
+    except Exception:
+        return None
+    return _central_state_dir()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -313,7 +330,7 @@ def _read_register_events(state_dir: Optional[Path] = None) -> list[dict]:
         pass
 
     try:
-        central_dir = _central_state_dir()
+        central_dir = _central_state_dir_for(state_dir)
         if central_dir is not None:
             effective_state = state_dir or _STATE_DIR
             if central_dir.resolve() != effective_state.resolve():
@@ -697,7 +714,7 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
     Duplicate lines (same raw bytes) are deduplicated.
     """
     per_project_path = state_dir / "t0_receipts.ndjson"
-    central_dir = _central_state_dir()
+    central_dir = _central_state_dir_for(state_dir)
     central_path = (central_dir / "t0_receipts.ndjson") if central_dir else None
 
     seen: set = set()
