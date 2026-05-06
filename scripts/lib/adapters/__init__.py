@@ -75,7 +75,15 @@ def resolve_adapter(terminal_id: str) -> ProviderAdapter:
         from adapters.ollama_adapter import OllamaAdapter  # noqa: PLC0415
         return OllamaAdapter(terminal_id)
 
+    if provider.startswith("litellm"):
+        from adapters.litellm_adapter import LiteLLMAdapter  # noqa: PLC0415
+        # Parse chain format: litellm/<provider>/<model> -> model=<provider>/<model>
+        parts = provider.split("/", 1)
+        litellm_model = parts[1] if len(parts) > 1 else ""
+        return LiteLLMAdapter(terminal_id, litellm_model=litellm_model)
+
     raise ValueError(
         f"Unknown provider '{provider}' for terminal {terminal_id}. "
-        f"Set VNX_PROVIDER_{terminal_id}=claude|gemini|codex|ollama or leave unset for default."
+        f"Set VNX_PROVIDER_{terminal_id}=claude|gemini|codex|ollama|litellm[/<provider>/<model>] "
+        f"or leave unset for default."
     )
