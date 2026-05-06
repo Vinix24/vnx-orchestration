@@ -55,8 +55,16 @@ def load_items() -> list[dict]:
 
 
 def canonical_path(orig_path: str) -> Path:
-    """Map any worktree-prefixed path to the main-repo equivalent."""
-    rel = orig_path.split("/Development/", 1)[-1]
+    """Map any worktree-prefixed path to the main-repo equivalent.
+
+    If the input is already repo-relative (e.g. ``scripts/foo.py``) it is
+    returned unchanged. Only when the input contains a ``/Development/...``
+    absolute prefix do we strip both the dev-root prefix and the worktree
+    directory name to recover the repo-relative path.
+    """
+    if "/Development/" not in orig_path:
+        return REPO_ROOT / orig_path
+    rel = orig_path.split("/Development/", 1)[1]
     rel = rel.split("/", 1)[1] if "/" in rel else rel
     return REPO_ROOT / rel
 
