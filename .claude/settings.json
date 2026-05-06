@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'ROOT=$(git rev-parse --show-toplevel 2>/dev/null) && python3 \"$ROOT/scripts/build_current_state.py\" 2>/dev/null; exit 0'"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "terminals/T0",
