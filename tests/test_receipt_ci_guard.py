@@ -28,6 +28,7 @@ WRITER_SCAN_EXCLUDES = {
     "generate_lean_receipt.sh",
     "receipt_processor_lean_update.sh",
     "llm_benchmark_coding_v2.py",
+    "migrate_phase2_identity.py",
 }
 
 DIRECT_APPEND_PATTERNS = (

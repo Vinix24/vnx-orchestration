@@ -5,6 +5,12 @@ Spawns `claude -p --output-format stream-json` subprocesses instead of routing
 through tmux panes. Each terminal_id maps to a tracked subprocess. All process
 group management uses os.setsid / os.killpg for clean teardown.
 
+Identity propagation (Phase 6 P2): the ``deliver()`` method accepts an
+``extra_env`` mapping that is merged into the worker subprocess environment.
+The orchestrator passes the four-tuple identity (operator_id, project_id,
+orchestrator_id, agent_id) via ``vnx_identity.VnxIdentity.to_env()`` so the
+worker's own ``resolve_identity()`` picks them up at the head of its chain.
+
 BILLING SAFETY: Only calls subprocess.Popen(["claude", ...]). No Anthropic SDK.
 """
 
@@ -183,6 +189,7 @@ class SubprocessAdapter:
         model: Optional[str] = None,
         resume_session: Optional[str] = None,
         cwd: Optional[Any] = None,
+        extra_env: Optional[Dict[str, str]] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -221,6 +228,10 @@ class SubprocessAdapter:
         }
         if cwd is not None:
             popen_kwargs["cwd"] = str(cwd)
+        if extra_env:
+            merged_env = os.environ.copy()
+            merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            popen_kwargs["env"] = merged_env
 
         # Clear stale session_id before spawning; updated when the init event arrives.
         self._session_ids.pop(terminal_id, None)
