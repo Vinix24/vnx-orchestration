@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """vnx status CLI dashboard — W-UX-3.
 
-Reads .vnx-data/strategy/current_state.md (strategic) +
-.vnx-data/state/t0_state.json (live terminals/queues).
-
-Outputs a 1-screen human-readable dashboard or --json for scripting.
-Read-only: no writes to .vnx-data/.
+Reads the strategic-state projection (current_state.md) and the
+runtime-state snapshot (t0_state.json) from VNX_STATE_DIR / VNX_DATA_DIR
+and renders a 1-screen human-readable dashboard, or JSON via --json.
+Read-only: no writes to runtime state.
 """
 from __future__ import annotations
 
