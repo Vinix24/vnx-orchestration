@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -73,6 +74,23 @@ def _skills_dir() -> Path:
 
 VALID_TERMINALS = {"T1", "T2", "T3"}
 VALID_TRACKS = {"A", "B", "C"}
+
+
+def _get_project_id() -> str:
+    """Return project ID from VNX_PROJECT_ID env, falling back to git root basename."""
+    pid = os.environ.get("VNX_PROJECT_ID", "").strip()
+    if pid:
+        return pid
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip()).name
+    except Exception:
+        pass
+    return "vnx-dev"
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +212,7 @@ def write_dispatch(
         "instruction": instruction,
         "context_files": context_files or [],
         "created_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "project_id": _get_project_id(),
     }
 
     # --- write atomically ---
