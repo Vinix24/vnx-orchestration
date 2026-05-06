@@ -823,12 +823,47 @@ class IntelligenceSelector:
         except Exception:
             pass
 
+    def stamp_source_dispatch_ids(self, result: InjectionResult) -> int:
+        """Public injection-time stamping helper (Phase 1.5 PR-2 / OI-1315).
+
+        Iterates ``result.items`` and stamps each one's source row
+        ``source_dispatch_ids`` JSON array with ``result.dispatch_id``. Each
+        item is wrapped in its own try/except so a single failure does NOT
+        leave subsequent items unstamped. Idempotent — already-present
+        dispatch_ids are skipped.
+
+        This is invoked from the ``record_injection()`` call site in
+        ``subprocess_dispatch_internals.skill_injection`` so that even when
+        ``_record_pattern_usage`` partially fails (or the quality DB is
+        absent), source_dispatch_ids is still populated reliably for
+        receipt-driven confidence updates of FRESHLY injected patterns.
+
+        Returns the count of rows successfully stamped.
+        """
+        if not result.items or not result.dispatch_id:
+            return 0
+        db = self._get_quality_db()
+        if db is None:
+            return 0
+        stamped = 0
+        for item in result.items:
+            try:
+                if self._stamp_source_dispatch_id(db, item, result.dispatch_id):
+                    stamped += 1
+            except Exception:
+                continue
+        try:
+            db.commit()
+        except sqlite3.Error:
+            pass
+        return stamped
+
     def _stamp_source_dispatch_id(
         self,
         db: sqlite3.Connection,
         item: IntelligenceItem,
         dispatch_id: str,
-    ) -> None:
+    ) -> bool:
         """Append dispatch_id to source_dispatch_ids on the item's source row.
 
         This restores the injection-time linkage that
@@ -846,9 +881,13 @@ class IntelligenceSelector:
           - ``proven_pattern`` items   → ``success_patterns.source_dispatch_ids``
           - ``failure_prevention`` items from antipatterns
             → ``antipatterns.source_dispatch_ids`` (when item_id has ``intel_ap_`` prefix)
+
+        Returns ``True`` when the row's source_dispatch_ids was modified
+        (or already contained ``dispatch_id``); ``False`` when the item is
+        ineligible or the row could not be located/updated.
         """
         if not dispatch_id:
-            return
+            return False
 
         item_id = item.item_id or ""
         if item.item_class == "proven_pattern" and item_id.startswith("intel_sp_"):
@@ -858,12 +897,12 @@ class IntelligenceSelector:
             table = "antipatterns"
             row_key = item_id[len("intel_ap_"):]
         else:
-            return
+            return False
 
         try:
             row_id = int(row_key)
         except (ValueError, TypeError):
-            return
+            return False
 
         try:
             row = db.execute(
@@ -871,10 +910,10 @@ class IntelligenceSelector:
                 (row_id,),
             ).fetchone()
         except sqlite3.Error:
-            return
+            return False
 
         if row is None:
-            return
+            return False
 
         existing_json = row["source_dispatch_ids"] if isinstance(row, sqlite3.Row) else row[0]
         ids: List[str] = []
@@ -887,7 +926,7 @@ class IntelligenceSelector:
                 ids = []
 
         if dispatch_id in ids:
-            return
+            return True
 
         ids.append(dispatch_id)
         ids = ids[-20:]
@@ -897,7 +936,8 @@ class IntelligenceSelector:
                 (json.dumps(ids), row_id),
             )
         except sqlite3.Error:
-            return
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Diversity helpers
@@ -1008,6 +1048,7 @@ class IntelligenceSelector:
         items: List[IntelligenceItem] = []
         has_pattern_cat = self._has_column("success_patterns", "pattern_category")
         has_content_hash_col = self._has_column("success_patterns", "content_hash")
+        has_project_id_col = self._has_column("success_patterns", "project_id")
         select_cols = (
             "id, title, description, category, confidence_score, "
             "usage_count, source_dispatch_ids, first_seen, last_used"
@@ -1016,9 +1057,10 @@ class IntelligenceSelector:
             select_cols += ", pattern_category"
         if has_content_hash_col:
             select_cols += ", content_hash"
-        scope_clause, scope_params = _project_scope_clause(
-            self._has_column("success_patterns", "project_id")
-        )
+        if has_project_id_col:
+            select_cols += ", project_id"
+        scope_clause, scope_params = _project_scope_clause(has_project_id_col)
+        active_project_id = current_project_id() if has_project_id_col else None
         try:
             rows = db.execute(
                 f"""
@@ -1034,7 +1076,7 @@ class IntelligenceSelector:
         except Exception:
             return items
 
-        canonical_id_cache: Dict[str, str] = {}
+        canonical_id_cache: Dict[Any, Any] = {}
 
         for row in rows:
             row_d = dict(row)
@@ -1044,49 +1086,80 @@ class IntelligenceSelector:
             if not _scope_matches(pattern_scope, scope_tags):
                 continue
 
-            source_refs = []
-            if row_d.get("source_dispatch_ids"):
-                try:
-                    source_refs = json.loads(row_d["source_dispatch_ids"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
             title = (row_d.get("title") or "Proven pattern")[:120]
             content = (row_d.get("description") or "")[:MAX_CONTENT_CHARS_PER_ITEM]
-            last_seen = row_d.get("last_used") or row_d.get("first_seen") or _now_utc()
-
-            stored_cat = row_d.get("pattern_category")
-            pattern_category = stored_cat or classify_pattern_category(title, content)
 
             # Resolve the canonical row id for this pattern's content. CFX-5:
             # when the same content lives under multiple rows (legacy
             # duplication or pre-dedup state), every row emits the *same*
             # item_id so pattern_usage aggregates instead of fragmenting.
+            # Phase 1.5 PR-2: lookup is project-scoped so two tenants with
+            # the same pattern text do NOT collide onto a single canonical id.
             stored_short_hash = (
                 row_d.get("content_hash") if has_content_hash_col else None
             )
             short_hash = stored_short_hash or _short_content_hash(title, content)
+            row_project_id = (
+                row_d.get("project_id") if has_project_id_col else None
+            )
             canonical_key = self._resolve_canonical_id(
                 db,
                 short_hash,
                 fallback_id=row_d.get("id"),
                 cache=canonical_id_cache,
                 has_content_hash_col=has_content_hash_col,
+                has_project_id_col=has_project_id_col,
+                project_id=row_project_id or active_project_id,
+            )
+
+            # Phase 1.5 PR-2 — Fix 2/3: when canonical_key differs from this
+            # row's id (i.e. this row is a duplicate that remapped to a
+            # canonical sibling), emit the CANONICAL row's confidence,
+            # usage_count, source_dispatch_ids, title, description, and
+            # last_used so downstream pattern_usage / _stamp_source_dispatch_id
+            # writes target the canonical row's data — not stale duplicate
+            # values that would silently desynchronize the canonical row.
+            canonical_row_d = row_d
+            if canonical_key and canonical_key != str(row_d.get("id") or ""):
+                fetched = self._fetch_canonical_row(
+                    db, canonical_key, select_cols=select_cols
+                )
+                if fetched is not None:
+                    canonical_row_d = fetched
+
+            source_refs = []
+            if canonical_row_d.get("source_dispatch_ids"):
+                try:
+                    source_refs = json.loads(canonical_row_d["source_dispatch_ids"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            canonical_title = (canonical_row_d.get("title") or title)[:120]
+            canonical_content = (canonical_row_d.get("description") or content)[:MAX_CONTENT_CHARS_PER_ITEM]
+            last_seen = (
+                canonical_row_d.get("last_used")
+                or canonical_row_d.get("first_seen")
+                or _now_utc()
+            )
+
+            stored_cat = canonical_row_d.get("pattern_category")
+            pattern_category = stored_cat or classify_pattern_category(
+                canonical_title, canonical_content
             )
 
             items.append(IntelligenceItem(
                 item_id=_stable_item_id("sp", canonical_key),
                 item_class="proven_pattern",
-                title=title,
-                content=content,
-                confidence=float(row_d.get("confidence_score", 0.0)),
-                evidence_count=int(row_d.get("usage_count", 0)),
+                title=canonical_title,
+                content=canonical_content,
+                confidence=float(canonical_row_d.get("confidence_score", 0.0)),
+                evidence_count=int(canonical_row_d.get("usage_count", 0)),
                 last_seen=last_seen,
                 scope_tags=pattern_scope,
                 source_refs=source_refs[:5],
                 task_class_filter=[],
                 pattern_category=pattern_category,
-                content_hash=_content_hash(title, content),
+                content_hash=_content_hash(canonical_title, canonical_content),
             ))
 
         return items
@@ -1097,39 +1170,82 @@ class IntelligenceSelector:
         short_hash: str,
         *,
         fallback_id: Any,
-        cache: Dict[str, str],
+        cache: Dict[Any, Any],
         has_content_hash_col: bool,
+        has_project_id_col: bool = False,
+        project_id: Optional[str] = None,
     ) -> str:
         """Return the canonical (smallest-id) row key for a given content hash.
 
+        Multi-tenant safety (Phase 1.5 PR-2 / OI-1315 / OI-1321):
+          When ``project_id`` is present on ``success_patterns``, the canonical
+          lookup MUST be scoped to the same project. Two projects with the
+          same pattern text would otherwise collapse onto a single id, which
+          contaminates pattern_usage / source_dispatch_ids across tenants.
+
         Consult the on-row ``content_hash`` index when available so that
-        ``intel_sp_<id>`` collapses across duplicate rows. When the column is
-        absent (pre-migration 0012) or no row matches the hash yet, fall back
-        to the row's own primary key — preserving the legacy ``intel_sp_<id>``
-        format and the backward-compatibility guarantee in the dispatch.
+        ``intel_sp_<id>`` collapses across duplicate rows within a project.
+        When the column is absent (pre-migration 0012) or no row matches the
+        hash yet, fall back to the row's own primary key — preserving the
+        legacy ``intel_sp_<id>`` format and the backward-compatibility
+        guarantee in the dispatch.
         """
         fallback_key = str(fallback_id) if fallback_id is not None else ""
         if not short_hash or not has_content_hash_col:
             return fallback_key
-        if short_hash in cache:
-            return cache[short_hash]
+        cache_key = (project_id, short_hash) if has_project_id_col else short_hash
+        if cache_key in cache:
+            return cache[cache_key]
         try:
-            row = db.execute(
-                "SELECT MIN(id) FROM success_patterns WHERE content_hash = ?",
-                (short_hash,),
-            ).fetchone()
+            if has_project_id_col and project_filter_enabled():
+                row = db.execute(
+                    "SELECT MIN(id) FROM success_patterns "
+                    "WHERE content_hash = ? AND project_id = ?",
+                    (short_hash, project_id),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT MIN(id) FROM success_patterns WHERE content_hash = ?",
+                    (short_hash,),
+                ).fetchone()
         except sqlite3.Error:
-            cache[short_hash] = fallback_key
+            cache[cache_key] = fallback_key
             return fallback_key
         canonical_id = None
         if row is not None:
             canonical_id = row[0] if not isinstance(row, sqlite3.Row) else row[0]
         if canonical_id is None:
-            cache[short_hash] = fallback_key
+            cache[cache_key] = fallback_key
             return fallback_key
         canonical_key = str(canonical_id)
-        cache[short_hash] = canonical_key
+        cache[cache_key] = canonical_key
         return canonical_key
+
+    def _fetch_canonical_row(
+        self,
+        db: sqlite3.Connection,
+        canonical_id: Any,
+        *,
+        select_cols: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch the canonical row's data for use after a duplicate remap.
+
+        Returns the row as a dict, or ``None`` if the lookup fails. The caller
+        passes in the same ``select_cols`` projection used for the bulk query
+        so the returned shape is consistent with ``row_d`` lookups elsewhere.
+        """
+        if canonical_id in (None, ""):
+            return None
+        try:
+            row = db.execute(
+                f"SELECT {select_cols} FROM success_patterns WHERE id = ?",
+                (canonical_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return dict(row)
 
     def _query_failure_prevention(
         self,
