@@ -39,6 +39,9 @@ _DEFAULT_MODEL = ""
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_STALL_THRESHOLD = 60
 
+# Observability tier: Codex emits live per-event NDJSON via StreamingDrainerMixin.
+OBSERVABILITY_TIER = 1
+
 
 class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
     """Provider adapter for the Codex CLI (review and decision only).
@@ -49,6 +52,7 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
     """
 
     provider_name = "codex"
+    provider_observability_tier = OBSERVABILITY_TIER
 
     def __init__(self, terminal_id: str) -> None:
         self._terminal_id = terminal_id

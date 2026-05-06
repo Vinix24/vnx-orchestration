@@ -41,6 +41,10 @@ _DEFAULT_TOTAL_DEADLINE = 300.0
 _TIER_STREAMING = 1
 _TIER_FINAL_ONLY = 2
 
+# Public adapter-level tier constant: effective tier when streaming SSE works.
+# Falls back to _TIER_FINAL_ONLY (2) when only [DONE] is reachable.
+OBSERVABILITY_TIER = _TIER_STREAMING
+
 # Path to the one-shot runner helper (sibling to this file)
 _RUNNER_PATH = Path(__file__).resolve().parent / "_litellm_runner.py"
 
@@ -127,6 +131,7 @@ class LiteLLMAdapter(StreamingDrainerMixin, ProviderAdapter):
     """
 
     provider_name = "litellm"
+    provider_observability_tier = OBSERVABILITY_TIER
 
     def __init__(self, terminal_id: str, litellm_model: str = "") -> None:
         self._terminal_id = terminal_id
