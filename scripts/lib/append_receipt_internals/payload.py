@@ -74,6 +74,31 @@ def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
         pass
 
 
+def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
+    """Stamp receipt with observability_tier from the producing adapter (best-effort).
+
+    Resolves from the receipt's own `observability_tier` field (already set by
+    an adapter-aware caller), then falls back to per-provider defaults from
+    observability_tier.resolve_effective_tier().
+
+    Caller-supplied `observability_tier` values are NEVER overwritten.
+    Receipts with no `provider` field and no existing `observability_tier`
+    are not modified — the field remains absent rather than guessing.
+    """
+    if receipt.get("observability_tier") is not None:
+        return
+    provider = str(receipt.get("provider") or "").lower().strip()
+    if not provider:
+        return
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        from observability_tier import resolve_effective_tier
+        tier = resolve_effective_tier(provider)
+        receipt["observability_tier"] = tier
+    except Exception:
+        pass
+
+
 def _stamp_identity(receipt: Dict[str, Any]) -> None:
     """Backfill the four-tuple identity fields on a receipt in place.
 
@@ -116,6 +141,7 @@ def append_receipt_payload(
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
     _stamp_identity(receipt)
+    _stamp_observability_tier(receipt)
 
     if not skip_enrichment:
         receipt = facade._enrich_completion_receipt(receipt)
