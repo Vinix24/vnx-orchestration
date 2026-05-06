@@ -76,7 +76,7 @@ class DrainResult(NamedTuple):
 # ---------------------------------------------------------------------------
 
 # Canonical status sets (kept in sync with scripts/append_receipt.py).
-SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", ""})
+SUCCESS_STATUSES = frozenset({"success", "completed", "complete", "ok", "", "done"})
 FAILURE_STATUSES = frozenset({"failed", "failure", "error", "blocked", "timeout"})
 
 

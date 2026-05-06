@@ -45,6 +45,20 @@ def _read_dispatch_path_manifest(dispatch_id: str) -> "list[str] | None":
     return manifest_paths
 
 
+def _write_dispatch_path_manifest(dispatch_id: str, dispatch_paths: "list[str]") -> None:
+    """Write CFX-1 dispatch path manifest from caller-supplied list (OI-1319 plumbing)."""
+    import subprocess_dispatch as _sd
+    try:
+        from dispatch_paths import write_manifest as _write_manifest
+        _write_manifest(_sd._default_state_dir(), dispatch_id, dispatch_paths)
+        logger.info(
+            "deliver_with_recovery: wrote dispatch_paths manifest for %s (%d paths)",
+            dispatch_id, len(dispatch_paths),
+        )
+    except Exception as _exc:
+        logger.warning("dispatch_paths manifest write failed for %s: %s", dispatch_id, _exc)
+
+
 def _resolve_committed(
     dispatch_id: str, commit_hash_before: str, commit_hash_after: str,
 ) -> bool:
@@ -212,6 +226,10 @@ def _handle_final_failure(
         pre_sha=pre_sha,
         manifest_paths=manifest_paths,
     )
+    # OI-1319: promote manifest to dead_letter/ here — after all retries are
+    # exhausted — so a transient failure that later succeeds cannot result in
+    # dual-bucketing (manifest appearing in both dead_letter/ and completed/).
+    _sd._promote_manifest(dispatch_id, stage="dead_letter")
     _sd.cleanup_worker_exit(
         terminal_id=terminal_id,
         dispatch_id=dispatch_id,
@@ -228,8 +246,13 @@ def _init_recovery_state(
     model: str,
     role: "str | None",
     repo_map: "str | None",
+    dispatch_paths: "list[str] | None" = None,
 ) -> tuple[str, str, "frozenset | set | list", "list[str] | None"]:
     """Capture dispatch_start_ts, commit_hash, pre-dispatch dirty files, manifest paths.
+
+    When dispatch_paths is provided it is written to the CFX-1 path manifest
+    before reading it back, so callers that pass dispatch_paths inline get the
+    correct manifest_paths without a separate write step (OI-1319 plumbing).
 
     Also runs ``_capture_dispatch_parameters`` for pattern-confidence intelligence.
     """
@@ -238,7 +261,22 @@ def _init_recovery_state(
     commit_hash_before = _sd._get_commit_hash()
     repo_cwd = Path(__file__).resolve().parents[3]
     pre_dispatch_dirty = _sd._get_dirty_files(repo_cwd)
+    if dispatch_paths is not None:
+        _write_dispatch_path_manifest(dispatch_id, dispatch_paths)
     manifest_paths = _read_dispatch_path_manifest(dispatch_id)
+    # CFX-1: if the manifest write failed (swallowed by _write_dispatch_path_manifest)
+    # and the subsequent read returns None, fall back to the caller-supplied
+    # dispatch_paths so in-memory scope is enforced even without a durable on-disk
+    # manifest.  Without this, _auto_commit_changes/_auto_stash_changes would fall
+    # back to legacy pre_dispatch_dirty scoping and could stage files outside the
+    # allowed scope on a shared worktree (codex PR-4 finding 2).
+    if manifest_paths is None and dispatch_paths is not None:
+        manifest_paths = list(dispatch_paths)
+        logger.warning(
+            "deliver_with_recovery: manifest write/read failed for %s; "
+            "enforcing in-memory scope (%d paths)",
+            dispatch_id, len(manifest_paths),
+        )
     _sd._capture_dispatch_parameters(
         dispatch_id=dispatch_id,
         instruction=instruction,
@@ -332,16 +370,24 @@ def deliver_with_recovery(
     total_deadline: float = 900.0,
     auto_commit: bool = True,
     gate: str = "",
+    dispatch_paths: "list[str] | None" = None,
 ) -> bool:
     """Deliver with automatic retry; success -> "done" receipt, final fail -> "failed".
 
     Retries use exponential backoff (30s, 60s, 120s).
+
+    dispatch_paths (OI-1319): when provided, the CFX-1 path manifest is written
+    before delivery starts so auto-commit/stash operations are correctly scoped
+    even when this function is called as a library (not via the CLI __main__ block).
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = _apply_runtime_overrides(chunk_timeout, total_deadline)
 
     dispatch_start_ts, commit_hash_before, pre_dispatch_dirty, manifest_paths = (
-        _init_recovery_state(dispatch_id, instruction, terminal_id, model, role, repo_map)
+        _init_recovery_state(
+            dispatch_id, instruction, terminal_id, model, role, repo_map,
+            dispatch_paths=dispatch_paths,
+        )
     )
     pre_sha = commit_hash_before
     monitor = _sd.WorkerHealthMonitor(terminal_id, dispatch_id)

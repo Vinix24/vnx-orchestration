@@ -173,12 +173,9 @@ if __name__ == "__main__":
     if args.role is None:
         args.role = _extract_role_from_instruction(args.instruction) or _ROLE_FALLBACK
 
+    _dispatch_paths: "list[str] | None" = None
     if args.dispatch_paths.strip():
-        from dispatch_paths import write_manifest as _write_dispatch_paths_manifest
-        _allowed = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
-        _write_dispatch_paths_manifest(
-            _default_state_dir(), args.dispatch_id, _allowed,
-        )
+        _dispatch_paths = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
 
     ok = deliver_with_recovery(
         terminal_id=args.terminal_id,
@@ -189,5 +186,6 @@ if __name__ == "__main__":
         max_retries=args.max_retries,
         auto_commit=not args.no_auto_commit,
         gate=args.gate,
+        dispatch_paths=_dispatch_paths,
     )
     sys.exit(0 if ok else 1)

@@ -243,10 +243,13 @@ def _classify_completion(
             "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
             returncode, terminal_id,
         )
-        dead = _sd._promote_manifest(dispatch_id, stage="dead_letter")
+        # OI-1319: do NOT promote to dead_letter here; the deliver_with_recovery
+        # retry loop may succeed on a subsequent attempt.  dead_letter promotion
+        # happens in _handle_final_failure() only after all retries are exhausted,
+        # preventing dual-bucketing (manifest in both dead_letter/ and completed/).
         return _SubprocessResult(
             success=False, session_id=session_id, event_count=event_count,
-            manifest_path=dead or manifest_path,
+            manifest_path=manifest_path,
             touched_files=frozenset(touched_files),
         )
     if adapter.was_timed_out(terminal_id):
@@ -254,10 +257,10 @@ def _classify_completion(
             "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
             dispatch_id, terminal_id,
         )
-        dead = _sd._promote_manifest(dispatch_id, stage="dead_letter")
+        # OI-1319: same as above — defer dead_letter promotion to _handle_final_failure().
         return _SubprocessResult(
             success=False, session_id=session_id, event_count=event_count,
-            manifest_path=dead or manifest_path,
+            manifest_path=manifest_path,
             touched_files=frozenset(touched_files),
         )
     completed = _sd._promote_manifest(dispatch_id, stage="completed")

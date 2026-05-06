@@ -573,3 +573,129 @@ class TestDeliverWithRecoveryForwardsTouchedFiles(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Codex PR-4 finding 2: manifest write failure must not fall back to legacy scope
+# ---------------------------------------------------------------------------
+
+class TestManifestWriteFailureFallback(unittest.TestCase):
+    """Codex PR-4 finding 2: _init_recovery_state wraps write_manifest() in a
+    try/except that swallows failures.  When write_manifest() raises, the
+    subsequent read_manifest() returns None, so manifest_paths becomes None.
+    Downstream _auto_commit_changes/_auto_stash_changes then fall back to legacy
+    pre_dispatch_dirty scoping and can stage files outside the dispatch scope.
+
+    Fix: when write_manifest() fails AND dispatch_paths was provided, set
+    manifest_paths = list(dispatch_paths) so in-memory scope is enforced.
+    """
+
+    def test_manifest_paths_populated_from_dispatch_paths_when_write_fails(self):
+        """When write_manifest internally fails (swallowed) and the subsequent read
+        returns None, manifest_paths must equal dispatch_paths — not None.
+
+        The actual failure mode: _write_dispatch_path_manifest catches the internal
+        exception and returns silently; _read_dispatch_path_manifest then returns None
+        because nothing was written to disk.  The fallback must populate manifest_paths
+        from the caller-supplied dispatch_paths so downstream commit/stash scope is
+        enforced (codex PR-4 finding 2).
+        """
+        import subprocess_dispatch as _sd
+
+        dispatch_id = "20260506-manifest-write-fail-regression"
+        dispatch_paths = ["scripts/", "tests/"]
+
+        with patch(
+            "subprocess_dispatch_internals.recovery._write_dispatch_path_manifest",
+            return_value=None,
+        ), patch(
+            "subprocess_dispatch_internals.recovery._read_dispatch_path_manifest",
+            return_value=None,
+        ), patch.object(_sd, "_get_commit_hash", return_value="sha1"), \
+           patch.object(_sd, "_get_dirty_files", return_value=frozenset()), \
+           patch.object(_sd, "_capture_dispatch_parameters"):
+            from subprocess_dispatch_internals.recovery import _init_recovery_state
+            _, _, _, manifest_paths = _init_recovery_state(
+                dispatch_id,
+                "instruction text",
+                "T1",
+                "sonnet",
+                None,
+                None,
+                dispatch_paths=dispatch_paths,
+            )
+
+        self.assertIsNotNone(
+            manifest_paths,
+            "manifest_paths must not be None when dispatch_paths was provided "
+            "but write_manifest() failed — legacy scope fallback is not safe on "
+            "a shared worktree (codex PR-4 finding 2)",
+        )
+        self.assertEqual(
+            sorted(manifest_paths),
+            sorted(dispatch_paths),
+            "manifest_paths must equal the caller-supplied dispatch_paths when "
+            "the on-disk write failed",
+        )
+
+    def test_manifest_paths_none_when_no_dispatch_paths_and_write_fails(self):
+        """When dispatch_paths is None (no caller scope), manifest_paths stays None."""
+        import subprocess_dispatch as _sd
+
+        with patch(
+            "subprocess_dispatch_internals.recovery._write_dispatch_path_manifest",
+        ), patch(
+            "subprocess_dispatch_internals.recovery._read_dispatch_path_manifest",
+            return_value=None,
+        ), patch.object(_sd, "_get_commit_hash", return_value="sha1"), \
+           patch.object(_sd, "_get_dirty_files", return_value=frozenset()), \
+           patch.object(_sd, "_capture_dispatch_parameters"):
+            from subprocess_dispatch_internals.recovery import _init_recovery_state
+            _, _, _, manifest_paths = _init_recovery_state(
+                "20260506-no-dispatch-paths",
+                "instruction",
+                "T1",
+                "sonnet",
+                None,
+                None,
+                dispatch_paths=None,
+            )
+
+        self.assertIsNone(
+            manifest_paths,
+            "When dispatch_paths=None, manifest_paths must remain None "
+            "(no scope override was requested)",
+        )
+
+    def test_manifest_paths_from_successful_read_not_overridden(self):
+        """When write and read succeed, the read result must be used (not overridden)."""
+        import subprocess_dispatch as _sd
+
+        dispatch_paths = ["scripts/"]
+        read_result = ["scripts/", "tests/extra/"]
+
+        with patch(
+            "subprocess_dispatch_internals.recovery._write_dispatch_path_manifest",
+        ), patch(
+            "subprocess_dispatch_internals.recovery._read_dispatch_path_manifest",
+            return_value=read_result,
+        ), patch.object(_sd, "_get_commit_hash", return_value="sha1"), \
+           patch.object(_sd, "_get_dirty_files", return_value=frozenset()), \
+           patch.object(_sd, "_capture_dispatch_parameters"):
+            from subprocess_dispatch_internals.recovery import _init_recovery_state
+            _, _, _, manifest_paths = _init_recovery_state(
+                "20260506-read-succeeds",
+                "instruction",
+                "T1",
+                "sonnet",
+                None,
+                None,
+                dispatch_paths=dispatch_paths,
+            )
+
+        self.assertEqual(
+            manifest_paths,
+            read_result,
+            "When read_manifest succeeds, manifest_paths must come from the read, "
+            "not from the fallback to dispatch_paths",
+        )
