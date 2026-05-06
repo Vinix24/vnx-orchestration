@@ -62,6 +62,7 @@ PENDING_DIR="$DISPATCH_DIR/pending"
 ACTIVE_DIR="$DISPATCH_DIR/active"
 COMPLETED_DIR="$DISPATCH_DIR/completed"
 REJECTED_DIR="$DISPATCH_DIR/rejected"
+STUCK_DIR="$DISPATCH_DIR/stuck"
 STATE_DIR="$VNX_STATE_DIR"
 TERMINALS_DIR="$CLAUDE_DIR/terminals"
 LOG_FILE="$VNX_LOGS_DIR/dispatcher_v8.log"
@@ -122,7 +123,7 @@ _invalid_skill_cooldown_var() {
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dispatcher V8 MINIMAL starting..."
 
 # Initialize directories
-for dir in "$QUEUE_DIR" "$PENDING_DIR" "$ACTIVE_DIR" "$COMPLETED_DIR" "$REJECTED_DIR"; do
+for dir in "$QUEUE_DIR" "$PENDING_DIR" "$ACTIVE_DIR" "$COMPLETED_DIR" "$REJECTED_DIR" "$STUCK_DIR"; do
     mkdir -p "$dir"
 done
 
@@ -531,28 +532,57 @@ _cleanup_stuck_dispatches() {
         fi
 
         if [ -n "$_stuck_terminal" ]; then
-            if ! release_terminal_claim "$_stuck_terminal" "$_stuck_dispatch_id"; then
-                log_structured_failure "stuck_claim_release_failed" \
-                    "Failed to release terminal claim for stuck dispatch" \
-                    "file=$(basename "$stuck_file") terminal=$_stuck_terminal"
+            # Guard: only release the terminal claim if the terminal is still owned
+            # by this stuck dispatch — not a new dispatch that reused the terminal.
+            # Releasing a claim that belongs to a different dispatch corrupts the
+            # new dispatch's terminal ownership (codex PR-4 finding 1).
+            local _current_claimed_by
+            export _VNX_STUCK_TERMINAL="$_stuck_terminal"
+            _current_claimed_by=$(python3 - 2>/dev/null <<'PYEOF'
+import json, os
+state_file = os.path.join(os.environ.get("VNX_STATE_DIR", ""), "terminal_state.json")
+terminal   = os.environ.get("_VNX_STUCK_TERMINAL", "")
+try:
+    with open(state_file, "r", encoding="utf-8") as fh:
+        d = json.load(fh)
+    print(((d.get("terminals") or {}).get(terminal) or {}).get("claimed_by") or "")
+except Exception:
+    print("")
+PYEOF
+            ) || _current_claimed_by=""
+            unset _VNX_STUCK_TERMINAL
+
+            if [ "$_current_claimed_by" = "$_stuck_dispatch_id" ]; then
+                if ! release_terminal_claim "$_stuck_terminal" "$_stuck_dispatch_id"; then
+                    log_structured_failure "stuck_claim_release_failed" \
+                        "Failed to release terminal claim for stuck dispatch" \
+                        "file=$(basename "$stuck_file") terminal=$_stuck_terminal"
+                fi
+                # release-on-receipt resolves the current lease generation internally;
+                # idempotent when the terminal is already idle.
+                python3 "$SCRIPT_DIR/runtime_core_cli.py" release-on-receipt \
+                    --terminal "$_stuck_terminal" \
+                    --dispatch-id "$_stuck_dispatch_id" > /dev/null 2>&1 || \
+                    log_structured_failure "stuck_lease_release_failed" \
+                        "Failed to release canonical lease for stuck dispatch" \
+                        "file=$(basename "$stuck_file") terminal=$_stuck_terminal"
+            else
+                log "V8: Skipping claim release for stuck dispatch $_stuck_dispatch_id — terminal $_stuck_terminal is claimed by '${_current_claimed_by:-<none>}', not this dispatch"
             fi
-            # release-on-receipt resolves the current lease generation internally;
-            # idempotent when the terminal is already idle.
-            python3 "$SCRIPT_DIR/runtime_core_cli.py" release-on-receipt \
-                --terminal "$_stuck_terminal" \
-                --dispatch-id "$_stuck_dispatch_id" > /dev/null 2>&1 || \
-                log_structured_failure "stuck_lease_release_failed" \
-                    "Failed to release canonical lease for stuck dispatch" \
-                    "file=$(basename "$stuck_file") terminal=$_stuck_terminal"
         else
             log "V8 WARN: Could not resolve terminal for stuck dispatch — lease may be stranded: $(basename "$stuck_file")"
         fi
 
-        # OI-1319: Do NOT promote to completed/ on mtime alone — long-running tasks
-        # that have not yet emitted a receipt must remain in active/ so they are not
-        # incorrectly recorded as completed work.  check_active_drain.py drains
-        # dispatches on positive receipt arrival; no mtime-only promotion here.
-        log "V8: Lease released for long-running dispatch; leaving in active/ pending receipt: $(basename "$stuck_file")"
+        # Quarantine: move the stuck file to dispatches/stuck/ so it is not
+        # re-processed on the next cleanup loop iteration.  Leaving it in active/
+        # caused the cleanup loop to call release_terminal_claim repeatedly; once
+        # the terminal was reused for a new dispatch that clobbered the new claim
+        # (codex PR-4 finding 1).  The stuck/ bucket is for human review.
+        if mv "$stuck_file" "$STUCK_DIR/$(basename "$stuck_file")"; then
+            log "V8: Quarantined stuck dispatch to stuck/ for human review: $(basename "$stuck_file")"
+        else
+            log "V8 WARN: Failed to quarantine stuck dispatch file: $stuck_file"
+        fi
     done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
 }
 

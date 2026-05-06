@@ -264,6 +264,19 @@ def _init_recovery_state(
     if dispatch_paths is not None:
         _write_dispatch_path_manifest(dispatch_id, dispatch_paths)
     manifest_paths = _read_dispatch_path_manifest(dispatch_id)
+    # CFX-1: if the manifest write failed (swallowed by _write_dispatch_path_manifest)
+    # and the subsequent read returns None, fall back to the caller-supplied
+    # dispatch_paths so in-memory scope is enforced even without a durable on-disk
+    # manifest.  Without this, _auto_commit_changes/_auto_stash_changes would fall
+    # back to legacy pre_dispatch_dirty scoping and could stage files outside the
+    # allowed scope on a shared worktree (codex PR-4 finding 2).
+    if manifest_paths is None and dispatch_paths is not None:
+        manifest_paths = list(dispatch_paths)
+        logger.warning(
+            "deliver_with_recovery: manifest write/read failed for %s; "
+            "enforcing in-memory scope (%d paths)",
+            dispatch_id, len(manifest_paths),
+        )
     _sd._capture_dispatch_parameters(
         dispatch_id=dispatch_id,
         instruction=instruction,

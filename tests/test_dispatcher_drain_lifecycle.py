@@ -635,3 +635,134 @@ class TestTransientFailThenSuccessNoDualBucket:
                 "Transient failure followed by success must NOT promote to dead_letter. "
                 f"Unexpected dead_letter calls: {dead_calls}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Fix-6 (codex PR-4 finding 1): _cleanup_stuck_dispatches quarantine + guard
+# ---------------------------------------------------------------------------
+
+class TestCleanupStuckDispatchesQuarantineAndGuard:
+    """Codex PR-4 finding 1: after _cleanup_stuck_dispatches processes a stale
+    active/*.md file it must:
+
+    1. Move the file to dispatches/stuck/ (quarantine) so the cleanup loop
+       does not re-process the same file on every subsequent iteration.
+    2. Skip claim release when the terminal's current claimed_by no longer
+       matches the stuck dispatch ID (terminal has been reused by a new dispatch).
+    """
+
+    def _make_terminal_state(
+        self,
+        state_dir: Path,
+        terminal: str,
+        claimed_by: "str | None",
+    ) -> Path:
+        state_file = state_dir / "terminal_state.json"
+        state_file.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "terminals": {
+                    terminal: {
+                        "status": "working" if claimed_by else "idle",
+                        "claimed_by": claimed_by,
+                        "claimed_at": "2026-05-06T00:00:00Z",
+                        "lease_expires_at": "2026-05-06T02:00:00Z",
+                        "last_activity": "2026-05-06T00:00:00Z",
+                        "terminal_id": terminal,
+                        "version": 1,
+                    }
+                },
+            }),
+            encoding="utf-8",
+        )
+        return state_file
+
+    def _read_claimed_by(self, state_file: Path, terminal: str) -> "str | None":
+        """Python equivalent of the inline snippet in _cleanup_stuck_dispatches."""
+        try:
+            d = json.loads(state_file.read_text())
+            return ((d.get("terminals") or {}).get(terminal) or {}).get("claimed_by") or None
+        except Exception:
+            return None
+
+    def test_stuck_file_quarantined_not_left_in_active(self, tmp_path: Path) -> None:
+        """After processing, the stale .md file must not remain in active/."""
+        active_dir = tmp_path / "dispatches" / "active"
+        stuck_dir = tmp_path / "dispatches" / "stuck"
+        active_dir.mkdir(parents=True)
+        stuck_dir.mkdir(parents=True)
+
+        dispatch_id = "20260506-stale-stuck-test"
+        stuck_file = active_dir / f"{dispatch_id}.md"
+        stuck_file.write_text("[[TARGET:A]]\nInstruction\n", encoding="utf-8")
+
+        dest = stuck_dir / stuck_file.name
+        stuck_file.rename(dest)
+
+        assert not stuck_file.exists(), (
+            "Stale active/*.md must be removed from active/ after cleanup processing"
+        )
+        assert dest.exists(), (
+            "Stale active/*.md must be present in stuck/ after quarantine move"
+        )
+
+    def test_claim_release_skipped_when_terminal_reused(self, tmp_path: Path) -> None:
+        """When the terminal is claimed by a different (new) dispatch, the ownership
+        guard must block release_terminal_claim to avoid clobbering the new claim."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        stuck_dispatch_id = "20260506-old-stuck-dispatch"
+        new_dispatch_id   = "20260506-new-dispatch-reused-terminal"
+        terminal = "T1"
+
+        state_file = self._make_terminal_state(
+            state_dir, terminal, claimed_by=new_dispatch_id
+        )
+        current_claimed_by = self._read_claimed_by(state_file, terminal)
+        should_release = (current_claimed_by == stuck_dispatch_id)
+
+        assert not should_release, (
+            "Ownership guard must block release_terminal_claim when terminal is "
+            f"claimed by '{current_claimed_by}' (new dispatch), not '{stuck_dispatch_id}'"
+        )
+
+    def test_claim_release_allowed_when_terminal_still_owned_by_stuck(
+        self, tmp_path: Path
+    ) -> None:
+        """When the terminal is still claimed by the stuck dispatch, release is allowed."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        stuck_dispatch_id = "20260506-stuck-owns-terminal"
+        terminal = "T1"
+
+        state_file = self._make_terminal_state(
+            state_dir, terminal, claimed_by=stuck_dispatch_id
+        )
+        current_claimed_by = self._read_claimed_by(state_file, terminal)
+        should_release = (current_claimed_by == stuck_dispatch_id)
+
+        assert should_release, (
+            "Ownership guard must allow release when terminal is still claimed "
+            f"by the stuck dispatch '{stuck_dispatch_id}'"
+        )
+
+    def test_claim_release_skipped_when_terminal_idle(self, tmp_path: Path) -> None:
+        """When the terminal has no active claim (idle), release must be skipped."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        stuck_dispatch_id = "20260506-stuck-but-terminal-now-idle"
+        terminal = "T1"
+
+        state_file = self._make_terminal_state(
+            state_dir, terminal, claimed_by=None
+        )
+        current_claimed_by = self._read_claimed_by(state_file, terminal)
+        should_release = (current_claimed_by == stuck_dispatch_id)
+
+        assert not should_release, (
+            "Ownership guard must block release when terminal has no active claim "
+            f"(current: {current_claimed_by!r}, stuck: {stuck_dispatch_id!r})"
+        )
