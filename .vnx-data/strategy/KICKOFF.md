@@ -24,7 +24,11 @@ After reading those 6 files, you have full strategic + tactical context. Confirm
 Phase 0 is 5 waves (W-UX-1 through W-UX-5). All have full FEATURE_PLAN.md specs. No operator decisions block Phase 0. Total ~340 LOC of source work + tests.
 
 Sequence:
-1. **W-UX-1** is essentially DONE — strategic state folder bootstrap landed via PR #398 (currently open, awaiting gemini-gate). Once that merges, W-UX-1 is closed automatically. If #398 hasn't merged yet, retry the gemini gate (gemini quota should have recovered today). Codex quota also recovered as of 2026-05-05; you can replay the ~75 codex re-audit OIs as a batch in parallel.
+1. **W-UX-1 is DONE** — PR #398 (strategic state folder + 17 phase FEATURE_PLAN.md files) merged on main as of 2026-05-06. Verify via `git log --oneline origin/main | head -3` (commit 8b1387e). All FEATURE_PLAN.md files are now in `roadmap/features/phase-XX-*/FEATURE_PLAN.md`.
+   **Phase 1 work that needs immediate attention:**
+   - PR #395 (ADRs No-Redis + F43 packaging + threshold-OI cleanup script): OPEN, gemini-gate kept stalling on 2026-05-06 (3 retries failed). Retry once more — if still stalls, run gate from the worktree at `/Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt`. CI is GREEN, mergeable=CLEAN. Content was operator-approved; once gemini cooperates, merge.
+   - PR #396 (UR-001 dead duplicate `_maybe_reroute_ghost_receipt` removal): OPEN, same gemini-stall issue. Same retry path. Tiny diff (-22 lines, no source-code added). Merge when gate cooperates.
+   - ~75 codex re-audit OIs: codex quota recovered 2026-05-05; replay as batch. They'll either close (no findings) or open structured fix-forward OIs.
 2. **W-UX-2** (current_state.md projector, ~150 LOC, Sonnet T2) — dispatch via `init_feature_batch`. Plan already at `.vnx-data/strategy/dispatch_plans/W-UX-2-current-state-projector.md`.
 3. **W-UX-3** (vnx status CLI, ~80 LOC, Sonnet T3) — depends on W-UX-2.
 4. **W-UX-4** (GC retention in build_t0_state.py, ~30 LOC, Sonnet) — independent of W-UX-2/3, can run parallel.
