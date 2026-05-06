@@ -6,10 +6,15 @@ into ``dispatches/completed/`` *before* the fail-closed checks (non-zero
 returncode, timeout-kill).  Failed dispatches were therefore recorded and
 later drained as completed work instead of going to ``dead_letter/``.
 
-These tests pin the corrected ordering:
-    success path        → manifest promoted to completed/
-    non-zero returncode → manifest promoted to dead_letter/
-    timeout kill        → manifest promoted to dead_letter/
+OI-1319 update: dead_letter promotion is now deferred from
+``_classify_completion()`` to ``_handle_final_failure()`` so that transient
+failures do not pre-bucket the manifest before retries are exhausted.
+
+Corrected ordering:
+    success path        → manifest promoted to completed/ (in _classify_completion)
+    non-zero returncode → manifest NOT promoted in _classify_completion;
+                         deferred to _handle_final_failure after retries done
+    timeout kill        → same deferral
 """
 from __future__ import annotations
 
@@ -75,16 +80,39 @@ class TestManifestStageRoutedByOutcome(unittest.TestCase):
                 cm.stop()
         return result, promote
 
-    def test_nonzero_exit_routes_manifest_to_dead_letter(self):
+    def test_nonzero_exit_does_not_promote_in_classify_completion(self):
+        """OI-1319: _classify_completion must NOT call _promote_manifest(dead_letter).
+
+        dead_letter promotion is deferred to _handle_final_failure() so that a
+        transient failure followed by a successful retry cannot leave the manifest
+        in both dead_letter/ and completed/ (dual-bucket regression).
+        """
         result, promote = self._run(returncode=1)
         self.assertFalse(result.success)
-        # _promote_manifest must be called exactly once, with stage=dead_letter.
-        promote.assert_called_once_with("d-cfx-r1", stage="dead_letter")
+        dead_calls = [
+            c for c in promote.call_args_list
+            if c.kwargs.get("stage") == "dead_letter"
+        ]
+        self.assertEqual(
+            len(dead_calls), 0,
+            "deliver_via_subprocess/_classify_completion must NOT promote to dead_letter "
+            "on a single failure — deferral to _handle_final_failure prevents dual-bucket "
+            f"(OI-1319). Found calls: {dead_calls}",
+        )
 
-    def test_timeout_routes_manifest_to_dead_letter(self):
+    def test_timeout_does_not_promote_in_classify_completion(self):
+        """OI-1319: same dead_letter deferral applies to timeout-terminated dispatches."""
         result, promote = self._run(returncode=None, was_timed_out=True)
         self.assertFalse(result.success)
-        promote.assert_called_once_with("d-cfx-r1", stage="dead_letter")
+        dead_calls = [
+            c for c in promote.call_args_list
+            if c.kwargs.get("stage") == "dead_letter"
+        ]
+        self.assertEqual(
+            len(dead_calls), 0,
+            "deliver_via_subprocess/_classify_completion must NOT promote to dead_letter "
+            f"on timeout — deferred to _handle_final_failure (OI-1319). Found: {dead_calls}",
+        )
 
     def test_clean_success_routes_manifest_to_completed(self):
         result, promote = self._run(returncode=0)

@@ -519,9 +519,16 @@ _cleanup_stuck_dispatches() {
 
         # Release terminal claim and canonical lease before marking complete so
         # future dispatches are not blocked by a stranded lease/claim.
-        local _stuck_track _stuck_terminal
+        # OI-1319 fix: when Requires-MCP:true and track is not C, the dispatch was
+        # rerouted to T3 — release T3, not the track's nominal terminal (OI-1323).
+        local _stuck_track _stuck_terminal _stuck_requires_mcp
         _stuck_track="$(extract_track "$stuck_file" 2>/dev/null || echo "")"
-        _stuck_terminal="$(track_to_terminal "$_stuck_track")"
+        _stuck_requires_mcp="$(vnx_dispatch_extract_requires_mcp "$stuck_file" 2>/dev/null || echo "false")"
+        if [ "$_stuck_requires_mcp" = "true" ] && [ "$_stuck_track" != "C" ]; then
+            _stuck_terminal="T3"
+        else
+            _stuck_terminal="$(track_to_terminal "$_stuck_track")"
+        fi
 
         if [ -n "$_stuck_terminal" ]; then
             if ! release_terminal_claim "$_stuck_terminal" "$_stuck_dispatch_id"; then
@@ -541,11 +548,11 @@ _cleanup_stuck_dispatches() {
             log "V8 WARN: Could not resolve terminal for stuck dispatch — lease may be stranded: $(basename "$stuck_file")"
         fi
 
-        log "V8: Moving stuck dispatch to completed: $(basename "$stuck_file")"
-        if ! mv "$stuck_file" "$COMPLETED_DIR/" 2>/dev/null; then
-            log_structured_failure "stuck_file_move_failed" "Failed to move stuck dispatch to completed" \
-                "file=$stuck_file"
-        fi
+        # OI-1319: Do NOT promote to completed/ on mtime alone — long-running tasks
+        # that have not yet emitted a receipt must remain in active/ so they are not
+        # incorrectly recorded as completed work.  check_active_drain.py drains
+        # dispatches on positive receipt arrival; no mtime-only promotion here.
+        log "V8: Lease released for long-running dispatch; leaving in active/ pending receipt: $(basename "$stuck_file")"
     done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
 }
 
