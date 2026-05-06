@@ -942,6 +942,44 @@ def _write_detail_files(state: Dict[str, Any], detail_dir: Path) -> Dict[str, st
 
 
 # ---------------------------------------------------------------------------
+# GC: retention sweep for t0_detail snapshots (W-UX-4)
+# ---------------------------------------------------------------------------
+
+def _gc_t0_detail(detail_dir: Path) -> int:
+    """Prune t0_detail/*.json files older than VNX_T0_DETAIL_RETENTION_DAYS days.
+
+    Env-var VNX_T0_DETAIL_RETENTION_DAYS (default 14). Set to 0 to disable GC.
+    Only touches *.json files inside detail_dir — never t0_state.json or t0_index.json.
+    Idempotent: a second call after files are already pruned deletes nothing more.
+    Returns the count of files deleted.
+    """
+    try:
+        retention_days = int(os.environ.get("VNX_T0_DETAIL_RETENTION_DAYS", "14"))
+    except (ValueError, TypeError):
+        retention_days = 14
+
+    if retention_days == 0:
+        return 0
+
+    if not detail_dir.is_dir():
+        return 0
+
+    cutoff = time.time() - retention_days * 86400
+    deleted = 0
+    try:
+        for p in detail_dir.glob("*.json"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+                    deleted += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return deleted
+
+
+# ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
 
@@ -1006,6 +1044,11 @@ def main() -> int:
         # Write per-section detail files — loaded on-demand (Sprint 4a)
         try:
             _write_detail_files(state, _STATE_DIR / "t0_detail")
+        except Exception:
+            pass  # best-effort — must not block SessionStart
+        # GC: prune stale t0_detail snapshots (W-UX-4)
+        try:
+            _gc_t0_detail(_STATE_DIR / "t0_detail")
         except Exception:
             pass  # best-effort — must not block SessionStart
         # Write pr_queue_state.json — replaces hand-maintained PR_QUEUE.md (Phase 2.1)
