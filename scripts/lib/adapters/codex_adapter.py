@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""adapters/codex_adapter.py — CodexAdapter for review and decision tasks.
+"""adapters/codex_adapter.py — CodexAdapter with live streaming via StreamingDrainerMixin.
 
 Executes code analysis via the `codex` CLI with inline file contents.
-Review-only: no CODE capability, no file writes, no git commits.
+Events are streamed live (Tier-1 observability) via StreamingDrainerMixin.
 
 IMPORTANT: Prompts include inline file contents — no GitHub PR references
 are used. This avoids the GitHub app dependency identified in F51-PR1.
@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import re
-import select
 import shutil
 import subprocess
 import sys
@@ -26,6 +25,8 @@ from typing import Iterator, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _streaming_drainer import StreamingDrainerMixin
+from canonical_event import CanonicalEvent
 from provider_adapter import AdapterResult, Capability, ProviderAdapter
 from vertex_ai_runner import collect_file_contents
 
@@ -39,16 +40,21 @@ _DEFAULT_TIMEOUT = 300
 _DEFAULT_STALL_THRESHOLD = 60
 
 
-class CodexAdapter(ProviderAdapter):
+class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
     """Provider adapter for the Codex CLI (review and decision only).
 
-    Streams the prompt via stdin to `codex exec --json -c model="<model>"`,
-    parses NDJSON output to extract findings from agent_message events, and
-    returns an AdapterResult.  Inline file contents replace PR references.
+    Streams the prompt via stdin to `codex exec --json`, normalizes the NDJSON
+    output to CanonicalEvent objects via StreamingDrainerMixin (Tier-1), and
+    returns an AdapterResult. Inline file contents replace PR references.
     """
+
+    provider_name = "codex"
 
     def __init__(self, terminal_id: str) -> None:
         self._terminal_id = terminal_id
+        # Set before drain_stream so _normalize can construct CanonicalEvents.
+        self._current_terminal_id: str = terminal_id
+        self._current_dispatch_id: str = "unknown"
 
     # ------------------------------------------------------------------
     # ProviderAdapter interface
@@ -67,29 +73,33 @@ class CodexAdapter(ProviderAdapter):
     def execute(self, instruction: str, context: dict) -> AdapterResult:
         """Run a Codex review with inline file contents and return findings.
 
-        Builds prompt from instruction + inline file contents from
-        context["changed_files"], invokes the codex CLI, and parses NDJSON.
+        Spawns `codex exec --json`, drains stdout via StreamingDrainerMixin for
+        live Tier-1 events, collects text findings, and returns AdapterResult.
         """
-        # Env precedence mirrors gate_runner._build_gate_cmd and
-        # GateRequestHandlerMixin._request_codex: HEADLESS_MODEL > MODEL.
         model = (
             os.environ.get("VNX_CODEX_HEADLESS_MODEL")
             or os.environ.get("VNX_CODEX_MODEL")
             or _DEFAULT_MODEL
         )
-        timeout = int(os.environ.get("VNX_CODEX_TIMEOUT", str(_DEFAULT_TIMEOUT)))
-        stall_threshold = int(
-            os.environ.get("VNX_CODEX_STALL_THRESHOLD", str(_DEFAULT_STALL_THRESHOLD))
+        chunk_timeout = float(
+            os.environ.get("VNX_CODEX_STALL_THRESHOLD",
+                           context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
         )
-
+        total_deadline = float(
+            os.environ.get("VNX_CODEX_TIMEOUT",
+                           context.get("total_deadline", _DEFAULT_TIMEOUT))
+        )
+        terminal_id = context.get("terminal_id", self._terminal_id)
+        dispatch_id = context.get("dispatch_id", "unknown")
+        event_store = context.get("event_store")
         changed_files = context.get("changed_files", [])
-        prompt = self._build_prompt(instruction, changed_files)
 
-        # Only override model if explicitly set; empty string = let codex use
-        # its own config.toml default.
-        cmd = ["codex", "exec", "--json"]
-        if model:
-            cmd += ["-c", f'model="{model}"']
+        prompt = self._build_prompt(instruction, changed_files)
+        cmd = self._build_cmd(model)
+
+        self._current_terminal_id = terminal_id
+        self._current_dispatch_id = dispatch_id
+
         t0 = time.monotonic()
         try:
             proc = subprocess.Popen(
@@ -117,61 +127,51 @@ class CodexAdapter(ProviderAdapter):
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
 
-        stdout, stderr, status = self._drain_with_stall_detection(
-            proc, timeout, stall_threshold
-        )
+        events: list[dict] = []
+        findings_parts: list[str] = []
+        last_token_usage: Optional[dict] = None
+
+        for canonical_event in self.drain_stream(
+            proc,
+            terminal_id,
+            dispatch_id,
+            event_store,
+            chunk_timeout=chunk_timeout,
+            total_deadline=total_deadline,
+        ):
+            events.append(canonical_event.to_dict())
+            if canonical_event.event_type == "text":
+                text = canonical_event.data.get("text", "")
+                if text:
+                    findings_parts.append(text)
+                tc = canonical_event.data.get("token_count")
+                if tc:
+                    last_token_usage = tc
+            elif canonical_event.event_type == "complete":
+                tc = canonical_event.data.get("token_count")
+                if tc:
+                    last_token_usage = tc
+                text = canonical_event.data.get("text", "")
+                if text:
+                    findings_parts.append(text)
+
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
         duration = time.monotonic() - t0
 
-        if status == "timeout":
-            self._kill(proc)
-            return AdapterResult(
-                status="timeout",
-                output=f"Codex CLI exceeded {timeout}s timeout",
-                events=[],
-                event_count=0,
-                duration_seconds=duration,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="codex",
-                model=model,
-            )
+        if last_token_usage:
+            self._write_token_cache(last_token_usage)
 
-        if status == "stall":
-            self._kill(proc)
-            return AdapterResult(
-                status="failed",
-                output=f"Codex CLI stalled: no output for {stall_threshold}s",
-                events=[],
-                event_count=0,
-                duration_seconds=duration,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="codex",
-                model=model,
-            )
+        findings = "\n\n".join(findings_parts) if findings_parts else ""
+        rc = proc.returncode
+        status = "done" if rc == 0 else "failed"
 
-        if proc.returncode != 0:
-            return AdapterResult(
-                status="failed",
-                output=stderr or stdout,
-                events=[],
-                event_count=0,
-                duration_seconds=duration,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="codex",
-                model=model,
-            )
-
-        events, findings = self._parse_ndjson(stdout)
-        token_usage = self._parse_token_usage_from_output(stdout)
-        if token_usage:
-            self._write_token_cache(token_usage)
         return AdapterResult(
-            status="done",
+            status=status,
             output=findings,
             events=events,
             event_count=len(events),
@@ -184,16 +184,216 @@ class CodexAdapter(ProviderAdapter):
         )
 
     def stream_events(self, instruction: str, context: dict) -> Iterator[dict]:
-        """Codex CLI emits NDJSON; replays parsed events one by one."""
-        result = self.execute(instruction, context)
-        for event in result.events:
-            yield event
-        if not result.events:
-            yield {"type": "result", "data": result.output, "status": result.status}
+        """Stream Codex events live; yields CanonicalEvent dicts during execution."""
+        model = (
+            os.environ.get("VNX_CODEX_HEADLESS_MODEL")
+            or os.environ.get("VNX_CODEX_MODEL")
+            or _DEFAULT_MODEL
+        )
+        chunk_timeout = float(
+            os.environ.get("VNX_CODEX_STALL_THRESHOLD",
+                           context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD))
+        )
+        total_deadline = float(
+            os.environ.get("VNX_CODEX_TIMEOUT",
+                           context.get("total_deadline", _DEFAULT_TIMEOUT))
+        )
+        terminal_id = context.get("terminal_id", self._terminal_id)
+        dispatch_id = context.get("dispatch_id", "unknown")
+        event_store = context.get("event_store")
+        changed_files = context.get("changed_files", [])
+
+        prompt = self._build_prompt(instruction, changed_files)
+        cmd = self._build_cmd(model)
+
+        self._current_terminal_id = terminal_id
+        self._current_dispatch_id = dispatch_id
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            yield {"type": "error", "data": {"reason": str(exc)}}
+            return
+
+        if proc.stdin:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
+
+        for canonical_event in self.drain_stream(
+            proc,
+            terminal_id,
+            dispatch_id,
+            event_store,
+            chunk_timeout=chunk_timeout,
+            total_deadline=total_deadline,
+        ):
+            yield canonical_event.to_dict()
+
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    # ------------------------------------------------------------------
+    # StreamingDrainerMixin: event normalizer
+    # ------------------------------------------------------------------
+
+    def _normalize(self, raw: dict) -> CanonicalEvent:
+        """Map a raw Codex NDJSON event to a CanonicalEvent (Tier-1).
+
+        Handles three Codex event shapes:
+        1. New-style top-level: {"type": "thread.started"|"turn.completed"|"item.*", ...}
+        2. Wrapped: {"event_msg": {"payload": {"type": "session_start"|"agent_message"|..., ...}}}
+        3. Legacy: {"type": "agent_message"|"result"|"message", "content": "..."}
+
+        Mapping:
+          thread.started / session_start             → init
+          agent_message (direct or item.completed)   → text
+          item.started/updated [command_execution]   → tool_use
+          item.completed [command_execution]          → tool_result
+          error                                       → error
+          turn.completed / result / message           → complete
+          token_count (intermediate telemetry)        → text (token_count in data)
+          unknown                                     → error
+        """
+        terminal_id = self._current_terminal_id
+        dispatch_id = self._current_dispatch_id
+
+        def make(event_type: str, data: dict) -> CanonicalEvent:
+            return CanonicalEvent(
+                dispatch_id=dispatch_id,
+                terminal_id=terminal_id,
+                provider="codex",
+                event_type=event_type,
+                data=data,
+                observability_tier=1,
+            )
+
+        # Resolve effective payload: unwrap event_msg.payload when present.
+        top_etype = raw.get("type", "")
+        payload: dict = raw
+        event_msg = raw.get("event_msg")
+        if isinstance(event_msg, dict):
+            inner = event_msg.get("payload")
+            if isinstance(inner, dict):
+                payload = inner
+            elif isinstance(event_msg.get("type"), str):
+                payload = event_msg
+
+        etype = payload.get("type", "") if isinstance(payload, dict) else ""
+
+        # New-style item.* / thread.* / turn.* events use the top-level type.
+        if top_etype and (
+            top_etype.startswith("item.")
+            or top_etype.startswith("thread.")
+            or top_etype.startswith("turn.")
+        ):
+            etype = top_etype
+            payload = raw
+
+        item: dict = {}
+        raw_item = raw.get("item") or (payload.get("item") if payload is not raw else None)
+        if isinstance(raw_item, dict):
+            item = raw_item
+        item_type = item.get("type", "")
+
+        # ── thread.started / session_start → init ──────────────────────
+        if etype in ("thread.started", "session_start"):
+            return make("init", {"raw_type": etype})
+
+        # ── agent_message (direct) → text ──────────────────────────────
+        if etype == "agent_message":
+            content = payload.get("text", payload.get("content", payload.get("message", "")))
+            return make("text", {"text": str(content)})
+
+        # ── item.completed [agent_message] → text ──────────────────────
+        if etype == "item.completed" and item_type == "agent_message":
+            content = item.get("content", "")
+            if isinstance(content, list):
+                texts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict)
+                ]
+                content = "\n".join(t for t in texts if t)
+            return make("text", {"text": str(content)})
+
+        # ── item.started / item.updated [command_execution] → tool_use ─
+        if etype in ("item.started", "item.updated") and item_type == "command_execution":
+            cmd_str = item.get("command", item.get("cmd", item.get("args", "")))
+            if isinstance(cmd_str, list):
+                cmd_str = " ".join(str(a) for a in cmd_str)
+            return make("tool_use", {"command": str(cmd_str), "raw_type": etype})
+
+        # ── item.completed [command_execution] → tool_result ───────────
+        if etype == "item.completed" and item_type == "command_execution":
+            output = item.get("output", item.get("result", ""))
+            exit_code = item.get("exit_code", 0)
+            return make("tool_result", {"output": str(output), "exit_code": exit_code})
+
+        # ── error → error ───────────────────────────────────────────────
+        if etype == "error":
+            msg = payload.get("message", payload.get("error", payload.get("text", "")))
+            return make("error", {"message": str(msg) if msg else str(payload)[:200]})
+
+        # ── turn.completed → complete (with token_count from event) ─────
+        if etype == "turn.completed":
+            tc_payload = CodexAdapter._extract_token_count_payload(raw)
+            token_count = CodexAdapter._normalize_token_count(tc_payload) if tc_payload else None
+            data: dict = {}
+            if token_count:
+                data["token_count"] = token_count
+            return make("complete", data)
+
+        # ── result / message → complete ─────────────────────────────────
+        if etype in ("result", "message"):
+            content = payload.get("content", payload.get("text", payload.get("output", "")))
+            tc_payload = CodexAdapter._extract_token_count_payload(raw)
+            token_count = CodexAdapter._normalize_token_count(tc_payload) if tc_payload else None
+            # Also check OpenAI-style usage block on result events
+            if token_count is None:
+                usage = raw.get("usage") or payload.get("usage")
+                if isinstance(usage, dict):
+                    token_count = CodexAdapter._normalize_token_count({
+                        "input_tokens": usage.get("input_tokens") or usage.get("prompt_tokens", 0),
+                        "output_tokens": usage.get("output_tokens") or usage.get("completion_tokens", 0),
+                    })
+            data = {"text": str(content)} if content else {}
+            if token_count:
+                data["token_count"] = token_count
+            return make("complete", data)
+
+        # ── intermediate token_count → text (with token data) ───────────
+        tc_payload = CodexAdapter._extract_token_count_payload(raw)
+        if tc_payload is not None:
+            token_count = CodexAdapter._normalize_token_count(tc_payload)
+            if token_count:
+                return make("text", {"text": "", "token_count": token_count})
+
+        # ── unknown event type → error ───────────────────────────────────
+        return make("error", {
+            "reason": f"unrecognized codex event type: {etype!r}",
+            "raw_type": etype,
+            "raw": str(raw)[:300],
+        })
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_cmd(model: str) -> list[str]:
+        cmd = ["codex", "exec", "--json"]
+        if model:
+            cmd += ["-c", f'model="{model}"']
+        return cmd
 
     # ------------------------------------------------------------------
     # Token usage
@@ -403,111 +603,6 @@ class CodexAdapter(ProviderAdapter):
         if file_contents:
             return f"{instruction}\n\n{file_contents}"
         return instruction
-
-    def _drain_with_stall_detection(
-        self, proc: subprocess.Popen, timeout: int, stall_threshold: int
-    ) -> tuple[str, str, str]:
-        """Read stdout/stderr with timeout and stall detection.
-
-        Returns (stdout, stderr, status) where status is 'ok', 'timeout', or 'stall'.
-        """
-        stdout_parts: list[bytes] = []
-        stderr_parts: list[bytes] = []
-        start = time.monotonic()
-        last_output_time = start
-        stdout_fd = proc.stdout.fileno() if proc.stdout else -1
-        stderr_fd = proc.stderr.fileno() if proc.stderr else -1
-        fd_map: dict[int, str] = {}
-        if stdout_fd >= 0:
-            fd_map[stdout_fd] = "stdout"
-        if stderr_fd >= 0:
-            fd_map[stderr_fd] = "stderr"
-        raw_fds = list(fd_map)
-
-        while True:
-            elapsed = time.monotonic() - start
-            if elapsed >= timeout:
-                return (
-                    b"".join(stdout_parts).decode("utf-8", errors="replace"),
-                    b"".join(stderr_parts).decode("utf-8", errors="replace"),
-                    "timeout",
-                )
-            stall_elapsed = time.monotonic() - last_output_time
-            if stall_elapsed >= stall_threshold:
-                return (
-                    b"".join(stdout_parts).decode("utf-8", errors="replace"),
-                    b"".join(stderr_parts).decode("utf-8", errors="replace"),
-                    "stall",
-                )
-            poll_timeout = max(
-                min(timeout - elapsed, stall_threshold - stall_elapsed, 1.0), 0.1
-            )
-            try:
-                readable, _, _ = select.select(raw_fds, [], [], poll_timeout)
-            except (ValueError, OSError):
-                break
-            for fd_num in readable:
-                try:
-                    chunk = os.read(fd_num, 4096)
-                except OSError:
-                    chunk = b""
-                if chunk:
-                    last_output_time = time.monotonic()
-                    if fd_map.get(fd_num) == "stdout":
-                        stdout_parts.append(chunk)
-                    else:
-                        stderr_parts.append(chunk)
-            if proc.poll() is not None:
-                for fd_num in raw_fds:
-                    try:
-                        while True:
-                            remaining = os.read(fd_num, 4096)
-                            if not remaining:
-                                break
-                            if fd_map.get(fd_num) == "stdout":
-                                stdout_parts.append(remaining)
-                            else:
-                                stderr_parts.append(remaining)
-                    except OSError:
-                        pass
-                break
-
-        return (
-            b"".join(stdout_parts).decode("utf-8", errors="replace"),
-            b"".join(stderr_parts).decode("utf-8", errors="replace"),
-            "ok",
-        )
-
-    @staticmethod
-    def _parse_ndjson(raw: str) -> tuple[list[dict], str]:
-        """Parse NDJSON output; extract agent_message events for findings.
-
-        Returns (events, findings_text).
-        """
-        events: list[dict] = []
-        findings_parts: list[str] = []
-
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            events.append(event)
-            event_type = event.get("type", "")
-            if event_type == "agent_message":
-                content = event.get("content", event.get("message", ""))
-                if content:
-                    findings_parts.append(str(content))
-            elif event_type in ("result", "message"):
-                content = event.get("content", event.get("text", event.get("output", "")))
-                if content:
-                    findings_parts.append(str(content))
-
-        findings = "\n\n".join(findings_parts) if findings_parts else raw.strip()
-        return events, findings
 
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
