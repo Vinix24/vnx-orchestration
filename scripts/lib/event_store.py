@@ -18,7 +18,10 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional, Union
+
+if TYPE_CHECKING:
+    from canonical_event import CanonicalEvent
 
 logger = logging.getLogger(__name__)
 
@@ -51,24 +54,48 @@ class EventStore:
         self._sequences[terminal] = seq
         return seq
 
-    def append(self, terminal: str, event: Dict[str, Any], dispatch_id: str = "") -> None:
+    def append(
+        self,
+        terminal: str,
+        event: "Union[Dict[str, Any], CanonicalEvent]",
+        dispatch_id: str = "",
+    ) -> None:
         """Append a single event as an atomic NDJSON line.
 
+        Accepts both legacy dict events and CanonicalEvent instances.
         Uses LOCK_EX for write safety. The line is written in a single write()
         call including the trailing newline to prevent partial reads.
         """
+        from canonical_event import CanonicalEvent as _CE  # local import avoids circular dep at module load
+
         self._events_dir.mkdir(parents=True, exist_ok=True)
         path = self._terminal_path(terminal)
 
-        # Build envelope per contract
-        envelope: Dict[str, Any] = {
-            "type": event.get("type", "unknown"),
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "dispatch_id": dispatch_id or event.get("dispatch_id", ""),
-            "terminal": terminal,
-            "sequence": self._next_sequence(terminal),
-            "data": event.get("data", event),
-        }
+        if isinstance(event, _CE):
+            envelope: Dict[str, Any] = {
+                "type": event.event_type,
+                "timestamp": event.timestamp,
+                "dispatch_id": event.dispatch_id or dispatch_id,
+                "terminal": terminal,
+                "sequence": self._next_sequence(terminal),
+                "data": event.data,
+                "observability_tier": event.observability_tier,
+                "event_id": event.event_id,
+                "provider": event.provider,
+                "terminal_id": event.terminal_id,
+                "provider_meta": event.provider_meta,
+            }
+        else:
+            # Legacy dict path — default tier 2 (buffered) for backwards compat
+            envelope = {
+                "type": event.get("type", "unknown"),
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "dispatch_id": dispatch_id or event.get("dispatch_id", ""),
+                "terminal": terminal,
+                "sequence": self._next_sequence(terminal),
+                "data": event.get("data", event),
+                "observability_tier": int(event.get("observability_tier", 2)),
+            }
 
         line = json.dumps(envelope, separators=(",", ":")) + "\n"
 
@@ -116,6 +143,10 @@ class EventStore:
 
                     if since and event.get("timestamp", "") <= since:
                         continue
+
+                    # Backfill tier for events written before observability_tier was added
+                    if "observability_tier" not in event:
+                        event["observability_tier"] = 2
 
                     yield event
             finally:
