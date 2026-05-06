@@ -50,6 +50,7 @@ class StreamingDrainerMixin:
 
         class MyAdapter(StreamingDrainerMixin, ProviderAdapter):
             provider_name = "myprovider"
+            provider_observability_tier = 1  # declare adapter's observability tier
 
             def _normalize(self, raw_chunk: dict) -> CanonicalEvent:
                 ...  # map raw provider event -> CanonicalEvent
@@ -61,6 +62,10 @@ class StreamingDrainerMixin:
 
     # Subclasses override these
     provider_name: str = "unknown"
+    # Observability tier this adapter produces via the drainer (W7-G).
+    # Tier 1 = live per-event streaming (full observability).
+    # Subclasses that compose this mixin produce Tier-1 events by default.
+    provider_observability_tier: int = 1
 
     def _normalize(self, raw_chunk: Dict[str, Any]) -> CanonicalEvent:
         """Map a raw provider JSON chunk to a CanonicalEvent.

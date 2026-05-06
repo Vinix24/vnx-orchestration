@@ -53,17 +53,21 @@ class GovernanceProfile:
     """Describes a governance profile.
 
     Attributes:
-        name:           Profile name (e.g. "default", "light", "minimal").
-        review_mode:    "full" | "exception_only" | "none".
-        required_gates: Ordered list of gates that must pass (e.g. ["codex_gate", "ci"]).
-        max_pr_lines:   Maximum allowed PR line count for this profile.
-        auto_merge:     Whether the PR may be auto-merged when gates pass.
+        name:                   Profile name (e.g. "default", "light", "minimal").
+        review_mode:            "full" | "exception_only" | "none".
+        required_gates:         Ordered list of gates that must pass (e.g. ["codex_gate", "ci"]).
+        max_pr_lines:           Maximum allowed PR line count for this profile.
+        auto_merge:             Whether the PR may be auto-merged when gates pass.
+        min_observability_tier: Minimum adapter observability tier required for dispatches.
+                                1=full streaming, 2=limited streaming, 3=final-only.
+                                Dispatches routed to adapters with tier > this value are rejected.
     """
     name: str
     review_mode: str
     required_gates: list[str] = field(default_factory=list)
     max_pr_lines: int = 300
     auto_merge: bool = False
+    min_observability_tier: int = 1
 
     def requires_gate(self, gate_name: str) -> bool:
         """True if gate_name is in required_gates."""
@@ -76,6 +80,7 @@ class GovernanceProfile:
             "required_gates": list(self.required_gates),
             "max_pr_lines": self.max_pr_lines,
             "auto_merge": self.auto_merge,
+            "min_observability_tier": self.min_observability_tier,
         }
 
 
@@ -90,6 +95,23 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
         required_gates=["codex_gate", "gemini_review", "ci"],
         max_pr_lines=300,
         auto_merge=False,
+        min_observability_tier=1,
+    ),
+    "coding-strict": GovernanceProfile(
+        name="coding-strict",
+        review_mode="full",
+        required_gates=["codex_gate", "gemini_review", "ci"],
+        max_pr_lines=300,
+        auto_merge=False,
+        min_observability_tier=1,
+    ),
+    "business-light": GovernanceProfile(
+        name="business-light",
+        review_mode="exception_only",
+        required_gates=["ci"],
+        max_pr_lines=500,
+        auto_merge=False,
+        min_observability_tier=2,
     ),
     "light": GovernanceProfile(
         name="light",
@@ -97,6 +119,7 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
         required_gates=["ci"],
         max_pr_lines=500,
         auto_merge=False,
+        min_observability_tier=2,
     ),
     "minimal": GovernanceProfile(
         name="minimal",
@@ -104,6 +127,7 @@ DEFAULT_PROFILES: dict[str, GovernanceProfile] = {
         required_gates=[],
         max_pr_lines=1000,
         auto_merge=True,
+        min_observability_tier=3,
     ),
 }
 
@@ -242,6 +266,7 @@ def load_profiles(project_root: Optional[Path] = None) -> dict[str, GovernancePr
             required_gates=list(attrs.get("required_gates") or []),
             max_pr_lines=int(attrs.get("max_pr_lines", 300)),
             auto_merge=bool(attrs.get("auto_merge", False)),
+            min_observability_tier=int(attrs.get("min_observability_tier", 1)),
         )
 
     return profiles

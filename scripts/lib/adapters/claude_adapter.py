@@ -25,6 +25,9 @@ from provider_adapter import AdapterResult, Capability, ProviderAdapter
 
 logger = logging.getLogger(__name__)
 
+# Observability tier: Claude CLI streams live per-event NDJSON via subprocess_adapter.
+OBSERVABILITY_TIER = 1
+
 
 class ClaudeAdapter(ProviderAdapter):
     """Provider adapter for Claude CLI (subprocess delivery).

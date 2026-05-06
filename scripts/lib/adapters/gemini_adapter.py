@@ -41,6 +41,10 @@ _DEFAULT_STALL_THRESHOLD = 60
 _TIER_STREAMING = 1   # VNX_GEMINI_STREAM=1: live per-event
 _TIER_LEGACY = 3      # VNX_GEMINI_STREAM=0: final-only synthetic result
 
+# Public adapter-level tier constant: effective tier under streaming config.
+# When VNX_GEMINI_STREAM=0 (legacy), effective tier is _TIER_LEGACY (3).
+OBSERVABILITY_TIER = _TIER_STREAMING
+
 
 def _gemini_stream_enabled() -> bool:
     """Return True when VNX_GEMINI_STREAM=1 is set in the environment."""
@@ -58,6 +62,7 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
     """
 
     provider_name = "gemini"
+    provider_observability_tier = OBSERVABILITY_TIER
 
     def __init__(self, terminal_id: str) -> None:
         self._terminal_id = terminal_id

@@ -43,6 +43,10 @@ _DEFAULT_TIMEOUT = 60
 _TIER_FULL     = 1  # tool_use detected (OpenAI tool-trained model)
 _TIER_BASELINE = 2  # text-only streaming (default for Ollama)
 
+# Public adapter-level tier constant: baseline tier (Tier 2).
+# Tier 1 is achieved at runtime when tool_use is detected in the stream.
+OBSERVABILITY_TIER = _TIER_BASELINE
+
 
 class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
     """Provider adapter for local Ollama endpoint (decision and digest only).
@@ -57,6 +61,7 @@ class OllamaAdapter(StreamingDrainerMixin, ProviderAdapter):
 
     # StreamingDrainerMixin contract
     provider_name = "ollama"
+    provider_observability_tier = OBSERVABILITY_TIER
 
     def __init__(self, terminal_id: str) -> None:
         self._terminal_id = terminal_id
