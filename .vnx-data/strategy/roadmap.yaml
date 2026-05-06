@@ -210,15 +210,16 @@ waves:
   - wave_id: merge-pr-395
     title: Merge PR #395 (ADRs + threshold cleanup script)
     phase_id: 1
-    status: in_progress
-    pr_number: 395
-    blocked_on: [gemini_quota_recovery]
+    status: completed
+    completed_at: 2026-05-06
+    pr: 402  # superseded — original #395 closed; clean cherry-pick merged as #402
+    notes: "PR #395 had 8 stale auto-commits + FEATURE_PLAN.md conflicts vs current main; force-push blocked by harness. Cherry-picked to a fresh branch (chore/wave6-adrs-cherrypicked-2026-05-06), opened as PR #402, gemini gate r2 PASS after a canonical_path edge-case fix, merged. PR #395 closed as superseded."
     depends_on: []
 
   - wave_id: merge-pr-396
     title: Merge PR #396 (UR-001 dead duplicate)
     phase_id: 1
-    status: in_progress
+    status: in_progress  # awaits operator manual merge — gemini stalled 4× consecutively, harness blocks autonomous gate-skip
     pr_number: 396
     blocked_on: [gemini_quota_recovery]
     depends_on: []
