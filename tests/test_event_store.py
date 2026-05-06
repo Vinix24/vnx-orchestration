@@ -75,6 +75,36 @@ class TestAppend:
         event = json.loads(path.read_text().strip())
         assert event["dispatch_id"] == "d-001"
 
+    def test_append_kwarg_wins_over_event_dispatch_id(self, store, tmp_events_dir):
+        """OI-1349: explicit dispatch_id kwarg takes precedence over event field."""
+        from canonical_event import CanonicalEvent
+        ce = CanonicalEvent(
+            dispatch_id="event-dispatch",
+            terminal_id="T1",
+            provider="claude",
+            event_type="text",
+            data={"text": "hi"},
+        )
+        store.append("T1", ce, dispatch_id="kwarg-dispatch")
+        path = tmp_events_dir / "T1.ndjson"
+        envelope = json.loads(path.read_text().strip())
+        assert envelope["dispatch_id"] == "kwarg-dispatch"
+
+    def test_append_canonical_event_no_kwarg_uses_event_dispatch_id(self, store, tmp_events_dir):
+        """When dispatch_id kwarg is omitted, CanonicalEvent.dispatch_id is used."""
+        from canonical_event import CanonicalEvent
+        ce = CanonicalEvent(
+            dispatch_id="event-owns-this",
+            terminal_id="T1",
+            provider="claude",
+            event_type="text",
+            data={},
+        )
+        store.append("T1", ce)
+        path = tmp_events_dir / "T1.ndjson"
+        envelope = json.loads(path.read_text().strip())
+        assert envelope["dispatch_id"] == "event-owns-this"
+
 
 class TestTail:
     def test_tail_returns_all_events(self, store):
