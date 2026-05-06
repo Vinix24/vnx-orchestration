@@ -33,7 +33,22 @@ _DEFAULT_RELATIVE_PATH = Path(".vnx-data/strategy/roadmap.yaml")
 
 
 class RoadmapValidationError(ValueError):
-    """Raised when roadmap.yaml violates the schema at load time."""
+    """Raised when roadmap.yaml violates the schema at load or write time.
+
+    Accepts either a single message string (parse-time errors) or a list of
+    error messages (cross-reference validation). The ``errors`` attribute is
+    always a list for programmatic access.
+    """
+
+    def __init__(self, errors):
+        if isinstance(errors, list):
+            self.errors = list(errors)
+            joined = "\n  - ".join(self.errors) if self.errors else "(no details)"
+            message = f"roadmap validation failed:\n  - {joined}"
+        else:
+            self.errors = [str(errors)]
+            message = str(errors)
+        super().__init__(message)
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +237,20 @@ def _parse_decision(raw: dict) -> OperatorDecision:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def load_roadmap(path: Path | None = None) -> Roadmap:
+def load_roadmap(path: Path | None = None, *, strict: bool = True) -> Roadmap:
     """Strict reader. Returns a typed Roadmap; raises on schema violations.
 
-    `schema_version` defaults to 1 if absent (backwards-compat shim).
+    Behavior:
+      - ``schema_version`` is enforced to equal ``1``. Unsupported versions
+        raise ``RoadmapValidationError`` immediately. The default value when
+        absent is ``1`` (backwards-compat shim).
+      - When ``strict=True`` (the default) the loader runs
+        ``validate_roadmap()`` after parsing and raises
+        ``RoadmapValidationError`` if any cross-reference errors are found
+        (duplicate wave_ids, dangling depends_on/blocked_on, etc.).
+      - When ``strict=False`` the loader returns the parsed Roadmap without
+        running cross-reference validation. Use this when you want to
+        inspect a possibly-invalid roadmap (tooling that reports errors).
     """
     target = Path(path) if path is not None else _default_path()
     if not target.exists():
@@ -239,6 +264,10 @@ def load_roadmap(path: Path | None = None) -> Roadmap:
         )
 
     schema_version = int(data.get("schema_version", 1))
+    if schema_version != 1:
+        raise RoadmapValidationError(
+            [f"Unsupported schema_version: {schema_version} (expected 1)"]
+        )
     roadmap_id = str(data.get("roadmap_id", ""))
     title = str(data.get("title", ""))
     generated_at = str(data.get("generated_at", ""))
@@ -261,7 +290,7 @@ def load_roadmap(path: Path | None = None) -> Roadmap:
         for entry in completed_history_raw
     ]
 
-    return Roadmap(
+    roadmap = Roadmap(
         schema_version=schema_version,
         roadmap_id=roadmap_id,
         title=title,
@@ -272,6 +301,13 @@ def load_roadmap(path: Path | None = None) -> Roadmap:
         completed_history=completed_history,
         notes=dict(notes_raw),
     )
+
+    if strict:
+        errors = validate_roadmap(roadmap)
+        if errors:
+            raise RoadmapValidationError(errors)
+
+    return roadmap
 
 
 def _wave_to_dict(w: Wave) -> dict:
@@ -342,7 +378,23 @@ def _decision_to_dict(d: OperatorDecision) -> dict:
 
 
 def write_roadmap(roadmap: Roadmap, path: Path | None = None) -> None:
-    """Structured writer. Comments are not preserved with PyYAML fallback."""
+    """Structured writer. Validates the roadmap before persisting.
+
+    Raises ``RoadmapValidationError`` if cross-reference validation fails or
+    if ``schema_version`` is not the supported value (``1``). The target file
+    is left untouched on failure: validation runs before any I/O.
+
+    Comments are not preserved with the PyYAML fallback; install
+    ``ruamel.yaml`` to round-trip comments.
+    """
+    if roadmap.schema_version != 1:
+        raise RoadmapValidationError(
+            [f"Unsupported schema_version: {roadmap.schema_version} (expected 1)"]
+        )
+    errors = validate_roadmap(roadmap)
+    if errors:
+        raise RoadmapValidationError(errors)
+
     target = Path(path) if path is not None else _default_path()
     payload: dict[str, Any] = {
         "schema_version": roadmap.schema_version,

@@ -36,12 +36,19 @@ from scripts.lib.strategy.roadmap import (
 )
 ```
 
-- `load_roadmap(path=None) -> Roadmap` — strict reader. Default path is
-  `<repo-root>/.vnx-data/strategy/roadmap.yaml`. Raises
-  `RoadmapValidationError` on schema violations. `schema_version` defaults
-  to `1` if absent (backwards-compat shim).
+- `load_roadmap(path=None, *, strict=True) -> Roadmap` — strict reader.
+  Default path is `<repo-root>/.vnx-data/strategy/roadmap.yaml`. Raises
+  `RoadmapValidationError` on parse-time violations (missing fields, bad
+  enums) **and** on cross-reference errors (duplicate `wave_id`, dangling
+  `depends_on`, etc.). `strict=False` skips the cross-reference pass and
+  returns a possibly-invalid `Roadmap` for tooling that wants to inspect
+  errors via `validate_roadmap()`. `schema_version` is enforced to equal
+  `1`; any other value (or no value, when not defaulted to `1`) raises.
 - `write_roadmap(roadmap, path=None) -> None` — structured writer that
-  serializes a `Roadmap` dataclass tree back to YAML.
+  validates the roadmap before serializing. Raises
+  `RoadmapValidationError` if cross-reference validation fails or
+  `schema_version != 1`. The target file is left untouched on failure
+  (validation runs before any I/O).
 - `validate_roadmap(roadmap) -> list[str]` — returns a list of error
   messages; an empty list means the roadmap is valid. Catches:
   - duplicate `wave_id` / `decision_id`
@@ -91,8 +98,21 @@ visible.
   mutate it through `write_roadmap()`.
 - It does not provide a CLI. `vnx status` (W-UX-3) is the operator-facing
   surface.
-- It does not migrate `schema_version`. Only `1` is supported; future
-  schema versions will need an explicit migration path.
+- It does not migrate `schema_version`. Only `1` is supported and is now
+  actively enforced by both `load_roadmap()` and `write_roadmap()`.
+  Introducing a future schema version (e.g. `2`) will require:
+  1. A migration script that reads `schema_version=1` and writes
+     `schema_version=2` with the new shape.
+  2. Updating the dataclasses + `_parse_*` helpers to accept the new
+     fields.
+  3. Bumping the `schema_version != 1` guards (or replacing them with a
+     supported-set check, e.g. `{1, 2}`) in both `load_roadmap()` and
+     `write_roadmap()`.
+  4. A round-trip test that an old `1`-shaped file migrates cleanly to
+     the new shape.
+
+  The placeholder is intentional: there is no `2` today, so the loader
+  fails loud rather than silently accepting unknown shapes.
 
 ## Forward look
 

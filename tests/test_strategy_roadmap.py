@@ -101,7 +101,7 @@ def test_reject_duplicate_wave_id(tmp_path: Path) -> None:
         }
     )
     path = _write_payload(tmp_path, payload)
-    roadmap = load_roadmap(path)
+    roadmap = load_roadmap(path, strict=False)
     errors = validate_roadmap(roadmap)
     assert any("duplicate wave_id: wave-a" in e for e in errors)
 
@@ -110,7 +110,7 @@ def test_reject_dangling_depends_on(tmp_path: Path) -> None:
     payload = _minimal_payload()
     payload["waves"][1]["depends_on"] = ["wave-zzz"]
     path = _write_payload(tmp_path, payload)
-    roadmap = load_roadmap(path)
+    roadmap = load_roadmap(path, strict=False)
     errors = validate_roadmap(roadmap)
     assert any("dangling depends_on 'wave-zzz'" in e for e in errors)
 
@@ -122,7 +122,7 @@ def test_reject_dangling_blocked_on(tmp_path: Path) -> None:
         {"decision_id": "od_1", "title": "real", "status": "open"},
     ]
     path = _write_payload(tmp_path, payload)
-    roadmap = load_roadmap(path)
+    roadmap = load_roadmap(path, strict=False)
     errors = validate_roadmap(roadmap)
     assert any("dangling blocked_on 'od_99'" in e for e in errors)
 
@@ -282,7 +282,7 @@ def test_validate_phase_waves_undefined(tmp_path: Path) -> None:
     payload = _minimal_payload()
     payload["phases"][0]["waves"].append("wave-ghost")
     path = _write_payload(tmp_path, payload)
-    roadmap = load_roadmap(path)
+    roadmap = load_roadmap(path, strict=False)
     errors = validate_roadmap(roadmap)
     assert any("wave-ghost" in e for e in errors)
 
@@ -298,7 +298,7 @@ def test_validate_decision_blocking_waves_undefined(tmp_path: Path) -> None:
         }
     ]
     path = _write_payload(tmp_path, payload)
-    roadmap = load_roadmap(path)
+    roadmap = load_roadmap(path, strict=False)
     errors = validate_roadmap(roadmap)
     assert any("wave-ghost" in e for e in errors)
 
@@ -358,3 +358,188 @@ def test_construct_dataclasses_directly() -> None:
         operator_decisions=[d],
     )
     assert validate_roadmap(r) == []
+
+
+# ---------------------------------------------------------------------------
+# Fix-forward regression tests for codex_gate findings on PR #410
+# (Phase 2 W-state-1 fix-forward, dispatch 20260506-phase02-wstate1-fixforward)
+# ---------------------------------------------------------------------------
+def test_write_roadmap_rejects_duplicate_wave_ids_and_leaves_file_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Finding 1 (BLOCKING): write_roadmap() must validate before persisting.
+
+    Synthesize a Roadmap with duplicate wave_ids → write_roadmap raises
+    RoadmapValidationError; the target file is not created/modified.
+    """
+    phase = Phase(phase_id=0, title="P", waves=["wave-a", "wave-a"])
+    wave_a = Wave(
+        wave_id="wave-a",
+        title="First",
+        phase_id=0,
+        status="planned",
+    )
+    wave_a_dup = Wave(
+        wave_id="wave-a",
+        title="Duplicate",
+        phase_id=0,
+        status="planned",
+    )
+    bad = Roadmap(
+        schema_version=1,
+        roadmap_id="bad",
+        title="Bad roadmap",
+        generated_at="2026-05-06T00:00:00Z",
+        phases=[phase],
+        waves=[wave_a, wave_a_dup],
+    )
+
+    sentinel = "untouched-original-content\n"
+    out_path = tmp_path / "preexisting.yaml"
+    out_path.write_text(sentinel, encoding="utf-8")
+
+    with pytest.raises(RoadmapValidationError) as excinfo:
+        write_roadmap(bad, out_path)
+    assert any("duplicate wave_id: wave-a" in e for e in excinfo.value.errors)
+    # File must not have been overwritten by the failed write.
+    assert out_path.read_text(encoding="utf-8") == sentinel
+
+    # And a fresh path must not be created when validation fails.
+    fresh_path = tmp_path / "should-not-exist.yaml"
+    with pytest.raises(RoadmapValidationError):
+        write_roadmap(bad, fresh_path)
+    assert not fresh_path.exists()
+
+
+def test_write_roadmap_rejects_dangling_depends_on(tmp_path: Path) -> None:
+    """write_roadmap() must catch dangling depends_on too, not just dupes."""
+    phase = Phase(phase_id=0, title="P", waves=["wave-a"])
+    wave = Wave(
+        wave_id="wave-a",
+        title="W",
+        phase_id=0,
+        status="planned",
+        depends_on=["wave-ghost"],
+    )
+    bad = Roadmap(
+        schema_version=1,
+        roadmap_id="bad",
+        title="t",
+        generated_at="2026-05-06T00:00:00Z",
+        phases=[phase],
+        waves=[wave],
+    )
+    out_path = tmp_path / "out.yaml"
+    with pytest.raises(RoadmapValidationError) as excinfo:
+        write_roadmap(bad, out_path)
+    assert any("wave-ghost" in e for e in excinfo.value.errors)
+    assert not out_path.exists()
+
+
+def test_load_roadmap_strict_by_default_raises_on_dangling_depends_on(
+    tmp_path: Path,
+) -> None:
+    """Finding 2 (advisory): load_roadmap() runs validate_roadmap() by default.
+
+    A roadmap with dangling depends_on must raise on load (not silently return
+    an invalid Roadmap that only fails when validate_roadmap is called).
+    """
+    payload = _minimal_payload()
+    payload["waves"][1]["depends_on"] = ["wave-zzz"]
+    path = _write_payload(tmp_path, payload)
+    with pytest.raises(RoadmapValidationError) as excinfo:
+        load_roadmap(path)
+    assert any("wave-zzz" in e for e in excinfo.value.errors)
+
+
+def test_load_roadmap_strict_by_default_raises_on_duplicate_wave_id(
+    tmp_path: Path,
+) -> None:
+    payload = _minimal_payload()
+    payload["waves"].append(
+        {
+            "wave_id": "wave-a",
+            "title": "Duplicate",
+            "phase_id": 0,
+            "status": "planned",
+        }
+    )
+    path = _write_payload(tmp_path, payload)
+    with pytest.raises(RoadmapValidationError) as excinfo:
+        load_roadmap(path)
+    assert any("duplicate wave_id: wave-a" in e for e in excinfo.value.errors)
+
+
+def test_load_roadmap_strict_false_returns_invalid_roadmap(tmp_path: Path) -> None:
+    """strict=False is the parse-only mode: returns Roadmap, no cross-check raise."""
+    payload = _minimal_payload()
+    payload["waves"][1]["depends_on"] = ["wave-zzz"]
+    path = _write_payload(tmp_path, payload)
+    roadmap = load_roadmap(path, strict=False)
+    # No raise — and the validator still surfaces the issue when called manually.
+    errors = validate_roadmap(roadmap)
+    assert any("wave-zzz" in e for e in errors)
+
+
+def test_load_roadmap_rejects_unsupported_schema_version(tmp_path: Path) -> None:
+    """Finding 3 (advisory): only schema_version=1 is supported."""
+    payload = _minimal_payload()
+    payload["schema_version"] = 2
+    path = _write_payload(tmp_path, payload)
+    with pytest.raises(RoadmapValidationError) as excinfo:
+        load_roadmap(path)
+    msg = str(excinfo.value)
+    assert "schema_version" in msg
+    assert "2" in msg
+
+
+def test_load_roadmap_rejects_unsupported_schema_version_in_strict_false_mode(
+    tmp_path: Path,
+) -> None:
+    """schema_version enforcement runs before strict cross-checks → strict=False
+    cannot bypass it.
+    """
+    payload = _minimal_payload()
+    payload["schema_version"] = 99
+    path = _write_payload(tmp_path, payload)
+    with pytest.raises(RoadmapValidationError):
+        load_roadmap(path, strict=False)
+
+
+def test_write_roadmap_rejects_unsupported_schema_version(tmp_path: Path) -> None:
+    """write_roadmap must also enforce schema_version."""
+    phase = Phase(phase_id=0, title="P", waves=["wave-a"])
+    wave = Wave(wave_id="wave-a", title="W", phase_id=0, status="planned")
+    bad = Roadmap(
+        schema_version=2,
+        roadmap_id="rid",
+        title="t",
+        generated_at="2026-05-06T00:00:00Z",
+        phases=[phase],
+        waves=[wave],
+    )
+    out_path = tmp_path / "out.yaml"
+    with pytest.raises(RoadmapValidationError) as excinfo:
+        write_roadmap(bad, out_path)
+    assert "schema_version" in str(excinfo.value)
+    assert not out_path.exists()
+
+
+def test_load_roadmap_accepts_schema_version_1(tmp_path: Path) -> None:
+    """The supported schema_version=1 still loads cleanly."""
+    payload = _minimal_payload()
+    payload["schema_version"] = 1
+    path = _write_payload(tmp_path, payload)
+    roadmap = load_roadmap(path)  # strict default — must not raise
+    assert roadmap.schema_version == 1
+
+
+def test_roadmap_validation_error_exposes_errors_attribute() -> None:
+    """RoadmapValidationError.errors must be a list for programmatic access."""
+    err = RoadmapValidationError(["a", "b"])
+    assert err.errors == ["a", "b"]
+    assert "a" in str(err) and "b" in str(err)
+    # Single-string form is wrapped in a list too.
+    err_single = RoadmapValidationError("plain message")
+    assert err_single.errors == ["plain message"]
+    assert "plain message" in str(err_single)
