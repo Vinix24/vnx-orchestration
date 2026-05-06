@@ -1,9 +1,9 @@
-"""Unit tests for scripts/build_current_state.py.
+"""Unit tests for scripts/build_current_state.py (updated for W-state-3 schema).
 
 Cases:
 - empty roadmap
 - all-completed roadmap
-- in-progress + blocked OI
+- in-progress roadmap
 - idempotence (run twice → byte-identical output)
 - graceful degrade if gh CLI fails
 """
@@ -52,6 +52,12 @@ def _write_receipts(state_dir: Path, records: list[dict]) -> None:
     )
 
 
+def _write_decisions(strategy_dir: Path, records: list[dict]) -> None:
+    (strategy_dir / "decisions.ndjson").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers to suppress gh CLI calls during tests
 # ---------------------------------------------------------------------------
@@ -68,7 +74,7 @@ class TestEmptyRoadmap:
     def test_builds_without_error(self, tmp_data_dir: Path) -> None:
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        assert "# VNX Project State" in content
+        assert "# Mission" in content
 
     def test_empty_roadmap_section(self, tmp_data_dir: Path) -> None:
         with patch.object(bcs, "_fetch_prs", _no_prs):
@@ -78,7 +84,7 @@ class TestEmptyRoadmap:
     def test_no_active_phase(self, tmp_data_dir: Path) -> None:
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        assert "No active phase" in content
+        assert "No roadmap available" in content or "No active phase" in content
 
     def test_within_200_lines(self, tmp_data_dir: Path) -> None:
         with patch.object(bcs, "_fetch_prs", _no_prs):
@@ -90,11 +96,16 @@ class TestAllCompletedRoadmap:
     def _make_roadmap(self) -> dict:
         return {
             "schema_version": 1,
+            "roadmap_id": "r1",
+            "title": "Test",
+            "generated_at": "2026-05-06T00:00:00Z",
             "phases": [
                 {
                     "phase_id": 0,
                     "title": "Phase Zero",
                     "waves": ["w-a", "w-b"],
+                    "estimated_loc": 0,
+                    "estimated_weeks": 0.0,
                     "blocked_on": [],
                 }
             ],
@@ -116,18 +127,23 @@ class TestAllCompletedRoadmap:
         _write_roadmap(tmp_data_dir / "strategy", self._make_roadmap())
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        assert "No active phase" in content
+        assert "All waves completed or roadmap empty" in content or "Nothing to do" in content
 
 
-class TestInProgressWithBlockedOI:
+class TestInProgressRoadmap:
     def _make_roadmap(self) -> dict:
         return {
             "schema_version": 1,
+            "roadmap_id": "r1",
+            "title": "Operator UX",
+            "generated_at": "2026-05-06T00:00:00Z",
             "phases": [
                 {
                     "phase_id": 0,
                     "title": "Operator UX",
                     "waves": ["w-ux-1", "w-ux-2"],
+                    "estimated_loc": 0,
+                    "estimated_weeks": 0.0,
                     "blocked_on": [],
                 }
             ],
@@ -137,24 +153,6 @@ class TestInProgressWithBlockedOI:
                 {"wave_id": "w-ux-2", "title": "State projector", "phase_id": 0,
                  "status": "planned", "depends_on": ["w-ux-1"]},
             ],
-        }
-
-    def _make_oi_digest(self) -> dict:
-        return {
-            "summary": {
-                "open_count": 5,
-                "blocker_count": 1,
-                "warn_count": 3,
-                "info_count": 1,
-            },
-            "top_blockers": [
-                {"id": "OI-001", "title": "Critical blocker", "pr_id": "PR-1"},
-            ],
-            "open_items": [
-                {"id": "OI-002", "severity": "warn", "title": "Minor warning",
-                 "pr_id": None},
-            ],
-            "recent_closures": [],
         }
 
     def test_in_progress_badge(self, tmp_data_dir: Path) -> None:
@@ -170,13 +168,11 @@ class TestInProgressWithBlockedOI:
         assert "Phase 0" in content
         assert "Operator UX" in content
 
-    def test_blocker_shown_in_oi(self, tmp_data_dir: Path) -> None:
+    def test_in_flight_section_present(self, tmp_data_dir: Path) -> None:
         _write_roadmap(tmp_data_dir / "strategy", self._make_roadmap())
-        _write_oi_digest(tmp_data_dir / "state", self._make_oi_digest())
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        assert "OI-001" in content
-        assert "Critical blocker" in content
+        assert "## In flight" in content
 
 
 class TestIdempotence:
@@ -191,15 +187,18 @@ class TestIdempotence:
     def test_idempotent_with_data(self, tmp_data_dir: Path) -> None:
         roadmap = {
             "schema_version": 1,
+            "roadmap_id": "r1",
+            "title": "T",
+            "generated_at": "2026-05-06T00:00:00Z",
             "phases": [{"phase_id": 0, "title": "T", "waves": ["w1"],
-                        "blocked_on": []}],
+                        "estimated_loc": 0, "estimated_weeks": 0.0, "blocked_on": []}],
             "waves": [{"wave_id": "w1", "title": "Wave", "phase_id": 0,
                        "status": "in_progress", "depends_on": []}],
         }
         _write_roadmap(tmp_data_dir / "strategy", roadmap)
-        _write_receipts(tmp_data_dir / "state", [
-            {"event_type": "task_complete", "timestamp": "2026-05-01T10:00:00",
-             "terminal": "T1", "dispatch_id": "disp-001", "status": "success"},
+        _write_decisions(tmp_data_dir / "strategy", [
+            {"decision_id": "OD-2026-05-01-001", "scope": "arch",
+             "ts": "2026-05-01T10:00:00Z", "rationale": "test reason"},
         ])
         with patch.object(bcs, "_fetch_prs", _no_prs):
             run1 = bcs.build(tmp_data_dir)
@@ -212,9 +211,6 @@ class TestIdempotence:
         today = datetime.date.today().isoformat()
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        # "Last updated: unknown" is fine; "Last updated: <today>" would only appear
-        # if the roadmap.yaml file was touched today, which it wasn't (tmpdir is fresh).
-        # The key assertion: datetime.now() is never called.
         lines_with_today = [
             line for line in content.splitlines()
             if today in line and not line.startswith("Last updated:")
@@ -227,9 +223,6 @@ class TestIdempotence:
 class TestGhCliFail:
     """Projector must degrade gracefully when gh CLI is unavailable."""
 
-    def _failing_gh(self, *_args, **_kwargs):
-        raise FileNotFoundError("gh not found")
-
     def test_no_prs_on_gh_failure(self, tmp_data_dir: Path) -> None:
         with patch("subprocess.run", side_effect=FileNotFoundError("gh not found")):
             content = bcs.build(tmp_data_dir)
@@ -238,7 +231,7 @@ class TestGhCliFail:
     def test_output_still_valid_markdown(self, tmp_data_dir: Path) -> None:
         with patch("subprocess.run", side_effect=FileNotFoundError("gh not found")):
             content = bcs.build(tmp_data_dir)
-        assert content.startswith("# VNX Project State")
+        assert content.startswith("# Mission")
         assert len(content.splitlines()) <= 200
 
     def test_gh_nonzero_exit(self, tmp_data_dir: Path) -> None:
@@ -248,7 +241,7 @@ class TestGhCliFail:
         mock_result.stdout = ""
         with patch("subprocess.run", return_value=mock_result):
             content = bcs.build(tmp_data_dir)
-        assert "# VNX Project State" in content
+        assert "# Mission" in content
 
 
 class TestLastUpdatedLine:
@@ -274,21 +267,23 @@ class TestLastUpdatedLine:
 class TestDecisionsSection:
     def test_decisions_rendered(self, tmp_data_dir: Path) -> None:
         decisions = [
-            {"timestamp": "2026-05-01T12:00:00Z", "title": "auth-model",
-             "decision": "jwt_symmetric"},
+            {
+                "decision_id": "OD-2026-05-01-001",
+                "scope": "auth",
+                "ts": "2026-05-01T12:00:00Z",
+                "rationale": "chose jwt_symmetric for simplicity",
+            },
         ]
-        (tmp_data_dir / "strategy" / "decisions.ndjson").write_text(
-            "\n".join(json.dumps(d) for d in decisions) + "\n"
-        )
+        _write_decisions(tmp_data_dir / "strategy", decisions)
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        assert "auth-model" in content
+        assert "OD-2026-05-01-001" in content
         assert "jwt_symmetric" in content
 
     def test_missing_decisions_file_graceful(self, tmp_data_dir: Path) -> None:
         with patch.object(bcs, "_fetch_prs", _no_prs):
             content = bcs.build(tmp_data_dir)
-        assert "# VNX Project State" in content
+        assert "# Mission" in content
 
 
 class TestOutputLength:
@@ -301,9 +296,12 @@ class TestOutputLength:
         ]
         roadmap = {
             "schema_version": 1,
+            "roadmap_id": "r1",
+            "title": "Big",
+            "generated_at": "2026-05-06T00:00:00Z",
             "phases": [{"phase_id": 0, "title": "Big Phase",
                         "waves": [f"w-{i}" for i in range(100)],
-                        "blocked_on": []}],
+                        "estimated_loc": 0, "estimated_weeks": 0.0, "blocked_on": []}],
             "waves": many_waves,
         }
         _write_roadmap(tmp_data_dir / "strategy", roadmap)

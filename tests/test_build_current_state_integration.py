@@ -107,7 +107,7 @@ class TestProjectorInvocationViaSubprocess:
         out = strategy_dir / "current_state.md"
         assert out.exists(), f"current_state.md not created at {out}"
         content = out.read_text()
-        assert "# VNX Project State" in content
+        assert "# Mission" in content
 
     def test_projector_idempotent_via_subprocess(self, tmp_path: Path) -> None:
         """Two subprocess calls produce byte-identical current_state.md."""

@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
-from .. import project_root as _pr_mod
+try:
+    from .. import project_root as _pr_mod
+except ImportError:
+    import project_root as _pr_mod  # type: ignore[no-redef]
 
 DocStatus = Literal["draft", "active", "superseded", "retired"]
 
