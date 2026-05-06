@@ -68,7 +68,7 @@ def _ollama_json_response(response_text: str) -> bytes:
 
 
 class _FakeHTTPResponse:
-    """Minimal urllib HTTP response mock."""
+    """Minimal urllib HTTP response mock — supports both read() and line iteration."""
 
     def __init__(self, body: bytes, status: int = 200) -> None:
         self._body = body
@@ -76,6 +76,12 @@ class _FakeHTTPResponse:
 
     def read(self) -> bytes:
         return self._body
+
+    def __iter__(self):
+        """Yield body as NDJSON lines for streaming drain compatibility."""
+        for line in self._body.split(b"\n"):
+            if line:
+                yield line + b"\n"
 
     def __enter__(self):
         return self
