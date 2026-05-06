@@ -274,6 +274,7 @@ def _find_gate_request_payload(
     gate: str,
     pr_id: str,
     results_dir: Path,
+    branch: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Locate a gate **request** payload as a fallback when no result exists.
 
@@ -306,6 +307,10 @@ def _find_gate_request_payload(
         if data.get("pr_id") and data["pr_id"] != pr_id:
             continue
         if data.get("gate") and data["gate"] != gate:
+            continue
+        # Reject requests recorded for a different branch — a cross-branch request
+        # with the same pr_id must not satisfy closure for the current branch.
+        if branch and data.get("branch") and data["branch"] != branch:
             continue
 
         # Normalise legacy `status`-only payloads (writer: _request_claude_github)
@@ -442,7 +447,7 @@ def _validate_review_evidence(
             # separate result file — so a missing result is not by itself
             # ambiguous.  Look there before declaring no evidence.
             if result is None:
-                result = _find_gate_request_payload(gate, contract.pr_id, results_dir)
+                result = _find_gate_request_payload(gate, contract.pr_id, results_dir, branch=branch)
             if result is None:
                 checks.append(CheckResult(
                     f"gate_{gate}",
@@ -528,6 +533,12 @@ def _validate_review_evidence(
                     f"gate_{gate}",
                     "FAIL",
                     f"no gate result for required reviewer {gate}",
+                ))
+            elif gate_is_terminal(result) and not result.get("report_path", ""):
+                checks.append(CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    "gemini_review result is missing required report_path field",
                 ))
             else:
                 passed, reason = gate_is_pass(result)
@@ -895,10 +906,11 @@ def _detect_gate_report_contradictions(
         except OSError:
             continue
 
-        # Recognise both standard (status/verdict) and Claude (state=completed/result_status)
-        # terminal formats so a completed Claude review with mismatched evidence is detected.
-        gate_status = _gate_terminal_status(result) or "unknown"
-        passed = gate_status == "pass"
+        # Use gate_is_pass so all PASS_STATES (completed, approve, passed, pass)
+        # are treated as a positive gate outcome for contradiction purposes.
+        # _gate_terminal_status only returns "pass"/"fail"/""  — it misses
+        # status="completed" and status="approve" which are valid pass states.
+        passed, _ = gate_is_pass(result)
         gate_blocking = result.get("blocking_count", 0)
         if not isinstance(gate_blocking, int):
             gate_blocking = len(result.get("blocking_findings") or [])
