@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import sys
 from pathlib import Path
@@ -74,6 +76,31 @@ def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
         pass
 
 
+def _write_central_receipt_mirror(receipt: Dict[str, Any], primary_path: Path) -> None:
+    """Phase 6 P3: best-effort mirror of a receipt to the central per-project path.
+
+    Writes to ~/.vnx-data/<project_id>/state/<filename> in addition to the
+    existing per-project path.  Per-project remains source-of-truth; this
+    never raises and never blocks the primary write.
+    """
+    project_id: Optional[str] = receipt.get("project_id") or os.environ.get("VNX_PROJECT_ID") or None
+    if not project_id:
+        return
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        from vnx_paths import resolve_central_data_dir
+        central_state = resolve_central_data_dir(project_id) / "state"
+        central_state.mkdir(parents=True, exist_ok=True)
+        central_path = central_state / primary_path.name
+        if central_path.resolve() == primary_path.resolve():
+            return
+        with central_path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.write(json.dumps(receipt, separators=(",", ":"), sort_keys=False) + "\n")
+    except Exception:
+        pass
+
+
 def _stamp_identity(receipt: Dict[str, Any]) -> None:
     """Backfill the four-tuple identity fields on a receipt in place.
 
@@ -139,8 +166,11 @@ def append_receipt_payload(
         cache_window_seconds,
     )
 
-    if result.status == "appended" and not skip_enrichment:
-        _run_post_append_hooks(receipt)
+    if result.status == "appended":
+        # Phase 6 P3: best-effort mirror to central per-project path. Never blocks.
+        _write_central_receipt_mirror(receipt, receipt_path)
+        if not skip_enrichment:
+            _run_post_append_hooks(receipt)
 
     return result
 

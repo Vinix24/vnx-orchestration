@@ -71,6 +71,27 @@ except ImportError:
     _build_pqs = None
 
 
+def _central_state_dir() -> Optional[Path]:
+    """Return ~/.vnx-data/<project_id>/state when project_id is resolvable.
+
+    Phase 6 P3: build_t0_state reads both per-project and central paths,
+    preferring central when it exists and has content.
+    """
+    try:
+        project_id = os.environ.get("VNX_PROJECT_ID") or None
+        if not project_id:
+            from vnx_identity import try_resolve_identity
+            identity = try_resolve_identity()
+            if identity:
+                project_id = identity.project_id
+        if not project_id:
+            return None
+        from vnx_paths import resolve_central_data_dir
+        return resolve_central_data_dir(project_id) / "state"
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -265,13 +286,42 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _read_register_events(state_dir: Optional[Path] = None) -> list[dict]:
-    """Read all register events, honoring state_dir for test isolation."""
+    """Read register events from per-project and central paths (Phase 6 P3).
+
+    Merges both sources, deduplicating by JSON content.  Per-project is the
+    source-of-truth; central supplements with events that arrived via dual-write.
+    """
     if _dr_read_events is None:
         return []
+    events: list[dict] = []
+    seen_lines: set = set()
+
+    def _merge(evts: list[dict]) -> None:
+        for ev in evts:
+            try:
+                key = json.dumps(ev, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                key = str(ev)
+            if key in seen_lines:
+                continue
+            seen_lines.add(key)
+            events.append(ev)
+
     try:
-        return _dr_read_events(state_dir=state_dir) or []
+        _merge(_dr_read_events(state_dir=state_dir) or [])
     except Exception:
-        return []
+        pass
+
+    try:
+        central_dir = _central_state_dir()
+        if central_dir is not None:
+            effective_state = state_dir or _STATE_DIR
+            if central_dir.resolve() != effective_state.resolve():
+                _merge(_dr_read_events(state_dir=central_dir) or [])
+    except Exception:
+        pass
+
+    return events
 
 
 _EVENT_TO_STATUS: Dict[str, str] = {
@@ -630,19 +680,37 @@ def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
 # Recent receipts (last N lines from t0_receipts.ndjson)
 # ---------------------------------------------------------------------------
 
-def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
-    receipts_path = state_dir / "t0_receipts.ndjson"
+def _read_receipts_lines(receipts_path: Path) -> List[bytes]:
+    """Read raw NDJSON byte lines from a receipts file. Returns [] on error."""
     if not receipts_path.exists():
         return []
-
     try:
-        raw_lines = receipts_path.read_bytes().splitlines()
+        return receipts_path.read_bytes().splitlines()
+    except Exception:
+        return []
 
-        events: List[Dict[str, Any]] = []
+
+def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
+    """Read recent receipts, merging per-project and central paths (Phase 6 P3).
+
+    Central path supplements per-project (source-of-truth).
+    Duplicate lines (same raw bytes) are deduplicated.
+    """
+    per_project_path = state_dir / "t0_receipts.ndjson"
+    central_dir = _central_state_dir()
+    central_path = (central_dir / "t0_receipts.ndjson") if central_dir else None
+
+    seen: set = set()
+    events: List[Dict[str, Any]] = []
+
+    def _parse_lines(raw_lines: List[bytes]) -> None:
         for raw_line in raw_lines:
             line = raw_line.strip()
             if not line:
                 continue
+            if line in seen:
+                continue
+            seen.add(line)
             try:
                 e = json.loads(line.decode("utf-8"))
                 if e.get("event_type") == "state_mutation":
@@ -658,9 +726,19 @@ def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-        return events[-100:][-n:]
+    try:
+        _parse_lines(_read_receipts_lines(per_project_path))
+        if central_path is not None and central_path != per_project_path:
+            _parse_lines(_read_receipts_lines(central_path))
     except Exception:
-        return []
+        pass
+
+    try:
+        events.sort(key=lambda e: e.get("timestamp") or "")
+    except Exception:
+        pass
+
+    return events[-100:][-n:]
 
 
 # ---------------------------------------------------------------------------

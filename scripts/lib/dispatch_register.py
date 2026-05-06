@@ -160,6 +160,34 @@ def _write_event_locked(path: Path, record: dict) -> None:
         fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+def _central_register_path(project_id: str) -> Optional[Path]:
+    """Resolve ~/.vnx-data/<project_id>/state/dispatch_register.ndjson.
+
+    Phase 6 P3: second write target for dual-write. Returns None on any error.
+    """
+    try:
+        from vnx_paths import resolve_central_data_dir
+        state_dir = resolve_central_data_dir(project_id) / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir / "dispatch_register.ndjson"
+    except Exception:
+        return None
+
+
+def _write_central_register(record: dict, project_id: Optional[str]) -> None:
+    """Best-effort mirror of a register event to the central path. Never raises."""
+    if not project_id:
+        project_id = os.environ.get("VNX_PROJECT_ID") or None
+    if not project_id:
+        return
+    try:
+        path = _central_register_path(project_id)
+        if path is not None:
+            _write_event_locked(path, record)
+    except Exception:
+        pass
+
+
 def append_event(
     event: str,
     *,
@@ -209,9 +237,14 @@ def append_event(
     try:
         _write_event_locked(_resolve_register_path(), record)
         _mirror_to_decision_log(event, record, extra=extra)
-        return True
     except Exception:
         return False
+    # Phase 6 P3: best-effort dual-write to central per-project path.
+    try:
+        _write_central_register(record, project_id)
+    except Exception:
+        pass
+    return True
 
 
 def _log_dispatch_created(log_fn, record: dict, extra_dict: dict) -> None:
