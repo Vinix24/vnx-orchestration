@@ -19,12 +19,13 @@
 #       Compare the dispatch's stamped Project-ID (extracted via
 #       vnx_dispatch_extract_project_id from dispatch_metadata.sh) against
 #       <expected_pid>. Behavior:
-#         - empty stamp (legacy): print 'legacy' and return 0
-#         - matching:             print 'match'  and return 0
-#         - mismatching:          print 'reject' and return 1; appends a
-#                                 [REJECTED: project_id mismatch] marker to
-#                                 the dispatch, then moves it to <rejected_dir>
-#         - malformed expected:   print 'fatal'  and return 2
+#         - empty stamp:        print 'reject' and return 1 (OI-1316 — unstamped
+#                               dispatches are quarantined, not accepted as legacy)
+#         - matching:           print 'match'  and return 0
+#         - mismatching:        print 'reject' and return 1; appends a
+#                               [REJECTED: project_id mismatch] marker to
+#                               the dispatch, then moves it to <rejected_dir>
+#         - malformed expected: print 'fatal'  and return 2
 #
 #       Pure: no logging side effects beyond the dispatch file move + marker.
 #       Callers (dispatcher_v8_minimal.sh) translate the printed status into
@@ -43,11 +44,27 @@ vnx_dispatch_resolve_project_id() {
     return 0
 }
 
-# Canonicalize a directory path. If the path doesn't exist, fall back to
-# the literal string — callers should still get a deterministic answer when
-# a test creates the parent in a tmpdir but the child hasn't been mkdir'd yet.
+# Canonicalize a directory path by resolving symlinks. For non-existent paths,
+# walk up to the deepest existing ancestor, canonicalize that, then append the
+# remaining suffix. This ensures ".." components in a non-existent child path
+# cannot slip past the prefix check — bash case "*" matches "/" so a raw
+# "../other" suffix would falsely satisfy the parent-prefix pattern.
 _vnx_dpg_canon() {
-    if [ -d "$1" ]; then (cd -P "$1" && pwd -P); else printf '%s\n' "$1"; fi
+    local p="$1"
+    if [ -d "$p" ]; then
+        (cd -P "$p" && pwd -P)
+        return
+    fi
+    local base="$p" rest=""
+    while [ -n "$base" ] && [ "$base" != "/" ] && ! [ -d "$base" ]; do
+        rest="/$(basename "$base")${rest}"
+        base="$(dirname "$base")"
+    done
+    if [ -d "$base" ]; then
+        printf '%s\n' "$(cd -P "$base" && pwd -P)${rest}"
+    else
+        printf '%s\n' "$p"
+    fi
 }
 
 vnx_dispatch_assert_dir_under() {
@@ -74,8 +91,15 @@ vnx_dispatch_validate_project_id() {
     stamped="$(vnx_dispatch_extract_project_id "$dispatch" 2>/dev/null || true)"
 
     if [ -z "$stamped" ]; then
-        printf 'legacy\n'
-        return 0
+        if ! grep -q "\[REJECTED: unstamped dispatch\]" "$dispatch" 2>/dev/null; then
+            printf '\n\n[REJECTED: unstamped dispatch] no Project-ID header; dispatcher bound to %q (OI-1316).\n' \
+                "$expected" >> "$dispatch"
+        fi
+        if [ -n "$rejected_dir" ] && [ -d "$rejected_dir" ] && [ -f "$dispatch" ]; then
+            mv "$dispatch" "$rejected_dir/" 2>/dev/null || true
+        fi
+        printf 'reject\n'
+        return 1
     fi
 
     if [ "$stamped" = "$expected" ]; then

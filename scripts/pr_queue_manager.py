@@ -7,6 +7,7 @@ Manages PR queue with dependency tracking and state persistence
 
 import os
 import re
+import subprocess as _subprocess
 import sys
 import json
 import yaml
@@ -28,6 +29,23 @@ from result_contract import (
     result_exit_code,
     result_ok,
 )
+
+
+def _get_project_id() -> str:
+    """Return project ID from VNX_PROJECT_ID env, falling back to git root basename."""
+    pid = os.environ.get("VNX_PROJECT_ID", "").strip()
+    if pid:
+        return pid
+    try:
+        result = _subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip()).name
+    except Exception:
+        pass
+    return "vnx-dev"
 
 
 ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
@@ -1001,6 +1019,7 @@ Review-Stack: {','.join(review_stack) if review_stack else 'none'}"""
         if requires_provider:
             manager_block += f"\nRequires-Provider: {requires_provider}"
         manager_block += f"\nClearContext: {'true' if clear_context else 'false'}"
+        manager_block += f"\nProject-ID: {_get_project_id()}"
 
         manager_block += f"""
 Dispatch-ID: {dispatch_id}
@@ -1577,6 +1596,7 @@ Cognition: {cognition}
 Risk-Class: {pr_data.get('risk_class', feature_metadata.get('risk_class', 'medium'))}
 Merge-Policy: {pr_data.get('merge_policy', feature_metadata.get('merge_policy', 'human'))}
 Review-Stack: {','.join(pr_data.get('review_stack', feature_metadata.get('review_stack', []))) or 'none'}
+Project-ID: {_get_project_id()}
 Dispatch-ID: {dispatch_id}
 PR-ID: {pr_id}
 Parent-Dispatch: none
