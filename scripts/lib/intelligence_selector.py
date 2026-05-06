@@ -1127,6 +1127,14 @@ class IntelligenceSelector:
                 if fetched is not None:
                     canonical_row_d = fetched
 
+            # Phase 1.5 PR-2 fix-forward: pattern_scope (and the underlying
+            # ``category``) must come from the canonical row, same as
+            # title/content/confidence/pattern_category already do. Otherwise a
+            # higher-confidence duplicate with a different category silently
+            # tags the emitted IntelligenceItem with a wrong scope.
+            canonical_category = canonical_row_d.get("category", "") or ""
+            pattern_scope = [canonical_category] if canonical_category else []
+
             source_refs = []
             if canonical_row_d.get("source_dispatch_ids"):
                 try:

@@ -432,16 +432,32 @@ def _redirect_dispatch_pattern_offered(
 ) -> None:
     if not _table_exists(conn, "dispatch_pattern_offered"):
         return
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO dispatch_pattern_offered
-            (dispatch_id, pattern_id, pattern_title, offered_at)
-        SELECT dispatch_id, ?, pattern_title, offered_at
-        FROM   dispatch_pattern_offered
-        WHERE  pattern_id = ?
-        """,
-        (canonical_pattern_id, duplicate_pattern_id),
-    )
+    # Phase 1.5 PR-2 fix-forward: carry the source row's project_id through
+    # the redirect insert. Without this, the re-inserted canonical row falls
+    # back to the table default ('vnx-dev' from migration 0010) and a tenant-
+    # scoped offering can be silently rebound to the wrong project.
+    if _column_exists(conn, "dispatch_pattern_offered", "project_id"):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
+            SELECT dispatch_id, ?, pattern_title, offered_at, project_id
+            FROM   dispatch_pattern_offered
+            WHERE  pattern_id = ?
+            """,
+            (canonical_pattern_id, duplicate_pattern_id),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dispatch_pattern_offered
+                (dispatch_id, pattern_id, pattern_title, offered_at)
+            SELECT dispatch_id, ?, pattern_title, offered_at
+            FROM   dispatch_pattern_offered
+            WHERE  pattern_id = ?
+            """,
+            (canonical_pattern_id, duplicate_pattern_id),
+        )
     conn.execute(
         "DELETE FROM dispatch_pattern_offered WHERE pattern_id = ?",
         (duplicate_pattern_id,),

@@ -546,6 +546,223 @@ class Finding5InjectionTimeStampingForFreshlyInjectedTests(_MultiTenantFixture):
         self.assertAlmostEqual(other_after, 0.85, places=4)
 
 
+class FixForwardCodexFinding1RedirectCarriesProjectIdTests(_MultiTenantFixture):
+    """pattern_dedup --apply must carry project_id through the dispatch_pattern_offered redirect.
+
+    Pre-fix bug: ``_redirect_dispatch_pattern_offered`` re-inserted the
+    redirected row WITHOUT ``project_id``, so the row picked up the table
+    default ('vnx-dev' from migration 0010). A same-content row from a
+    different tenant could be silently rebound onto the wrong project.
+    """
+
+    TITLE = "Cross-tenant redirect protection"
+    DESC = "Same-text rows in different projects must keep their tenant on redirect."
+
+    def test_redirect_preserves_source_row_project_id(self) -> None:
+        # Two duplicates within proj-x (canonical + dup) plus one offered
+        # row each, AND a same-text proj-y baseline that must remain
+        # untouched. After dedup, the proj-x dup row's offering should be
+        # rebound to the proj-x canonical with project_id='proj-x', NOT the
+        # 'vnx-dev' table default.
+        conn = sqlite3.connect(str(self._quality_db_path))
+        try:
+            x_canonical = _seed_pattern(
+                conn,
+                title=self.TITLE,
+                description=self.DESC,
+                project_id="proj-x",
+                confidence=0.8,
+                usage_count=2,
+            )
+            x_duplicate = _seed_pattern(
+                conn,
+                title=self.TITLE,
+                description=self.DESC,
+                project_id="proj-x",
+                confidence=0.7,
+                usage_count=1,
+            )
+            y_baseline = _seed_pattern(
+                conn,
+                title=self.TITLE,
+                description=self.DESC,
+                project_id="proj-y",
+                confidence=0.75,
+                usage_count=4,
+            )
+            now_ts = "2026-05-06T10:00:00Z"
+            conn.execute(
+                """
+                INSERT INTO dispatch_pattern_offered
+                    (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("D-X-CANON", f"intel_sp_{x_canonical}", self.TITLE, now_ts, "proj-x"),
+            )
+            conn.execute(
+                """
+                INSERT INTO dispatch_pattern_offered
+                    (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("D-X-DUP", f"intel_sp_{x_duplicate}", self.TITLE, now_ts, "proj-x"),
+            )
+            conn.execute(
+                """
+                INSERT INTO dispatch_pattern_offered
+                    (dispatch_id, pattern_id, pattern_title, offered_at, project_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("D-Y-1", f"intel_sp_{y_baseline}", self.TITLE, now_ts, "proj-y"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        report = dedup_success_patterns(self._quality_db_path, apply=True)
+        # Exactly one duplicate group: proj-x had 2 rows → 1 collapsed.
+        self.assertEqual(sum(report.values()), 1)
+
+        # The redirected row from D-X-DUP must now point at the canonical
+        # pattern_id AND retain project_id='proj-x'.
+        conn = sqlite3.connect(str(self._quality_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT dispatch_id, pattern_id, project_id
+                FROM   dispatch_pattern_offered
+                WHERE  dispatch_id = 'D-X-DUP'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row, "Redirected D-X-DUP row missing after dedup --apply")
+        self.assertEqual(row["pattern_id"], f"intel_sp_{x_canonical}")
+        # Pre-fix this would have been 'vnx-dev' (the table default).
+        self.assertEqual(row["project_id"], "proj-x")
+
+        # Cross-tenant proj-y row stays exactly as it was.
+        conn = sqlite3.connect(str(self._quality_db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            y_row = conn.execute(
+                """
+                SELECT pattern_id, project_id
+                FROM   dispatch_pattern_offered
+                WHERE  dispatch_id = 'D-Y-1'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(y_row)
+        self.assertEqual(y_row["pattern_id"], f"intel_sp_{y_baseline}")
+        self.assertEqual(y_row["project_id"], "proj-y")
+
+
+class FixForwardCodexFinding2CanonicalCategoryAfterRemapTests(_MultiTenantFixture):
+    """After dedup remap, the IntelligenceItem MUST emit the canonical row's category.
+
+    Pre-fix bug: ``_query_proven_patterns`` derived ``pattern_scope`` from the
+    pre-remap (duplicate) row's ``category`` value, even though title/content/
+    confidence/pattern_category were correctly remapped. A higher-ranked
+    duplicate with a different ``category`` could therefore tag the emitted
+    item with a stale scope.
+    """
+
+    TITLE = "Bound subprocess output capture"
+    DESC = "Stream stdout/stderr with bounded buffers to avoid OOM on long runs."
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Canonical row uses category='governance' (smaller id, lower confidence
+        # and usage_count); duplicate uses category='code' with higher
+        # confidence so the duplicate's row would be processed first.
+        conn = sqlite3.connect(str(self._quality_db_path))
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO success_patterns
+                    (pattern_type, category, title, description, pattern_data,
+                     confidence_score, usage_count, source_dispatch_ids,
+                     first_seen, last_used, project_id, content_hash,
+                     pattern_category)
+                VALUES ('approach', 'governance', ?, ?, '{}', ?, ?, ?,
+                        '2026-04-01', '2026-04-01', ?, ?, 'governance')
+                """,
+                (
+                    self.TITLE,
+                    self.DESC,
+                    0.65,
+                    2,
+                    None,
+                    "proj-h",
+                    self._content_hash(),
+                ),
+            )
+            self._canonical_id = int(cur.lastrowid)
+            cur = conn.execute(
+                """
+                INSERT INTO success_patterns
+                    (pattern_type, category, title, description, pattern_data,
+                     confidence_score, usage_count, source_dispatch_ids,
+                     first_seen, last_used, project_id, content_hash,
+                     pattern_category)
+                VALUES ('approach', 'code', ?, ?, '{}', ?, ?, ?,
+                        '2026-04-01', '2026-04-01', ?, ?, 'code')
+                """,
+                (
+                    self.TITLE,
+                    self.DESC,
+                    0.95,
+                    50,
+                    None,
+                    "proj-h",
+                    self._content_hash(),
+                ),
+            )
+            self._duplicate_id = int(cur.lastrowid)
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertLess(self._canonical_id, self._duplicate_id)
+
+    def _content_hash(self) -> str:
+        from pattern_dedup import _short_content_hash
+        return _short_content_hash(self.TITLE, self.DESC)
+
+    def test_emitted_scope_tags_match_canonical_category(self) -> None:
+        self._set_project("proj-h")
+        # Pass scope_tags explicitly so BOTH rows pass the per-row scope
+        # filter regardless of category; we want the test to exercise the
+        # post-remap pattern_scope assignment, not the pre-filter.
+        selector = IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+        try:
+            result = selector.select(
+                dispatch_id="D-H-1",
+                injection_point="dispatch_create",
+                # explicit task class avoids governance-penalty short-circuit
+                task_class="research_structured",
+                scope_tags=["governance", "code"],
+            )
+        finally:
+            selector.close()
+
+        sp_items = [i for i in result.items if i.item_class == "proven_pattern"]
+        self.assertEqual(len(sp_items), 1)
+        emitted = sp_items[0]
+        self.assertEqual(emitted.item_id, f"intel_sp_{self._canonical_id}")
+        # Pre-fix: emitted.scope_tags would be ['code'] (the duplicate's
+        # category). Post-fix: it must reflect the canonical's 'governance'.
+        self.assertEqual(emitted.scope_tags, ["governance"])
+        # pattern_category was already canonical-sourced; confirm regression
+        # protection so a future refactor cannot silently break it either.
+        self.assertEqual(emitted.pattern_category, "governance")
+
+
 class Finding5StampingIdempotencyTests(_MultiTenantFixture):
     """stamp_source_dispatch_ids is idempotent when called twice for the same dispatch."""
 
