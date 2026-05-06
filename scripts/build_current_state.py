@@ -260,7 +260,7 @@ def _render_resume_hints(roadmap: Roadmap | None, last_updated: str) -> list[str
     lines.append("After `/clear`, T0 should:")
     lines.append("1. Check `## Recommended next move` above for the actionable wave.")
     lines.append("2. Run `python3 scripts/build_current_state.py` to refresh this file.")
-    lines.append("3. Check `.vnx-data/state/t0_state.json` for terminal availability.")
+    lines.append("3. Check `t0_state.json` under your VNX state directory for terminal availability.")
     lines.append("4. Review `## Last 3 decisions` to restore decision context.")
     if roadmap:
         lines.append(
