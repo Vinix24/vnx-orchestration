@@ -128,6 +128,55 @@ visible.
   `strategic_state` block surfaces directly to T0 at SessionStart.
   Feature-end gate; high-blast-radius wave.
 
+## What W-state-3 delivers
+
+W-state-3 rewrites `scripts/build_current_state.py` to consume the typed
+`strategy.roadmap` and `strategy.decisions` modules from W-state-1 and W-state-2.
+The result is a schema-stable, idempotent Markdown file at
+`.vnx-data/strategy/current_state.md`.
+
+### current_state.md schema (PROJECT_STATE_DESIGN §4.2)
+
+The file always contains exactly **seven sections** in this order:
+
+| # | Header | Source | Notes |
+|---|--------|--------|-------|
+| 1 | `# Mission` | `roadmap.title` | Placeholder when roadmap is absent |
+| 2 | `## Current focus` | `next_actionable_wave()` + wave statuses | Shows active/in_progress wave or next planned |
+| 3 | `## Roadmap snapshot` | `phases` list + derived phase status | Phase-level table: id, title, badge, blockers |
+| 4 | `## In flight` | `gh pr list` + `t0_state.json` tracks | Open PRs and active dispatcher slots |
+| 5 | `## Last 3 decisions` | `recent_decisions(n=3)` | Sorted by `(ts, decision_id)` for determinism |
+| 6 | `## Recommended next move` | `next_actionable_wave()` | Includes rationale, branch, risk, dep-chain status |
+| 7 | `## Resume hints` | derived | Static guidance for T0 after `/clear`; contains `Last updated:` mtime line |
+
+#### Idempotency guarantee
+
+Running `python3 scripts/build_current_state.py` twice on unchanged inputs
+produces **byte-identical output**. This is enforced by:
+- Never calling `datetime.now()` — all timestamps come from input-file mtimes.
+- Sorting decisions by `(ts, decision_id)` so ties are resolved deterministically.
+- Sorting active dispatches by track ID (dict ordering is not relied on).
+
+#### Section placeholders
+
+Every section emits a placeholder line when its data source is empty or
+unavailable, so the file always has all seven sections regardless of state:
+
+```
+_No mission set._              # Mission, when roadmap missing or title empty
+_No roadmap available._        # Current focus / Recommended next move, no roadmap file
+_No roadmap data._             # Roadmap snapshot, no phases
+_No open PRs or gh CLI unavailable._   # In flight, gh CLI absent or no open PRs
+_No active dispatches._        # In flight, no active dispatch slots
+_No decisions recorded._       # Last 3 decisions, file absent or empty
+```
+
+#### Hook wiring (W-UX-2 preserved)
+
+The script is invoked automatically via `.claude/settings.json` SessionEnd
+hook and post-merge hook — both from W-UX-2. W-state-3 does not re-wire
+these hooks; it only replaces the script body.
+
 ## Quick smoke test
 
 ```bash
