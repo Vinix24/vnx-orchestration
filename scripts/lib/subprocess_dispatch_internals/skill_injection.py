@@ -100,6 +100,20 @@ def _build_intelligence_section(dispatch_id: str, role: str | None) -> str:
                 selector.record_injection(result, coord_state_dir=state_dir)
             except Exception as exc:
                 logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
+            # Phase 1.5 PR-2 / OI-1315 / OI-1321: stamp source_dispatch_ids
+            # at the record_injection call site even when _record_pattern_usage
+            # is partially or fully skipped.  Without this, FRESHLY injected
+            # patterns can't be matched back to their source dispatch on
+            # receipt arrival (intelligence_persist.update_confidence_from_outcome
+            # filters by ``source_dispatch_ids LIKE '%dispatch_id%'``).  The
+            # call is idempotent and resilient — each item is wrapped
+            # individually so partial failure cannot lose subsequent stamps.
+            try:
+                selector.stamp_source_dispatch_ids(result)
+            except Exception as exc:
+                logger.debug(
+                    "stamp_source_dispatch_ids failed for %s: %s", dispatch_id, exc
+                )
         finally:
             selector.close()
         if not result.items:
