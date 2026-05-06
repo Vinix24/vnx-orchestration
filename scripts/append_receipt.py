@@ -60,7 +60,6 @@ from append_receipt_internals.validation import (
     STATE_MUTATION_EVENTS,
     _is_completion_event,
     _is_subprocess_intermediate_completion,
-    _maybe_reroute_ghost_receipt,
     _requires_dispatch_id,
     _validate_receipt,
     _warn_if_review_gate_missing_dispatch_id,

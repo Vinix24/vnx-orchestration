@@ -1,8 +1,7 @@
-"""Receipt validation, completion-event detection, and ghost-receipt routing."""
+"""Receipt validation and completion-event detection."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .common import (
@@ -97,21 +96,3 @@ def _is_subprocess_intermediate_completion(receipt: Dict[str, Any]) -> bool:
     """True for the intermediate subprocess-adapter completion receipt."""
     event_type = receipt.get("event_type") or receipt.get("event") or ""
     return event_type == "subprocess_completion"
-
-
-def _maybe_reroute_ghost_receipt(receipt: Dict[str, Any], receipts_file: Optional[str]) -> Optional[str]:
-    """Route ghost gate receipts (dispatch_id unset + gate event) to gate_events.ndjson."""
-    if receipts_file is not None or not facade.should_route_to_gate_stream(receipt):
-        return receipts_file
-    try:
-        paths = facade.ensure_env()
-        state_dir = Path(paths["VNX_STATE_DIR"])
-        rerouted = str(facade.gate_events_file(state_dir))
-        facade._emit("INFO", "ghost_receipt_rerouted",
-              gate=str(receipt.get("gate") or ""),
-              pr_id=str(receipt.get("pr_id") or ""),
-              destination=rerouted)
-        return rerouted
-    except Exception as exc:
-        facade._emit("WARN", "ghost_receipt_reroute_failed", error=str(exc))
-        return receipts_file
