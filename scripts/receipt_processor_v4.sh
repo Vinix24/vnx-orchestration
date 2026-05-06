@@ -218,6 +218,7 @@ process_single_report() {
     update_receipt_shadow_state "$terminal"
     _move_dispatch_to_completed
     _psr_release_lease_on_event "$_rf_event_type" "$_rf_status" "$terminal" "$_rf_dispatch_id"
+    run_state_projector
     _psr_update_dispatch_outcome "$_rf_dispatch_id" "$_rf_event_type" "$_rf_status" "$report_path" "$_rf_timestamp"
     attach_pr_evidence "$receipt_json" "$report_path"
     _psr_verify_contract "$_rf_dispatch_id" "$_rf_event_type"
