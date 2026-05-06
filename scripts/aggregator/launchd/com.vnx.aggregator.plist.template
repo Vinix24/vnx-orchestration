@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  VNX Read-Only Federation Aggregator launchd template.
+
+  Operator install (NOT done by this PR):
+    1. cp this file to ~/Library/LaunchAgents/com.vnx.aggregator.plist
+    2. Replace {{REPO_ROOT}} with the full path to vnx-roadmap-autopilot.
+    3. launchctl load ~/Library/LaunchAgents/com.vnx.aggregator.plist
+    4. Verify: launchctl list | grep com.vnx.aggregator
+
+  Reverse:
+    launchctl unload ~/Library/LaunchAgents/com.vnx.aggregator.plist
+    rm ~/Library/LaunchAgents/com.vnx.aggregator.plist
+    rm -rf ~/.vnx-aggregator/    # zero-data-loss removal
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vnx.aggregator</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{REPO_ROOT}}/scripts/aggregator/refresh_loop.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_AGGREGATOR_REPO_ROOT</key>
+    <string>{{REPO_ROOT}}</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/com.vnx.aggregator.out</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.vnx.aggregator.err</string>
+</dict>
+</plist>
