@@ -99,16 +99,19 @@ def _run_guard(dispatch: Path, expected: str, rejected_dir: Path) -> tuple[str, 
     return lines.get("STATUS", ""), int(lines.get("RC", "-1"))
 
 
-def test_legacy_dispatch_accepted(tmp_path):
+def test_legacy_dispatch_quarantined(tmp_path):
+    """Unstamped dispatches are quarantined (OI-1316 — no more legacy passthrough)."""
     d = tmp_path / "legacy.md"
     rej = tmp_path / "rejected"
     rej.mkdir()
     _write_dispatch(d, project_id=None)
     status, rc = _run_guard(d, "vnx-dev", rej)
-    assert status == "legacy"
-    assert rc == 0
-    assert d.exists(), "legacy dispatch must not be moved"
-    assert list(rej.iterdir()) == []
+    assert status == "reject"
+    assert rc == 1
+    assert not d.exists(), "unstamped dispatch must be quarantined (moved out)"
+    moved = rej / "legacy.md"
+    assert moved.exists()
+    assert "[REJECTED: unstamped dispatch]" in moved.read_text()
 
 
 def test_matching_project_id_accepted(tmp_path):
