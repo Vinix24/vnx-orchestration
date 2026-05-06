@@ -669,7 +669,11 @@ class TestClosureVerifierContractEnforcement:
             risk_class="high",
         )
         results_dir = tmp_path / "results"
-        _write_gate_result(results_dir, "gemini_review", "PR-0", _make_gemini_result())
+        # Gemini must carry a report_path — terminal receipts without one are now rejected.
+        gemini_report = tmp_path / "gemini_report.md"
+        gemini_report.write_text("# Gemini Review\nAll clear.\n", encoding="utf-8")
+        _write_gate_result(results_dir, "gemini_review", "PR-0",
+                           _make_gemini_result(report_path=str(gemini_report)))
         _write_gate_result(results_dir, "claude_github_optional", "PR-0",
                            _make_claude_result(state="not_configured"))
         # Deliberately omit codex_gate result
