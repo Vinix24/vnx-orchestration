@@ -41,7 +41,7 @@ function TrackBadge({ track }: { track: string }) {
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const cfg = STATUS_COLORS[status.toLowerCase()] ?? { color: 'var(--color-muted)', bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.1)' };
+  const cfg = STATUS_COLORS[(status ?? '').toLowerCase()] ?? { color: 'var(--color-muted)', bg: 'rgba(255,255,255,0.04)', border: 'rgba(255,255,255,0.1)' };
   return (
     <span
       style={{
