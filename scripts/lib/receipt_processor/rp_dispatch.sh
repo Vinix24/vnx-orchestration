@@ -44,6 +44,21 @@ _auto_release_lease_on_receipt() {
     fi
 }
 
+# Section C2c: Refresh current_state.md after lease release (non-fatal, W-UX-2).
+run_state_projector() {
+    local scripts_dir="${SCRIPTS_DIR:-}"
+    if [ -z "$scripts_dir" ]; then
+        local root
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+        scripts_dir="$root/scripts"
+    fi
+    local projector="$scripts_dir/build_current_state.py"
+    [ -f "$projector" ] || return 0
+    python3 "$projector" 2>/dev/null \
+        && log "DEBUG" "State projector refreshed current_state.md" \
+        || log "WARN" "State projector failed (non-fatal)"
+}
+
 # Section D: Extract PR ID (3-tier) and attach evidence to open items.
 # Reads _rf_* variables. Non-fatal.
 attach_pr_evidence() {
