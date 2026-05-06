@@ -734,6 +734,201 @@ def _build_register_events(state_dir: Optional[Path] = None, limit: int = 50) ->
 
 
 # ---------------------------------------------------------------------------
+# Strategic state (Phase 2 W-state-5: surface strategy/ folder under t0_state)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_strategy_dir(state_dir: Path) -> Path:
+    """Resolve strategy/ folder. ``<data>/strategy`` by convention.
+
+    When ``state_dir`` follows the conventional ``<data>/state`` layout, the
+    strategy folder lives next to it under ``<data>/strategy``. We prefer the
+    sibling-of-state path so tests passing an arbitrary tmp ``state_dir`` see a
+    co-located strategy/ rather than the global ``_DATA_DIR`` fallback.
+    """
+    candidate = state_dir.parent / "strategy"
+    if candidate.exists():
+        return candidate
+    return _DATA_DIR / "strategy"
+
+
+def _decision_to_light_dict(d: Any) -> Dict[str, Any]:
+    rationale = getattr(d, "rationale", "") or ""
+    return {
+        "decision_id": getattr(d, "decision_id", ""),
+        "scope": getattr(d, "scope", ""),
+        "ts": getattr(d, "ts", ""),
+        "rationale": rationale[:200],
+    }
+
+
+def _decision_to_full_dict(d: Any) -> Dict[str, Any]:
+    rec: Dict[str, Any] = {
+        "decision_id": getattr(d, "decision_id", ""),
+        "scope": getattr(d, "scope", ""),
+        "ts": getattr(d, "ts", ""),
+        "rationale": getattr(d, "rationale", "") or "",
+    }
+    supersedes = getattr(d, "supersedes", None)
+    if supersedes:
+        rec["supersedes"] = supersedes
+    evidence_path = getattr(d, "evidence_path", None)
+    if evidence_path:
+        rec["evidence_path"] = evidence_path
+    return rec
+
+
+def _doc_entry_to_dict(e: Any) -> Dict[str, Any]:
+    return {
+        "id": getattr(e, "id", ""),
+        "path": getattr(e, "path", ""),
+        "version": getattr(e, "version", ""),
+        "status": getattr(e, "status", ""),
+        "supersedes": getattr(e, "supersedes", None),
+        "title": getattr(e, "title", ""),
+    }
+
+
+def _strategy_unavailable(reason: str) -> Dict[str, Any]:
+    return {
+        "available": False,
+        "reason": reason,
+        "current_focus": None,
+        "next_actionable_wave_id": None,
+        "recent_decisions": [],
+        "available_indexes": [],
+    }
+
+
+def _build_strategic_state(
+    state_dir: Path, *, strategy_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Light strategic-state surface for ``t0_state.json.strategic_state``.
+
+    Defensive: a missing strategy/ folder, malformed roadmap.yaml, or any
+    unexpected error yields ``available=false`` with no crash. Budget: must
+    not regress total build_t0_state runtime by more than 200ms (W-state-5).
+
+    Returned shape (when ``available=true``):
+      - ``current_focus``: ``{wave_id, title, phase_id}`` or None
+      - ``next_actionable_wave_id``: wave_id of the first ready wave, or None
+      - ``recent_decisions``: up to 5 entries, oldest-first, with truncated
+        ``rationale`` (≤200 chars) for cheap ingest
+      - ``available_indexes``: presence summary for prd/adr indexes
+    """
+    target = strategy_dir if strategy_dir is not None else _resolve_strategy_dir(state_dir)
+    if not target.exists() or not target.is_dir():
+        return _strategy_unavailable("strategy/ folder not found")
+
+    try:
+        from strategy.loaders import load_strategy_for_boot
+        from strategy.roadmap import next_actionable_wave
+    except Exception as e:
+        return _strategy_unavailable(f"strategy module import failed: {type(e).__name__}")
+
+    try:
+        loaded = load_strategy_for_boot(target, decisions_n=5)
+    except Exception as e:
+        return _strategy_unavailable(f"load failed: {type(e).__name__}")
+
+    roadmap = loaded.get("roadmap")
+    next_wave_id: Optional[str] = None
+    current_focus: Optional[Dict[str, Any]] = None
+    if roadmap is not None:
+        try:
+            nw = next_actionable_wave(roadmap)
+        except Exception:
+            nw = None
+        if nw is not None:
+            next_wave_id = nw.wave_id
+            current_focus = {
+                "wave_id": nw.wave_id,
+                "title": nw.title,
+                "phase_id": nw.phase_id,
+            }
+        else:
+            for w in (roadmap.waves or []):
+                if w.status == "in_progress":
+                    current_focus = {
+                        "wave_id": w.wave_id,
+                        "title": w.title,
+                        "phase_id": w.phase_id,
+                    }
+                    break
+
+    recent_decisions_light = [
+        _decision_to_light_dict(d) for d in (loaded.get("decisions") or [])
+    ]
+
+    available_indexes: List[Dict[str, Any]] = []
+    prd = loaded.get("prd_index") or []
+    adr = loaded.get("adr_index") or []
+    if prd:
+        available_indexes.append({"name": "prd_index", "count": len(prd)})
+    if adr:
+        available_indexes.append({"name": "adr_index", "count": len(adr)})
+
+    return {
+        "available": True,
+        "strategy_dir": str(target),
+        "current_focus": current_focus,
+        "next_actionable_wave_id": next_wave_id,
+        "recent_decisions": recent_decisions_light,
+        "available_indexes": available_indexes,
+    }
+
+
+def _build_strategic_state_heavy(
+    state_dir: Path, *, strategy_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Heavy strategic-state surface for ``t0_detail/strategic_state.json``.
+
+    Includes the full roadmap, last 20 decisions, and full prd/adr index
+    payloads. Defensive: same crash semantics as the light builder.
+    """
+    target = strategy_dir if strategy_dir is not None else _resolve_strategy_dir(state_dir)
+    if not target.exists() or not target.is_dir():
+        return {"available": False, "reason": "strategy/ folder not found"}
+
+    try:
+        from strategy.loaders import load_strategy_for_boot
+        from strategy.roadmap import roadmap_to_dict
+    except Exception as e:
+        return {
+            "available": False,
+            "reason": f"strategy module import failed: {type(e).__name__}",
+        }
+
+    try:
+        loaded = load_strategy_for_boot(target, decisions_n=20)
+    except Exception as e:
+        return {"available": False, "reason": f"load failed: {type(e).__name__}"}
+
+    roadmap = loaded.get("roadmap")
+    roadmap_dict: Optional[Dict[str, Any]] = None
+    if roadmap is not None:
+        try:
+            roadmap_dict = roadmap_to_dict(roadmap)
+        except Exception:
+            roadmap_dict = None
+
+    decisions_full = [
+        _decision_to_full_dict(d) for d in (loaded.get("decisions") or [])
+    ]
+    prd_index = [_doc_entry_to_dict(e) for e in (loaded.get("prd_index") or [])]
+    adr_index = [_doc_entry_to_dict(e) for e in (loaded.get("adr_index") or [])]
+
+    return {
+        "available": True,
+        "strategy_dir": str(target),
+        "roadmap": roadmap_dict,
+        "decisions": decisions_full,
+        "prd_index": prd_index,
+        "adr_index": adr_index,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -771,6 +966,8 @@ def build_t0_state(
             pr_queue = _build_pqs(state_dir)
         except Exception:
             pass
+    strategic_state = _build_strategic_state(state_dir)
+    strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(state_dir, db_ok)
 
@@ -792,6 +989,8 @@ def build_t0_state(
         "git_context": git_context,
         "system_health": system_health,
         "pr_queue": pr_queue,
+        "strategic_state": strategic_state,
+        "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
 
@@ -875,6 +1074,10 @@ _DETAIL_SECTION_MAP: Dict[str, str] = {
     "dispatch_register_events": "dispatch_register",
     "active_chains": "active_chains",
     "intelligence": "intelligence",
+    # Phase 2 W-state-5: heavy strategic_state lives in a private state key
+    # (``_strategic_state_heavy``) so it is excluded from t0_state.json/the
+    # brief output but still mirrored to t0_detail/strategic_state.json.
+    "_strategic_state_heavy": "strategic_state",
 }
 
 
@@ -1034,6 +1237,10 @@ def main() -> int:
     try:
         t_start = time.monotonic()
         state = build_t0_state(_STATE_DIR, _DISPATCH_DIR)
+        # Heavy strategic_state is for t0_detail/ only — do not let it leak
+        # into t0_state.json or the brief output. Re-attached below for the
+        # detail-file write step, then dropped when the function returns.
+        _strategic_heavy = state.pop("_strategic_state_heavy", None)
         payload = _state_to_brief(state) if args.format == "brief" else state
         _write_atomic(output_path, payload)
         # Write cheap index — always loaded for cold-start orientation (Sprint 4a)
@@ -1043,9 +1250,13 @@ def main() -> int:
             pass  # best-effort — must not block SessionStart
         # Write per-section detail files — loaded on-demand (Sprint 4a)
         try:
+            if _strategic_heavy is not None:
+                state["_strategic_state_heavy"] = _strategic_heavy
             _write_detail_files(state, _STATE_DIR / "t0_detail")
         except Exception:
             pass  # best-effort — must not block SessionStart
+        finally:
+            state.pop("_strategic_state_heavy", None)
         # GC: prune stale t0_detail snapshots (W-UX-4)
         try:
             _gc_t0_detail(_STATE_DIR / "t0_detail")
