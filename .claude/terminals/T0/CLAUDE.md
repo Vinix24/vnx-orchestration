@@ -120,6 +120,17 @@ When a required gate remains only `queued` or `requested`:
 - do not close the PR
 - either start execution, dispatch execution, or classify the missing runner path as a blocker
 
+### CI Workflow Conclusion Verification (mandatory before any merge)
+
+BEFORE merging any PR, MUST verify the workflow-level VNX CI conclusion equals "success", not just that individual checks like Profile A appear green in `gh pr checks`.
+
+Run:
+    gh run list --branch <pr-head-ref> --workflow "VNX CI" --limit 1 --json conclusion --jq '.[0].conclusion'
+
+If output is anything other than "success", do NOT merge. Investigate the cause, dispatch a fix-forward, re-run CI, and only merge when the workflow conclusion equals "success".
+
+RATIONALE: `gh pr checks` lists individual job names but the workflow as a whole can still produce a "failure" conclusion (e.g. multi-step Profile A whose Legacy path gate sub-step fails) while the visible names appear "pass". Multiple late-night merges on 2026-05-06/07 had VNX CI = failure that was missed by checking individual names only — Legacy path gate was tripping on a literal `.vnx-data/state/` string in build_current_state.py:263 that the rg-based gate flagged repository-wide on main, but did not flag in PR-scoped diffs.
+
 ## Doubt Escalation Policy
 
 When uncertain, use this order:
