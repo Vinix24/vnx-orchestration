@@ -47,7 +47,10 @@ jobs:
             --glob "!**/intelligence_export.py" \
             --glob "!**/intelligence_import.py" \
             --glob "!**/vnx_install.py" \
-            --glob "!**/commands/merge_preflight.sh" || true)
+            --glob "!**/commands/merge_preflight.sh" \
+            --glob "!**/migrate_to_central_vnx.py" \
+            --glob "!**/migrate_dry_run.py" \
+            || true)
           if [ -n "$matches" ]; then
             echo "$matches"
             echo "Legacy path literals detected. Use VNX_STATE_DIR via vnx_paths."
@@ -261,7 +264,10 @@ jobs:
             --glob "!**/intelligence_export.py" \
             --glob "!**/intelligence_import.py" \
             --glob "!**/vnx_install.py" \
-            --glob "!**/commands/merge_preflight.sh" || true)
+            --glob "!**/commands/merge_preflight.sh" \
+            --glob "!**/migrate_to_central_vnx.py" \
+            --glob "!**/migrate_dry_run.py" \
+            || true)
           if [ -n "$matches" ]; then
             echo "$matches"
             echo "Legacy path literals detected. Use VNX_STATE_DIR via vnx_paths."
