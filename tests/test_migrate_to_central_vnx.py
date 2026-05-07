@@ -801,6 +801,466 @@ def test_apply_preserves_snippet_links_across_fts_rebuild(fixture_env):
     assert all(row[1] == row[2] for row in rows)
 
 
+# ---------------------------------------------------------------------------
+# Round-2 regression tests (codex BLOCKING findings against b937f25)
+# ---------------------------------------------------------------------------
+
+
+def test_round2_snapshot_restore_preserves_wal_committed_state(tmp_path: Path):
+    """ROUND-2 BLOCKING 1: snapshot/restore must survive WAL-mode commits.
+
+    Plain ``shutil.copy2`` of the base ``.db`` file misses content held in
+    the ``-wal`` sidecar. The new implementation uses the SQLite online
+    backup API which produces a transactionally consistent single-file
+    copy regardless of journal mode.
+
+    Test sequence:
+      1. Create a WAL-mode DB and commit a transaction (state visible to
+         readers but the WAL is intentionally not yet checkpointed).
+      2. Take a snapshot.
+      3. Mutate the live DB (insert another row, then delete the original).
+      4. Restore from the snapshot.
+      5. Verify the originally-committed row is present and the post-snapshot
+         mutation is gone.
+    """
+    qi = tmp_path / "qi.db"
+    rc = tmp_path / "rc.db"
+    for db in (qi, rc):
+        con = sqlite3.connect(db)
+        try:
+            con.execute("PRAGMA journal_mode = WAL")
+            con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT)")
+            con.execute(
+                "INSERT INTO t (id, label) VALUES (1, ?)",
+                (f"committed-{db.stem}",),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    # Take a snapshot. The backup API copies a transactionally consistent
+    # view regardless of where committed pages physically live (base vs WAL).
+    snapshots = M._snapshot_central(qi, rc)
+    assert set(snapshots) == {"qi", "rc"}
+    assert snapshots["qi"].stat().st_size > 0
+    assert snapshots["rc"].stat().st_size > 0
+
+    # Mutate live DBs after snapshot.
+    for db in (qi, rc):
+        con = sqlite3.connect(db)
+        try:
+            con.execute("INSERT INTO t (id, label) VALUES (2, 'after-snapshot')")
+            con.execute("DELETE FROM t WHERE id = 1")
+            con.commit()
+        finally:
+            con.close()
+
+    M._restore_snapshot(snapshots, qi, rc)
+
+    for db in (qi, rc):
+        con = sqlite3.connect(db)
+        try:
+            rows = sorted(con.execute("SELECT id, label FROM t").fetchall())
+        finally:
+            con.close()
+        assert rows == [(1, f"committed-{db.stem}")], (
+            f"snapshot/restore lost WAL-committed row in {db.name}; got {rows}"
+        )
+
+    # Snapshot files cleaned up on restore.
+    for snap in snapshots.values():
+        assert not snap.exists(), f"snapshot tmp not cleaned up: {snap}"
+
+
+def test_round2_snapshot_via_backup_api_handles_uncheckpointed_wal(tmp_path: Path):
+    """Stronger variant: ensures the snapshot helper still produces a complete
+    copy when the source's committed pages are still entirely in the WAL
+    sidecar (no auto-checkpoint has occurred yet).
+
+    This is the scenario where the old ``shutil.copy2`` of just the ``.db``
+    file would have produced an empty/incomplete snapshot.
+    """
+    db = tmp_path / "wal_source.db"
+    holder = sqlite3.connect(db)
+    holder.execute("PRAGMA journal_mode = WAL")
+    holder.execute("PRAGMA wal_autocheckpoint = 0")
+    holder.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT)")
+    holder.execute("INSERT INTO t (id, label) VALUES (1, 'wal-only-state')")
+    holder.commit()
+    try:
+        # Snapshot WHILE holder is still open and WAL has uncheckpointed pages.
+        snapshots = M._snapshot_central(db, db)
+        assert "qi" in snapshots
+        snap = snapshots["qi"]
+
+        # Verify the snapshot is independently readable — proving the backup
+        # API materialized every committed page, not just the base file.
+        check = sqlite3.connect(snap)
+        try:
+            rows = list(check.execute("SELECT id, label FROM t"))
+        finally:
+            check.close()
+        assert rows == [(1, "wal-only-state")], (
+            f"snapshot missing WAL-only data; got {rows} (Finding 1 round 2)"
+        )
+    finally:
+        holder.close()
+        # cleanup tmp snapshot file in case _restore_snapshot wasn't called.
+        for sn in snapshots.values():
+            if sn.exists():
+                sn.unlink()
+
+
+def test_round2_collision_rewrites_ancillary_dispatch_columns(tmp_path: Path):
+    """ROUND-2 BLOCKING 2: ``related_dispatch_id``, ``parent_dispatch``,
+    ``source_dispatch_ids`` (JSON), and ``coordination_events.entity_id``
+    must all be project-prefixed by the live migrator.
+    """
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
+
+    central_db = tmp_path / "central.db"
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE quality_alerts (
+                id INTEGER PRIMARY KEY,
+                message TEXT NOT NULL,
+                related_dispatch_id TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY,
+                dispatch_id TEXT NOT NULL,
+                parent_dispatch TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                title TEXT,
+                source_dispatch_ids TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE coordination_events (
+                id INTEGER PRIMARY KEY,
+                event_id TEXT UNIQUE,
+                event_type TEXT,
+                entity_type TEXT,
+                entity_id TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        M._ensure_rowid_map_table(con)
+
+        src_db = tmp_path / "mc_src.db"
+        src = sqlite3.connect(src_db)
+        try:
+            src.executescript(
+                """
+                CREATE TABLE quality_alerts (
+                    id INTEGER PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    related_dispatch_id TEXT
+                );
+                CREATE TABLE dispatch_metadata (
+                    id INTEGER PRIMARY KEY,
+                    dispatch_id TEXT NOT NULL,
+                    parent_dispatch TEXT
+                );
+                CREATE TABLE success_patterns (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT,
+                    source_dispatch_ids TEXT
+                );
+                CREATE TABLE coordination_events (
+                    id INTEGER PRIMARY KEY,
+                    event_id TEXT UNIQUE,
+                    event_type TEXT,
+                    entity_type TEXT,
+                    entity_id TEXT
+                );
+                """
+            )
+            src.execute(
+                "INSERT INTO quality_alerts (message, related_dispatch_id) VALUES (?, ?)",
+                ("alert", "shared-dispatch"),
+            )
+            src.execute(
+                "INSERT INTO dispatch_metadata (dispatch_id, parent_dispatch) VALUES (?, ?)",
+                ("mc-disp-1", "shared-parent"),
+            )
+            src.execute(
+                "INSERT INTO success_patterns (title, source_dispatch_ids) VALUES (?, ?)",
+                ("p1", '["shared-dispatch","other-dispatch"]'),
+            )
+            src.execute(
+                "INSERT INTO coordination_events (event_id, event_type, entity_type, entity_id) "
+                "VALUES (?, ?, ?, ?)",
+                ("evt-1", "dispatch_completed", "dispatch", "shared-dispatch"),
+            )
+            src.execute(
+                "INSERT INTO coordination_events (event_id, event_type, entity_type, entity_id) "
+                "VALUES (?, ?, ?, ?)",
+                ("evt-2", "lease_acquired", "lease", "T1"),
+            )
+            src.commit()
+        finally:
+            src.close()
+
+        attach_readonly(con, "src", src_db)
+        project = ProjectEntry(name="mc", path=tmp_path / "mc", project_id="mc")
+        con.execute("BEGIN")
+        try:
+            for tbl in (
+                "quality_alerts",
+                "dispatch_metadata",
+                "success_patterns",
+                "coordination_events",
+            ):
+                M._import_table(con, "src", project, tbl)
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        related = con.execute(
+            "SELECT related_dispatch_id FROM quality_alerts"
+        ).fetchone()[0]
+        assert related == "mc:shared-dispatch", (
+            f"related_dispatch_id not prefixed: {related}"
+        )
+
+        dispatch_id, parent = con.execute(
+            "SELECT dispatch_id, parent_dispatch FROM dispatch_metadata"
+        ).fetchone()
+        assert dispatch_id == "mc:mc-disp-1"
+        assert parent == "mc:shared-parent", (
+            f"parent_dispatch not prefixed: {parent}"
+        )
+
+        json_array = con.execute(
+            "SELECT source_dispatch_ids FROM success_patterns"
+        ).fetchone()[0]
+        decoded = json.loads(json_array)
+        assert decoded == ["mc:shared-dispatch", "mc:other-dispatch"], (
+            f"source_dispatch_ids JSON not prefixed: {decoded}"
+        )
+
+        events = dict(
+            con.execute(
+                "SELECT event_id, entity_id FROM coordination_events"
+            ).fetchall()
+        )
+        assert events["evt-1"] == "mc:shared-dispatch", (
+            "dispatch entity_id must be project-prefixed"
+        )
+        assert events["evt-2"] == "T1", (
+            "non-dispatch/pattern entity_id must NOT be prefixed"
+        )
+
+        # Idempotency: importing the same source twice must not double-prefix.
+        con.execute("BEGIN")
+        try:
+            for tbl in (
+                "quality_alerts",
+                "dispatch_metadata",
+                "success_patterns",
+                "coordination_events",
+            ):
+                M._import_table(con, "src", project, tbl)
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        related2 = con.execute(
+            "SELECT related_dispatch_id FROM quality_alerts"
+        ).fetchone()[0]
+        assert related2 == "mc:shared-dispatch", (
+            f"second import double-prefixed: {related2}"
+        )
+    finally:
+        con.close()
+
+
+def test_round2_skipped_resolved_on_subsequent_success(tmp_path: Path):
+    """ROUND-2 BLOCKING 3: a row skipped on run 1 that imports successfully
+    on run 2 must mark its prior skip as resolved, and ``verify_import``
+    must filter out the resolved record so it does NOT count as a
+    discrepancy.
+    """
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
+
+    src_db = tmp_path / "src.db"
+    con = sqlite3.connect(src_db)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT,
+                pattern_hash TEXT,
+                project_id TEXT
+            );
+            INSERT INTO pattern_usage VALUES ('p1', 'src-title', 'h', 'mc');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    central_db = tmp_path / "central.db"
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT,
+                pattern_hash TEXT,
+                project_id TEXT
+            );
+            INSERT INTO pattern_usage VALUES ('mc:p1', 'pre-existing', 'pre', 'mc');
+            """
+        )
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        attach_readonly(con, "src", src_db)
+        project = ProjectEntry(name="mc", path=tmp_path / "mc", project_id="mc")
+
+        # Run 1: central row already present → INSERT OR IGNORE skips.
+        con.execute("BEGIN")
+        try:
+            M._import_table(con, "src", project, "pattern_usage", run_id="run-1")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        unresolved_run1 = con.execute(
+            "SELECT COUNT(*) FROM p4_import_skipped WHERE resolved_at IS NULL"
+        ).fetchone()[0]
+        assert unresolved_run1 == 1
+
+        # Operator repairs the central state — drop the conflict row.
+        con.execute("DELETE FROM pattern_usage WHERE pattern_id = 'mc:p1'")
+
+        # Run 2: same row imports successfully now.
+        con.execute("BEGIN")
+        try:
+            summary = M._import_table(con, "src", project, "pattern_usage", run_id="run-2")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        assert summary.rows_inserted == 1
+
+        # The prior skip must be marked resolved.
+        unresolved_after = con.execute(
+            "SELECT COUNT(*) FROM p4_import_skipped WHERE resolved_at IS NULL"
+        ).fetchone()[0]
+        assert unresolved_after == 0, (
+            "successful re-import did not mark prior skip resolved (Finding 3 round 2)"
+        )
+
+        # _collect_skipped_rows must filter on resolved_at IS NULL.
+        skipped = M._collect_skipped_rows(central_db, "test")
+        assert skipped == [], f"resolved skips must not surface: {skipped}"
+
+        # And run-scoped lookups must also filter to current run only.
+        skipped_run2 = M._collect_skipped_rows(central_db, "test", run_id="run-2")
+        assert skipped_run2 == []
+    finally:
+        con.close()
+
+
+def test_round2_dry_run_corrupt_db_returns_exit_code_3(tmp_path: Path):
+    """ROUND-2 BLOCKING 4: corrupt source DB must surface as exit code 3,
+    not a clean preflight.
+    """
+    import scripts.migrate_dry_run as DR
+
+    proj_dir = tmp_path / "proj"
+    state = proj_dir / ".vnx-data" / "state"
+    state.mkdir(parents=True)
+
+    # Build one valid DB to populate the state dir, then corrupt it.
+    valid = state / "quality_intelligence.db"
+    con = sqlite3.connect(valid)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT,
+                pattern_hash TEXT,
+                project_id TEXT
+            );
+            INSERT INTO pattern_usage VALUES ('p1', 't', 'h', 'mc');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    # Corrupt the file by truncating mid-page. SQLite header is 100 bytes;
+    # writing garbage past it leaves the header valid but the page table
+    # malformed. The attach succeeds but COUNT(*) raises.
+    raw = valid.read_bytes()
+    valid.write_bytes(raw[:100] + b"\x00" * 16 + b"GARBAGE-PAGE-DATA" * 64)
+
+    # And add an empty rc DB so we exercise both attach attempts.
+    rc = state / "runtime_coordination.db"
+    rc.write_bytes(b"this is not a sqlite database at all")
+
+    registry = tmp_path / "projects.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "projects": [
+                    {
+                        "name": "proj",
+                        "path": str(proj_dir),
+                        "project_id": "mc",
+                    }
+                ],
+            }
+        )
+    )
+
+    out_path = tmp_path / "report.md"
+    rc_code = DR.main(["--registry", str(registry), "--out", str(out_path)])
+    assert rc_code == 3, (
+        f"dry-run on corrupted source DB must exit 3; got {rc_code}"
+    )
+    json_path = out_path.with_suffix(out_path.suffix + ".json")
+    assert json_path.exists()
+    plan = json.loads(json_path.read_text())
+    assert plan.get("read_errors"), (
+        "corrupt source must populate read_errors in the plan"
+    )
+
+    # --verify-only on a corrupt source must also fail with exit 4 (verification failure).
+    central_state = tmp_path / "central"
+    central_state.mkdir()
+    central_qi = central_state / "quality_intelligence.db"
+    central_rc = central_state / "runtime_coordination.db"
+    sqlite3.connect(central_qi).close()
+    sqlite3.connect(central_rc).close()
+    rc_verify = M.main([
+        "--verify-only",
+        "--registry", str(registry),
+        "--central-state", str(central_state),
+    ])
+    assert rc_verify == 4, (
+        f"--verify-only on unreadable source must return 4; got {rc_verify}"
+    )
+
+
 def test_apply_migration_0016_rolls_back_on_failure(tmp_path: Path, monkeypatch):
     """Finding 4: ``apply_migration_0016`` must wrap its DROP+rebuild in an
     explicit transaction so a failure after ``DROP TABLE code_snippets``

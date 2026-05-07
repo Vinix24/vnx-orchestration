@@ -18,11 +18,22 @@ Exit codes:
     0  — preflight produced reports successfully (collisions/drift may still exist)
     2  — registry not found or unreadable
     3  — at least one source DB unreadable (catastrophic preflight failure)
+
+Round-2 fixes (2026-05-07):
+    - Read failures (corrupt source DB, malformed table) no longer silently
+      degrade to zero rows. They accumulate into ``plan["read_errors"]``
+      and force exit code 3. (BLOCKING 4.)
+    - Collision detection now inspects every cross-tenant identifier
+      carrier flagged by ``migrate_to_central_vnx._is_collision_column``
+      and the JSON-array columns enumerated there, plus
+      ``coordination_events.entity_id`` when the entity_type is dispatch
+      or pattern. (BLOCKING 2.)
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import logging
@@ -49,6 +60,14 @@ from scripts.aggregator.build_central_view import (  # noqa: E402
 from scripts.aggregator.schema_drift_report import (  # noqa: E402
     _project_schema,
     compute_drift,
+)
+from scripts.migrate_to_central_vnx import (  # noqa: E402
+    COLLISION_ENTITY_ID_COLUMN,
+    COLLISION_ENTITY_TABLE,
+    COLLISION_ENTITY_TYPE_COLUMN,
+    COLLISION_ENTITY_TYPES_PREFIXED,
+    COLLISION_JSON_ARRAY_COLUMNS,
+    _is_collision_column,
 )
 
 LOG = logging.getLogger("vnx.migrate.dryrun")
@@ -101,28 +120,53 @@ class TablePlan:
     has_project_id_column: bool
 
 
-def _safe_count(con: sqlite3.Connection, alias: str, table: str) -> tuple[int, bool]:
-    """Return (row_count, has_project_id_column) for `alias.table`. Skips missing tables."""
+class _ReadError(RuntimeError):
+    """Raised by _safe_count when a present table is unreadable.
+
+    Round-2 (Finding 4): we used to swallow ``sqlite3.Error`` and report
+    zero rows, which let a corrupted source DB pass dry-run silently.
+    Errors now propagate up to ``_plan_for_db`` and accumulate into
+    ``plan["read_errors"]`` for operator review.
+    """
+
+
+def _safe_count(con: sqlite3.Connection, alias: str, table: str) -> tuple[int, bool, bool]:
+    """Return ``(row_count, has_project_id_column, present)``.
+
+    ``present=False`` means the table simply doesn't exist in this source
+    (acceptable schema drift — for example, the source predates a table
+    added later). ``present=True`` with a SQLite error during count means
+    the table exists but is unreadable; that case raises ``_ReadError``
+    instead of silently returning zero rows. (Finding 4 round 2.)
+    """
+    cur = con.execute(
+        f"SELECT 1 FROM {alias}.sqlite_master WHERE type IN ('table','virtual') AND name=?",
+        (table,),
+    )
+    if cur.fetchone() is None:
+        return (0, False, False)
     try:
-        cur = con.execute(
-            f"SELECT 1 FROM {alias}.sqlite_master WHERE type IN ('table','virtual') AND name=?",
-            (table,),
-        )
-        if cur.fetchone() is None:
-            return (0, False)
         cols = [row[1] for row in con.execute(f"PRAGMA {alias}.table_info({table})")]
         has_pid = "project_id" in cols
-        # Defensive read: SQLite may raise if the table is malformed.
         n = con.execute(f"SELECT COUNT(*) FROM {alias}.{table}").fetchone()[0]
-        return (int(n), bool(has_pid))
     except sqlite3.Error as exc:
-        LOG.warning("count failed alias=%s table=%s err=%s", alias, table, exc)
-        return (0, False)
+        raise _ReadError(f"alias={alias} table={table} err={exc}") from exc
+    return (int(n), bool(has_pid), True)
 
 
 def _plan_for_db(
-    project: ProjectEntry, db_filename: str, tables: Iterable[str]
+    project: ProjectEntry,
+    db_filename: str,
+    tables: Iterable[str],
+    read_errors: list[dict[str, object]],
 ) -> list[TablePlan]:
+    """Build per-table row-count plans. Records read errors instead of swallowing.
+
+    Round-2 fix (Finding 4): an attach failure (corrupt SQLite header,
+    truncated file) and a per-table read error both append a structured
+    record to ``read_errors`` so the caller can fail the dry-run with
+    exit code 3 instead of reporting a clean preflight.
+    """
     db_path = project.state_dir / db_filename
     if not db_path.is_file():
         return []
@@ -132,10 +176,33 @@ def _plan_for_db(
         try:
             attach_readonly(con, "src", db_path)
         except sqlite3.Error as exc:
-            LOG.warning("attach failed project=%s db=%s err=%s", project.project_id, db_filename, exc)
+            read_errors.append(
+                {
+                    "project_id": project.project_id,
+                    "db": db_filename,
+                    "phase": "attach",
+                    "path": str(db_path),
+                    "error": str(exc),
+                }
+            )
             return []
         for tbl in tables:
-            n, has_pid = _safe_count(con, "src", tbl)
+            try:
+                n, has_pid, present = _safe_count(con, "src", tbl)
+            except _ReadError as exc:
+                read_errors.append(
+                    {
+                        "project_id": project.project_id,
+                        "db": db_filename,
+                        "phase": "count",
+                        "table": tbl,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            if not present:
+                # Schema drift: table doesn't exist in this source. Acceptable.
+                continue
             out.append(
                 TablePlan(
                     project_id=project.project_id,
@@ -145,63 +212,220 @@ def _plan_for_db(
                     has_project_id_column=has_pid,
                 )
             )
-        con.execute("DETACH DATABASE src")
+        with contextlib.suppress(sqlite3.OperationalError):
+            con.execute("DETACH DATABASE src")
     finally:
         con.close()
     return out
 
 
-def _detect_collisions(projects: list[ProjectEntry]) -> dict:
-    """Detect dispatch_id and pattern_id collisions across projects.
+def _list_user_tables(con: sqlite3.Connection, alias: str) -> list[str]:
+    return [
+        row[0]
+        for row in con.execute(
+            f"SELECT name FROM {alias}.sqlite_master "
+            f"WHERE type IN ('table','virtual') AND name NOT LIKE 'sqlite_%'"
+        )
+    ]
 
-    Pure read — attaches each project DB in ``?mode=ro``. Returns:
-        {
-            "dispatch_id": {<id>: [<project_id>, ...]},
-            "pattern_id":  {<id>: [<project_id>, ...]},
-        }
-    Only ids appearing in >1 project are reported.
+
+def _table_columns_dry(con: sqlite3.Connection, alias: str, table: str) -> list[str]:
+    return [row[1] for row in con.execute(f"PRAGMA {alias}.table_info({table})")]
+
+
+def _classify_dispatch_or_pattern(column: str) -> str:
+    """Bucket a collision-eligible column into ``dispatch_id`` / ``pattern_id``.
+
+    Used only by the dry-run reporter for grouping output. Free-form
+    ``parent_dispatch`` is treated as a dispatch identifier; ``entity_id``
+    falls under ``dispatch_id`` because the entity_type filter resolves
+    pattern entities into the same bucket logically.
+    """
+    if "pattern" in column:
+        return "pattern_id"
+    return "dispatch_id"
+
+
+def _scan_collisions_in_db(
+    con: sqlite3.Connection,
+    alias: str,
+    project_id: str,
+    dispatch_seen: dict[str, list[str]],
+    pattern_seen: dict[str, list[str]],
+    read_errors: list[dict[str, object]],
+    db_label: str,
+) -> None:
+    """Walk every user table once and harvest cross-project identifiers.
+
+    Round-2 (Finding 2): the previous implementation only looked at
+    ``dispatches.dispatch_id`` and ``pattern_usage.pattern_id``. That left
+    ``related_dispatch_id``, ``parent_dispatch``, ``source_dispatch_ids``
+    (JSON), and ``coordination_events.entity_id`` blind to collisions.
+    The schema-driven walk below mirrors the live migrator's prefixing
+    rules so dry-run and apply detect the same collisions.
+    """
+    try:
+        tables = _list_user_tables(con, alias)
+    except sqlite3.Error as exc:
+        read_errors.append(
+            {
+                "project_id": project_id,
+                "db": db_label,
+                "phase": "list_tables",
+                "error": str(exc),
+            }
+        )
+        return
+
+    for table in tables:
+        try:
+            columns = _table_columns_dry(con, alias, table)
+        except sqlite3.Error as exc:
+            read_errors.append(
+                {
+                    "project_id": project_id,
+                    "db": db_label,
+                    "phase": "table_info",
+                    "table": table,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        scalar_cols = [c for c in columns if _is_collision_column(c)]
+        json_cols = [c for c in columns if c in COLLISION_JSON_ARRAY_COLUMNS]
+        is_entity_table = (
+            table == COLLISION_ENTITY_TABLE
+            and COLLISION_ENTITY_ID_COLUMN in columns
+            and COLLISION_ENTITY_TYPE_COLUMN in columns
+        )
+
+        select_targets: list[str] = list(scalar_cols)
+        select_targets.extend(c for c in json_cols if c not in select_targets)
+        if is_entity_table:
+            for c in (COLLISION_ENTITY_TYPE_COLUMN, COLLISION_ENTITY_ID_COLUMN):
+                if c not in select_targets:
+                    select_targets.append(c)
+        if not select_targets:
+            continue
+
+        select_sql = ", ".join(f'"{c}"' for c in select_targets)
+        try:
+            rows = list(
+                con.execute(f"SELECT {select_sql} FROM {alias}.{table}")
+            )
+        except sqlite3.Error as exc:
+            read_errors.append(
+                {
+                    "project_id": project_id,
+                    "db": db_label,
+                    "phase": "select",
+                    "table": table,
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        target_index = {name: idx for idx, name in enumerate(select_targets)}
+        for row in rows:
+            for column in scalar_cols:
+                value = row[target_index[column]]
+                if value is None or value == "":
+                    continue
+                bucket = (
+                    pattern_seen
+                    if _classify_dispatch_or_pattern(column) == "pattern_id"
+                    else dispatch_seen
+                )
+                bucket.setdefault(str(value), []).append(project_id)
+
+            for column in json_cols:
+                value = row[target_index[column]]
+                if not value:
+                    continue
+                try:
+                    parsed = json.loads(value) if isinstance(value, str) else value
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(parsed, list):
+                    continue
+                bucket = (
+                    pattern_seen
+                    if _classify_dispatch_or_pattern(column) == "pattern_id"
+                    else dispatch_seen
+                )
+                for item in parsed:
+                    if item is None or item == "":
+                        continue
+                    bucket.setdefault(str(item), []).append(project_id)
+
+            if is_entity_table:
+                etype = row[target_index[COLLISION_ENTITY_TYPE_COLUMN]]
+                eid = row[target_index[COLLISION_ENTITY_ID_COLUMN]]
+                if (etype or "") and eid:
+                    etype_l = str(etype).lower()
+                    if etype_l in COLLISION_ENTITY_TYPES_PREFIXED:
+                        bucket = (
+                            pattern_seen if etype_l == "pattern" else dispatch_seen
+                        )
+                        bucket.setdefault(str(eid), []).append(project_id)
+
+
+def _detect_collisions(
+    projects: list[ProjectEntry],
+    read_errors: list[dict[str, object]] | None = None,
+) -> dict:
+    """Detect cross-project dispatch_id / pattern_id collisions.
+
+    Round-2 fix (Finding 2): scans every column flagged by
+    :func:`migrate_to_central_vnx._is_collision_column`, every JSON array
+    column in :data:`migrate_to_central_vnx.COLLISION_JSON_ARRAY_COLUMNS`,
+    and the ``coordination_events.entity_id`` field (filtered by
+    ``entity_type``). The previous implementation only inspected
+    ``dispatches.dispatch_id`` / ``pattern_usage.pattern_id``, leaving
+    every cross-tenant FK reference invisible.
+
+    ``read_errors`` (optional): if provided, attach failures and
+    per-table read failures append to this list so the caller (dry-run
+    reporter) can promote them to fatal exit-3 errors. (Finding 4.)
     """
     dispatch_seen: dict[str, list[str]] = {}
     pattern_seen: dict[str, list[str]] = {}
+    errors_target: list[dict[str, object]] = (
+        read_errors if read_errors is not None else []
+    )
 
     for project in projects:
-        rc_path = project.state_dir / "runtime_coordination.db"
-        if rc_path.is_file():
+        for db_filename in ("runtime_coordination.db", "quality_intelligence.db"):
+            db_path = project.state_dir / db_filename
+            if not db_path.is_file():
+                continue
             con = sqlite3.connect(":memory:")
             try:
                 try:
-                    attach_readonly(con, "src", rc_path)
-                    cur = con.execute(
-                        "SELECT 1 FROM src.sqlite_master WHERE type='table' AND name='dispatches'"
-                    )
-                    if cur.fetchone() is not None:
-                        for (did,) in con.execute("SELECT dispatch_id FROM src.dispatches"):
-                            if not did:
-                                continue
-                            dispatch_seen.setdefault(str(did), []).append(project.project_id)
-                    con.execute("DETACH DATABASE src")
+                    attach_readonly(con, "src", db_path)
                 except sqlite3.Error as exc:
-                    LOG.warning("dispatch_id collision-check failed project=%s err=%s", project.project_id, exc)
-            finally:
-                con.close()
-
-        qi_path = project.state_dir / "quality_intelligence.db"
-        if qi_path.is_file():
-            con = sqlite3.connect(":memory:")
-            try:
-                try:
-                    attach_readonly(con, "src", qi_path)
-                    cur = con.execute(
-                        "SELECT 1 FROM src.sqlite_master WHERE type='table' AND name='pattern_usage'"
+                    errors_target.append(
+                        {
+                            "project_id": project.project_id,
+                            "db": db_filename,
+                            "phase": "attach",
+                            "path": str(db_path),
+                            "error": str(exc),
+                        }
                     )
-                    if cur.fetchone() is not None:
-                        for (pid,) in con.execute("SELECT pattern_id FROM src.pattern_usage"):
-                            if not pid:
-                                continue
-                            pattern_seen.setdefault(str(pid), []).append(project.project_id)
+                    continue
+                _scan_collisions_in_db(
+                    con,
+                    "src",
+                    project.project_id,
+                    dispatch_seen,
+                    pattern_seen,
+                    errors_target,
+                    db_filename,
+                )
+                with contextlib.suppress(sqlite3.OperationalError):
                     con.execute("DETACH DATABASE src")
-                except sqlite3.Error as exc:
-                    LOG.warning("pattern_id collision-check failed project=%s err=%s", project.project_id, exc)
             finally:
                 con.close()
 
@@ -212,13 +436,24 @@ def _detect_collisions(projects: list[ProjectEntry]) -> dict:
 
 
 def build_dry_run_report(projects: list[ProjectEntry]) -> dict:
-    """Build the full dry-run plan dict. Pure read — no writes anywhere."""
+    """Build the full dry-run plan dict. Pure read — no writes anywhere.
+
+    Round-2 (Finding 4): the returned dict now includes a ``read_errors``
+    list. The CLI promotes any non-empty list to exit code 3 so the
+    operator never sees a clean preflight that masked an unreadable
+    source.
+    """
+    read_errors: list[dict[str, object]] = []
     plan_rows: list[TablePlan] = []
     for project in projects:
-        plan_rows.extend(_plan_for_db(project, "quality_intelligence.db", PLAN_TABLES_QI))
-        plan_rows.extend(_plan_for_db(project, "runtime_coordination.db", PLAN_TABLES_RC))
+        plan_rows.extend(
+            _plan_for_db(project, "quality_intelligence.db", PLAN_TABLES_QI, read_errors)
+        )
+        plan_rows.extend(
+            _plan_for_db(project, "runtime_coordination.db", PLAN_TABLES_RC, read_errors)
+        )
 
-    collisions = _detect_collisions(projects)
+    collisions = _detect_collisions(projects, read_errors=read_errors)
     schemas = {p.project_id: _project_schema(p) for p in projects}
     drift = compute_drift(schemas)
 
@@ -250,6 +485,7 @@ def build_dry_run_report(projects: list[ProjectEntry]) -> dict:
         ],
         "collisions": collisions,
         "schema_drift": drift,
+        "read_errors": read_errors,
         "dry_run": True,
     }
 
@@ -354,6 +590,27 @@ def render_markdown(plan: dict) -> str:
         lines.append("_No schema drift detected._")
     lines.append("")
 
+    lines.append("## Read errors (fatal if non-empty)")
+    lines.append("")
+    read_errors = plan.get("read_errors") or []
+    if not read_errors:
+        lines.append("_No source DBs or tables produced read errors._")
+    else:
+        lines.append(
+            "**Preflight FAILED.** The following source reads errored — exit code 3 returned. "
+            "Operator must repair the source(s) before re-running the dry-run:"
+        )
+        lines.append("")
+        lines.append("| Project | DB | Phase | Table | Error |")
+        lines.append("|---------|----|-------|-------|-------|")
+        for err in read_errors:
+            lines.append(
+                f"| `{err.get('project_id','?')}` | {err.get('db','?')} | "
+                f"{err.get('phase','?')} | {err.get('table','-')} | "
+                f"`{str(err.get('error','?')).replace('|', ' ')}` |"
+            )
+    lines.append("")
+
     lines.append("## Operator pre-flight checklist")
     lines.append("")
     lines.append("Before running `scripts/migrate_to_central_vnx.py --apply`:")
@@ -421,6 +678,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     else:
         print(f"DRY-RUN report: {out_path}")
         print(f"DRY-RUN manifest: {json_path}")
+
+    # Round-2 fix (Finding 4): a non-empty read_errors list means at
+    # least one source DB/table was unreadable. Surface as exit code 3
+    # so operators cannot mistake a corrupted-source dry-run for a clean
+    # preflight.
+    if plan.get("read_errors"):
+        print(
+            f"DRY-RUN FAILED: {len(plan['read_errors'])} source read error(s); "
+            f"see report for details",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 
