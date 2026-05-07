@@ -84,6 +84,9 @@ MIGRATION_0015_PATH = REPO_ROOT / "schemas" / "migrations" / "0015_complete_proj
 MIGRATION_0016_PATH = REPO_ROOT / "schemas" / "migrations" / "0016_rebuild_fts5.sql"
 
 # Tables to import per source DB. Aligned with migrate_dry_run.PLAN_TABLES_*.
+# Note: `code_snippets` (FTS5 vtab) MUST be imported BEFORE migration 0016
+# rebuilds the FTS5 index — otherwise 0016 rebuilds over an empty table and
+# the resulting central index is useless. See Finding 3 in PR #432 review.
 IMPORT_TABLES_QI: tuple[str, ...] = (
     "success_patterns",
     "antipatterns",
@@ -95,6 +98,7 @@ IMPORT_TABLES_QI: tuple[str, ...] = (
     "session_analytics",
     "vnx_code_quality",
     "snippet_metadata",
+    "code_snippets",
     "quality_trends",
     "quality_alerts",
     "dispatch_quality_context",
@@ -246,6 +250,40 @@ def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
     _apply_alters_idempotently(rc_db, rc_block)
 
 
+def _strip_leading_sql_comments(stmt: str) -> str:
+    """Drop leading whitespace + ``--`` comment lines from a SQL chunk.
+
+    A naive ``split(";")`` over a SQL file bundles the leading comment block
+    with the first SQL statement after it. Without this helper, that whole
+    chunk would be matched by ``stmt.startswith("--")`` and silently dropped,
+    causing the first ALTER after each comment block to never execute. See
+    Finding 1 in PR #432 review.
+    """
+    lines = stmt.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line or line.startswith("--"):
+            i += 1
+            continue
+        break
+    return "\n".join(lines[i:]).strip()
+
+
+def _iter_sql_statements(sql: str) -> Iterable[str]:
+    """Yield non-empty, comment-stripped SQL statements split on ``;``.
+
+    Used by both ``_apply_alters_idempotently`` and ``apply_migration_0016``
+    so a single comment-handling rule applies to every migration. Note: this
+    is a deliberately simple split — none of our migrations contain ``;``
+    inside string literals, so we don't pay the cost of a full SQL tokenizer.
+    """
+    for raw_stmt in sql.split(";"):
+        stmt = _strip_leading_sql_comments(raw_stmt)
+        if stmt:
+            yield stmt
+
+
 def _apply_alters_idempotently(db_path: Path, sql_block: str) -> None:
     """Apply ALTER TABLE / CREATE INDEX statements, skipping duplicates and missing tables.
 
@@ -258,10 +296,7 @@ def _apply_alters_idempotently(db_path: Path, sql_block: str) -> None:
     con = sqlite3.connect(str(db_path))
     try:
         con.execute("PRAGMA foreign_keys = ON")
-        for raw_stmt in sql_block.split(";"):
-            stmt = raw_stmt.strip()
-            if not stmt or stmt.startswith("--"):
-                continue
+        for stmt in _iter_sql_statements(sql_block):
             stmt_upper = stmt.upper()
             if stmt_upper.startswith("ALTER TABLE"):
                 _try_alter(con, stmt)
@@ -309,12 +344,19 @@ def _column_exists(con: sqlite3.Connection, table: str, column: str) -> bool:
 
 
 def apply_migration_0016(qi_db: Path) -> None:
-    """Rebuild FTS5 indexes in quality_intelligence.db with project_id."""
+    """Rebuild FTS5 indexes in quality_intelligence.db with project_id.
+
+    All statements run inside an explicit BEGIN/COMMIT frame so a failure
+    after ``DROP TABLE code_snippets`` rolls back the drop and the original
+    table survives intact. ``executescript`` is unsafe here because it
+    issues an implicit COMMIT before running, defeating the wrapper. See
+    Finding 4 in PR #432 review.
+    """
     if not qi_db.exists():
         LOG.warning("skipping FTS5 rebuild: %s missing", qi_db)
         return
     sql = MIGRATION_0016_PATH.read_text()
-    con = sqlite3.connect(str(qi_db))
+    con = sqlite3.connect(str(qi_db), isolation_level=None)
     try:
         if not _table_exists(con, "code_snippets"):
             LOG.info("code_snippets vtab not present; skipping FTS5 rebuild")
@@ -323,8 +365,15 @@ def apply_migration_0016(qi_db: Path) -> None:
         if "project_id" in cols:
             LOG.info("FTS5 already includes project_id; skipping rebuild")
             return
-        con.executescript(sql)
-        con.commit()
+        con.execute("BEGIN")
+        try:
+            for stmt in _iter_sql_statements(sql):
+                con.execute(stmt)
+            con.execute("COMMIT")
+        except Exception:
+            with contextlib.suppress(sqlite3.OperationalError):
+                con.execute("ROLLBACK")
+            raise
     finally:
         con.close()
 
@@ -351,6 +400,28 @@ def _ensure_idempotency_table(con: sqlite3.Connection) -> None:
             source_table TEXT NOT NULL,
             source_rowid INTEGER NOT NULL,
             imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, source_table, source_rowid)
+        )
+        """
+    )
+
+
+def _ensure_skipped_table(con: sqlite3.Connection) -> None:
+    """Audit table for rows the migrator could NOT insert (conflicts/IGNOREs).
+
+    Created alongside ``p4_import_idempotency`` so every dry-run / apply
+    keeps a durable record of rows that were dropped by ``INSERT OR
+    IGNORE`` and would otherwise be silently lost. See Finding 2 in PR
+    #432 review.
+    """
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS p4_import_skipped (
+            project_id TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_rowid INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            skipped_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (project_id, source_table, source_rowid)
         )
         """
@@ -440,20 +511,41 @@ def _import_table(
                 values[kidx] = f"{project.project_id}:{kv}"
         placeholders = ", ".join("?" for _ in cols)
         try:
-            con.execute(
+            cur = con.execute(
                 f"INSERT OR IGNORE INTO {table} ({select_cols}) VALUES ({placeholders})",
                 values,
             )
-            con.execute(
-                "INSERT OR IGNORE INTO p4_import_idempotency "
-                "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
-                (project.project_id, table, rid),
-            )
-            inserted += 1
+            if cur.rowcount == 1:
+                con.execute(
+                    "INSERT OR IGNORE INTO p4_import_idempotency "
+                    "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
+                    (project.project_id, table, rid),
+                )
+                inserted += 1
+            else:
+                # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
+                # write to p4_import_idempotency — that table must reflect
+                # actually-imported rows so re-runs can re-attempt the conflict
+                # if the central row is later deleted/repaired. Audit the skip.
+                LOG.warning(
+                    "INSERT IGNORED project=%s table=%s rowid=%s (central key conflict)",
+                    project.project_id, table, rid,
+                )
+                con.execute(
+                    "INSERT OR IGNORE INTO p4_import_skipped "
+                    "(project_id, source_table, source_rowid, reason) VALUES (?, ?, ?, ?)",
+                    (project.project_id, table, rid, "insert_or_ignore_conflict"),
+                )
+                skipped += 1
         except sqlite3.IntegrityError as exc:
             LOG.warning(
                 "INSERT skipped project=%s table=%s rowid=%s err=%s",
                 project.project_id, table, rid, exc,
+            )
+            con.execute(
+                "INSERT OR IGNORE INTO p4_import_skipped "
+                "(project_id, source_table, source_rowid, reason) VALUES (?, ?, ?, ?)",
+                (project.project_id, table, rid, f"integrity_error:{exc}"),
             )
             skipped += 1
     return ImportSummary(project.project_id, "", table, inserted, skipped)
@@ -473,6 +565,7 @@ def import_project(
         con = sqlite3.connect(str(central_qi), isolation_level=None)
         try:
             _ensure_idempotency_table(con)
+            _ensure_skipped_table(con)
             attach_readonly(con, "src", qi_src)
             con.execute("BEGIN")
             try:
@@ -502,6 +595,7 @@ def import_project(
         con = sqlite3.connect(str(central_rc), isolation_level=None)
         try:
             _ensure_idempotency_table(con)
+            _ensure_skipped_table(con)
             attach_readonly(con, "src", rc_src)
             con.execute("BEGIN")
             try:
@@ -691,8 +785,13 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     pre_snapshot = _snapshot_central(central_qi, central_rc)
     try:
+        # Order matters (Finding 3 in PR #432 review):
+        #   1. 0015 ALTER TABLE — adds project_id column to non-FTS tables
+        #   2. import_project loop — populates code_snippets + snippet_metadata
+        #   3. 0016 FTS5 rebuild — joins snippet_metadata to assign project_id
+        # Running 0016 before the import loop rebuilds FTS5 over an empty
+        # central table → useless index.
         apply_migration_0015(central_qi, central_rc)
-        apply_migration_0016(central_qi)
     except sqlite3.Error as exc:
         LOG.error("schema migration failed: %s", exc)
         _restore_snapshot(pre_snapshot, central_qi, central_rc)
@@ -710,6 +809,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         except Exception as exc:
             LOG.error("project=%s import failed; rolled back THAT project: %s", project.project_id, exc)
             failed_projects.append(project.project_id)
+
+    try:
+        apply_migration_0016(central_qi)
+    except sqlite3.Error as exc:
+        LOG.error("FTS5 rebuild (migration 0016) failed: %s", exc)
+        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        return 3
 
     try:
         verify_report = verify_import(central_qi, central_rc, projects)

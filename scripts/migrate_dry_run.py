@@ -65,6 +65,7 @@ PLAN_TABLES_QI: tuple[str, ...] = (
     "session_analytics",
     "vnx_code_quality",
     "snippet_metadata",
+    "code_snippets",
     "quality_trends",
     "quality_alerts",
     "dispatch_quality_context",

@@ -369,3 +369,253 @@ def test_verify_only_after_apply(fixture_env):
         "--central-state", str(fixture_env["central_state"]),
     ])
     assert rc2 == 0
+
+
+# ---------------------------------------------------------------------------
+# PR #432 fix-forward regression tests (codex BLOCKING findings)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_alters_first_after_comments_runs(tmp_path: Path):
+    """Finding 1: ``_apply_alters_idempotently`` must execute the first ALTER
+    that follows a leading comment block, not silently skip it.
+
+    Before the fix, ``sql_block.split(";")`` produced a chunk that bundled
+    leading ``--`` lines with the first ALTER; the chunk was then dropped
+    because ``stmt.strip().startswith("--")`` matched the comment, never the
+    SQL inside.
+    """
+    db = tmp_path / "alter_test.db"
+    con = sqlite3.connect(db)
+    try:
+        con.execute("CREATE TABLE foo (id INTEGER PRIMARY KEY)")
+        con.commit()
+    finally:
+        con.close()
+
+    sql_block = """
+    -- This block has leading comments that historically swallowed
+    -- the very next ALTER statement.
+
+    ALTER TABLE foo ADD COLUMN bar INTEGER;
+    ALTER TABLE foo ADD COLUMN baz INTEGER;
+    """
+
+    M._apply_alters_idempotently(db, sql_block)
+
+    con = sqlite3.connect(db)
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(foo)")}
+    finally:
+        con.close()
+
+    assert "bar" in cols, "first ALTER after leading comments was silently skipped (Finding 1)"
+    assert "baz" in cols
+
+
+def test_import_table_logs_conflict_skipped_rows(tmp_path: Path):
+    """Finding 2: ``_import_table`` must use ``cursor.rowcount`` to detect
+    rows that ``INSERT OR IGNORE`` dropped due to UNIQUE/PRIMARY KEY conflict,
+    record them in ``p4_import_skipped``, and NOT mark them as imported.
+    """
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
+
+    src_db = tmp_path / "src.db"
+    con = sqlite3.connect(src_db)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT,
+                pattern_hash TEXT,
+                project_id TEXT
+            );
+            INSERT INTO pattern_usage VALUES ('shared-key', 'src-title', 'h', 'mc');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    central_db = tmp_path / "central.db"
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT,
+                pattern_hash TEXT,
+                project_id TEXT
+            );
+            INSERT INTO pattern_usage VALUES ('mc:shared-key', 'pre-existing', 'pre', 'mc');
+            """
+        )
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        attach_readonly(con, "src", src_db)
+
+        project = ProjectEntry(
+            name="mc",
+            path=tmp_path / "mc",
+            project_id="mc",
+        )
+
+        con.execute("BEGIN")
+        try:
+            summary = M._import_table(con, "src", project, "pattern_usage")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        assert summary.rows_inserted == 0, (
+            f"central row already present → INSERT must IGNORE; got rows_inserted={summary.rows_inserted}"
+        )
+        assert summary.rows_skipped_existing >= 1
+
+        skipped_rows = list(
+            con.execute(
+                "SELECT project_id, source_table, source_rowid, reason "
+                "FROM p4_import_skipped"
+            )
+        )
+        assert len(skipped_rows) == 1, f"expected 1 skipped row, got {skipped_rows}"
+        pid, src_tbl, src_rowid, reason = skipped_rows[0]
+        assert pid == "mc"
+        assert src_tbl == "pattern_usage"
+        assert src_rowid == 1
+        assert reason == "insert_or_ignore_conflict"
+
+        # And NO entry in idempotency for the conflict — this is the contract:
+        # idempotency must reflect actually-imported rows, not attempted ones.
+        idem_rows = list(
+            con.execute(
+                "SELECT source_rowid FROM p4_import_idempotency "
+                "WHERE project_id = ? AND source_table = ?",
+                ("mc", "pattern_usage"),
+            )
+        )
+        assert idem_rows == [], (
+            f"conflict-IGNOREd row must NOT appear in p4_import_idempotency; got {idem_rows}"
+        )
+    finally:
+        con.close()
+
+
+def test_apply_imports_code_snippets_table(fixture_env):
+    """Finding 3: ``code_snippets`` must be in the import plan so its rows
+    are copied into central before migration 0016 rebuilds the FTS5 index.
+
+    Uses a regular table (not the FTS5 vtab) so the test stays focused on
+    the import path. The ordering guarantee — 0015 ALTER → import → 0016 —
+    is exercised by the rebuild test below.
+    """
+    central_qi = fixture_env["central_qi"]
+    with sqlite3.connect(central_qi) as c:
+        c.execute(
+            "CREATE TABLE code_snippets ("
+            "  id INTEGER PRIMARY KEY,"
+            "  title TEXT,"
+            "  project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+            ")"
+        )
+
+    for spec in fixture_env["specs"]:
+        path = Path(spec["path"]) / ".vnx-data" / "state" / "quality_intelligence.db"
+        with sqlite3.connect(path) as c:
+            c.execute(
+                "CREATE TABLE code_snippets ("
+                "  id INTEGER PRIMARY KEY,"
+                "  title TEXT,"
+                "  project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+                ")"
+            )
+            c.execute(
+                "INSERT INTO code_snippets (title, project_id) VALUES (?, ?)",
+                (f"snippet-{spec['project_id']}", spec["project_id"]),
+            )
+
+    rc = _apply(fixture_env)
+    assert rc == 0
+
+    with sqlite3.connect(central_qi) as c:
+        rows = sorted(
+            c.execute("SELECT title, project_id FROM code_snippets").fetchall()
+        )
+
+    titles = [r[0] for r in rows]
+    project_ids = {r[1] for r in rows}
+    assert len(rows) == 4, f"expected 4 imported code_snippets rows, got {rows}"
+    assert "snippet-vnx-dev" in titles
+    assert "snippet-mc" in titles
+    assert "snippet-sales-copilot" in titles
+    assert "snippet-seocrawler-v2" in titles
+    assert project_ids == {"vnx-dev", "mc", "sales-copilot", "seocrawler-v2"}
+
+
+def test_apply_migration_0016_rolls_back_on_failure(tmp_path: Path, monkeypatch):
+    """Finding 4: ``apply_migration_0016`` must wrap its DROP+rebuild in an
+    explicit transaction so a failure after ``DROP TABLE code_snippets``
+    rolls back and the original rows survive.
+    """
+    central_qi = tmp_path / "central_fts.db"
+    con = sqlite3.connect(central_qi)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE snippet_metadata (
+                snippet_rowid INTEGER PRIMARY KEY,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE VIRTUAL TABLE code_snippets USING fts5(
+                title, description, code, file_path, line_range, tags, language,
+                framework, dependencies, quality_score, usage_count, last_updated,
+                tokenize = 'porter unicode61'
+            );
+            """
+        )
+        con.execute(
+            "INSERT INTO code_snippets (rowid, title) VALUES (?, ?)",
+            (1, "preserved-1"),
+        )
+        con.execute(
+            "INSERT INTO code_snippets (rowid, title) VALUES (?, ?)",
+            (2, "preserved-2"),
+        )
+        con.execute("INSERT INTO snippet_metadata VALUES (1, 'vnx-dev')")
+        con.execute("INSERT INTO snippet_metadata VALUES (2, 'mc')")
+        con.commit()
+    finally:
+        con.close()
+
+    bad_sql = (
+        "CREATE TABLE IF NOT EXISTS code_snippets_rebuild_tmp AS "
+        "SELECT rowid, title FROM code_snippets;\n"
+        "DROP TABLE IF EXISTS code_snippets;\n"
+        "THIS_IS_NOT_VALID_SQL FAIL_HERE;\n"
+    )
+    bad_path = tmp_path / "bad_0016.sql"
+    bad_path.write_text(bad_sql)
+    monkeypatch.setattr(M, "MIGRATION_0016_PATH", bad_path)
+
+    with pytest.raises(sqlite3.Error):
+        M.apply_migration_0016(central_qi)
+
+    con = sqlite3.connect(central_qi)
+    try:
+        cur = con.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual') "
+            "AND name = 'code_snippets'"
+        )
+        assert cur.fetchone() is not None, (
+            "code_snippets table missing after failed 0016 — rollback did not fire (Finding 4)"
+        )
+        rows = sorted(con.execute("SELECT rowid, title FROM code_snippets").fetchall())
+    finally:
+        con.close()
+
+    assert rows == [(1, "preserved-1"), (2, "preserved-2")], (
+        f"original rows lost after rollback; got {rows}"
+    )
