@@ -135,10 +135,30 @@ def _append_receipt_line_locked(receipts_path: Path, receipt: Dict[str, Any]) ->
 
 
 def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: Path) -> bool:
+    """Phase 6 P4: route the locked central append through scripts.lib.dual_writer.
+
+    Path resolution stays inside this module (so test monkey-patches on
+    ``payload.resolve_central_data_dir`` keep redirecting the mirror).
+    The locked append itself is delegated to ``dual_writer.append_record_locked``
+    so every dual-write call site (receipts + register events) shares one
+    fcntl/atomicity implementation.
+
+    Returns True on a successful central write, False on cutover skip or
+    missing project_id, and raises ``OSError`` on I/O failure so the
+    pending-mirror queue can retain the record for a later flush.
+    """
     central_receipts = _resolve_central_receipts_path(receipt, primary_path)
     if central_receipts is None:
         return False
-    _append_receipt_line_locked(central_receipts, receipt)
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        from dual_writer import append_record_locked
+    except Exception:
+        _append_receipt_line_locked(central_receipts, receipt)
+        return True
+    append_record_locked(
+        central_receipts, receipt, lock_filename="append_receipt.lock"
+    )
     return True
 
 
