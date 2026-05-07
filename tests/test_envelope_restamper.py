@@ -310,3 +310,70 @@ class TestCli:
                 "--state-dir", str(state_dir),
             ])
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Sentinel lock race (BLOCKING 2)
+# ---------------------------------------------------------------------------
+
+class TestSentinelLockRace:
+    """Sentinel lock must coordinate re-stamper and dispatch_register appenders
+    so that appenders always write to the current inode — never to an unlinked
+    old inode that the re-stamper replaced via os.replace().
+    """
+
+    def test_100_concurrent_appends_vs_restamper_no_data_loss(self, tmp_path):
+        """Race 100 dispatch_register writers against the re-stamper.
+
+        All 100 appended events must appear in the final NDJSON after
+        _restamp_ndjson_inplace completes.  With the sentinel fix both
+        parties acquire .state.lock before touching the file, ensuring
+        appenders that acquire the sentinel after the rename always open
+        the new inode.
+        """
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        ndjson = state_dir / "dispatch_register.ndjson"
+        ndjson.write_text(
+            json.dumps({"event": "dispatch_created", "dispatch_id": "d-0"}) + "\n",
+            encoding="utf-8",
+        )
+
+        # Import the appender that uses the sentinel after the fix.
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+        from dispatch_register import _write_event_locked
+
+        APPENDERS = 100
+        errors: List[Exception] = []
+
+        def do_append(i: int) -> None:
+            try:
+                _write_event_locked(ndjson, {
+                    "event": "dispatch_completed",
+                    "dispatch_id": f"d-{i}",
+                })
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=do_append, args=(i,))
+            for i in range(1, APPENDERS + 1)
+        ]
+        for t in threads:
+            t.start()
+
+        # Re-stamper runs concurrently with the 100 appenders.
+        migrator._restamp_ndjson_inplace(ndjson, ENVELOPE)
+
+        for t in threads:
+            t.join(timeout=15)
+
+        assert not errors, f"Appender errors: {errors[:3]!r}"
+
+        records = _read_ndjson(ndjson)
+        dispatch_ids = {r.get("dispatch_id") for r in records}
+        missing = [f"d-{i}" for i in range(1, APPENDERS + 1) if f"d-{i}" not in dispatch_ids]
+        assert not missing, (
+            f"Lost {len(missing)}/{APPENDERS} events to rename race: {missing[:5]!r}"
+        )

@@ -102,11 +102,14 @@ def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
     load time) so tests/migrations that override state_dir work correctly.
 
     Returns None when:
+    - VNX_USE_CENTRAL_DB != '1' (explicit opt-in required until P5 cutover)
     - resolve_central_data_dir is unavailable
     - VNX_PROJECT_ID is not set in env
     - central state dir does not exist on filesystem
     - central == primary (P5 cutover guard — skip double-read)
     """
+    if os.environ.get("VNX_USE_CENTRAL_DB") != "1":
+        return None
     if resolve_central_data_dir is None:
         return None
     project_id = os.environ.get("VNX_PROJECT_ID", "").strip()

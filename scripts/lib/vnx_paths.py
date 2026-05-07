@@ -7,10 +7,13 @@ Allows environment overrides while defaulting to dist/runtime-relative paths.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import warnings
 from pathlib import Path
 from typing import Dict
+
+_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 
 def _resolve_vnx_home() -> Path:
@@ -166,12 +169,17 @@ def resolve_central_data_dir(project_id: str) -> Path:
     Used by Phase 6 P3 dual-write paths and the envelope re-stamper.
 
     Raises:
-        ValueError: if project_id is empty or contains path separators.
+        ValueError: if project_id is empty or does not match ^[a-z][a-z0-9-]{1,31}$.
+            Rejects dots, slashes, leading dashes, uppercase, and all special chars
+            to prevent path-traversal escaping the ~/.vnx-data sandbox.
     """
     if not project_id:
         raise ValueError("project_id must be non-empty")
-    if "/" in project_id or "\\" in project_id:
-        raise ValueError(f"project_id must not contain path separators: {project_id!r}")
+    if not _PROJECT_ID_RE.match(project_id):
+        raise ValueError(
+            f"project_id must match ^[a-z][a-z0-9-]{{1,31}}$ "
+            f"(no dots, slashes, leading dashes, or special chars): {project_id!r}"
+        )
     return Path.home() / ".vnx-data" / project_id
 
 

@@ -138,6 +138,40 @@ class TestCentralMirrorSkip:
 # ---------------------------------------------------------------------------
 
 class TestStateDirOverride:
+    def test_explicit_state_dir_ignores_env_project_id(self, monkeypatch, isolated_data_dir, tmp_path):
+        """ADVISORY 2 regression: explicit state_dir must not merge central via env VNX_PROJECT_ID.
+
+        explicit state_dir + different env VNX_PROJECT_ID → only state_dir contents read.
+        """
+        primary_state = tmp_path / "primary_state"
+        primary_state.mkdir(parents=True)
+        (primary_state / "dispatch_register.ndjson").write_text(
+            json.dumps({"timestamp": "2026-01-01T00:00:00.000000Z",
+                        "event": "dispatch_created", "dispatch_id": "d-primary"}) + "\n"
+        )
+
+        central_base = tmp_path / "central"
+        central_state = central_base / "env-proj" / "state"
+        central_state.mkdir(parents=True)
+        (central_state / "dispatch_register.ndjson").write_text(
+            json.dumps({"timestamp": "2026-01-02T00:00:00.000000Z",
+                        "event": "dispatch_created", "dispatch_id": "d-central-env"}) + "\n"
+        )
+
+        monkeypatch.setenv("VNX_PROJECT_ID", "env-proj")  # env points to different project
+
+        def _patched_resolve(pid):
+            return central_base / pid
+
+        with patch.object(dispatch_register, "_resolve_central_data_dir", _patched_resolve):
+            events = read_events(state_dir=primary_state)
+
+        dispatch_ids = [e.get("dispatch_id") for e in events]
+        assert "d-primary" in dispatch_ids, "primary events must be present"
+        assert "d-central-env" not in dispatch_ids, (
+            "VNX_PROJECT_ID env must be ignored when explicit state_dir is provided"
+        )
+
     def test_read_events_uses_passed_state_dir(self, isolated_data_dir, tmp_path):
         """read_events(state_dir=X) reads from X, not from the ambient VNX_STATE_DIR."""
         alt_state = tmp_path / "alt_state"
@@ -173,7 +207,12 @@ class TestStateDirOverride:
 
 class TestMergeReadCentralWins:
     def test_central_record_overwrites_primary_on_same_key(self, monkeypatch, isolated_data_dir, tmp_path):
-        """When central and primary share the same (ts, event, dispatch_id), central wins."""
+        """When central and primary share the same (ts, event, dispatch_id), central wins.
+
+        Uses env-based routing (VNX_STATE_DIR + VNX_PROJECT_ID) so that the central
+        merge is triggered via the env path rather than the state_dir-explicit path
+        (which ignores VNX_PROJECT_ID after the ADVISORY 2 fix).
+        """
         ts = "2026-05-01T12:00:00.000000Z"
         primary_state = tmp_path / "primary_state"
         primary_state.mkdir(parents=True)
@@ -194,10 +233,12 @@ class TestMergeReadCentralWins:
         def _patched_resolve(pid):
             return central_base / pid
 
+        # Route primary via env so central merge fires via VNX_PROJECT_ID
+        monkeypatch.setenv("VNX_STATE_DIR", str(primary_state))
         monkeypatch.setenv("VNX_PROJECT_ID", "test-merge")
 
         with patch.object(dispatch_register, "_resolve_central_data_dir", _patched_resolve):
-            events = read_events(state_dir=primary_state)
+            events = read_events()  # no state_dir — env-based path triggers central merge
 
         assert len(events) == 1
         assert events[0]["source"] == "central"

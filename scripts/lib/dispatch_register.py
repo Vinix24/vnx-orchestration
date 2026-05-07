@@ -14,9 +14,12 @@ import datetime as _dt
 import fcntl
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -160,10 +163,35 @@ def _resolve_central_data_dir(project_id: str) -> Path:
     return resolve_central_data_dir(project_id)
 
 
+def _project_id_from_state_dir(state_dir: Path) -> str:
+    """Extract project_id from state_dir if it matches ~/.vnx-data/<project>/state.
+
+    Returns empty string when state_dir does not follow the central hierarchy,
+    ensuring env-based VNX_PROJECT_ID is never consulted when an explicit
+    state_dir is provided.
+    """
+    try:
+        resolved = state_dir.resolve()
+        vnx_data = (Path.home() / ".vnx-data").resolve()
+        if resolved.name == "state" and resolved.parent.parent == vnx_data:
+            pid = resolved.parent.name
+            if _PROJECT_ID_RE.match(pid):
+                return pid
+    except Exception:
+        pass
+    return ""
+
+
 def _write_event_locked(path: Path, record: dict) -> None:
-    with path.open("a", encoding="utf-8") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    # Acquire directory-level sentinel BEFORE opening the file so that a
+    # concurrent re-stamper that holds the sentinel and is about to os.replace()
+    # cannot leave this writer holding an fd to the unlinked (old) inode.
+    sentinel = path.parent / ".state.lock"
+    with sentinel.open("a+", encoding="utf-8") as _sentinel_fh:
+        fcntl.flock(_sentinel_fh.fileno(), fcntl.LOCK_EX)
+        with path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
@@ -343,18 +371,25 @@ def _read_events_from_path(path: Path, since_iso: Optional[str]) -> list[dict]:
 
 
 def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
-    """Read all events; merge-reads from central when VNX_PROJECT_ID is set.
+    """Read all events; merge-reads from central when project_id is derivable.
 
     Primary path: ``state_dir/dispatch_register.ndjson`` (or ambient VNX_STATE_DIR).
-    Central path: derived from VNX_PROJECT_ID env via ``_resolve_central_data_dir``.
+    Central path: derived from state_dir hierarchy when explicit; from VNX_PROJECT_ID
+        env only when state_dir is not provided. This prevents env bleed-through when
+        an explicit state_dir override is supplied.
     Deduplication: on (timestamp, event, dispatch_id) — central record wins.
     P5 cutover guard: central is skipped when it resolves to the same file as primary.
     """
     primary_path = (Path(state_dir) / "dispatch_register.ndjson") if state_dir is not None else _register_path()
     primary_events = _read_events_from_path(primary_path, since_iso)
 
-    # Phase 6 P3 merge-read from central when project_id is known
-    project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+    # Derive project_id from state_dir structure when explicit (ignore env);
+    # fall back to env only when state_dir was not provided by the caller.
+    if state_dir is not None:
+        project_id = _project_id_from_state_dir(Path(state_dir))
+    else:
+        project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+
     central_events: list[dict] = []
     if project_id:
         try:
