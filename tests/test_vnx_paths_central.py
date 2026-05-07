@@ -48,3 +48,47 @@ class TestResolveCentralDataDir:
         result = resolve_central_data_dir("seocrawler-v2")
         assert result.name == "seocrawler-v2"
         assert result.parent.name == ".vnx-data"
+
+
+class TestPathTraversalRejection:
+    """Regression tests for BLOCKING 1 — path traversal via project_id."""
+
+    def test_rejects_dotdot(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir("..")
+
+    def test_rejects_dotdot_slash_foo(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir("../foo")
+
+    def test_rejects_dotfoo(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir(".foo")
+
+    def test_rejects_slash_in_id(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir("a/b")
+
+    def test_rejects_leading_dash(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir("-bad")
+
+    def test_rejects_uppercase(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir("BadProj")
+
+    def test_rejects_single_char(self):
+        with pytest.raises(ValueError):
+            resolve_central_data_dir("a")
+
+    def test_accepts_vnx_dev(self):
+        result = resolve_central_data_dir("vnx-dev")
+        assert result == Path.home() / ".vnx-data" / "vnx-dev"
+
+    def test_accepts_mc_prod(self):
+        result = resolve_central_data_dir("mc-prod")
+        assert result == Path.home() / ".vnx-data" / "mc-prod"
+
+    def test_accepts_two_char_id(self):
+        result = resolve_central_data_dir("mc")
+        assert result == Path.home() / ".vnx-data" / "mc"

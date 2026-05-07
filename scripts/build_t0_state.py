@@ -51,7 +51,7 @@ _LIB_DIR = _SCRIPT_DIR / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
-from vnx_paths import ensure_env  # noqa: E402
+from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 try:
     from vnx_paths import resolve_central_data_dir  # noqa: E402
 except ImportError:
@@ -98,18 +98,22 @@ def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
 def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
     """Return the central state dir for the current project_id, derived from state_dir.
 
-    Phase 6 P3: resolves project_id from VNX_PROJECT_ID env at call time (not module
-    load time) so tests/migrations that override state_dir work correctly.
+    Phase 6 P3: resolves project_id from the explicit ``state_dir`` first
+    (central hierarchy or nearby ``.vnx-project-id``), and falls back to
+    ambient ``VNX_PROJECT_ID`` only when state_dir itself is not attributable.
 
     Returns None when:
+    - VNX_USE_CENTRAL_DB != '1' (explicit opt-in required until P5 cutover)
     - resolve_central_data_dir is unavailable
-    - VNX_PROJECT_ID is not set in env
+    - no project_id can be derived from state_dir and no ambient project_id exists
     - central state dir does not exist on filesystem
     - central == primary (P5 cutover guard — skip double-read)
     """
+    if os.environ.get("VNX_USE_CENTRAL_DB") != "1":
+        return None
     if resolve_central_data_dir is None:
         return None
-    project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+    project_id = project_id_from_state_dir(state_dir) or os.environ.get("VNX_PROJECT_ID", "").strip()
     if not project_id:
         return None
     try:

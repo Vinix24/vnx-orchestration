@@ -240,17 +240,21 @@ def test_append_receipt_concurrent_writers_no_corruption(tmp_path: Path):
     assert all(result.returncode == 0 for result in results)
 
     receipts_file = tmp_path / "data" / "state" / "t0_receipts.ndjson"
-    lines = [line for line in receipts_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == len(payloads)
+    parsed = [
+        json.loads(line)
+        for line in receipts_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    task_receipts = [entry for entry in parsed if entry.get("event_type") == "task_complete"]
+    assert len(task_receipts) == len(payloads)
 
-    parsed = [json.loads(line) for line in lines]
-    dispatch_ids = {entry["dispatch_id"] for entry in parsed}
-    assert len(dispatch_ids) == len(payloads)
+    task_dispatch_ids = {entry["dispatch_id"] for entry in task_receipts}
+    assert len(task_dispatch_ids) == len(payloads)
 
 
 def test_runtime_writers_use_append_receipt_helper_and_no_direct_append():
     script_expectations = {
-        "receipt_notifier.sh": {
+        "receipt_processor_v4.sh": {
             "must_contain": ["append_receipt.py"],
             "must_not_contain": [">> \"$RECEIPTS_FILE\""],
         },

@@ -38,6 +38,29 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 
+def _default_primary_state_dir(project_id: str) -> Path:
+    """Derive the default repo-local primary state dir for project_id.
+
+    Uses the current repo root rather than ambient ``VNX_STATE_DIR`` so
+    ``--project-id`` cannot silently target another project's state. When the
+    repo-local ``.vnx-project-id`` disagrees with ``project_id``, callers must
+    pass ``--state-dir`` explicitly.
+    """
+    from vnx_paths import project_id_from_state_dir, resolve_paths
+
+    project_root = Path(resolve_paths()["PROJECT_ROOT"]).expanduser().resolve()
+    candidate = project_root / ".vnx-data" / "state"
+    inferred_project_id = project_id_from_state_dir(candidate)
+    if inferred_project_id != project_id:
+        inferred_label = inferred_project_id or "<unknown>"
+        raise ValueError(
+            f"--project-id {project_id!r} does not match inferred project_id "
+            f"{inferred_label!r} for default state_dir {candidate}. "
+            "Pass --state-dir explicitly."
+        )
+    return candidate
+
+
 def _resolve_identity(project_id: str) -> Dict[str, Optional[str]]:
     """Resolve the four-tuple for the given project_id."""
     result: Dict[str, Optional[str]] = {
@@ -77,58 +100,67 @@ def _restamp_ndjson_inplace(
 ) -> int:
     """Re-stamp a single NDJSON file with envelope fields. Returns stamped line count.
 
-    Locking: acquires LOCK_EX on lock_path (if given) or on ndjson_path itself.
-    Lock is held through the atomic rename — race-free with concurrent appenders.
+    Locking: acquires LOCK_EX on a directory-level sentinel (.state.lock) first,
+    then on lock_path (if given) or ndjson_path itself. Both locks are held through
+    the atomic rename.
+
+    The sentinel coordinates with dispatch_register._write_event_locked so that
+    writers that open the NDJSON file before the rename complete will always open
+    the new inode (they block on the sentinel, which is released only after rename).
     """
     if not ndjson_path.exists():
         return 0
 
+    sentinel = ndjson_path.parent / ".state.lock"
     effective_lock = lock_path if lock_path is not None else ndjson_path
 
-    with effective_lock.open("a+", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+    with sentinel.open("a+", encoding="utf-8") as _sentinel_fh:
+        fcntl.flock(_sentinel_fh.fileno(), fcntl.LOCK_EX)
 
-        # Read under lock.
-        try:
-            content = ndjson_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return 0
+        with effective_lock.open("a+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
 
-        stamped_lines: List[str] = []
-        count = 0
-        for raw_line in content.splitlines():
-            stripped = raw_line.strip()
-            if not stripped:
-                continue
+            # Read under lock.
             try:
-                record = json.loads(stripped)
-            except json.JSONDecodeError:
-                stamped_lines.append(stripped)
-                continue
-            stamped = _stamp_line(record, envelope)
-            stamped_lines.append(json.dumps(stamped, separators=(",", ":"), sort_keys=False))
-            count += 1
+                content = ndjson_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return 0
 
-        if dry_run:
-            return count
+            stamped_lines: List[str] = []
+            count = 0
+            for raw_line in content.splitlines():
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    stamped_lines.append(stripped)
+                    continue
+                stamped = _stamp_line(record, envelope)
+                stamped_lines.append(json.dumps(stamped, separators=(",", ":"), sort_keys=False))
+                count += 1
 
-        new_content = "\n".join(stamped_lines) + ("\n" if stamped_lines else "")
+            if dry_run:
+                return count
 
-        # Atomic rename under lock — concurrent appenders block until complete.
-        fd, tmp_str = tempfile.mkstemp(
-            prefix=ndjson_path.name + ".restamp.tmp.",
-            dir=str(ndjson_path.parent),
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
-                tmp_fh.write(new_content)
-            os.replace(tmp_str, str(ndjson_path))
-        except Exception:
+            new_content = "\n".join(stamped_lines) + ("\n" if stamped_lines else "")
+
+            # Atomic rename under lock — concurrent appenders block until complete.
+            fd, tmp_str = tempfile.mkstemp(
+                prefix=ndjson_path.name + ".restamp.tmp.",
+                dir=str(ndjson_path.parent),
+            )
             try:
-                os.unlink(tmp_str)
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
+                    tmp_fh.write(new_content)
+                os.replace(tmp_str, str(ndjson_path))
             except Exception:
-                pass
-            raise
+                try:
+                    os.unlink(tmp_str)
+                except Exception:
+                    pass
+                raise
 
     return count
 
@@ -205,8 +237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         state_dir = Path(args.state_dir).expanduser().resolve()
     else:
         try:
-            from vnx_paths import resolve_paths
-            state_dir = Path(resolve_paths()["VNX_STATE_DIR"])
+            state_dir = _default_primary_state_dir(args.project_id)
         except Exception as exc:
             print(f"ERROR: cannot resolve state dir: {exc}", file=sys.stderr)
             return 1

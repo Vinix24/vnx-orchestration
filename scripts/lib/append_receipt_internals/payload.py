@@ -7,11 +7,12 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .common import (
     AppendReceiptError,
     AppendResult,
+    EXIT_IO_ERROR,
     EXIT_INVALID_INPUT,
     REPO_ROOT,
     SCRIPTS_DIR,
@@ -21,6 +22,7 @@ from .common import (
 from .idempotency import (
     _compute_idempotency_key,
     _cache_file_for,
+    _lock_file_for,
     _resolve_receipts_file,
     _write_receipt_under_lock,
 )
@@ -107,6 +109,39 @@ def resolve_central_data_dir(project_id: str) -> Path:
     return _resolve(project_id)
 
 
+def _pending_mirror_queue_for(receipt_path: Path) -> Path:
+    return receipt_path.parent / "pending_mirrors.ndjson"
+
+
+def _resolve_central_receipts_path(receipt: Dict[str, Any], primary_path: Path) -> Optional[Path]:
+    project_id = str(receipt.get("project_id") or "").strip()
+    if not project_id:
+        return None
+    central_base = resolve_central_data_dir(project_id)
+    central_state = central_base / "state"
+    central_receipts = central_state / "t0_receipts.ndjson"
+    if central_receipts.resolve() == primary_path.resolve():
+        return None
+    return central_receipts
+
+
+def _append_receipt_line_locked(receipts_path: Path, receipt: Dict[str, Any]) -> None:
+    receipts_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = receipts_path.parent / "append_receipt.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        with receipts_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt, separators=(",", ":"), sort_keys=False) + "\n")
+
+
+def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: Path) -> bool:
+    central_receipts = _resolve_central_receipts_path(receipt, primary_path)
+    if central_receipts is None:
+        return False
+    _append_receipt_line_locked(central_receipts, receipt)
+    return True
+
+
 def _mirror_receipt_to_central(receipt: Dict[str, Any], primary_path: Path) -> None:
     """Best-effort mirror of a receipt to the central path. Never raises.
 
@@ -120,23 +155,116 @@ def _mirror_receipt_to_central(receipt: Dict[str, Any], primary_path: Path) -> N
     if not project_id:
         return
     try:
-        central_base = resolve_central_data_dir(project_id)
-        central_state = central_base / "state"
-        central_receipts = central_state / "t0_receipts.ndjson"
-        # P5 cutover guard
-        if central_receipts.resolve() == primary_path.resolve():
-            return
-        central_state.mkdir(parents=True, exist_ok=True)
-        lock_path = central_state / "append_receipt.lock"
-        with lock_path.open("a+", encoding="utf-8") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-            with central_receipts.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(receipt, separators=(",", ":"), sort_keys=False) + "\n")
+        _mirror_receipt_to_central_or_raise(receipt, primary_path)
     except Exception:
         pass
 
 
-def _stamp_identity(receipt: Dict[str, Any]) -> None:
+def _load_pending_mirrors(queue_path: Path) -> List[Dict[str, Any]]:
+    if not queue_path.exists():
+        return []
+    pending: List[Dict[str, Any]] = []
+    try:
+        with queue_path.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                receipt = entry.get("receipt")
+                key = str(entry.get("idempotency_key") or "").strip()
+                if isinstance(receipt, dict) and key:
+                    pending.append({"idempotency_key": key, "receipt": receipt})
+    except OSError as exc:
+        raise AppendReceiptError(
+            "pending_mirror_read_failed",
+            EXIT_IO_ERROR,
+            f"Failed to read pending mirror queue: {exc}",
+        ) from exc
+    return pending
+
+
+def _write_pending_mirrors(queue_path: Path, pending: List[Dict[str, Any]]) -> None:
+    tmp_path = queue_path.with_name(f"{queue_path.name}.{os.getpid()}.tmp")
+    try:
+        if not pending:
+            if queue_path.exists():
+                queue_path.unlink()
+            return
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            for entry in pending:
+                fh.write(json.dumps(entry, separators=(",", ":"), sort_keys=False))
+                fh.write("\n")
+        os.replace(tmp_path, queue_path)
+    except OSError as exc:
+        raise AppendReceiptError(
+            "pending_mirror_write_failed",
+            EXIT_IO_ERROR,
+            f"Failed to write pending mirror queue: {exc}",
+        ) from exc
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _drain_pending_mirrors_and_mirror_current(
+    receipt: Dict[str, Any],
+    primary_path: Path,
+    idempotency_key: str,
+) -> int:
+    queue_path = _pending_mirror_queue_for(primary_path)
+    lock_path = _lock_file_for(primary_path)
+    remaining: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    last_error: Optional[Exception] = None
+
+    def _keep_pending(entry: Dict[str, Any]) -> None:
+        key = str(entry.get("idempotency_key") or "").strip()
+        if not key or key in seen_keys:
+            return
+        pending_receipt = entry.get("receipt")
+        if not isinstance(pending_receipt, dict):
+            return
+        seen_keys.add(key)
+        remaining.append({"idempotency_key": key, "receipt": pending_receipt})
+
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+
+        for entry in _load_pending_mirrors(queue_path):
+            try:
+                _mirror_receipt_to_central_or_raise(entry["receipt"], primary_path)
+            except Exception as exc:
+                last_error = exc
+                _keep_pending(entry)
+
+        try:
+            _mirror_receipt_to_central_or_raise(receipt, primary_path)
+        except Exception as exc:
+            last_error = exc
+            _keep_pending({"idempotency_key": idempotency_key, "receipt": receipt})
+
+        _write_pending_mirrors(queue_path, remaining)
+
+    if remaining:
+        fields: Dict[str, Any] = {
+            "pending_count": len(remaining),
+            "receipts_file": str(primary_path),
+        }
+        if last_error is not None:
+            fields["error"] = str(last_error)
+        _emit("WARN", "central_receipt_mirror_pending", **fields)
+
+    return len(remaining)
+
+
+def _stamp_identity(receipt: Dict[str, Any], *, identity_cwd: Optional[Path] = None) -> None:
     """Backfill the four-tuple identity fields on a receipt in place.
 
     Phase 6 P2: every NDJSON line should be attributable to
@@ -153,7 +281,7 @@ def _stamp_identity(receipt: Dict[str, Any]) -> None:
     except Exception:
         return
 
-    identity = try_resolve_identity()
+    identity = try_resolve_identity(cwd=identity_cwd)
     if identity is None:
         return
 
@@ -177,7 +305,9 @@ def append_receipt_payload(
     if not isinstance(receipt, dict):
         raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
 
-    _stamp_identity(receipt)
+    receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
+
+    _stamp_identity(receipt, identity_cwd=receipt_path.parent)
     _stamp_observability_tier(receipt)
 
     if not skip_enrichment:
@@ -190,7 +320,6 @@ def append_receipt_payload(
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)
 
-    receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)
 
@@ -203,8 +332,9 @@ def append_receipt_payload(
     )
 
     if result.status == "appended":
-        # Phase 6 P3 dual-write: mirror to central path (best-effort, never raises)
-        _mirror_receipt_to_central(receipt, receipt_path)
+        # Phase 6 P3 dual-write: drain persisted mirror debt before attempting
+        # the current central write so transient mirror failures are repaired.
+        _drain_pending_mirrors_and_mirror_current(receipt, receipt_path, idempotency_key)
         if not skip_enrichment:
             _run_post_append_hooks(receipt)
 

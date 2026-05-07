@@ -84,6 +84,7 @@ class TestCentralStateDirFor:
         from unittest.mock import patch
         import build_t0_state
 
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
         central_base = tmp_path / "central"
         central_state = central_base / "test-proj" / "state"
@@ -107,14 +108,16 @@ class TestCentralStateDirFor:
         state_dir = tmp_path / "state"
         state_dir.mkdir(parents=True)
 
-        # First call: no project_id → None
+        # First call: no project_id, flag not set → None
         monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
         result_none = build_t0_state._central_state_dir_for(state_dir)
         assert result_none is None
 
-        # Second call in same process: set project_id → central is found
+        # Second call in same process: set project_id + flag → central is found
         central_state = central_base / "dyn-proj" / "state"
         central_state.mkdir(parents=True)
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
         monkeypatch.setenv("VNX_PROJECT_ID", "dyn-proj")
 
         with patch.object(build_t0_state, "resolve_central_data_dir",
@@ -122,6 +125,36 @@ class TestCentralStateDirFor:
             result_found = build_t0_state._central_state_dir_for(state_dir)
 
         assert result_found == central_state, "env change must be picked up at call time"
+
+    def test_explicit_state_dir_beats_ambient_project_id(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        import build_t0_state
+
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
+        monkeypatch.setenv("VNX_PROJECT_ID", "wrong-proj")
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir(parents=True)
+        (repo_root / ".vnx-project-id").write_text("right-proj\n", encoding="utf-8")
+        primary_state = repo_root / ".vnx-data" / "state"
+        primary_state.mkdir(parents=True)
+
+        central_base = tmp_path / "central"
+        correct_central = central_base / "right-proj" / "state"
+        wrong_central = central_base / "wrong-proj" / "state"
+        correct_central.mkdir(parents=True)
+        wrong_central.mkdir(parents=True)
+
+        def _patched_resolve(project_id: str):
+            return central_base / project_id
+
+        with patch.object(build_t0_state, "resolve_central_data_dir", side_effect=_patched_resolve):
+            result = build_t0_state._central_state_dir_for(primary_state)
+
+        assert result == correct_central, (
+            "explicit state_dir must derive central project_id from the state_dir hierarchy, "
+            "not from ambient VNX_PROJECT_ID"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +180,7 @@ class TestBuildRecentReceiptsPrefersCentral:
         from unittest.mock import patch
         import build_t0_state
 
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
         central_base = tmp_path / "central"
         central_state = central_base / "test-proj" / "state"
@@ -191,6 +225,7 @@ class TestBuildQueuesPrefersCentral:
         from unittest.mock import patch
         import build_t0_state
 
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
         monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
         central_base = tmp_path / "central"
         central_state = central_base / "test-proj" / "state"
@@ -214,6 +249,60 @@ class TestBuildQueuesPrefersCentral:
             queues = build_t0_state._build_queues(dispatch_dir, primary_state)
 
         assert queues["completed_last_hour"] == 1, "central receipt count must be used"
+
+
+# ---------------------------------------------------------------------------
+# VNX_USE_CENTRAL_DB gate (ADVISORY 1)
+# ---------------------------------------------------------------------------
+
+class TestVNXUseCentralDBGate:
+    """_central_state_dir_for must return None unless VNX_USE_CENTRAL_DB=1."""
+
+    def test_flag_not_set_returns_none_even_with_project_id(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        import build_t0_state
+
+        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+
+        central_state = tmp_path / "central" / "test-proj" / "state"
+        central_state.mkdir(parents=True)
+        primary_state = tmp_path / "primary" / "state"
+        primary_state.mkdir(parents=True)
+
+        with patch.object(build_t0_state, "resolve_central_data_dir",
+                          return_value=tmp_path / "central" / "test-proj"):
+            result = build_t0_state._central_state_dir_for(primary_state)
+
+        assert result is None, "VNX_USE_CENTRAL_DB not set must suppress central preference"
+
+    def test_flag_set_to_zero_returns_none(self, monkeypatch, tmp_path):
+        import build_t0_state
+
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "0")
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+
+        result = build_t0_state._central_state_dir_for(tmp_path / "state")
+
+        assert result is None, "VNX_USE_CENTRAL_DB=0 must not enable central"
+
+    def test_flag_set_to_1_enables_central(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        import build_t0_state
+
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+
+        central_state = tmp_path / "central" / "test-proj" / "state"
+        central_state.mkdir(parents=True)
+        primary_state = tmp_path / "primary" / "state"
+        primary_state.mkdir(parents=True)
+
+        with patch.object(build_t0_state, "resolve_central_data_dir",
+                          return_value=tmp_path / "central" / "test-proj"):
+            result = build_t0_state._central_state_dir_for(primary_state)
+
+        assert result == central_state, "VNX_USE_CENTRAL_DB=1 must enable central preference"
 
 
 # ---------------------------------------------------------------------------
