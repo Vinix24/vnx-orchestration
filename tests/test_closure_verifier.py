@@ -954,6 +954,7 @@ class TestClosureVerifierRoundOneCodexFindings:
         # writes `status`, no `state` / `was_intentionally_absent` fields.
         legacy_payload = {
             "gate": "claude_github_optional",
+            "pr_id": "PR-0",
             "status": "configured_dry_run",
             "branch": "feature/demo",
             "pr_number": 45,

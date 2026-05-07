@@ -304,6 +304,15 @@ def _find_gate_request_payload(
             data = json.loads(_read_text(path))
         except (json.JSONDecodeError, OSError):
             continue
+        # claude_github_optional payloads must carry an explicit pr_id so that a
+        # file written for one PR cannot silently satisfy another PR's closure check.
+        if gate == "claude_github_optional" and not data.get("pr_id"):
+            print(
+                f"WARNING: claude_github_optional request payload {path.name} is missing"
+                f" pr_id — rejected to prevent cross-PR false-green (OI-1339)",
+                file=sys.stderr,
+            )
+            continue
         if data.get("pr_id") and data["pr_id"] != pr_id:
             continue
         if data.get("gate") and data["gate"] != gate:
