@@ -698,6 +698,13 @@ class IntelligenceSelector:
         if result.items and self._quality_db_path is not None and self._quality_db_path.exists():
             self._record_pattern_usage(result)
 
+        # Ensure source_dispatch_ids is stamped for all callers — idempotent, so
+        # safe when _record_pattern_usage already did a partial stamp internally.
+        try:
+            self.stamp_source_dispatch_ids(result)
+        except Exception:
+            pass
+
     def _record_pattern_usage(self, result: InjectionResult) -> None:
         """Write one pattern_usage row per injected item so feedback can find them later.
 

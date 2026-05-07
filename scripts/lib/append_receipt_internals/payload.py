@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import sys
 from pathlib import Path
@@ -99,6 +101,41 @@ def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
         pass
 
 
+def resolve_central_data_dir(project_id: str) -> Path:
+    """Module-level wrapper so tests can monkeypatch ``payload_mod.resolve_central_data_dir``."""
+    from vnx_paths import resolve_central_data_dir as _resolve
+    return _resolve(project_id)
+
+
+def _mirror_receipt_to_central(receipt: Dict[str, Any], primary_path: Path) -> None:
+    """Best-effort mirror of a receipt to the central path. Never raises.
+
+    Phase 6 P3 dual-write: writes to ``~/.vnx-data/<project_id>/state/t0_receipts.ndjson``
+    using the same ``append_receipt.lock`` locking convention as the primary writer.
+
+    P5 cutover guard: skips when central_receipts resolves to the same file as
+    primary_path so that at Phase 5 cutover there is no double-write.
+    """
+    project_id = str(receipt.get("project_id") or "").strip()
+    if not project_id:
+        return
+    try:
+        central_base = resolve_central_data_dir(project_id)
+        central_state = central_base / "state"
+        central_receipts = central_state / "t0_receipts.ndjson"
+        # P5 cutover guard
+        if central_receipts.resolve() == primary_path.resolve():
+            return
+        central_state.mkdir(parents=True, exist_ok=True)
+        lock_path = central_state / "append_receipt.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            with central_receipts.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(receipt, separators=(",", ":"), sort_keys=False) + "\n")
+    except Exception:
+        pass
+
+
 def _stamp_identity(receipt: Dict[str, Any]) -> None:
     """Backfill the four-tuple identity fields on a receipt in place.
 
@@ -165,8 +202,11 @@ def append_receipt_payload(
         cache_window_seconds,
     )
 
-    if result.status == "appended" and not skip_enrichment:
-        _run_post_append_hooks(receipt)
+    if result.status == "appended":
+        # Phase 6 P3 dual-write: mirror to central path (best-effort, never raises)
+        _mirror_receipt_to_central(receipt, receipt_path)
+        if not skip_enrichment:
+            _run_post_append_hooks(receipt)
 
     return result
 

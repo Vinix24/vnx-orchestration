@@ -52,6 +52,10 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from vnx_paths import ensure_env  # noqa: E402
+try:
+    from vnx_paths import resolve_central_data_dir  # noqa: E402
+except ImportError:
+    resolve_central_data_dir = None  # type: ignore[assignment]
 
 _PATHS = ensure_env()
 _STATE_DIR = Path(_PATHS["VNX_STATE_DIR"])
@@ -87,6 +91,35 @@ def _safe_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
+    """Return the central state dir for the current project_id, derived from state_dir.
+
+    Phase 6 P3: resolves project_id from VNX_PROJECT_ID env at call time (not module
+    load time) so tests/migrations that override state_dir work correctly.
+
+    Returns None when:
+    - resolve_central_data_dir is unavailable
+    - VNX_PROJECT_ID is not set in env
+    - central state dir does not exist on filesystem
+    - central == primary (P5 cutover guard — skip double-read)
+    """
+    if resolve_central_data_dir is None:
+        return None
+    project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+    if not project_id:
+        return None
+    try:
+        central_base = resolve_central_data_dir(project_id)
+        central_state = central_base / "state"
+        if not central_state.exists():
+            return None
+        if central_state.resolve() == state_dir.resolve():
+            return None
+        return central_state
     except Exception:
         return None
 
@@ -181,7 +214,9 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
     conflict = _count_md(dispatch_dir / "conflicts")
 
     completed_last_hour = 0
-    receipts_path = state_dir / "t0_receipts.ndjson"
+    # Phase 6 P3: prefer central receipts when available (derived from state_dir)
+    _central = _central_state_dir_for(state_dir)
+    receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
     if receipts_path.exists():
         cutoff = _now_utc() - timedelta(hours=1)
         try:
@@ -631,7 +666,9 @@ def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _build_recent_receipts(state_dir: Path, n: int = 3) -> List[Dict[str, Any]]:
-    receipts_path = state_dir / "t0_receipts.ndjson"
+    # Phase 6 P3: prefer central receipts when available (derived from state_dir, not module global)
+    _central = _central_state_dir_for(state_dir)
+    receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
     if not receipts_path.exists():
         return []
 
