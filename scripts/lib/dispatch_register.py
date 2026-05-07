@@ -154,10 +154,33 @@ def _resolve_identity_for_register() -> dict:
     }
 
 
+def _resolve_central_data_dir(project_id: str) -> Path:
+    """Return the central data dir for project_id. Module-level for monkeypatching."""
+    from vnx_paths import resolve_central_data_dir
+    return resolve_central_data_dir(project_id)
+
+
 def _write_event_locked(path: Path, record: dict) -> None:
     with path.open("a", encoding="utf-8") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
+    """Best-effort mirror of a register event to the central path. Never raises.
+
+    P5 cutover guard: skips when primary_path already resolves to the central file
+    so that at Phase 5 cutover there is no double-write.
+    """
+    try:
+        central_base = _resolve_central_data_dir(project_id)
+        central_path = central_base / "state" / "dispatch_register.ndjson"
+        if central_path.resolve() == primary_path.resolve():
+            return
+        central_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_event_locked(central_path, record)
+    except Exception:
+        pass
 
 
 def append_event(
@@ -207,8 +230,12 @@ def append_event(
         agent_id=agent_id,
     )
     try:
-        _write_event_locked(_resolve_register_path(), record)
+        primary_path = _resolve_register_path()
+        _write_event_locked(primary_path, record)
         _mirror_to_decision_log(event, record, extra=extra)
+        # Phase 6 P3 dual-write: mirror to central when project_id is known
+        if project_id:
+            _mirror_event_to_central(record, primary_path, project_id)
         return True
     except Exception:
         return False
@@ -284,20 +311,13 @@ def _read_register_locked(path: Path) -> str:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
-    """Read all events; takes shared lock to avoid partial-write reads. Honors optional state_dir override."""
-    if state_dir is not None:
-        path = Path(state_dir) / "dispatch_register.ndjson"
-    else:
-        path = _register_path()
+def _read_events_from_path(path: Path, since_iso: Optional[str]) -> list[dict]:
+    """Read events from a single NDJSON path with optional timestamp filter."""
     if not path.exists():
         return []
-    events = []
     cutoff_dt = _parse_iso(since_iso) if since_iso else None
-    # If the caller provided a since_iso we could not parse, fall back to the
-    # legacy lexicographic compare so behaviour stays predictable rather than
-    # silently disabling the filter.
     cutoff_lex = since_iso if (since_iso and cutoff_dt is None) else None
+    events: list[dict] = []
     try:
         content = _read_register_locked(path)
         for line in content.splitlines():
@@ -320,6 +340,47 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
     except Exception:
         return []
     return events
+
+
+def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = None) -> list[dict]:
+    """Read all events; merge-reads from central when VNX_PROJECT_ID is set.
+
+    Primary path: ``state_dir/dispatch_register.ndjson`` (or ambient VNX_STATE_DIR).
+    Central path: derived from VNX_PROJECT_ID env via ``_resolve_central_data_dir``.
+    Deduplication: on (timestamp, event, dispatch_id) — central record wins.
+    P5 cutover guard: central is skipped when it resolves to the same file as primary.
+    """
+    primary_path = (Path(state_dir) / "dispatch_register.ndjson") if state_dir is not None else _register_path()
+    primary_events = _read_events_from_path(primary_path, since_iso)
+
+    # Phase 6 P3 merge-read from central when project_id is known
+    project_id = os.environ.get("VNX_PROJECT_ID", "").strip()
+    central_events: list[dict] = []
+    if project_id:
+        try:
+            central_base = _resolve_central_data_dir(project_id)
+            central_path = central_base / "state" / "dispatch_register.ndjson"
+            # P5 cutover guard: skip if central == primary
+            primary_resolved = primary_path.resolve() if primary_path.exists() else None
+            if central_path.exists() and (
+                primary_resolved is None or central_path.resolve() != primary_resolved
+            ):
+                central_events = _read_events_from_path(central_path, since_iso)
+        except Exception:
+            pass
+
+    if not central_events:
+        return primary_events
+
+    # Merge: deduplicate on (timestamp, event, dispatch_id); central wins on collision
+    merged: dict = {}
+    for ev in primary_events:
+        key = (ev.get("timestamp", ""), ev.get("event", ""), ev.get("dispatch_id", ""))
+        merged[key] = ev
+    for ev in central_events:
+        key = (ev.get("timestamp", ""), ev.get("event", ""), ev.get("dispatch_id", ""))
+        merged[key] = ev  # central overwrites primary on same key
+    return sorted(merged.values(), key=lambda e: e.get("timestamp", ""))
 
 
 # CLI for bash callers

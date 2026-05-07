@@ -160,6 +160,21 @@ def ensure_env() -> Dict[str, str]:
     return paths
 
 
+def resolve_central_data_dir(project_id: str) -> Path:
+    """Return ``~/.vnx-data/<project_id>/`` — the central per-project data directory.
+
+    Used by Phase 6 P3 dual-write paths and the envelope re-stamper.
+
+    Raises:
+        ValueError: if project_id is empty or contains path separators.
+    """
+    if not project_id:
+        raise ValueError("project_id must be non-empty")
+    if "/" in project_id or "\\" in project_id:
+        raise ValueError(f"project_id must not contain path separators: {project_id!r}")
+    return Path.home() / ".vnx-data" / project_id
+
+
 if __name__ == "__main__":
     # Print resolved paths for quick diagnostics
     resolved = ensure_env()
