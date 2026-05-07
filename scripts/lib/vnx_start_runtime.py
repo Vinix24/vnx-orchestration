@@ -97,7 +97,7 @@ class StartConfig:
     vnx_home: str
     vnx_data_dir: str
     terminals: Dict[str, TerminalConfig] = field(default_factory=dict)
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-2.5-pro"
     codex_model: str = "gpt-5.1-codex-mini"
     queue_popup_enabled: bool = True
     preset_name: str = ""
@@ -110,7 +110,7 @@ class StartConfig:
         vnx_home = os.environ.get("VNX_HOME", "")
         vnx_data_dir = os.environ.get("VNX_DATA_DIR", "")
 
-        gemini_model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-flash")
+        gemini_model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
         codex_model = os.environ.get("VNX_CODEX_MODEL", "gpt-5.1-codex-mini")
         t0_flags = os.environ.get("VNX_T0_FLAGS", "")
         queue_popup = os.environ.get("VNX_QUEUE_POPUP_ENABLED", "1") != "0"
@@ -148,7 +148,7 @@ class StartConfig:
 
 def build_provider_command(
     tc: TerminalConfig,
-    gemini_model: str = "gemini-2.5-flash",
+    gemini_model: str = "gemini-2.5-pro",
     codex_model: str = "gpt-5.1-codex-mini",
     project_root: str = "",
 ) -> str:
