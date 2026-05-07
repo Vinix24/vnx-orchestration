@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 from typing import List
+from unittest.mock import patch
 
 import pytest
 
@@ -310,6 +311,44 @@ class TestCli:
                 "--state-dir", str(state_dir),
             ])
         assert rc == 0
+
+    def test_default_state_dir_is_derived_from_project_id_not_ambient_env(self, tmp_path):
+        repo_root = tmp_path / "repo"
+        state_dir = repo_root / ".vnx-data" / "state"
+        state_dir.mkdir(parents=True)
+        (repo_root / ".vnx-project-id").write_text("test-proj\n", encoding="utf-8")
+
+        fake_paths = {
+            "PROJECT_ROOT": str(repo_root),
+            "VNX_STATE_DIR": str(tmp_path / "wrong" / "state"),
+        }
+
+        with patch("vnx_paths.resolve_paths", return_value=fake_paths), \
+             patch.object(migrator, "restamp_project", return_value={}) as restamp_mock:
+            rc = migrator.main(["--project-id", "test-proj", "--dry-run"])
+
+        assert rc == 0
+        assert restamp_mock.call_args[0][0] == state_dir
+
+    def test_default_state_dir_project_mismatch_fails_fast(self, tmp_path, capsys):
+        repo_root = tmp_path / "repo"
+        state_dir = repo_root / ".vnx-data" / "state"
+        state_dir.mkdir(parents=True)
+        (repo_root / ".vnx-project-id").write_text("repo-proj\n", encoding="utf-8")
+
+        fake_paths = {
+            "PROJECT_ROOT": str(repo_root),
+            "VNX_STATE_DIR": str(tmp_path / "wrong" / "state"),
+        }
+
+        with patch("vnx_paths.resolve_paths", return_value=fake_paths), \
+             patch.object(migrator, "restamp_project") as restamp_mock:
+            rc = migrator.main(["--project-id", "other-proj", "--dry-run"])
+
+        assert rc == 1
+        restamp_mock.assert_not_called()
+        captured = capsys.readouterr()
+        assert "Pass --state-dir explicitly." in captured.err
 
 
 # ---------------------------------------------------------------------------

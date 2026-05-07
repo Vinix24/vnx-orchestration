@@ -126,6 +126,36 @@ class TestCentralStateDirFor:
 
         assert result_found == central_state, "env change must be picked up at call time"
 
+    def test_explicit_state_dir_beats_ambient_project_id(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+        import build_t0_state
+
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
+        monkeypatch.setenv("VNX_PROJECT_ID", "wrong-proj")
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir(parents=True)
+        (repo_root / ".vnx-project-id").write_text("right-proj\n", encoding="utf-8")
+        primary_state = repo_root / ".vnx-data" / "state"
+        primary_state.mkdir(parents=True)
+
+        central_base = tmp_path / "central"
+        correct_central = central_base / "right-proj" / "state"
+        wrong_central = central_base / "wrong-proj" / "state"
+        correct_central.mkdir(parents=True)
+        wrong_central.mkdir(parents=True)
+
+        def _patched_resolve(project_id: str):
+            return central_base / project_id
+
+        with patch.object(build_t0_state, "resolve_central_data_dir", side_effect=_patched_resolve):
+            result = build_t0_state._central_state_dir_for(primary_state)
+
+        assert result == correct_central, (
+            "explicit state_dir must derive central project_id from the state_dir hierarchy, "
+            "not from ambient VNX_PROJECT_ID"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _build_recent_receipts — prefers central when available

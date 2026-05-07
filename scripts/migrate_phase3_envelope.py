@@ -38,6 +38,29 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 
+def _default_primary_state_dir(project_id: str) -> Path:
+    """Derive the default repo-local primary state dir for project_id.
+
+    Uses the current repo root rather than ambient ``VNX_STATE_DIR`` so
+    ``--project-id`` cannot silently target another project's state. When the
+    repo-local ``.vnx-project-id`` disagrees with ``project_id``, callers must
+    pass ``--state-dir`` explicitly.
+    """
+    from vnx_paths import project_id_from_state_dir, resolve_paths
+
+    project_root = Path(resolve_paths()["PROJECT_ROOT"]).expanduser().resolve()
+    candidate = project_root / ".vnx-data" / "state"
+    inferred_project_id = project_id_from_state_dir(candidate)
+    if inferred_project_id != project_id:
+        inferred_label = inferred_project_id or "<unknown>"
+        raise ValueError(
+            f"--project-id {project_id!r} does not match inferred project_id "
+            f"{inferred_label!r} for default state_dir {candidate}. "
+            "Pass --state-dir explicitly."
+        )
+    return candidate
+
+
 def _resolve_identity(project_id: str) -> Dict[str, Optional[str]]:
     """Resolve the four-tuple for the given project_id."""
     result: Dict[str, Optional[str]] = {
@@ -214,8 +237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         state_dir = Path(args.state_dir).expanduser().resolve()
     else:
         try:
-            from vnx_paths import resolve_paths
-            state_dir = Path(resolve_paths()["VNX_STATE_DIR"])
+            state_dir = _default_primary_state_dir(args.project_id)
         except Exception as exc:
             print(f"ERROR: cannot resolve state dir: {exc}", file=sys.stderr)
             return 1

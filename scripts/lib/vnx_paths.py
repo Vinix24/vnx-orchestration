@@ -163,6 +163,45 @@ def ensure_env() -> Dict[str, str]:
     return paths
 
 
+def project_id_from_state_dir(state_dir: Path) -> str:
+    """Best-effort derive a project_id from a state dir path.
+
+    Supports both:
+    - central paths: ``~/.vnx-data/<project_id>/state``
+    - repo-local paths with a nearby ``.vnx-project-id`` file, such as
+      ``<repo>/.vnx-data/state``
+
+    Returns an empty string when no valid project_id can be derived.
+    """
+    try:
+        resolved = Path(state_dir).expanduser().resolve()
+    except Exception:
+        return ""
+
+    try:
+        vnx_data = (Path.home() / ".vnx-data").resolve()
+        if resolved.name == "state" and resolved.parent.parent == vnx_data:
+            candidate = resolved.parent.name.strip()
+            if _PROJECT_ID_RE.match(candidate):
+                return candidate
+    except Exception:
+        pass
+
+    for ancestor in [resolved, *resolved.parents]:
+        project_file = ancestor / ".vnx-project-id"
+        if not project_file.is_file():
+            continue
+        try:
+            first_line = project_file.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError):
+            return ""
+        if _PROJECT_ID_RE.match(first_line):
+            return first_line
+        return ""
+
+    return ""
+
+
 def resolve_central_data_dir(project_id: str) -> Path:
     """Return ``~/.vnx-data/<project_id>/`` — the central per-project data directory.
 

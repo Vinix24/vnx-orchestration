@@ -243,6 +243,35 @@ class TestMergeReadCentralWins:
         assert len(events) == 1
         assert events[0]["source"] == "central"
 
+    def test_pr_level_events_with_same_timestamp_do_not_collapse(self, monkeypatch, isolated_data_dir, tmp_path):
+        ts = "2026-05-01T12:00:00.000000Z"
+        primary_state = tmp_path / "primary_state"
+        primary_state.mkdir(parents=True)
+        (primary_state / "dispatch_register.ndjson").write_text(
+            json.dumps({"timestamp": ts, "event": "pr_opened", "pr_number": 101}) + "\n"
+        )
+
+        central_base = tmp_path / "central"
+        central_state = central_base / "test-merge" / "state"
+        central_state.mkdir(parents=True)
+        (central_state / "dispatch_register.ndjson").write_text(
+            json.dumps({"timestamp": ts, "event": "pr_opened", "pr_number": 202}) + "\n"
+        )
+
+        def _patched_resolve(pid):
+            return central_base / pid
+
+        monkeypatch.setenv("VNX_STATE_DIR", str(primary_state))
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-merge")
+
+        with patch.object(dispatch_register, "_resolve_central_data_dir", _patched_resolve):
+            events = read_events()
+
+        assert len(events) == 2, (
+            "PR-level events that differ only by pr_number must survive primary/central merge-read"
+        )
+        assert {event["pr_number"] for event in events} == {101, 202}
+
 
 # ---------------------------------------------------------------------------
 # Helper — not a test

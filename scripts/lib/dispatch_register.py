@@ -182,6 +182,16 @@ def _project_id_from_state_dir(state_dir: Path) -> str:
     return ""
 
 
+def _merge_dedup_key(event: dict) -> tuple[str, str, str, str, str]:
+    return (
+        str(event.get("timestamp", "")),
+        str(event.get("event", "")),
+        str(event.get("dispatch_id", "") or ""),
+        str(event.get("pr_number", "") or ""),
+        str(event.get("feature_id", "") or ""),
+    )
+
+
 def _write_event_locked(path: Path, record: dict) -> None:
     # Acquire directory-level sentinel BEFORE opening the file so that a
     # concurrent re-stamper that holds the sentinel and is about to os.replace()
@@ -377,7 +387,8 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
     Central path: derived from state_dir hierarchy when explicit; from VNX_PROJECT_ID
         env only when state_dir is not provided. This prevents env bleed-through when
         an explicit state_dir override is supplied.
-    Deduplication: on (timestamp, event, dispatch_id) — central record wins.
+    Deduplication: on (timestamp, event, dispatch_id, pr_number, feature_id)
+        — central record wins.
     P5 cutover guard: central is skipped when it resolves to the same file as primary.
     """
     primary_path = (Path(state_dir) / "dispatch_register.ndjson") if state_dir is not None else _register_path()
@@ -407,13 +418,14 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
     if not central_events:
         return primary_events
 
-    # Merge: deduplicate on (timestamp, event, dispatch_id); central wins on collision
+    # Merge: deduplicate on (timestamp, event, dispatch_id, pr_number, feature_id);
+    # central wins on collision.
     merged: dict = {}
     for ev in primary_events:
-        key = (ev.get("timestamp", ""), ev.get("event", ""), ev.get("dispatch_id", ""))
+        key = _merge_dedup_key(ev)
         merged[key] = ev
     for ev in central_events:
-        key = (ev.get("timestamp", ""), ev.get("event", ""), ev.get("dispatch_id", ""))
+        key = _merge_dedup_key(ev)
         merged[key] = ev  # central overwrites primary on same key
     return sorted(merged.values(), key=lambda e: e.get("timestamp", ""))
 
