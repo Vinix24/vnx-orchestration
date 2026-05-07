@@ -329,9 +329,8 @@ def test_readonly_attach_blocks_writes(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_per_project_failure_rolls_back_only_that_project(fixture_env, monkeypatch):
-    """Force project 'sales-copilot' to fail mid-import; assert vnx-dev + mc remain
-    applied, sales-copilot has zero rows in central, seocrawler-v2 also applied."""
+def test_project_import_failure_restores_snapshot_after_verification(fixture_env, monkeypatch):
+    """A project import error must fail verification and restore the snapshot."""
     real_import = M._import_table
     fail_pid = "sales-copilot"
 
@@ -342,17 +341,12 @@ def test_per_project_failure_rolls_back_only_that_project(fixture_env, monkeypat
 
     monkeypatch.setattr(M, "_import_table", flaky_import)
     rc = _apply(fixture_env)
-    # exit 4 because at least one project failed
+    # exit 4 because the failed project creates a verification mismatch.
     assert rc == 4
 
     with sqlite3.connect(fixture_env["central_qi"]) as c:
-        for_pid = lambda pid: c.execute(
-            "SELECT COUNT(*) FROM success_patterns WHERE project_id = ?", (pid,)
-        ).fetchone()[0]
-        assert for_pid("vnx-dev") == 2
-        assert for_pid("mc") == 2
-        assert for_pid("sales-copilot") == 0  # rolled back
-        assert for_pid("seocrawler-v2") == 2
+        total = c.execute("SELECT COUNT(*) FROM success_patterns").fetchone()[0]
+    assert total == 0
 
 
 # ---------------------------------------------------------------------------
@@ -504,55 +498,307 @@ def test_import_table_logs_conflict_skipped_rows(tmp_path: Path):
         con.close()
 
 
-def test_apply_imports_code_snippets_table(fixture_env):
-    """Finding 3: ``code_snippets`` must be in the import plan so its rows
-    are copied into central before migration 0016 rebuilds the FTS5 index.
+def test_import_table_backfills_project_id_when_source_lacks_it(tmp_path: Path):
+    """BLOCKING 1: central-only ``project_id`` columns must be stamped on import."""
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
 
-    Uses a regular table (not the FTS5 vtab) so the test stays focused on
-    the import path. The ordering guarantee — 0015 ALTER → import → 0016 —
-    is exercised by the rebuild test below.
-    """
+    src_db = tmp_path / "src.db"
+    con = sqlite3.connect(src_db)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE quality_alerts (
+                id INTEGER PRIMARY KEY,
+                message TEXT NOT NULL
+            );
+            INSERT INTO quality_alerts (message) VALUES ('alert-from-legacy');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    central_db = tmp_path / "central.db"
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE quality_alerts (
+                id INTEGER PRIMARY KEY,
+                message TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        M._ensure_rowid_map_table(con)
+        attach_readonly(con, "src", src_db)
+
+        project = ProjectEntry(name="mc", path=tmp_path / "mc", project_id="mc")
+        con.execute("BEGIN")
+        try:
+            summary = M._import_table(con, "src", project, "quality_alerts")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        assert summary.rows_inserted == 1
+        row = con.execute(
+            "SELECT message, project_id FROM quality_alerts"
+        ).fetchone()
+        assert row == ("alert-from-legacy", "mc")
+    finally:
+        con.close()
+
+
+def test_import_table_prefixes_all_schema_detected_collision_columns(tmp_path: Path):
+    """BLOCKING 2: any imported table with ``dispatch_id``/``pattern_id`` must prefix."""
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
+
+    central_db = tmp_path / "central.db"
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE future_dispatch_analytics (
+                id INTEGER PRIMARY KEY,
+                dispatch_id TEXT NOT NULL,
+                note TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE future_pattern_refs (
+                id INTEGER PRIMARY KEY,
+                pattern_id TEXT NOT NULL,
+                note TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        M._ensure_rowid_map_table(con)
+
+        for alias, pid in (("src_a", "mc"), ("src_b", "sales-copilot")):
+            src_db = tmp_path / f"{pid}.db"
+            src = sqlite3.connect(src_db)
+            try:
+                src.executescript(
+                    """
+                    CREATE TABLE future_dispatch_analytics (
+                        id INTEGER PRIMARY KEY,
+                        dispatch_id TEXT NOT NULL,
+                        note TEXT,
+                        project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+                    );
+                    CREATE TABLE future_pattern_refs (
+                        id INTEGER PRIMARY KEY,
+                        pattern_id TEXT NOT NULL,
+                        note TEXT,
+                        project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+                    );
+                    """
+                )
+                src.execute(
+                    "INSERT INTO future_dispatch_analytics (dispatch_id, note, project_id) VALUES (?, ?, ?)",
+                    ("shared-dispatch", f"{pid}-dispatch", pid),
+                )
+                src.execute(
+                    "INSERT INTO future_pattern_refs (pattern_id, note, project_id) VALUES (?, ?, ?)",
+                    ("shared-pattern", f"{pid}-pattern", pid),
+                )
+                src.commit()
+            finally:
+                src.close()
+
+            attach_readonly(con, alias, src_db)
+            project = ProjectEntry(name=pid, path=tmp_path / pid, project_id=pid)
+            con.execute("BEGIN")
+            try:
+                M._import_table(con, alias, project, "future_dispatch_analytics")
+                M._import_table(con, alias, project, "future_pattern_refs")
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+            finally:
+                con.execute(f"DETACH DATABASE {alias}")
+
+        dispatch_ids = {
+            row[0] for row in con.execute(
+                "SELECT dispatch_id FROM future_dispatch_analytics"
+            )
+        }
+        pattern_ids = {
+            row[0] for row in con.execute(
+                "SELECT pattern_id FROM future_pattern_refs"
+            )
+        }
+        assert dispatch_ids == {
+            "mc:shared-dispatch",
+            "sales-copilot:shared-dispatch",
+        }
+        assert pattern_ids == {
+            "mc:shared-pattern",
+            "sales-copilot:shared-pattern",
+        }
+    finally:
+        con.close()
+
+
+def test_apply_detects_verification_mismatch_and_restores_snapshot(fixture_env, monkeypatch):
+    """BLOCKING 3: verification mismatches must raise and force exit 4."""
+    real_import_project = M.import_project
+    dropped = {"done": False}
+
+    def drop_row_after_import(central_qi, central_rc, project):
+        summaries = real_import_project(central_qi, central_rc, project)
+        if project.project_id == "mc" and not dropped["done"]:
+            with sqlite3.connect(central_qi) as c:
+                c.execute(
+                    "DELETE FROM success_patterns "
+                    "WHERE project_id = ? AND title = ?",
+                    ("mc", "mc-p1"),
+                )
+                c.commit()
+            dropped["done"] = True
+        return summaries
+
+    monkeypatch.setattr(M, "import_project", drop_row_after_import)
+
+    rc = _apply(fixture_env)
+    assert rc == 4
+
+    report = M.verify_import(
+        fixture_env["central_qi"],
+        fixture_env["central_rc"],
+        load_registry(fixture_env["registry"]),
+    )
+    with pytest.raises(M.VerificationFailure):
+        M.raise_for_verification_failures(report)
+
+    with sqlite3.connect(fixture_env["central_qi"]) as c:
+        restored_rows = c.execute("SELECT COUNT(*) FROM success_patterns").fetchone()[0]
+    assert restored_rows == 0, "verification failure must restore the pre-attempt snapshot"
+
+
+def test_apply_preserves_snippet_links_across_fts_rebuild(fixture_env):
+    """Advisory: snippet metadata must still resolve to the imported FTS rows."""
     central_qi = fixture_env["central_qi"]
     with sqlite3.connect(central_qi) as c:
-        c.execute(
-            "CREATE TABLE code_snippets ("
-            "  id INTEGER PRIMARY KEY,"
-            "  title TEXT,"
-            "  project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
-            ")"
+        c.executescript(
+            """
+            CREATE TABLE schema_version (
+                version TEXT PRIMARY KEY,
+                description TEXT
+            );
+            CREATE TABLE snippet_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snippet_rowid INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                line_start INTEGER,
+                line_end INTEGER,
+                quality_score REAL DEFAULT 0.0,
+                usage_count INTEGER DEFAULT 0,
+                source_commit_hash TEXT,
+                pattern_hash TEXT,
+                extracted_at DATETIME,
+                verified_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE VIRTUAL TABLE code_snippets USING fts5(
+                title, description, code, file_path, line_range, tags, language,
+                framework, dependencies, quality_score, usage_count, last_updated,
+                tokenize = 'porter unicode61'
+            );
+            """
         )
 
     for spec in fixture_env["specs"]:
         path = Path(spec["path"]) / ".vnx-data" / "state" / "quality_intelligence.db"
         with sqlite3.connect(path) as c:
-            c.execute(
-                "CREATE TABLE code_snippets ("
-                "  id INTEGER PRIMARY KEY,"
-                "  title TEXT,"
-                "  project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
-                ")"
+            c.executescript(
+                """
+                CREATE TABLE snippet_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snippet_rowid INTEGER NOT NULL,
+                    file_path TEXT NOT NULL,
+                    line_start INTEGER,
+                    line_end INTEGER,
+                    quality_score REAL DEFAULT 0.0,
+                    usage_count INTEGER DEFAULT 0,
+                    source_commit_hash TEXT,
+                    pattern_hash TEXT,
+                    extracted_at DATETIME,
+                    verified_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE VIRTUAL TABLE code_snippets USING fts5(
+                    title, description, code, file_path, line_range, tags, language,
+                    framework, dependencies, quality_score, usage_count, last_updated,
+                    tokenize = 'porter unicode61'
+                );
+                """
             )
             c.execute(
-                "INSERT INTO code_snippets (title, project_id) VALUES (?, ?)",
-                (f"snippet-{spec['project_id']}", spec["project_id"]),
+                """
+                INSERT INTO code_snippets
+                    (rowid, title, description, code, file_path, line_range, tags,
+                     language, framework, dependencies, quality_score, usage_count, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    1,
+                    f"snippet-{spec['project_id']}",
+                    "d",
+                    "print('hi')",
+                    f"/tmp/{spec['project_id']}.py",
+                    "1-1",
+                    "tag",
+                    "python",
+                    "",
+                    "",
+                    "90",
+                    "1",
+                    "2026-05-07T00:00:00Z",
+                ),
+            )
+            c.execute(
+                """
+                INSERT INTO snippet_metadata
+                    (snippet_rowid, file_path, line_start, line_end, pattern_hash)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (1, f"/tmp/{spec['project_id']}.py", 1, 1, f"hash-{spec['project_id']}"),
             )
 
     rc = _apply(fixture_env)
     assert rc == 0
 
     with sqlite3.connect(central_qi) as c:
-        rows = sorted(
-            c.execute("SELECT title, project_id FROM code_snippets").fetchall()
+        rows = list(
+            c.execute(
+                """
+                SELECT m.project_id, m.snippet_rowid, s.rowid, s.title, s.project_id
+                FROM snippet_metadata m
+                JOIN code_snippets s ON s.rowid = m.snippet_rowid
+                ORDER BY m.project_id
+                """
+            )
         )
 
-    titles = [r[0] for r in rows]
-    project_ids = {r[1] for r in rows}
-    assert len(rows) == 4, f"expected 4 imported code_snippets rows, got {rows}"
-    assert "snippet-vnx-dev" in titles
-    assert "snippet-mc" in titles
-    assert "snippet-sales-copilot" in titles
-    assert "snippet-seocrawler-v2" in titles
-    assert project_ids == {"vnx-dev", "mc", "sales-copilot", "seocrawler-v2"}
+    assert len(rows) == 4
+    assert len({row[1] for row in rows}) == 4, "central snippet rowids must be unique across projects"
+    assert {(row[0], row[3], row[4]) for row in rows} == {
+        ("mc", "snippet-mc", "mc"),
+        ("sales-copilot", "snippet-sales-copilot", "sales-copilot"),
+        ("seocrawler-v2", "snippet-seocrawler-v2", "seocrawler-v2"),
+        ("vnx-dev", "snippet-vnx-dev", "vnx-dev"),
+    }
+    assert all(row[1] == row[2] for row in rows)
 
 
 def test_apply_migration_0016_rolls_back_on_failure(tmp_path: Path, monkeypatch):

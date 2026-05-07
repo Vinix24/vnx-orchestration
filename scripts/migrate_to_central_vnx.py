@@ -97,8 +97,8 @@ IMPORT_TABLES_QI: tuple[str, ...] = (
     "dispatch_pattern_offered",
     "session_analytics",
     "vnx_code_quality",
-    "snippet_metadata",
     "code_snippets",
+    "snippet_metadata",
     "quality_trends",
     "quality_alerts",
     "dispatch_quality_context",
@@ -124,16 +124,11 @@ IMPORT_TABLES_RC: tuple[str, ...] = (
     "recommendation_outcomes",
 )
 
-# Tables whose primary key is a TEXT id that may collide across projects.
-# For these, the migrator prefixes the colliding key with `<project_id>:` per plan §5.2.
-COLLISION_PREFIX_KEYS: dict[str, str] = {
-    "pattern_usage": "pattern_id",
-    "dispatch_metadata": "dispatch_id",
-    "dispatch_pattern_offered": "dispatch_id",
-    "dispatches": "dispatch_id",
-    "dispatch_attempts": "dispatch_id",
-    "intelligence_injections": "dispatch_id",
-}
+# Schema-driven collision-prefixing candidates. Any imported table that carries
+# one of these exact column names gets its value rewritten to
+# ``<project_id>:<original>`` so per-project identifiers remain unique after
+# consolidation.
+COLLISION_PREFIX_COLUMNS: tuple[str, ...] = ("dispatch_id", "pattern_id")
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +273,12 @@ def _iter_sql_statements(sql: str) -> Iterable[str]:
     is a deliberately simple split — none of our migrations contain ``;``
     inside string literals, so we don't pay the cost of a full SQL tokenizer.
     """
-    for raw_stmt in sql.split(";"):
+    uncommented_sql = "\n".join(
+        line
+        for line in sql.splitlines()
+        if not line.lstrip().startswith("--")
+    )
+    for raw_stmt in uncommented_sql.split(";"):
         stmt = _strip_leading_sql_comments(raw_stmt)
         if stmt:
             yield stmt
@@ -339,8 +339,22 @@ def _table_exists(con: sqlite3.Connection, table: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _column_exists(con: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})"))
+def _table_columns(
+    con: sqlite3.Connection,
+    table: str,
+    alias: Optional[str] = None,
+) -> list[str]:
+    pragma = f"PRAGMA {alias}.table_info({table})" if alias else f"PRAGMA table_info({table})"
+    return [r[1] for r in con.execute(pragma)]
+
+
+def _column_exists(
+    con: sqlite3.Connection,
+    table: str,
+    column: str,
+    alias: Optional[str] = None,
+) -> bool:
+    return column in _table_columns(con, table, alias=alias)
 
 
 def apply_migration_0016(qi_db: Path) -> None:
@@ -428,6 +442,22 @@ def _ensure_skipped_table(con: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_rowid_map_table(con: sqlite3.Connection) -> None:
+    """Map source rowids to imported central rowids for link-table rewrites."""
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS p4_import_rowid_map (
+            project_id TEXT NOT NULL,
+            source_table TEXT NOT NULL,
+            source_rowid INTEGER NOT NULL,
+            central_rowid INTEGER NOT NULL,
+            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, source_table, source_rowid)
+        )
+        """
+    )
+
+
 def _integer_primary_key(con: sqlite3.Connection, table: str, alias: Optional[str] = None) -> Optional[str]:
     """Return the column name that is INTEGER PRIMARY KEY (autoincrement rowid alias).
 
@@ -451,15 +481,64 @@ def _common_columns(con: sqlite3.Connection, source_alias: str, table: str) -> l
     """
     if not _table_exists(con, table):
         return []
-    central_cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
-    src_cols = [
-        r[1]
-        for r in con.execute(f"PRAGMA {source_alias}.table_info({table})")
-    ]
+    central_cols = _table_columns(con, table)
+    src_cols = _table_columns(con, table, alias=source_alias)
     src_int_pk = _integer_primary_key(con, table, alias=source_alias)
     central_int_pk = _integer_primary_key(con, table)
     skip = {c for c in (src_int_pk, central_int_pk) if c}
     return [c for c in src_cols if c in central_cols and c not in skip]
+
+
+def _collect_collision_columns(
+    con: sqlite3.Connection,
+    source_alias: str,
+    table: str,
+) -> tuple[str, ...]:
+    if not _table_exists(con, table):
+        return ()
+    central_cols = set(_table_columns(con, table))
+    source_cols = set(_table_columns(con, table, alias=source_alias))
+    return tuple(
+        column
+        for column in COLLISION_PREFIX_COLUMNS
+        if column in central_cols and column in source_cols
+    )
+
+
+def _record_rowid_mapping(
+    con: sqlite3.Connection,
+    project_id: str,
+    source_table: str,
+    source_rowid: int,
+    central_rowid: int,
+) -> None:
+    con.execute(
+        """
+        INSERT INTO p4_import_rowid_map
+            (project_id, source_table, source_rowid, central_rowid)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project_id, source_table, source_rowid)
+        DO UPDATE SET central_rowid = excluded.central_rowid
+        """,
+        (project_id, source_table, source_rowid, central_rowid),
+    )
+
+
+def _mapped_central_rowid(
+    con: sqlite3.Connection,
+    project_id: str,
+    source_table: str,
+    source_rowid: int,
+) -> Optional[int]:
+    row = con.execute(
+        """
+        SELECT central_rowid
+        FROM p4_import_rowid_map
+        WHERE project_id = ? AND source_table = ? AND source_rowid = ?
+        """,
+        (project_id, source_table, source_rowid),
+    ).fetchone()
+    return int(row[0]) if row else None
 
 
 def _import_table(
@@ -468,10 +547,14 @@ def _import_table(
     project: ProjectEntry,
     table: str,
 ) -> ImportSummary:
-    cols = _common_columns(con, source_alias, table)
-    if not cols:
+    source_cols = _common_columns(con, source_alias, table)
+    central_has_project_id = _column_exists(con, table, "project_id")
+    source_has_project_id = _column_exists(con, table, "project_id", alias=source_alias)
+    insert_cols = list(source_cols)
+    if central_has_project_id and not source_has_project_id:
+        insert_cols.append("project_id")
+    if not source_cols:
         return ImportSummary(project.project_id, "", table, 0, 0)
-    has_project_id = "project_id" in cols
 
     cur = con.execute(
         "SELECT source_rowid FROM p4_import_idempotency "
@@ -480,7 +563,7 @@ def _import_table(
     )
     already = {int(row[0]) for row in cur.fetchall()}
 
-    select_cols = ", ".join(f'"{c}"' for c in cols)
+    select_cols = ", ".join(f'"{c}"' for c in source_cols)
     src_rows = list(
         con.execute(
             f"SELECT rowid, {select_cols} FROM {source_alias}.{table}"
@@ -489,38 +572,71 @@ def _import_table(
 
     inserted = 0
     skipped = 0
-    prefix_col = COLLISION_PREFIX_KEYS.get(table)
+    collision_cols = _collect_collision_columns(con, source_alias, table)
     for row in src_rows:
         check_abort()
         rid = row[0]
         if rid in already:
             skipped += 1
             continue
-        values = list(row[1:])
-        if has_project_id:
-            pid_idx = cols.index("project_id")
-            v = values[pid_idx]
-            if not v or v == "vnx-dev":
-                values[pid_idx] = project.project_id
-            elif v != project.project_id:
-                values[pid_idx] = project.project_id
-        if prefix_col and prefix_col in cols:
-            kidx = cols.index(prefix_col)
-            kv = values[kidx]
-            if kv is not None and kv != "":
-                values[kidx] = f"{project.project_id}:{kv}"
-        placeholders = ", ".join("?" for _ in cols)
+        row_data = dict(zip(source_cols, row[1:]))
+        if central_has_project_id:
+            row_data["project_id"] = project.project_id
+        for column in collision_cols:
+            value = row_data.get(column)
+            if value is None or value == "":
+                continue
+            prefix = f"{project.project_id}:"
+            text_value = str(value)
+            row_data[column] = text_value if text_value.startswith(prefix) else f"{prefix}{text_value}"
+        if table == "snippet_metadata" and "snippet_rowid" in row_data:
+            mapped_rowid = _mapped_central_rowid(
+                con,
+                project.project_id,
+                "code_snippets",
+                int(row_data["snippet_rowid"]),
+            )
+            if mapped_rowid is None:
+                LOG.warning(
+                    "INSERT skipped project=%s table=%s rowid=%s err=missing_code_snippet_rowid_map",
+                    project.project_id,
+                    table,
+                    rid,
+                )
+                con.execute(
+                    "INSERT OR IGNORE INTO p4_import_skipped "
+                    "(project_id, source_table, source_rowid, reason) VALUES (?, ?, ?, ?)",
+                    (project.project_id, table, rid, "missing_code_snippet_rowid_map"),
+                )
+                skipped += 1
+                continue
+            row_data["snippet_rowid"] = mapped_rowid
+
+        values = [row_data[column] for column in insert_cols]
+        quoted_insert_cols = ", ".join(f'"{c}"' for c in insert_cols)
+        placeholders = ", ".join("?" for _ in insert_cols)
         try:
             cur = con.execute(
-                f"INSERT OR IGNORE INTO {table} ({select_cols}) VALUES ({placeholders})",
+                f"INSERT OR IGNORE INTO {table} ({quoted_insert_cols}) VALUES ({placeholders})",
                 values,
             )
             if cur.rowcount == 1:
+                central_rowid = cur.lastrowid
                 con.execute(
                     "INSERT OR IGNORE INTO p4_import_idempotency "
                     "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
                     (project.project_id, table, rid),
                 )
+                if table == "code_snippets":
+                    # Preserve the logical snippet linkage without forcing raw
+                    # rowid reuse across projects, which would collide.
+                    _record_rowid_mapping(
+                        con,
+                        project.project_id,
+                        table,
+                        rid,
+                        int(central_rowid),
+                    )
                 inserted += 1
             else:
                 # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
@@ -566,6 +682,7 @@ def import_project(
         try:
             _ensure_idempotency_table(con)
             _ensure_skipped_table(con)
+            _ensure_rowid_map_table(con)
             attach_readonly(con, "src", qi_src)
             con.execute("BEGIN")
             try:
@@ -596,6 +713,7 @@ def import_project(
         try:
             _ensure_idempotency_table(con)
             _ensure_skipped_table(con)
+            _ensure_rowid_map_table(con)
             attach_readonly(con, "src", rc_src)
             con.execute("BEGIN")
             try:
@@ -634,7 +752,12 @@ def verify_import(
     projects: list[ProjectEntry],
 ) -> dict:
     """Recompute per-project row counts + simple column checksums; raises on drift."""
-    report: dict = {"per_project": {}, "checksums": {}}
+    report: dict = {
+        "per_project": {},
+        "checksums": {},
+        "skipped_rows": [],
+        "discrepancies": [],
+    }
     for project in projects:
         check_abort()
         qi_src = project.state_dir / "quality_intelligence.db"
@@ -645,6 +768,9 @@ def verify_import(
         if rc_src.is_file() and central_rc.exists():
             per_table.update(_compare_counts(central_rc, "runtime_coordination.db", rc_src, project, IMPORT_TABLES_RC))
         report["per_project"][project.project_id] = per_table
+    report["skipped_rows"].extend(_collect_skipped_rows(central_qi, "quality_intelligence.db"))
+    report["skipped_rows"].extend(_collect_skipped_rows(central_rc, "runtime_coordination.db"))
+    report["discrepancies"] = _verification_discrepancies(report)
     return report
 
 
@@ -684,6 +810,70 @@ def _compare_counts(
     finally:
         con.close()
     return out
+
+
+def _collect_skipped_rows(central_db: Path, central_db_label: str) -> list[dict[str, object]]:
+    if not central_db.exists():
+        return []
+    con = sqlite3.connect(str(central_db))
+    try:
+        if not _table_exists(con, "p4_import_skipped"):
+            return []
+        rows = con.execute(
+            """
+            SELECT project_id, source_table, source_rowid, reason
+            FROM p4_import_skipped
+            ORDER BY project_id, source_table, source_rowid
+            """
+        ).fetchall()
+        return [
+            {
+                "db": central_db_label,
+                "project_id": row[0],
+                "source_table": row[1],
+                "source_rowid": int(row[2]),
+                "reason": row[3],
+            }
+            for row in rows
+        ]
+    finally:
+        con.close()
+
+
+def _verification_discrepancies(report: dict) -> list[dict[str, object]]:
+    discrepancies: list[dict[str, object]] = []
+    for project_id, per_table in report.get("per_project", {}).items():
+        for table_label, counts in per_table.items():
+            source_rows = int(counts.get("source_rows", 0))
+            central_rows = int(counts.get("central_rows_for_project", 0))
+            if source_rows != central_rows:
+                discrepancies.append(
+                    {
+                        "type": "count_mismatch",
+                        "project_id": project_id,
+                        "table": table_label,
+                        "source_rows": source_rows,
+                        "central_rows_for_project": central_rows,
+                    }
+                )
+    for skipped in report.get("skipped_rows", []):
+        discrepancies.append(
+            {
+                "type": "skipped_row",
+                **skipped,
+            }
+        )
+    return discrepancies
+
+
+def raise_for_verification_failures(report: dict) -> None:
+    discrepancies = report.get("discrepancies") or _verification_discrepancies(report)
+    if not discrepancies:
+        return
+    sample = discrepancies[0]
+    raise VerificationFailure(
+        f"{len(discrepancies)} verification discrepancy(s); first={sample}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +926,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.verify_only:
         report = verify_import(central_qi, central_rc, projects)
         print(json.dumps(report, indent=2, default=str))
+        try:
+            raise_for_verification_failures(report)
+        except VerificationFailure as exc:
+            LOG.error("verification failed: %s", exc)
+            return 4
         return 0
 
     if not args.apply:
@@ -819,6 +1014,15 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     try:
         verify_report = verify_import(central_qi, central_rc, projects)
+        raise_for_verification_failures(verify_report)
+        if failed_projects:
+            raise VerificationFailure(
+                f"project import failures recorded for: {', '.join(failed_projects)}"
+            )
+    except VerificationFailure as exc:
+        LOG.error("verification failed: %s", exc)
+        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        return 4
     except Exception as exc:
         LOG.error("verification raised: %s", exc)
         _restore_snapshot(pre_snapshot, central_qi, central_rc)
@@ -852,7 +1056,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"  [{s.project_id}] {s.db_name} {s.table}: +{s.rows_inserted} ({s.rows_skipped_existing} idempotent skips)")
         if failed_projects:
             print(f"  FAILED projects (rolled back): {', '.join(failed_projects)}")
-    return 0 if not failed_projects else 4
+    return 0
 
 
 def _snapshot_central(qi: Path, rc: Path) -> dict[str, Path]:
