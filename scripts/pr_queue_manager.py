@@ -22,6 +22,7 @@ if _lib_dir not in sys.path:
 
 from vnx_paths import resolve_paths as _resolve_vnx_paths
 from pr_queue_state_snapshot import build_vnx_state_snapshot
+from project_scope import current_project_id as _current_project_id
 from result_contract import (
     EXIT_DEPENDENCY,
     Result,
@@ -32,20 +33,8 @@ from result_contract import (
 
 
 def _get_project_id() -> str:
-    """Return project ID from VNX_PROJECT_ID env, falling back to git root basename."""
-    pid = os.environ.get("VNX_PROJECT_ID", "").strip()
-    if pid:
-        return pid
-    try:
-        result = _subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-        if result.returncode == 0:
-            return Path(result.stdout.strip()).name
-    except Exception:
-        pass
-    return "vnx-dev"
+    """Return project ID — delegates to project_scope.current_project_id (OI-1342)."""
+    return _current_project_id()
 
 
 ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
