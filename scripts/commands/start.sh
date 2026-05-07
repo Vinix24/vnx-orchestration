@@ -146,7 +146,7 @@ cmd_start() {
   local t1_provider="${VNX_T1_PROVIDER:-claude_code}"
   local t2_provider="${VNX_T2_PROVIDER:-claude_code}"
   local t3_provider="${VNX_T3_PROVIDER:-claude_code}"
-  local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-flash}"
+  local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-pro}"
   local codex_model="${VNX_CODEX_MODEL:-gpt-5.1-codex-mini}"
   local t0_flags="${VNX_T0_FLAGS:-}"
 

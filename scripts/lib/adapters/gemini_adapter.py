@@ -33,7 +33,7 @@ from vertex_ai_runner import collect_file_contents
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
+_DEFAULT_MODEL = "gemini-2.5-pro"
 _DEFAULT_TIMEOUT = 300
 _DEFAULT_STALL_THRESHOLD = 60
 
