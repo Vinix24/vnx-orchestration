@@ -655,3 +655,64 @@ class TestReportPathEnforcementCodexGate:
         # Gate fails (pending is not passing), but NOT because of missing report_path
         assert check_map["gate_codex_gate"].status == "FAIL"
         assert "report_path" not in check_map["gate_codex_gate"].detail
+
+
+# ---------------------------------------------------------------------------
+# OI-1339: claude_github_optional payloads must carry pr_id
+# ---------------------------------------------------------------------------
+
+class TestRequireClaudeGithubOptionalPrId:
+    """OI-1339 — _find_gate_request_payload must reject claude_github_optional
+    payloads that lack an explicit pr_id.
+
+    Without this check, a file like pr-45-claude_github_optional.json (written
+    for PR-45 with no pr_id field) can satisfy the closure check for any other
+    PR, producing a false-green on the optional-gate contract.
+    """
+
+    def test_payload_without_pr_id_is_rejected(self, tmp_path):
+        """claude_github_optional request with no pr_id field must be rejected."""
+        results_dir = tmp_path / "results"
+
+        # Payload deliberately omits pr_id — simulates the legacy/buggy writer.
+        payload_no_pr_id = {
+            "gate": "claude_github_optional",
+            "state": "not_configured",
+            "branch": "feature/demo",
+            "was_intentionally_absent": True,
+            "contributed_evidence": False,
+        }
+        _write_request(results_dir, "claude_github_optional", "PR-0", payload_no_pr_id)
+
+        contract = _make_contract(review_stack=["claude_github_optional"])
+
+        checks = cv._validate_review_evidence(contract, results_dir, branch="feature/demo")
+        check_map = {c.name: c for c in checks}
+
+        assert "gate_claude_github_optional" in check_map
+        # Payload without pr_id must not satisfy the evidence requirement.
+        assert check_map["gate_claude_github_optional"].status == "FAIL"
+
+    def test_payload_with_mismatched_pr_id_is_rejected(self, tmp_path):
+        """claude_github_optional request with a different pr_id must be rejected."""
+        results_dir = tmp_path / "results"
+
+        # Payload written for PR-99 — must not satisfy PR-0's closure.
+        payload_wrong_pr = {
+            "gate": "claude_github_optional",
+            "pr_id": "PR-99",
+            "state": "not_configured",
+            "branch": "feature/demo",
+            "was_intentionally_absent": True,
+            "contributed_evidence": False,
+        }
+        _write_request(results_dir, "claude_github_optional", "PR-0", payload_wrong_pr)
+
+        contract = _make_contract(review_stack=["claude_github_optional"])
+
+        checks = cv._validate_review_evidence(contract, results_dir, branch="feature/demo")
+        check_map = {c.name: c for c in checks}
+
+        assert "gate_claude_github_optional" in check_map
+        # Mismatched pr_id must be filtered out — no valid evidence → FAIL.
+        assert check_map["gate_claude_github_optional"].status == "FAIL"
