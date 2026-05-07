@@ -763,6 +763,121 @@ class FixForwardCodexFinding2CanonicalCategoryAfterRemapTests(_MultiTenantFixtur
         self.assertEqual(emitted.pattern_category, "governance")
 
 
+class OI1340ScopeMatchAfterCanonicalRemapTests(_MultiTenantFixture):
+    """OI-1340: scope is re-evaluated against canonical row after dedup remap.
+
+    Two cases:
+      1. Duplicate matches requested scope, canonical does NOT → item skipped.
+      2. Both duplicate and canonical match requested scope → item emitted.
+    """
+
+    TITLE = "Stream stderr with bounded buffers"
+    DESC = "Capture subprocess stderr via bounded queues to prevent OOM."
+
+    def _seed_rows(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        canonical_category: str,
+        duplicate_category: str,
+        project_id: str,
+    ):
+        from pattern_dedup import _short_content_hash
+        shared_hash = _short_content_hash(self.TITLE, self.DESC)
+        cur = conn.execute(
+            """
+            INSERT INTO success_patterns
+                (pattern_type, category, title, description, pattern_data,
+                 confidence_score, usage_count, first_seen, last_used,
+                 project_id, content_hash, pattern_category)
+            VALUES ('approach', ?, ?, ?, '{}', 0.60, 2, '2026-04-01', '2026-04-01',
+                    ?, ?, ?)
+            """,
+            (canonical_category, self.TITLE, self.DESC, project_id, shared_hash, canonical_category),
+        )
+        canonical_id = int(cur.lastrowid)
+        cur = conn.execute(
+            """
+            INSERT INTO success_patterns
+                (pattern_type, category, title, description, pattern_data,
+                 confidence_score, usage_count, first_seen, last_used,
+                 project_id, content_hash, pattern_category)
+            VALUES ('approach', ?, ?, ?, '{}', 0.95, 50, '2026-04-01', '2026-04-01',
+                    ?, ?, ?)
+            """,
+            (duplicate_category, self.TITLE, self.DESC, project_id, shared_hash, duplicate_category),
+        )
+        duplicate_id = int(cur.lastrowid)
+        conn.commit()
+        return canonical_id, duplicate_id
+
+    def test_canonical_out_of_scope_item_is_skipped(self) -> None:
+        """Pre-remap duplicate matches 'backend'; canonical remaps to 'governance' → skipped."""
+        self._set_project("proj-oi1340a")
+        conn = sqlite3.connect(str(self._quality_db_path))
+        try:
+            canonical_id, duplicate_id = self._seed_rows(
+                conn,
+                canonical_category="governance",
+                duplicate_category="backend",
+                project_id="proj-oi1340a",
+            )
+        finally:
+            conn.close()
+        self.assertLess(canonical_id, duplicate_id)
+
+        selector = IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+        try:
+            result = selector.select(
+                dispatch_id="D-OI1340-skip",
+                injection_point="dispatch_create",
+                scope_tags=["backend"],
+            )
+        finally:
+            selector.close()
+
+        sp_items = [i for i in result.items if i.item_class == "proven_pattern"]
+        # canonical has category='governance', which does NOT match scope_tags=['backend']
+        # → item must be skipped entirely after canonical remap.
+        self.assertEqual(sp_items, [])
+
+    def test_both_in_scope_item_is_emitted(self) -> None:
+        """Both duplicate and canonical have category 'backend' → item emitted."""
+        self._set_project("proj-oi1340b")
+        conn = sqlite3.connect(str(self._quality_db_path))
+        try:
+            canonical_id, duplicate_id = self._seed_rows(
+                conn,
+                canonical_category="backend",
+                duplicate_category="backend",
+                project_id="proj-oi1340b",
+            )
+        finally:
+            conn.close()
+        self.assertLess(canonical_id, duplicate_id)
+
+        selector = IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+        try:
+            result = selector.select(
+                dispatch_id="D-OI1340-emit",
+                injection_point="dispatch_create",
+                scope_tags=["backend"],
+            )
+        finally:
+            selector.close()
+
+        sp_items = [i for i in result.items if i.item_class == "proven_pattern"]
+        self.assertEqual(len(sp_items), 1)
+        self.assertEqual(sp_items[0].item_id, f"intel_sp_{canonical_id}")
+        self.assertEqual(sp_items[0].scope_tags, ["backend"])
+
+
 class Finding5StampingIdempotencyTests(_MultiTenantFixture):
     """stamp_source_dispatch_ids is idempotent when called twice for the same dispatch."""
 

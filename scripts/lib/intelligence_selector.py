@@ -1135,6 +1135,12 @@ class IntelligenceSelector:
             canonical_category = canonical_row_d.get("category", "") or ""
             pattern_scope = [canonical_category] if canonical_category else []
 
+            # OI-1340: re-evaluate scope after canonical remap. A duplicate row
+            # may have passed the pre-remap scope check but remapped to a
+            # canonical sibling whose category does NOT match the requested scope.
+            if not _scope_matches(pattern_scope, scope_tags):
+                continue
+
             source_refs = []
             if canonical_row_d.get("source_dispatch_ids"):
                 try:
