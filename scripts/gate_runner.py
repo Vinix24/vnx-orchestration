@@ -228,7 +228,7 @@ class GateRunner:
         """Build CLI command list with model selection for the given gate."""
         cli_args = list(GATE_CLI_ARGS.get(gate, []))
         if gate == "gemini_review":
-            model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
             cli_args = ["--model", model] + cli_args
         elif gate == "codex_gate":
             # Model selection: only override if explicitly requested via env/payload.
