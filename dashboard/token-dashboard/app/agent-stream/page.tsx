@@ -141,59 +141,83 @@ export default function AgentStreamPage() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const statusIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastTimestampRef = useRef<string | null>(null);
   const pausedRef = useRef(false);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const terminalRef = useRef<Terminal>('T1');
+  const activeTerminalRef = useRef<Terminal | null>(null);
+  const isNavigatingAwayRef = useRef(false);
 
   // Keep ref in sync with state for use in EventSource callbacks
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
 
-  // Fetch status endpoint
   useEffect(() => {
-    let cancelled = false;
-    async function fetchStatus() {
-      try {
-        const res = await fetch('/api/agent-stream/status');
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled) setStatus(data.terminals ?? {});
-        }
-      } catch {
-        // non-critical
-      }
+    terminalRef.current = terminal;
+  }, [terminal]);
+
+  const clearStatusPolling = useCallback(() => {
+    if (statusIntervalRef.current) {
+      clearInterval(statusIntervalRef.current);
+      statusIntervalRef.current = null;
     }
-    fetchStatus();
-    const iv = setInterval(fetchStatus, 5000);
-    return () => { cancelled = true; clearInterval(iv); };
   }, []);
 
-  // Connect to SSE
-  const connect = useCallback((term: Terminal, since: string | null) => {
-    // Cancel any pending retry before opening a new connection
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    // Close existing connection
+  const disconnectStream = useCallback(() => {
+    activeTerminalRef.current = null;
     if (eventSourceRef.current) {
+      eventSourceRef.current.onopen = null;
+      eventSourceRef.current.onmessage = null;
+      eventSourceRef.current.onerror = null;
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
+    setConnected(false);
+  }, []);
+
+  const pollStatus = useCallback(async () => {
+    if (isNavigatingAwayRef.current) return;
+    try {
+      const res = await fetch('/api/agent-stream/status');
+      if (res.ok && !isNavigatingAwayRef.current) {
+        const data = await res.json();
+        if (!isNavigatingAwayRef.current) {
+          setStatus(data.terminals ?? {});
+        }
+      }
+    } catch {
+      // non-critical
+    }
+  }, []);
+
+  const startStatusPolling = useCallback(() => {
+    if (statusIntervalRef.current || isNavigatingAwayRef.current) return;
+    statusIntervalRef.current = setInterval(() => {
+      void pollStatus();
+    }, 5000);
+  }, [pollStatus]);
+
+  // Connect to SSE
+  const connect = useCallback((term: Terminal, since: string | null) => {
+    disconnectStream();
+    if (isNavigatingAwayRef.current) return;
 
     let url = `/api/agent-stream/${term}`;
     if (since) url += `?since=${encodeURIComponent(since)}`;
 
     const es = new EventSource(url);
     eventSourceRef.current = es;
+    activeTerminalRef.current = term;
 
     es.onopen = () => {
+      if (eventSourceRef.current !== es || isNavigatingAwayRef.current) return;
       setConnected(true);
       setError(null);
     };
 
     es.onmessage = (msg) => {
+      if (eventSourceRef.current !== es || isNavigatingAwayRef.current) return;
       try {
         const event: StreamEvent = JSON.parse(msg.data);
         if (event.timestamp) {
@@ -208,36 +232,71 @@ export default function AgentStreamPage() {
     };
 
     es.onerror = () => {
+      if (eventSourceRef.current !== es || isNavigatingAwayRef.current) return;
       setConnected(false);
       setError('SSE connection failed — retrying…');
-      es.close();
-      eventSourceRef.current = null;
-      retryTimerRef.current = setTimeout(() => {
-        retryTimerRef.current = null;
-        connect(term, lastTimestampRef.current);
-      }, 2000);
     };
-  }, []);
+  }, [disconnectStream]);
+
+  useEffect(() => {
+    function handleDocumentClick(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      if (!(event.target instanceof Element)) return;
+
+      const anchor = event.target.closest('a[href]');
+      const href = anchor?.getAttribute('href');
+      if (!href || href.startsWith('#')) return;
+
+      const nextUrl = new URL(href, window.location.href);
+      if (nextUrl.origin !== window.location.origin) return;
+
+      if (nextUrl.pathname !== '/agent-stream') {
+        isNavigatingAwayRef.current = true;
+        clearStatusPolling();
+        disconnectStream();
+        return;
+      }
+
+      if (!isNavigatingAwayRef.current) return;
+
+      isNavigatingAwayRef.current = false;
+      setEvents([]);
+      setError(null);
+      lastTimestampRef.current = null;
+      startStatusPolling();
+      connect(terminalRef.current, null);
+    }
+
+    document.addEventListener('click', handleDocumentClick, true);
+    return () => {
+      document.removeEventListener('click', handleDocumentClick, true);
+    };
+  }, [clearStatusPolling, connect, disconnectStream, startStatusPolling]);
+
+  useEffect(() => {
+    isNavigatingAwayRef.current = false;
+    startStatusPolling();
+    return clearStatusPolling;
+  }, [clearStatusPolling, startStatusPolling]);
 
   // Connect when terminal changes
   useEffect(() => {
+    isNavigatingAwayRef.current = false;
     setEvents([]);
     setError(null);
     lastTimestampRef.current = null;
+
+    if (eventSourceRef.current && activeTerminalRef.current === terminal) {
+      return;
+    }
+
     connect(terminal, null);
 
     return () => {
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-      setConnected(false);
+      disconnectStream();
     };
-  }, [terminal, connect]);
+  }, [terminal, connect, disconnectStream]);
 
   // Auto-scroll
   useEffect(() => {
