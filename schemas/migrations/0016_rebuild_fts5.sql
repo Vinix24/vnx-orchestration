@@ -26,6 +26,16 @@
 -- @db: quality_intelligence — code_snippets rebuild
 -- ============================================================================
 
+-- Round-4 perf fix: the project_id assignment below uses a correlated
+-- subquery against snippet_metadata.snippet_rowid. Without an index on
+-- that column the rebuild does a full scan of snippet_metadata for each
+-- row in code_snippets_rebuild_tmp (O(N×M)). On a real central with
+-- ~855k snippets and ~119k metadata rows that's ~100B row scans /
+-- multi-hour runtime. The index turns the lookup into an O(log M) probe
+-- and brings the rebuild back to single-digit minutes.
+CREATE INDEX IF NOT EXISTS idx_snippet_metadata_rowid
+ON snippet_metadata(snippet_rowid);
+
 -- Materialize the existing rows into a temporary table so we can drop
 -- and recreate the FTS5 vtab with the project_id column added.
 CREATE TABLE IF NOT EXISTS code_snippets_rebuild_tmp AS

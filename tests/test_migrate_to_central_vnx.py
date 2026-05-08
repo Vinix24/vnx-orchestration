@@ -1522,3 +1522,151 @@ def test_round3_fresh_central_requires_flag(fixture_env, caplog):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='success_patterns'"
             ).fetchone()
         assert row is None, "abort must run BEFORE any bootstrap"
+
+
+# ---------------------------------------------------------------------------
+# Round-4 regression test (P4 perf bug: 0016 FTS rebuild O(N×M) without index)
+# Operator's --apply at 1bf128c stalled in 0016 with ETA 3-5h on a real
+# central (855k snippets / 119k metadata). The correlated subquery against
+# snippet_metadata.snippet_rowid was doing a full scan per outer row.
+# ---------------------------------------------------------------------------
+
+
+def test_round4_fts_rebuild_uses_index(tmp_path: Path):
+    """ROUND-4 PERF: migration 0016 must add idx_snippet_metadata_rowid
+    BEFORE rebuilding code_snippets, otherwise the project_id correlated
+    subquery degrades to O(N×M) on real centrals.
+
+    Builds a synthetic central with 5,000 snippets + matching metadata,
+    runs apply_migration_0016, and asserts:
+
+      1. The migration completes in well under 30 seconds. Without the
+         index the same SQL would do 25M row scans (5k × 5k); with the
+         index it's a single-digit-millisecond build.
+      2. ``idx_snippet_metadata_rowid`` exists on snippet_metadata after
+         the rebuild — proving the migration actually created it (not
+         just that some prior bootstrap did).
+      3. ``EXPLAIN QUERY PLAN`` for the project_id lookup uses the index.
+         Deterministic guard against a future edit that drops the index
+         clause but leaves the timing under threshold by accident.
+    """
+    import time
+
+    central_qi = tmp_path / "central_round4.db"
+    n_rows = 5000
+
+    con = sqlite3.connect(central_qi)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE schema_version (
+                version TEXT PRIMARY KEY,
+                description TEXT
+            );
+            CREATE TABLE snippet_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snippet_rowid INTEGER NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                file_path TEXT NOT NULL,
+                line_start INTEGER,
+                line_end INTEGER,
+                pattern_hash TEXT
+            );
+            CREATE VIRTUAL TABLE code_snippets USING fts5(
+                title, description, code, file_path, line_range, tags, language,
+                framework, dependencies, quality_score, usage_count, last_updated,
+                tokenize = 'porter unicode61'
+            );
+            """
+        )
+        # Bulk-insert synthetic snippets + 1:1 metadata rows. The matching
+        # rowids are what the correlated subquery joins on.
+        snippet_rows = [
+            (
+                i,
+                f"title-{i}",
+                "desc",
+                "code",
+                f"/tmp/{i}.py",
+                "1-1",
+                "tag",
+                "python",
+                "",
+                "",
+                "0.9",
+                "1",
+                "2026-05-08T00:00:00Z",
+            )
+            for i in range(1, n_rows + 1)
+        ]
+        con.executemany(
+            "INSERT INTO code_snippets (rowid, title, description, code, file_path, "
+            "line_range, tags, language, framework, dependencies, quality_score, "
+            "usage_count, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            snippet_rows,
+        )
+        meta_rows = [
+            (i, f"proj-{i % 4}", f"/tmp/{i}.py", 1, 1, f"hash-{i}")
+            for i in range(1, n_rows + 1)
+        ]
+        con.executemany(
+            "INSERT INTO snippet_metadata (snippet_rowid, project_id, file_path, "
+            "line_start, line_end, pattern_hash) VALUES (?, ?, ?, ?, ?, ?)",
+            meta_rows,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    # Sanity: FTS5 vtab does NOT yet include project_id (so 0016 will run).
+    with sqlite3.connect(central_qi) as c:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(code_snippets)")]
+        assert "project_id" not in cols, "test setup invalid: vtab already has project_id"
+
+    start = time.monotonic()
+    M.apply_migration_0016(central_qi)
+    elapsed = time.monotonic() - start
+
+    # 30s threshold per dispatch — generous so the test isn't flaky on
+    # slow CI, but still catches the catastrophic O(N×M) regression.
+    assert elapsed < 30.0, (
+        f"FTS rebuild took {elapsed:.2f}s for {n_rows} rows — index regression "
+        "(should be sub-second with idx_snippet_metadata_rowid)"
+    )
+
+    with sqlite3.connect(central_qi) as c:
+        # (2) The index must exist after the rebuild.
+        idx_row = c.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name='idx_snippet_metadata_rowid' "
+            "AND tbl_name='snippet_metadata'"
+        ).fetchone()
+        assert idx_row is not None, (
+            "idx_snippet_metadata_rowid missing post-rebuild — migration 0016 "
+            "did not create the perf index (round-4 fix not present)"
+        )
+
+        # (3) The project_id correlated subquery must use the index.
+        plan = list(
+            c.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT (SELECT project_id FROM snippet_metadata m "
+                "WHERE m.snippet_rowid = code_snippets.rowid) "
+                "FROM code_snippets"
+            )
+        )
+        plan_text = " | ".join(str(row) for row in plan)
+        assert "idx_snippet_metadata_rowid" in plan_text, (
+            f"correlated lookup not using idx_snippet_metadata_rowid; "
+            f"plan was: {plan_text}"
+        )
+
+        # (4) Functional sanity: project_id was populated for every row.
+        col_names = [r[1] for r in c.execute("PRAGMA table_info(code_snippets)")]
+        assert "project_id" in col_names, "rebuild failed to add project_id column"
+        populated = c.execute(
+            "SELECT COUNT(*) FROM code_snippets WHERE project_id IS NOT NULL"
+        ).fetchone()[0]
+        assert populated == n_rows, (
+            f"expected {n_rows} project_id-populated rows, got {populated}"
+        )
