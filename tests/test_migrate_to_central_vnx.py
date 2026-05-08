@@ -1325,3 +1325,200 @@ def test_apply_migration_0016_rolls_back_on_failure(tmp_path: Path, monkeypatch)
     assert rows == [(1, "preserved-1"), (2, "preserved-2")], (
         f"original rows lost after rollback; got {rows}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-3 regression tests (codex BLOCKING findings against 54904c4)
+# Operator's --apply produced an empty central DB (only bookkeeping tables).
+# These tests cover the four root causes codex review identified.
+# ---------------------------------------------------------------------------
+
+
+def _drop_central_dbs(env: dict) -> None:
+    """Remove central QI + RC plus their WAL/SHM sidecars to simulate fresh deploy."""
+    for db in (env["central_qi"], env["central_rc"]):
+        for suffix in ("", "-wal", "-shm"):
+            path = db.with_name(db.name + suffix)
+            if path.exists():
+                path.unlink()
+
+
+def test_round3_apply_against_fresh_empty_central(fixture_env):
+    """ROUND-3 Issue 1+2+4: end-to-end apply must succeed against a fresh
+    empty central by running canonical bootstrap → 0010 → 0015 → import.
+
+    Reproduces the broken operator run: central DBs absent, --apply with
+    --fresh-central must create the canonical schemas, populate
+    project_id columns on hot tables, and import every project's rows.
+    """
+    _drop_central_dbs(fixture_env)
+    assert not fixture_env["central_qi"].exists()
+    assert not fixture_env["central_rc"].exists()
+
+    rc = _apply(fixture_env, extra_args=["--fresh-central"])
+    assert rc == 0, "fresh apply with --fresh-central must succeed"
+
+    # Canonical structure present.
+    with sqlite3.connect(fixture_env["central_qi"]) as c:
+        qi_tables = {
+            row[0] for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "success_patterns" in qi_tables
+    assert "pattern_usage" in qi_tables
+    # Imperative migrations from quality_db_init.py:
+    assert "confidence_events" in qi_tables, (
+        "canonical bootstrap must create confidence_events (added by quality_db_init.py, "
+        "not by base SQL) — Issue 2"
+    )
+    assert "dispatch_pattern_offered" in qi_tables, (
+        "canonical bootstrap must create dispatch_pattern_offered — Issue 2"
+    )
+    # 0010 ran (project_id on hot table):
+    pu_cols = {
+        row[1] for row in
+        sqlite3.connect(fixture_env["central_qi"]).execute(
+            "PRAGMA table_info(pattern_usage)"
+        )
+    }
+    assert "project_id" in pu_cols, "migration 0010 must extend pattern_usage with project_id — Issue 1"
+
+    # Per-project rows imported across all four sources.
+    with sqlite3.connect(fixture_env["central_qi"]) as c:
+        success_titles = {row[0] for row in c.execute("SELECT title FROM success_patterns")}
+    assert {"vnx-dev-p1", "mc-p1", "sales-copilot-p1", "seocrawler-v2-p1"}.issubset(success_titles), (
+        f"sample rows from each project must be imported; got {success_titles}"
+    )
+
+    with sqlite3.connect(fixture_env["central_rc"]) as c:
+        dispatch_ids = {row[0] for row in c.execute("SELECT dispatch_id FROM dispatches")}
+    assert "vnx-dev:shared-dispatch" in dispatch_ids
+    assert "mc:shared-dispatch" in dispatch_ids
+
+
+def test_round3_canonical_bootstrap_includes_imperative_tables(tmp_path: Path):
+    """ROUND-3 Issue 2: ``_init_central_if_missing`` must produce the SAME
+    schema as ``quality_db_init.py`` and ``coordination_db.init_schema``,
+    including the imperative migrations that are NOT in the base SQL.
+
+    Specifically: ``confidence_events`` (added by F50-PR3) and
+    ``dispatch_pattern_offered`` (added by per-dispatch isolation work)
+    are appended imperatively after the base schema runs. A bootstrap
+    that only loaded the SQL file would silently miss them.
+    """
+    # ``coordination_db.init_schema`` writes to a fixed
+    # ``<state_dir>/runtime_coordination.db`` filename — match production layout.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    qi_db = state_dir / "quality_intelligence.db"
+    rc_db = state_dir / "runtime_coordination.db"
+    M._init_central_if_missing(qi_db, rc_db)
+
+    with sqlite3.connect(qi_db) as c:
+        qi_tables = {
+            row[0] for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','virtual')"
+            )
+        }
+
+    assert "confidence_events" in qi_tables, (
+        "imperative migration for confidence_events must be applied via "
+        "quality_db_init.bootstrap_qi_db, not via raw SQL load"
+    )
+    assert "dispatch_pattern_offered" in qi_tables, (
+        "imperative migration for dispatch_pattern_offered must be applied"
+    )
+    # Sentinels for base SQL coverage.
+    for required in ("success_patterns", "pattern_usage", "code_snippets",
+                     "dispatch_metadata", "snippet_metadata"):
+        assert required in qi_tables, f"canonical QI must contain {required}"
+
+    with sqlite3.connect(rc_db) as c:
+        rc_tables = {
+            row[0] for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    # Sentinels covering the v1+v2..v9 delta chain.
+    for required in ("dispatches", "dispatch_attempts", "terminal_leases",
+                     "coordination_events", "incident_log", "retry_budgets",
+                     "retry_state", "execution_targets", "intelligence_injections",
+                     "inbound_inbox", "recommendations", "recommendation_outcomes"):
+        assert required in rc_tables, (
+            f"canonical RC must contain {required} — coordination_db.init_schema "
+            "must apply v1 + v2..v9 delta chain"
+        )
+
+
+def test_round3_missing_central_table_fails_verify(fixture_env):
+    """ROUND-3 Issue 3: ``_compare_counts`` must surface a missing central
+    table as a verification discrepancy (exit 4), not silently skip it.
+
+    Reproduces the codex finding: deleting ``pattern_usage`` from the
+    populated central must cause ``--verify-only`` to fail loud rather
+    than continue with the remaining counts and report success.
+    """
+    rc = _apply(fixture_env)
+    assert rc == 0
+    with sqlite3.connect(fixture_env["central_qi"]) as c:
+        c.execute("DROP TABLE pattern_usage")
+        c.commit()
+
+    rc_verify = M.main([
+        "--verify-only",
+        "--registry", str(fixture_env["registry"]),
+        "--central-state", str(fixture_env["central_state"]),
+    ])
+    assert rc_verify == 4, (
+        f"--verify-only on a central DB with a missing import-target table "
+        f"must exit 4; got {rc_verify}"
+    )
+
+    # The missing table must surface as a read_error in the report.
+    report = M.verify_import(
+        fixture_env["central_qi"],
+        fixture_env["central_rc"],
+        load_registry(fixture_env["registry"]),
+    )
+    central_missing = [
+        err for err in report.get("read_errors", [])
+        if err.get("phase") == "central_table_missing"
+        and err.get("table") == "pattern_usage"
+    ]
+    assert central_missing, (
+        f"missing pattern_usage must populate read_errors with phase=central_table_missing; "
+        f"got read_errors={report.get('read_errors')}"
+    )
+
+
+def test_round3_fresh_central_requires_flag(fixture_env, caplog):
+    """ROUND-3 Bonus: ``--apply`` against a fresh/empty central without
+    ``--fresh-central`` must abort with exit 1 and a helpful message.
+
+    Reproduces the operator-acknowledgement gate: an accidental run
+    against a freshly-deployed system (or one whose state dir was just
+    blown away) is caught before any backup or import runs.
+    """
+    _drop_central_dbs(fixture_env)
+    assert not fixture_env["central_qi"].exists()
+
+    import logging
+    caplog.set_level(logging.ERROR, logger="vnx.migrate.apply")
+    rc = _apply(fixture_env)  # NB: no --fresh-central
+    assert rc == 1, (
+        f"empty central without --fresh-central must abort with exit 1; got {rc}"
+    )
+    # The error message must reference the flag so the operator knows the fix.
+    msg = " ".join(record.getMessage() for record in caplog.records)
+    assert "--fresh-central" in msg, (
+        f"abort message must reference --fresh-central; got {msg}"
+    )
+
+    # Sanity: no canonical schema was created.
+    if fixture_env["central_qi"].exists():
+        with sqlite3.connect(fixture_env["central_qi"]) as c:
+            row = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='success_patterns'"
+            ).fetchone()
+        assert row is None, "abort must run BEFORE any bootstrap"

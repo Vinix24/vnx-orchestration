@@ -89,18 +89,32 @@ def backup_existing_db() -> bool:
         return False
 
 def initialize_database() -> bool:
-    """Initialize database from schema file"""
-    log('INFO', 'Initializing quality intelligence database...')
+    """Initialize database from schema file (uses module-level DB_PATH)."""
+    return bootstrap_qi_db(DB_PATH, SCHEMA_FILE)
+
+
+def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
+    """Initialize a quality_intelligence DB at ``db_path`` using the canonical schema.
+
+    Path-explicit variant of :func:`initialize_database` so callers
+    (Phase 6 P4 migrator, tests) can target a specific DB without
+    relying on module-level constants. ``schema_file`` defaults to the
+    canonical ``schemas/quality_intelligence.sql`` resolved from
+    ``VNX_HOME``.
+    """
+    schema_file = Path(schema_file) if schema_file is not None else SCHEMA_FILE
+    log('INFO', f'Initializing quality intelligence database at {db_path}...')
 
     try:
         # Read schema file
-        with open(SCHEMA_FILE, 'r') as f:
+        with open(schema_file, 'r') as f:
             schema_sql = f.read()
 
         log('INFO', f'Schema loaded: {len(schema_sql)} characters')
 
         # Connect to database
-        conn = sqlite3.connect(DB_PATH)
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
         # Execute schema

@@ -79,8 +79,10 @@ CONFIRMATION_PHRASE = "MIGRATE-NOW-2026"
 DEFAULT_BACKUP_BASE = Path.home() / "Documents"
 CENTRAL_DATA_DIR = Path.home() / ".vnx-data" / "state"
 
+MIGRATION_0010_PATH = REPO_ROOT / "schemas" / "migrations" / "0010_add_project_id.sql"
 MIGRATION_0015_PATH = REPO_ROOT / "schemas" / "migrations" / "0015_complete_project_id.sql"
 MIGRATION_0016_PATH = REPO_ROOT / "schemas" / "migrations" / "0016_rebuild_fts5.sql"
+QI_SCHEMA_PATH = REPO_ROOT / "schemas" / "quality_intelligence.sql"
 
 # Tables to import per source DB. Aligned with migrate_dry_run.PLAN_TABLES_*.
 # Note: `code_snippets` (FTS5 vtab) MUST be imported BEFORE migration 0016
@@ -183,6 +185,17 @@ class VerificationFailure(RuntimeError):
     pass
 
 
+class BootstrapFailure(RuntimeError):
+    """Raised when the central DB is missing canonical structure required for import.
+
+    Round-3 fix-forward (Issue 4): rather than letting a per-row INSERT
+    OR IGNORE silently drop every row when a central table is absent,
+    pre-flight assert that every import-target table exists. If not,
+    surface the missing tables in the exception message so the operator
+    can diagnose the broken bootstrap before any data is moved.
+    """
+
+
 def confirm_apply(confirmation: Optional[str], no_prompt: bool = False) -> bool:
     """Enforce the two-factor apply gate: phrase + TTY confirmation."""
     if confirmation != CONFIRMATION_PHRASE:
@@ -262,8 +275,201 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration application (schemas/migrations/0015 + 0016)
+# Central DB freshness + canonical bootstrap (round-3 fix-forward)
 # ---------------------------------------------------------------------------
+
+
+# Sentinel tables: a populated central DB always has these. When either is
+# absent the central is considered "fresh" and requires --fresh-central
+# acknowledgement plus a canonical bootstrap before any import can run.
+_QI_SENTINEL_TABLE = "success_patterns"
+_RC_SENTINEL_TABLE = "dispatches"
+
+
+def _has_table(db_path: Path, table: str) -> bool:
+    """Return True iff ``db_path`` exists and contains ``table``."""
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return False
+    try:
+        con = sqlite3.connect(str(db_path))
+        try:
+            row = con.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type IN ('table','virtual') AND name = ?",
+                (table,),
+            ).fetchone()
+            return row is not None
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+
+
+def _central_is_empty(qi_db: Path, rc_db: Path) -> bool:
+    """True if the central DBs lack canonical structure (fresh-deploy state).
+
+    Round-3 fix-forward (Bonus): used to gate the ``--fresh-central``
+    operator acknowledgement and to decide whether canonical bootstrap
+    must run. Bookkeeping tables (``p4_import_*``) created by a previous
+    failed apply do not count as "populated" — only the sentinel
+    business tables matter.
+    """
+    qi_fresh = not _has_table(qi_db, _QI_SENTINEL_TABLE)
+    rc_fresh = not _has_table(rc_db, _RC_SENTINEL_TABLE)
+    return qi_fresh or rc_fresh
+
+
+def _init_central_if_missing(qi_db: Path, rc_db: Path) -> None:
+    """Bootstrap canonical QI + RC schemas at the given central paths.
+
+    Round-3 fix-forward (Issue 2): the previous apply path created empty
+    SQLite files via ``sqlite3.connect(...).close()`` and then expected
+    migration 0015 alone to extend "remaining tables" — but with no base
+    schema in place, every ALTER TABLE skipped and zero rows landed.
+
+    This helper invokes the canonical init paths used at install time:
+
+    * :func:`scripts.quality_db_init.bootstrap_qi_db` — applies
+      ``schemas/quality_intelligence.sql`` plus the 14 imperative
+      migrations (``confidence_events``, ``dispatch_pattern_offered``,
+      governance/SPC tables, etc.) that are NOT in the base SQL.
+    * :func:`scripts.lib.coordination_db.init_schema` — applies
+      ``schemas/runtime_coordination.sql`` plus every
+      ``runtime_coordination_v{N}.sql`` delta in numeric order.
+
+    Idempotent on subsequent calls: both init paths use
+    ``CREATE TABLE IF NOT EXISTS`` and ``ALTER TABLE`` guards. The
+    helper only refuses to run when the parent directory cannot be
+    created.
+    """
+    qi_db = Path(qi_db).expanduser()
+    rc_db = Path(rc_db).expanduser()
+    qi_db.parent.mkdir(parents=True, exist_ok=True)
+    rc_db.parent.mkdir(parents=True, exist_ok=True)
+
+    # ``coordination_db.init_schema(state_dir)`` writes to a hardcoded
+    # ``state_dir / "runtime_coordination.db"`` filename. If a caller
+    # passed a non-canonical RC path the bootstrap would silently write
+    # to the wrong file. Fail-fast so the contract is explicit.
+    if rc_db.name != "runtime_coordination.db":
+        raise BootstrapFailure(
+            f"runtime_coordination DB must be named 'runtime_coordination.db'; "
+            f"got {rc_db.name!r}"
+        )
+
+    # Local imports keep `migrate_to_central_vnx` importable in test
+    # contexts where vnx_paths' ensure_env() depends on env state that
+    # tests have not yet set up. Both paths are also independent of
+    # each other so a partial bootstrap is recoverable on retry.
+    import importlib
+
+    qdb = importlib.import_module("scripts.quality_db_init")
+    if not qdb.bootstrap_qi_db(qi_db, QI_SCHEMA_PATH):
+        raise BootstrapFailure(
+            f"quality_db_init.bootstrap_qi_db returned False for {qi_db}"
+        )
+
+    cdb = importlib.import_module("coordination_db")
+    cdb.init_schema(rc_db.parent)
+
+
+def _assert_central_tables_exist(
+    qi_db: Path,
+    rc_db: Path,
+    projects: list[ProjectEntry],
+) -> None:
+    """Pre-import: every IMPORT_TABLES_* table any source has must exist in central.
+
+    Round-3 fix-forward (Issue 4): without this guard, a missing central
+    table caused ``_common_columns`` to return ``[]`` and
+    ``_import_table`` to silently early-return zero rows imported per
+    source — exactly the failure mode the empty-central apply hit.
+
+    Lenient w.r.t. schema drift: a table that exists in NO source is
+    treated as acceptably absent (tests use minimal source fixtures).
+    Strict against silent skip: if any source has a row of data we'd
+    try to import, the central must have the table.
+
+    Raises :class:`BootstrapFailure` with a human-readable list of every
+    missing target.
+    """
+    missing: list[str] = []
+    _check_assert_db(qi_db, IMPORT_TABLES_QI, "quality_intelligence",
+                     [p.state_dir / "quality_intelligence.db" for p in projects],
+                     missing)
+    _check_assert_db(rc_db, IMPORT_TABLES_RC, "runtime_coordination",
+                     [p.state_dir / "runtime_coordination.db" for p in projects],
+                     missing)
+    if missing:
+        raise BootstrapFailure(
+            "central DB(s) missing required import-target tables: "
+            + ", ".join(missing)
+            + ". Run --fresh-central or repair the central state before retrying."
+        )
+
+
+def _check_assert_db(
+    central_db: Path,
+    tables: tuple[str, ...],
+    label: str,
+    source_dbs: list[Path],
+    missing_acc: list[str],
+) -> None:
+    """Append ``label.<table>`` entries to ``missing_acc`` for tables that
+    a source has but ``central_db`` is missing. Helper for
+    :func:`_assert_central_tables_exist`.
+    """
+    if not central_db.exists():
+        # Whole-DB absence is fatal; record every potentially-relevant table.
+        for tbl in tables:
+            if any(_has_table(src, tbl) for src in source_dbs):
+                missing_acc.append(f"{label}.{tbl}")
+        return
+    con = sqlite3.connect(str(central_db))
+    try:
+        for tbl in tables:
+            if _table_exists(con, tbl):
+                continue
+            if any(_has_table(src, tbl) for src in source_dbs):
+                missing_acc.append(f"{label}.{tbl}")
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# Migration application (schemas/migrations/0010 + 0015 + 0016)
+# ---------------------------------------------------------------------------
+
+
+def apply_migration_0010(qi_db: Path, rc_db: Path) -> None:
+    """Apply the Phase 0 hot-table ``project_id`` ALTERs to central.
+
+    Round-3 fix-forward (Issue 1): the prior apply flow only invoked
+    0015, which extends to "remaining 18 tables" — but the foundational
+    0010 (``dispatches``, ``success_patterns``, ``pattern_usage``,
+    ``coordination_events``, …) was never applied against a freshly
+    bootstrapped central, leaving hot tables without ``project_id``.
+
+    The migration file is partitioned by ``-- @db: runtime_coordination``
+    so the QI half runs against ``qi_db`` and the RC half runs against
+    ``rc_db``. Each statement is filtered through
+    :func:`_apply_alters_idempotently`, which:
+
+    * skips ALTERs for tables not present in the target DB,
+    * skips ADD COLUMN for columns that already exist,
+    * tolerates ``duplicate column`` errors from concurrent writers, and
+    * applies CREATE INDEX / INSERT OR IGNORE clauses if present.
+
+    The companion 0015 then extends to cold tables; the order
+    ``0010 → 0015`` matches FEATURE_PLAN §w6-p4.
+    """
+    sql = MIGRATION_0010_PATH.read_text()
+    # 0010 uses a slightly different delimiter than 0015. Match the
+    # exact partition heading from the file so we don't accidentally
+    # split inside an inline comment.
+    qi_block, _, rc_block = sql.partition("-- @db: runtime_coordination")
+    _apply_alters_idempotently(qi_db, qi_block)
+    _apply_alters_idempotently(rc_db, rc_block)
 
 
 def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
@@ -1091,10 +1297,27 @@ def _compare_counts(
             )
             return out
         for tbl in tables:
-            if not _table_exists(con, tbl):
-                continue
-            if not _src_table_present(con, "src", tbl):
+            src_present = _src_table_present(con, "src", tbl)
+            central_present = _table_exists(con, tbl)
+            if not src_present:
                 # Source predates this table → acceptable schema drift.
+                continue
+            if not central_present:
+                # Round-3 fix-forward (Issue 3): a missing central table
+                # while the source HAS the table is a hard failure, not a
+                # silent skip. Without this, an empty-bootstrap apply
+                # would happily declare "verification clean" against
+                # zero imported rows. Surfacing as a read_error promotes
+                # to a verification discrepancy (exit code 4).
+                read_errors.append(
+                    {
+                        "db": central_db_label,
+                        "project_id": project.project_id,
+                        "phase": "central_table_missing",
+                        "table": tbl,
+                        "error": "central DB missing import-target table",
+                    }
+                )
                 continue
             try:
                 src_cnt = con.execute(f"SELECT COUNT(*) FROM src.{tbl}").fetchone()[0]
@@ -1261,6 +1484,15 @@ def main(argv: Iterable[str] | None = None) -> int:
                         help="Override central state dir (used by tests)")
     parser.add_argument("--verify-only", action="store_true",
                         help="Run verification suite against the central DBs and exit")
+    parser.add_argument(
+        "--fresh-central",
+        action="store_true",
+        help=(
+            "Operator acknowledgement that the central DB is fresh (missing or "
+            "empty). Required when --apply targets a central state dir without "
+            "canonical schemas — guards against accidental first-deploy runs."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON to stdout on completion")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1329,6 +1561,19 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 3
 
     central_state.mkdir(parents=True, exist_ok=True)
+
+    # Round-3 fix-forward: detect a fresh central BEFORE creating empty
+    # DB files. Without this gate, an operator who has just blown away
+    # ~/.vnx-data/state/ would see "import complete" against empty DBs.
+    central_was_fresh = _central_is_empty(central_qi, central_rc)
+    if central_was_fresh and not args.fresh_central:
+        LOG.error(
+            "central appears fresh (missing canonical schema at %s); "
+            "pass --fresh-central to acknowledge first-deploy bootstrap",
+            central_state,
+        )
+        return 1
+
     if not central_qi.exists():
         LOG.warning("central QI db missing; creating empty: %s", central_qi)
         sqlite3.connect(str(central_qi)).close()
@@ -1338,15 +1583,34 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     pre_snapshot = _snapshot_central(central_qi, central_rc)
     try:
-        # Order matters (Finding 3 in PR #432 review):
-        #   1. 0015 ALTER TABLE — adds project_id column to non-FTS tables
-        #   2. import_project loop — populates code_snippets + snippet_metadata
-        #   3. 0016 FTS5 rebuild — joins snippet_metadata to assign project_id
+        if central_was_fresh:
+            LOG.info(
+                "central is fresh; running canonical bootstrap "
+                "(quality_db_init + coordination_db.init_schema)"
+            )
+            _init_central_if_missing(central_qi, central_rc)
+
+        # Order matters (Round-3 Issue 1 + Finding 3 in PR #432 review):
+        #   1. 0010 ALTER TABLE — adds project_id to hot tables (foundation)
+        #   2. 0015 ALTER TABLE — extends project_id to remaining cold tables
+        #   3. _assert_central_tables_exist — fail-fast before per-row losses
+        #   4. import_project loop — populates code_snippets + snippet_metadata
+        #   5. 0016 FTS5 rebuild — joins snippet_metadata to assign project_id
         # Running 0016 before the import loop rebuilds FTS5 over an empty
         # central table → useless index.
+        apply_migration_0010(central_qi, central_rc)
         apply_migration_0015(central_qi, central_rc)
+        _assert_central_tables_exist(central_qi, central_rc, projects)
+    except BootstrapFailure as exc:
+        LOG.error("bootstrap assertion failed: %s", exc)
+        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        return 3
     except sqlite3.Error as exc:
         LOG.error("schema migration failed: %s", exc)
+        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        return 3
+    except (FileNotFoundError, ImportError) as exc:
+        LOG.error("canonical bootstrap failed: %s", exc)
         _restore_snapshot(pre_snapshot, central_qi, central_rc)
         return 3
 
