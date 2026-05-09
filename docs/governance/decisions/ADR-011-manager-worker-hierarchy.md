@@ -53,24 +53,59 @@ A worker MAY spawn subagents only when ALL of the following hold:
 - Subagent that consumes a budget the worker has not pre-provisioned. (Subagent token cost counts against the worker's dispatch budget; if exceeded, the worker fails closed.)
 - Subagent in T0. (T0 does not implement code; T0 dispatches workers. T0 may use direct Read/Grep but does not need parallel fanout — its work is dispatch-decision, not exploration.)
 
-#### Pilot scope (Q3 2026)
+#### Pilot scope (Q3 2026) — split into 2 gates per Codex Q8 (2026-05-09 amendment)
+
+Original v1 amendment treated "100% audit completeness" + "≥30% wall-clock savings" + "zero leaks" as joint outcome criteria. Codex Q8 flagged this as evidence-model error: those are different *kinds* of evidence requiring different *kinds* of measurement, and the wall-clock claim is plausible-but-optimistic for the VNX workload mix. The pilot is split into two sequential gates.
 
 The first deployment is a single pilot, not a general rollout:
 
 - **Pilot terminal:** T1 only.
 - **Pilot task:** parallel-search across `code_snippets` FTS5 table during open-item triage and during multi-file refactor research. Out of scope for the pilot: codex-fix-codex round loops (those stay sequential).
 - **Pilot env flag:** `VNX_T1_TACTICAL_SUBAGENTS=1`. Default unset = forbidden.
-- **Pilot duration:** 4 weeks (or 25 dispatches with subagent use, whichever comes first).
-- **Pilot telemetry:** every dispatch using subagents emits a row to `.vnx-data/state/runtime_coordination.db` table `subagent_pilot_log` with columns `(dispatch_id, agent_count, total_subagent_tokens, wall_clock_savings_ms, summary_quality_score, audit_completeness_bool)`.
-- **Success criteria for promotion to general rollout:**
-  - ≥30% wall-clock reduction vs the same-task baseline (measured against direct tool use on matched tasks).
-  - 100% audit completeness — every subagent's `agent_id`/`agent_type` and summary hash present in the worker's receipt.
-  - Zero leaks: no subagent recorded a tool call to a forbidden tool (PreToolUse hook never fired with exit code 2 for that reason ≥1 time per dispatch).
-  - Operator review approves at week 4.
-- **Failure / rollback criteria:**
-  - Any audit-completeness failure → roll back the pilot, re-publish ADR-011 with status downgraded to "Rejected" for that section.
-  - Any secret leakage incident → immediate rollback, security review.
-  - Wall-clock savings < 15% on pilot tasks → keep pilot in monitor mode but do not promote.
+- **Pilot telemetry:** every dispatch using subagents emits a row to `.vnx-data/state/runtime_coordination.db` table `subagent_pilot_log` with columns `(dispatch_id, agent_count, total_subagent_tokens, wall_clock_savings_ms, summary_quality_score, audit_completeness_bool, gate1_passed, gate2_passed)`.
+
+##### Gate 1 — Provenance and redaction (10 dispatches, ~1 week)
+
+**Goal:** prove the audit instrumentation works in practice before measuring performance.
+
+- **Sample size:** ≥10 dispatches that successfully use subagents.
+- **Manual audit:** operator (or T0 with explicit operator review per dispatch) inspects:
+  - Worker's receipt has `subagents` array populated for every spawned subagent
+  - Each subagent's `agent_id`, `agent_type`, `tool_call_count`, `total_duration_ms`, `summary_hash` present
+  - Hook events forwarded to `.vnx-data/events/T1.ndjson` are 1:1 with subagent tool calls
+- **Secret-canary test:** at least 3 of the 10 dispatches deliberately work in a directory containing fake secret tokens (`tests/canary/secrets/*.txt` with patterns `sk-test-FAKE-LEAK-CANARY-…`). Verify `PostToolUse.hookSpecificOutput.updatedToolOutput` redaction strips these from any forwarded event.
+- **Pass criteria for Gate 1:**
+  - 100% receipt provenance completeness on the 10 dispatches
+  - 0 secret-canary tokens leaked to NDJSON ledger or worker receipt
+  - 0 `PreToolUse` hook firings with exit code 2 (no forbidden-tool attempts)
+
+**If Gate 1 fails:** roll back pilot, security review, ADR status downgraded to "Rejected" for the subagent sub-decision.
+
+**If Gate 1 passes:** proceed to Gate 2.
+
+##### Gate 2 — Performance against deterministic baseline (15 dispatches, ~3 weeks)
+
+**Goal:** measure wall-clock savings against a *matched-task* deterministic baseline. The original ≥30% threshold is plausible for ideal Anthropic-Django-style fanout-search; it is probably optimistic for VNX's actual workload mix per Codex Q8. Gate 2 uses a stricter measurement approach.
+
+- **Sample size:** 15 additional dispatches (cumulative ≥25).
+- **Baseline definition:** for each pilot dispatch, T0 also logs the *direct-tool-use plan* (sequential Read/Grep/Glob calls the worker would have made without subagent fanout). T0 estimates the wall-clock equivalent using a fixed `tool_latency_ms_p50` per tool from the previous 100 non-subagent dispatches as a calibration baseline.
+- **Pass criteria for Gate 2:**
+  - **Median** wall-clock reduction ≥30% vs baseline (not mean — outliers from idealized fanout searches inflate mean)
+  - **p25 (worst quartile)** wall-clock reduction ≥0% (no dispatch is *slower* than direct tool use; worst case is wash)
+  - Total `subagent_pilot_log.total_subagent_tokens` does not exceed worker's pre-provisioned dispatch budget by >10% on any individual dispatch
+  - Operator review approves at the end of the 25-dispatch / 4-week window
+
+**If Gate 2 fails (median <30% but ≥15%):** keep pilot in monitor mode for 4 more weeks; do not promote to general rollout. Re-evaluate task scope.
+
+**If Gate 2 fails (median <15%):** roll back pilot. Re-evaluate whether VNX's workload mix is fanout-friendly enough to justify subagents.
+
+**If Gate 2 passes:** ADR-011 amendment status promoted from "Conditional / Pilot" to "Accepted (with constraints)" — general rollout permitted within the existing 7 constraints + 5 forbidden shapes above.
+
+##### Failure / rollback criteria (apply to either gate)
+
+- Any audit-completeness failure → immediate rollback, status downgrade to "Rejected".
+- Any secret-canary leakage → immediate rollback, security review.
+- Pilot duration cap: 4 weeks Gate 1 + 4 weeks Gate 2 maximum. If neither gate has produced enough samples by then, re-scope or terminate.
 
 #### Reasoning for Conditional rather than Accepted (general)
 
