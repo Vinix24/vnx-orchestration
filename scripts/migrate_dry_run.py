@@ -73,6 +73,7 @@ from scripts.migrate_to_central_vnx import (  # noqa: E402
 LOG = logging.getLogger("vnx.migrate.dryrun")
 
 # Tables planned for import (subset of the central DBs; matches Phase 0+P4 scope).
+# Mirror IMPORT_TABLES_QI in scripts/migrate_to_central_vnx.py — keep in lockstep.
 PLAN_TABLES_QI: tuple[str, ...] = (
     "success_patterns",
     "antipatterns",
@@ -80,6 +81,7 @@ PLAN_TABLES_QI: tuple[str, ...] = (
     "pattern_usage",
     "confidence_events",
     "dispatch_metadata",
+    "dispatch_experiments",
     "dispatch_pattern_offered",
     "session_analytics",
     "vnx_code_quality",

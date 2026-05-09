@@ -204,3 +204,34 @@ def test_plan_tables_constants_disjoint():
     qi = set(PLAN_TABLES_QI)
     rc = set(PLAN_TABLES_RC)
     assert qi.isdisjoint(rc), f"overlap: {qi & rc}"
+
+
+def test_plan_tables_qi_includes_dispatch_experiments():
+    """Codex round-7 advisory 2: PLAN_TABLES_QI must include dispatch_experiments.
+
+    IMPORT_TABLES_QI in migrate_to_central_vnx.py was updated to include
+    dispatch_experiments in round-7.  PLAN_TABLES_QI must mirror it so the
+    dry-run operator preflight sees the same table set as the live migrator.
+    A mismatch means the operator approval is based on under-reported row counts.
+    """
+    assert "dispatch_experiments" in PLAN_TABLES_QI, (
+        "PLAN_TABLES_QI is missing 'dispatch_experiments'. "
+        "Keep it in lockstep with IMPORT_TABLES_QI in scripts/migrate_to_central_vnx.py."
+    )
+
+
+def test_plan_tables_qi_matches_import_tables_qi():
+    """PLAN_TABLES_QI and IMPORT_TABLES_QI must contain the same table names.
+
+    The two lists serve the same purpose (QI table scope) and must not diverge.
+    Any table in the live migrator that is absent from the dry-run reporter
+    means the operator preflight under-reports the migration plan.
+    """
+    from scripts.migrate_to_central_vnx import IMPORT_TABLES_QI
+    plan_set = set(PLAN_TABLES_QI)
+    import_set = set(IMPORT_TABLES_QI)
+    missing_from_plan = import_set - plan_set
+    assert not missing_from_plan, (
+        f"Tables in IMPORT_TABLES_QI but absent from PLAN_TABLES_QI: {sorted(missing_from_plan)}. "
+        "Mirror both lists whenever the live migrator scope changes."
+    )

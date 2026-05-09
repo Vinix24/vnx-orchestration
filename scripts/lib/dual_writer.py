@@ -80,11 +80,26 @@ def _resolve_lock_filename(target_filename: str, override: Optional[str]) -> str
 
 
 def _append_locked(central_path: Path, record: Dict[str, Any], lock_filename: str) -> None:
+    """Append record to central_path under two fcntl locks.
+
+    Lock contract (codex round-7 finding 4):
+    1. Sentinel lock (LOCK_EX on ``lock_filename``): excludes concurrent
+       writers from each other and from re-stampers that hold the sentinel
+       while replacing the inode.
+    2. Data-file lock (LOCK_EX on central_path): serialises against readers
+       that hold LOCK_SH on the data file (e.g. dispatch_register
+       ``_read_register_locked``).  Without this second lock a reader can
+       interleave with an append mid-write and observe a truncated last line.
+
+    Both ``_write_event_locked`` (primary path writer) and this helper must
+    hold the data-file lock so readers and writers share the same lock surface.
+    """
     central_path.parent.mkdir(parents=True, exist_ok=True)
     sentinel = central_path.parent / lock_filename
     with sentinel.open("a+", encoding="utf-8") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         with central_path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             fh.write(json.dumps(record, separators=(",", ":"), sort_keys=False) + "\n")
 
 

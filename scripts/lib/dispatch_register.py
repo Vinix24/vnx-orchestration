@@ -261,7 +261,13 @@ def append_event(
     if not dispatch_id and pr_number is None and not feature_id:
         return False
 
-    if not (operator_id or project_id or orchestrator_id or agent_id):
+    # Codex round-7 finding 3 (ADVISORY): resolve identity per-field so that a
+    # partial-identity caller (e.g. only operator_id supplied) still gets
+    # project_id resolved from env/context.  The previous condition fired only
+    # when ALL four fields were absent, silently skipping central mirror for any
+    # caller that supplied even one field.  Empty-string values are treated as
+    # unset (Python `or` semantics) per the caller contract.
+    if not (operator_id and project_id and orchestrator_id and agent_id):
         identity = _resolve_identity_for_register()
         operator_id = operator_id or identity.get("operator_id")
         project_id = project_id or identity.get("project_id")
