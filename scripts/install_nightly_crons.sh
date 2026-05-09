@@ -13,6 +13,8 @@ if [[ -z "$PROJECT_ROOT" ]]; then
 fi
 
 CRON_ENTRY="30 2 * * * cd $PROJECT_ROOT && python3 scripts/compact_state.py --mode all >> .vnx-data/logs/compact_state.log 2>&1"
+# Wave 1 — rotate shadow_divergence.ndjson if >100MB or older than 30 days
+SHADOW_CRON_ENTRY="0 3 * * * find $PROJECT_ROOT/.vnx-data/state -name \"shadow_divergence.ndjson\" -size +100M -exec mv {} {}.archive-\$(date +%Y%m%d) \; -exec touch {} \;"
 
 existing=$(crontab -l 2>/dev/null || true)
 
@@ -25,6 +27,15 @@ else
         printf '%s\n' "$CRON_ENTRY" | crontab -
     fi
     printf 'compact_state cron entry installed.\n'
+fi
+
+existing=$(crontab -l 2>/dev/null || true)
+
+if printf '%s\n' "$existing" | grep -qF "shadow_divergence.ndjson"; then
+    printf 'shadow_divergence rotation cron entry already installed — no change.\n'
+else
+    printf '%s\n%s\n' "$existing" "$SHADOW_CRON_ENTRY" | crontab -
+    printf 'shadow_divergence rotation cron entry installed.\n'
 fi
 
 printf '\nCurrent crontab:\n'
