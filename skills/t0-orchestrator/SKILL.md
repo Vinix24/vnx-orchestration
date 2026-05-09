@@ -27,7 +27,7 @@ You do not implement features directly.
 6. T0 orchestration itself uses `CLAUDE.md` only.
 7. You may use `Bash` for orchestration/state commands only.
 8. Do not use write/edit style tooling for implementation work.
-9. Primary dispatch path: `subprocess_dispatch.py` direct invocation. Manager blocks apply only to tmux-routed dispatches.
+9. Dispatch output belongs in terminal output (manager block), not direct queue file edits.
 10. In full autonomous chain mode, do not ask the user for routine checkpoints; escalate only on true chain-breaking blockers.
 
 ## 2. Primary Workflow (Receipt -> Review -> Dispatch)
@@ -38,14 +38,14 @@ Run this loop each orchestration cycle.
 2. Read QUALITY advisory first.
 3. Review open items for the PR.
 4. Validate evidence quality (tests, logs, behavior proof).
-5. Close/defer items with explicit reasons.
+5. Close/defer/wontfix items with explicit reasons.
 6. Complete PR only if blocker/warn criteria are satisfied.
 7. Check dispatch guard (terminals + queue + dependencies).
 8. Verify required review-gate evidence, including headless report artifacts when policy requires them.
 9. Reconcile queue truth before promotion and before PR completion when any projection drift is suspected.
 10. Choose one action:
    1. WAIT
-   2. DISPATCH one manager block (tmux) or subprocess_dispatch.py call
+   2. DISPATCH one manager block
    3. ESCALATE
 
 ## 3. Decision Framework
@@ -68,6 +68,40 @@ Apply this 8-step decision tree in order. The first matching rule wins.
 - Verification (spot-check 3 claims) only when risk > 0.3.
 - If status=failure or blocking findings → REJECT immediately, do not look for reasons to approve.
 
+### Skill Routing (specialist dispatch)
+
+When dispatching, route to the most-specific skill available. Specialists catch domain bugs that generalists miss.
+
+| Work type | Skill | Why |
+|---|---|---|
+| Schema changes, migrations, SQLite, FTS5, multi-tenant patterns, INSERT/UPSERT design, "rows missing" / "stuck for hours" debugging | **`database-engineer`** | Has migration defense checklist + SQLite gotcha references; learned from P4's 5-round chain |
+| VNX intelligence schema, central state DBs, dispatch lifecycle, code_snippets/snippet_metadata, intelligence_injections, project_id propagation | **`intelligence-engineer`** | Knows the VNX-specific table semantics and lifecycle |
+| API endpoints, scripts, refactoring, general server-side code | `backend-developer` | Generalist; has Codex Defense Checklist as baseline |
+| UI/UX, dashboards, frontend frameworks | `frontend-developer` | |
+| Code review (general) | `reviewer` | May request `database-engineer` second-opinion when PR touches `schemas/` or migration files |
+| API design, REST contracts | `api-developer` | |
+| Testing strategy, regression coverage | `test-engineer` | |
+| Performance profiling, bottleneck hunt | `performance-profiler` | |
+| Security audit, vulnerability scan | `security-engineer` | |
+| Architecture / design / planning | `architect` | NOT for implementation; planning only |
+| Skill creation / improvement | `skill-creator` | |
+
+**Rule:** if the dispatch involves code under `schemas/`, `scripts/migrate*`, `_import_table`-style importers, or any SQLite touching DB schema → MUST route to `database-engineer`, not `backend-developer`. The P4 chain demonstrated that generalist routing wastes 4-5x more rounds on multi-tenant DB work.
+
+### B3.1 sub-rule: Iteration cap on net-new findings
+
+If round N codex review finds **≥3 NEW blocking findings** that were not caught by round 1's review, escalate to a redesign decision instead of running another fix-forward round. Repeated discovery of new bugs across rounds is a signal that:
+
+- The code is being audited at a patch-level when it needs system-level review, OR
+- The original design is fundamentally flawed and patches won't converge
+
+Action when B3.1 triggers:
+1. Stop iterating on the current branch
+2. Dispatch the `architect` skill for a system-level reflection
+3. Decide: rewrite the affected component, or defer with OIs
+
+P4 violated B3.1 implicitly across rounds 3-5; the lessons doc (`claudedocs/2026-05-09-p4-migration-architecture-lessons.md`) Section 6 documents the cost.
+
 **Verification (when risk > 0.3 only)**:
 - Claimed file modified: `git log --oneline -1 -- <file>`
 - Fix present in code: Grep for the change
@@ -79,11 +113,10 @@ Apply this 8-step decision tree in order. The first matching rule wins.
 - Close only evidence-backed items.
 - If new out-of-scope risk appears, create a new open item.
 
-3. Dispatch policy.
-- Primary path: `subprocess_dispatch.py` direct invocation (347 invocations per audit — this is the dominant flow).
-- Use staged dispatch templates when they exist for a worker/scope combination.
-- If ad-hoc dispatch introduces new obligations, create open item(s).
-- Parallel by default: dispatches without declared `requires:` dependency are independent — fan out to all idle terminals in a single turn.
+3. Staging-first dispatch policy.
+- Prefer promoting staged dispatches.
+- Create manual dispatch only if no suitable staged dispatch exists.
+- If manual dispatch introduces new obligations, create open item(s).
 
 4. Queue discipline.
 - One dispatch block at a time.
@@ -114,10 +147,18 @@ Apply this 8-step decision tree in order. The first matching rule wins.
 - If structured gate JSON and normalized report content disagree, treat that as explicit evidence failure.
 - Required gates that remain only `queued` or `requested` block PR completion.
 
-6. No-pause-after-status.
-- Status reports during an autonomous chain are informational only.
-- Continue with the next planned action in the same turn.
-- Stop only when a blocking criterion from §3 fires.
+6. CI Workflow Conclusion Verification.
+
+### CI Workflow Conclusion Verification (mandatory before any merge)
+
+BEFORE merging any PR, MUST verify the workflow-level VNX CI conclusion equals "success", not just that individual checks like Profile A appear green in `gh pr checks`.
+
+Run:
+    gh run list --branch <pr-head-ref> --workflow "VNX CI" --limit 1 --json conclusion --jq '.[0].conclusion'
+
+If output is anything other than "success", do NOT merge. Investigate the cause, dispatch a fix-forward, re-run CI, and only merge when the workflow conclusion equals "success".
+
+RATIONALE: `gh pr checks` lists individual job names but the workflow as a whole can still produce a "failure" conclusion (e.g. multi-step Profile A whose Legacy path gate sub-step fails) while the visible names appear "pass". Multiple late-night merges on 2026-05-06/07 had VNX CI = failure that was missed by checking individual names only — Legacy path gate was tripping on a literal `.vnx-data/state/` string in build_current_state.py:263 that the rg-based gate flagged repository-wide on main, but did not flag in PR-scoped diffs.
 
 ## 4. Quality Advisory Interpretation
 
@@ -186,12 +227,14 @@ python3 scripts/reconcile_queue_state.py --json
 # Step 4: Reconcile terminal state (no tmux probe for safety)
 python3 scripts/reconcile_terminal_state.py --no-tmux-probe
 
-# Step 5: Check active and pending dispatches
+# Step 5: Review incident log
+sqlite3 .vnx-data/state/runtime_coordination.db \
+  "SELECT COUNT(*), severity FROM incident_log WHERE resolved_at IS NULL GROUP BY severity;"
+
+# Step 6: Check active and pending dispatches
 ls -la .vnx-data/dispatches/active/ 2>/dev/null
 ls -la .vnx-data/dispatches/pending/ 2>/dev/null
 ```
-
-Note: `incident_log` query was documented in prior versions but was never run in practice (0 invocations per audit). It has been removed from the mandatory sequence; check it manually only if a crash shows signs of unresolved blocking incidents.
 
 ### 6.3 Orphaned Dispatch Handling
 
@@ -223,14 +266,15 @@ This engine encapsulates lease cleanup, queue reconciliation, and terminal state
 
 ## 7. Open Items Lifecycle
 
-### 7.1 Inspect
+### 6.1 Inspect
 
 ```bash
 python3 scripts/open_items_manager.py digest
 python3 scripts/open_items_manager.py list --status open
+bash .claude/skills/t0-orchestrator/scripts/deliverable_review.sh blockers PR-X
 ```
 
-### 7.2 Resolve
+### 6.2 Resolve
 
 Before closing any item, VERIFY the fix against actual code:
 ```bash
@@ -244,9 +288,10 @@ Only then proceed to close:
 ```bash
 python3 scripts/open_items_manager.py close OI-XXX --reason "evidence: ..."
 python3 scripts/open_items_manager.py defer OI-XXX --reason "non-blocking for now"
+python3 scripts/open_items_manager.py wontfix OI-XXX --reason "out of scope"
 ```
 
-### 7.3 Create new item when needed
+### 6.3 Create new item when needed
 
 Use this when worker output introduces a new risk not in current scope.
 
@@ -262,15 +307,15 @@ If CLI signature differs in your branch, use `--help` and map fields accordingly
 
 ## 8. PR Queue Lifecycle
 
-### 8.1 Read state
+### 7.1 Read state
 
 ```bash
 python3 scripts/pr_queue_manager.py status
+python3 scripts/pr_queue_manager.py list
+bash .claude/skills/t0-orchestrator/scripts/queue_status.sh summary
 ```
 
-T0 typically reads queue state via `t0_state.json` and `gh pr list` — the pr_queue_manager is an optional cross-check.
-
-### 8.2 Staging operations (when a template exists)
+### 7.2 Staging-first operations
 
 ```bash
 python3 scripts/pr_queue_manager.py staging-list
@@ -279,7 +324,7 @@ python3 scripts/pr_queue_manager.py promote <dispatch-id>
 python3 scripts/pr_queue_manager.py reject <dispatch-id> --reason "..."
 ```
 
-### 8.3 Complete PR
+### 7.3 Complete PR
 
 ```bash
 python3 scripts/pr_queue_manager.py complete PR-X
@@ -287,7 +332,7 @@ python3 scripts/pr_queue_manager.py complete PR-X
 
 Only after blocker/warn obligations are satisfied.
 
-### 8.4 Review gate verification
+### 7.4 Review gate verification
 
 Before closure on any PR with a non-empty review stack:
 
@@ -313,36 +358,56 @@ T0 must treat the following as closure blockers:
 - gate result exists but `report_path` is empty
 - ad hoc shell review output exists but no normalized report and no recorded result exist
 
-## 9. Dispatch Guard
+## 9. Dispatch Guard and Provider Awareness
 
 Before dispatching:
 
 ```bash
-bash skills/t0-orchestrator/scripts/dispatch_guard.sh
+bash .claude/skills/t0-orchestrator/scripts/dispatch_guard.sh
+bash .claude/skills/t0-orchestrator/scripts/provider_capabilities.sh current
 ```
 
 1. If guard returns WAIT, do not dispatch.
-2. Select model via `--model` flag in `subprocess_dispatch.py` (e.g. `--model sonnet` for T1/T2, `--model opus` for T3 deep review).
+2. Use provider capability output for mode/model fields.
+3. Keep non-Claude constraints in mind (mode/model differences).
 
-Note: The provider capabilities helper was removed (DEAD — 0 invocations per audit). Model selection is ad-hoc via `--model` flag.
+See full matrix in `references/provider-matrix.md`.
 
-### 9.1 Pre-Dispatch Pane Verification (tmux fallback only)
+### 9.1 Pre-Dispatch Pane Verification
 
-This section applies only when dispatching via the tmux adapter. Subprocess-routed terminals (T1 default) do not require pane verification.
+Before the first dispatch of any session or after a tmux restart, verify pane IDs match live tmux state.
 
-If using tmux routing, verify pane IDs match live tmux state:
+**Pane discovery tiers (in fallback order):**
+
+| Tier | Method | Survives tmux restart |
+|------|--------|-----------------------|
+| 1. Cache | TTL-based fast lookup (5 min) | NO |
+| 2. panes.json | Static file with pane_id field | NO (pane IDs change) |
+| 3. Path-based | `pane_current_path` match | YES — always works |
+| 4. Interactive | Operator manual resolution | NO |
+
+Path-based discovery is the most reliable tier after a crash because `pane_current_path` is preserved by tmux when the session is recreated, even though pane IDs change.
+
+**Verification commands:**
 
 ```bash
+# List all panes with their paths to verify terminal presence
 tmux list-panes -a -F "#{pane_id} #{pane_current_path}"
+
+# Check which panes match expected terminal paths
+for T in T0 T1 T2 T3; do
+  tmux list-panes -a -F "#{pane_id} #{pane_current_path}" | \
+    grep "$(pwd)/.claude/terminals/$T" && echo "$T: OK" || echo "$T: MISSING"
+done
 ```
 
-Path-based discovery is the most reliable tier after a crash because `pane_current_path` is preserved by tmux when the session is recreated, even though pane IDs change. If any terminal pane is missing, escalate before dispatching.
+If any terminal pane is missing, escalate before dispatching — do not send a dispatch to a stale or unknown pane ID.
 
-## 10. Manager Block Quality Standard (tmux-routed dispatches only)
+If panes.json contains stale IDs, update it manually or delete it and let path-based discovery take over on next delivery.
 
-This section applies **only when dispatching via the tmux adapter**. Subprocess dispatches use the format implied by `subprocess_dispatch.py --instruction`.
+## 10. Manager Block Quality Standard
 
-For tmux-routed dispatches, every manager block must include:
+Every dispatch must include:
 
 1. `[[TARGET:A|B|C]]`
 2. `[[DONE]]`
@@ -360,49 +425,31 @@ For tmux-routed dispatches, every manager block must include:
 5. Explicit success criteria
 6. If the dispatch requests a headless review gate, it must name the expected report path and required receipt/result linkage
 
-Validate role names before dispatch when uncertain:
+Validate role names before init, promote, and dispatch when uncertain:
 
 ```bash
 python3 scripts/validate_skill.py --list
 ```
 
-## 11. Intelligence Consultation (mandatory checks)
+## 11. Recommended Script Toolbox
 
-At session start AND after every 3rd major decision, T0 MUST consult:
+1. `scripts/queue_status.sh`
+- queue/staging/terminal summary
 
-1. `.vnx-data/state/t0_recommendations.json` — if stale >24h, run `python3 scripts/build_t0_state.py` to attempt refresh; if still stale, surface as chain-breaking blocker
-2. `.vnx-data/state/open_items_digest.json` — surface blockers/warnings before next dispatch
-3. `.vnx-data/state/t0_state.json` — verify terminals/queue state matches expectations
+2. `scripts/deliverable_review.sh`
+- PR-focused open-item checks
 
-After major chain (>5 merges in <24h):
+3. `scripts/dispatch_guard.sh`
+- go/no-go guard
 
-4. `sqlite3 .vnx-data/state/runtime_coordination.db "SELECT * FROM incident_log WHERE resolved_at IS NULL"` — check for unresolved incidents
-5. `python3 scripts/health_check.py` (after PR-T1 #332 lands) — verify component beacons fresh
+4. `scripts/provider_capabilities.sh`
+- provider constraints and routing hints
 
-### 11.1 Recommended Script Toolbox (live scripts only)
+5. `scripts/staging_helper.sh`
+- staging convenience wrapper
 
-Scripts that are actually used (per 7-day audit):
-
-1. `skills/t0-orchestrator/scripts/dispatch_guard.sh`
-   - go/no-go guard before any dispatch
-
-2. `skills/t0-orchestrator/scripts/intelligence.sh`
-   - intelligence read helpers (consultation shortcuts)
-
-Four previously documented helpers were removed (0 invocations in 30+ days), superseded by `build_t0_state.py`, `open_items_manager.py`, and `--model` flag selection.
-
-### 11.2 Actually-used script toolbox
-
-These are the scripts T0 drives most (HOT/WARM per audit):
-
-1. `scripts/lib/subprocess_dispatch.py` — primary dispatch path (347 invocations/week)
-2. `scripts/build_t0_state.py` — state refresh (58 invocations/week)
-3. `scripts/runtime_core_cli.py check-terminal / release-on-failure` — lease management (105 invocations/week)
-4. `scripts/lib/vnx_recover_runtime.py` — crash recovery (16 invocations/week)
-5. `scripts/closure_verifier.py` — pre-merge gate verification (18 invocations/week)
-6. `scripts/review_gate_manager.py request / status` — review gate driver (193 invocations/week)
-7. `scripts/open_items_manager.py list / add / close` — OI lifecycle (120 invocations/week)
-8. `skills/t0-orchestrator/scripts/dispatch_guard.sh` — sole surviving helper (10 invocations/week)
+6. `scripts/intelligence.sh`
+- intelligence read helpers
 
 ## 12. Decision Outputs
 
