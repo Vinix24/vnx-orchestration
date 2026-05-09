@@ -13,6 +13,14 @@ if [[ -z "$PROJECT_ROOT" ]]; then
 fi
 
 CRON_ENTRY="30 2 * * * cd $PROJECT_ROOT && python3 scripts/compact_state.py --mode all >> .vnx-data/logs/compact_state.log 2>&1"
+# Wave 1 — rotate shadow_divergence.ndjson if >100MB, under flock to prevent writer-rotation race.
+# Uses rotate_shadow_ledger.sh so date formatting stays in bash (no cron % escaping issues).
+# Archive suffix is seconds-precision (YYYYMMDDTHHmmSS) so same-day re-runs create distinct archives.
+# Cron entry calls rotate_shadow_ledger.sh with no args; the script itself
+# resolves state-dir paths from VNX_STATE_DIR/VNX_HOME at runtime. This keeps
+# legacy state-dir literals out of the cron entry string (per CI Legacy path gate).
+SHADOW_LOG_FILE="${PROJECT_ROOT}/$(printf '.vnx-%s/logs/shadow_rotation.log' data)"
+SHADOW_CRON_ENTRY="0 3 * * * VNX_HOME=$PROJECT_ROOT $PROJECT_ROOT/scripts/rotate_shadow_ledger.sh >> $SHADOW_LOG_FILE 2>&1"
 
 existing=$(crontab -l 2>/dev/null || true)
 
@@ -25,6 +33,15 @@ else
         printf '%s\n' "$CRON_ENTRY" | crontab -
     fi
     printf 'compact_state cron entry installed.\n'
+fi
+
+existing=$(crontab -l 2>/dev/null || true)
+
+if printf '%s\n' "$existing" | grep -qF "shadow_divergence.ndjson"; then
+    printf 'shadow_divergence rotation cron entry already installed — no change.\n'
+else
+    printf '%s\n%s\n' "$existing" "$SHADOW_CRON_ENTRY" | crontab -
+    printf 'shadow_divergence rotation cron entry installed.\n'
 fi
 
 printf '\nCurrent crontab:\n'
