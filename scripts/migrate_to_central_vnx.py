@@ -89,6 +89,10 @@ QI_SCHEMA_PATH = REPO_ROOT / "schemas" / "quality_intelligence.sql"
 # Note: `code_snippets` (FTS5 vtab) MUST be imported BEFORE migration 0016
 # rebuilds the FTS5 index — otherwise 0016 rebuilds over an empty table and
 # the resulting central index is useless. See Finding 3 in PR #432 review.
+# Streaming batch size for _import_table — bounds Python memory during import
+# of large FTS5 tables (code_snippets: 855k rows). OI-1377 / ADR-009.
+_IMPORT_BATCH_SIZE = 500
+
 IMPORT_TABLES_QI: tuple[str, ...] = (
     "success_patterns",
     "antipatterns",
@@ -197,6 +201,17 @@ class BootstrapFailure(RuntimeError):
     pre-flight assert that every import-target table exists. If not,
     surface the missing tables in the exception message so the operator
     can diagnose the broken bootstrap before any data is moved.
+    """
+
+
+class MigrationOrphanError(RuntimeError):
+    """Raised when FTS5 rebuild finds code_snippets rows with no recoverable project_id.
+
+    Indicates orphan rows: no snippet_metadata match and no p4_import_rowid_map
+    entry exists for the snippet. The operator must either fix the source data
+    (ensure snippet_metadata covers all snippets) or re-run the full migration
+    so that p4_import_rowid_map is populated before migration 0016 fires.
+    OI-1376 / ADR-009.
     """
 
 
@@ -1239,19 +1254,132 @@ def _column_exists(
     return column in _table_columns(con, table, alias=alias)
 
 
+def _rebuild_fts5_code_snippets(con: sqlite3.Connection) -> None:
+    """Schema-first FTS5 rebuild for code_snippets per ADR-009.
+
+    Derives column list from ``PRAGMA table_info`` at apply time so that
+    deployed DBs with extra columns beyond the canonical 12 are preserved
+    (OI-1375).  Attributes each row's ``project_id`` via ``snippet_metadata``
+    first, then ``p4_import_rowid_map`` as fallback; rows with no recoverable
+    project_id raise ``MigrationOrphanError`` BEFORE the DROP so the database
+    is left intact (OI-1376).
+
+    Must be called inside an active transaction.  Caller is responsible for
+    the ``BEGIN`` / ``ROLLBACK`` / ``COMMIT`` frame.
+    """
+    # --- schema-first column discovery (ADR-009) ----------------------------
+    cols_info = list(con.execute("PRAGMA table_info(code_snippets)"))
+    if not cols_info:
+        raise BootstrapFailure(
+            "code_snippets has no columns in PRAGMA table_info — schema empty?"
+        )
+    current_cols = [row[1] for row in cols_info]
+
+    # Preserve the original FTS5 tokenize options so the rebuilt table is
+    # semantically identical except for the added project_id column.
+    fts5_row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='code_snippets'"
+    ).fetchone()
+    tokenize_clause = "tokenize = 'porter unicode61'"
+    if fts5_row and fts5_row[0]:
+        m = re.search(r"tokenize\s*=\s*'[^']*'", fts5_row[0], re.IGNORECASE)
+        if m:
+            tokenize_clause = m.group(0)
+
+    # --- materialize existing rows into a plain temp table ------------------
+    # Using a regular (non-virtual) table preserves rowid values which are
+    # required both for the project_id correlated lookups below and for
+    # FTS5 rowid-preservation on re-insert.
+    quoted_cols = ", ".join(f'"{c}"' for c in current_cols)
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS code_snippets_rebuild_tmp AS "
+        f"SELECT rowid, {quoted_cols} FROM code_snippets"
+    )
+
+    # --- orphan check BEFORE DROP (fail fast, leave DB intact) --------------
+    has_rowid_map = _table_exists(con, "p4_import_rowid_map")
+    if has_rowid_map:
+        orphan_sql = (
+            "SELECT t.rowid FROM code_snippets_rebuild_tmp t "
+            "WHERE (SELECT m.project_id FROM snippet_metadata m "
+            "       WHERE m.snippet_rowid = t.rowid) IS NULL "
+            "AND NOT EXISTS ("
+            "    SELECT 1 FROM p4_import_rowid_map r "
+            "    WHERE r.source_table = 'code_snippets' AND r.central_rowid = t.rowid"
+            ")"
+        )
+    else:
+        orphan_sql = (
+            "SELECT t.rowid FROM code_snippets_rebuild_tmp t "
+            "WHERE (SELECT m.project_id FROM snippet_metadata m "
+            "       WHERE m.snippet_rowid = t.rowid) IS NULL"
+        )
+    orphan_rowids = [r[0] for r in con.execute(orphan_sql)]
+    if orphan_rowids:
+        # Drop the temp table we just created before raising so the caller's
+        # ROLLBACK has nothing extra to undo.
+        con.execute("DROP TABLE IF EXISTS code_snippets_rebuild_tmp")
+        raise MigrationOrphanError(
+            f"FTS5 rebuild: {len(orphan_rowids)} code_snippets row(s) have no "
+            f"recoverable project_id (no snippet_metadata match and no "
+            f"p4_import_rowid_map entry). "
+            f"Orphan rowids: {orphan_rowids[:20]}"
+            + ("..." if len(orphan_rowids) > 20 else "")
+            + ". Fix source data or re-run migration to regenerate rowid map."
+        )
+
+    # --- drop FTS5, recreate with dynamic column list + project_id ----------
+    con.execute("DROP TABLE IF EXISTS code_snippets")
+    new_col_list = ", ".join(current_cols) + f", project_id, {tokenize_clause}"
+    con.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS code_snippets USING fts5({new_col_list})"
+    )
+
+    # --- re-populate with SQL-level project_id attribution ------------------
+    # 1st choice: snippet_metadata.project_id via snippet_rowid → rowid join
+    #             (canonical cross-reference populated by import step)
+    # 2nd choice: p4_import_rowid_map.project_id via central_rowid lookup
+    #             (records which project imported each snippet — covers orphan
+    #             snippets that exist in the DB but have no metadata row)
+    if has_rowid_map:
+        pid_expr = (
+            "COALESCE("
+            "(SELECT m.project_id FROM snippet_metadata m WHERE m.snippet_rowid = t.rowid), "
+            "(SELECT r.project_id FROM p4_import_rowid_map r "
+            " WHERE r.source_table = 'code_snippets' AND r.central_rowid = t.rowid)"
+            ")"
+        )
+    else:
+        pid_expr = (
+            "(SELECT m.project_id FROM snippet_metadata m WHERE m.snippet_rowid = t.rowid)"
+        )
+
+    con.execute(
+        f"INSERT INTO code_snippets (rowid, {quoted_cols}, project_id) "
+        f"SELECT t.rowid, {quoted_cols}, {pid_expr} "
+        f"FROM code_snippets_rebuild_tmp t"
+    )
+    con.execute("DROP TABLE IF EXISTS code_snippets_rebuild_tmp")
+
+
 def apply_migration_0016(qi_db: Path) -> None:
     """Rebuild FTS5 indexes in quality_intelligence.db with project_id.
 
+    Column list is derived from ``PRAGMA table_info`` at apply time per
+    ADR-009 (schema-first migrations).  Project-id attribution uses
+    ``snippet_metadata`` with ``p4_import_rowid_map`` as fallback; orphan
+    rows with no recoverable project_id raise ``MigrationOrphanError``
+    before the DROP so the database is left intact.
+
     All statements run inside an explicit BEGIN/COMMIT frame so a failure
     after ``DROP TABLE code_snippets`` rolls back the drop and the original
-    table survives intact. ``executescript`` is unsafe here because it
-    issues an implicit COMMIT before running, defeating the wrapper. See
+    table survives intact.  ``executescript`` is unsafe here because it
+    issues an implicit COMMIT before running, defeating the wrapper.  See
     Finding 4 in PR #432 review.
     """
     if not qi_db.exists():
         LOG.warning("skipping FTS5 rebuild: %s missing", qi_db)
         return
-    sql = MIGRATION_0016_PATH.read_text()
     con = sqlite3.connect(str(qi_db), isolation_level=None)
     try:
         if not _table_exists(con, "code_snippets"):
@@ -1263,8 +1391,18 @@ def apply_migration_0016(qi_db: Path) -> None:
             return
         con.execute("BEGIN")
         try:
-            for stmt in _iter_sql_statements(sql):
-                con.execute(stmt)
+            # Perf index (round-4 fix): must exist before the correlated
+            # subquery in _rebuild_fts5_code_snippets to avoid O(N×M) scans.
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_snippet_metadata_rowid "
+                "ON snippet_metadata(snippet_rowid)"
+            )
+            _rebuild_fts5_code_snippets(con)
+            con.execute(
+                "INSERT OR IGNORE INTO schema_version (version, description) "
+                "VALUES ('8.4.0-fts5-project-id', "
+                "'Phase 6 P4: rebuild FTS5 virtual tables with project_id column')"
+            )
             con.execute("COMMIT")
         except Exception:
             with contextlib.suppress(sqlite3.OperationalError):
@@ -1657,10 +1795,11 @@ def _import_table(
     already = {int(row[0]) for row in cur.fetchall()}
 
     select_cols = ", ".join(f'"{c}"' for c in source_cols)
-    src_rows = list(
-        con.execute(
-            f"SELECT rowid, {select_cols} FROM {source_alias}.{table}"
-        )
+    # Stream rows in batches instead of materializing the full result set.
+    # code_snippets can have 855k rows × full text payload; list() would load
+    # all snippet bodies into Python memory at once.  OI-1377 / ADR-009.
+    src_cursor = con.execute(
+        f"SELECT rowid, {select_cols} FROM {source_alias}.{table}"
     )
 
     inserted = 0
@@ -1672,114 +1811,118 @@ def _import_table(
         and COLLISION_ENTITY_ID_COLUMN in source_cols
         and COLLISION_ENTITY_TYPE_COLUMN in source_cols
     )
-    for row in src_rows:
-        check_abort()
-        rid = row[0]
-        if rid in already:
-            skipped += 1
-            continue
-        row_data = dict(zip(source_cols, row[1:]))
-        if central_has_project_id:
-            row_data["project_id"] = project.project_id
-        for column in collision_cols:
-            row_data[column] = _prefix_value(project.project_id, row_data.get(column))
-        for column in json_array_cols:
-            row_data[column] = _prefix_json_array(project.project_id, row_data.get(column))
-        if is_entity_table:
-            entity_type = row_data.get(COLLISION_ENTITY_TYPE_COLUMN)
-            if (entity_type or "").lower() in COLLISION_ENTITY_TYPES_PREFIXED:
-                row_data[COLLISION_ENTITY_ID_COLUMN] = _prefix_value(
-                    project.project_id,
-                    row_data.get(COLLISION_ENTITY_ID_COLUMN),
-                )
-        if table == "snippet_metadata" and "snippet_rowid" in row_data:
-            mapped_rowid = _mapped_central_rowid(
-                con,
-                project.project_id,
-                "code_snippets",
-                int(row_data["snippet_rowid"]),
-            )
-            if mapped_rowid is None:
-                LOG.warning(
-                    "INSERT skipped project=%s table=%s rowid=%s err=missing_code_snippet_rowid_map",
-                    project.project_id,
-                    table,
-                    rid,
-                )
-                _record_skip(
-                    con,
-                    project.project_id,
-                    table,
-                    rid,
-                    "missing_code_snippet_rowid_map",
-                    run_id,
-                )
+    while True:
+        batch = src_cursor.fetchmany(_IMPORT_BATCH_SIZE)
+        if not batch:
+            break
+        for row in batch:
+            check_abort()
+            rid = row[0]
+            if rid in already:
                 skipped += 1
                 continue
-            row_data["snippet_rowid"] = mapped_rowid
-
-        values = [row_data[column] for column in insert_cols]
-        quoted_insert_cols = ", ".join(f'"{c}"' for c in insert_cols)
-        placeholders = ", ".join("?" for _ in insert_cols)
-        try:
-            cur = con.execute(
-                f"INSERT OR IGNORE INTO {table} ({quoted_insert_cols}) VALUES ({placeholders})",
-                values,
-            )
-            if cur.rowcount == 1:
-                central_rowid = cur.lastrowid
-                con.execute(
-                    "INSERT OR IGNORE INTO p4_import_idempotency "
-                    "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
-                    (project.project_id, table, rid),
+            row_data = dict(zip(source_cols, row[1:]))
+            if central_has_project_id:
+                row_data["project_id"] = project.project_id
+            for column in collision_cols:
+                row_data[column] = _prefix_value(project.project_id, row_data.get(column))
+            for column in json_array_cols:
+                row_data[column] = _prefix_json_array(project.project_id, row_data.get(column))
+            if is_entity_table:
+                entity_type = row_data.get(COLLISION_ENTITY_TYPE_COLUMN)
+                if (entity_type or "").lower() in COLLISION_ENTITY_TYPES_PREFIXED:
+                    row_data[COLLISION_ENTITY_ID_COLUMN] = _prefix_value(
+                        project.project_id,
+                        row_data.get(COLLISION_ENTITY_ID_COLUMN),
+                    )
+            if table == "snippet_metadata" and "snippet_rowid" in row_data:
+                mapped_rowid = _mapped_central_rowid(
+                    con,
+                    project.project_id,
+                    "code_snippets",
+                    int(row_data["snippet_rowid"]),
                 )
-                # Self-heal: if a prior run logged this row as skipped (conflict
-                # / integrity error), mark it resolved now that the import
-                # succeeded. (Finding 3 round 2.)
-                _resolve_prior_skip(con, project.project_id, table, rid)
-                if table == "code_snippets":
-                    # Preserve the logical snippet linkage without forcing raw
-                    # rowid reuse across projects, which would collide.
-                    _record_rowid_mapping(
+                if mapped_rowid is None:
+                    LOG.warning(
+                        "INSERT skipped project=%s table=%s rowid=%s err=missing_code_snippet_rowid_map",
+                        project.project_id,
+                        table,
+                        rid,
+                    )
+                    _record_skip(
                         con,
                         project.project_id,
                         table,
                         rid,
-                        int(central_rowid),
+                        "missing_code_snippet_rowid_map",
+                        run_id,
                     )
-                inserted += 1
-            else:
-                # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
-                # write to p4_import_idempotency — that table must reflect
-                # actually-imported rows so re-runs can re-attempt the conflict
-                # if the central row is later deleted/repaired. Audit the skip.
+                    skipped += 1
+                    continue
+                row_data["snippet_rowid"] = mapped_rowid
+
+            values = [row_data[column] for column in insert_cols]
+            quoted_insert_cols = ", ".join(f'"{c}"' for c in insert_cols)
+            placeholders = ", ".join("?" for _ in insert_cols)
+            try:
+                cur = con.execute(
+                    f"INSERT OR IGNORE INTO {table} ({quoted_insert_cols}) VALUES ({placeholders})",
+                    values,
+                )
+                if cur.rowcount == 1:
+                    central_rowid = cur.lastrowid
+                    con.execute(
+                        "INSERT OR IGNORE INTO p4_import_idempotency "
+                        "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
+                        (project.project_id, table, rid),
+                    )
+                    # Self-heal: if a prior run logged this row as skipped (conflict
+                    # / integrity error), mark it resolved now that the import
+                    # succeeded. (Finding 3 round 2.)
+                    _resolve_prior_skip(con, project.project_id, table, rid)
+                    if table == "code_snippets":
+                        # Preserve the logical snippet linkage without forcing raw
+                        # rowid reuse across projects, which would collide.
+                        _record_rowid_mapping(
+                            con,
+                            project.project_id,
+                            table,
+                            rid,
+                            int(central_rowid),
+                        )
+                    inserted += 1
+                else:
+                    # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
+                    # write to p4_import_idempotency — that table must reflect
+                    # actually-imported rows so re-runs can re-attempt the conflict
+                    # if the central row is later deleted/repaired. Audit the skip.
+                    LOG.warning(
+                        "INSERT IGNORED project=%s table=%s rowid=%s (central key conflict)",
+                        project.project_id, table, rid,
+                    )
+                    _record_skip(
+                        con,
+                        project.project_id,
+                        table,
+                        rid,
+                        "insert_or_ignore_conflict",
+                        run_id,
+                    )
+                    skipped += 1
+            except sqlite3.IntegrityError as exc:
                 LOG.warning(
-                    "INSERT IGNORED project=%s table=%s rowid=%s (central key conflict)",
-                    project.project_id, table, rid,
+                    "INSERT skipped project=%s table=%s rowid=%s err=%s",
+                    project.project_id, table, rid, exc,
                 )
                 _record_skip(
                     con,
                     project.project_id,
                     table,
                     rid,
-                    "insert_or_ignore_conflict",
+                    f"integrity_error:{exc}",
                     run_id,
                 )
                 skipped += 1
-        except sqlite3.IntegrityError as exc:
-            LOG.warning(
-                "INSERT skipped project=%s table=%s rowid=%s err=%s",
-                project.project_id, table, rid, exc,
-            )
-            _record_skip(
-                con,
-                project.project_id,
-                table,
-                rid,
-                f"integrity_error:{exc}",
-                run_id,
-            )
-            skipped += 1
     return ImportSummary(project.project_id, "", table, inserted, skipped)
 
 
