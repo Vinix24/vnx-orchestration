@@ -1,0 +1,24 @@
+name: ADR-003 Enforcement
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  adr-003-no-anthropic-sdk:
+    name: "ADR-003: No Anthropic SDK Imports"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: ADR-003 gate — scan for forbidden SDK imports
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/check_adr_003_no_sdk_imports.py" "$GITHUB_WORKSPACE"
