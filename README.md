@@ -10,8 +10,10 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-Current release: `v0.10.0`
+Current release: `v1.0.0-rc1` — architectural stabilization milestone (2026-05-09).
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
+
+**API contract is stable from this release forward.** Dispatch envelope, receipt schema, NDJSON ledger format, and 14 ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`) are now backwards-compatibility-honoring. v1.0.0 final ships after Phase 5 reader cutover validation.
 
 ## The Problem
 
