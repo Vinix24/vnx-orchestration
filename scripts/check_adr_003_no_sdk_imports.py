@@ -22,9 +22,20 @@ from pathlib import Path
 
 SCAN_DIRS = ("scripts", "dashboard", "tests")
 
+# Forbidden imports per ADR-003 (no Anthropic SDK / Claude Agent SDK in VNX runtime).
+# Pattern catches:
+#   import anthropic                 -> match
+#   import anthropic, os             -> match (anthropic first in multi-import)
+#   import anthropic.types           -> match (\b boundary before .)
+#   from anthropic import X          -> match
+#   from anthropic.types import Y    -> match
+#   import anthropic_utils           -> NOT match (\b boundary requires word break)
+# Limitation: `import os, anthropic` (anthropic second in multi-import) is NOT caught.
+# That style is uncommon (PEP 8 discourages multi-imports). If it lands, raise OI to
+# upgrade this scanner to ast.parse() for full coverage.
 FORBIDDEN_PATTERN = re.compile(
-    r"^(?:import anthropic(?:\s|$)|from anthropic[\s.]"
-    r"|import claude_agent_sdk(?:\s|$)|from claude_agent_sdk[\s.])"
+    r"^(?:import\s+(?:anthropic|claude_agent_sdk)\b"
+    r"|from\s+(?:anthropic|claude_agent_sdk)[\s.])"
 )
 
 ALLOWLIST_COMMENT = "# vnx:allow-anthropic-sdk-import-with-justification"

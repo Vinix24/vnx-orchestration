@@ -72,7 +72,7 @@ VNX's value proposition depends on a Claude credential model the operator alread
 
 - ADR-004 — VNX positioning as self-hosted alternative to Anthropic Managed Agents
 - ADR-005 — Append-only NDJSON audit ledger as primary observability surface
-- ADR-010 — (forthcoming) Single-VNX migration design choice
+- ADR-010 — Subprocess adapter as canonical Claude routing (concrete implementation of this ADR)
 - `CLAUDE.md` (project root) — "Subprocess Adapter Feature Flag" section
 - `scripts/lib/subprocess_adapter.py` — canonical Claude transport
 - `scripts/lib/subprocess_dispatch.py` — canonical dispatch entry point

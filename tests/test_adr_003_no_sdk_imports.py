@@ -57,6 +57,10 @@ def test_clean_file_passes(tmp_path: Path) -> None:
         "from anthropic.types import Message",
         "import claude_agent_sdk",
         "from claude_agent_sdk import Agent",
+        # Codex PR #439 round-1 advisory: multi-import was missed by old regex.
+        # Now caught: package name first in the import list.
+        "import anthropic, os",
+        "import claude_agent_sdk, json",
     ],
 )
 def test_forbidden_imports_detected(tmp_path: Path, line: str) -> None:
