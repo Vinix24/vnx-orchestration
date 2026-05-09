@@ -29,6 +29,7 @@ from typing import Any, Sequence
 SEVERITY_HARD = "hard"
 SEVERITY_SOFT = "soft"
 SEVERITY_AGGREGATE = "aggregate"
+SEVERITY_ADVISORY = "advisory"
 
 # Central latency must be <= this factor * legacy p95
 LATENCY_THRESHOLD_FACTOR = 1.5
@@ -254,10 +255,31 @@ def _compare_metric_4_count_and_checksum(
     legacy: Sequence[Any],
     central: Sequence[Any],
     project_id: str,
-    table: str,
+    table: str | None,
     read_site: str,
 ) -> list[DivergenceEvent]:
-    """Metric 4: row count must match exactly; checksum drift must be <0.01%."""
+    """Metric 4: row count must match exactly; checksum drift must be <0.01%.
+
+    Severity split per Wave 1 design §3 metric 4:
+    - table is None: SEVERITY_ADVISORY — caller must pass the actual table name.
+    - count drift > 0: SEVERITY_HARD — zero-tolerance, structural correctness.
+    - checksum drift in (0, 0.01%]: SEVERITY_SOFT — race-window allowance.
+    - checksum drift > 0.01%: SEVERITY_HARD — above tolerance threshold.
+    """
+    if table is None:
+        return [
+            DivergenceEvent(
+                metric_id=4,
+                severity=SEVERITY_ADVISORY,
+                project_id=project_id,
+                read_site=read_site,
+                detail={"reason": "table_identity_missing"},
+                legacy_count=len(legacy),
+                central_count=len(central),
+                timestamp_iso=_now_iso(),
+            )
+        ]
+
     legacy_count = len(legacy)
     central_count = len(central)
 
@@ -265,7 +287,7 @@ def _compare_metric_4_count_and_checksum(
         return [
             DivergenceEvent(
                 metric_id=4,
-                severity=SEVERITY_SOFT,
+                severity=SEVERITY_HARD,
                 project_id=project_id,
                 read_site=read_site,
                 detail={
@@ -294,12 +316,30 @@ def _compare_metric_4_count_and_checksum(
     drift_pct = diff_count / legacy_count
 
     if drift_pct < CHECKSUM_DRIFT_TOLERANCE:
-        return []
+        return [
+            DivergenceEvent(
+                metric_id=4,
+                severity=SEVERITY_SOFT,
+                project_id=project_id,
+                read_site=read_site,
+                detail={
+                    "table": table,
+                    "legacy_checksum": legacy_cksum,
+                    "central_checksum": central_cksum,
+                    "drift_pct": drift_pct,
+                    "kind": "checksum_drift",
+                    "within_tolerance": True,
+                },
+                legacy_count=legacy_count,
+                central_count=central_count,
+                timestamp_iso=_now_iso(),
+            )
+        ]
 
     return [
         DivergenceEvent(
             metric_id=4,
-            severity=SEVERITY_SOFT,
+            severity=SEVERITY_HARD,
             project_id=project_id,
             read_site=read_site,
             detail={
@@ -327,34 +367,75 @@ def _compare_metric_5_lease_collisions(
     project_id: str,
     read_site: str,
 ) -> list[DivergenceEvent]:
-    """Metric 5: same lease key held by multiple projects simultaneously is fatal."""
-    # Build map: lease_key -> set of project_ids from the central view
-    central_map: dict[str, list[str]] = {}
+    """Metric 5: same lease key held by multiple projects simultaneously is fatal.
+
+    A lease row with missing project_id is treated as a structural violation
+    (SEVERITY_HARD) — we never substitute the requesting project_id to fill missing
+    data, as that would collapse two different projects with the same lease_key into
+    the same synthetic owner and mask the exact cross-project collision this metric
+    is designed to catch.
+    """
+    events: list[DivergenceEvent] = []
+    # Build map: lease_key -> list of project_ids (None if absent in the row)
+    central_map: dict[str, list[str | None]] = {}
+
     for row in central_leases:
         key = _lease_key(row)
-        pid = _project_id_of(row) or project_id
+        pid = _project_id_of(row)
+
+        if pid is None:
+            events.append(
+                DivergenceEvent(
+                    metric_id=5,
+                    severity=SEVERITY_HARD,
+                    project_id=project_id,
+                    read_site=read_site,
+                    detail={
+                        "reason": "missing_project_id_in_lease_row",
+                        "lease_key": key,
+                        "table": "terminal_leases",
+                    },
+                    legacy_count=len(legacy_leases),
+                    central_count=len(central_leases),
+                    timestamp_iso=_now_iso(),
+                )
+            )
+
         central_map.setdefault(key, []).append(pid)
 
-    collisions = [
-        {"lease_key": k, "projects": sorted(set(pids))}
-        for k, pids in central_map.items()
-        if len(set(pids)) > 1
-    ]
-    if not collisions:
-        return []
+    # Detect collisions: same lease_key held by multiple distinct owners.
+    # A None alongside any other entry (real pid or another None) is a collision-suspect
+    # because we cannot confirm both rows belong to the same project.
+    collisions = []
+    for k, pids in central_map.items():
+        if len(pids) <= 1:
+            continue
+        distinct_real = set(p for p in pids if p is not None)
+        has_none = any(p is None for p in pids)
+        if len(distinct_real) > 1 or (has_none and len(pids) > 1):
+            entry: dict[str, Any] = {
+                "lease_key": k,
+                "projects": sorted(distinct_real),
+            }
+            if has_none:
+                entry["has_missing_project_id"] = True
+            collisions.append(entry)
 
-    return [
-        DivergenceEvent(
-            metric_id=5,
-            severity=SEVERITY_HARD,
-            project_id=project_id,
-            read_site=read_site,
-            detail={"collisions": collisions},
-            legacy_count=len(legacy_leases),
-            central_count=len(central_leases),
-            timestamp_iso=_now_iso(),
+    if collisions:
+        events.append(
+            DivergenceEvent(
+                metric_id=5,
+                severity=SEVERITY_HARD,
+                project_id=project_id,
+                read_site=read_site,
+                detail={"collisions": collisions},
+                legacy_count=len(legacy_leases),
+                central_count=len(central_leases),
+                timestamp_iso=_now_iso(),
+            )
         )
-    ]
+
+    return events
 
 
 def _compare_metric_6_latency(
@@ -402,6 +483,7 @@ def compare(
     *,
     legacy_latency_ms: float = 0.0,
     central_latency_ms: float = 0.0,
+    table: str | None = None,
 ) -> ComparisonResult:
     """Compare two result sets and return divergence findings.
 
@@ -409,6 +491,10 @@ def compare(
     site's semantics. The verifier does NOT decide which metric applies; it
     applies the metric the caller specifies. This keeps the comparator
     schema-agnostic and prevents accidental coupling to migration logic.
+
+    For metric_id=4, callers MUST pass `table` (the actual table name). If
+    omitted, a SEVERITY_ADVISORY divergence is emitted instead of the comparison
+    — callers that forget `table` are flagged, not silently mis-labeled.
     """
     result = ComparisonResult(
         legacy_latency_ms=legacy_latency_ms,
@@ -430,7 +516,7 @@ def compare(
         )
     elif metric_id == 4:
         result.divergences = _compare_metric_4_count_and_checksum(
-            legacy_rows, central_rows, project_id, "__unknown_table__", read_site
+            legacy_rows, central_rows, project_id, table, read_site
         )
     elif metric_id == 5:
         result.divergences = _compare_metric_5_lease_collisions(

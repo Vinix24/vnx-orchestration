@@ -44,6 +44,7 @@ def _cmp(
     sql: str = "SELECT * FROM t WHERE project_id = ?",
     legacy_ms: float = 10.0,
     central_ms: float = 10.0,
+    table: str | None = None,
 ) -> sv.ComparisonResult:
     return sv.compare(
         legacy_rows=legacy,
@@ -54,6 +55,7 @@ def _cmp(
         metric_id=metric_id,
         legacy_latency_ms=legacy_ms,
         central_latency_ms=central_ms,
+        table=table,
     )
 
 
@@ -239,20 +241,23 @@ class TestMetric4CountAndChecksum:
         assert len(result) == 1
         e = result[0]
         assert e.metric_id == 4
-        assert e.severity == sv.SEVERITY_SOFT
+        assert e.severity == sv.SEVERITY_HARD
         assert e.detail["kind"] == "count_mismatch"
         assert e.detail["count_drift"] == -1
 
     def test_metric_4_checksum_within_tolerance(self):
         # N=20001, K=1 changed → drift = 1/20001 ≈ 0.005% < 0.01% threshold
+        # Within-tolerance drift is flagged as SOFT (race-window allowance), not silenced.
         n = 20001
         legacy = [row(project_id="p", id=i, val=f"v{i}") for i in range(n)]
         central = list(legacy)
         central[5000] = row(project_id="p", id=5000, val="race_window_write")
         result = sv._compare_metric_4_count_and_checksum(legacy, central, "p", "tbl", "test")
-        assert not result, (
-            f"Expected no divergence (drift below 0.01% tolerance), got: {result}"
+        assert len(result) == 1, (
+            f"Expected one SOFT divergence for drift within 0.01% tolerance, got: {result}"
         )
+        assert result[0].severity == sv.SEVERITY_SOFT
+        assert result[0].detail["within_tolerance"] is True
 
     def test_metric_4_detects_checksum_above_tolerance(self):
         # N=10, K=2 rows differ → drift = 20% >> 0.01%
@@ -262,6 +267,40 @@ class TestMetric4CountAndChecksum:
         central[1] = row(project_id="p", id=1, val="CHANGED_B")
         result = sv._compare_metric_4_count_and_checksum(legacy, central, "p", "tbl", "test")
         assert len(result) == 1
+        assert result[0].severity == sv.SEVERITY_HARD
+        assert result[0].detail["kind"] == "checksum_drift"
+        assert result[0].detail["drift_pct"] > sv.CHECKSUM_DRIFT_TOLERANCE
+
+    def test_metric_4_count_drift_is_hard_severity(self):
+        # Any count drift → SEVERITY_HARD (zero-tolerance per design §3 metric 4)
+        legacy = [row(project_id="p", id=1), row(project_id="p", id=2)]
+        central = [row(project_id="p", id=1)]
+        result = sv._compare_metric_4_count_and_checksum(legacy, central, "p", "tbl", "test")
+        assert len(result) == 1
+        assert result[0].severity == sv.SEVERITY_HARD
+        assert result[0].detail["kind"] == "count_mismatch"
+
+    def test_metric_4_checksum_under_0_01_pct_is_soft(self):
+        # N=20001, K=1 changed → drift ≈ 0.005% < 0.01% → SEVERITY_SOFT
+        n = 20001
+        legacy = [row(project_id="p", id=i, val=f"v{i}") for i in range(n)]
+        central = list(legacy)
+        central[100] = row(project_id="p", id=100, val="race_window_write")
+        result = sv._compare_metric_4_count_and_checksum(legacy, central, "p", "tbl", "test")
+        assert len(result) == 1
+        assert result[0].severity == sv.SEVERITY_SOFT
+        assert result[0].detail["kind"] == "checksum_drift"
+        assert result[0].detail["within_tolerance"] is True
+
+    def test_metric_4_checksum_above_0_01_pct_is_hard(self):
+        # N=100, K=5 rows differ → drift = 5% > 0.01% → SEVERITY_HARD
+        legacy = [row(project_id="p", id=i, val=f"v{i}") for i in range(100)]
+        central = list(legacy)
+        for i in range(5):
+            central[i] = row(project_id="p", id=i, val=f"CHANGED_{i}")
+        result = sv._compare_metric_4_count_and_checksum(legacy, central, "p", "tbl", "test")
+        assert len(result) == 1
+        assert result[0].severity == sv.SEVERITY_HARD
         assert result[0].detail["kind"] == "checksum_drift"
         assert result[0].detail["drift_pct"] > sv.CHECKSUM_DRIFT_TOLERANCE
 
@@ -294,8 +333,44 @@ class TestMetric5LeaseCollisions:
         collision_keys = [c["lease_key"] for c in e.detail["collisions"]]
         assert "T1" in collision_keys
         t1_collision = next(c for c in e.detail["collisions"] if c["lease_key"] == "T1")
+        # Verify both distinct project_ids appear — no substitution collapsed them
+        assert len(t1_collision["projects"]) == 2
         assert "proj_a" in t1_collision["projects"]
         assert "proj_b" in t1_collision["projects"]
+        # No missing-project_id event — both rows had explicit project_ids
+        assert not any(
+            e.detail.get("reason") == "missing_project_id_in_lease_row" for e in result
+        )
+
+    def test_metric_5_missing_project_id_in_lease_row_is_hard(self):
+        # A lease row without project_id is a structural violation — not a substitution opportunity
+        central = [row(lease_key="T1")]  # no project_id field
+        result = sv._compare_metric_5_lease_collisions([], central, "proj_a", "test")
+        assert len(result) == 1
+        e = result[0]
+        assert e.metric_id == 5
+        assert e.severity == sv.SEVERITY_HARD
+        assert e.detail["reason"] == "missing_project_id_in_lease_row"
+        assert e.detail["lease_key"] == "T1"
+        assert e.detail["table"] == "terminal_leases"
+
+    def test_metric_5_lease_collision_with_one_missing_project_id(self):
+        # One row with project_id, one without, same lease_key → HARD divergence (not collapsed)
+        central = [
+            row(project_id="proj_a", lease_key="T1"),
+            row(lease_key="T1"),  # same key, missing project_id
+        ]
+        result = sv._compare_metric_5_lease_collisions([], central, "proj_a", "test")
+        # Must have the missing_project_id structural error
+        missing_pid_events = [
+            e for e in result if e.detail.get("reason") == "missing_project_id_in_lease_row"
+        ]
+        assert missing_pid_events, "Expected HARD event for missing project_id in lease row"
+        assert missing_pid_events[0].severity == sv.SEVERITY_HARD
+        # Must also have a collision event (two rows, one lacks pid — cannot confirm same owner)
+        collision_events = [e for e in result if "collisions" in e.detail]
+        assert collision_events, "Expected collision event when one row lacks project_id"
+        assert collision_events[0].severity == sv.SEVERITY_HARD
 
 
 # ---------------------------------------------------------------------------
@@ -386,10 +461,12 @@ class TestSeverityRouting:
         assert r5 and r5[0].severity == sv.SEVERITY_HARD
 
     def test_severity_soft_for_metrics_4_6(self):
-        # Metric 4: count mismatch
-        r4 = sv._compare_metric_4_count_and_checksum(
-            [row(project_id="p", id=1)], [], "p", "tbl", "test"
-        )
+        # Metric 4: checksum drift within tolerance (race-window allowance → SOFT)
+        n = 20001
+        legacy4 = [row(project_id="p", id=i, val=f"v{i}") for i in range(n)]
+        central4 = list(legacy4)
+        central4[5000] = row(project_id="p", id=5000, val="race_window_write")
+        r4 = sv._compare_metric_4_count_and_checksum(legacy4, central4, "p", "tbl", "test")
         assert r4 and r4[0].severity == sv.SEVERITY_SOFT
 
         # Metric 6: latency violation
@@ -449,6 +526,41 @@ class TestComparisonResult:
 
     def test_has_hard_divergence_empty_list_is_false(self):
         result = sv.ComparisonResult()
+        assert not result.has_hard_divergence()
+
+
+# ---------------------------------------------------------------------------
+# compare() public API — metric 4 table identity (ADV1)
+# ---------------------------------------------------------------------------
+
+
+class TestCompareMetric4TableIdentity:
+    def test_compare_metric_4_passes_table_name_through(self):
+        # When caller passes table="dispatches", the divergence detail must reflect it
+        legacy = [row(project_id="p", id=1)]
+        central = []  # count mismatch → HARD
+        result = sv.compare(
+            legacy_rows=legacy,
+            central_rows=central,
+            project_id="p",
+            read_site="test",
+            sql_template="SELECT * FROM dispatches WHERE project_id = ?",
+            metric_id=4,
+            table="dispatches",
+        )
+        assert result.divergences
+        assert result.divergences[0].detail["table"] == "dispatches"
+        assert result.divergences[0].severity == sv.SEVERITY_HARD
+
+    def test_compare_metric_4_without_table_emits_advisory(self):
+        # When caller omits table (None), emit SEVERITY_ADVISORY — not a blocking hard event
+        legacy = [row(project_id="p", id=1)]
+        central = []  # would be count mismatch, but table=None takes precedence
+        result = _cmp(4, legacy, central)  # table defaults to None via _cmp
+        assert len(result.divergences) == 1
+        e = result.divergences[0]
+        assert e.severity == sv.SEVERITY_ADVISORY
+        assert e.detail["reason"] == "table_identity_missing"
         assert not result.has_hard_divergence()
 
 
