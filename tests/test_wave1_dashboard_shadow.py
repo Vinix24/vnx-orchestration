@@ -32,18 +32,21 @@ import api_operator as ao
 # Shared DB helpers
 # ---------------------------------------------------------------------------
 
-def _make_per_project_db(path: Path, n_patterns: int = 3) -> None:
+def _make_per_project_db(
+    path: Path, n_patterns: int = 3, project_id: str = "local-project"
+) -> None:
+    """Create a per-project quality_intelligence.db with project_id column (post-ADR-007)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.execute("""
         CREATE TABLE success_patterns (
-            title TEXT, confidence_score REAL, category TEXT,
+            project_id TEXT, title TEXT, confidence_score REAL, category TEXT,
             usage_count INT, last_used TEXT
         )
     """)
     conn.execute("""
         CREATE TABLE antipatterns (
-            title TEXT, severity TEXT, occurrence_count INT, last_seen TEXT
+            project_id TEXT, title TEXT, severity TEXT, occurrence_count INT, last_seen TEXT
         )
     """)
     conn.execute("""
@@ -54,8 +57,8 @@ def _make_per_project_db(path: Path, n_patterns: int = 3) -> None:
     """)
     for i in range(n_patterns):
         conn.execute(
-            "INSERT INTO success_patterns VALUES (?,?,?,?,?)",
-            (f"local-pattern-{i}", 0.8 - i * 0.1, "test", i + 1, "2026-01-01"),
+            "INSERT INTO success_patterns VALUES (?,?,?,?,?,?)",
+            (project_id, f"local-pattern-{i}", 0.8 - i * 0.1, "test", i + 1, "2026-01-01"),
         )
     conn.commit()
     conn.close()
@@ -331,3 +334,177 @@ class TestOperatorSystemHealthHonorsCutoverFlag:
         intel = result["components"]["intelligence_db"]
         assert intel["status"] == "dead", "flag=1 with no central must report dead"
         assert "error" in intel["details"]
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — Symmetric project_id columns prevent metric-4 false positives
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyAndCentralRowsSymmetricColumns:
+    """BLOCKING #1 fix: legacy SQL now selects project_id — metric 4 must not false-positive."""
+
+    PROJECT_ID = "seocrawler-v2"
+    _SAME_SP = [
+        ("seocrawler-v2", "pattern-alpha", 0.9, "test", 5, "2026-01-01"),
+        ("seocrawler-v2", "pattern-beta", 0.8, "refactor", 3, "2026-01-02"),
+    ]
+    _SAME_AP = [
+        ("seocrawler-v2", "bad-thing", "high", 3, "2026-01-01"),
+    ]
+
+    def _build_db(self, path: Path) -> None:
+        conn = sqlite3.connect(str(path))
+        conn.execute("""
+            CREATE TABLE success_patterns (
+                project_id TEXT, title TEXT, confidence_score REAL,
+                category TEXT, usage_count INT, last_used TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE antipatterns (
+                project_id TEXT, title TEXT, severity TEXT,
+                occurrence_count INT, last_seen TEXT
+            )
+        """)
+        for row in self._SAME_SP:
+            conn.execute("INSERT INTO success_patterns VALUES (?,?,?,?,?,?)", row)
+        for row in self._SAME_AP:
+            conn.execute("INSERT INTO antipatterns VALUES (?,?,?,?,?)", row)
+        conn.commit()
+        conn.close()
+
+    def test_metric_4_no_false_positive_success_patterns(self, tmp_path: Path) -> None:
+        """Identical data in legacy + central must yield no hard divergence on metric 4."""
+        per_proj = tmp_path / "local.db"
+        central = tmp_path / "central.db"
+        self._build_db(per_proj)
+        self._build_db(central)
+
+        pconn = sqlite3.connect(str(per_proj))
+        pconn.row_factory = sqlite3.Row
+        cconn = sqlite3.connect(str(central))
+        cconn.row_factory = sqlite3.Row
+        legacy_raw, _ = ai._fetch_success_patterns(pconn, 50)
+        central_raw, _ = ai._fetch_success_patterns(cconn, 50, project_id=self.PROJECT_ID)
+        pconn.close()
+        cconn.close()
+
+        assert legacy_raw, "legacy fetch must return rows — project_id column now present"
+        assert "project_id" in legacy_raw[0], "legacy row must carry project_id after SQL fix"
+
+        result = sv.compare(
+            legacy_raw, central_raw,
+            project_id=self.PROJECT_ID,
+            read_site="test.symmetry.success_patterns",
+            sql_template=ai._PATTERNS_SUCCESS_SQL,
+            metric_id=4,
+            table="success_patterns",
+        )
+        hard = [d for d in result.divergences if d.severity == sv.SEVERITY_HARD]
+        assert not hard, f"metric 4 must not false-positive when data is identical: {hard}"
+
+    def test_metric_4_no_false_positive_antipatterns(self, tmp_path: Path) -> None:
+        """Identical antipattern data in legacy + central must yield no hard divergence."""
+        per_proj = tmp_path / "local.db"
+        central = tmp_path / "central.db"
+        self._build_db(per_proj)
+        self._build_db(central)
+
+        pconn = sqlite3.connect(str(per_proj))
+        pconn.row_factory = sqlite3.Row
+        cconn = sqlite3.connect(str(central))
+        cconn.row_factory = sqlite3.Row
+        legacy_raw, _ = ai._fetch_antipatterns(pconn, 50)
+        central_raw, _ = ai._fetch_antipatterns(cconn, 50, project_id=self.PROJECT_ID)
+        pconn.close()
+        cconn.close()
+
+        assert legacy_raw, "legacy antipatterns fetch must return rows"
+        assert "project_id" in legacy_raw[0], "antipattern legacy row must carry project_id"
+
+        result = sv.compare(
+            legacy_raw, central_raw,
+            project_id=self.PROJECT_ID,
+            read_site="test.symmetry.antipatterns",
+            sql_template=ai._PATTERNS_ANTI_SQL,
+            metric_id=4,
+            table="antipatterns",
+        )
+        hard = [d for d in result.divergences if d.severity == sv.SEVERITY_HARD]
+        assert not hard, f"metric 4 must not false-positive for antipatterns: {hard}"
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — Unknown VNX_USE_CENTRAL_DB value falls back to legacy + logs warning
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownFlagValueFallsBackToLegacy:
+    """BLOCKING #2 fix: any value outside {'', '1', 'shadow'} must go legacy + warn."""
+
+    def test_flag_zero_does_not_activate_shadow(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """flag='0' must NOT activate shadow mode; must return per-project data."""
+        per_proj_db = tmp_path / "local.db"
+        _make_per_project_db(per_proj_db, n_patterns=4)
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "0")
+
+        mock_sd = MagicMock()
+        mock_sd.DB_PATH = per_proj_db
+
+        shadow_compare_calls: list = []
+
+        with (
+            patch.object(ai, "_sd", return_value=mock_sd),
+            patch.object(ai, "_shadow_verifier", MagicMock(
+                compare=lambda *a, **kw: shadow_compare_calls.append(1) or sv.ComparisonResult(),
+            )),
+        ):
+            result = ai._intelligence_get_patterns({})
+
+        assert not shadow_compare_calls, (
+            "shadow_verifier.compare must NOT be called when flag='0'"
+        )
+        assert len(result["success_patterns"]) == 4, (
+            "flag='0' must return per-project data (4 patterns), not empty"
+        )
+
+    def test_flag_zero_logs_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """flag='0' must emit a warning that includes the unknown value."""
+        per_proj_db = tmp_path / "local.db"
+        _make_per_project_db(per_proj_db, n_patterns=1)
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "0")
+
+        mock_sd = MagicMock()
+        mock_sd.DB_PATH = per_proj_db
+
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING, logger="api_intelligence"):
+            with patch.object(ai, "_sd", return_value=mock_sd):
+                ai._intelligence_get_patterns({})
+
+        assert any("0" in r.message for r in caplog.records), (
+            "warning must mention the unknown flag value '0'"
+        )
+
+    def test_arbitrary_flag_string_falls_back_to_legacy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Any non-contract flag value must return per-project data, not empty."""
+        per_proj_db = tmp_path / "local.db"
+        _make_per_project_db(per_proj_db, n_patterns=2)
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "disabled")
+
+        mock_sd = MagicMock()
+        mock_sd.DB_PATH = per_proj_db
+
+        with patch.object(ai, "_sd", return_value=mock_sd):
+            result = ai._intelligence_get_patterns({})
+
+        assert len(result["success_patterns"]) == 2, (
+            "arbitrary flag must fall back to legacy (2 patterns), not empty"
+        )

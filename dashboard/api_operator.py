@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -16,6 +17,8 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
 
 try:
     import yaml as _yaml
@@ -814,7 +817,10 @@ def _operator_get_system_health() -> dict:
     """
     now = datetime.now(timezone.utc)
     components: dict[str, dict] = {}
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
 
     # 1. Intelligence DB table population (3-state VNX_USE_CENTRAL_DB dispatcher)
     intel_details: dict[str, Any] = {}

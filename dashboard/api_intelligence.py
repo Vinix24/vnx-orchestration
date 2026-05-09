@@ -10,6 +10,7 @@ imported into serve_dashboard.py and wired in DashboardHandler.do_GET/do_POST.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -19,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
@@ -46,7 +49,7 @@ except Exception:
 
 # SQL templates (per-project — no project_id filter; used for sql_template_hash)
 _PATTERNS_SUCCESS_SQL = (
-    "SELECT title, confidence_score, category, usage_count, last_used "
+    "SELECT project_id, title, confidence_score, category, usage_count, last_used "
     "FROM success_patterns ORDER BY confidence_score DESC, usage_count DESC LIMIT ?"
 )
 _PATTERNS_SUCCESS_CENTRAL_SQL = (
@@ -55,7 +58,7 @@ _PATTERNS_SUCCESS_CENTRAL_SQL = (
     "ORDER BY confidence_score DESC, usage_count DESC LIMIT ?"
 )
 _PATTERNS_ANTI_SQL = (
-    "SELECT title, severity, occurrence_count, last_seen FROM antipatterns "
+    "SELECT project_id, title, severity, occurrence_count, last_seen FROM antipatterns "
     "ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
     "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, occurrence_count DESC LIMIT ?"
 )
@@ -66,7 +69,7 @@ _PATTERNS_ANTI_CENTRAL_SQL = (
     "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, occurrence_count DESC LIMIT ?"
 )
 _CONFIDENCE_TRENDS_SUCCESS_SQL = (
-    "SELECT SUBSTR(last_used, 1, 10) AS day, confidence_score "
+    "SELECT project_id, SUBSTR(last_used, 1, 10) AS day, confidence_score "
     "FROM success_patterns WHERE last_used IS NOT NULL AND last_used != '' ORDER BY day"
 )
 _CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL = (
@@ -74,7 +77,7 @@ _CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL = (
     "FROM success_patterns WHERE project_id = ? AND last_used IS NOT NULL AND last_used != '' ORDER BY day"
 )
 _CONFIDENCE_TRENDS_ANTI_SQL = (
-    "SELECT SUBSTR(last_seen, 1, 10) AS day, severity "
+    "SELECT project_id, SUBSTR(last_seen, 1, 10) AS day, severity "
     "FROM antipatterns WHERE last_seen IS NOT NULL AND last_seen != '' ORDER BY day"
 )
 _CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL = (
@@ -82,7 +85,7 @@ _CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL = (
     "FROM antipatterns WHERE project_id = ? AND last_seen IS NOT NULL AND last_seen != '' ORDER BY day"
 )
 _LEARNING_EVENTS_SQL = (
-    "SELECT outcome, confidence_change FROM confidence_events WHERE occurred_at >= ?"
+    "SELECT project_id, outcome, confidence_change FROM confidence_events WHERE occurred_at >= ?"
 )
 _LEARNING_EVENTS_CENTRAL_SQL = (
     "SELECT project_id, outcome, confidence_change FROM confidence_events "
@@ -205,7 +208,10 @@ def _intelligence_get_patterns(params: dict) -> dict:
 
     sd = _sd()
     db_path: Path = sd.DB_PATH
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
 
     if flag == "":
         # Default: per-project read — byte-identical to pre-Wave-1 behaviour
@@ -683,7 +689,10 @@ def _intelligence_get_confidence_trends(params: dict) -> dict:
     """
     sd = _sd()
     db_path: Path = sd.DB_PATH
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
 
     if flag == "":
         if not db_path.exists():
@@ -874,7 +883,10 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
 
     sd = _sd()
     db_path: Path = sd.DB_PATH
-    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
     since = (datetime.now(_UTC) - timedelta(days=7)).isoformat()
 
     _empty = {"boosts": 0, "decays": 0, "net_confidence_drift": 0.0, "prevention_suggestions": 0}
