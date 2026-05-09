@@ -49,6 +49,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -501,13 +502,91 @@ def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
 
 # Map: table → business-key column whose old single-column UNIQUE must
 # become composite ``UNIQUE(project_id, key)``.
+#
+# Round-6: extended with the 5 QI tables surfaced by the v4 verify failure
+# (session_analytics) and the audit pass over the central schema. Each
+# table has a single-column UNIQUE on a tenant-suspect column that would
+# silently drop cross-project rows on import.
 COMPOSITE_UNIQUE_TABLES_QI: dict[str, str] = {
+    # Round-5
     "tag_combinations": "tag_tuple",
+    # Round-6
+    "session_analytics": "session_id",
+    "vnx_code_quality": "file_path",
+    "dispatch_quality_context": "dispatch_id",
+    "dispatch_metadata": "dispatch_id",
+    "dispatch_experiments": "dispatch_id",
 }
 COMPOSITE_UNIQUE_TABLES_RC: dict[str, str] = {
     "terminal_leases": "terminal_id",
     "execution_targets": "target_id",
 }
+
+# Round-6 audit: tenant-suspect column-name patterns. Any single-column
+# UNIQUE on a column matching one of these patterns must either be
+# rebuilt to composite UNIQUE(project_id, col) (added to the maps above)
+# or be explicitly listed as an exception. Documented exceptions cover
+# columns whose value is already globally unique by construction (e.g.
+# random UUIDs prefixed with project_id, or schema_version pkeys).
+_T3_SUSPECT_COLUMN_PATTERN = re.compile(
+    r"^(.*_id|.*_path|.*_key|.*_hash|.*_tuple|tag_tuple|session_id|file_path|dispatch_id)$",
+    re.IGNORECASE,
+)
+
+# Documented exceptions: tables/columns where single-column UNIQUE is
+# correct because the column carries a globally-unique value. These are
+# accepted by ``_audit_unique_constraints`` without rebuild. Each entry
+# must be justified — the audit's purpose is to force every multi-tenant-
+# suspect column into an explicit decision (rebuild OR exception).
+_T3_AUDIT_EXCEPTIONS: frozenset[tuple[str, str]] = frozenset({
+    # ``schema_version.version`` / ``runtime_schema_version.version``:
+    # PK-or-UNIQUE on a hand-curated migration tag (e.g. "8.0.4-…").
+    # One row per migration step, project-agnostic; cannot collide.
+    ("schema_version", "version"),
+    ("runtime_schema_version", "version"),
+    # Application-generated UUID columns in runtime_coordination.
+    # Values are produced by the dispatcher / event log writer with
+    # ``uuid.uuid4()``; collision probability across projects is
+    # ~2^-122. Listed explicitly so future-you knows the *reason* a
+    # single-column UNIQUE is OK here, vs. a real T3 regression.
+    ("dispatch_attempts", "attempt_id"),
+    ("coordination_events", "event_id"),
+    ("incident_log", "incident_id"),
+    ("escalation_log", "escalation_id"),
+    ("intelligence_injections", "injection_id"),
+    ("inbound_inbox", "event_id"),
+    ("recommendations", "recommendation_id"),
+    # ``retry_budgets.budget_key`` is a structured string
+    # ``"{entity_type}:{entity_id}:{incident_class}"`` whose entity_id
+    # component already namespaces values per-tenant (terminals/dispatches
+    # are scoped to a project). Single-column UNIQUE is correct.
+    ("retry_budgets", "budget_key"),
+})
+
+
+def _is_prefix_rewritten_column(table: str, col: str) -> bool:
+    """True if the importer rewrites ``table.col`` values to
+    ``"<project_id>:<original>"`` on import. Such columns are globally
+    unique by construction — single-column UNIQUE is safe.
+
+    Mirrors the prefix-rewrite logic in :func:`_import_table` /
+    :func:`_collect_collision_columns`. Kept as an audit-side helper to
+    avoid pulling the importer's runtime mapping into a structural check.
+    """
+    if col in COLLISION_PREFIX_COLUMNS:
+        return True
+    if col in COLLISION_NAMED_IDENTIFIER_COLUMNS:
+        return True
+    for suffix in COLLISION_PREFIX_SUFFIXES:
+        if col.endswith(suffix):
+            return True
+    # ``coordination_events.entity_id`` is conditionally rewritten based
+    # on entity_type. Treat it as rewritten for audit purposes — the
+    # value is namespaced for the prefix-eligible types and is otherwise
+    # an unstructured FK that doesn't carry a UNIQUE constraint.
+    if table == COLLISION_ENTITY_TABLE and col == COLLISION_ENTITY_ID_COLUMN:
+        return True
+    return False
 
 # Hardcoded rebuild SQL per table. Keeping the SQL canonical (no
 # post-ALTER ", project_id ..." cruft) means EXPLAIN QUERY PLAN and
@@ -719,10 +798,233 @@ def _rebuild_one_table(
             "project_id column. Apply migrations 0010+0015 first."
         )
 
-    sql = _REBUILD_SQL[table]
     LOG.info("composite-unique rebuild: %s → UNIQUE(project_id,%s)", table, key_col)
-    for stmt in _iter_sql_statements(sql):
-        con.execute(stmt)
+    if table in _REBUILD_SQL:
+        # Round-5 path: hardcoded canonical SQL for the 3 RC/QI tables
+        # whose schemas are pinned to the source-of-truth .sql files.
+        sql = _REBUILD_SQL[table]
+        for stmt in _iter_sql_statements(sql):
+            con.execute(stmt)
+    else:
+        # Round-6 path: schema-introspection rebuild for tables whose
+        # live schema is the product of bootstrap + imperative migrations
+        # (e.g. ``dispatch_metadata`` accumulates cqs/normalized_status/
+        # cqs_components/target_open_items/... columns across releases).
+        # Hardcoding their SQL would drift; introspection stays correct.
+        _rebuild_one_table_dynamic(con, table, key_col)
+
+
+def _rebuild_one_table_dynamic(
+    con: sqlite3.Connection,
+    table: str,
+    key_col: str,
+) -> None:
+    """Round-6: schema-introspection rebuild for composite UNIQUE.
+
+    Reads the live table schema via ``PRAGMA table_info`` plus
+    ``sqlite_master.sql`` and reconstructs an equivalent ``CREATE TABLE``
+    statement that:
+
+    * preserves every column (name, type, NOT NULL, DEFAULT) in order;
+    * preserves the integer-PK ``AUTOINCREMENT`` modifier when the
+      original schema had it;
+    * **drops** the column-level ``UNIQUE`` modifier on ``key_col``
+      (effectively, by not re-emitting it) — the dynamic builder never
+      writes a column-level UNIQUE, so the only UNIQUE the rebuilt table
+      carries is the composite one we add;
+    * adds a table-level ``UNIQUE(project_id, key_col)`` constraint.
+
+    All non-UNIQUE indexes are captured before ``DROP TABLE`` and
+    re-created from their original SQL after rename. UNIQUE auto-indexes
+    backing the dropped column-level UNIQUE go away with the old table
+    and are not recreated (the composite UNIQUE provides the new index).
+
+    The rebuild runs inside the caller's transaction frame, so failure
+    raises and rolls back the entire composite-unique pass.
+    """
+    cols_info = list(con.execute(f"PRAGMA table_info({table})"))
+    if not cols_info:
+        raise BootstrapFailure(
+            f"dynamic rebuild: {table} has no columns (schema empty?)"
+        )
+
+    # Validate that key_col actually exists; otherwise the composite UNIQUE
+    # we'd produce would reference a phantom column.
+    col_names = [c[1] for c in cols_info]
+    if key_col not in col_names:
+        raise BootstrapFailure(
+            f"dynamic rebuild: {table} has no column {key_col!r}; "
+            "COMPOSITE_UNIQUE_TABLES_QI/RC entry must match the live schema."
+        )
+
+    # Pull the original CREATE TABLE so we can detect AUTOINCREMENT, which
+    # PRAGMA table_info does not surface directly.
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if row is None or not row[0]:
+        raise BootstrapFailure(
+            f"dynamic rebuild: sqlite_master has no CREATE TABLE for {table}"
+        )
+    original_sql = row[0]
+
+    # Capture non-auto indexes BEFORE drop. ``sql`` is NULL for SQLite-
+    # auto-generated indexes (UNIQUE backings, internal sqlite_autoindex_*),
+    # which we explicitly do NOT want to recreate.
+    saved_index_sql = [
+        sql for (sql,) in con.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name = ? AND sql IS NOT NULL",
+            (table,),
+        )
+    ]
+
+    # Build column definitions from PRAGMA introspection. Columns are
+    # emitted in cid order (matches original definition order).
+    col_defs: list[str] = []
+    for cid, name, ctype, notnull, dflt, pk in cols_info:
+        parts = [name, (ctype or "TEXT")]
+        if pk:
+            # SQLite reports the PK status per-column; only one column
+            # can carry an integer ROWID PK, so we emit PRIMARY KEY here
+            # rather than as a table constraint.
+            parts.append("PRIMARY KEY")
+            if (ctype or "").upper() == "INTEGER":
+                # AUTOINCREMENT only valid on INTEGER PRIMARY KEY. Detect
+                # via a regex on the original CREATE TABLE — normalize
+                # whitespace so multi-space definitions still match.
+                normalized = re.sub(r"\s+", " ", original_sql).upper()
+                pat = (
+                    rf"\b{re.escape(name.upper())}\s+INTEGER\s+PRIMARY\s+KEY"
+                    r"\s+AUTOINCREMENT\b"
+                )
+                if re.search(pat, normalized):
+                    parts.append("AUTOINCREMENT")
+        if notnull and not pk:
+            parts.append("NOT NULL")
+        if dflt is not None:
+            # PRAGMA returns dflt as the literal SQL fragment used in the
+            # original DEFAULT clause (e.g. ``'vnx-dev'``, ``0``,
+            # ``CURRENT_TIMESTAMP``, ``(strftime('%Y-...', 'now'))``).
+            # Re-emit as-is.
+            parts.append(f"DEFAULT {dflt}")
+        col_defs.append(" ".join(parts))
+
+    # Composite UNIQUE replaces the dropped single-column UNIQUE.
+    col_defs.append(f"UNIQUE (project_id, {key_col})")
+
+    # Build the rebuild SQL. ``<table>_p4r6_new`` is a transient name
+    # scoped to the rebuild transaction; renamed before any other code
+    # observes the database.
+    new_table = f"{table}_p4r6_new"
+    create_new = (
+        f"CREATE TABLE {new_table} (\n  " + ",\n  ".join(col_defs) + "\n)"
+    )
+    con.execute(create_new)
+
+    quoted_cols = ", ".join(col_names)
+    con.execute(
+        f"INSERT INTO {new_table} ({quoted_cols}) "
+        f"SELECT {quoted_cols} FROM {table}"
+    )
+    con.execute(f"DROP TABLE {table}")
+    con.execute(f"ALTER TABLE {new_table} RENAME TO {table}")
+
+    # Recreate user-defined indexes captured pre-drop. ``IF NOT EXISTS``
+    # guards on those statements would have been included in their
+    # original SQL when present.
+    for idx_sql in saved_index_sql:
+        with contextlib.suppress(sqlite3.OperationalError):
+            con.execute(idx_sql)
+
+
+def _audit_unique_constraints(qi_db: Path, rc_db: Path) -> None:
+    """Round-6 regression guard: scan central schema for unhandled T3 patterns.
+
+    Runs AFTER ``apply_composite_unique_constraints``. By that point, every
+    table listed in :data:`COMPOSITE_UNIQUE_TABLES_QI` /
+    :data:`COMPOSITE_UNIQUE_TABLES_RC` should have its single-column
+    UNIQUE swapped for ``UNIQUE(project_id, key)``. Any remaining
+    single-column UNIQUE on a tenant-suspect column means a NEW table
+    was added without composite-key handling — fail-fast so the operator
+    decides explicitly.
+
+    Suspect columns are those matching :data:`_T3_SUSPECT_COLUMN_PATTERN`
+    (``*_id``, ``*_path``, ``*_key``, ``*_hash``, plus the literal
+    ``session_id`` / ``tag_tuple`` / ``file_path`` / ``dispatch_id``).
+    Documented exceptions live in :data:`_T3_AUDIT_EXCEPTIONS`.
+
+    Raises :class:`BootstrapFailure` listing every offending
+    ``<table>.<column>`` pair. Tables without a ``project_id`` column
+    are skipped (they are pre-multi-tenant or singleton tables and are
+    not exposed to cross-project import collisions).
+    """
+    findings: list[str] = []
+    for db_path in (qi_db, rc_db):
+        if not db_path.exists():
+            continue
+        con = sqlite3.connect(str(db_path))
+        try:
+            tables = [
+                r[0] for r in con.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' "
+                    "AND name NOT LIKE 'p4_import_%'"
+                )
+            ]
+            for table in tables:
+                if not _column_exists(con, table, "project_id"):
+                    # Singleton or pre-multi-tenant table — not exposed
+                    # to cross-project collisions.
+                    continue
+                for idx_row in con.execute(f"PRAGMA index_list({table})"):
+                    is_unique = bool(idx_row[2])
+                    if not is_unique:
+                        continue
+                    # PRAGMA index_list columns: (seq, name, unique, origin, partial).
+                    # ``origin`` is ``'pk'`` for the auto-index that backs a PRIMARY
+                    # KEY, ``'u'`` for a UNIQUE constraint, ``'c'`` for an explicit
+                    # CREATE [UNIQUE] INDEX. PK-backed indexes are the table's
+                    # identity and are handled by collision-prefix-rewrite for
+                    # cross-tenant scoping (``dispatches.dispatch_id``,
+                    # ``pattern_usage.pattern_id``); they are NOT a T3 regression
+                    # signal.
+                    origin = idx_row[3] if len(idx_row) > 3 else None
+                    if origin == "pk":
+                        continue
+                    idx_name = idx_row[1]
+                    cols = [r[2] for r in con.execute(
+                        f"PRAGMA index_info({idx_name})"
+                    )]
+                    if len(cols) != 1:
+                        continue
+                    col = cols[0]
+                    if col == "project_id":
+                        continue
+                    if (table, col) in _T3_AUDIT_EXCEPTIONS:
+                        continue
+                    # Prefix-rewritten columns are globally unique by
+                    # construction (the importer rewrites their value
+                    # to ``<project_id>:<orig>``), so single-column
+                    # UNIQUE is safe regardless of the column name
+                    # matching the suspect pattern.
+                    if _is_prefix_rewritten_column(table, col):
+                        continue
+                    if not _T3_SUSPECT_COLUMN_PATTERN.match(col):
+                        continue
+                    findings.append(f"{table}.{col}")
+        finally:
+            con.close()
+
+    if findings:
+        raise BootstrapFailure(
+            "Multi-tenant T3 pattern detected: "
+            + ", ".join(sorted(findings))
+            + " has single-column UNIQUE on a tenant-suspect column. "
+            "Either add to COMPOSITE_UNIQUE_REBUILDS or document as exception."
+        )
 
 
 def _rebuild_dependent_fk_holders(con: sqlite3.Connection) -> None:
@@ -780,6 +1082,19 @@ def apply_composite_unique_constraints(qi_db: Path, rc_db: Path) -> None:
             # FKs OFF during rebuild so DROP TABLE on a referenced table
             # does not trip the check. We restore at the end.
             con.execute("PRAGMA foreign_keys = OFF")
+            # Round-6: ``legacy_alter_table = ON`` disables SQLite 3.25+'s
+            # automatic rewriting of view/trigger references during
+            # ALTER TABLE RENAME. Without this, the canonical QI schema's
+            # ``cost_per_dispatch`` view (which joins dispatch_metadata to
+            # session_analytics) trips during the rename step: the view
+            # body references both tables, and SQLite's reference walker
+            # sees a transient missing-table state mid-rebuild and aborts
+            # with ``error in view cost_per_dispatch: no such table``.
+            # Since we always rename ``<table>_p4r6_new`` back to its
+            # original name within the same transaction, view references
+            # are restored before any view is queried — the legacy
+            # behavior is correct for our pattern.
+            con.execute("PRAGMA legacy_alter_table = ON")
             con.execute("BEGIN")
             try:
                 # On RC: rebuild FK-holders FIRST so terminal_leases'
@@ -804,6 +1119,7 @@ def apply_composite_unique_constraints(qi_db: Path, rc_db: Path) -> None:
                 raise
             finally:
                 con.execute("PRAGMA foreign_keys = ON")
+                con.execute("PRAGMA legacy_alter_table = OFF")
         finally:
             con.close()
 
@@ -2002,6 +2318,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         apply_migration_0010(central_qi, central_rc)
         apply_migration_0015(central_qi, central_rc)
         apply_composite_unique_constraints(central_qi, central_rc)
+        # Round-6 regression guard: every tenant-suspect single-column
+        # UNIQUE in central must either be rebuilt to composite UNIQUE
+        # (handled above) or be in the documented exceptions list. This
+        # makes adding a new T3-pattern table without scoping a hard
+        # failure rather than a silent post-import discrepancy.
+        _audit_unique_constraints(central_qi, central_rc)
         _assert_central_tables_exist(central_qi, central_rc, projects)
     except BootstrapFailure as exc:
         LOG.error("bootstrap assertion failed: %s", exc)

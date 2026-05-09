@@ -2169,3 +2169,398 @@ def test_round5_reset_idempotency_clears_tables(tmp_path: Path):
     counts2 = M.reset_idempotency_state(qi_db, rc_db)
     assert counts2["qi"] == 0
     assert counts2["rc"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Round-6: T3-pattern audit + dynamic rebuild for the 5 remaining tables
+# ---------------------------------------------------------------------------
+
+
+def _make_qi_with_round6_tables(path: Path) -> None:
+    """Round-6 QI seed: bootstrap shape AFTER 0010+0015 have run, mirroring
+    the 5 tables flagged by the v4 verifier failure plus the 3 round-5
+    tables. Each table carries the legacy single-column UNIQUE on its
+    tenant-suspect key column.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(
+            """
+            -- Round-5 holdover (already in COMPOSITE_UNIQUE_TABLES_QI)
+            CREATE TABLE tag_combinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_tuple TEXT NOT NULL UNIQUE,
+                occurrence_count INTEGER DEFAULT 0,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                phases TEXT,
+                terminals TEXT,
+                outcomes TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            -- Round-6 newly-handled tables
+            CREATE TABLE session_analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                project_path TEXT NOT NULL,
+                terminal TEXT,
+                session_date DATE NOT NULL,
+                total_input_tokens INTEGER DEFAULT 0,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE INDEX idx_session_terminal
+                ON session_analytics (terminal, session_date DESC);
+            CREATE TABLE vnx_code_quality (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                project_root TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                line_count INTEGER DEFAULT 0,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE dispatch_quality_context (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                files_analyzed INTEGER DEFAULT 0,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                role TEXT,
+                cqs REAL,
+                normalized_status TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE dispatch_experiments (
+                id INTEGER PRIMARY KEY,
+                dispatch_id TEXT UNIQUE,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                instruction_chars INTEGER,
+                role TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_round6_schema_audit_detects_t3_pattern(tmp_path: Path):
+    """ROUND-6: ``_audit_unique_constraints`` must raise on any
+    tenant-suspect column carrying a single-column UNIQUE that is NOT
+    covered by the COMPOSITE_UNIQUE_REBUILDS map.
+
+    Simulates the regression scenario: a developer adds a new table to
+    central with ``UNIQUE(some_id)`` and forgets to either (a) add it to
+    ``COMPOSITE_UNIQUE_TABLES_QI`` for rebuild, or (b) document it in
+    ``_T3_AUDIT_EXCEPTIONS``. The audit must fail-fast with a clear
+    error message naming the offending ``<table>.<column>``.
+    """
+    qi_db = tmp_path / "central_qi.db"
+    rc_db = tmp_path / "central_rc.db"
+
+    # Custom table NOT in COMPOSITE_UNIQUE_TABLES_QI. Suspect column
+    # name ``entity_hash`` matches the ``*_hash`` pattern AND is NOT
+    # prefix-rewritten by the importer (so it has no other globally-
+    # unique guarantee). This is the exact "developer added a new
+    # T3-pattern table without scoping" regression we want to catch.
+    con = sqlite3.connect(qi_db)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE custom_round6 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_hash TEXT NOT NULL UNIQUE,
+                payload TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    # RC empty is fine — audit only reports findings.
+    sqlite3.connect(rc_db).close()
+
+    with pytest.raises(M.BootstrapFailure) as exc:
+        M._audit_unique_constraints(qi_db, rc_db)
+
+    msg = str(exc.value)
+    assert "Multi-tenant T3 pattern detected" in msg, msg
+    assert "custom_round6.entity_hash" in msg, msg
+    assert "COMPOSITE_UNIQUE_REBUILDS" in msg, msg
+
+
+def test_round6_audit_passes_after_rebuild(tmp_path: Path):
+    """ROUND-6 happy path: after rebuild, audit returns silently.
+
+    Bootstraps a QI with all 6 tables under
+    ``COMPOSITE_UNIQUE_TABLES_QI`` carrying their pre-rebuild
+    single-column UNIQUE, applies the rebuild, then verifies the audit
+    no longer flags anything.
+    """
+    qi_db = tmp_path / "central_qi.db"
+    rc_db = tmp_path / "central_rc.db"
+    _make_qi_with_round6_tables(qi_db)
+    sqlite3.connect(rc_db).close()
+
+    M.apply_composite_unique_constraints(qi_db, rc_db)
+    # No raise = pass.
+    M._audit_unique_constraints(qi_db, rc_db)
+
+
+def test_round6_audit_skips_tables_without_project_id(tmp_path: Path):
+    """ROUND-6: tables WITHOUT a project_id column are out-of-scope for
+    multi-tenant T3 pattern. The audit must not flag them even when
+    they carry a single-column UNIQUE on a suspect-named column.
+    """
+    qi_db = tmp_path / "central_qi.db"
+    rc_db = tmp_path / "central_rc.db"
+
+    con = sqlite3.connect(qi_db)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE singleton_no_pid (
+                id INTEGER PRIMARY KEY,
+                some_id TEXT NOT NULL UNIQUE
+            );
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+    sqlite3.connect(rc_db).close()
+
+    # Should NOT raise — singleton tables are not multi-tenant.
+    M._audit_unique_constraints(qi_db, rc_db)
+
+
+def test_round6_dynamic_rebuild_preserves_columns_and_data(tmp_path: Path):
+    """ROUND-6: ``_rebuild_one_table_dynamic`` must preserve every column
+    (with its NOT NULL / DEFAULT / PRIMARY KEY / AUTOINCREMENT modifiers)
+    and every row when rebuilding ``dispatch_metadata`` to composite
+    UNIQUE.
+
+    Critical because ``dispatch_metadata``'s schema is the product of
+    multiple imperative migrations (cqs, normalized_status,
+    cqs_components, target_open_items, ... columns added across
+    releases). A naive hardcoded rebuild SQL would drift; introspection
+    must reconstruct the live schema faithfully.
+    """
+    qi_db = tmp_path / "qi.db"
+    _make_qi_with_round6_tables(qi_db)
+
+    # Add a row with non-default values that exercise every column.
+    with sqlite3.connect(qi_db) as c:
+        c.execute(
+            "INSERT INTO dispatch_metadata "
+            "(dispatch_id, terminal, track, role, cqs, normalized_status, project_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("d-1", "T1", "A", "backend-developer", 87.5, "success", "vnx-dev"),
+        )
+        c.commit()
+
+    rc_db = tmp_path / "rc.db"
+    sqlite3.connect(rc_db).close()
+
+    # Snapshot the column metadata pre-rebuild.
+    with sqlite3.connect(qi_db) as c:
+        pre_cols = list(c.execute("PRAGMA table_info(dispatch_metadata)"))
+
+    M.apply_composite_unique_constraints(qi_db, rc_db)
+
+    with sqlite3.connect(qi_db) as c:
+        post_cols = list(c.execute("PRAGMA table_info(dispatch_metadata)"))
+        # Every column survived (same name, type, NOT NULL, default).
+        # ``cid`` may legitimately differ if SQLite re-numbers; compare
+        # by (name, type, notnull, dflt, pk).
+        pre_norm = sorted(
+            (n, (t or '').upper(), nn, d, pk)
+            for (_, n, t, nn, d, pk) in pre_cols
+        )
+        post_norm = sorted(
+            (n, (t or '').upper(), nn, d, pk)
+            for (_, n, t, nn, d, pk) in post_cols
+        )
+        assert pre_norm == post_norm, (
+            f"column metadata drift in dispatch_metadata after rebuild:\n"
+            f"  pre={pre_norm}\n  post={post_norm}"
+        )
+
+        # Composite UNIQUE present.
+        composite_present = False
+        for idx in c.execute("PRAGMA index_list(dispatch_metadata)"):
+            if idx[2]:
+                cols = [r[2] for r in c.execute(
+                    f"PRAGMA index_info({idx[1]})"
+                )]
+                if set(cols) == {"project_id", "dispatch_id"}:
+                    composite_present = True
+                    break
+        assert composite_present, (
+            "composite UNIQUE(project_id, dispatch_id) missing after dynamic rebuild"
+        )
+
+        # Data preserved with full fidelity.
+        row = c.execute(
+            "SELECT dispatch_id, terminal, track, role, cqs, "
+            "normalized_status, project_id FROM dispatch_metadata"
+        ).fetchone()
+        assert row == ("d-1", "T1", "A", "backend-developer",
+                       87.5, "success", "vnx-dev"), row
+
+        # AUTOINCREMENT preserved: inserting after rebuild yields a
+        # monotonic id (sqlite_sequence row exists).
+        sequence_present = c.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='sqlite_sequence'"
+        ).fetchone() is not None
+        assert sequence_present, (
+            "sqlite_sequence missing — AUTOINCREMENT was lost in rebuild"
+        )
+
+
+def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypatch):
+    """ROUND-6 INTEGRATION: full --apply against fixtures derived from the
+    4 real source schemas (autopilot, mc, sales-copilot, seocrawler-v2)
+    with overlapping IDs across "projects".
+
+    Validates the architect's lessons doc Section 3.1 ("P0, ~2h"): until
+    this round there was no test that ran the migrator against fixtures
+    sized like the real source schemas. Each project carries the same
+    business keys (session_id, dispatch_id, file_path, ...) so cross-
+    tenant collision would silently drop rows under the round-5 design.
+    Post-rebuild, every project's rows must coexist in central.
+
+    Per-project counts must equal source counts; central must hold the
+    sum across the 4 projects with composite UNIQUE preserving each
+    project's natural keys.
+    """
+    backup_base = tmp_path / "backups"
+    backup_base.mkdir()
+    abort_dir = tmp_path / ".vnx-aggregator"
+    abort_dir.mkdir()
+    monkeypatch.setattr(M, "ABORT_FLAG", abort_dir / "ABORT")
+
+    central_state = tmp_path / "central" / "state"
+    central_state.mkdir(parents=True)
+    central_qi = central_state / "quality_intelligence.db"
+    central_rc = central_state / "runtime_coordination.db"
+    _make_qi_db(central_qi)
+    _make_rc_db(central_rc)
+
+    # Mirror the real 4-project layout. Each project gets its OWN copy
+    # of the bootstrap schema and seeds rows with shared natural keys
+    # to exercise the cross-tenant collision pattern that broke v4.
+    real_projects = [
+        ("vnx-roadmap-autopilot", "vnx-dev"),
+        ("mission-control", "mc"),
+        ("sales-copilot", "sales-copilot"),
+        ("SEOcrawler_v2", "seocrawler-v2"),
+    ]
+
+    SHARED_SESSION_ID = "abcd-shared-session-1"
+    SHARED_DISPATCH_ID = "shared-dispatch-1"
+    SHARED_PATTERN_ID = "shared-key"
+
+    specs: list[dict] = []
+    for proj_name, pid in real_projects:
+        proj = tmp_path / proj_name
+        state = proj / ".vnx-data" / "state"
+        _make_qi_db(state / "quality_intelligence.db")
+        _make_rc_db(state / "runtime_coordination.db")
+        with sqlite3.connect(state / "quality_intelligence.db") as c:
+            c.executemany(
+                "INSERT INTO success_patterns "
+                "(pattern_type, category, title, description, pattern_data, project_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    ("approach", "test", f"{pid}-p1", "d", "{}", pid),
+                    ("approach", "test", f"{pid}-p2", "d", "{}", pid),
+                ],
+            )
+            c.execute(
+                "INSERT INTO pattern_usage VALUES (?, ?, ?, ?)",
+                (SHARED_PATTERN_ID, f"{pid}-title", "hash", pid),
+            )
+        with sqlite3.connect(state / "runtime_coordination.db") as c:
+            c.execute(
+                "INSERT INTO dispatches VALUES (?, ?, ?)",
+                (SHARED_DISPATCH_ID, "completed", pid),
+            )
+        specs.append({"name": proj_name, "path": str(proj), "project_id": pid})
+
+    registry = tmp_path / "projects.json"
+    registry.write_text(json.dumps({"schema_version": 1, "projects": specs}))
+
+    rc = M.main([
+        "--apply",
+        "--confirm", M.CONFIRMATION_PHRASE,
+        "--no-prompt",
+        "--registry", str(registry),
+        "--backup-base", str(backup_base),
+        "--central-state", str(central_state),
+    ])
+    assert rc == 0, f"--apply must succeed, got rc={rc}"
+
+    # 1. Each project's rows present (4 success_patterns + 1 pattern_usage)
+    with sqlite3.connect(central_qi) as c:
+        sp_total = c.execute("SELECT COUNT(*) FROM success_patterns").fetchone()[0]
+        assert sp_total == 4 * 2, (
+            f"expected 8 success_patterns rows total, got {sp_total}"
+        )
+        for _, pid in real_projects:
+            n = c.execute(
+                "SELECT COUNT(*) FROM success_patterns WHERE project_id = ?",
+                (pid,),
+            ).fetchone()[0]
+            assert n == 2, (
+                f"project {pid}: expected 2 success_patterns rows, got {n}"
+            )
+
+        # pattern_usage carries shared natural key across all 4 projects;
+        # post-prefix rewrite each project's row is namespaced as
+        # "<pid>:<key>", so all 4 must coexist in central.
+        pu = c.execute(
+            "SELECT pattern_id, project_id FROM pattern_usage ORDER BY project_id"
+        ).fetchall()
+        assert len(pu) == 4, (
+            f"expected 4 pattern_usage rows (one per project) after collision "
+            f"prefix-rewrite, got {pu}"
+        )
+        # Verify every project_id is represented.
+        pids_seen = {row[1] for row in pu}
+        expected_pids = {pid for _, pid in real_projects}
+        assert pids_seen == expected_pids, (
+            f"missing projects in pattern_usage: "
+            f"expected={expected_pids} got={pids_seen}"
+        )
+
+    # 2. dispatches: shared dispatch_id, prefix-rewritten per project
+    with sqlite3.connect(central_rc) as c:
+        d_rows = c.execute(
+            "SELECT dispatch_id, project_id FROM dispatches ORDER BY project_id"
+        ).fetchall()
+        assert len(d_rows) == 4, (
+            f"expected 4 dispatches rows after prefix-rewrite, got {d_rows}"
+        )
+        pids_seen = {row[1] for row in d_rows}
+        assert pids_seen == {pid for _, pid in real_projects}, (
+            f"missing projects in dispatches: got {pids_seen}"
+        )
+        # Each dispatch_id is prefixed with its project_id.
+        for did, pid in d_rows:
+            assert did.startswith(f"{pid}:"), (
+                f"dispatch_id {did!r} (project={pid}) not prefix-rewritten"
+            )
+
+    # 3. Audit must pass post-apply: every T3-suspect single-column
+    # UNIQUE in central is either rebuilt to composite or in exceptions.
+    M._audit_unique_constraints(central_qi, central_rc)
