@@ -96,6 +96,7 @@ IMPORT_TABLES_QI: tuple[str, ...] = (
     "pattern_usage",
     "confidence_events",
     "dispatch_metadata",
+    "dispatch_experiments",
     "dispatch_pattern_offered",
     "session_analytics",
     "vnx_code_quality",

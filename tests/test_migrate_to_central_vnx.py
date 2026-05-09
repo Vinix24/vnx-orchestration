@@ -2250,6 +2250,78 @@ def _make_qi_with_round6_tables(path: Path) -> None:
         con.close()
 
 
+def _make_qi_db_round6_source(path: Path, *, with_project_id: bool = True) -> None:
+    """QI source DB with success_patterns, pattern_usage, and all 5 round-6 tables.
+
+    with_project_id=True  → autopilot shape: project_id column pre-exists on
+                            round-6 tables (legacy migration 0015 ran on this
+                            project's local DB before P4 consolidation).
+    with_project_id=False → mc/sales-copilot/seocrawler shape: migration 0015
+                            did not run on source DB; round-6 tables lack
+                            project_id, forcing the migrator to stamp it from
+                            the registry entry.  This was the actual asymmetry
+                            that broke P4 v4.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pid_col = ",\n                project_id TEXT NOT NULL DEFAULT 'vnx-dev'" if with_project_id else ""
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(f"""
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE pattern_usage (
+                pattern_id TEXT PRIMARY KEY,
+                pattern_title TEXT NOT NULL,
+                pattern_hash TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE session_analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                project_path TEXT NOT NULL,
+                terminal TEXT,
+                session_date DATE NOT NULL,
+                total_input_tokens INTEGER DEFAULT 0{pid_col}
+            );
+            CREATE TABLE vnx_code_quality (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                project_root TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                line_count INTEGER DEFAULT 0{pid_col}
+            );
+            CREATE TABLE dispatch_quality_context (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                files_analyzed INTEGER DEFAULT 0{pid_col}
+            );
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                role TEXT{pid_col}
+            );
+            CREATE TABLE dispatch_experiments (
+                id INTEGER PRIMARY KEY,
+                dispatch_id TEXT UNIQUE,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                instruction_chars INTEGER,
+                role TEXT{pid_col}
+            );
+        """)
+        con.commit()
+    finally:
+        con.close()
+
+
 def test_round6_schema_audit_detects_t3_pattern(tmp_path: Path):
     """ROUND-6: ``_audit_unique_constraints`` must raise on any
     tenant-suspect column carrying a single-column UNIQUE that is NOT
@@ -2430,18 +2502,26 @@ def test_round6_dynamic_rebuild_preserves_columns_and_data(tmp_path: Path):
 def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypatch):
     """ROUND-6 INTEGRATION: full --apply against fixtures derived from the
     4 real source schemas (autopilot, mc, sales-copilot, seocrawler-v2)
-    with overlapping IDs across "projects".
+    with overlapping IDs across projects — exercising ALL 5 round-6 tables
+    and the project_id asymmetry that broke P4 v4.
 
-    Validates the architect's lessons doc Section 3.1 ("P0, ~2h"): until
-    this round there was no test that ran the migrator against fixtures
-    sized like the real source schemas. Each project carries the same
-    business keys (session_id, dispatch_id, file_path, ...) so cross-
-    tenant collision would silently drop rows under the round-5 design.
-    Post-rebuild, every project's rows must coexist in central.
+    Coverage:
+    - All 5 COMPOSITE_UNIQUE_TABLES_QI round-6 tables populated in each
+      source and verified in central after migration.
+    - project_id asymmetry: vnx-roadmap-autopilot source has project_id
+      pre-existing on round-6 tables (legacy migration applied); the other
+      3 projects do NOT, so the migrator must stamp it from the registry.
+    - SHARED_SESSION_ID and SHARED_FILE_PATH appear in all 4 source DBs
+      with the same natural key; post-rebuild composite UNIQUE must let
+      all 4 rows coexist in central rather than silently dropping 3.
+    - Non-autopilot rows must land under their own project_id (mc,
+      sales-copilot, seocrawler-v2), not under 'vnx-dev' default.
+    - Existing collision-prefix coverage (pattern_usage, dispatches) is
+      preserved from prior rounds.
 
-    Per-project counts must equal source counts; central must hold the
-    sum across the 4 projects with composite UNIQUE preserving each
-    project's natural keys.
+    Regression guard: if any of the 5 round-6 tables were removed from
+    COMPOSITE_UNIQUE_TABLES_QI, the cross-tenant rows would collide on
+    import and the per-project count assertions below would fail.
     """
     backup_base = tmp_path / "backups"
     backup_base.mkdir()
@@ -2453,7 +2533,9 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
     central_state.mkdir(parents=True)
     central_qi = central_state / "quality_intelligence.db"
     central_rc = central_state / "runtime_coordination.db"
-    _make_qi_db(central_qi)
+    # Central needs all 5 round-6 tables with project_id + single-col UNIQUE
+    # so apply_composite_unique_constraints can rebuild them before import.
+    _make_qi_db_round6_source(central_qi, with_project_id=True)
     _make_rc_db(central_rc)
 
     # Mirror the real 4-project layout. Each project gets its OWN copy
@@ -2469,14 +2551,23 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
     SHARED_SESSION_ID = "abcd-shared-session-1"
     SHARED_DISPATCH_ID = "shared-dispatch-1"
     SHARED_PATTERN_ID = "shared-key"
+    SHARED_FILE_PATH = "/shared/common/module.py"
 
     specs: list[dict] = []
     for proj_name, pid in real_projects:
         proj = tmp_path / proj_name
         state = proj / ".vnx-data" / "state"
-        _make_qi_db(state / "quality_intelligence.db")
+        # autopilot had migration 0015 applied to its local source DB before
+        # consolidation; the other 3 projects did not — their round-6 tables
+        # lack project_id and the migrator must stamp it from the registry.
+        is_autopilot = (proj_name == "vnx-roadmap-autopilot")
+        _make_qi_db_round6_source(
+            state / "quality_intelligence.db", with_project_id=is_autopilot
+        )
         _make_rc_db(state / "runtime_coordination.db")
+
         with sqlite3.connect(state / "quality_intelligence.db") as c:
+            # success_patterns: 2 rows per project (unchanged from prior rounds)
             c.executemany(
                 "INSERT INTO success_patterns "
                 "(pattern_type, category, title, description, pattern_data, project_id) "
@@ -2486,10 +2577,116 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
                     ("approach", "test", f"{pid}-p2", "d", "{}", pid),
                 ],
             )
+            # pattern_usage: 1 row with shared natural key (prefix-rewrite
+            # ensures all 4 coexist in central after migration)
             c.execute(
                 "INSERT INTO pattern_usage VALUES (?, ?, ?, ?)",
                 (SHARED_PATTERN_ID, f"{pid}-title", "hash", pid),
             )
+
+            # ----------------------------------------------------------------
+            # Round-6 tables — seeded with shared natural keys to exercise
+            # the cross-tenant collision surface.
+            # ----------------------------------------------------------------
+
+            # session_analytics: 2 rows per project.
+            # One with SHARED_SESSION_ID (same across all 4 projects),
+            # one project-unique.  Exercises UNIQUE(project_id, session_id).
+            if is_autopilot:
+                c.execute(
+                    "INSERT INTO session_analytics "
+                    "(session_id, project_path, session_date, project_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    (SHARED_SESSION_ID, f"/projects/{proj_name}", "2026-01-01", pid),
+                )
+                c.execute(
+                    "INSERT INTO session_analytics "
+                    "(session_id, project_path, session_date, project_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    (f"{pid}-unique-session", f"/projects/{proj_name}", "2026-01-01", pid),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO session_analytics "
+                    "(session_id, project_path, session_date) VALUES (?, ?, ?)",
+                    (SHARED_SESSION_ID, f"/projects/{proj_name}", "2026-01-01"),
+                )
+                c.execute(
+                    "INSERT INTO session_analytics "
+                    "(session_id, project_path, session_date) VALUES (?, ?, ?)",
+                    (f"{pid}-unique-session", f"/projects/{proj_name}", "2026-01-01"),
+                )
+
+            # vnx_code_quality: 2 rows per project.
+            # One with SHARED_FILE_PATH, one project-unique.
+            # Exercises UNIQUE(project_id, file_path).
+            if is_autopilot:
+                c.execute(
+                    "INSERT INTO vnx_code_quality "
+                    "(file_path, project_root, relative_path, project_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    (SHARED_FILE_PATH, f"/projects/{proj_name}", "common/module.py", pid),
+                )
+                c.execute(
+                    "INSERT INTO vnx_code_quality "
+                    "(file_path, project_root, relative_path, project_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    (f"/projects/{proj_name}/unique.py", f"/projects/{proj_name}", "unique.py", pid),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO vnx_code_quality "
+                    "(file_path, project_root, relative_path) VALUES (?, ?, ?)",
+                    (SHARED_FILE_PATH, f"/projects/{proj_name}", "common/module.py"),
+                )
+                c.execute(
+                    "INSERT INTO vnx_code_quality "
+                    "(file_path, project_root, relative_path) VALUES (?, ?, ?)",
+                    (f"/projects/{proj_name}/unique.py", f"/projects/{proj_name}", "unique.py"),
+                )
+
+            # dispatch_quality_context: 1 row with SHARED_DISPATCH_ID.
+            # dispatch_id is prefix-rewritten so all 4 coexist under
+            # UNIQUE(project_id, dispatch_id).
+            if is_autopilot:
+                c.execute(
+                    "INSERT INTO dispatch_quality_context (dispatch_id, project_id) "
+                    "VALUES (?, ?)",
+                    (SHARED_DISPATCH_ID, pid),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO dispatch_quality_context (dispatch_id) VALUES (?)",
+                    (SHARED_DISPATCH_ID,),
+                )
+
+            # dispatch_metadata: 1 row with SHARED_DISPATCH_ID.
+            if is_autopilot:
+                c.execute(
+                    "INSERT INTO dispatch_metadata "
+                    "(dispatch_id, terminal, track, project_id) VALUES (?, ?, ?, ?)",
+                    (SHARED_DISPATCH_ID, "T1", "A", pid),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO dispatch_metadata (dispatch_id, terminal, track) "
+                    "VALUES (?, ?, ?)",
+                    (SHARED_DISPATCH_ID, "T1", "A"),
+                )
+
+            # dispatch_experiments: 1 row with SHARED_DISPATCH_ID.
+            if is_autopilot:
+                c.execute(
+                    "INSERT INTO dispatch_experiments (dispatch_id, project_id) "
+                    "VALUES (?, ?)",
+                    (SHARED_DISPATCH_ID, pid),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO dispatch_experiments (dispatch_id) VALUES (?)",
+                    (SHARED_DISPATCH_ID,),
+                )
+
         with sqlite3.connect(state / "runtime_coordination.db") as c:
             c.execute(
                 "INSERT INTO dispatches VALUES (?, ?, ?)",
@@ -2510,8 +2707,10 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
     ])
     assert rc == 0, f"--apply must succeed, got rc={rc}"
 
-    # 1. Each project's rows present (4 success_patterns + 1 pattern_usage)
     with sqlite3.connect(central_qi) as c:
+        # -----------------------------------------------------------------
+        # 1. success_patterns (unchanged from prior rounds)
+        # -----------------------------------------------------------------
         sp_total = c.execute("SELECT COUNT(*) FROM success_patterns").fetchone()[0]
         assert sp_total == 4 * 2, (
             f"expected 8 success_patterns rows total, got {sp_total}"
@@ -2525,9 +2724,9 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
                 f"project {pid}: expected 2 success_patterns rows, got {n}"
             )
 
-        # pattern_usage carries shared natural key across all 4 projects;
-        # post-prefix rewrite each project's row is namespaced as
-        # "<pid>:<key>", so all 4 must coexist in central.
+        # -----------------------------------------------------------------
+        # 2. pattern_usage: shared natural key, prefix-rewritten per project
+        # -----------------------------------------------------------------
         pu = c.execute(
             "SELECT pattern_id, project_id FROM pattern_usage ORDER BY project_id"
         ).fetchall()
@@ -2535,7 +2734,6 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
             f"expected 4 pattern_usage rows (one per project) after collision "
             f"prefix-rewrite, got {pu}"
         )
-        # Verify every project_id is represented.
         pids_seen = {row[1] for row in pu}
         expected_pids = {pid for _, pid in real_projects}
         assert pids_seen == expected_pids, (
@@ -2543,7 +2741,123 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
             f"expected={expected_pids} got={pids_seen}"
         )
 
-    # 2. dispatches: shared dispatch_id, prefix-rewritten per project
+        # -----------------------------------------------------------------
+        # 3. session_analytics: 2 rows per project, 4 share SHARED_SESSION_ID
+        # UNIQUE(project_id, session_id) must allow cross-tenant coexistence.
+        # -----------------------------------------------------------------
+        sa_total = c.execute("SELECT COUNT(*) FROM session_analytics").fetchone()[0]
+        assert sa_total == 4 * 2, (
+            f"expected 8 session_analytics rows (2/project × 4 projects), got {sa_total}"
+        )
+        # All 4 projects have a row with SHARED_SESSION_ID — composite UNIQUE
+        # must have allowed them to coexist; single-col UNIQUE would have
+        # silently dropped 3 of the 4.
+        shared_sa_rows = c.execute(
+            "SELECT project_id FROM session_analytics WHERE session_id = ? ORDER BY project_id",
+            (SHARED_SESSION_ID,),
+        ).fetchall()
+        assert len(shared_sa_rows) == 4, (
+            f"expected 4 session_analytics rows with SHARED_SESSION_ID "
+            f"(one per project), got {shared_sa_rows}; "
+            f"composite UNIQUE may be missing or rebuild failed"
+        )
+        assert {r[0] for r in shared_sa_rows} == expected_pids, (
+            f"wrong project_ids in shared session_analytics rows: {shared_sa_rows}"
+        )
+        # Non-autopilot rows stamped with their own project_id, not 'vnx-dev'.
+        for _, pid in real_projects:
+            n = c.execute(
+                "SELECT COUNT(*) FROM session_analytics WHERE project_id = ?", (pid,)
+            ).fetchone()[0]
+            assert n == 2, (
+                f"session_analytics: project {pid!r} expected 2 rows, got {n}"
+            )
+
+        # -----------------------------------------------------------------
+        # 4. vnx_code_quality: 2 rows per project, 4 share SHARED_FILE_PATH
+        # -----------------------------------------------------------------
+        vq_total = c.execute("SELECT COUNT(*) FROM vnx_code_quality").fetchone()[0]
+        assert vq_total == 4 * 2, (
+            f"expected 8 vnx_code_quality rows (2/project × 4), got {vq_total}"
+        )
+        shared_vq_rows = c.execute(
+            "SELECT project_id FROM vnx_code_quality WHERE file_path = ? ORDER BY project_id",
+            (SHARED_FILE_PATH,),
+        ).fetchall()
+        assert len(shared_vq_rows) == 4, (
+            f"expected 4 vnx_code_quality rows with SHARED_FILE_PATH, "
+            f"got {shared_vq_rows}"
+        )
+        assert {r[0] for r in shared_vq_rows} == expected_pids, (
+            f"wrong project_ids in shared vnx_code_quality rows: {shared_vq_rows}"
+        )
+        for _, pid in real_projects:
+            n = c.execute(
+                "SELECT COUNT(*) FROM vnx_code_quality WHERE project_id = ?", (pid,)
+            ).fetchone()[0]
+            assert n == 2, (
+                f"vnx_code_quality: project {pid!r} expected 2 rows, got {n}"
+            )
+
+        # -----------------------------------------------------------------
+        # 5. dispatch_quality_context: 1 row per project; dispatch_id
+        # prefix-rewritten so all 4 coexist under UNIQUE(project_id, dispatch_id).
+        # -----------------------------------------------------------------
+        dqc_rows = c.execute(
+            "SELECT dispatch_id, project_id FROM dispatch_quality_context ORDER BY project_id"
+        ).fetchall()
+        assert len(dqc_rows) == 4, (
+            f"expected 4 dispatch_quality_context rows, got {dqc_rows}"
+        )
+        assert {r[1] for r in dqc_rows} == expected_pids, (
+            f"missing projects in dispatch_quality_context: {dqc_rows}"
+        )
+        for did, pid in dqc_rows:
+            assert did.startswith(f"{pid}:"), (
+                f"dispatch_quality_context.dispatch_id {did!r} (project={pid}) "
+                f"not prefix-rewritten"
+            )
+            # Non-autopilot project_id stamped from registry, not 'vnx-dev'.
+            if pid != "vnx-dev":
+                assert pid in {"mc", "sales-copilot", "seocrawler-v2"}, (
+                    f"non-autopilot row has unexpected project_id={pid!r}"
+                )
+
+        # -----------------------------------------------------------------
+        # 6. dispatch_metadata: 1 row per project; prefix-rewritten dispatch_id
+        # -----------------------------------------------------------------
+        dm_rows = c.execute(
+            "SELECT dispatch_id, project_id FROM dispatch_metadata ORDER BY project_id"
+        ).fetchall()
+        assert len(dm_rows) == 4, (
+            f"expected 4 dispatch_metadata rows, got {dm_rows}"
+        )
+        assert {r[1] for r in dm_rows} == expected_pids, (
+            f"missing projects in dispatch_metadata: {dm_rows}"
+        )
+        for did, pid in dm_rows:
+            assert did.startswith(f"{pid}:"), (
+                f"dispatch_metadata.dispatch_id {did!r} (project={pid}) not prefix-rewritten"
+            )
+
+        # -----------------------------------------------------------------
+        # 7. dispatch_experiments: 1 row per project; prefix-rewritten dispatch_id
+        # -----------------------------------------------------------------
+        de_rows = c.execute(
+            "SELECT dispatch_id, project_id FROM dispatch_experiments ORDER BY project_id"
+        ).fetchall()
+        assert len(de_rows) == 4, (
+            f"expected 4 dispatch_experiments rows, got {de_rows}"
+        )
+        assert {r[1] for r in de_rows} == expected_pids, (
+            f"missing projects in dispatch_experiments: {de_rows}"
+        )
+        for did, pid in de_rows:
+            assert did.startswith(f"{pid}:"), (
+                f"dispatch_experiments.dispatch_id {did!r} (project={pid}) not prefix-rewritten"
+            )
+
+    # 8. dispatches: shared dispatch_id, prefix-rewritten per project
     with sqlite3.connect(central_rc) as c:
         d_rows = c.execute(
             "SELECT dispatch_id, project_id FROM dispatches ORDER BY project_id"
@@ -2555,12 +2869,11 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
         assert pids_seen == {pid for _, pid in real_projects}, (
             f"missing projects in dispatches: got {pids_seen}"
         )
-        # Each dispatch_id is prefixed with its project_id.
         for did, pid in d_rows:
             assert did.startswith(f"{pid}:"), (
                 f"dispatch_id {did!r} (project={pid}) not prefix-rewritten"
             )
 
-    # 3. Audit must pass post-apply: every T3-suspect single-column
+    # 9. Audit must pass post-apply: every T3-suspect single-column
     # UNIQUE in central is either rebuilt to composite or in exceptions.
     M._audit_unique_constraints(central_qi, central_rc)
