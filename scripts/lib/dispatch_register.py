@@ -19,6 +19,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+try:
+    import shadow_verifier as _shadow_verifier
+    import shadow_logger as _shadow_logger
+except ImportError:
+    _shadow_verifier = None  # type: ignore[assignment]
+    _shadow_logger = None  # type: ignore[assignment]
+
+# SQL template identifier used in shadow comparisons (no actual SQL — NDJSON source)
+_REGISTER_NDJSON_TEMPLATE = "dispatch_register.ndjson"
+
 _PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -354,7 +364,8 @@ def _mirror_to_decision_log(event: str, record: dict, *, extra: Optional[dict] =
     # them to resolve pending decisions.
 
 
-def _read_register_locked(path: Path) -> str:
+def _read_register_locked_per_project(path: Path) -> str:
+    """Read raw NDJSON content from a register file under shared lock."""
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
         try:
@@ -363,15 +374,81 @@ def _read_register_locked(path: Path) -> str:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+def _read_register_locked_central(project_id: str) -> str:
+    """Read raw NDJSON content from the central register for project_id.
+
+    Returns empty string when the central path does not exist or any error occurs.
+    """
+    try:
+        central_base = _resolve_central_data_dir(project_id)
+        central_path = central_base / "state" / "dispatch_register.ndjson"
+        if not central_path.exists():
+            return ""
+        return _read_register_locked_per_project(central_path)
+    except Exception:
+        return ""
+
+
+def _read_register_locked(path: Path) -> str:
+    """3-state dispatcher for register reads (Wave 1 VNX_USE_CENTRAL_DB).
+
+    | VNX_USE_CENTRAL_DB | Behaviour |
+    |--------------------|-----------|
+    | unset (default)    | per-project read only — zero behaviour change |
+    | shadow             | per-project authoritative; central read compared via metric 4 |
+    | 1                  | central read only |
+    """
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    if flag == "":
+        return _read_register_locked_per_project(path)
+    project_id = _project_id_from_state_dir(path.parent) or os.environ.get("VNX_PROJECT_ID", "")
+    if flag == "1":
+        if project_id:
+            return _read_register_locked_central(project_id)
+        return _read_register_locked_per_project(path)
+    # flag == "shadow": per-project authoritative; central observed-only
+    legacy_content = _read_register_locked_per_project(path)
+    if project_id and _shadow_verifier is not None:
+        try:
+            central_content = _read_register_locked_central(project_id)
+            legacy_events = [
+                json.loads(ln) for ln in legacy_content.splitlines() if ln.strip()
+            ]
+            central_events = [
+                json.loads(ln) for ln in central_content.splitlines() if ln.strip()
+            ]
+            cmp = _shadow_verifier.compare(
+                legacy_events,
+                central_events,
+                project_id=project_id,
+                read_site="_read_register_locked",
+                sql_template=_REGISTER_NDJSON_TEMPLATE,
+                metric_id=4,
+                table="dispatch_register",
+            )
+            if cmp.divergences and _shadow_logger is not None:
+                _shadow_logger.write_comparison_result(
+                    cmp, project_id, "_read_register_locked"
+                )
+        except Exception:
+            pass
+    return legacy_content
+
+
 def _read_events_from_path(path: Path, since_iso: Optional[str]) -> list[dict]:
-    """Read events from a single NDJSON path with optional timestamp filter."""
+    """Read events from a single NDJSON path with optional timestamp filter.
+
+    Uses _read_register_locked_per_project directly so that shadow comparison
+    at this level does not interfere with higher-level _query_recent_dispatches
+    shadow logging (each level logs independently via its own dispatcher).
+    """
     if not path.exists():
         return []
     cutoff_dt = _parse_iso(since_iso) if since_iso else None
     cutoff_lex = since_iso if (since_iso and cutoff_dt is None) else None
     events: list[dict] = []
     try:
-        content = _read_register_locked(path)
+        content = _read_register_locked_per_project(path)
         for line in content.splitlines():
             line = line.strip()
             if not line:
@@ -442,6 +519,102 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
         key = _merge_dedup_key(ev)
         merged[key] = ev  # central overwrites primary on same key
     return sorted(merged.values(), key=lambda e: e.get("timestamp", ""))
+
+
+# ---------------------------------------------------------------------------
+# Shadow-aware recent-dispatch query (Wave 1, 3-state VNX_USE_CENTRAL_DB)
+# ---------------------------------------------------------------------------
+
+
+def _query_recent_dispatches_per_project(
+    path: Path,
+    since_iso: Optional[str] = None,
+) -> list[dict]:
+    """Return dispatch register events from the per-project NDJSON path."""
+    return _read_events_from_path(path, since_iso)
+
+
+def _query_recent_dispatches_central(
+    project_id: str,
+    since_iso: Optional[str] = None,
+) -> list[dict]:
+    """Return dispatch register events from the central NDJSON path, filtered to project_id.
+
+    Metric 1 safety: only rows whose project_id matches are returned.
+    Rows with a missing project_id field are included under the assumption they
+    belong to the requesting project (pre-identity-stamp legacy events); callers
+    that need strict isolation should apply _compare_metric_1_wrong_project_rows.
+    """
+    try:
+        central_base = _resolve_central_data_dir(project_id)
+        central_path = central_base / "state" / "dispatch_register.ndjson"
+        if not central_path.exists():
+            return []
+        events = _read_events_from_path(central_path, since_iso)
+        return [
+            e for e in events
+            if (e.get("project_id") or project_id) == project_id
+        ]
+    except Exception:
+        return []
+
+
+def _query_recent_dispatches(
+    path: Path,
+    project_id: str,
+    since_iso: Optional[str] = None,
+) -> list[dict]:
+    """3-state dispatcher for recent-dispatch reads with shadow comparison.
+
+    | VNX_USE_CENTRAL_DB | Behaviour |
+    |--------------------|-----------|
+    | unset (default)    | per-project read only — zero behaviour change |
+    | shadow             | per-project authoritative; central compared via metric 1 + metric 4 |
+    | 1                  | central read only (project_id-scoped) |
+    """
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    if flag == "":
+        return _query_recent_dispatches_per_project(path, since_iso)
+    if flag == "1":
+        if project_id:
+            return _query_recent_dispatches_central(project_id, since_iso)
+        return _query_recent_dispatches_per_project(path, since_iso)
+    # flag == "shadow": per-project authoritative; central observed-only
+    legacy = _query_recent_dispatches_per_project(path, since_iso)
+    if not project_id or _shadow_verifier is None:
+        return legacy
+    try:
+        central = _query_recent_dispatches_central(project_id, since_iso)
+        # metric 1: wrong-project rows
+        cmp1 = _shadow_verifier.compare(
+            legacy,
+            central,
+            project_id=project_id,
+            read_site="_query_recent_dispatches",
+            sql_template=_REGISTER_NDJSON_TEMPLATE,
+            metric_id=1,
+        )
+        if cmp1.divergences and _shadow_logger is not None:
+            _shadow_logger.write_comparison_result(
+                cmp1, project_id, "_query_recent_dispatches"
+            )
+        # metric 4: count + checksum
+        cmp4 = _shadow_verifier.compare(
+            legacy,
+            central,
+            project_id=project_id,
+            read_site="_query_recent_dispatches",
+            sql_template=_REGISTER_NDJSON_TEMPLATE,
+            metric_id=4,
+            table="dispatch_register",
+        )
+        if cmp4.divergences and _shadow_logger is not None:
+            _shadow_logger.write_comparison_result(
+                cmp4, project_id, "_query_recent_dispatches"
+            )
+    except Exception:
+        pass
+    return legacy
 
 
 # CLI for bash callers

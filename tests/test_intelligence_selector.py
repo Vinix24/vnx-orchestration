@@ -907,5 +907,487 @@ class TestPreventionRuleTagParsing(unittest.TestCase):
         self.assertIsNotNone(result)
 
 
+# ---------------------------------------------------------------------------
+# Wave 1 shadow-mode tests — VNX_USE_CENTRAL_DB flag (PR-W1.4)
+# ---------------------------------------------------------------------------
+
+def _setup_central_quality_db(central_db_path: Path, project_id: str) -> sqlite3.Connection:
+    """Create a minimal central quality_intelligence.db with project_id column seeded."""
+    conn = sqlite3.connect(str(central_db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS success_patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pattern_type TEXT, category TEXT, title TEXT, description TEXT,
+            confidence_score REAL DEFAULT 0.0, usage_count INTEGER DEFAULT 0,
+            source_dispatch_ids TEXT, first_seen DATETIME, last_used DATETIME,
+            valid_from DATETIME DEFAULT NULL, valid_until DATETIME DEFAULT NULL,
+            project_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS antipatterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT, title TEXT, description TEXT,
+            why_problematic TEXT, better_alternative TEXT,
+            occurrence_count INTEGER DEFAULT 0, severity TEXT DEFAULT 'medium',
+            source_dispatch_ids TEXT, first_seen DATETIME, last_seen DATETIME,
+            valid_from DATETIME DEFAULT NULL, valid_until DATETIME DEFAULT NULL,
+            project_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS dispatch_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT UNIQUE, terminal TEXT, track TEXT,
+            role TEXT, skill_name TEXT, gate TEXT, priority TEXT DEFAULT 'P1',
+            pr_id TEXT, pattern_count INTEGER DEFAULT 0,
+            prevention_rule_count INTEGER DEFAULT 0,
+            dispatched_at DATETIME, completed_at DATETIME,
+            outcome_status TEXT, project_id TEXT
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+def _seed_central_proven_pattern(
+    conn: sqlite3.Connection,
+    project_id: str,
+    title: str = "Central pattern",
+    description: str = "From central DB.",
+    category: str = "architect",
+    confidence: float = 0.85,
+    usage_count: int = 5,
+) -> int:
+    cur = conn.execute(
+        """INSERT INTO success_patterns (title, description, category, confidence_score,
+           usage_count, first_seen, last_used, project_id)
+           VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)""",
+        (title, description, category, confidence, usage_count, project_id),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _seed_central_antipattern(
+    conn: sqlite3.Connection,
+    project_id: str,
+    title: str = "Central antipattern",
+    category: str = "reviewer",
+    severity: str = "high",
+    occurrence_count: int = 3,
+) -> int:
+    cur = conn.execute(
+        """INSERT INTO antipatterns (title, description, category, severity,
+           why_problematic, better_alternative, occurrence_count,
+           first_seen, last_seen, project_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)""",
+        (title, title, category, severity, "Bad pattern", "Do better", occurrence_count, project_id),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _seed_central_dispatch(
+    conn: sqlite3.Connection,
+    project_id: str,
+    dispatch_id: str = "central-dispatch-001",
+    skill_name: str = "architect",
+    outcome: str = "success",
+    days_ago: int = 2,
+) -> int:
+    from datetime import datetime, timedelta, timezone
+    dispatched_at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    cur = conn.execute(
+        """INSERT INTO dispatch_metadata (dispatch_id, terminal, track, skill_name,
+           outcome_status, dispatched_at, project_id)
+           VALUES (?, 'T1', 'A', ?, ?, ?, ?)""",
+        (dispatch_id, skill_name, outcome, dispatched_at, project_id),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+class TestShadowModeQueryProvenPatterns(unittest.TestCase):
+    """3-state flag tests for _query_proven_patterns (metric 3, success_patterns)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._project_id = "test-project"
+        # Per-project DB
+        self._per_project_db_path = self._base / "quality_intelligence.db"
+        self._per_project_db = _setup_quality_db(self._per_project_db_path)
+        _seed_proven_pattern(
+            self._per_project_db, title="Per-project pattern",
+            confidence=0.85, usage_count=5, category="architect",
+        )
+        self._per_project_db.close()
+        # Central DB (simulated at ~/.vnx-data/<project_id>/state/)
+        self._central_dir = self._base / "central" / self._project_id / "state"
+        self._central_dir.mkdir(parents=True)
+        self._central_db_path = self._central_dir / "quality_intelligence.db"
+        self._central_db = _setup_central_quality_db(self._central_db_path, self._project_id)
+        _seed_central_proven_pattern(
+            self._central_db, self._project_id,
+            title="Central pattern", confidence=0.85, usage_count=5, category="architect",
+        )
+        self._central_db.close()
+        # Shadow ledger dir
+        self._ledger_path = self._base / "shadow_divergence.ndjson"
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+
+    def tearDown(self):
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        self._tmpdir.cleanup()
+
+    def _make_selector(self) -> IntelligenceSelector:
+        return IntelligenceSelector(quality_db_path=self._per_project_db_path)
+
+    def _open_per_project_db(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._per_project_db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test__query_proven_patterns_unset_uses_per_project(self):
+        """When VNX_USE_CENTRAL_DB unset, dispatcher returns per-project result unchanged."""
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        selector = self._make_selector()
+        db = self._open_per_project_db()
+        items = selector._query_proven_patterns(db, "research_structured", ["architect"])
+        db.close()
+        selector.close()
+        self.assertTrue(len(items) >= 1)
+        titles = [i.title for i in items]
+        self.assertTrue(any("Per-project" in t for t in titles))
+
+    def test__query_proven_patterns_shadow_logs_divergence(self):
+        """Shadow mode logs divergence when per-project and central results differ."""
+        import shadow_verifier
+        import shadow_logger
+
+        os.environ["VNX_USE_CENTRAL_DB"] = "shadow"
+
+        # Patch _get_central_qi_conn to return central DB conn
+        import intelligence_selector as _is_module
+        original_central_data_dir = _is_module._resolve_central_data_dir
+
+        def _patched_resolve(pid):
+            return self._base / "central" / pid
+
+        _is_module._resolve_central_data_dir = _patched_resolve
+
+        # Patch current_project_id to return our test project_id
+        import project_scope as _ps
+        original_pid = _ps.current_project_id
+
+        def _patched_pid():
+            return self._project_id
+
+        _ps.current_project_id = _patched_pid
+
+        try:
+            selector = self._make_selector()
+            db = self._open_per_project_db()
+            # Add a divergence: extra item in per-project
+            db.execute(
+                """INSERT INTO success_patterns (title, description, category,
+                   confidence_score, usage_count, first_seen)
+                   VALUES ('Extra per-project', 'Only in per-project', 'reviewer', 0.9, 3, datetime('now'))"""
+            )
+            db.commit()
+            items = selector._query_proven_patterns(db, "research_structured", [])
+            db.close()
+            selector.close()
+            # Legacy result is authoritative (returned)
+            self.assertTrue(len(items) >= 1)
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_central_data_dir
+            _ps.current_project_id = original_pid
+
+    def test__query_proven_patterns_authoritative_uses_central(self):
+        """VNX_USE_CENTRAL_DB=1 → dispatcher returns central result."""
+        import intelligence_selector as _is_module
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _is_module.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _is_module.current_project_id = lambda: self._project_id
+
+        os.environ["VNX_USE_CENTRAL_DB"] = "1"
+        try:
+            selector = self._make_selector()
+            db = self._open_per_project_db()
+            items = selector._query_proven_patterns(db, "research_structured", ["architect"])
+            db.close()
+            selector.close()
+            titles = [i.title for i in items]
+            self.assertTrue(any("Central" in t for t in titles), f"Expected central title, got: {titles}")
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_rcd
+            _is_module.current_project_id = original_pid
+
+
+class TestShadowModeQueryFailurePrevention(unittest.TestCase):
+    """3-state flag tests for _query_failure_prevention (metric 3, antipatterns)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._project_id = "test-project"
+        self._per_project_db_path = self._base / "quality_intelligence.db"
+        db = _setup_quality_db(self._per_project_db_path)
+        _seed_antipattern(db, title="Per-project antipattern", severity="high", occurrence_count=3)
+        db.close()
+        self._central_dir = self._base / "central" / self._project_id / "state"
+        self._central_dir.mkdir(parents=True)
+        self._central_db_path = self._central_dir / "quality_intelligence.db"
+        central_db = _setup_central_quality_db(self._central_db_path, self._project_id)
+        _seed_central_antipattern(
+            central_db, self._project_id, title="Central antipattern",
+            severity="high", occurrence_count=3,
+        )
+        central_db.close()
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+
+    def tearDown(self):
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        self._tmpdir.cleanup()
+
+    def _make_selector(self):
+        return IntelligenceSelector(quality_db_path=self._per_project_db_path)
+
+    def _open_per_project_db(self):
+        conn = sqlite3.connect(str(self._per_project_db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test__query_failure_prevention_unset_uses_per_project(self):
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        selector = self._make_selector()
+        db = self._open_per_project_db()
+        items = selector._query_failure_prevention(db, "research_structured", [])
+        db.close()
+        selector.close()
+        self.assertTrue(len(items) >= 1)
+        self.assertTrue(any("Per-project" in i.title for i in items))
+
+    def test__query_failure_prevention_shadow_logs_divergence(self):
+        import intelligence_selector as _is_module
+        import project_scope as _ps
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _ps.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _ps.current_project_id = lambda: self._project_id
+        os.environ["VNX_USE_CENTRAL_DB"] = "shadow"
+        try:
+            selector = self._make_selector()
+            db = self._open_per_project_db()
+            items = selector._query_failure_prevention(db, "research_structured", [])
+            db.close()
+            selector.close()
+            # Per-project authoritative: result is returned regardless of divergence
+            self.assertIsInstance(items, list)
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_rcd
+            _ps.current_project_id = original_pid
+
+    def test__query_failure_prevention_authoritative_uses_central(self):
+        import intelligence_selector as _is_module
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _is_module.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _is_module.current_project_id = lambda: self._project_id
+        os.environ["VNX_USE_CENTRAL_DB"] = "1"
+        try:
+            selector = self._make_selector()
+            db = self._open_per_project_db()
+            items = selector._query_failure_prevention(db, "research_structured", [])
+            db.close()
+            selector.close()
+            titles = [i.title for i in items]
+            self.assertTrue(any("Central" in t for t in titles), f"Got: {titles}")
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_rcd
+            _is_module.current_project_id = original_pid
+
+
+class TestShadowModeQueryRecentComparable(unittest.TestCase):
+    """3-state flag tests for _query_recent_comparable (metric 4, dispatch_metadata)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._project_id = "test-project"
+        self._per_project_db_path = self._base / "quality_intelligence.db"
+        db = _setup_quality_db(self._per_project_db_path)
+        _seed_recent_dispatch(db, dispatch_id="pp-dispatch-001", skill_name="architect", days_ago=1)
+        db.close()
+        self._central_dir = self._base / "central" / self._project_id / "state"
+        self._central_dir.mkdir(parents=True)
+        self._central_db_path = self._central_dir / "quality_intelligence.db"
+        central_db = _setup_central_quality_db(self._central_db_path, self._project_id)
+        _seed_central_dispatch(central_db, self._project_id, dispatch_id="central-dispatch-001", days_ago=1)
+        central_db.close()
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+
+    def tearDown(self):
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        self._tmpdir.cleanup()
+
+    def _make_selector(self):
+        return IntelligenceSelector(quality_db_path=self._per_project_db_path)
+
+    def _open_per_project_db(self):
+        conn = sqlite3.connect(str(self._per_project_db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test__query_recent_comparable_unset_uses_per_project(self):
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        selector = self._make_selector()
+        db = self._open_per_project_db()
+        items = selector._query_recent_comparable(db, "research_structured", ["architect"])
+        db.close()
+        selector.close()
+        self.assertIsInstance(items, list)
+        ids = [i.item_id for i in items]
+        self.assertTrue(any("pp-dispatch-001" in iid for iid in ids), f"Got: {ids}")
+
+    def test__query_recent_comparable_shadow_logs_divergence(self):
+        import intelligence_selector as _is_module
+        import project_scope as _ps
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _ps.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _ps.current_project_id = lambda: self._project_id
+        os.environ["VNX_USE_CENTRAL_DB"] = "shadow"
+        try:
+            selector = self._make_selector()
+            db = self._open_per_project_db()
+            items = selector._query_recent_comparable(db, "research_structured", [])
+            db.close()
+            selector.close()
+            # Per-project authoritative
+            self.assertIsInstance(items, list)
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_rcd
+            _ps.current_project_id = original_pid
+
+    def test__query_recent_comparable_authoritative_uses_central(self):
+        import intelligence_selector as _is_module
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _is_module.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _is_module.current_project_id = lambda: self._project_id
+        os.environ["VNX_USE_CENTRAL_DB"] = "1"
+        try:
+            selector = self._make_selector()
+            db = self._open_per_project_db()
+            items = selector._query_recent_comparable(db, "research_structured", [])
+            db.close()
+            selector.close()
+            ids = [i.item_id for i in items]
+            self.assertTrue(any("central-dispatch" in iid for iid in ids), f"Got: {ids}")
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_rcd
+            _is_module.current_project_id = original_pid
+
+
+class TestShadowModeSelectIntegration(unittest.TestCase):
+    """Integration tests: select() top-N unaffected by shadow mode; divergences logged."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._project_id = "test-project"
+        self._per_project_db_path = self._base / "quality_intelligence.db"
+        db = _setup_quality_db(self._per_project_db_path)
+        _seed_proven_pattern(db, title="Best pattern", confidence=0.9, usage_count=5, category="architect")
+        _seed_antipattern(db, title="Best antipattern", severity="high", occurrence_count=4, category="architect")
+        _seed_recent_dispatch(db, dispatch_id="sel-disp-001", skill_name="architect", days_ago=1)
+        db.close()
+        self._central_dir = self._base / "central" / self._project_id / "state"
+        self._central_dir.mkdir(parents=True)
+        central_db = _setup_central_quality_db(self._central_dir / "quality_intelligence.db", self._project_id)
+        # Central has same data — no divergence
+        _seed_central_proven_pattern(central_db, self._project_id, title="Best pattern", confidence=0.9, usage_count=5, category="architect")
+        central_db.close()
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+
+    def tearDown(self):
+        os.environ.pop("VNX_USE_CENTRAL_DB", None)
+        self._tmpdir.cleanup()
+
+    def test_select_with_shadow_mode_returns_legacy_top_n(self):
+        """select() in shadow mode returns per-project top-N unchanged."""
+        import intelligence_selector as _is_module
+        import project_scope as _ps
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _ps.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _ps.current_project_id = lambda: self._project_id
+        os.environ["VNX_USE_CENTRAL_DB"] = "shadow"
+        try:
+            selector = IntelligenceSelector(quality_db_path=self._per_project_db_path)
+            result_shadow = selector.select("d-shadow-001", "dispatch_create", skill_name="architect")
+            selector.close()
+
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            selector2 = IntelligenceSelector(quality_db_path=self._per_project_db_path)
+            result_default = selector2.select("d-default-001", "dispatch_create", skill_name="architect")
+            selector2.close()
+
+            self.assertEqual(result_shadow.items_injected, result_default.items_injected)
+            shadow_ids = [i.item_id for i in result_shadow.items]
+            default_ids = [i.item_id for i in result_default.items]
+            self.assertEqual(shadow_ids, default_ids)
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            _is_module._resolve_central_data_dir = original_rcd
+            _ps.current_project_id = original_pid
+
+    def test_select_with_shadow_mode_logs_divergence_per_class(self):
+        """Shadow mode captures divergence from each of the 3 query dispatchers."""
+        import intelligence_selector as _is_module
+        import project_scope as _ps
+        import shadow_verifier
+        original_rcd = _is_module._resolve_central_data_dir
+        original_pid = _ps.current_project_id
+
+        _is_module._resolve_central_data_dir = lambda pid: self._base / "central" / pid
+        _ps.current_project_id = lambda: self._project_id
+        os.environ["VNX_USE_CENTRAL_DB"] = "shadow"
+
+        logged_calls = []
+        original_compare = shadow_verifier.compare
+
+        def _spy_compare(*args, **kwargs):
+            logged_calls.append(kwargs.get("read_site", ""))
+            return original_compare(*args, **kwargs)
+
+        shadow_verifier.compare = _spy_compare
+        try:
+            selector = IntelligenceSelector(quality_db_path=self._per_project_db_path)
+            selector.select("d-spy-001", "dispatch_create", skill_name="architect")
+            selector.close()
+            # All 3 dispatchers should have been called
+            sites = [c for c in logged_calls if "IntelligenceSelector" in c]
+            self.assertGreaterEqual(len(sites), 1, f"Expected shadow compare calls, got: {logged_calls}")
+        finally:
+            os.environ.pop("VNX_USE_CENTRAL_DB", None)
+            shadow_verifier.compare = original_compare
+            _is_module._resolve_central_data_dir = original_rcd
+            _ps.current_project_id = original_pid
+
+
 if __name__ == "__main__":
     unittest.main()

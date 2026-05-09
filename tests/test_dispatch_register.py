@@ -397,3 +397,230 @@ class TestAppendEventIdRequirement:
         """feature_id alone satisfies the ID requirement."""
         result = append_event("dispatch_created", feature_id="F-55")
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Wave 1 shadow-mode tests — VNX_USE_CENTRAL_DB flag (PR-W1.4)
+# ---------------------------------------------------------------------------
+
+import json as _json
+import tempfile as _tempfile
+import unittest as _unittest
+
+# Import shadow-aware functions from dispatch_register
+from dispatch_register import (
+    _read_register_locked,
+    _read_register_locked_per_project,
+    _read_register_locked_central,
+    _query_recent_dispatches,
+    _query_recent_dispatches_per_project,
+    _query_recent_dispatches_central,
+)
+import dispatch_register as _dr_module
+
+
+def _make_ndjson_content(*events: dict) -> str:
+    return "\n".join(_json.dumps(e) for e in events) + "\n"
+
+
+class TestReadRegisterLockedShadow:
+    """3-state flag tests for _read_register_locked."""
+
+    def _write_register(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def test__read_register_locked_unset_uses_per_project(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
+        reg = tmp_path / "state" / "dispatch_register.ndjson"
+        content = _make_ndjson_content({"event": "dispatch_created", "dispatch_id": "d-001"})
+        self._write_register(reg, content)
+
+        result = _read_register_locked(reg)
+        assert "dispatch_created" in result
+        assert "d-001" in result
+
+    def test__read_register_locked_authoritative_uses_central(self, monkeypatch, tmp_path):
+        """VNX_USE_CENTRAL_DB=1 → reads from central register path."""
+        project_id = "test-project"
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
+        monkeypatch.setenv("VNX_PROJECT_ID", project_id)
+
+        # Per-project file (legacy)
+        reg = tmp_path / "state" / "dispatch_register.ndjson"
+        legacy_content = _make_ndjson_content({"event": "dispatch_created", "dispatch_id": "legacy-d-001"})
+        self._write_register(reg, legacy_content)
+
+        # Central file
+        central_dir = tmp_path / "central" / project_id / "state"
+        central_dir.mkdir(parents=True)
+        central_content = _make_ndjson_content({"event": "dispatch_created", "dispatch_id": "central-d-001"})
+        (central_dir / "dispatch_register.ndjson").write_text(central_content)
+
+        # Patch _resolve_central_data_dir to point at tmp_path/central/<pid>
+        original = _dr_module._resolve_central_data_dir
+        _dr_module._resolve_central_data_dir = lambda pid: tmp_path / "central" / pid
+        try:
+            result = _read_register_locked(reg)
+            assert "central-d-001" in result, f"Expected central content, got: {result[:200]}"
+            assert "legacy-d-001" not in result
+        finally:
+            _dr_module._resolve_central_data_dir = original
+
+    def test__read_register_locked_shadow_logs_divergence(self, monkeypatch, tmp_path):
+        """Shadow mode logs divergence when per-project and central differ."""
+        project_id = "test-project"
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
+        monkeypatch.setenv("VNX_PROJECT_ID", project_id)
+
+        # Per-project with 2 events
+        reg = tmp_path / "state" / "dispatch_register.ndjson"
+        legacy_content = _make_ndjson_content(
+            {"event": "dispatch_created", "dispatch_id": "d-001"},
+            {"event": "dispatch_completed", "dispatch_id": "d-002"},
+        )
+        self._write_register(reg, legacy_content)
+
+        # Central with 1 event (count mismatch → metric 4 divergence)
+        central_dir = tmp_path / "central" / project_id / "state"
+        central_dir.mkdir(parents=True)
+        central_content = _make_ndjson_content({"event": "dispatch_created", "dispatch_id": "d-001"})
+        (central_dir / "dispatch_register.ndjson").write_text(central_content)
+
+        import shadow_verifier as sv
+        compare_calls = []
+        original_compare = sv.compare
+
+        def _spy_compare(*args, **kwargs):
+            compare_calls.append(kwargs.get("read_site", ""))
+            return original_compare(*args, **kwargs)
+
+        original_rcd = _dr_module._resolve_central_data_dir
+        _dr_module._resolve_central_data_dir = lambda pid: tmp_path / "central" / pid
+        sv.compare = _spy_compare
+        try:
+            result = _read_register_locked(reg)
+            # Legacy content is authoritative
+            assert "d-001" in result
+            assert "d-002" in result
+            # Shadow comparison was invoked
+            assert any("_read_register_locked" in c for c in compare_calls), f"compare not called: {compare_calls}"
+        finally:
+            sv.compare = original_compare
+            _dr_module._resolve_central_data_dir = original_rcd
+
+
+class TestQueryRecentDispatchesShadow:
+    """3-state flag tests for _query_recent_dispatches."""
+
+    def test__query_recent_dispatches_unset_uses_per_project(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
+        project_id = "test-project"
+
+        reg = tmp_path / "state" / "dispatch_register.ndjson"
+        reg.parent.mkdir(parents=True)
+        reg.write_text(_make_ndjson_content(
+            {"event": "dispatch_created", "dispatch_id": "pp-001",
+             "timestamp": "2026-05-01T10:00:00.000000Z"}
+        ))
+
+        events = _query_recent_dispatches(reg, project_id)
+        assert len(events) == 1
+        assert events[0]["dispatch_id"] == "pp-001"
+
+    def test__query_recent_dispatches_authoritative_uses_central(self, monkeypatch, tmp_path):
+        project_id = "test-project"
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "1")
+
+        reg = tmp_path / "state" / "dispatch_register.ndjson"
+        reg.parent.mkdir(parents=True)
+        reg.write_text(_make_ndjson_content(
+            {"event": "dispatch_created", "dispatch_id": "pp-001",
+             "project_id": project_id, "timestamp": "2026-05-01T10:00:00.000000Z"}
+        ))
+
+        central_dir = tmp_path / "central" / project_id / "state"
+        central_dir.mkdir(parents=True)
+        (central_dir / "dispatch_register.ndjson").write_text(_make_ndjson_content(
+            {"event": "dispatch_created", "dispatch_id": "central-001",
+             "project_id": project_id, "timestamp": "2026-05-01T11:00:00.000000Z"}
+        ))
+
+        original = _dr_module._resolve_central_data_dir
+        _dr_module._resolve_central_data_dir = lambda pid: tmp_path / "central" / pid
+        try:
+            events = _query_recent_dispatches(reg, project_id)
+            ids = [e["dispatch_id"] for e in events]
+            assert "central-001" in ids, f"Expected central event, got: {ids}"
+            assert "pp-001" not in ids
+        finally:
+            _dr_module._resolve_central_data_dir = original
+
+    def test__query_recent_dispatches_shadow_logs_divergence(self, monkeypatch, tmp_path):
+        """Shadow mode calls compare for both metric 1 and metric 4."""
+        project_id = "test-project"
+        monkeypatch.setenv("VNX_USE_CENTRAL_DB", "shadow")
+
+        reg = tmp_path / "state" / "dispatch_register.ndjson"
+        reg.parent.mkdir(parents=True)
+        reg.write_text(_make_ndjson_content(
+            {"event": "dispatch_created", "dispatch_id": "pp-001",
+             "project_id": project_id, "timestamp": "2026-05-01T10:00:00.000000Z"},
+            {"event": "dispatch_completed", "dispatch_id": "pp-002",
+             "project_id": project_id, "timestamp": "2026-05-01T11:00:00.000000Z"},
+        ))
+
+        central_dir = tmp_path / "central" / project_id / "state"
+        central_dir.mkdir(parents=True)
+        # Central has fewer events → metric 4 count divergence
+        (central_dir / "dispatch_register.ndjson").write_text(_make_ndjson_content(
+            {"event": "dispatch_created", "dispatch_id": "pp-001",
+             "project_id": project_id, "timestamp": "2026-05-01T10:00:00.000000Z"}
+        ))
+
+        import shadow_verifier as sv
+        compare_calls = []
+        original_compare = sv.compare
+
+        def _spy(*args, **kwargs):
+            compare_calls.append(kwargs.get("metric_id"))
+            return original_compare(*args, **kwargs)
+
+        original_rcd = _dr_module._resolve_central_data_dir
+        _dr_module._resolve_central_data_dir = lambda pid: tmp_path / "central" / pid
+        sv.compare = _spy
+        try:
+            events = _query_recent_dispatches(reg, project_id)
+            # Legacy is authoritative
+            assert len(events) == 2
+            # Both metric 1 and metric 4 should have been compared
+            assert 1 in compare_calls, f"metric 1 not compared: {compare_calls}"
+            assert 4 in compare_calls, f"metric 4 not compared: {compare_calls}"
+        finally:
+            sv.compare = original_compare
+            _dr_module._resolve_central_data_dir = original_rcd
+
+
+class TestWritePathsUnchangedByShadowMode:
+    """Write paths in dispatch_register.py must be unaffected by VNX_USE_CENTRAL_DB."""
+
+    def test_write_paths_unchanged_by_shadow_mode(self, monkeypatch, isolated_data_dir):
+        """append_event writes correctly regardless of VNX_USE_CENTRAL_DB value."""
+        for flag_val in ("", "shadow", "1"):
+            if flag_val:
+                monkeypatch.setenv("VNX_USE_CENTRAL_DB", flag_val)
+            else:
+                monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
+
+            dispatch_id = f"write-test-flag-{flag_val or 'unset'}"
+            result = append_event("dispatch_created", dispatch_id=dispatch_id)
+            assert result is True, f"append_event failed with flag={flag_val!r}"
+
+        # All 3 writes should be in the register (one per flag value)
+        reg = _reg_path(isolated_data_dir)
+        assert reg.exists()
+        lines = [l for l in reg.read_text().splitlines() if l.strip()]
+        ids = [_json.loads(l)["dispatch_id"] for l in lines]
+        assert "write-test-flag-unset" in ids
+        assert "write-test-flag-shadow" in ids
+        assert "write-test-flag-1" in ids

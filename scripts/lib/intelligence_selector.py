@@ -19,12 +19,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    import shadow_verifier as _shadow_verifier
+    import shadow_logger as _shadow_logger
+except ImportError:
+    _shadow_verifier = None  # type: ignore[assignment]
+    _shadow_logger = None  # type: ignore[assignment]
+
+try:
+    from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
+except ImportError:
+    _resolve_central_data_dir = None  # type: ignore[assignment]
 
 try:
     from project_scope import current_project_id, project_filter_enabled
@@ -352,6 +365,34 @@ def _task_class_matches(item_filter: List[str], task_class: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SQL templates used by shadow comparisons (passed to shadow_verifier.compare)
+# ---------------------------------------------------------------------------
+
+_PROVEN_PATTERNS_SQL_TEMPLATE = (
+    "SELECT id, title, description, confidence_score, usage_count "
+    "FROM success_patterns "
+    "WHERE (valid_until IS NULL OR valid_until > datetime('now')) "
+    "ORDER BY confidence_score DESC LIMIT 20"
+)
+
+_FAILURE_PREVENTION_SQL_TEMPLATE = (
+    "SELECT id, title, description, severity, occurrence_count "
+    "FROM antipatterns "
+    "WHERE occurrence_count >= 1 "
+    "AND (valid_until IS NULL OR valid_until > datetime('now')) "
+    "ORDER BY occurrence_count DESC LIMIT 5"
+)
+
+_RECENT_COMPARABLE_SQL_TEMPLATE = (
+    "SELECT dispatch_id, terminal, track, role, skill_name, gate, "
+    "outcome_status, dispatched_at "
+    "FROM dispatch_metadata "
+    "WHERE dispatched_at >= ? AND outcome_status IS NOT NULL "
+    "ORDER BY dispatched_at DESC LIMIT 20"
+)
+
+
+# ---------------------------------------------------------------------------
 # Intelligence Selector
 # ---------------------------------------------------------------------------
 
@@ -426,6 +467,29 @@ class IntelligenceSelector:
             maybe_reconcile(self._quality_db_path)
         except Exception:
             pass
+
+    def _get_central_qi_conn(self) -> Optional[sqlite3.Connection]:
+        """Open a fresh independent connection to the central quality_intelligence.db.
+
+        Verifier-independence principle (Wave 1 design §4): this connection is
+        opened via resolve_central_data_dir — never reusing self._quality_db —
+        so schema bugs in the per-project path cannot blind the comparator.
+        Returns None when project_id cannot be resolved or the DB does not exist.
+        """
+        if _resolve_central_data_dir is None:
+            return None
+        try:
+            project_id = current_project_id()
+            if not project_id:
+                return None
+            db_path = _resolve_central_data_dir(project_id) / "state" / "quality_intelligence.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -1040,13 +1104,13 @@ class IntelligenceSelector:
 
         return result
 
-    def _query_proven_patterns(
+    def _query_proven_patterns_per_project(
         self,
         db: sqlite3.Connection,
         task_class: str,
         scope_tags: List[str],
     ) -> List[IntelligenceItem]:
-        """Query success_patterns for proven_pattern candidates."""
+        """Query success_patterns for proven_pattern candidates (per-project DB)."""
         # Safety net: if the daily learning_loop reconcile has not run
         # recently, sync pattern_usage learning state into
         # success_patterns.confidence_score before reading it.
@@ -1268,13 +1332,13 @@ class IntelligenceSelector:
             return None
         return dict(row)
 
-    def _query_failure_prevention(
+    def _query_failure_prevention_per_project(
         self,
         db: sqlite3.Connection,
         task_class: str,
         scope_tags: List[str],
     ) -> List[IntelligenceItem]:
-        """Query antipatterns and prevention_rules for failure_prevention candidates."""
+        """Query antipatterns and prevention_rules for failure_prevention candidates (per-project DB)."""
         items: List[IntelligenceItem] = []
 
         # Query antipatterns
@@ -1398,13 +1462,13 @@ class IntelligenceSelector:
 
         return items
 
-    def _query_recent_comparable(
+    def _query_recent_comparable_per_project(
         self,
         db: sqlite3.Connection,
         task_class: str,
         scope_tags: List[str],
     ) -> List[IntelligenceItem]:
-        """Query dispatch_metadata for recent_comparable candidates."""
+        """Query dispatch_metadata for recent_comparable candidates (per-project DB)."""
         items: List[IntelligenceItem] = []
         cutoff = (datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)).isoformat()
 
@@ -1472,6 +1536,348 @@ class IntelligenceSelector:
             ))
 
         return items
+
+    # ------------------------------------------------------------------
+    # Central DB query methods (Wave 1 shadow reads)
+    # ------------------------------------------------------------------
+
+    def _query_proven_patterns_central(
+        self,
+        task_class: str,
+        scope_tags: List[str],
+    ) -> List[IntelligenceItem]:
+        """Query success_patterns from central DB (independent connection, project_id-scoped)."""
+        items: List[IntelligenceItem] = []
+        conn = self._get_central_qi_conn()
+        if conn is None:
+            return items
+        try:
+            project_id = current_project_id()
+            has_pattern_cat = _table_has_column(conn, "success_patterns", "pattern_category")
+            has_content_hash_col = _table_has_column(conn, "success_patterns", "content_hash")
+            has_project_id_col = _table_has_column(conn, "success_patterns", "project_id")
+            select_cols = (
+                "id, title, description, category, confidence_score, "
+                "usage_count, source_dispatch_ids, first_seen, last_used"
+            )
+            if has_pattern_cat:
+                select_cols += ", pattern_category"
+            if has_content_hash_col:
+                select_cols += ", content_hash"
+            if has_project_id_col:
+                select_cols += ", project_id"
+            if has_project_id_col and project_id:
+                rows = conn.execute(
+                    f"""SELECT {select_cols} FROM success_patterns
+                    WHERE (valid_until IS NULL OR valid_until > datetime('now'))
+                    AND project_id = ?
+                    ORDER BY confidence_score DESC LIMIT 20""",
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""SELECT {select_cols} FROM success_patterns
+                    WHERE (valid_until IS NULL OR valid_until > datetime('now'))
+                    ORDER BY confidence_score DESC LIMIT 20"""
+                ).fetchall()
+            for row in rows:
+                row_d = dict(row)
+                category = row_d.get("category", "")
+                pattern_scope = [category] if category else []
+                if not _scope_matches(pattern_scope, scope_tags):
+                    continue
+                title = (row_d.get("title") or "Proven pattern")[:120]
+                content = (row_d.get("description") or "")[:MAX_CONTENT_CHARS_PER_ITEM]
+                stored_cat = row_d.get("pattern_category")
+                pattern_category = stored_cat or classify_pattern_category(title, content)
+                items.append(IntelligenceItem(
+                    item_id=_stable_item_id("sp", str(row_d.get("id", ""))),
+                    item_class="proven_pattern",
+                    title=title,
+                    content=content,
+                    confidence=float(row_d.get("confidence_score", 0.0)),
+                    evidence_count=int(row_d.get("usage_count", 0)),
+                    last_seen=row_d.get("last_used") or row_d.get("first_seen") or _now_utc(),
+                    scope_tags=pattern_scope,
+                    task_class_filter=[],
+                    pattern_category=pattern_category,
+                    content_hash=_content_hash(title, content),
+                ))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return items
+
+    def _query_failure_prevention_central(
+        self,
+        task_class: str,
+        scope_tags: List[str],
+    ) -> List[IntelligenceItem]:
+        """Query antipatterns from central DB (independent connection, project_id-scoped)."""
+        items: List[IntelligenceItem] = []
+        conn = self._get_central_qi_conn()
+        if conn is None:
+            return items
+        try:
+            project_id = current_project_id()
+            has_project_id = _table_has_column(conn, "antipatterns", "project_id")
+            severity_confidence = {"critical": 0.9, "high": 0.75, "medium": 0.6, "low": 0.5}
+            if has_project_id and project_id:
+                rows = conn.execute(
+                    """SELECT id, title, description, category, severity,
+                           why_problematic, better_alternative,
+                           occurrence_count, first_seen, last_seen
+                    FROM antipatterns
+                    WHERE occurrence_count >= 1
+                      AND (valid_until IS NULL OR valid_until > datetime('now'))
+                      AND project_id = ?
+                    ORDER BY
+                        CASE severity
+                            WHEN 'critical' THEN 4 WHEN 'high' THEN 3
+                            WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0
+                        END DESC,
+                        occurrence_count DESC
+                    LIMIT 5""",
+                    (project_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id, title, description, category, severity,
+                           why_problematic, better_alternative,
+                           occurrence_count, first_seen, last_seen
+                    FROM antipatterns
+                    WHERE occurrence_count >= 1
+                      AND (valid_until IS NULL OR valid_until > datetime('now'))
+                    ORDER BY
+                        CASE severity
+                            WHEN 'critical' THEN 4 WHEN 'high' THEN 3
+                            WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0
+                        END DESC,
+                        occurrence_count DESC
+                    LIMIT 5"""
+                ).fetchall()
+            for row in rows:
+                row_d = dict(row)
+                category = row_d.get("category", "")
+                pattern_scope = [category] if category else []
+                if not _scope_matches(pattern_scope, scope_tags):
+                    continue
+                content_parts = []
+                if row_d.get("why_problematic"):
+                    content_parts.append(row_d["why_problematic"])
+                if row_d.get("better_alternative"):
+                    content_parts.append(f"Instead: {row_d['better_alternative']}")
+                content = " ".join(content_parts)[:MAX_CONTENT_CHARS_PER_ITEM]
+                severity = row_d.get("severity", "medium")
+                confidence = severity_confidence.get(severity, 0.5)
+                ap_title = (row_d.get("title") or "Failure prevention")[:120]
+                items.append(IntelligenceItem(
+                    item_id=_stable_item_id("ap", str(row_d.get("id", ""))),
+                    item_class="failure_prevention",
+                    title=ap_title,
+                    content=content,
+                    confidence=confidence,
+                    evidence_count=int(row_d.get("occurrence_count", 1)),
+                    last_seen=row_d.get("last_seen") or row_d.get("first_seen") or _now_utc(),
+                    scope_tags=pattern_scope,
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_ANTIPATTERN_EVIDENCE,
+                    content_hash=_content_hash(ap_title, content),
+                ))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return items
+
+    def _query_recent_comparable_central(
+        self,
+        task_class: str,
+        scope_tags: List[str],
+    ) -> List[IntelligenceItem]:
+        """Query dispatch_metadata from central DB (independent connection, project_id-scoped)."""
+        items: List[IntelligenceItem] = []
+        conn = self._get_central_qi_conn()
+        if conn is None:
+            return items
+        try:
+            project_id = current_project_id()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)).isoformat()
+            has_project_id = _table_has_column(conn, "dispatch_metadata", "project_id")
+            if has_project_id and project_id:
+                rows = conn.execute(
+                    """SELECT dispatch_id, terminal, track, role, skill_name, gate,
+                           outcome_status, dispatched_at, pattern_count,
+                           prevention_rule_count
+                    FROM dispatch_metadata
+                    WHERE dispatched_at >= ?
+                      AND outcome_status IS NOT NULL
+                      AND project_id = ?
+                    ORDER BY dispatched_at DESC LIMIT 20""",
+                    (cutoff, project_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT dispatch_id, terminal, track, role, skill_name, gate,
+                           outcome_status, dispatched_at, pattern_count,
+                           prevention_rule_count
+                    FROM dispatch_metadata
+                    WHERE dispatched_at >= ?
+                      AND outcome_status IS NOT NULL
+                    ORDER BY dispatched_at DESC LIMIT 20""",
+                    (cutoff,),
+                ).fetchall()
+            for row in rows:
+                row_d = dict(row)
+                dispatch_scope = []
+                if row_d.get("skill_name"):
+                    dispatch_scope.append(row_d["skill_name"])
+                if row_d.get("gate"):
+                    dispatch_scope.append(row_d["gate"])
+                if row_d.get("track"):
+                    dispatch_scope.append(f"Track-{row_d['track']}")
+                if not _scope_matches(dispatch_scope, scope_tags):
+                    continue
+                outcome = row_d.get("outcome_status", "unknown")
+                skill = row_d.get("skill_name") or row_d.get("role") or "unknown"
+                gate = row_d.get("gate") or ""
+                content = (
+                    f"Dispatch {row_d['dispatch_id']} ({skill}, {gate}) "
+                    f"completed with status: {outcome}. "
+                    f"Patterns used: {row_d.get('pattern_count', 0)}, "
+                    f"Prevention rules: {row_d.get('prevention_rule_count', 0)}."
+                )[:MAX_CONTENT_CHARS_PER_ITEM]
+                confidence = 0.7 if outcome == "success" else 0.45
+                dm_title = f"Recent: {skill} dispatch ({outcome})"[:120]
+                items.append(IntelligenceItem(
+                    item_id=_stable_item_id("dm", str(row_d.get("dispatch_id", ""))),
+                    item_class="recent_comparable",
+                    title=dm_title,
+                    content=content,
+                    confidence=confidence,
+                    evidence_count=1,
+                    last_seen=row_d.get("dispatched_at") or _now_utc(),
+                    scope_tags=dispatch_scope,
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_PROCESS,
+                    content_hash=_content_hash(dm_title, content),
+                ))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+        return items
+
+    # ------------------------------------------------------------------
+    # Shadow-aware dispatcher methods (Wave 1 — 3-state VNX_USE_CENTRAL_DB)
+    # ------------------------------------------------------------------
+
+    def _query_proven_patterns(
+        self,
+        db: sqlite3.Connection,
+        task_class: str,
+        scope_tags: List[str],
+    ) -> List[IntelligenceItem]:
+        """3-state dispatcher: per-project | central | shadow (metric 3, success_patterns)."""
+        flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+        if flag == "":
+            return self._query_proven_patterns_per_project(db, task_class, scope_tags)
+        if flag == "1":
+            return self._query_proven_patterns_central(task_class, scope_tags)
+        # flag == "shadow": per-project authoritative; central observed-only
+        legacy = self._query_proven_patterns_per_project(db, task_class, scope_tags)
+        central = self._query_proven_patterns_central(task_class, scope_tags)
+        if _shadow_verifier is not None:
+            project_id = current_project_id()
+            try:
+                cmp = _shadow_verifier.compare(
+                    [item.to_dict() for item in legacy],
+                    [item.to_dict() for item in central],
+                    project_id=project_id,
+                    read_site="IntelligenceSelector._query_proven_patterns",
+                    sql_template=_PROVEN_PATTERNS_SQL_TEMPLATE,
+                    metric_id=3,
+                )
+                if cmp.divergences and _shadow_logger is not None:
+                    _shadow_logger.write_comparison_result(
+                        cmp, project_id,
+                        "IntelligenceSelector._query_proven_patterns",
+                    )
+            except Exception:
+                pass
+        return legacy
+
+    def _query_failure_prevention(
+        self,
+        db: sqlite3.Connection,
+        task_class: str,
+        scope_tags: List[str],
+    ) -> List[IntelligenceItem]:
+        """3-state dispatcher: per-project | central | shadow (metric 3, antipatterns)."""
+        flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+        if flag == "":
+            return self._query_failure_prevention_per_project(db, task_class, scope_tags)
+        if flag == "1":
+            return self._query_failure_prevention_central(task_class, scope_tags)
+        # flag == "shadow"
+        legacy = self._query_failure_prevention_per_project(db, task_class, scope_tags)
+        central = self._query_failure_prevention_central(task_class, scope_tags)
+        if _shadow_verifier is not None:
+            project_id = current_project_id()
+            try:
+                cmp = _shadow_verifier.compare(
+                    [item.to_dict() for item in legacy],
+                    [item.to_dict() for item in central],
+                    project_id=project_id,
+                    read_site="IntelligenceSelector._query_failure_prevention",
+                    sql_template=_FAILURE_PREVENTION_SQL_TEMPLATE,
+                    metric_id=3,
+                )
+                if cmp.divergences and _shadow_logger is not None:
+                    _shadow_logger.write_comparison_result(
+                        cmp, project_id,
+                        "IntelligenceSelector._query_failure_prevention",
+                    )
+            except Exception:
+                pass
+        return legacy
+
+    def _query_recent_comparable(
+        self,
+        db: sqlite3.Connection,
+        task_class: str,
+        scope_tags: List[str],
+    ) -> List[IntelligenceItem]:
+        """3-state dispatcher: per-project | central | shadow (metric 4, dispatch_metadata)."""
+        flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+        if flag == "":
+            return self._query_recent_comparable_per_project(db, task_class, scope_tags)
+        if flag == "1":
+            return self._query_recent_comparable_central(task_class, scope_tags)
+        # flag == "shadow"
+        legacy = self._query_recent_comparable_per_project(db, task_class, scope_tags)
+        central = self._query_recent_comparable_central(task_class, scope_tags)
+        if _shadow_verifier is not None:
+            project_id = current_project_id()
+            try:
+                cmp = _shadow_verifier.compare(
+                    [item.to_dict() for item in legacy],
+                    [item.to_dict() for item in central],
+                    project_id=project_id,
+                    read_site="IntelligenceSelector._query_recent_comparable",
+                    sql_template=_RECENT_COMPARABLE_SQL_TEMPLATE,
+                    metric_id=4,
+                    table="dispatch_metadata",
+                )
+                if cmp.divergences and _shadow_logger is not None:
+                    _shadow_logger.write_comparison_result(
+                        cmp, project_id,
+                        "IntelligenceSelector._query_recent_comparable",
+                    )
+            except Exception:
+                pass
+        return legacy
 
     # ------------------------------------------------------------------
     # Payload enforcement
