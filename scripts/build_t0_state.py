@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -73,6 +74,13 @@ try:
     from pr_queue_state import build_pr_queue_state as _build_pqs
 except ImportError:
     _build_pqs = None
+
+try:
+    import shadow_verifier as _shadow_verifier  # noqa: E402
+    import shadow_logger as _shadow_logger  # noqa: E402
+except ImportError:
+    _shadow_verifier = None  # type: ignore[assignment]
+    _shadow_logger = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +134,24 @@ def _central_state_dir_for(state_dir: Path) -> Optional[Path]:
         return central_state
     except Exception:
         return None
+
+
+def _central_qi_db_for_project(project_id: str) -> Optional[Path]:
+    """Return central quality_intelligence.db path for a project_id, or None."""
+    if not project_id or resolve_central_data_dir is None:
+        return None
+    try:
+        db_path = resolve_central_data_dir(project_id) / "state" / "quality_intelligence.db"
+        return db_path if db_path.exists() else None
+    except Exception:
+        return None
+
+
+def _shadow_log(cmp: Any, project_id: str, read_site: str) -> None:
+    """Write comparison divergences to shadow ledger if any."""
+    if _shadow_logger is None or not cmp.divergences:
+        return
+    _shadow_logger.write_comparison_result(cmp, project_id, read_site)
 
 
 def _count_md(directory: Path) -> int:
@@ -546,18 +572,57 @@ def _build_pr_progress(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
 # Open items (reads existing digest)
 # ---------------------------------------------------------------------------
 
-def _build_open_items(state_dir: Path) -> Dict[str, Any]:
+# Wave 1 shadow — _collect_open_items is the 3-state dispatcher; the original
+# _build_open_items logic lives in _collect_open_items_per_project.
+
+_OPEN_ITEMS_SQL_TEMPLATE = "open_items_digest.json"
+
+
+def _collect_open_items_per_project(project_id: str, state_dir: Path) -> Dict[str, Any]:
     digest_path = state_dir / "open_items_digest.json"
     data = _safe_json(digest_path) if digest_path.exists() else None
     if not data:
         return {"open_count": 0, "blocker_count": 0, "top_blockers": []}
-
     summary = data.get("summary") or {}
     return {
         "open_count": int(summary.get("open_count") or 0),
         "blocker_count": int(summary.get("blocker_count") or 0),
         "top_blockers": (data.get("top_blockers") or [])[:3],
     }
+
+
+def _collect_open_items_central(project_id: str) -> Dict[str, Any]:
+    if not project_id or resolve_central_data_dir is None:
+        return {"open_count": 0, "blocker_count": 0, "top_blockers": []}
+    try:
+        central_state = resolve_central_data_dir(project_id) / "state"
+        return _collect_open_items_per_project(project_id, central_state)
+    except Exception:
+        return {"open_count": 0, "blocker_count": 0, "top_blockers": []}
+
+
+def _collect_open_items(project_id: str, state_dir: Path) -> Dict[str, Any]:
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    if flag == "":
+        return _collect_open_items_per_project(project_id, state_dir)
+    if flag == "1":
+        return _collect_open_items_central(project_id)
+    # flag == "shadow": read both, compare via metric 4; metric 1 skipped because
+    # open_items_digest.json rows carry no project_id field to scope-check against.
+    legacy_result = _collect_open_items_per_project(project_id, state_dir)
+    central_result = _collect_open_items_central(project_id)
+    if _shadow_verifier is not None:
+        cmp = _shadow_verifier.compare(
+            [legacy_result],
+            [central_result],
+            project_id=project_id,
+            read_site="build_t0_state._collect_open_items",
+            sql_template=_OPEN_ITEMS_SQL_TEMPLATE,
+            metric_id=4,
+            table="open_items",
+        )
+        _shadow_log(cmp, project_id, "build_t0_state._collect_open_items")
+    return legacy_result
 
 
 # ---------------------------------------------------------------------------
@@ -598,11 +663,153 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Dispatch insights (from DispatchParameterTracker)
+# Recent dispatches (direct query of dispatch_metadata) — Wave 1 shadow read
 # ---------------------------------------------------------------------------
 
-def _build_dispatch_insights(state_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Return top 5 dispatch insights when >= 20 experiments exist."""
+_RECENT_DISPATCHES_SQL = (
+    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+    "dispatched_at, completed_at, outcome_status "
+    "FROM dispatch_metadata "
+    "ORDER BY dispatched_at DESC "
+    "LIMIT 50"
+)
+
+_RECENT_DISPATCHES_CENTRAL_SQL = (
+    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+    "dispatched_at, completed_at, outcome_status "
+    "FROM dispatch_metadata "
+    "WHERE project_id = ? "
+    "ORDER BY dispatched_at DESC "
+    "LIMIT 50"
+)
+
+
+def _query_qi_db(db_path: Path, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    """Execute a read-only query against a quality_intelligence.db and return dicts."""
+    if not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def _collect_recent_dispatches_per_project(
+    project_id: str, state_dir: Path
+) -> List[Dict[str, Any]]:
+    return _query_qi_db(state_dir / "quality_intelligence.db", _RECENT_DISPATCHES_SQL)
+
+
+def _collect_recent_dispatches_central(project_id: str) -> List[Dict[str, Any]]:
+    db_path = _central_qi_db_for_project(project_id)
+    if db_path is None:
+        return []
+    return _query_qi_db(db_path, _RECENT_DISPATCHES_CENTRAL_SQL, (project_id,))
+
+
+def _collect_recent_dispatches(
+    project_id: str, state_dir: Path
+) -> List[Dict[str, Any]]:
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    if flag == "":
+        return _collect_recent_dispatches_per_project(project_id, state_dir)
+    if flag == "1":
+        return _collect_recent_dispatches_central(project_id)
+    # flag == "shadow"
+    legacy_result = _collect_recent_dispatches_per_project(project_id, state_dir)
+    central_result = _collect_recent_dispatches_central(project_id)
+    if _shadow_verifier is not None:
+        cmp = _shadow_verifier.compare(
+            legacy_result,
+            central_result,
+            project_id=project_id,
+            read_site="build_t0_state._collect_recent_dispatches",
+            sql_template=_RECENT_DISPATCHES_SQL,
+            metric_id=4,
+            table="dispatch_metadata",
+        )
+        _shadow_log(cmp, project_id, "build_t0_state._collect_recent_dispatches")
+    return legacy_result
+
+
+# ---------------------------------------------------------------------------
+# Intelligence brief (success_patterns + antipatterns) — Wave 1 shadow read
+# ---------------------------------------------------------------------------
+
+_INTELLIGENCE_BRIEF_SQL = (
+    "SELECT id, pattern_type, category, title, description, "
+    "success_rate, confidence_score "
+    "FROM success_patterns "
+    "ORDER BY confidence_score DESC, success_rate DESC "
+    "LIMIT 10"
+)
+
+_INTELLIGENCE_BRIEF_CENTRAL_SQL = (
+    "SELECT id, pattern_type, category, title, description, "
+    "success_rate, confidence_score "
+    "FROM success_patterns "
+    "WHERE project_id = ? "
+    "ORDER BY confidence_score DESC, success_rate DESC "
+    "LIMIT 10"
+)
+
+
+def _collect_intelligence_brief_per_project(
+    project_id: str, state_dir: Path
+) -> List[Dict[str, Any]]:
+    return _query_qi_db(state_dir / "quality_intelligence.db", _INTELLIGENCE_BRIEF_SQL)
+
+
+def _collect_intelligence_brief_central(project_id: str) -> List[Dict[str, Any]]:
+    db_path = _central_qi_db_for_project(project_id)
+    if db_path is None:
+        return []
+    return _query_qi_db(db_path, _INTELLIGENCE_BRIEF_CENTRAL_SQL, (project_id,))
+
+
+def _collect_intelligence_brief(
+    project_id: str, state_dir: Path
+) -> List[Dict[str, Any]]:
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    if flag == "":
+        return _collect_intelligence_brief_per_project(project_id, state_dir)
+    if flag == "1":
+        return _collect_intelligence_brief_central(project_id)
+    # flag == "shadow"
+    legacy_result = _collect_intelligence_brief_per_project(project_id, state_dir)
+    central_result = _collect_intelligence_brief_central(project_id)
+    if _shadow_verifier is not None:
+        cmp = _shadow_verifier.compare(
+            legacy_result,
+            central_result,
+            project_id=project_id,
+            read_site="build_t0_state._collect_intelligence_brief",
+            sql_template=_INTELLIGENCE_BRIEF_SQL,
+            metric_id=3,
+        )
+        _shadow_log(cmp, project_id, "build_t0_state._collect_intelligence_brief")
+    return legacy_result
+
+
+# ---------------------------------------------------------------------------
+# Dispatch insights (from DispatchParameterTracker) — Wave 1 shadow-wrapped
+# ---------------------------------------------------------------------------
+
+# Wave 1 shadow — _collect_dispatch_insights is the 3-state dispatcher; the
+# original _build_dispatch_insights logic is in _collect_dispatch_insights_per_project.
+
+_DISPATCH_INSIGHTS_SQL_TEMPLATE = "dispatch_experiments"
+
+
+def _collect_dispatch_insights_per_project(
+    project_id: str, state_dir: Optional[Path] = None
+) -> Dict[str, Any]:
     _empty: Dict[str, Any] = {"available": False, "insights": [], "experiment_count": 0}
     actual_state_dir = state_dir if state_dir else _STATE_DIR
     try:
@@ -621,6 +828,41 @@ def _build_dispatch_insights(state_dir: Optional[Path] = None) -> Dict[str, Any]
         }
     except Exception:
         return _empty
+
+
+def _collect_dispatch_insights_central(project_id: str) -> Dict[str, Any]:
+    if not project_id or resolve_central_data_dir is None:
+        return {"available": False, "insights": [], "experiment_count": 0}
+    try:
+        central_state = resolve_central_data_dir(project_id) / "state"
+        return _collect_dispatch_insights_per_project(project_id, central_state)
+    except Exception:
+        return {"available": False, "insights": [], "experiment_count": 0}
+
+
+def _collect_dispatch_insights(
+    project_id: str, state_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
+    if flag == "":
+        return _collect_dispatch_insights_per_project(project_id, state_dir)
+    if flag == "1":
+        return _collect_dispatch_insights_central(project_id)
+    # flag == "shadow"
+    legacy_result = _collect_dispatch_insights_per_project(project_id, state_dir)
+    central_result = _collect_dispatch_insights_central(project_id)
+    if _shadow_verifier is not None:
+        cmp = _shadow_verifier.compare(
+            [legacy_result],
+            [central_result],
+            project_id=project_id,
+            read_site="build_t0_state._collect_dispatch_insights",
+            sql_template=_DISPATCH_INSIGHTS_SQL_TEMPLATE,
+            metric_id=4,
+            table="dispatch_experiments",
+        )
+        _shadow_log(cmp, project_id, "build_t0_state._collect_dispatch_insights")
+    return legacy_result
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1222,12 @@ def build_t0_state(
     """Build the full T0 state document. Never raises — errors produce safe fallbacks."""
     start = time.monotonic()
 
+    # Wave 1: resolve project_id for shadow-read dispatchers
+    project_id = (
+        project_id_from_state_dir(state_dir)
+        or os.environ.get("VNX_PROJECT_ID", "").strip()
+    )
+
     # Step 1: Ensure DB schema (absorbed from runtime_coordination_init.py)
     db_ok = _init_and_check_db(state_dir)
 
@@ -988,9 +1236,11 @@ def build_t0_state(
     tracks = _build_tracks(state_dir)
     pr_progress = _build_pr_progress(dispatch_dir, state_dir)
     feature_state = _build_feature_state(state_dir=state_dir)
-    open_items = _build_open_items(state_dir)
+    open_items = _collect_open_items(project_id, state_dir)
     quality_digest = _build_quality_digest(state_dir)
-    dispatch_insights = _build_dispatch_insights(state_dir=state_dir)
+    dispatch_insights = _collect_dispatch_insights(project_id, state_dir=state_dir)
+    recent_dispatches = _collect_recent_dispatches(project_id, state_dir)
+    intelligence_brief = _collect_intelligence_brief(project_id, state_dir)
     active_work = _build_active_work(dispatch_dir)
     recent_receipts = _build_recent_receipts(state_dir)
     register_events = _build_register_events(state_dir=state_dir)
@@ -1024,6 +1274,8 @@ def build_t0_state(
         "open_items": open_items,
         "quality_digest": quality_digest,
         "dispatch_insights": dispatch_insights,
+        "recent_dispatches": recent_dispatches,
+        "intelligence_brief": intelligence_brief,
         "active_work": active_work,
         "recent_receipts": recent_receipts,
         "dispatch_register_events": register_events,
