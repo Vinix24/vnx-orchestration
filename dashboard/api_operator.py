@@ -40,6 +40,61 @@ VALID_TERMINALS = frozenset({"T0", "T1", "T2", "T3"})
 
 _gate_config_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Wave 1 shadow mode — lazy imports; no hard dep on scripts/lib availability
+# ---------------------------------------------------------------------------
+
+_OP_SCRIPTS_LIB = str(VNX_DIR / "scripts" / "lib")
+
+try:
+    if _OP_SCRIPTS_LIB not in sys.path:
+        sys.path.insert(0, _OP_SCRIPTS_LIB)
+    import shadow_verifier as _op_shadow_verifier  # type: ignore[import]
+    import shadow_logger as _op_shadow_logger       # type: ignore[import]
+    from vnx_paths import resolve_central_data_dir as _op_resolve_central  # type: ignore[import]
+    from vnx_paths import project_id_from_state_dir as _op_project_id_from_state_dir  # type: ignore[import]
+except Exception:
+    _op_shadow_verifier = None   # type: ignore[assignment]
+    _op_shadow_logger = None     # type: ignore[assignment]
+    _op_resolve_central = None   # type: ignore[assignment]
+    _op_project_id_from_state_dir = None  # type: ignore[assignment]
+
+_SYSTEM_HEALTH_COUNT_SQL_TEMPLATE = "SELECT COUNT(*) AS cnt FROM {table}"
+_SYSTEM_HEALTH_COUNT_CENTRAL_SQL_TEMPLATE = "SELECT COUNT(*) AS cnt FROM {table} WHERE project_id = ?"
+
+
+def _op_dashboard_project_id() -> str:
+    """Derive project_id from CANONICAL_STATE_DIR, fallback to env var."""
+    if _op_project_id_from_state_dir is not None:
+        pid = _op_project_id_from_state_dir(CANONICAL_STATE_DIR)
+        if pid:
+            return pid
+    return os.environ.get("VNX_PROJECT_ID", "").strip()
+
+
+def _op_central_qi_db() -> "Path | None":
+    """Return central quality_intelligence.db for the current project, or None."""
+    if _op_resolve_central is None:
+        return None
+    project_id = _op_dashboard_project_id()
+    if not project_id:
+        return None
+    try:
+        central = _op_resolve_central(project_id) / "state" / "quality_intelligence.db"
+        if not central.exists() or central.resolve() == DB_PATH.resolve():
+            return None
+        return central
+    except Exception:
+        return None
+
+
+def _op_shadow_write(cmp: object, project_id: str, read_site: str) -> None:
+    if _op_shadow_logger is not None and getattr(cmp, "divergences", None):
+        try:
+            _op_shadow_logger.write_comparison_result(cmp, project_id, read_site)  # type: ignore[union-attr]
+        except Exception:
+            pass
+
 
 # ---------- Dispatch Kanban helpers ----------
 
@@ -751,9 +806,15 @@ _SYSTEM_HEALTH_DB_TABLES = ("success_patterns", "antipatterns", "prevention_rule
 
 
 def _operator_get_system_health() -> dict:
-    """GET /api/operator/system-health -- deep system health check."""
+    """GET /api/operator/system-health -- deep system health check.
+
+    3-state VNX_USE_CENTRAL_DB dispatcher (Wave 1) applied to intelligence DB
+    table counts. Per-project count remains authoritative; central compared via
+    compare_aggregate_count (metric 4 aggregate, <0.1% tolerance).
+    """
     now = datetime.now(timezone.utc)
     components: dict[str, dict] = {}
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
 
     # 1. Intelligence DB table population
     intel_details: dict[str, Any] = {}
@@ -774,6 +835,34 @@ def _operator_get_system_health() -> dict:
             status = "healthy" if total_rows > 0 else "dead"
             if total_rows > 0 and any(intel_details[t] == 0 for t in _SYSTEM_HEALTH_DB_TABLES):
                 status = "degraded"
+
+            # Shadow: compare per-table counts against central DB (aggregate metric)
+            if flag == "shadow" and _op_shadow_verifier is not None:
+                central_qi = _op_central_qi_db()
+                project_id = _op_dashboard_project_id()
+                if central_qi is not None and project_id:
+                    try:
+                        c_conn = sqlite3.connect(str(central_qi))
+                        c_conn.row_factory = sqlite3.Row
+                        for table in _SYSTEM_HEALTH_DB_TABLES:
+                            try:
+                                c_row = c_conn.execute(
+                                    f"SELECT COUNT(*) as cnt FROM {table} WHERE project_id = ?",  # noqa: S608
+                                    (project_id,),
+                                ).fetchone()
+                                c_count = c_row["cnt"] if c_row else 0
+                            except Exception:
+                                continue
+                            cmp = _op_shadow_verifier.compare_aggregate_count(
+                                intel_details.get(table, 0), c_count,
+                                project_id=project_id,
+                                read_site=f"dashboard.api.system_health.{table}",
+                                sql_template=_SYSTEM_HEALTH_COUNT_SQL_TEMPLATE.format(table=table),
+                            )
+                            _op_shadow_write(cmp, project_id, f"dashboard.api.system_health.{table}")
+                        c_conn.close()
+                    except Exception:
+                        pass
         else:
             status = "dead"
             intel_details["error"] = "quality_intelligence.db not found"
