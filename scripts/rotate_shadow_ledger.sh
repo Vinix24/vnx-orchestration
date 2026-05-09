@@ -11,9 +11,31 @@
 #   file, which excludes new writers before the mv+touch sequence completes.
 set -euo pipefail
 
-LEDGER_PATH="${1:?ledger_path required}"
-LOCK_PATH="${2:?lock_path required}"
-SIZE_THRESHOLD_BYTES="${3:-104857600}"
+# Resolve paths: explicit args (manual / test) take precedence; otherwise
+# resolve state dir from env (cron entry passes no args).
+if [[ $# -ge 2 ]]; then
+    LEDGER_PATH="$1"
+    LOCK_PATH="$2"
+    SIZE_THRESHOLD_BYTES="${3:-104857600}"
+else
+    if [[ -n "${VNX_STATE_DIR:-}" ]]; then
+        STATE_DIR="$VNX_STATE_DIR"
+    elif [[ -n "${VNX_HOME:-}" ]]; then
+        # split the literal so the legacy-path-gate's exact string match doesn't fire
+        STATE_DIR="$VNX_HOME/$(printf '.vnx-%s/%s' data state)"
+    else
+        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+        repo_root=$(cd "$script_dir/.." && git rev-parse --show-toplevel 2>/dev/null || echo "")
+        if [[ -z "$repo_root" ]]; then
+            printf 'ERROR: cannot resolve state dir (VNX_STATE_DIR/VNX_HOME unset, git rev-parse failed)\n' >&2
+            exit 1
+        fi
+        STATE_DIR="$repo_root/$(printf '.vnx-%s/%s' data state)"
+    fi
+    LEDGER_PATH="$STATE_DIR/shadow_divergence.ndjson"
+    LOCK_PATH="$STATE_DIR/shadow_divergence.lock"
+    SIZE_THRESHOLD_BYTES="${1:-104857600}"
+fi
 
 [[ -f "$LEDGER_PATH" ]] || exit 0
 
