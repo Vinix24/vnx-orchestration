@@ -1,5 +1,83 @@
 # Changelog
 
+## v1.0.0-rc1 — 2026-05-09 (Architectural stabilization milestone)
+
+Chain summary: Wave 0 + Wave 0.5 of the strategic replan — architectural decisions LOCKED via 14 ADRs, central VNX state proven on real production data (855k snippets across 4 projects, 0 verifier discrepancies), CI gate enforcing OAuth-only Claude routing, smart context injection validated at +30 percentage-point dispatch quality lift on 658 outcome-tagged dispatches.
+
+This is the architectural stabilization moment: dispatch envelope, receipt schema, NDJSON ledger format, and ADR-locked invariants are now backwards-compatibility-honoring. Future v1.x is feature additions on a stable foundation; future v2.0 reserved for breaking changes.
+
+### Added — ADR backfill (10 new ADRs, 003-014)
+- ADR-003 — OAuth-only Claude routing via `claude -p` subprocess (no SDK, no API key) (#439)
+- ADR-004 — VNX positioning: self-hosted alternative to Anthropic Managed Agents (#439)
+- ADR-005 — Append-only NDJSON audit ledger as primary orchestration substrate (#439)
+- ADR-006 — Mandatory staging→promote with human approval gate (#439)
+- ADR-007 — Multi-tenant `project_id` stamping with composite UNIQUE rebuilds (#439)
+- ADR-008 — Dual-LLM adversarial review (codex_gate + gemini_review) with `contract_hash` evidence binding (#439)
+- ADR-009 — Schema-first migrations via PRAGMA introspection (no hardcoded column projections) (#439)
+- ADR-010 — Subprocess adapter (`claude -p`) as canonical Claude routing (#439)
+- ADR-011 — Manager+worker hierarchy with explicit depth>1; subagents Conditional/Pilot for read-only parallel-fanout (#439, #447)
+- ADR-012 — Hybrid interactive+headless (no retire-interactive) (#439)
+- ADR-013 — Worker pool size as configuration, not constant (workers = N) (#445)
+- ADR-014 — Autonomous mode = pre-approved chain dispatch with SHA-256 chain-spec hash as consent token (#445)
+
+### Added — Structural enforcement
+- CI gate `ADR-003: No Anthropic SDK Imports` — blocks any `import anthropic` / `from anthropic` / `import claude_agent_sdk` in `scripts/`, `dashboard/`, `tests/`. Magic-comment opt-in for explicit exceptions only. (#439)
+- `scripts/check_adr_003_no_sdk_imports.py` + `tests/test_adr_003_no_sdk_imports.py` (23 unit tests).
+
+### Improved — Migration architecture (Phase 6 P4)
+- One-shot data import script `scripts/migrate_to_central_vnx.py` (#432): real-data success on 4 production source DBs (855k code_snippets, 505 dispatches, 0 verifier discrepancies)
+- Migration 0016 schema-first rewrite per ADR-009 (#446): replaces hardcoded 12-column projection with PRAGMA introspection; orphan project_id stamping uses migrating-project_id (not vnx-dev fallback); `_import_table` streams via `cursor.fetchmany(500)` instead of materializing full table — resolves OI-1375, OI-1376, OI-1377.
+- Composite UNIQUE rebuilds for 5 round-6 tables (`session_analytics`, `vnx_code_quality`, `dispatch_quality_context`, `dispatch_metadata`, `dispatch_experiments`)
+- Schema audit step `_audit_unique_constraints()` catches T3 single-column UNIQUE patterns at startup
+- Structural test parsing `0015_complete_project_id.sql` enforces ALTER↔IMPORT_TABLES symmetry (would have caught all round-7/8/9 gaps)
+- Dispatch-register identity fallback per-field (was all-or-nothing); dual-writer locking on data file (was sentinel only); ghost-gate receipt rerouting fixed (#446 sibling)
+
+### Added — Repo hygiene (OI-1373 cleanup)
+- Tier 1: 8 business agent drafts moved from public `roadmap/features/phase-16-business-domain-bootstrap/agent_drafts/` to private `claudedocs/business-domain/` (#440)
+- Tier 2: 7 strategy files (`KICKOFF.md`, `ROADMAP.md`, `backlog.yaml`, `roadmap.yaml`, 3 dispatch_plans) from `.vnx-data/strategy/` to `claudedocs/strategy/`; `!.vnx-data/strategy/` carve-out removed from `.gitignore` (#441)
+- Tier 3: `.vnx-data/state/PROJECT_STATE_DESIGN.md` to private; 2 `.vnx-data/state/` carve-outs removed (in #443)
+- Tier 4: 18 phase FEATURE_PLAN.md files from public `roadmap/features/<phase>/` to `claudedocs/roadmap/features/` (#442)
+- Tier 5: 9 stale docs from `docs/internal/plans/` and `docs/research/` archived to `claudedocs/archive/{headless-t0-research,research-2026-spring}/` (#443)
+- Pattern: filesystem `mv` + `git add -u` (NOT `git mv`) — preserves files locally on disk while removing from git tracking. History scrub intentionally NOT performed.
+
+### Added — Strategic documentation
+- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` v1.1 — 6-wave plan (Wave 0-6) replacing the overtaken-by-reality PRD-UH-001 v1.3 framing
+- `claudedocs/PRD-VNX-UH-002-v1.0-DRAFT.md` — "VNX 2.0: self-hosted alternative to Anthropic Managed Agents" with 8 structural moats, ICP refinement, and §11.b open horizons
+- `claudedocs/2026-05-09-vnx-replan-inventory.md` — full repo inventory: shipped/in-flight/planned/dead with provenance
+- `claudedocs/2026-05-09-vnx-industry-research.md` — 15-topic competitive landscape (May 2026): no competitor stacks 4+ of VNX's 5 axes
+- `claudedocs/2026-05-09-vnx-platform-features-verification.md` — Perplexity-verified 8 platform claims; 2 outdated (subagent session-resume + Anthropic Code Review GA), 1 partial (Agent SDK orchestration), 5 confirmed
+- `claudedocs/2026-05-09-vnx-market-validation.md` — verdict CONDITIONAL GO; OpenClaw ban (April 2026) retroactively validated M6/ADR-003 OAuth-only as structural ToS-policy moat
+- `claudedocs/2026-05-09-vnx-smart-context-design.md` — three-state intelligence pipeline design + +30pp lift PoC
+- `claudedocs/2026-05-09-vnx-subagent-tactical-research.md` — verdict Conditional/Pilot; T1-only `VNX_T1_TACTICAL_SUBAGENTS=1`, read-only parallel-fanout, 4-week pilot
+- `claudedocs/2026-05-09-vnx-f46-f58-reconciliation.md` — F46-F58 phantom-features claim refuted: 6 real-clean-PR + 6 cluster-titled + 1 verify + 0 phantom
+- `claudedocs/2026-05-09-p4-migration-architecture-lessons.md` — bug taxonomy + 14 action items from the 9-round PR #432 chain
+- `claudedocs/blog-drafts/2026-05-09-intelligence-30pp-lift-DRAFT.md` — 2300-word public-facing deep-dive draft on the +30pp result
+- PRD-UH-001 v1.3 archived to `claudedocs/archive/`
+
+### Reports
+- `claudedocs/2026-05-09-vnx-replan-inventory.md`
+- `claudedocs/2026-05-09-vnx-industry-research.md`
+- `claudedocs/2026-05-09-vnx-platform-features-verification.md`
+- `claudedocs/2026-05-09-vnx-market-validation.md`
+- `claudedocs/2026-05-09-vnx-smart-context-design.md`
+- `claudedocs/2026-05-09-vnx-subagent-tactical-research.md`
+- `claudedocs/2026-05-09-vnx-f46-f58-reconciliation.md`
+- `claudedocs/2026-05-09-p4-migration-architecture-lessons.md`
+
+### Validated — Smart context injection (gevalideerd op real production data)
+- `IntelligenceSelector.select()` pipeline measured: **88.9% dispatch success WITH intelligence vs 58.3% WITHOUT** across 658 outcome-tagged dispatches (+30.6 pp lift)
+- 922 rows in `intelligence_injections` ledger growing hourly
+- Pipeline plumbing 9/10; content quality 2/10 — "the lift we got despite injecting governance noise; imagine signal" (Wave 5 design target)
+
+### Open items resolved
+- OI-1373 (49+ strategic/business docs in public repo) — fully closed via Tiers 1-5
+- OI-1375 (migration 0016 hardcoded 12-column projection) — closed by #446
+- OI-1376 (migration 0016 orphan COALESCE project_id fallback) — closed by #446
+- OI-1377 (`_import_table` materializes full source table) — closed by #446
+
+### Known open items deferred to v1.0.0 final
+- OI-1374 (dashboard `/agent-stream` SSE lifecycle regression — separate-PR cleanup)
+
 ## v0.10.0 — 2026-04-30
 
 Chain summary: 27 PRs landed across governance hardening, headless audit parity, supervisor pack, CFX thematic refactors, P0 intelligence loop fixes.
