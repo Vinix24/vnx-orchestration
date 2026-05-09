@@ -50,7 +50,7 @@ _PATTERNS_SUCCESS_SQL = (
     "FROM success_patterns ORDER BY confidence_score DESC, usage_count DESC LIMIT ?"
 )
 _PATTERNS_SUCCESS_CENTRAL_SQL = (
-    "SELECT title, confidence_score, category, usage_count, last_used "
+    "SELECT project_id, title, confidence_score, category, usage_count, last_used "
     "FROM success_patterns WHERE project_id = ? "
     "ORDER BY confidence_score DESC, usage_count DESC LIMIT ?"
 )
@@ -60,7 +60,7 @@ _PATTERNS_ANTI_SQL = (
     "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, occurrence_count DESC LIMIT ?"
 )
 _PATTERNS_ANTI_CENTRAL_SQL = (
-    "SELECT title, severity, occurrence_count, last_seen FROM antipatterns "
+    "SELECT project_id, title, severity, occurrence_count, last_seen FROM antipatterns "
     "WHERE project_id = ? "
     "ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
     "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, occurrence_count DESC LIMIT ?"
@@ -70,7 +70,7 @@ _CONFIDENCE_TRENDS_SUCCESS_SQL = (
     "FROM success_patterns WHERE last_used IS NOT NULL AND last_used != '' ORDER BY day"
 )
 _CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL = (
-    "SELECT SUBSTR(last_used, 1, 10) AS day, confidence_score "
+    "SELECT project_id, SUBSTR(last_used, 1, 10) AS day, confidence_score "
     "FROM success_patterns WHERE project_id = ? AND last_used IS NOT NULL AND last_used != '' ORDER BY day"
 )
 _CONFIDENCE_TRENDS_ANTI_SQL = (
@@ -78,14 +78,14 @@ _CONFIDENCE_TRENDS_ANTI_SQL = (
     "FROM antipatterns WHERE last_seen IS NOT NULL AND last_seen != '' ORDER BY day"
 )
 _CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL = (
-    "SELECT SUBSTR(last_seen, 1, 10) AS day, severity "
+    "SELECT project_id, SUBSTR(last_seen, 1, 10) AS day, severity "
     "FROM antipatterns WHERE project_id = ? AND last_seen IS NOT NULL AND last_seen != '' ORDER BY day"
 )
 _LEARNING_EVENTS_SQL = (
     "SELECT outcome, confidence_change FROM confidence_events WHERE occurred_at >= ?"
 )
 _LEARNING_EVENTS_CENTRAL_SQL = (
-    "SELECT outcome, confidence_change FROM confidence_events "
+    "SELECT project_id, outcome, confidence_change FROM confidence_events "
     "WHERE project_id = ? AND occurred_at >= ?"
 )
 _LEARNING_ANTI_COUNT_SQL = "SELECT COUNT(*) FROM antipatterns WHERE occurrence_count >= 3"
@@ -224,15 +224,13 @@ def _intelligence_get_patterns(params: dict) -> dict:
     central = _central_qi_db(db_path)
 
     if flag == "1":
-        # Central-only read; fallback to per-project when central unavailable
-        target = central if central is not None else db_path
-        pid = project_id if central is not None else None
-        if not target.exists():
+        # Cutover: central DB only; no fallback to per-project
+        if central is None or not central.exists():
             return {"success_patterns": [], "antipatterns": []}
         try:
-            con = _open_qi_ro(target)
-            _, sp = _fetch_success_patterns(con, limit, pid)
-            _, ap = _fetch_antipatterns(con, limit, pid)
+            con = _open_qi_ro(central)
+            _, sp = _fetch_success_patterns(con, limit, project_id)
+            _, ap = _fetch_antipatterns(con, limit, project_id)
             con.close()
         except Exception:
             sp, ap = [], []
@@ -256,6 +254,23 @@ def _intelligence_get_patterns(params: dict) -> dict:
             central_raw_sp, _ = _fetch_success_patterns(con, limit, project_id)
             central_raw_ap, _ = _fetch_antipatterns(con, limit, project_id)
             con.close()
+            # Metric 1: wrong-project contamination in central (per-project DB is inherently isolated)
+            cmp = _shadow_verifier.compare(
+                [], central_raw_sp,
+                project_id=project_id,
+                read_site="dashboard.api.intelligence_patterns.success_patterns",
+                sql_template=_PATTERNS_SUCCESS_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.success_patterns")
+            cmp = _shadow_verifier.compare(
+                [], central_raw_ap,
+                project_id=project_id,
+                read_site="dashboard.api.intelligence_patterns.antipatterns",
+                sql_template=_PATTERNS_ANTI_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.antipatterns")
             # success_patterns: metric 3 (top-N parity; display rank order matters)
             cmp = _shadow_verifier.compare(
                 legacy_raw_sp, central_raw_sp,
@@ -685,13 +700,12 @@ def _intelligence_get_confidence_trends(params: dict) -> dict:
     central = _central_qi_db(db_path)
 
     if flag == "1":
-        target = central if central is not None else db_path
-        pid = project_id if central is not None else None
-        if not target.exists():
+        # Cutover: central DB only; no fallback to per-project
+        if central is None or not central.exists():
             return {"trends": []}
         try:
-            con = _open_qi_ro(target)
-            success_rows, anti_rows = _fetch_confidence_trend_rows(con, pid)
+            con = _open_qi_ro(central)
+            success_rows, anti_rows = _fetch_confidence_trend_rows(con, project_id)
             con.close()
         except Exception:
             return {"trends": []}
@@ -712,6 +726,23 @@ def _intelligence_get_confidence_trends(params: dict) -> dict:
             con = _open_qi_ro(central)
             central_sp_rows, central_ap_rows = _fetch_confidence_trend_rows(con, project_id)
             con.close()
+            # Metric 1: wrong-project contamination in central
+            cmp = _shadow_verifier.compare(
+                [], central_sp_rows,
+                project_id=project_id,
+                read_site="dashboard.api.confidence_trends.success_patterns",
+                sql_template=_CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.success_patterns")
+            cmp = _shadow_verifier.compare(
+                [], central_ap_rows,
+                project_id=project_id,
+                read_site="dashboard.api.confidence_trends.antipatterns",
+                sql_template=_CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.antipatterns")
             cmp = _shadow_verifier.compare(
                 legacy_sp_rows, central_sp_rows,
                 project_id=project_id,
@@ -869,18 +900,15 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
     central = _central_qi_db(db_path)
 
     if flag == "1":
-        target = central if central is not None else db_path
-        pid = project_id if central is not None else None
-        if not target.exists():
+        # Cutover: central DB only; no fallback to per-project
+        if central is None or not central.exists():
             return _empty, 200
         try:
-            con = _open_qi_ro(target)
-            event_rows = _fetch_confidence_events(con, since, pid)
+            con = _open_qi_ro(central)
+            event_rows = _fetch_confidence_events(con, since, project_id)
             prev_count = 0
             try:
-                sql = _LEARNING_ANTI_COUNT_CENTRAL_SQL if pid else _LEARNING_ANTI_COUNT_SQL
-                params = (pid,) if pid else ()
-                result = con.execute(sql, params).fetchone()
+                result = con.execute(_LEARNING_ANTI_COUNT_CENTRAL_SQL, (project_id,)).fetchone()
                 prev_count = int(result[0] or 0) if result else 0
             except sqlite3.OperationalError:
                 pass
@@ -916,6 +944,15 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
             except sqlite3.OperationalError:
                 pass
             con.close()
+            # Metric 1: wrong-project contamination in central confidence_events
+            cmp = _shadow_verifier.compare(
+                [], central_events,
+                project_id=project_id,
+                read_site="dashboard.api.learning_summary.confidence_events",
+                sql_template=_LEARNING_EVENTS_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.learning_summary.confidence_events")
             # Compare confidence_events rows (metric 4 — count + checksum)
             cmp = _shadow_verifier.compare(
                 legacy_events, central_events,

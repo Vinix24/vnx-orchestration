@@ -127,7 +127,7 @@ Wave 1 PRs in merge order (revert in **reverse** order):
 
 | PR | Commit | Description |
 |---|---|---|
-| PR-W1.5 | TBD | Dashboard shadow wiring + canary tests + rollback docs |
+| PR-W1.5 | `1e86d60` (PR #454) | Dashboard shadow wiring + canary tests + rollback docs |
 | PR-W1.4 | `1c1a52b` | IntelligenceSelector + DispatchRegister shadow wiring |
 | PR-W1.3 | `4c742f4` | T0 state-builder shadow wiring |
 | PR-W1.2 | `8996a21` | shadow_logger NDJSON writer |
@@ -137,9 +137,10 @@ Wave 1 PRs in merge order (revert in **reverse** order):
 
 ```bash
 # Find the merge commit for PR-W1.5
-gh pr view <PR_W1.5_NUMBER> --json mergeCommit --jq .mergeCommit.oid
+gh pr view 454 --json mergeCommit --jq .mergeCommit.oid
 
 # Revert (creates a new revert commit — do NOT force-push)
+# Replace <merge_commit_sha> with the SHA from the command above
 git revert <merge_commit_sha> --no-commit
 git commit -m "revert(wave1): revert PR-W1.5 — dashboard shadow wiring
 

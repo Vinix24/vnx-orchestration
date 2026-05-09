@@ -816,10 +816,36 @@ def _operator_get_system_health() -> dict:
     components: dict[str, dict] = {}
     flag = os.environ.get("VNX_USE_CENTRAL_DB", "")
 
-    # 1. Intelligence DB table population
+    # 1. Intelligence DB table population (3-state VNX_USE_CENTRAL_DB dispatcher)
     intel_details: dict[str, Any] = {}
     try:
-        if DB_PATH.exists():
+        if flag == "1":
+            # Cutover: count from central DB with project_id filter; no fallback
+            central_qi = _op_central_qi_db()
+            project_id = _op_dashboard_project_id()
+            if central_qi is not None and central_qi.exists() and project_id:
+                conn = sqlite3.connect(str(central_qi))
+                conn.row_factory = sqlite3.Row
+                total_rows = 0
+                for table in _SYSTEM_HEALTH_DB_TABLES:
+                    try:
+                        row = conn.execute(
+                            _SYSTEM_HEALTH_COUNT_CENTRAL_SQL_TEMPLATE.format(table=table),  # noqa: S608
+                            (project_id,),
+                        ).fetchone()
+                        count = row["cnt"] if row else 0
+                    except Exception:
+                        count = 0
+                    intel_details[table] = count
+                    total_rows += count
+                conn.close()
+                status = "healthy" if total_rows > 0 else "dead"
+                if total_rows > 0 and any(intel_details[t] == 0 for t in _SYSTEM_HEALTH_DB_TABLES):
+                    status = "degraded"
+            else:
+                status = "dead"
+                intel_details["error"] = "central quality_intelligence.db not available"
+        elif DB_PATH.exists():
             conn = sqlite3.connect(str(DB_PATH))
             conn.row_factory = sqlite3.Row
             total_rows = 0
