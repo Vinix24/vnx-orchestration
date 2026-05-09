@@ -10,6 +10,7 @@ imported into serve_dashboard.py and wired in DashboardHandler.do_GET/do_POST.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -20,10 +21,165 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+_logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from http.server import BaseHTTPRequestHandler
 
 _UTC = timezone.utc
+
+# ---------------------------------------------------------------------------
+# Wave 1 shadow mode — lazy imports; no hard dep on scripts/lib availability
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_LIB_PATH = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
+
+try:
+    if _SCRIPTS_LIB_PATH not in sys.path:
+        sys.path.insert(0, _SCRIPTS_LIB_PATH)
+    import shadow_verifier as _shadow_verifier  # type: ignore[import]
+    import shadow_logger as _shadow_logger       # type: ignore[import]
+    from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir  # type: ignore[import]
+    from vnx_paths import project_id_from_state_dir as _project_id_from_state_dir  # type: ignore[import]
+except Exception:
+    _shadow_verifier = None   # type: ignore[assignment]
+    _shadow_logger = None     # type: ignore[assignment]
+    _resolve_central_data_dir = None  # type: ignore[assignment]
+    _project_id_from_state_dir = None  # type: ignore[assignment]
+
+# SQL templates (per-project — no project_id filter; used for sql_template_hash)
+_PATTERNS_SUCCESS_SQL = (
+    "SELECT project_id, title, confidence_score, category, usage_count, last_used "
+    "FROM success_patterns ORDER BY confidence_score DESC, usage_count DESC LIMIT ?"
+)
+_PATTERNS_SUCCESS_CENTRAL_SQL = (
+    "SELECT project_id, title, confidence_score, category, usage_count, last_used "
+    "FROM success_patterns WHERE project_id = ? "
+    "ORDER BY confidence_score DESC, usage_count DESC LIMIT ?"
+)
+_PATTERNS_ANTI_SQL = (
+    "SELECT project_id, title, severity, occurrence_count, last_seen FROM antipatterns "
+    "ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
+    "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, occurrence_count DESC LIMIT ?"
+)
+_PATTERNS_ANTI_CENTRAL_SQL = (
+    "SELECT project_id, title, severity, occurrence_count, last_seen FROM antipatterns "
+    "WHERE project_id = ? "
+    "ORDER BY CASE severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
+    "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, occurrence_count DESC LIMIT ?"
+)
+_CONFIDENCE_TRENDS_SUCCESS_SQL = (
+    "SELECT project_id, SUBSTR(last_used, 1, 10) AS day, confidence_score "
+    "FROM success_patterns WHERE last_used IS NOT NULL AND last_used != '' ORDER BY day"
+)
+_CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL = (
+    "SELECT project_id, SUBSTR(last_used, 1, 10) AS day, confidence_score "
+    "FROM success_patterns WHERE project_id = ? AND last_used IS NOT NULL AND last_used != '' ORDER BY day"
+)
+_CONFIDENCE_TRENDS_ANTI_SQL = (
+    "SELECT project_id, SUBSTR(last_seen, 1, 10) AS day, severity "
+    "FROM antipatterns WHERE last_seen IS NOT NULL AND last_seen != '' ORDER BY day"
+)
+_CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL = (
+    "SELECT project_id, SUBSTR(last_seen, 1, 10) AS day, severity "
+    "FROM antipatterns WHERE project_id = ? AND last_seen IS NOT NULL AND last_seen != '' ORDER BY day"
+)
+_LEARNING_EVENTS_SQL = (
+    "SELECT project_id, outcome, confidence_change FROM confidence_events WHERE occurred_at >= ?"
+)
+_LEARNING_EVENTS_CENTRAL_SQL = (
+    "SELECT project_id, outcome, confidence_change FROM confidence_events "
+    "WHERE project_id = ? AND occurred_at >= ?"
+)
+_LEARNING_ANTI_COUNT_SQL = "SELECT COUNT(*) FROM antipatterns WHERE occurrence_count >= 3"
+_LEARNING_ANTI_COUNT_CENTRAL_SQL = (
+    "SELECT COUNT(*) FROM antipatterns WHERE project_id = ? AND occurrence_count >= 3"
+)
+
+
+def _dashboard_project_id(db_path: Path) -> str:
+    """Derive project_id from DB path via state_dir heuristic, fallback to env var."""
+    if _project_id_from_state_dir is not None:
+        pid = _project_id_from_state_dir(db_path.parent)
+        if pid:
+            return pid
+    return os.environ.get("VNX_PROJECT_ID", "").strip()
+
+
+def _central_qi_db(db_path: Path) -> "Path | None":
+    """Return central quality_intelligence.db for the current project, or None."""
+    if _resolve_central_data_dir is None:
+        return None
+    project_id = _dashboard_project_id(db_path)
+    if not project_id:
+        return None
+    try:
+        central = _resolve_central_data_dir(project_id) / "state" / "quality_intelligence.db"
+        if not central.exists() or central.resolve() == db_path.resolve():
+            return None
+        return central
+    except Exception:
+        return None
+
+
+def _shadow_write_cmp(cmp: object, project_id: str, read_site: str) -> None:
+    """Write divergence events to NDJSON ledger if any divergences present."""
+    if _shadow_logger is not None and getattr(cmp, "divergences", None):
+        try:
+            _shadow_logger.write_comparison_result(cmp, project_id, read_site)  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
+def _open_qi_ro(db_path: Path) -> "sqlite3.Connection":
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _fetch_success_patterns(
+    con: "sqlite3.Connection", limit: int, project_id: "str | None" = None
+) -> "tuple[list[dict], list[dict]]":
+    """Returns (raw_rows, api_formatted_rows). raw_rows used for shadow comparison."""
+    raw: list[dict] = []
+    formatted: list[dict] = []
+    sql = _PATTERNS_SUCCESS_CENTRAL_SQL if project_id else _PATTERNS_SUCCESS_SQL
+    params = (project_id, limit) if project_id else (limit,)
+    try:
+        for row in con.execute(sql, params).fetchall():
+            raw.append(dict(row))
+            formatted.append({
+                "title": row["title"] or "",
+                "confidence": float(row["confidence_score"] or 0.0),
+                "category": row["category"] or "",
+                "used_count": int(row["usage_count"] or 0),
+                "last_seen": row["last_used"] or "",
+            })
+    except sqlite3.OperationalError:
+        pass
+    return raw, formatted
+
+
+def _fetch_antipatterns(
+    con: "sqlite3.Connection", limit: int, project_id: "str | None" = None
+) -> "tuple[list[dict], list[dict]]":
+    """Returns (raw_rows, api_formatted_rows). raw_rows used for shadow comparison."""
+    raw: list[dict] = []
+    formatted: list[dict] = []
+    sql = _PATTERNS_ANTI_CENTRAL_SQL if project_id else _PATTERNS_ANTI_SQL
+    params = (project_id, limit) if project_id else (limit,)
+    try:
+        for row in con.execute(sql, params).fetchall():
+            raw.append(dict(row))
+            formatted.append({
+                "title": row["title"] or "",
+                "severity": row["severity"] or "medium",
+                "occurrence_count": int(row["occurrence_count"] or 0),
+                "last_seen": row["last_seen"] or "",
+            })
+    except sqlite3.OperationalError:
+        pass
+    return raw, formatted
 
 
 def _sd():
@@ -37,7 +193,13 @@ def _sd():
 # ---------------------------------------------------------------------------
 
 def _intelligence_get_patterns(params: dict) -> dict:
-    """Return success_patterns and antipatterns from quality_intelligence.db."""
+    """Return success_patterns and antipatterns from quality_intelligence.db.
+
+    3-state VNX_USE_CENTRAL_DB dispatcher (Wave 1):
+    - unset: per-project DB (current behaviour, byte-identical)
+    - "1":   central DB with project_id filter
+    - "shadow": both; per-project authoritative; divergences logged to NDJSON
+    """
     try:
         raw_limit = (params.get("limit") or [None])[0]
         limit = max(1, min(int(raw_limit), 500)) if raw_limit else 50
@@ -46,70 +208,98 @@ def _intelligence_get_patterns(params: dict) -> dict:
 
     sd = _sd()
     db_path: Path = sd.DB_PATH
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
 
-    success_patterns: list[dict] = []
-    antipatterns: list[dict] = []
+    if flag == "":
+        # Default: per-project read — byte-identical to pre-Wave-1 behaviour
+        if not db_path.exists():
+            return {"success_patterns": [], "antipatterns": []}
+        try:
+            con = _open_qi_ro(db_path)
+            _, sp = _fetch_success_patterns(con, limit)
+            _, ap = _fetch_antipatterns(con, limit)
+            con.close()
+        except Exception:
+            sp, ap = [], []
+        return {"success_patterns": sp, "antipatterns": ap}
 
+    project_id = _dashboard_project_id(db_path)
+    central = _central_qi_db(db_path)
+
+    if flag == "1":
+        # Cutover: central DB only; no fallback to per-project
+        if central is None or not central.exists():
+            return {"success_patterns": [], "antipatterns": []}
+        try:
+            con = _open_qi_ro(central)
+            _, sp = _fetch_success_patterns(con, limit, project_id)
+            _, ap = _fetch_antipatterns(con, limit, project_id)
+            con.close()
+        except Exception:
+            sp, ap = [], []
+        return {"success_patterns": sp, "antipatterns": ap}
+
+    # flag == "shadow": per-project authoritative; central observed-only
     if not db_path.exists():
-        return {"success_patterns": success_patterns, "antipatterns": antipatterns}
-
+        return {"success_patterns": [], "antipatterns": []}
     try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-        try:
-            rows = con.execute(
-                """
-                SELECT title, confidence_score, category, usage_count, last_used
-                FROM success_patterns
-                ORDER BY confidence_score DESC, usage_count DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-            for row in rows:
-                success_patterns.append({
-                    "title": row["title"] or "",
-                    "confidence": float(row["confidence_score"] or 0.0),
-                    "category": row["category"] or "",
-                    "used_count": int(row["usage_count"] or 0),
-                    "last_seen": row["last_used"] or "",
-                })
-        except sqlite3.OperationalError:
-            pass
-
-        try:
-            rows = con.execute(
-                """
-                SELECT title, severity, occurrence_count, last_seen
-                FROM antipatterns
-                ORDER BY
-                    CASE severity
-                        WHEN 'critical' THEN 4
-                        WHEN 'high' THEN 3
-                        WHEN 'medium' THEN 2
-                        WHEN 'low' THEN 1
-                        ELSE 0
-                    END DESC,
-                    occurrence_count DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-            for row in rows:
-                antipatterns.append({
-                    "title": row["title"] or "",
-                    "severity": row["severity"] or "medium",
-                    "occurrence_count": int(row["occurrence_count"] or 0),
-                    "last_seen": row["last_seen"] or "",
-                })
-        except sqlite3.OperationalError:
-            pass
-
+        con = _open_qi_ro(db_path)
+        legacy_raw_sp, legacy_sp = _fetch_success_patterns(con, limit)
+        legacy_raw_ap, legacy_ap = _fetch_antipatterns(con, limit)
         con.close()
     except Exception:
-        pass
+        legacy_sp, legacy_ap = [], []
+        legacy_raw_sp, legacy_raw_ap = [], []
 
-    return {"success_patterns": success_patterns, "antipatterns": antipatterns}
+    if central is not None and _shadow_verifier is not None:
+        try:
+            con = _open_qi_ro(central)
+            central_raw_sp, _ = _fetch_success_patterns(con, limit, project_id)
+            central_raw_ap, _ = _fetch_antipatterns(con, limit, project_id)
+            con.close()
+            # Metric 1: wrong-project contamination in central (per-project DB is inherently isolated)
+            cmp = _shadow_verifier.compare(
+                [], central_raw_sp,
+                project_id=project_id,
+                read_site="dashboard.api.intelligence_patterns.success_patterns",
+                sql_template=_PATTERNS_SUCCESS_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.success_patterns")
+            cmp = _shadow_verifier.compare(
+                [], central_raw_ap,
+                project_id=project_id,
+                read_site="dashboard.api.intelligence_patterns.antipatterns",
+                sql_template=_PATTERNS_ANTI_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.antipatterns")
+            # success_patterns: metric 3 (top-N parity; display rank order matters)
+            cmp = _shadow_verifier.compare(
+                legacy_raw_sp, central_raw_sp,
+                project_id=project_id,
+                read_site="dashboard.api.intelligence_patterns.success_patterns",
+                sql_template=_PATTERNS_SUCCESS_SQL,
+                metric_id=3,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.success_patterns")
+            # antipatterns: metric 4 (count + checksum)
+            cmp = _shadow_verifier.compare(
+                legacy_raw_ap, central_raw_ap,
+                project_id=project_id,
+                read_site="dashboard.api.intelligence_patterns.antipatterns",
+                sql_template=_PATTERNS_ANTI_SQL,
+                metric_id=4,
+                table="antipatterns",
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.antipatterns")
+        except Exception:
+            pass
+
+    return {"success_patterns": legacy_sp, "antipatterns": legacy_ap}
 
 
 # ---------------------------------------------------------------------------
@@ -445,62 +635,42 @@ def _intelligence_apply_proposals() -> tuple[dict, int]:
 _SEVERITY_SCORE = {"critical": 1.0, "high": 0.75, "medium": 0.5, "low": 0.25}
 
 
-def _intelligence_get_confidence_trends(params: dict) -> dict:
-    """Return time-series confidence data grouped by date."""
-    sd = _sd()
-    db_path: Path = sd.DB_PATH
-    trends: list[dict] = []
-
-    if not db_path.exists():
-        return {"trends": trends}
-
+def _fetch_confidence_trend_rows(
+    con: "sqlite3.Connection", project_id: "str | None" = None
+) -> "tuple[list[dict], list[dict]]":
+    """Return (success_raw_rows, antipattern_raw_rows) for shadow comparison."""
+    success_rows: list[dict] = []
+    anti_rows: list[dict] = []
+    success_sql = _CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL if project_id else _CONFIDENCE_TRENDS_SUCCESS_SQL
+    anti_sql = _CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL if project_id else _CONFIDENCE_TRENDS_ANTI_SQL
     try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
+        for row in con.execute(success_sql, (project_id,) if project_id else ()).fetchall():
+            success_rows.append(dict(row))
+    except sqlite3.OperationalError:
+        pass
+    try:
+        for row in con.execute(anti_sql, (project_id,) if project_id else ()).fetchall():
+            anti_rows.append(dict(row))
+    except sqlite3.OperationalError:
+        pass
+    return success_rows, anti_rows
 
-        # Collect success pattern confidence by date
-        success_by_date: dict[str, list[float]] = {}
-        try:
-            rows = con.execute(
-                """
-                SELECT SUBSTR(last_used, 1, 10) AS day, confidence_score
-                FROM success_patterns
-                WHERE last_used IS NOT NULL AND last_used != ''
-                ORDER BY day
-                """
-            ).fetchall()
-            for row in rows:
-                day = row["day"]
-                if day:
-                    success_by_date.setdefault(day, []).append(float(row["confidence_score"] or 0.0))
-        except sqlite3.OperationalError:
-            pass
 
-        # Collect antipattern severity by date
-        anti_by_date: dict[str, list[float]] = {}
-        try:
-            rows = con.execute(
-                """
-                SELECT SUBSTR(last_seen, 1, 10) AS day, severity
-                FROM antipatterns
-                WHERE last_seen IS NOT NULL AND last_seen != ''
-                ORDER BY day
-                """
-            ).fetchall()
-            for row in rows:
-                day = row["day"]
-                if day:
-                    score = _SEVERITY_SCORE.get((row["severity"] or "medium").lower(), 0.5)
-                    anti_by_date.setdefault(day, []).append(score)
-        except sqlite3.OperationalError:
-            pass
-
-        con.close()
-    except Exception:
-        return {"trends": trends}
-
-    all_days = sorted(set(list(success_by_date.keys()) + list(anti_by_date.keys())))
-    for day in all_days:
+def _aggregate_trends(success_rows: list[dict], anti_rows: list[dict]) -> list[dict]:
+    """Aggregate raw trend rows into per-day summary dicts."""
+    success_by_date: dict[str, list[float]] = {}
+    anti_by_date: dict[str, list[float]] = {}
+    for row in success_rows:
+        day = (row.get("day") or "").strip()
+        if day:
+            success_by_date.setdefault(day, []).append(float(row.get("confidence_score") or 0.0))
+    for row in anti_rows:
+        day = (row.get("day") or "").strip()
+        if day:
+            score = _SEVERITY_SCORE.get((row.get("severity") or "medium").lower(), 0.5)
+            anti_by_date.setdefault(day, []).append(score)
+    trends: list[dict] = []
+    for day in sorted(set(list(success_by_date) + list(anti_by_date))):
         s_vals = success_by_date.get(day, [])
         a_vals = anti_by_date.get(day, [])
         trends.append({
@@ -509,8 +679,101 @@ def _intelligence_get_confidence_trends(params: dict) -> dict:
             "avg_antipattern_severity": round(sum(a_vals) / len(a_vals), 4) if a_vals else None,
             "pattern_count": len(s_vals) + len(a_vals),
         })
+    return trends
 
-    return {"trends": trends}
+
+def _intelligence_get_confidence_trends(params: dict) -> dict:
+    """Return time-series confidence data grouped by date.
+
+    3-state VNX_USE_CENTRAL_DB dispatcher (Wave 1).
+    """
+    sd = _sd()
+    db_path: Path = sd.DB_PATH
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
+
+    if flag == "":
+        if not db_path.exists():
+            return {"trends": []}
+        try:
+            con = _open_qi_ro(db_path)
+            success_rows, anti_rows = _fetch_confidence_trend_rows(con)
+            con.close()
+        except Exception:
+            return {"trends": []}
+        return {"trends": _aggregate_trends(success_rows, anti_rows)}
+
+    project_id = _dashboard_project_id(db_path)
+    central = _central_qi_db(db_path)
+
+    if flag == "1":
+        # Cutover: central DB only; no fallback to per-project
+        if central is None or not central.exists():
+            return {"trends": []}
+        try:
+            con = _open_qi_ro(central)
+            success_rows, anti_rows = _fetch_confidence_trend_rows(con, project_id)
+            con.close()
+        except Exception:
+            return {"trends": []}
+        return {"trends": _aggregate_trends(success_rows, anti_rows)}
+
+    # shadow: per-project authoritative
+    if not db_path.exists():
+        return {"trends": []}
+    try:
+        con = _open_qi_ro(db_path)
+        legacy_sp_rows, legacy_ap_rows = _fetch_confidence_trend_rows(con)
+        con.close()
+    except Exception:
+        return {"trends": []}
+
+    if central is not None and _shadow_verifier is not None:
+        try:
+            con = _open_qi_ro(central)
+            central_sp_rows, central_ap_rows = _fetch_confidence_trend_rows(con, project_id)
+            con.close()
+            # Metric 1: wrong-project contamination in central
+            cmp = _shadow_verifier.compare(
+                [], central_sp_rows,
+                project_id=project_id,
+                read_site="dashboard.api.confidence_trends.success_patterns",
+                sql_template=_CONFIDENCE_TRENDS_SUCCESS_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.success_patterns")
+            cmp = _shadow_verifier.compare(
+                [], central_ap_rows,
+                project_id=project_id,
+                read_site="dashboard.api.confidence_trends.antipatterns",
+                sql_template=_CONFIDENCE_TRENDS_ANTI_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.antipatterns")
+            cmp = _shadow_verifier.compare(
+                legacy_sp_rows, central_sp_rows,
+                project_id=project_id,
+                read_site="dashboard.api.confidence_trends.success_patterns",
+                sql_template=_CONFIDENCE_TRENDS_SUCCESS_SQL,
+                metric_id=4,
+                table="success_patterns",
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.success_patterns")
+            cmp = _shadow_verifier.compare(
+                legacy_ap_rows, central_ap_rows,
+                project_id=project_id,
+                read_site="dashboard.api.confidence_trends.antipatterns",
+                sql_template=_CONFIDENCE_TRENDS_ANTI_SQL,
+                metric_id=4,
+                table="antipatterns",
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.antipatterns")
+        except Exception:
+            pass
+
+    return {"trends": _aggregate_trends(legacy_sp_rows, legacy_ap_rows)}
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +834,40 @@ def _intelligence_generate_weekly_digest() -> tuple[dict, int]:
 # /api/intelligence/learning-summary  (GET)
 # ---------------------------------------------------------------------------
 
+def _fetch_confidence_events(
+    con: "sqlite3.Connection", since: str, project_id: "str | None" = None
+) -> list[dict]:
+    """Fetch confidence_events rows since a timestamp, optionally filtered by project_id."""
+    sql = _LEARNING_EVENTS_CENTRAL_SQL if project_id else _LEARNING_EVENTS_SQL
+    params = (project_id, since) if project_id else (since,)
+    rows: list[dict] = []
+    try:
+        for row in con.execute(sql, params).fetchall():
+            rows.append(dict(row))
+    except sqlite3.OperationalError:
+        pass
+    return rows
+
+
+def _compute_learning_metrics(event_rows: list[dict], prevention_count: int) -> dict:
+    boosts = 0
+    decays = 0
+    net_drift = 0.0
+    for row in event_rows:
+        change = float(row.get("confidence_change") or 0.0)
+        if row.get("outcome") == "success":
+            boosts += 1
+        else:
+            decays += 1
+        net_drift += change
+    return {
+        "boosts": boosts,
+        "decays": decays,
+        "net_confidence_drift": round(net_drift, 4),
+        "prevention_suggestions": prevention_count,
+    }
+
+
 def _intelligence_get_learning_summary() -> tuple[dict, int]:
     """Return learning feedback loop metrics for the last 7 days.
 
@@ -579,59 +876,117 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
       decays               — confidence-decay event count
       net_confidence_drift — sum of confidence_change over the window
       prevention_suggestions — antipatterns with occurrence_count >= 3
+
+    3-state VNX_USE_CENTRAL_DB dispatcher (Wave 1).
     """
+    from datetime import timedelta
+
     sd = _sd()
     db_path: Path = sd.DB_PATH
-
-    if not db_path.exists():
-        return {"boosts": 0, "decays": 0, "net_confidence_drift": 0.0, "prevention_suggestions": 0}, 200
-
-    from datetime import timedelta
+    flag = os.environ.get("VNX_USE_CENTRAL_DB", "").strip()
+    if flag not in ("", "1", "shadow"):
+        _logger.warning("unknown VNX_USE_CENTRAL_DB value %r; falling back to legacy", flag)
+        flag = ""
     since = (datetime.now(_UTC) - timedelta(days=7)).isoformat()
 
-    boosts = 0
-    decays = 0
-    net_drift = 0.0
-    prevention_suggestions = 0
+    _empty = {"boosts": 0, "decays": 0, "net_confidence_drift": 0.0, "prevention_suggestions": 0}
 
+    if flag == "":
+        if not db_path.exists():
+            return _empty, 200
+        try:
+            con = _open_qi_ro(db_path)
+            event_rows = _fetch_confidence_events(con, since)
+            prev_count = 0
+            try:
+                result = con.execute(_LEARNING_ANTI_COUNT_SQL).fetchone()
+                prev_count = int(result[0] or 0) if result else 0
+            except sqlite3.OperationalError:
+                pass
+            con.close()
+        except Exception:
+            return _empty, 200
+        return _compute_learning_metrics(event_rows, prev_count), 200
+
+    project_id = _dashboard_project_id(db_path)
+    central = _central_qi_db(db_path)
+
+    if flag == "1":
+        # Cutover: central DB only; no fallback to per-project
+        if central is None or not central.exists():
+            return _empty, 200
+        try:
+            con = _open_qi_ro(central)
+            event_rows = _fetch_confidence_events(con, since, project_id)
+            prev_count = 0
+            try:
+                result = con.execute(_LEARNING_ANTI_COUNT_CENTRAL_SQL, (project_id,)).fetchone()
+                prev_count = int(result[0] or 0) if result else 0
+            except sqlite3.OperationalError:
+                pass
+            con.close()
+        except Exception:
+            return _empty, 200
+        return _compute_learning_metrics(event_rows, prev_count), 200
+
+    # shadow: per-project authoritative
+    if not db_path.exists():
+        return _empty, 200
     try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        con.row_factory = sqlite3.Row
-
+        con = _open_qi_ro(db_path)
+        legacy_events = _fetch_confidence_events(con, since)
+        legacy_prev = 0
         try:
-            rows = con.execute(
-                "SELECT outcome, confidence_change FROM confidence_events WHERE occurred_at >= ?",
-                (since,),
-            ).fetchall()
-            for row in rows:
-                change = float(row["confidence_change"] or 0.0)
-                if row["outcome"] == "success":
-                    boosts += 1
-                else:
-                    decays += 1
-                net_drift += change
+            result = con.execute(_LEARNING_ANTI_COUNT_SQL).fetchone()
+            legacy_prev = int(result[0] or 0) if result else 0
         except sqlite3.OperationalError:
             pass
-
-        try:
-            result = con.execute(
-                "SELECT COUNT(*) FROM antipatterns WHERE occurrence_count >= 3"
-            ).fetchone()
-            if result:
-                prevention_suggestions = int(result[0] or 0)
-        except sqlite3.OperationalError:
-            pass
-
         con.close()
     except Exception:
-        pass
+        return _empty, 200
 
-    return {
-        "boosts": boosts,
-        "decays": decays,
-        "net_confidence_drift": round(net_drift, 4),
-        "prevention_suggestions": prevention_suggestions,
-    }, 200
+    if central is not None and _shadow_verifier is not None:
+        try:
+            con = _open_qi_ro(central)
+            central_events = _fetch_confidence_events(con, since, project_id)
+            central_prev = 0
+            try:
+                result = con.execute(_LEARNING_ANTI_COUNT_CENTRAL_SQL, (project_id,)).fetchone()
+                central_prev = int(result[0] or 0) if result else 0
+            except sqlite3.OperationalError:
+                pass
+            con.close()
+            # Metric 1: wrong-project contamination in central confidence_events
+            cmp = _shadow_verifier.compare(
+                [], central_events,
+                project_id=project_id,
+                read_site="dashboard.api.learning_summary.confidence_events",
+                sql_template=_LEARNING_EVENTS_CENTRAL_SQL,
+                metric_id=1,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.learning_summary.confidence_events")
+            # Compare confidence_events rows (metric 4 — count + checksum)
+            cmp = _shadow_verifier.compare(
+                legacy_events, central_events,
+                project_id=project_id,
+                read_site="dashboard.api.learning_summary.confidence_events",
+                sql_template=_LEARNING_EVENTS_SQL,
+                metric_id=4,
+                table="confidence_events",
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.learning_summary.confidence_events")
+            # Compare prevention suggestion count (aggregate)
+            cmp = _shadow_verifier.compare_aggregate_count(
+                legacy_prev, central_prev,
+                project_id=project_id,
+                read_site="dashboard.api.learning_summary.antipatterns_count",
+                sql_template=_LEARNING_ANTI_COUNT_SQL,
+            )
+            _shadow_write_cmp(cmp, project_id, "dashboard.api.learning_summary.antipatterns_count")
+        except Exception:
+            pass
+
+    return _compute_learning_metrics(legacy_events, legacy_prev), 200
 
 
 # ---------------------------------------------------------------------------
