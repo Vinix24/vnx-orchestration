@@ -1670,3 +1670,502 @@ def test_round4_fts_rebuild_uses_index(tmp_path: Path):
         assert populated == n_rows, (
             f"expected {n_rows} project_id-populated rows, got {populated}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round-5 regression tests
+#
+# Bug 1: terminal_leases/execution_targets had a single-column UNIQUE on the
+#        business key (terminal_id / target_id). When central had a leftover
+#        row stamped 'vnx-dev' from migration 0010's DEFAULT, INSERT OR IGNORE
+#        from a real project silently skipped the row, leaving the legacy
+#        stamp in place. Fix: composite UNIQUE(project_id, key) lets cross-
+#        tenant rows coexist.
+# Bug 2: tag_combinations had the same single-column UNIQUE on tag_tuple,
+#        causing 3-5x source/central mismatch when projects shared tag tuples.
+# Bug 3: verifier's _compare_counts silently fell back to unfiltered COUNT(*)
+#        when project_id was missing — producing per-project counts equal to
+#        the global central total.
+# ---------------------------------------------------------------------------
+
+
+def _make_rc_with_round5_tables(path: Path) -> None:
+    """RC seed schema for round-5 tests: matches the post-bootstrap shape
+    the migrator sees AFTER 0010+0015 have run (project_id present,
+    legacy single-column UNIQUE still in place).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE runtime_schema_version (
+                version INTEGER PRIMARY KEY,
+                description TEXT
+            );
+            CREATE TABLE dispatches (
+                dispatch_id TEXT PRIMARY KEY,
+                state TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE terminal_leases (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                terminal_id         TEXT    NOT NULL UNIQUE,
+                state               TEXT    NOT NULL DEFAULT 'idle',
+                dispatch_id         TEXT    REFERENCES dispatches (dispatch_id),
+                generation          INTEGER NOT NULL DEFAULT 1,
+                leased_at           TEXT,
+                expires_at          TEXT,
+                last_heartbeat_at   TEXT,
+                released_at         TEXT,
+                metadata_json       TEXT    DEFAULT '{}',
+                project_id          TEXT    NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE execution_targets (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id           TEXT    NOT NULL UNIQUE,
+                target_type         TEXT    NOT NULL,
+                terminal_id         TEXT,
+                capabilities_json   TEXT    NOT NULL DEFAULT '[]',
+                health              TEXT    NOT NULL DEFAULT 'offline',
+                health_checked_at   TEXT,
+                model               TEXT,
+                registered_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                metadata_json       TEXT    DEFAULT '{}',
+                project_id          TEXT    NOT NULL DEFAULT 'vnx-dev'
+            );
+            INSERT INTO runtime_schema_version (version, description) VALUES (10, 'phase-0');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def _make_qi_with_tag_combinations(path: Path) -> None:
+    """QI seed for round-5 Bug 2: tag_combinations with single-column UNIQUE."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE tag_combinations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_tuple TEXT NOT NULL UNIQUE,
+                occurrence_count INTEGER DEFAULT 0,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                phases TEXT,
+                terminals TEXT,
+                outcomes TEXT,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_round5_upsert_overwrites_default_project_id(tmp_path: Path):
+    """ROUND-5 BUG 1: pre-existing 'vnx-dev'-stamped row in central must
+    not block a new project's INSERT.
+
+    Setup mirrors the partial-failure-recovery scenario: migration 0010
+    has stamped existing terminal_leases rows with project_id='vnx-dev',
+    then a real project (autopilot, project_id='vnx-orchestration')
+    imports its T1/T2/T3. Pre-fix: INSERT OR IGNORE conflict on
+    terminal_id silently skipped autopilot's rows. Post-fix
+    (composite UNIQUE on (project_id, terminal_id)): both rows coexist,
+    autopilot's row is correctly stamped, and the legacy 'vnx-dev' row
+    is preserved (it will be cleaned up by --fresh-central or operator).
+    """
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
+
+    src_db = tmp_path / "src_rc.db"
+    _make_rc_with_round5_tables(src_db)
+    with sqlite3.connect(src_db) as c:
+        c.execute(
+            "INSERT INTO terminal_leases (terminal_id, project_id) VALUES (?, ?)",
+            ("T1", "vnx-dev"),
+        )
+        c.commit()
+
+    central_db = tmp_path / "central_rc.db"
+    _make_rc_with_round5_tables(central_db)
+    with sqlite3.connect(central_db) as c:
+        c.execute(
+            "INSERT INTO terminal_leases (terminal_id, project_id) VALUES (?, ?)",
+            ("T1", "vnx-dev"),
+        )
+        c.commit()
+
+    # Apply round-5 composite UNIQUE rebuild before import.
+    M.apply_composite_unique_constraints(tmp_path / "missing_qi.db", central_db)
+
+    with sqlite3.connect(central_db) as c:
+        idx_list = list(c.execute("PRAGMA index_list(terminal_leases)"))
+        composite_present = False
+        for idx in idx_list:
+            if idx[2]:  # is_unique
+                cols = [r[2] for r in c.execute(f"PRAGMA index_info({idx[1]})")]
+                if set(cols) == {"project_id", "terminal_id"}:
+                    composite_present = True
+                    break
+        assert composite_present, (
+            "composite UNIQUE(project_id, terminal_id) missing post-rebuild "
+            f"-- index_list={idx_list}"
+        )
+
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        M._ensure_rowid_map_table(con)
+        attach_readonly(con, "src", src_db)
+
+        project = ProjectEntry(
+            name="autopilot",
+            path=tmp_path / "autopilot",
+            project_id="vnx-orchestration",
+        )
+        con.execute("BEGIN")
+        try:
+            summary = M._import_table(con, "src", project, "terminal_leases")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        assert summary.rows_inserted == 1, (
+            f"autopilot's T1 must INSERT successfully despite legacy 'vnx-dev' "
+            f"row; got rows_inserted={summary.rows_inserted}"
+        )
+
+        rows = sorted(
+            (r[0], r[1]) for r in con.execute(
+                "SELECT terminal_id, project_id FROM terminal_leases"
+            )
+        )
+        assert ("T1", "vnx-dev") in rows, "legacy row was clobbered (data loss!)"
+        assert ("T1", "vnx-orchestration") in rows, (
+            "autopilot's row missing -- INSERT OR IGNORE silently skipped, "
+            "round-5 fix not engaged"
+        )
+        # Both rows present and distinct -- composite UNIQUE working.
+        assert len(rows) == 2, f"expected 2 distinct rows, got {rows}"
+    finally:
+        con.close()
+
+
+def test_round5_tag_combinations_no_cross_tenant_dedup(tmp_path: Path):
+    """ROUND-5 BUG 2: cross-tenant tag_tuples must coexist after import.
+
+    Pre-fix: tag_combinations.tag_tuple was UNIQUE without project_id
+    scoping, so 'common-tag' loaded for project A would block 'common-
+    tag' for project B (3-5x mismatch on real central). Post-fix:
+    composite UNIQUE(project_id, tag_tuple) lets both rows coexist.
+    """
+    from scripts.aggregator.build_central_view import ProjectEntry, attach_readonly
+
+    central_db = tmp_path / "central_qi.db"
+    _make_qi_with_tag_combinations(central_db)
+    with sqlite3.connect(central_db) as c:
+        c.execute(
+            "INSERT INTO tag_combinations "
+            "(tag_tuple, first_seen, last_seen, project_id) "
+            "VALUES (?, ?, ?, ?)",
+            ("common-tag", "2026-05-09T00:00:00Z", "2026-05-09T00:00:00Z", "mc"),
+        )
+        c.commit()
+
+    src_db = tmp_path / "src_qi_sales.db"
+    _make_qi_with_tag_combinations(src_db)
+    with sqlite3.connect(src_db) as c:
+        c.execute(
+            "INSERT INTO tag_combinations "
+            "(tag_tuple, first_seen, last_seen, project_id) "
+            "VALUES (?, ?, ?, ?)",
+            ("common-tag", "2026-05-09T00:00:00Z", "2026-05-09T00:00:00Z", "vnx-dev"),
+        )
+        c.commit()
+
+    # Apply round-5 composite UNIQUE rebuild on QI side (RC missing is fine).
+    M.apply_composite_unique_constraints(central_db, tmp_path / "missing_rc.db")
+
+    con = sqlite3.connect(central_db, isolation_level=None)
+    try:
+        M._ensure_idempotency_table(con)
+        M._ensure_skipped_table(con)
+        M._ensure_rowid_map_table(con)
+        attach_readonly(con, "src", src_db)
+
+        project = ProjectEntry(
+            name="sales",
+            path=tmp_path / "sales",
+            project_id="sales-copilot",
+        )
+        con.execute("BEGIN")
+        try:
+            summary = M._import_table(con, "src", project, "tag_combinations")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+
+        assert summary.rows_inserted == 1, (
+            f"cross-tenant tag_tuple must INSERT after composite UNIQUE; "
+            f"got rows_inserted={summary.rows_inserted} "
+            f"(pre-fix this was 0 -- the 3-5x mismatch source)"
+        )
+
+        tuples = sorted(
+            (r[0], r[1]) for r in con.execute(
+                "SELECT tag_tuple, project_id FROM tag_combinations"
+            )
+        )
+        assert ("common-tag", "mc") in tuples, "mc's pre-existing tuple lost"
+        assert ("common-tag", "sales-copilot") in tuples, (
+            "sales-copilot's tuple missing -- cross-tenant dedup still happening"
+        )
+        assert len(tuples) == 2
+    finally:
+        con.close()
+
+
+def test_round5_verify_per_project_count_correct(tmp_path: Path):
+    """ROUND-5 BUG 3: _compare_counts must filter by project_id.
+
+    The original recovery report showed code_snippets central count
+    equal to GLOBAL total (855,159) for every project, indicating an
+    unfiltered COUNT(*) fallback. This test pre-populates a central
+    table with mixed project_id rows and asserts each project gets its
+    OWN count, not the total.
+
+    Also tests the round-5 strict-mode addition: when project_id is
+    missing from a central import-target table, the verifier must
+    surface a read_error rather than fall back to unfiltered count.
+    """
+    from scripts.aggregator.build_central_view import ProjectEntry
+
+    central_qi = tmp_path / "central_qi.db"
+    central_qi.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(central_qi)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        # 100 rows for project A, 200 for project B
+        for i in range(100):
+            con.execute(
+                "INSERT INTO success_patterns (pattern_type, category, title, "
+                "description, pattern_data, project_id) VALUES (?, ?, ?, ?, ?, ?)",
+                ("approach", "test", f"a-{i}", "d", "{}", "project-a"),
+            )
+        for i in range(200):
+            con.execute(
+                "INSERT INTO success_patterns (pattern_type, category, title, "
+                "description, pattern_data, project_id) VALUES (?, ?, ?, ?, ?, ?)",
+                ("approach", "test", f"b-{i}", "d", "{}", "project-b"),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    # Source DBs need only contain row counts matching central per project,
+    # so verification yields source_rows == central_rows_for_project.
+    src_a = tmp_path / "src_a" / "qi.db"
+    src_a.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(src_a)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        for i in range(100):
+            con.execute(
+                "INSERT INTO success_patterns (pattern_type, category, title, "
+                "description, pattern_data, project_id) VALUES (?, ?, ?, ?, ?, ?)",
+                ("approach", "test", f"a-{i}", "d", "{}", "project-a"),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    src_b = tmp_path / "src_b" / "qi.db"
+    src_b.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(src_b)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            """
+        )
+        for i in range(200):
+            con.execute(
+                "INSERT INTO success_patterns (pattern_type, category, title, "
+                "description, pattern_data, project_id) VALUES (?, ?, ?, ?, ?, ?)",
+                ("approach", "test", f"b-{i}", "d", "{}", "project-b"),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    project_a = ProjectEntry(name="a", path=tmp_path / "src_a", project_id="project-a")
+    project_b = ProjectEntry(name="b", path=tmp_path / "src_b", project_id="project-b")
+
+    read_errors: list[dict] = []
+    counts_a = M._compare_counts(
+        central_qi, "quality_intelligence.db", src_a,
+        project_a, ("success_patterns",), read_errors,
+    )
+    counts_b = M._compare_counts(
+        central_qi, "quality_intelligence.db", src_b,
+        project_b, ("success_patterns",), read_errors,
+    )
+    assert read_errors == [], f"unexpected read_errors: {read_errors}"
+
+    a_label = counts_a["quality_intelligence.db.success_patterns"]
+    b_label = counts_b["quality_intelligence.db.success_patterns"]
+    assert a_label["central_rows_for_project"] == 100, (
+        f"project A central count must be 100 (its own rows only), "
+        f"got {a_label['central_rows_for_project']} "
+        f"-- pre-fix this was 300 (total)"
+    )
+    assert b_label["central_rows_for_project"] == 200, (
+        f"project B central count must be 200, "
+        f"got {b_label['central_rows_for_project']}"
+    )
+    assert a_label["source_rows"] == 100
+    assert b_label["source_rows"] == 200
+
+    # Round-5 strict-mode addition: drop project_id from central and
+    # confirm verifier surfaces a read_error rather than silently
+    # falling back to unfiltered COUNT(*).
+    central_no_pid = tmp_path / "central_no_pid.db"
+    con = sqlite3.connect(central_no_pid)
+    try:
+        # Same shape WITHOUT project_id (simulates FTS5 vtab w/o project_id).
+        con.executescript(
+            """
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL
+            );
+            """
+        )
+        for i in range(50):
+            con.execute(
+                "INSERT INTO success_patterns (pattern_type, category, title, "
+                "description, pattern_data) VALUES (?, ?, ?, ?, ?)",
+                ("approach", "test", f"x-{i}", "d", "{}"),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    read_errors_strict: list[dict] = []
+    counts_strict = M._compare_counts(
+        central_no_pid, "quality_intelligence.db", src_a,
+        project_a, ("success_patterns",), read_errors_strict,
+    )
+    assert counts_strict == {}, (
+        f"strict-mode must NOT report a count when project_id is missing; "
+        f"got {counts_strict}"
+    )
+    phases = [e.get("phase") for e in read_errors_strict]
+    assert "central_missing_project_id" in phases, (
+        f"strict-mode must surface central_missing_project_id read_error; "
+        f"got phases={phases}"
+    )
+
+
+def test_round5_reset_idempotency_clears_tables(tmp_path: Path):
+    """ROUND-5: --reset-idempotency clears p4 bookkeeping tables.
+
+    Used after schema rebuilds (composite UNIQUE) when prior bookkeeping
+    is no longer accurate. Must clear all three tables idempotently.
+    """
+    qi_db = tmp_path / "qi.db"
+    rc_db = tmp_path / "rc.db"
+
+    for db_path in (qi_db, rc_db):
+        con = sqlite3.connect(db_path)
+        try:
+            M._ensure_idempotency_table(con)
+            M._ensure_skipped_table(con)
+            M._ensure_rowid_map_table(con)
+            con.execute(
+                "INSERT INTO p4_import_idempotency (project_id, source_table, source_rowid) "
+                "VALUES (?, ?, ?)",
+                ("project-a", "success_patterns", 1),
+            )
+            con.execute(
+                "INSERT INTO p4_import_skipped (project_id, source_table, source_rowid, reason) "
+                "VALUES (?, ?, ?, ?)",
+                ("project-a", "success_patterns", 2, "test"),
+            )
+            con.execute(
+                "INSERT INTO p4_import_rowid_map "
+                "(project_id, source_table, source_rowid, central_rowid) VALUES (?, ?, ?, ?)",
+                ("project-a", "code_snippets", 3, 100),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    counts = M.reset_idempotency_state(qi_db, rc_db)
+    assert counts["qi"] == 3
+    assert counts["rc"] == 3
+
+    for db_path in (qi_db, rc_db):
+        with sqlite3.connect(db_path) as c:
+            for tbl in ("p4_import_idempotency", "p4_import_skipped", "p4_import_rowid_map"):
+                n = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                assert n == 0, f"{db_path.name}.{tbl} still has rows after reset"
+
+    # Idempotent re-run yields zero counts.
+    counts2 = M.reset_idempotency_state(qi_db, rc_db)
+    assert counts2["qi"] == 0
+    assert counts2["rc"] == 0

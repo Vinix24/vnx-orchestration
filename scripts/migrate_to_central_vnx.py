@@ -481,6 +481,333 @@ def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
     _apply_alters_idempotently(rc_db, rc_block)
 
 
+# ---------------------------------------------------------------------------
+# Round-5 fix: composite UNIQUE rebuild for cross-tenant collision tables
+# ---------------------------------------------------------------------------
+#
+# Bugs 1 + 2 from P4 round-5: terminal_leases, execution_targets, and
+# tag_combinations have a single-column UNIQUE constraint that is NOT
+# scoped by project_id. Source DBs across projects share the same
+# business keys (T1/T2/T3, target IDs, tag tuples) so INSERT OR IGNORE
+# silently drops cross-tenant rows. Migration 0010's
+# ``DEFAULT 'vnx-dev'`` ALTER TABLE further compounds this on partial-
+# failure recovery: pre-existing rows stamped 'vnx-dev' block the new
+# project's correctly-stamped INSERT.
+#
+# The fix rebuilds each affected table with composite UNIQUE
+# (project_id, key_col). After rebuild, cross-tenant rows coexist as
+# distinct composite keys; legacy 'vnx-dev'-stamped rows do not block
+# new imports for other projects.
+
+# Map: table → business-key column whose old single-column UNIQUE must
+# become composite ``UNIQUE(project_id, key)``.
+COMPOSITE_UNIQUE_TABLES_QI: dict[str, str] = {
+    "tag_combinations": "tag_tuple",
+}
+COMPOSITE_UNIQUE_TABLES_RC: dict[str, str] = {
+    "terminal_leases": "terminal_id",
+    "execution_targets": "target_id",
+}
+
+# Hardcoded rebuild SQL per table. Keeping the SQL canonical (no
+# post-ALTER ", project_id ..." cruft) means EXPLAIN QUERY PLAN and
+# downstream tooling sees the same shape as a fresh-bootstrap DB.
+_REBUILD_SQL: dict[str, str] = {
+    "terminal_leases": """
+        CREATE TABLE terminal_leases_new (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            terminal_id         TEXT    NOT NULL,
+            state               TEXT    NOT NULL DEFAULT 'idle',
+            dispatch_id         TEXT    REFERENCES dispatches (dispatch_id),
+            generation          INTEGER NOT NULL DEFAULT 1,
+            leased_at           TEXT,
+            expires_at          TEXT,
+            last_heartbeat_at   TEXT,
+            released_at         TEXT,
+            metadata_json       TEXT    DEFAULT '{}',
+            project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+            UNIQUE (project_id, terminal_id)
+        );
+        INSERT INTO terminal_leases_new (
+            id, terminal_id, state, dispatch_id, generation,
+            leased_at, expires_at, last_heartbeat_at, released_at,
+            metadata_json, project_id
+        )
+        SELECT
+            id, terminal_id, state, dispatch_id, generation,
+            leased_at, expires_at, last_heartbeat_at, released_at,
+            metadata_json, project_id
+        FROM terminal_leases;
+        DROP TABLE terminal_leases;
+        ALTER TABLE terminal_leases_new RENAME TO terminal_leases;
+        CREATE INDEX IF NOT EXISTS idx_lease_state ON terminal_leases (state);
+        CREATE INDEX IF NOT EXISTS idx_lease_dispatch ON terminal_leases (dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_terminal_leases_project ON terminal_leases (project_id);
+    """,
+    "execution_targets": """
+        CREATE TABLE execution_targets_new (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_id           TEXT    NOT NULL,
+            target_type         TEXT    NOT NULL,
+            terminal_id         TEXT,
+            capabilities_json   TEXT    NOT NULL DEFAULT '[]',
+            health              TEXT    NOT NULL DEFAULT 'offline',
+            health_checked_at   TEXT,
+            model               TEXT,
+            registered_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            metadata_json       TEXT    DEFAULT '{}',
+            project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+            UNIQUE (project_id, target_id)
+        );
+        INSERT INTO execution_targets_new (
+            id, target_id, target_type, terminal_id, capabilities_json,
+            health, health_checked_at, model, registered_at, updated_at,
+            metadata_json, project_id
+        )
+        SELECT
+            id, target_id, target_type, terminal_id, capabilities_json,
+            health, health_checked_at, model, registered_at, updated_at,
+            metadata_json, project_id
+        FROM execution_targets;
+        DROP TABLE execution_targets;
+        ALTER TABLE execution_targets_new RENAME TO execution_targets;
+        CREATE INDEX IF NOT EXISTS idx_target_type ON execution_targets (target_type);
+        CREATE INDEX IF NOT EXISTS idx_target_terminal ON execution_targets (terminal_id);
+        CREATE INDEX IF NOT EXISTS idx_target_health ON execution_targets (health);
+        CREATE INDEX IF NOT EXISTS idx_execution_targets_project ON execution_targets (project_id);
+    """,
+    "tag_combinations": """
+        CREATE TABLE tag_combinations_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag_tuple TEXT NOT NULL,
+            occurrence_count INTEGER DEFAULT 0,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            phases TEXT,
+            terminals TEXT,
+            outcomes TEXT,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            UNIQUE (project_id, tag_tuple)
+        );
+        INSERT INTO tag_combinations_new (
+            id, tag_tuple, occurrence_count, first_seen, last_seen,
+            phases, terminals, outcomes, project_id
+        )
+        SELECT
+            id, tag_tuple, occurrence_count, first_seen, last_seen,
+            phases, terminals, outcomes, project_id
+        FROM tag_combinations;
+        DROP TABLE tag_combinations;
+        ALTER TABLE tag_combinations_new RENAME TO tag_combinations;
+        CREATE INDEX IF NOT EXISTS idx_tag_tuple ON tag_combinations (tag_tuple);
+        CREATE INDEX IF NOT EXISTS idx_tag_combinations_project ON tag_combinations (project_id);
+    """,
+}
+
+
+# Tables whose FK declarations would break when terminal_leases drops its
+# single-column UNIQUE on terminal_id. SQLite parses the FK reference at
+# every schema validation, and a reference to a non-UNIQUE/PK column is a
+# "foreign key mismatch" error. We rebuild these tables WITHOUT the FK
+# to terminal_leases. This is safe in central context because:
+#   - worker_states is a runtime-state-tracking table; it doesn't need a
+#     hard FK constraint to enforce referential integrity at the central
+#     consolidation layer (each project's worker_states is single-tenant
+#     and unrelated to the central composite-keyed terminal_leases).
+#   - the canonical per-project schema still has the FK; only the central
+#     DB drops it.
+_REBUILD_DEPENDENT_FK_SQL: dict[str, str] = {
+    "worker_states": """
+        CREATE TABLE worker_states_new (
+            terminal_id      TEXT    NOT NULL,
+            dispatch_id      TEXT    NOT NULL,
+            state            TEXT    NOT NULL DEFAULT 'initializing',
+            last_output_at   TEXT,
+            state_entered_at TEXT    NOT NULL,
+            stall_count      INTEGER NOT NULL DEFAULT 0,
+            blocked_reason   TEXT,
+            metadata_json    TEXT,
+            created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            PRIMARY KEY (terminal_id)
+        );
+        INSERT INTO worker_states_new
+            SELECT terminal_id, dispatch_id, state, last_output_at,
+                   state_entered_at, stall_count, blocked_reason,
+                   metadata_json, created_at, updated_at
+            FROM worker_states;
+        DROP TABLE worker_states;
+        ALTER TABLE worker_states_new RENAME TO worker_states;
+        CREATE INDEX IF NOT EXISTS idx_worker_state ON worker_states (state);
+        CREATE INDEX IF NOT EXISTS idx_worker_dispatch ON worker_states (dispatch_id);
+    """,
+}
+
+
+def _has_composite_project_unique(
+    con: sqlite3.Connection,
+    table: str,
+    key_col: str,
+) -> bool:
+    """Return True iff a UNIQUE index on ``(project_id, key_col)`` (in either
+    order) is already present.
+
+    Used to make :func:`apply_composite_unique_constraints` idempotent
+    so a re-run of ``--apply`` against an already-rebuilt central is a
+    no-op rather than an attempted second rebuild that would fail
+    because the column-level ``UNIQUE`` is already gone.
+    """
+    if not _table_exists(con, table):
+        return False
+    target = {"project_id", key_col}
+    for row in con.execute(f"PRAGMA index_list({table})"):
+        idx_name = row[1]
+        is_unique = bool(row[2])
+        if not is_unique:
+            continue
+        cols = [r[2] for r in con.execute(f"PRAGMA index_info({idx_name})")]
+        if len(cols) == 2 and set(cols) == target:
+            return True
+    return False
+
+
+def _has_single_column_unique(
+    con: sqlite3.Connection,
+    table: str,
+    key_col: str,
+) -> bool:
+    """Return True iff a UNIQUE index covers ONLY ``key_col`` (the
+    pre-rebuild state)."""
+    if not _table_exists(con, table):
+        return False
+    for row in con.execute(f"PRAGMA index_list({table})"):
+        idx_name = row[1]
+        is_unique = bool(row[2])
+        if not is_unique:
+            continue
+        cols = [r[2] for r in con.execute(f"PRAGMA index_info({idx_name})")]
+        if cols == [key_col]:
+            return True
+    return False
+
+
+def _rebuild_one_table(
+    con: sqlite3.Connection,
+    table: str,
+    key_col: str,
+) -> None:
+    """Rebuild a single table to swap single-column UNIQUE → composite
+    ``UNIQUE(project_id, key_col)``.
+
+    Idempotent: returns early if the composite UNIQUE is already present
+    or if the table is missing in this DB. The rebuild runs inside the
+    caller's transaction frame; failure raises and rolls back the entire
+    composite-unique pass.
+    """
+    if not _table_exists(con, table):
+        LOG.info("composite-unique skip: %s not present in this DB", table)
+        return
+    if _has_composite_project_unique(con, table, key_col):
+        LOG.info("composite-unique already applied: %s(%s,project_id)", table, key_col)
+        return
+    if not _column_exists(con, table, "project_id"):
+        # 0010/0015 must have run first. Defensive: refuse to rebuild
+        # a pre-Phase-0 table or we will lose the project_id semantics.
+        raise BootstrapFailure(
+            f"composite-unique pre-condition failed: {table} has no "
+            "project_id column. Apply migrations 0010+0015 first."
+        )
+
+    sql = _REBUILD_SQL[table]
+    LOG.info("composite-unique rebuild: %s → UNIQUE(project_id,%s)", table, key_col)
+    for stmt in _iter_sql_statements(sql):
+        con.execute(stmt)
+
+
+def _rebuild_dependent_fk_holders(con: sqlite3.Connection) -> None:
+    """Rebuild tables whose FK declarations would dangle after a
+    composite-unique rebuild drops a referenced single-column UNIQUE.
+
+    Currently only ``worker_states`` (FK on
+    ``terminal_leases(terminal_id)``). Idempotent: detects rebuild
+    completion via the absence of FK in PRAGMA foreign_key_list.
+    """
+    for dep_table in _REBUILD_DEPENDENT_FK_SQL.keys():
+        if not _table_exists(con, dep_table):
+            continue
+        fk_rows = list(con.execute(f"PRAGMA foreign_key_list({dep_table})"))
+        # Skip if no FK to terminal_leases survives (already rebuilt).
+        has_lease_fk = any((row[2] or "") == "terminal_leases" for row in fk_rows)
+        if not has_lease_fk:
+            LOG.info("dependent-fk rebuild skip: %s has no terminal_leases FK", dep_table)
+            continue
+        LOG.info("dependent-fk rebuild: %s (drop FK to terminal_leases)", dep_table)
+        for stmt in _iter_sql_statements(_REBUILD_DEPENDENT_FK_SQL[dep_table]):
+            con.execute(stmt)
+
+
+def apply_composite_unique_constraints(qi_db: Path, rc_db: Path) -> None:
+    """Round-5 fix: rebuild collision-prone tables with composite UNIQUE.
+
+    Runs after migrations 0010 + 0015 (so the project_id column exists)
+    and BEFORE the per-project import (so the import sees the new
+    constraints). Wrapped in a single transaction per DB; any failure
+    rolls back the rebuild and propagates so the outer pre-snapshot
+    restore engages.
+
+    Idempotent: re-running against an already-rebuilt central is a
+    no-op via :func:`_has_composite_project_unique`.
+
+    Note on FK handling: terminal_leases.dispatch_id has a FOREIGN KEY
+    to dispatches. SQLite does not enforce FKs unless
+    ``PRAGMA foreign_keys = ON`` is set, and the migrator does NOT set
+    it during this rebuild because the dispatches data may not yet be
+    imported (rebuild happens BEFORE per-project import). We run a
+    ``foreign_key_check`` after rebuild for visibility, but only log
+    findings rather than fail — the import phase will populate
+    dispatches and the FK becomes consistent at that point.
+    """
+    for db_path, mapping, is_rc in (
+        (qi_db, COMPOSITE_UNIQUE_TABLES_QI, False),
+        (rc_db, COMPOSITE_UNIQUE_TABLES_RC, True),
+    ):
+        if not db_path.exists():
+            LOG.warning("skipping composite-unique on missing DB: %s", db_path)
+            continue
+        con = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            # FKs OFF during rebuild so DROP TABLE on a referenced table
+            # does not trip the check. We restore at the end.
+            con.execute("PRAGMA foreign_keys = OFF")
+            con.execute("BEGIN")
+            try:
+                # On RC: rebuild FK-holders FIRST so terminal_leases'
+                # subsequent UNIQUE drop doesn't dangle worker_states' FK.
+                if is_rc:
+                    _rebuild_dependent_fk_holders(con)
+                for table, key_col in mapping.items():
+                    _rebuild_one_table(con, table, key_col)
+                # Visibility-only FK check; warn rather than fail because
+                # the dispatches table may legitimately be empty at this
+                # point in the apply flow (rebuild precedes import).
+                fk_violations = list(con.execute("PRAGMA foreign_key_check"))
+                if fk_violations:
+                    LOG.info(
+                        "composite-unique post-rebuild FK check: %d findings (informational; "
+                        "import phase will populate referenced tables)",
+                        len(fk_violations),
+                    )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+            finally:
+                con.execute("PRAGMA foreign_keys = ON")
+        finally:
+            con.close()
+
+
 def _strip_leading_sql_comments(stmt: str) -> str:
     """Drop leading whitespace + ``--`` comment lines from a SQL chunk.
 
@@ -713,6 +1040,34 @@ def _generate_run_id() -> str:
     can filter out historical / resolved skips.
     """
     return f"run-{_dt.datetime.now(_dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
+
+
+def reset_idempotency_state(qi_db: Path, rc_db: Path) -> dict[str, int]:
+    """Round-5: wipe p4 bookkeeping tables so next --apply re-evaluates every row.
+
+    Returns a per-DB count of rows deleted across the three tables for
+    operator visibility. Targets only the migrator's own bookkeeping —
+    never touches imported business data. Idempotent: tables that don't
+    yet exist are silently skipped (returns 0 for that DB).
+    """
+    counts: dict[str, int] = {}
+    for label, db_path in (("qi", qi_db), ("rc", rc_db)):
+        if not db_path.exists():
+            counts[label] = 0
+            continue
+        con = sqlite3.connect(str(db_path))
+        try:
+            total = 0
+            for tbl in ("p4_import_idempotency", "p4_import_skipped", "p4_import_rowid_map"):
+                if not _table_exists(con, tbl):
+                    continue
+                cur = con.execute(f"DELETE FROM {tbl}")
+                total += cur.rowcount or 0
+            con.commit()
+            counts[label] = total
+        finally:
+            con.close()
+    return counts
 
 
 def _ensure_rowid_map_table(con: sqlite3.Connection) -> None:
@@ -1279,8 +1634,18 @@ def _compare_counts(
     'table absent' (fine — schema drift) vs 'table present but unreadable'
     (fatal — appended to the shared ``read_errors`` list and surfaced as
     a verification discrepancy).
+
+    Round-5 fix (Bug 3): when the central DB has the table but is
+    missing the ``project_id`` column, the verifier no longer silently
+    falls back to an unfiltered ``COUNT(*)``. That fallback could
+    produce per-project counts equal to the GLOBAL central total
+    (e.g. ``code_snippets`` reporting 855,159 for every project when
+    the FTS5 vtab was rebuilt without ``project_id``). Instead it now
+    records a ``central_missing_project_id`` read_error which becomes a
+    verification discrepancy.
     """
     out: dict[str, dict] = {}
+    tables_list = list(tables)
     con = sqlite3.connect(str(central_db))
     try:
         try:
@@ -1296,7 +1661,7 @@ def _compare_counts(
                 }
             )
             return out
-        for tbl in tables:
+        for tbl in tables_list:
             src_present = _src_table_present(con, "src", tbl)
             central_present = _table_exists(con, tbl)
             if not src_present:
@@ -1332,14 +1697,33 @@ def _compare_counts(
                     }
                 )
                 continue
-            try:
-                cnt_query = (
-                    f"SELECT COUNT(*) FROM {tbl} WHERE project_id = ?"
-                    if _column_exists(con, tbl, "project_id")
-                    else f"SELECT COUNT(*) FROM {tbl}"
+            central_has_pid = _column_exists(con, tbl, "project_id")
+            if not central_has_pid:
+                # Round-5 fix (Bug 3): central is missing project_id on a
+                # table that is in the import list. After 0010+0015 every
+                # import-target table MUST have project_id. A missing
+                # column means the migration didn't take, or the FTS5
+                # vtab was rebuilt without it — either way the unfiltered
+                # COUNT(*) fallback would lie. Surface as discrepancy.
+                read_errors.append(
+                    {
+                        "db": central_db_label,
+                        "project_id": project.project_id,
+                        "phase": "central_missing_project_id",
+                        "table": tbl,
+                        "error": (
+                            "import-target table is missing project_id "
+                            "column post-migration; per-project verification "
+                            "cannot be performed without it"
+                        ),
+                    }
                 )
-                params = (project.project_id,) if "WHERE" in cnt_query else ()
-                central_cnt = con.execute(cnt_query, params).fetchone()[0]
+                continue
+            try:
+                central_cnt = con.execute(
+                    f"SELECT COUNT(*) FROM {tbl} WHERE project_id = ?",
+                    (project.project_id,),
+                ).fetchone()[0]
             except sqlite3.Error as exc:
                 read_errors.append(
                     {
@@ -1493,6 +1877,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             "canonical schemas — guards against accidental first-deploy runs."
         ),
     )
+    parser.add_argument(
+        "--reset-idempotency",
+        action="store_true",
+        help=(
+            "Round-5: clear p4_import_idempotency, p4_import_skipped, "
+            "p4_import_rowid_map before importing. Use after schema rebuilds "
+            "(e.g. composite-UNIQUE migration) when prior bookkeeping is no "
+            "longer accurate. Only effective with --apply."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="Emit JSON to stdout on completion")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1590,16 +1984,24 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
             _init_central_if_missing(central_qi, central_rc)
 
-        # Order matters (Round-3 Issue 1 + Finding 3 in PR #432 review):
+        # Order matters (Round-3 Issue 1 + Finding 3 in PR #432 review,
+        # extended with Round-5 step 2.5 for composite UNIQUE):
         #   1. 0010 ALTER TABLE — adds project_id to hot tables (foundation)
         #   2. 0015 ALTER TABLE — extends project_id to remaining cold tables
+        #   2.5 Composite UNIQUE rebuild — terminal_leases, execution_targets,
+        #       tag_combinations swap single-col UNIQUE for
+        #       UNIQUE(project_id, key) so cross-tenant rows coexist (round-5).
         #   3. _assert_central_tables_exist — fail-fast before per-row losses
         #   4. import_project loop — populates code_snippets + snippet_metadata
         #   5. 0016 FTS5 rebuild — joins snippet_metadata to assign project_id
         # Running 0016 before the import loop rebuilds FTS5 over an empty
-        # central table → useless index.
+        # central table → useless index. Running composite UNIQUE AFTER the
+        # import would either (a) lose data when the rebuild discovers a
+        # conflict, or (b) require us to reapply the import; running it
+        # BEFORE the import is the only safe order.
         apply_migration_0010(central_qi, central_rc)
         apply_migration_0015(central_qi, central_rc)
+        apply_composite_unique_constraints(central_qi, central_rc)
         _assert_central_tables_exist(central_qi, central_rc, projects)
     except BootstrapFailure as exc:
         LOG.error("bootstrap assertion failed: %s", exc)
@@ -1613,6 +2015,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         LOG.error("canonical bootstrap failed: %s", exc)
         _restore_snapshot(pre_snapshot, central_qi, central_rc)
         return 3
+
+    if args.reset_idempotency:
+        cleared = reset_idempotency_state(central_qi, central_rc)
+        LOG.info(
+            "round-5: cleared p4_import bookkeeping (qi=%s rows, rc=%s rows)",
+            cleared.get("qi", 0),
+            cleared.get("rc", 0),
+        )
 
     run_id = _generate_run_id()
     summaries: list[ImportSummary] = []
