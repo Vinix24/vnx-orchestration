@@ -13,8 +13,10 @@ if [[ -z "$PROJECT_ROOT" ]]; then
 fi
 
 CRON_ENTRY="30 2 * * * cd $PROJECT_ROOT && python3 scripts/compact_state.py --mode all >> .vnx-data/logs/compact_state.log 2>&1"
-# Wave 1 — rotate shadow_divergence.ndjson if >100MB or older than 30 days
-SHADOW_CRON_ENTRY="0 3 * * * find $PROJECT_ROOT/.vnx-data/state -name \"shadow_divergence.ndjson\" -size +100M -exec mv {} {}.archive-\$(date +%Y%m%d) \; -exec touch {} \;"
+# Wave 1 — rotate shadow_divergence.ndjson if >100MB, under flock to prevent writer-rotation race.
+# Uses rotate_shadow_ledger.sh so date formatting stays in bash (no cron % escaping issues).
+# Archive suffix is seconds-precision (YYYYMMDDTHHmmSS) so same-day re-runs create distinct archives.
+SHADOW_CRON_ENTRY="0 3 * * * $PROJECT_ROOT/scripts/rotate_shadow_ledger.sh $PROJECT_ROOT/.vnx-data/state/shadow_divergence.ndjson $PROJECT_ROOT/.vnx-data/state/shadow_divergence.lock >> $PROJECT_ROOT/.vnx-data/logs/shadow_rotation.log 2>&1"
 
 existing=$(crontab -l 2>/dev/null || true)
 

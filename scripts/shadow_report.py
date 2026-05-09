@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
 import json
 import sys
 from collections import defaultdict
@@ -47,19 +48,24 @@ def _parse_duration(s: str) -> datetime.timedelta:
     raise ValueError(f"Unrecognized duration format: {s!r}. Use Xh or Xd.")
 
 
-def _load_events(ledger_path: Path) -> list[dict[str, Any]]:
+def _load_events(ledger_path: Path) -> tuple[list[dict[str, Any]], int]:
+    """Return (events, skipped_count). Holds LOCK_SH during read to avoid partial-write races."""
     if not ledger_path.exists():
-        return []
+        return [], 0
     events: list[dict[str, Any]] = []
-    for line in ledger_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    skipped = 0
+    with ledger_path.open("r", encoding="utf-8", errors="replace") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        raw = fh.read()
+    for line in raw.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
             events.append(json.loads(line))
         except json.JSONDecodeError:
-            continue
-    return events
+            skipped += 1
+    return events, skipped
 
 
 def _parse_ts(ts: str | None) -> datetime.datetime | None:
@@ -136,10 +142,13 @@ def _group_by_metric(events: list[dict]) -> dict[int, list[dict]]:
     return dict(groups)
 
 
-def _human_report(events: list[dict], since_label: str) -> str:
+def _human_report(events: list[dict], since_label: str, skipped_count: int = 0) -> str:
     lines: list[str] = []
     lines.append(f"Shadow divergence report — last {since_label}")
     lines.append("=" * 38)
+
+    if skipped_count:
+        lines.append(f"WARNING: {skipped_count} malformed line(s) skipped (partial writes or corruption)")
 
     if not events:
         lines.append("Total events: 0")
@@ -195,7 +204,7 @@ def _human_report(events: list[dict], since_label: str) -> str:
     return "\n".join(lines)
 
 
-def _json_report(events: list[dict], since_label: str) -> str:
+def _json_report(events: list[dict], since_label: str, skipped_count: int = 0) -> str:
     by_sev = _count_by_severity(events)
     by_met = _count_by_metric(events)
     by_proj = _count_by_project(events)
@@ -203,6 +212,7 @@ def _json_report(events: list[dict], since_label: str) -> str:
     summary = {
         "since": since_label,
         "total_events": len(events),
+        "skipped_lines": skipped_count,
         "by_severity": {s: by_sev.get(s, 0) for s in SEVERITY_ORDER},
         "by_metric": {str(m): by_met.get(m, 0) for m in range(1, 7)},
         "by_project": dict(sorted(by_proj.items())),
@@ -230,7 +240,7 @@ def main() -> int:
         return 1
 
     ledger_path = _resolve_ledger_path(args.ledger)
-    all_events = _load_events(ledger_path)
+    all_events, skipped_count = _load_events(ledger_path)
 
     events = _filter_events(
         all_events,
@@ -242,8 +252,12 @@ def main() -> int:
     if args.by_table:
         by_table = _group_by_table(events)
         if args.json_output:
-            print(json.dumps({f"{p}:{t}": c for (p, t), c in sorted(by_table.items())}, indent=2))
+            out = {f"{p}:{t}": c for (p, t), c in sorted(by_table.items())}
+            out["skipped_lines"] = skipped_count
+            print(json.dumps(out, indent=2))
         else:
+            if skipped_count:
+                print(f"WARNING: {skipped_count} malformed line(s) skipped")
             print(f"By (project, table) — last {args.since}:")
             for (pid, table), count in sorted(by_table.items(), key=lambda x: -x[1]):
                 print(f"  ({pid}, {table}): {count}")
@@ -252,17 +266,21 @@ def main() -> int:
     if args.by_metric:
         by_met = _count_by_metric(events)
         if args.json_output:
-            print(json.dumps({str(m): by_met.get(m, 0) for m in range(1, 7)}, indent=2))
+            out = {str(m): by_met.get(m, 0) for m in range(1, 7)}
+            out["skipped_lines"] = skipped_count
+            print(json.dumps(out, indent=2))
         else:
+            if skipped_count:
+                print(f"WARNING: {skipped_count} malformed line(s) skipped")
             print(f"By metric — last {args.since}:")
             for m in range(1, 7):
                 print(f"  metric {m}: {by_met.get(m, 0)}")
         return 0
 
     if args.json_output:
-        print(_json_report(events, args.since))
+        print(_json_report(events, args.since, skipped_count))
     else:
-        print(_human_report(events, args.since))
+        print(_human_report(events, args.since, skipped_count))
 
     return 0
 

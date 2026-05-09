@@ -206,6 +206,41 @@ class TestJsonOutput:
         assert data["by_severity"]["soft"] == 1
 
 
+class TestSkippedLinesCount:
+    def test_reports_skipped_lines_count(self, tmp_path: Path) -> None:
+        """Malformed NDJSON lines are counted and reported; valid events still appear."""
+        ledger = tmp_path / "ledger.ndjson"
+        events = [_make_event(hours_ago=1) for _ in range(3)]
+        _populate_ledger(ledger, events)
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write("NOT VALID JSON\n")
+            fh.write("{broken: line without quotes}\n")
+
+        # Human-readable report must mention skipped count
+        result = _run_cli(ledger, "--since", "24h")
+        assert result.returncode == 0, result.stderr
+        assert "2" in result.stdout and "skipped" in result.stdout.lower()
+
+        # JSON report must carry skipped_lines key
+        result_json = _run_cli(ledger, "--since", "24h", "--json")
+        assert result_json.returncode == 0, result_json.stderr
+        data = json.loads(result_json.stdout)
+        assert data["skipped_lines"] == 2
+        assert data["total_events"] == 3
+
+    def test_skipped_lines_in_by_metric_output(self, tmp_path: Path) -> None:
+        """--by-metric output also surfaces skipped_lines count."""
+        ledger = tmp_path / "ledger.ndjson"
+        _populate_ledger(ledger, [_make_event(metric_id=1, hours_ago=1)])
+        with ledger.open("a", encoding="utf-8") as fh:
+            fh.write("this is garbage\n")
+
+        result = _run_cli(ledger, "--since", "24h", "--by-metric", "--json")
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["skipped_lines"] == 1
+
+
 class TestEmptyLedger:
     def test_empty_ledger_produces_empty_report(self, tmp_path: Path) -> None:
         ledger = tmp_path / "ledger_empty.ndjson"

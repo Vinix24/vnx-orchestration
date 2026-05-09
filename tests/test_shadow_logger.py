@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+ROTATION_SCRIPT = SCRIPTS_DIR / "rotate_shadow_ledger.sh"
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import shadow_logger as sl  # noqa: E402
@@ -172,6 +174,51 @@ class TestWriteComparisonResult:
             assert n == count
             lines = ledger.read_text().splitlines()
             assert len(lines) == count
+
+
+class TestConcurrentRotation:
+    def test_concurrent_rotation_no_overwrite_same_second(self, tmp_path: Path) -> None:
+        """Two concurrent rotation calls must not overwrite each other's archive.
+
+        With flock: calls are serialized. The first rotates the large ledger and
+        touches an empty one; the second acquires the lock and sees a 0-byte ledger
+        (below threshold), so it skips. Result: exactly 1 archive, no data lost.
+        This proves the flock contract and the seconds-precision suffix uniqueness.
+        """
+        ledger = tmp_path / "shadow_divergence.ndjson"
+        lock_file = tmp_path / "shadow_divergence.lock"
+        data = b"x" * 200  # 200 bytes of data
+        ledger.write_bytes(data)
+        threshold = "100"  # 100-byte threshold for fast testing
+
+        results: list[subprocess.CompletedProcess] = []
+
+        def rotate() -> None:
+            r = subprocess.run(
+                ["bash", str(ROTATION_SCRIPT), str(ledger), str(lock_file), threshold],
+                capture_output=True,
+                text=True,
+            )
+            results.append(r)
+
+        t1 = threading.Thread(target=rotate)
+        t2 = threading.Thread(target=rotate)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        for r in results:
+            assert r.returncode == 0, f"rotation script failed: {r.stderr}"
+
+        archives = sorted(tmp_path.glob("shadow_divergence.ndjson.archive-*"))
+        # flock serializes: exactly one rotation completes; second sees empty ledger
+        assert len(archives) == 1, f"Expected 1 archive, got {len(archives)}: {archives}"
+        # Archive content is intact — no data loss
+        assert archives[0].read_bytes() == data
+        # Ledger was recreated empty
+        assert ledger.exists()
+        assert ledger.stat().st_size == 0
 
 
 class TestNoLockRequiredForReaders:
