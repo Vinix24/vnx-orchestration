@@ -42,6 +42,18 @@ skills:
     type: implementation
     domain: frontend
 
+  database-engineer:
+    name: "@database-engineer"
+    file: "database-engineer/SKILL.md"
+    type: implementation
+    domain: database
+
+  intelligence-engineer:
+    name: "@intelligence-engineer"
+    file: "intelligence-engineer/SKILL.md"
+    type: implementation
+    domain: vnx-intelligence
+
   test-engineer:
     name: "@test-engineer"
     file: "test-engineer/SKILL.md"
