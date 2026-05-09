@@ -1,9 +1,11 @@
 """Wave 1 shadow-mode divergence event logger (NDJSON append-only).
 
 Consumes DivergenceEvent from shadow_verifier; writes to
-.vnx-data/state/shadow_divergence.ndjson per ADR-005 (NDJSON ledger as primary
-substrate). Same append+lock pattern as dual_writer._append_locked (sentinel +
-LOCK_EX on data file — codex round-7 finding 4 fix from PR #432 round-8).
+``${VNX_STATE_DIR}/shadow_divergence.ndjson`` per ADR-005 (NDJSON ledger as
+primary substrate). Same append+lock pattern as dual_writer._append_locked
+(sentinel + LOCK_EX on data file — codex round-7 finding 4 fix from PR #432
+round-8). State-dir resolution goes through vnx_paths.resolve_paths() so the
+literal path lives only in the helper, not here.
 """
 
 from __future__ import annotations
