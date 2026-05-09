@@ -1,6 +1,6 @@
 # ADR-011 — Manager+Worker Hierarchy with Explicit Depth>1 (vs Subagents Depth-1)
 
-**Status:** Accepted (primary architecture decision) — with a **Tentative** section labeled "When to tactically use subagents (FUTURE / RESEARCH)" that documents an OPEN QUESTION rather than a recommendation.
+**Status:** Accepted (primary architecture decision) — with a **Conditional / Pilot** sub-decision (2026-05-09 amendment) for tactical subagent use inside VNX workers, narrowed to read-only parallel-fanout via `VNX_T1_TACTICAL_SUBAGENTS=1` flag. The original Tentative section has been resolved by the Wave 0.5 subagent research dispatch (`claudedocs/2026-05-09-vnx-subagent-tactical-research.md`).
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Cross-references:** ADR-003 (OAuth-only Claude routing, no SDK), ADR-010 (subprocess adapter), ADR-012 (hybrid interactive + headless)
@@ -26,26 +26,67 @@ The strategic question for VNX: should T0..Tn be flattened to native subagents (
 
 VNX's architecture primitive is **separate-agent-per-task** orchestrated through a manager (T0) and worker terminals (T1, T2, T3, …Tn). Workers are first-class processes — each has its own dispatch lifecycle, its own receipt, its own NDJSON event stream (when subprocess-routed), its own lease, and its own audit trail in `t0_receipts.ndjson`. Workers may themselves dispatch sub-tasks (depth>1). This is the canonical primitive. New orchestration patterns extend hierarchy depth — they do not flatten it.
 
-### Tentative section — When to tactically use subagents (FUTURE / RESEARCH)
+### Conditional sub-decision — Tactical subagents inside VNX workers (Status: **Conditional / Pilot**, 2026-05-09)
 
-As of **2026-05-08**, Claude Code subagents now expose:
+VNX permits the tactical use of Claude Code subagents *inside a single VNX worker dispatch* under the following constraints. The May 2026 platform shift (v2.1.117 added `agent_id`/`agent_type` to all hook events; v2.1.121 made `PostToolUse.hookSpecificOutput.updatedToolOutput` honor every tool, not only MCP) closed the primary objection — that subagent activity was opaque to the parent worker and therefore broke the glass-box audit property. With deliberate hook instrumentation, the worker can observe and redact every subagent tool call, fold subagent provenance into its own receipt, and retain VNX's "one dispatch = one receipt" contract.
 
-- Real-time hook events for subagent lifecycle (Subagent start/stop, PreToolUse, PostToolUse) — verified via `code.claude.com/docs/en/hooks` and the May 2026 changelog (Releasebot, Developers Digest "Agent Teams, Subagents, and MCP: The 2026 Playbook").
-- `PostToolUse.hookSpecificOutput.updatedToolOutput` — hooks can rewrite tool output for **all tools** (not only MCP).
-- `duration_ms` on `PostToolUse` / `PostToolUseFailure` for tool-performance observability.
-- Parallel subagent + SDK MCP-server reconnection.
-- 27 hook events across 5 categories, with 4 execution types (shell, LLM-evaluated, webhook, subagent-verifier).
+#### Permitted shape: read-only parallel-fanout only
 
-This means subagents are no longer the opaque depth-1 black boxes that originally justified their wholesale replacement by VNX workers. Subagents *may* be tactically useful in narrow cases — for example, a quick parallel grep/search inside a single VNX worker dispatch where spawning another full T-terminal dispatch would be wasteful. Such tactical use does **not** compromise VNX's separate-agent-per-task primitive because the subagent runs **inside** a single VNX worker dispatch and reports back to that worker (the VNX dispatch boundary is preserved).
+A worker MAY spawn subagents only when ALL of the following hold:
 
-**However, when exactly to use a tactical subagent vs. spawn another VNX worker dispatch needs further research before any guidance can be Accepted.** Open questions:
+1. **Read-only tool budget.** The subagent's `allowed-tools` list contains only `Read`, `Grep`, `Glob`, `Bash` (read-only commands like `rg`, `grep`, `find`, `cat`, `wc`). It MUST NOT include `Edit`, `Write`, `NotebookEdit`, MCP write tools, or any command that mutates `.vnx-data/`, `runtime_coordination.db`, `quality_intelligence.db`, `dispatch_tracker.db`, the worktree filesystem outside ephemeral scratch, or any git ref.
+2. **Independent fanout (≥4 branches recommended, ≥2 minimum).** Subagent N+1 MUST NOT depend on subagent N's output. Sequential dependent searches do not qualify; the worker performs them with direct tool use.
+3. **Bounded summary contract.** Each subagent returns a structured summary (≤2000 tokens) — list of matches, count, file paths, line ranges — never raw tool output passed through.
+4. **Worker-side hook instrumentation MUST be active.** The worker's process hook configuration (provided by `subprocess_dispatch.py` via injected `--settings` or equivalent) installs:
+   - a `PreToolUse` hook that blocks any disallowed tool with exit code 2 (defense-in-depth against an out-of-band subagent role definition);
+   - a `PostToolUse` hook that forwards `{agent_id, agent_type, tool_name, duration_ms, input_hash, output_hash}` to `.vnx-data/events/T{n}.ndjson` — same NDJSON the worker already uses;
+   - a `PostToolUse` hook that applies secret redaction via `hookSpecificOutput.updatedToolOutput` (strips API keys, OAuth tokens, customer business content patterns).
+5. **Receipt provenance.** The worker's final receipt MUST include a `subagents` array with one entry per spawned subagent: `{agent_type, tool_call_count, total_duration_ms, summary_hash}`. The worker's existing `t0_receipts.ndjson` line gains this field; downstream readers ignore unknown fields, so this is forward-compatible.
+6. **No subagent-of-subagent.** The worker MUST NOT spawn a subagent that itself spawns subagents. Claude Code enforces this at the platform level (depth-1 limit per v1.0.64), but the worker's own role spec also asserts it for clarity.
+7. **No cross-dispatch state writes.** A subagent MUST NOT call `dispatch_register`, `append_receipt`, `open_items_manager`, or any VNX state-mutating CLI. Its role definition omits these.
 
-- What triggers (LOC, parallelism, latency budget, evidence-needed) tip the choice toward a tactical subagent vs. a new VNX dispatch?
-- Do subagent observability events (PreToolUse, PostToolUse) get captured in VNX's NDJSON ledger or do they vanish when the parent worker exits?
-- Does using subagents inside a worker break the "one dispatch = one receipt" provenance contract, or can the worker fold subagent evidence into its own receipt cleanly?
-- Does the depth-1 limit matter when the subagent is one level *under* a VNX worker (effective system depth = 2+), or is the depth-1 floor itself a problem?
+#### Forbidden shapes (use a separate VNX dispatch instead)
 
-This section therefore documents an **OPEN QUESTION** and the answer is deliberately deferred. A research dispatch (Wave 0 doc-hygiene track or Wave 4 of the strategic replan, see `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §8) will produce concrete guidance. Until that research lands, the default is: **do not use Claude Code subagents inside VNX workers**; spawn another VNX dispatch instead.
+- Subagent that edits source files. (Use a new T1 dispatch.)
+- Subagent that runs gates (codex_gate, gemini_review). (Use the existing review-gate flow; gates are siblings of the work, both children of T0.)
+- Subagent that spans more than one worker dispatch lifecycle. (Subagents are ephemeral and tied to one parent worker; no cross-dispatch handoff.)
+- Subagent that consumes a budget the worker has not pre-provisioned. (Subagent token cost counts against the worker's dispatch budget; if exceeded, the worker fails closed.)
+- Subagent in T0. (T0 does not implement code; T0 dispatches workers. T0 may use direct Read/Grep but does not need parallel fanout — its work is dispatch-decision, not exploration.)
+
+#### Pilot scope (Q3 2026)
+
+The first deployment is a single pilot, not a general rollout:
+
+- **Pilot terminal:** T1 only.
+- **Pilot task:** parallel-search across `code_snippets` FTS5 table during open-item triage and during multi-file refactor research. Out of scope for the pilot: codex-fix-codex round loops (those stay sequential).
+- **Pilot env flag:** `VNX_T1_TACTICAL_SUBAGENTS=1`. Default unset = forbidden.
+- **Pilot duration:** 4 weeks (or 25 dispatches with subagent use, whichever comes first).
+- **Pilot telemetry:** every dispatch using subagents emits a row to `.vnx-data/state/runtime_coordination.db` table `subagent_pilot_log` with columns `(dispatch_id, agent_count, total_subagent_tokens, wall_clock_savings_ms, summary_quality_score, audit_completeness_bool)`.
+- **Success criteria for promotion to general rollout:**
+  - ≥30% wall-clock reduction vs the same-task baseline (measured against direct tool use on matched tasks).
+  - 100% audit completeness — every subagent's `agent_id`/`agent_type` and summary hash present in the worker's receipt.
+  - Zero leaks: no subagent recorded a tool call to a forbidden tool (PreToolUse hook never fired with exit code 2 for that reason ≥1 time per dispatch).
+  - Operator review approves at week 4.
+- **Failure / rollback criteria:**
+  - Any audit-completeness failure → roll back the pilot, re-publish ADR-011 with status downgraded to "Rejected" for that section.
+  - Any secret leakage incident → immediate rollback, security review.
+  - Wall-clock savings < 15% on pilot tasks → keep pilot in monitor mode but do not promote.
+
+#### Reasoning for Conditional rather than Accepted (general)
+
+A general "subagents are allowed inside workers" policy is too broad for VNX's audit constraints. The risk surface — receipt-provenance leakage, untracked token cost, evidence trails that vanish when the parent exits, operator confusion about whether a finding came from VNX governance or from a black-box subagent — is real and was the basis for the 2026-05-09 default ban. The pilot scope above narrows usage to the one shape (read-only parallel fanout) where the cost/benefit calculation is documented and the platform's new hook surface (v2.1.117 `agent_id`, v2.1.121 universal `updatedToolOutput`) makes audit instrumentation feasible. Promoting from Conditional to Accepted requires evidence from the pilot, not theoretical argument.
+
+#### Reasoning for Conditional rather than Rejected
+
+The Anthropic-documented Django parallel-search example (4 Explore subagents, 3m40s vs 14min sequential, better results — `code.claude.com/docs/en/sub-agents`) maps directly onto VNX's largest fanout-search workload: searching the 855k-snippet `code_snippets` FTS5 table for cross-cutting refactor evidence. A blanket Reject would forfeit a real wall-clock win on a real recurring task. The platform's hook instrumentation now lets us capture that win without sacrificing audit completeness, *if* the wiring is done right. The pilot tests whether "if the wiring is done right" holds in practice.
+
+#### Citations
+
+- Subagent depth-1 + condensed-summary return: `code.claude.com/docs/en/sub-agents`; v1.0.64 release note (Jul 30 2025); `claudedocs/2026-05-09-vnx-platform-features-verification.md` Claim 1.
+- `agent_id`/`agent_type` in hook payloads: v2.1.117 changelog (April 2026); `code.claude.com/docs/en/hooks`; `claudefa.st/blog/guide/changelog`.
+- Universal `updatedToolOutput` for all tools: v2.1.121 release notes (May 2026); `wotai.co/blog/claude-code-2-1-121`; `code.claude.com/docs/en/hooks`.
+- Parallel Explore subagents wall-clock benchmark: `code.claude.com/docs/en/sub-agents` (Django 4-fanout example, 3m40s vs 14min sequential, surfaced via `nimbalyst.com/blog/claude-code-subagents-guide` 2026 guide).
+- Companion research: `claudedocs/2026-05-09-vnx-subagent-tactical-research.md` (full Q1-Q4 analysis with sources).
 
 ## Reasoning
 
