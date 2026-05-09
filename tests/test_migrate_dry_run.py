@@ -235,3 +235,44 @@ def test_plan_tables_qi_matches_import_tables_qi():
         f"Tables in IMPORT_TABLES_QI but absent from PLAN_TABLES_QI: {sorted(missing_from_plan)}. "
         "Mirror both lists whenever the live migrator scope changes."
     )
+
+
+def test_migration_0015_all_tables_covered_by_import_and_plan_lists():
+    """Structural defense: every table in 0015_complete_project_id.sql must appear
+    in IMPORT_TABLES_QI ∪ IMPORT_TABLES_RC (live migrator) and in
+    PLAN_TABLES_QI ∪ PLAN_TABLES_RC (dry-run planner).
+
+    This test would have caught both the round-7 dispatch_experiments gap
+    and the round-8 quality_system_metrics/scan_history gap.
+    """
+    import re
+    from scripts.migrate_to_central_vnx import IMPORT_TABLES_QI, IMPORT_TABLES_RC
+
+    sql_path = ROOT / "schemas" / "migrations" / "0015_complete_project_id.sql"
+    sql = sql_path.read_text()
+
+    sql_tables = set(
+        re.findall(
+            r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+project_id",
+            sql,
+            re.IGNORECASE,
+        )
+    )
+    assert sql_tables, "No ALTER TABLE ... ADD COLUMN project_id found in 0015 SQL"
+
+    import_scope = set(IMPORT_TABLES_QI) | set(IMPORT_TABLES_RC)
+    plan_scope = set(PLAN_TABLES_QI) | set(PLAN_TABLES_RC)
+
+    missing_from_import = sql_tables - import_scope
+    assert not missing_from_import, (
+        f"Tables in 0015 SQL absent from IMPORT_TABLES_QI ∪ IMPORT_TABLES_RC: "
+        f"{sorted(missing_from_import)}. "
+        "Add them to scripts/migrate_to_central_vnx.py."
+    )
+
+    missing_from_plan = sql_tables - plan_scope
+    assert not missing_from_plan, (
+        f"Tables in 0015 SQL absent from PLAN_TABLES_QI ∪ PLAN_TABLES_RC: "
+        f"{sorted(missing_from_plan)}. "
+        "Add them to scripts/migrate_dry_run.py."
+    )

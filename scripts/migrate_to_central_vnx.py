@@ -105,6 +105,8 @@ IMPORT_TABLES_QI: tuple[str, ...] = (
     "quality_trends",
     "quality_alerts",
     "dispatch_quality_context",
+    "quality_system_metrics",
+    "scan_history",
     "tag_combinations",
     "improvement_suggestions",
     "nightly_digests",
