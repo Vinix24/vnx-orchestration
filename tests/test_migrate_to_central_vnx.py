@@ -2877,3 +2877,289 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
     # 9. Audit must pass post-apply: every T3-suspect single-column
     # UNIQUE in central is either rebuilt to composite or in exceptions.
     M._audit_unique_constraints(central_qi, central_rc)
+
+
+# ---------------------------------------------------------------------------
+# Wave-0 OI-1375 / OI-1376 / OI-1377 regression tests (ADR-009 schema-first)
+# ---------------------------------------------------------------------------
+
+
+def _make_fts5_db_with_extra_cols(path: Path, extra_cols: list) -> None:
+    """Build a synthetic quality_intelligence.db with a code_snippets FTS5
+    that has the standard 12 columns PLUS any extra columns in extra_cols.
+    Also creates snippet_metadata with project_id so the rebuild has no orphans.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    all_fts5_cols = [
+        "title", "description", "code", "file_path", "line_range",
+        "tags", "language", "framework", "dependencies",
+        "quality_score", "usage_count", "last_updated",
+    ] + list(extra_cols)
+    fts5_col_list = ", ".join(all_fts5_cols) + ", tokenize = 'porter unicode61'"
+    con = sqlite3.connect(str(path))
+    try:
+        con.executescript(
+            f"""
+            CREATE TABLE schema_version (version TEXT PRIMARY KEY, description TEXT);
+            CREATE TABLE snippet_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snippet_rowid INTEGER NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE VIRTUAL TABLE code_snippets USING fts5({fts5_col_list});
+            """
+        )
+        con.execute(
+            "INSERT INTO code_snippets (rowid, title) VALUES (?, ?)", (1, "snap-1")
+        )
+        con.execute(
+            "INSERT INTO snippet_metadata (snippet_rowid, project_id) VALUES (?, ?)",
+            (1, "test-proj"),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def test_migration_0016_schema_first_preserves_extra_columns(tmp_path: Path):
+    """OI-1375: migration 0016 must derive column list from PRAGMA table_info.
+
+    A deployed DB with 14 columns (12 standard + 2 custom) must end up with
+    15 columns post-rebuild (14 original + project_id), not 13 (hardcoded 12
+    + project_id).
+    """
+    central_qi = tmp_path / "central_extra_cols.db"
+    _make_fts5_db_with_extra_cols(central_qi, extra_cols=["custom_tag", "custom_score"])
+
+    with sqlite3.connect(central_qi) as c:
+        pre_cols = [r[1] for r in c.execute("PRAGMA table_info(code_snippets)")]
+    assert len(pre_cols) == 14, f"test setup: expected 14 pre-rebuild cols, got {pre_cols}"
+    assert "project_id" not in pre_cols
+
+    M.apply_migration_0016(central_qi)
+
+    with sqlite3.connect(central_qi) as c:
+        post_cols = [r[1] for r in c.execute("PRAGMA table_info(code_snippets)")]
+
+    assert len(post_cols) == 15, (
+        f"expected 15 post-rebuild columns (14 original + project_id), got {post_cols}"
+    )
+    assert "project_id" in post_cols, "project_id must be present in rebuilt FTS5 (OI-1375)"
+    assert "custom_tag" in post_cols, "custom_tag column must be preserved (OI-1375)"
+    assert "custom_score" in post_cols, "custom_score column must be preserved (OI-1375)"
+
+
+def test_migration_0016_orphan_uses_rowid_map_project_id(tmp_path: Path):
+    """OI-1376: orphan snippet (no snippet_metadata row) must get project_id
+    from p4_import_rowid_map, not the old 'vnx-dev' fallback.
+    """
+    central_qi = tmp_path / "central_orphan.db"
+    central_qi.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(central_qi))
+    try:
+        con.executescript(
+            """
+            CREATE TABLE schema_version (version TEXT PRIMARY KEY, description TEXT);
+            CREATE TABLE snippet_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snippet_rowid INTEGER NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE p4_import_rowid_map (
+                project_id TEXT NOT NULL,
+                source_table TEXT NOT NULL,
+                source_rowid INTEGER NOT NULL,
+                central_rowid INTEGER NOT NULL,
+                imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, source_table, source_rowid)
+            );
+            CREATE VIRTUAL TABLE code_snippets USING fts5(
+                title, description, code, file_path, line_range, tags, language,
+                framework, dependencies, quality_score, usage_count, last_updated,
+                tokenize = 'porter unicode61'
+            );
+            """
+        )
+        # Insert snippet with NO matching snippet_metadata — it is an orphan.
+        con.execute(
+            "INSERT INTO code_snippets (rowid, title) VALUES (?, ?)", (42, "orphan-snip")
+        )
+        # Record in rowid_map: the orphan was imported by project 'seocrawler-v2'.
+        con.execute(
+            "INSERT INTO p4_import_rowid_map "
+            "(project_id, source_table, source_rowid, central_rowid) VALUES (?, ?, ?, ?)",
+            ("seocrawler-v2", "code_snippets", 10, 42),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    M.apply_migration_0016(central_qi)
+
+    with sqlite3.connect(central_qi) as c:
+        pid_row = c.execute(
+            "SELECT project_id FROM code_snippets WHERE rowid = 42"
+        ).fetchone()
+
+    assert pid_row is not None, "orphan row missing after rebuild"
+    assert pid_row[0] == "seocrawler-v2", (
+        f"orphan snippet must get project_id from p4_import_rowid_map "
+        f"('seocrawler-v2'), got {pid_row[0]!r} — must NOT fall back to 'vnx-dev' (OI-1376)"
+    )
+
+
+def test_migration_0016_orphan_raises_without_any_project_id(tmp_path: Path):
+    """OI-1376: if an orphan has no snippet_metadata AND no p4_import_rowid_map
+    entry, apply_migration_0016 must raise MigrationOrphanError before the
+    DROP so the database is left intact.
+    """
+    central_qi = tmp_path / "central_orphan_fail.db"
+    central_qi.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(central_qi))
+    try:
+        con.executescript(
+            """
+            CREATE TABLE schema_version (version TEXT PRIMARY KEY, description TEXT);
+            CREATE TABLE snippet_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snippet_rowid INTEGER NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE VIRTUAL TABLE code_snippets USING fts5(
+                title, description, code, file_path, line_range, tags, language,
+                framework, dependencies, quality_score, usage_count, last_updated,
+                tokenize = 'porter unicode61'
+            );
+            """
+        )
+        # Orphan: no metadata, no rowid_map (table absent entirely).
+        con.execute(
+            "INSERT INTO code_snippets (rowid, title) VALUES (?, ?)", (7, "true-orphan")
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    with pytest.raises(M.MigrationOrphanError):
+        M.apply_migration_0016(central_qi)
+
+    # DB must be intact: original table exists with original rows.
+    with sqlite3.connect(central_qi) as c:
+        vtab = c.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type IN ('table','virtual') AND name='code_snippets'"
+        ).fetchone()
+        assert vtab is not None, "code_snippets missing — orphan check failed to keep DB intact"
+        cols = [r[1] for r in c.execute("PRAGMA table_info(code_snippets)")]
+        assert "project_id" not in cols, (
+            "project_id must NOT be present — original table should be intact"
+        )
+        row = c.execute("SELECT rowid, title FROM code_snippets").fetchone()
+        assert row == (7, "true-orphan"), f"original row lost after orphan raise; got {row}"
+
+
+def test_import_table_uses_fetchmany_streaming(tmp_path: Path, monkeypatch):
+    """OI-1377: _import_table must use cursor.fetchmany to stream rows
+    instead of materialising the entire result set with list().
+
+    Verifies that fetchmany is called at least once on the cursor returned
+    by the source-table SELECT.
+    """
+    central_qi = tmp_path / "central_stream.db"
+    central_qi.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(central_qi)) as c:
+        c.executescript(
+            """
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+            );
+            CREATE TABLE p4_import_idempotency (
+                project_id TEXT NOT NULL,
+                source_table TEXT NOT NULL,
+                source_rowid INTEGER NOT NULL,
+                imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, source_table, source_rowid)
+            );
+            CREATE TABLE p4_import_skipped (
+                project_id TEXT NOT NULL,
+                source_table TEXT NOT NULL,
+                source_rowid INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                skipped_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                run_id TEXT,
+                resolved_at TEXT,
+                PRIMARY KEY (project_id, source_table, source_rowid)
+            );
+            """
+        )
+
+    src_db = tmp_path / "src.db"
+    with sqlite3.connect(str(src_db)) as sc:
+        sc.executescript(
+            """
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY,
+                pattern_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                pattern_data TEXT NOT NULL
+            );
+            """
+        )
+        sc.executemany(
+            "INSERT INTO success_patterns "
+            "(pattern_type, category, title, description, pattern_data) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(f"t{i}", f"c{i}", f"title-{i}", "desc", "data") for i in range(10)],
+        )
+
+    # OI-1377 streaming verification — sqlite3.Connection and Cursor are
+    # C-extension types whose `execute` and `fetchmany` attributes are
+    # read-only, so we cannot monkeypatch them at runtime. Instead, we use
+    # static source-inspection of `_import_table` to verify the streaming
+    # pattern is in place. Combined with the integration assertion below
+    # (run the function on real data and verify all rows are imported),
+    # this gives high confidence that streaming is actually used at runtime.
+    import inspect
+    src = inspect.getsource(M._import_table)
+    assert "fetchmany" in src, (
+        "_import_table source does not call fetchmany — OI-1377 streaming "
+        "fix not in place. The function should iterate via cursor.fetchmany("
+        "batch_size) instead of materializing the full result set."
+    )
+    # Anti-pattern check: the original bug was `list(con.execute(...))`. After
+    # the streaming fix, that exact line should no longer appear in the
+    # function body.
+    assert "list(con.execute(" not in src and "list(cur.execute(" not in src, (
+        "_import_table still uses `list(...execute(...))` to materialize the "
+        "full source table — OI-1377 streaming fix is incomplete."
+    )
+
+    # Integration check: run _import_table on real source data, verify
+    # all rows imported correctly (the streaming fix must not change
+    # functional behavior).
+    proj = M.ProjectEntry(
+        name="test-proj",
+        path=tmp_path / "proj",
+        project_id="test-proj",
+    )
+
+    with sqlite3.connect(str(central_qi), isolation_level=None) as c:
+        c.execute("BEGIN")
+        c.execute(f"ATTACH DATABASE 'file:{src_db}?mode=ro' AS src")
+        M._import_table(c, "src", proj, "success_patterns")
+        c.execute("COMMIT")
+
+    with sqlite3.connect(str(central_qi)) as c:
+        n = c.execute(
+            "SELECT COUNT(*) FROM success_patterns WHERE project_id = ?",
+            ("test-proj",),
+        ).fetchone()[0]
+        assert n == 10, f"streaming import lost rows: imported {n}/10"
