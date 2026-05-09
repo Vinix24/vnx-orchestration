@@ -207,16 +207,24 @@ def _write_event_locked(path: Path, record: dict) -> None:
 def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
     """Best-effort mirror of a register event to the central path. Never raises.
 
-    P5 cutover guard: skips when primary_path already resolves to the central file
-    so that at Phase 5 cutover there is no double-write.
+    Phase 6 P4: path resolution stays in this module (so test monkey-patches
+    on ``_resolve_central_data_dir`` keep working). The locked append is
+    delegated to ``scripts.lib.dual_writer.append_record_locked`` so all
+    dual-write sites (receipts + register events) share one fcntl/atomicity
+    implementation.
+    P5 cutover guard: skips when primary_path resolves to the central file.
     """
     try:
         central_base = _resolve_central_data_dir(project_id)
         central_path = central_base / "state" / "dispatch_register.ndjson"
         if central_path.resolve() == primary_path.resolve():
             return
-        central_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_event_locked(central_path, record)
+        try:
+            from dual_writer import append_record_locked
+            append_record_locked(central_path, record)
+        except Exception:
+            central_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_event_locked(central_path, record)
     except Exception:
         pass
 
@@ -253,7 +261,13 @@ def append_event(
     if not dispatch_id and pr_number is None and not feature_id:
         return False
 
-    if not (operator_id or project_id or orchestrator_id or agent_id):
+    # Codex round-7 finding 3 (ADVISORY): resolve identity per-field so that a
+    # partial-identity caller (e.g. only operator_id supplied) still gets
+    # project_id resolved from env/context.  The previous condition fired only
+    # when ALL four fields were absent, silently skipping central mirror for any
+    # caller that supplied even one field.  Empty-string values are treated as
+    # unset (Python `or` semantics) per the caller contract.
+    if not (operator_id and project_id and orchestrator_id and agent_id):
         identity = _resolve_identity_for_register()
         operator_id = operator_id or identity.get("operator_id")
         project_id = project_id or identity.get("project_id")

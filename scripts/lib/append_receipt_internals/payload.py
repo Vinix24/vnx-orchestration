@@ -135,10 +135,30 @@ def _append_receipt_line_locked(receipts_path: Path, receipt: Dict[str, Any]) ->
 
 
 def _mirror_receipt_to_central_or_raise(receipt: Dict[str, Any], primary_path: Path) -> bool:
+    """Phase 6 P4: route the locked central append through scripts.lib.dual_writer.
+
+    Path resolution stays inside this module (so test monkey-patches on
+    ``payload.resolve_central_data_dir`` keep redirecting the mirror).
+    The locked append itself is delegated to ``dual_writer.append_record_locked``
+    so every dual-write call site (receipts + register events) shares one
+    fcntl/atomicity implementation.
+
+    Returns True on a successful central write, False on cutover skip or
+    missing project_id, and raises ``OSError`` on I/O failure so the
+    pending-mirror queue can retain the record for a later flush.
+    """
     central_receipts = _resolve_central_receipts_path(receipt, primary_path)
     if central_receipts is None:
         return False
-    _append_receipt_line_locked(central_receipts, receipt)
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        from dual_writer import append_record_locked
+    except Exception:
+        _append_receipt_line_locked(central_receipts, receipt)
+        return True
+    append_record_locked(
+        central_receipts, receipt, lock_filename="append_receipt.lock"
+    )
     return True
 
 
@@ -316,6 +336,12 @@ def append_receipt_payload(
     receipt.setdefault("open_items_created", facade._count_quality_violations(receipt))
 
     receipts_file = _maybe_reroute_to_gate_stream(receipt, receipts_file)
+    # Codex round-7 finding 1 (BLOCKING): recompute receipt_path after the
+    # reroute so ghost-gate receipts write to gate_events.ndjson, not the
+    # original receipts file.  The reroute only reassigns the local
+    # receipts_file variable; without this line receipt_path (and cache_path
+    # below) still point at the pre-reroute location.
+    receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
     event_name = _validate_receipt(receipt)
     idempotency_key = _compute_idempotency_key(receipt, event_name)
