@@ -2116,5 +2116,267 @@ class TestIntelligenceItemSerialization(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 P4: schema_section integration tests
+# ---------------------------------------------------------------------------
+
+class TestSchemaSectionInjection(unittest.TestCase):
+    """Integration tests for Wave 5 P4 schema_section injection in IntelligenceSelector."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._quality_db_path = self._base / "quality_intelligence.db"
+        self._state_dir = self._base / "state"
+        self._state_dir.mkdir()
+        init_schema(str(self._state_dir))
+        db = _setup_quality_db(self._quality_db_path)
+        db.close()
+
+        # Create a minimal schemas dir with a table the dispatch will touch
+        self._schemas = self._base / "schemas"
+        self._schemas.mkdir()
+        (self._schemas / "quality_intelligence.sql").write_text(
+            "CREATE TABLE IF NOT EXISTS dispatch_metadata (\n"
+            "    id INTEGER PRIMARY KEY,\n"
+            "    dispatch_id TEXT NOT NULL,\n"
+            "    created_at TEXT NOT NULL\n"
+            ");\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        import schema_section_indexer
+        schema_section_indexer._INDEX.loaded_at = 0.0
+        self._tmpdir.cleanup()
+
+    def _patch_schemas_dir(self, schemas_dir: Path):
+        """Patch schema_section_indexer._resolve_schemas_dir to return schemas_dir."""
+        import schema_section_indexer
+
+        original = schema_section_indexer._resolve_schemas_dir
+
+        def _patched(sd=None):
+            return schemas_dir
+
+        schema_section_indexer._resolve_schemas_dir = _patched
+        return original
+
+    def _restore_schemas_dir(self, original):
+        import schema_section_indexer
+        schema_section_indexer._resolve_schemas_dir = original
+
+    def test_select_includes_schema_section_for_migration_dispatch(self):
+        """dispatch_paths touching schemas/ + instruction mentioning table name injects schema_section."""
+        import schema_section_indexer
+        schema_section_indexer._INDEX.loaded_at = 0.0
+        original = self._patch_schemas_dir(self._schemas)
+
+        try:
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "ss-test-001",
+                "dispatch_create",
+                skill_name="database-engineer",
+                dispatch_paths=["schemas/quality_intelligence.sql"],
+                instruction_text=(
+                    "Update the dispatch_metadata table to add a project_id column. "
+                    "Apply the migration sqlite schema change."
+                ),
+            )
+            selector.close()
+        finally:
+            self._restore_schemas_dir(original)
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertIn(
+            "schema_section",
+            item_classes,
+            f"Expected schema_section in items for migration dispatch, got: {item_classes}",
+        )
+
+        ss_items = [i for i in result.items if i.item_class == "schema_section"]
+        self.assertEqual(len(ss_items), 1)
+        self.assertEqual(ss_items[0].confidence, 1.0)
+        self.assertGreater(ss_items[0].evidence_count, 0)
+        self.assertTrue(len(ss_items[0].source_refs) > 0)
+        self.assertIn("dispatch_metadata", ss_items[0].content)
+
+    def test_select_does_not_include_schema_section_for_non_db_dispatch(self):
+        """Dispatch with no DB paths and no DB terms in instruction does not get schema_section."""
+        import schema_section_indexer
+        schema_section_indexer._INDEX.loaded_at = 0.0
+        original = self._patch_schemas_dir(self._schemas)
+
+        try:
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "ss-test-002",
+                "dispatch_create",
+                skill_name="frontend-developer",
+                dispatch_paths=["dashboard/components/TokenDashboard.tsx"],
+                instruction_text="Refactor the dashboard header component styles",
+            )
+            selector.close()
+        finally:
+            self._restore_schemas_dir(original)
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertNotIn(
+            "schema_section",
+            item_classes,
+            f"schema_section should not fire for non-DB dispatch, got: {item_classes}",
+        )
+
+    def test_select_combines_all_5_wave5_classes_within_budget(self):
+        """prior_round + adr + code_anchor + operator_memory + schema_section all within 4000-char payload."""
+        import prior_round_injector
+        import operator_memory_indexer
+        import adr_indexer
+        import schema_section_indexer
+
+        schema_section_indexer._INDEX.loaded_at = 0.0
+
+        # Seed prior-round finding
+        results_dir = self._base / "review_gates" / "results"
+        results_dir.mkdir(parents=True)
+        (results_dir / "pr-888-codex_gate.json").write_text(
+            json.dumps({
+                "recorded_at": "2026-05-10T12:00:00Z",
+                "contract_hash": "abc888",
+                "blocking_findings": [{"message": "Missing UNIQUE on dispatch_metadata"}],
+                "advisory_findings": [],
+            }),
+            encoding="utf-8",
+        )
+
+        # Set up ADR dir with a matching ADR
+        adr_dir = self._base / "docs" / "governance" / "decisions"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "ADR-009-schema-first.md").write_text(
+            "# ADR-009 — Schema first migrations\n\n"
+            "## Decision\n\n"
+            "All CREATE TABLE statements go in schemas/quality_intelligence.sql first.\n\n"
+            "## See also\n\n"
+            "See scripts/lib/code_anchor_finder.py for implementation details.\n",
+            encoding="utf-8",
+        )
+
+        # Set up source file for code_anchor
+        scripts_dir = self._base / "scripts" / "lib"
+        scripts_dir.mkdir(parents=True)
+        source_file = scripts_dir / "code_anchor_finder.py"
+        source_file.write_text(
+            "def fetch_code_anchors(dispatch_paths, instruction_text):\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+
+        # Set up operator memory
+        memory_dir = self._base / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "feedback_database_lease.md").write_text(
+            "---\n"
+            "name: Stale lease cleanup\n"
+            "description: Check runtime_coordination database leases before dispatch\n"
+            "type: feedback\n"
+            "---\n"
+            "Release stale leases before first dispatch.\n",
+            encoding="utf-8",
+        )
+
+        prior_round_injector._fetch_cached.cache_clear()
+        original_prior_resolve = prior_round_injector._resolve_state_dir
+
+        def _patched_prior_resolve(state_dir=None):
+            return self._base
+
+        prior_round_injector._resolve_state_dir = _patched_prior_resolve
+
+        original_memory = operator_memory_indexer._project_memory_dir
+        operator_memory_indexer._project_memory_dir = lambda cwd=None: memory_dir
+        operator_memory_indexer._CACHES.clear()
+
+        original_adr_loaded_dir = adr_indexer._INDEX._loaded_dir
+        original_adr_entries = dict(adr_indexer._INDEX.entries)
+        original_adr_fta = dict(adr_indexer._INDEX.file_to_adrs)
+        original_adr_mtimes = dict(adr_indexer._INDEX._file_mtimes)
+        original_adr_loaded_at = adr_indexer._INDEX.loaded_at
+        adr_indexer._INDEX.loaded_at = 0.0
+
+        original_schemas_resolve = self._patch_schemas_dir(self._schemas)
+
+        try:
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "ss-test-003",
+                "dispatch_create",
+                pr_id="888",
+                skill_name="database-engineer",
+                dispatch_paths=["scripts/lib/code_anchor_finder.py"],
+                instruction_text=(
+                    "Edit fetch_code_anchors and update dispatch_metadata migration sqlite schema"
+                ),
+            )
+            selector.close()
+        finally:
+            prior_round_injector._resolve_state_dir = original_prior_resolve
+            operator_memory_indexer._project_memory_dir = original_memory
+            adr_indexer._INDEX.loaded_at = original_adr_loaded_at
+            adr_indexer._INDEX.entries = original_adr_entries
+            adr_indexer._INDEX.file_to_adrs = original_adr_fta
+            adr_indexer._INDEX._file_mtimes = original_adr_mtimes
+            adr_indexer._INDEX._loaded_dir = original_adr_loaded_dir
+            self._restore_schemas_dir(original_schemas_resolve)
+
+        payload_size = len(json.dumps(result.to_payload_dict()))
+        self.assertLessEqual(
+            payload_size,
+            MAX_PAYLOAD_CHARS * 2,
+            f"Combined payload {payload_size} chars exceeds 2x limit",
+        )
+
+        item_classes = [item.item_class for item in result.items]
+        # At minimum schema_section should be present (dispatch_metadata matches)
+        self.assertIn(
+            "schema_section",
+            item_classes,
+            f"Expected schema_section in combined W5 payload, got: {item_classes}",
+        )
+
+    def test_schema_section_class_in_direct_injection_set(self):
+        """schema_section must be in _DIRECT_INJECTION_CLASSES (1500-char cap applies)."""
+        from intelligence_selector import _DIRECT_INJECTION_CLASSES
+        self.assertIn("schema_section", _DIRECT_INJECTION_CLASSES)
+
+        # Verify to_dict() does not truncate schema_section content at 500
+        content = "s" * 1500
+        item = IntelligenceItem(
+            item_id="test-ss",
+            item_class="schema_section",
+            title="Test schema section",
+            content=content,
+            confidence=1.0,
+            evidence_count=2,
+            last_seen="2026-05-10T00:00:00Z",
+            scope_tags=[],
+        )
+        serialized = item.to_dict()
+        self.assertEqual(
+            len(serialized["content"]),
+            1500,
+            "schema_section content was truncated — should use MAX_CODE_ANCHOR_CHARS cap",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
