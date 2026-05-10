@@ -157,8 +157,8 @@ def _project_memory_dir(cwd: Optional[Path] = None) -> Optional[Path]:
         cwd = Path.cwd()
     cwd = cwd.resolve()
 
-    # Claude Code slug: posix path with '/' replaced by '-'
-    # e.g. /Users/x/Development/foo → -Users-x-Development-foo
+    # Claude Code slug: posix path with each '/' replaced by '-'
+    # e.g. <HOME>/Development/foo → -<HOME>-Development-foo
     slug = cwd.as_posix().replace("/", "-")
     candidate = Path.home() / ".claude" / "projects" / slug / "memory"
     if candidate.is_dir():
