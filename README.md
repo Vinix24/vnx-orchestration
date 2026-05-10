@@ -185,6 +185,28 @@ Agent hits 65% context → blocked from further tool calls
 
 Zero human intervention. Zero lost work. The receipt ledger maintains a complete chain across rotations.
 
+## What's new since v1.0.0-rc1 (May 2026)
+
+> Strategic replan v1.2 organizes work into 6 waves. v1.0.0-rc1 itself shipped Wave 0 + 0.5 (architectural stabilization + Phase 6 P4 migration). Wave 1 (shadow read cutover) and Wave 5 P0/P1 (smart-context injection) shipped on top of the rc1 baseline and are still pending burn-in before the v1.0.0 final tag — see [CHANGELOG.md](CHANGELOG.md) "Unreleased" for the post-rc1 PR list.
+
+### Architectural stabilization — 14 ADRs locked (v1.0.0-rc1)
+Decisions previously implicit are now captured as numbered ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`). Highlights: ADR-003 OAuth-only Claude routing (no SDK), ADR-005 NDJSON ledger as primary substrate, ADR-008 dual-LLM adversarial review with `contract_hash` evidence binding, ADR-011 manager+worker hierarchy with Conditional/Pilot subagents, ADR-014 autonomous chain dispatch with SHA-256 consent token. From this release forward, dispatch envelope, receipt schema, and ledger format are backwards-compatibility-honoring.
+
+### CI gate — no Anthropic SDK imports
+`scripts/check_adr_003_no_sdk_imports.py` blocks any `import anthropic` / `from anthropic` / `import claude_agent_sdk` in `scripts/`, `dashboard/`, or `tests/`. Magic-comment opt-in for explicit exceptions only. Enforces ADR-003: VNX drives Claude exclusively via `claude -p` subprocess on the operator's OAuth credential — never SDK + API key.
+
+### Smart context injection — measured +30pp dispatch quality lift
+Replaced naïve "intelligence_items" with three-state-aware context bundles. PR #455 (W5.0) adds prior-round-findings injection — when a dispatch is round N+1 of a multi-round PR, the worker auto-receives blocking + advisory findings from prior rounds. PR #456 (W5.1) adds ADR injection by file-touch — dispatches whose `dispatch_paths` overlap with files referenced in ADRs auto-receive the relevant governance text. Validated on 658 outcome-tagged dispatches: 88.9% success WITH intelligence vs 58.3% WITHOUT.
+
+### Phase 6 P4 — central VNX state proven on production data
+`scripts/migrate_to_central_vnx.py` (PR #432) imported 855k code_snippets + 505 dispatches across 4 production source DBs with **0 verifier discrepancies**. Migration 0016 schema-first rewrite per ADR-009 (PR #446) replaces hardcoded column projections with PRAGMA introspection. Composite UNIQUE rebuilds for 5 multi-tenant tables; structural test parsing `0015_complete_project_id.sql` enforces ALTER↔IMPORT_TABLES symmetry.
+
+### Wave 1 — shadow-mode read cutover with 6 hard divergence metrics
+`shadow_verifier.py` (PR #450) is an independent comparator (no shared code with the migration) that computes 6 zero-tolerance metrics: wrong-project rows, scoping/blocking-finding mismatch, top-3 divergence, count drift, lease-key collisions, p95-latency ratio. `shadow_logger.py` (PR #451) writes NDJSON divergence records under flock with timestamp-suffix rotation. PRs #452–#454 wire 4 T0 read sites + 5 IntelligenceSelector/DispatchRegister read sites + dashboard read paths through `VNX_USE_CENTRAL_DB=unset|shadow|1` flag. Canary test pack with 14+ deliberate-divergence fixtures + operator-readable rollback procedure.
+
+### Repo hygiene — 49 strategic/business docs moved to private `claudedocs/`
+Five-tier OI-1373 cleanup: 8 business agent drafts, 7 strategy files, internal design docs, 18 phase FEATURE_PLANs, and 9 stale research docs moved from public `roadmap/`+`docs/internal/` to gitignored `claudedocs/`. Pattern: filesystem `mv` + `git add -u` (NOT `git mv`) — preserves files locally on disk while removing from git tracking.
+
 ## What's new in v0.10.0 (April 2026)
 
 ### Self-healing daemons
@@ -305,11 +327,13 @@ Receipts track `in_worktree: true/false` and commit provenance (`CLEAN`, `DIRTY_
 
 ## Session Intelligence
 
-VNX mines session logs to find patterns and generate tuning suggestions. Nothing is auto-applied:
+VNX continuously mines its own NDJSON ledger + dispatch metadata to learn what works and inject it into future dispatches. Three layers:
 
-1. **Analyze** — Parse logs, detect patterns, extract model performance
-2. **Brief** — Aggregate into T0-readable state file
-3. **Suggest** — Generate tuning proposals (MEMORY, rules, skills)
+1. **Pattern extraction** — `intelligence_extractor.py` writes success patterns + anti-patterns to SQLite (`quality_intelligence.db`) with `valid_from` / `valid_until` lifecycle, `source_dispatch_ids` provenance, and per-pattern confidence scores updated from outcome feedback.
+2. **Three-state-aware context bundle** — `IntelligenceSelector.select()` now combines intelligence_items, prior-round review findings (Wave 5 P0), ADR governance text by file-touch (Wave 5 P1), and on-roadmap code anchors / schemas / operator memory (Wave 5 P2-P4 in flight) into a bounded per-dispatch context pack.
+3. **Tuning suggestions** — `vnx suggest review` surfaces auto-generated proposals (MEMORY edits, rule/skill changes); nothing auto-applies. `vnx suggest accept <ids>` then `vnx suggest apply`.
+
+Measured impact: **88.9% dispatch success WITH intelligence vs 58.3% WITHOUT** over 658 outcome-tagged dispatches (+30 percentage-point lift). PR-cascade prevention validated against PR #432's 9-round chain as canonical proof-of-concept.
 
 ```bash
 vnx suggest review         # See what's proposed
@@ -319,15 +343,25 @@ vnx suggest apply          # Apply to target files
 
 ## Mission Control Dashboard
 
-A real-time operator dashboard runs locally at `localhost:3100` (Next.js frontend) with an API server at `localhost:4173`. No cloud dependency — the dashboard reads directly from `.vnx-data/` filesystem state.
+Real-time operator dashboard at `localhost:3100` (Next.js frontend) backed by a Python API server at `localhost:4173`. No cloud dependency — the dashboard reads directly from `.vnx-data/` filesystem state and the runtime SQLite DBs.
 
-What it shows:
+### Live streams (SSE)
+- **`/api/register-stream`** — dispatch lifecycle events stream (`created → promoted → started → gate_passed → completed`). Kanban no longer polls.
+- **`/api/agent-stream`** — per-terminal NDJSON event tail (`init`, `thinking`, `text`, `tool_use`, `tool_result`) — watch a headless worker reason in real time.
 
-- **Terminal status cards** — which agent is doing what, context pressure level, last heartbeat timestamp
-- **Reports browser** — auto-assembled worker reports organized by domain (coding, business), browsable without digging through files
-- **Dispatch queue** — pending, active, and completed dispatches with full provenance chain visible
-- **Quality metrics** — first-pass yield, rework rate, SPC control charts, and governance health indicators
-- **Agent selector** — pick agents by name rather than terminal ID when routing work
+### Operator pages
+- **Terminals** — per-terminal status cards: which agent is doing what, lease state, context pressure, last heartbeat.
+- **Kanban** — pending / active / completed dispatch board with full provenance chain.
+- **Dispatches** (+ detail view) — every dispatch's manifest, instruction_sha256, receipt, and gate evidence in one place.
+- **Reports** — auto-assembled worker reports browsable by domain (coding / business) and headless gate output (codex_gate, gemini_review markdown).
+- **Open Items** — blocker / warn / info ledger filterable by PR, severity, and dispatch source.
+- **Intelligence** — pattern catalog with confidence trends, injection ledger, dispatch-effectiveness bucket chart (with vs without intelligence).
+- **Improvements** — proposals view: see what `vnx suggest` would change, accept/reject inline.
+- **Governance** — ADR catalog, CI gate status, contract-hash binding for the active review stack.
+- **Conversations** — session transcript viewer for any historical dispatch.
+
+### Token + cost
+- **Tokens** + **Models** + **Usage** pages — cross-provider token counts (Claude / Codex / Gemini), per-feature spend aggregation, model-mix breakdown.
 
 ```bash
 vnx dashboard          # Launch at localhost:3100
@@ -387,41 +421,37 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 Active development. Priorities shift based on real usage patterns.
 
-### Recently landed (F46–F75, April 2026)
+### Recently landed (Wave 0 + 0.5 + Wave 1 + Wave 5 P0/P1, May 2026)
 
-- **F46** Intelligence extraction pipeline — learning loop writes success/anti-patterns to SQLite; intelligence selector returns real items per dispatch
-- **F47** T0 state feedback loop — receipt watcher, feature state machine, structured feature context in `t0_brief.json`
-- **F48** Autonomous loop + headless dispatch daemon — model-agnostic LLM decision router (Ollama / Claude CLI / dry-run backends)
-- **F49** Dashboard intelligence — pattern/injection/classification API endpoints, intelligence page, session transcript viewer
-- **F50** Self-improvement loop — proposals API, confidence trends, weekly digest, pattern-usage feedback wiring
-- **F51** Configurable governance enforcement — 4-level YAML config (off / advisory / soft / hard mandatory) with per-check override support
-- **F52** Operator CLI + per-terminal permission profiles + post-dispatch commit enforcement
-- **F53** Multi-provider adapter layer — `ProviderAdapter` ABC with Claude / Gemini / Codex / Ollama adapters
-- **F54** Temporal pattern lifecycle (`valid_from` / `valid_until` on intelligence tables)
-- **F55** PageRank repo map — tree-sitter symbol extraction wired into pre-dispatch enrichment
-- **F56** Nightly NDJSON memory consolidation
-- **F57** Karpathy-style dispatch parameter tracker + correlation analysis
-- **F58** Observability fixes — dispatch manifest, session/commit traceability in receipts, event archival, layered user-message architecture
-- **F60** Intelligence activation — SQL fixes, universal-scope patterns, retroactive backfill of 829 dispatch experiments
-- **F61–F75 (chain 2026-04-28→04-30)** State self-maintenance (compact_state nightly cron), headless audit parity (instruction_sha256, stuck-event tracking, token tracking, canonical gate schema), supervisor pack (cleanup_worker_exit + receipt_processor_supervisor), codex severity prompt tightening, dashboard frontend regression suites (Playwright visual + network + console).
+Strategic replan v1.2 reframed development around 6 waves. Shipped between v1.0.0-rc1 cut and now:
 
-T0 orchestration hardening (2026-04-19 postmortem response) landed in `fix/t0-hardening-2026-04-19`: dispatch_guard cross-validates brief vs terminal_state, auto-recover expired leases, `canonical_state_views.py` restored.
+- **Wave 0** — 14 ADRs locked (003-014), CI gate `ADR-003: No Anthropic SDK Imports`, 49 strategic docs moved to private `claudedocs/` (5-tier OI-1373 cleanup), v1.0.0-rc1 release notes (#439–#449)
+- **Wave 0.5** — Phase 6 P4 data migration to central VNX state proven on real production data (855k code_snippets, 505 dispatches, 0 verifier discrepancies); migration 0016 schema-first per ADR-009 (#432, #446)
+- **Wave 1 — shadow-mode read cutover (#450–#454)** —
+  - W1.1 `shadow_verifier.py` independent comparator with 6 hard divergence-detection metrics (zero-tolerance for scoping/blocking findings)
+  - W1.2 `shadow_logger.py` NDJSON writer + report CLI + flock-rotation
+  - W1.3 T0 state-builder shadow wiring (4 read sites)
+  - W1.4 `IntelligenceSelector` + `DispatchRegister` shadow wiring (5 read sites)
+  - W1.5 Dashboard shadow wiring + canary divergence test pack (14+ fixtures) + operator-readable rollback docs
+- **Wave 5 P0 — prior-round-findings injection (#455)** — when a dispatch is round N+1 of a multi-round PR, the worker auto-receives blocking + advisory findings from prior rounds. Validated against PR #432's 9-round cascade as the canonical proof-of-concept.
+- **Wave 5 P1 — ADR injection by file-touch (#456)** — dispatches whose `dispatch_paths` overlap with files referenced in ADRs auto-receive the relevant ADR sections as governance context.
 
 ### Next
 
-- **Roadmap Autopilot (P0)** — multi-feature orchestration with auto-feature handoff after merged + verified closure (see `roadmap/features/roadmap-autopilot/FEATURE_PLAN.md`)
-- **Task Control Surface** — live dispatch board, SSE streaming, one-click re-dispatch from dashboard
-- **Battle testing** — overnight soak + failure injection on the full autonomous loop
-- **Model-agnostic execution** — route headless dispatches to Gemini / Codex / Ollama using the F53 adapter layer (currently Claude-only in practice)
-- **Multi-channel operator input** — Slack / WhatsApp / webhook triggers alongside tmux
-- **Dynamic worker pools** — scale headless workers based on queue depth and API budget
-- **Business agent templates** — pre-built configurations for content, research, analysis
+Strategic replan v1.2 sequence:
+
+- **Wave 1 cutover validation (in progress)** — pilot burn-in on mc + sales projects with `VNX_USE_CENTRAL_DB=shadow`. Required: 7 consecutive days clean on all 6 hard metrics before flipping `shadow → 1` per project per table.
+- **Wave 5 P2/P3/P4 (in progress)** — file:line code-anchor injection, operator-memory injection, schema-introspection injection (extends the +30pp smart-context lift across the remaining context bundle classes).
+- **Wave 2 — Phase 6 cleanup** — retire shadow-mode flag once all consumers cut over, remove dual-write code paths, rotate-and-archive per-project DBs.
+- **Wave 5.5 (conditional)** — cryptographic audit-integrity layer (signed checkpoints, hash-chained NDJSON) — gating decision pending operator review.
+- **Wave 6** — workers=N tactical: subagent-pilot 2-gate split per ADR-011 v2 (Gate 1 provenance/redaction, Gate 2 performance baseline median ≥30% wall-clock saved).
+- **Wave 7+** — option space: multi-operator/federation, performance/scale, integration breadth (LiteLLM bridge to non-Claude providers), domain expansion. Non-binding; refresh post-Wave 6.
 
 ### Known gaps / deferred
 
-- **Headless context rotation** (F43 follow-up, tracked in OI-1073) — subprocess workers currently use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
+- **Headless context rotation** (OI-1073) — subprocess workers currently use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
 - **MCP server** — expose VNX state to external Claude sessions; not yet built.
-- **9 chain PRs deferred** (#300–#303 fix-loop convergence; #305, #311, #316, #317, #320, #321 merge conflicts after sequential merge wave) — branches alive on origin, see OI-1211 through OI-1236 for context.
+- **v1.0.0 final tag** — operator decision after Wave 1 cutover validates on pilot projects. Currently `v1.0.0-rc1` is the public release candidate.
 
 See [CHANGELOG.md](CHANGELOG.md) for what shipped recently.
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased — post-v1.0.0-rc1 (2026-05-09 → present)
+
+Wave 1 (shadow-mode read cutover) + Wave 5 P0/P1 (smart-context smart injection) shipped on top of the v1.0.0-rc1 architectural baseline.
+
+### Added — Wave 1 shadow-mode read cutover (#450–#454)
+- **PR-W1.1 (#450)** `scripts/lib/shadow_verifier.py` — independent comparator (no shared code with the migration) computing 6 zero-tolerance divergence metrics: wrong-project rows, scoping/blocking-finding mismatch, IntelligenceSelector top-3 divergence, count drift (0%) + checksum drift (<0.01%), lease-key collision count, p95-latency ratio (central ≤ 1.5× per-project).
+- **PR-W1.2 (#451)** `scripts/lib/shadow_logger.py` NDJSON writer + `scripts/shadow_report.py` CLI + `scripts/rotate_shadow_ledger.sh` timestamp-suffix rotation under flock; routes via `vnx_paths.resolve_paths()` (no `.vnx-data/state/` literals).
+- **PR-W1.3 (#452)** T0 state-builder shadow wiring — 4 read sites in `scripts/build_t0_state.py` instrumented with `VNX_USE_CENTRAL_DB=unset|shadow|1` flag.
+- **PR-W1.4 (#453)** `IntelligenceSelector` (5 read methods) + `DispatchRegister` shadow wiring (~600 LOC additions).
+- **PR-W1.5 (#454)** Dashboard read paths shadow-wired (`api_intelligence.py`, `api_operator.py`); canary divergence test pack with 14+ deliberate-divergence fixtures (`tests/canary/test_shadow_canary_divergence.py`); operator-readable `docs/operations/wave1-rollback.md`.
+
+### Added — Wave 5 smart-context injection (#455–#456)
+- **PR-W5.0 (#455)** `scripts/lib/prior_round_injector.py` — when a dispatch has `pr_id` mapping to existing review-gate results, fetch blocking + advisory findings from prior rounds and inject as a bounded markdown section (≤2000 chars). Scope-filtered by `dispatch_paths` overlap; recency-sorted; LRU-cached 60s TTL; anti-anchoring instruction included per Codex Q4 epistemic-failure-mode mitigation. Validated against PR #432's 9-round cascade as canonical proof-of-concept.
+- **PR-W5.1 (#456)** `scripts/lib/adr_indexer.py` — scans `docs/governance/decisions/ADR-*.md` for file-path references, builds an inverted index `file_path → [ADR_ids]`. When dispatch `dispatch_paths` overlap with ADR-referenced files, the relevant ADR sections are auto-injected as governance context. Bounded by 1500-char budget; mtime-based 60s TTL cache.
+
+### Added — Governance amendment
+- **ADR-011 v2 (#449)** — split subagent pilot into 2 sequential gates: Gate 1 provenance/redaction (10 dispatches), Gate 2 performance baseline (15 dispatches, median ≥30% wall-clock saved + p25 ≥0%).
+
+### Documentation produced (claudedocs/, gitignored)
+- `claudedocs/2026-05-09-wave1-design.md` — Wave 1 spec with 6 hard metrics
+- `claudedocs/2026-05-09-wave5-p0-design.md` — prior-round-findings injection design
+- `claudedocs/2026-05-09-vnx-smart-context-design.md` — three-state context bundle pipeline
+- `claudedocs/2026-05-10-deepseek-v4-pro-harness-feasibility.md` — three integration paths analysis
+- `claudedocs/2026-05-09-vnx-codex-strategic-review.md` + `2026-05-09-vnx-gemini-strategic-review.md` + `2026-05-09-vnx-reviews-synthesis.md` — dual-LLM external review insights driving v1.2 strategic plan
+
+### Burn-in pending (not yet merged into v1.0.0 final)
+- Wave 1 cutover requires 7 consecutive days clean on all 6 hard metrics (per project, per table) before flipping `VNX_USE_CENTRAL_DB=shadow → 1`.
+- Wave 5 P2/P3/P4 (file:line code anchors / operator memory / schema introspection) extend the +30pp smart-context lift; in flight.
+- v1.0.0 final tag is operator-decision after Wave 1 cutover validates on pilot projects.
+
 ## v1.0.0-rc1 — 2026-05-09 (Architectural stabilization milestone)
 
 Chain summary: Wave 0 + Wave 0.5 of the strategic replan — architectural decisions LOCKED via 14 ADRs, central VNX state proven on real production data (855k snippets across 4 projects, 0 verifier discrepancies), CI gate enforcing OAuth-only Claude routing, smart context injection validated at +30 percentage-point dispatch quality lift on 658 outcome-tagged dispatches.
