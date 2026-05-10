@@ -1831,6 +1831,233 @@ class TestCodeAnchorInjection(unittest.TestCase):
         self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2)
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 P3: operator_memory integration tests
+# ---------------------------------------------------------------------------
+
+class TestOperatorMemoryInjection(unittest.TestCase):
+    """Integration tests for Wave 5 P3 operator memory injection in IntelligenceSelector."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._quality_db_path = self._base / "quality_intelligence.db"
+        self._state_dir = self._base / "state"
+        self._state_dir.mkdir()
+        init_schema(str(self._state_dir))
+        db = _setup_quality_db(self._quality_db_path)
+        db.close()
+
+        # Set up a memory directory with a relevant feedback file
+        self._memory_dir = self._base / "memory"
+        self._memory_dir.mkdir()
+        (self._memory_dir / "feedback_database_lease.md").write_text(
+            "---\n"
+            "name: Stale lease cleanup\n"
+            "description: Check runtime_coordination database leases before dispatch\n"
+            "type: feedback\n"
+            "---\n"
+            "Before first dispatch, release stale leases in runtime_coordination.db.\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        import operator_memory_indexer
+        operator_memory_indexer._CACHES.clear()
+        self._tmpdir.cleanup()
+
+    def _patch_memory_dir(self, memory_dir):
+        """Patch operator_memory_indexer._project_memory_dir to return memory_dir."""
+        import operator_memory_indexer
+
+        original = operator_memory_indexer._project_memory_dir
+
+        def _patched(cwd=None):
+            return memory_dir
+
+        operator_memory_indexer._project_memory_dir = _patched
+        return original
+
+    def _restore_memory_dir(self, original):
+        import operator_memory_indexer
+        operator_memory_indexer._project_memory_dir = original
+
+    def test_select_includes_operator_memory_when_role_present(self):
+        """When skill_name is provided and matching memories exist, operator_memory is injected."""
+        import operator_memory_indexer
+        original = self._patch_memory_dir(self._memory_dir)
+
+        try:
+            operator_memory_indexer._CACHES.clear()
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "om-test-001",
+                "dispatch_create",
+                skill_name="database-engineer",
+                instruction_text="Check database leases and dispatch to runtime_coordination",
+            )
+            selector.close()
+        finally:
+            self._restore_memory_dir(original)
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertIn("operator_memory", item_classes,
+                      f"Expected operator_memory in items, got: {item_classes}")
+
+        om_items = [i for i in result.items if i.item_class == "operator_memory"]
+        self.assertEqual(len(om_items), 1)
+        self.assertEqual(om_items[0].confidence, 1.0)
+        self.assertGreater(om_items[0].evidence_count, 0)
+        self.assertTrue(len(om_items[0].source_refs) > 0)
+
+    def test_select_does_not_include_operator_memory_when_no_inputs(self):
+        """Without skill_name, dispatch_paths, or instruction_text, no operator_memory is injected."""
+        import operator_memory_indexer
+        original = self._patch_memory_dir(self._memory_dir)
+
+        try:
+            operator_memory_indexer._CACHES.clear()
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "om-test-002",
+                "dispatch_create",
+                skill_name=None,
+                dispatch_paths=None,
+                instruction_text=None,
+            )
+            selector.close()
+        finally:
+            self._restore_memory_dir(original)
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertNotIn("operator_memory", item_classes)
+
+    def test_select_combines_all_wave5_classes_within_budget(self):
+        """prior_round + adr + code_anchor + operator_memory all fit within 4000-char payload."""
+        import prior_round_injector
+        import operator_memory_indexer
+        import adr_indexer
+
+        # Seed prior-round finding
+        results_dir = self._base / "review_gates" / "results"
+        results_dir.mkdir(parents=True)
+        gate_file = results_dir / "pr-777-codex_gate.json"
+        gate_file.write_text(
+            json.dumps({
+                "recorded_at": "2026-05-10T12:00:00Z",
+                "contract_hash": "abc777",
+                "blocking_findings": [{"message": "Missing null guard in fetch_code_anchors"}],
+                "advisory_findings": [],
+            }),
+            encoding="utf-8",
+        )
+
+        # Set up ADR dir with a matching ADR
+        adr_dir = self._base / "docs" / "governance" / "decisions"
+        adr_dir.mkdir(parents=True)
+        (adr_dir / "ADR-009-schema-first.md").write_text(
+            "# ADR-009 — Schema first migrations\n\n"
+            "## Decision\n\n"
+            "All CREATE TABLE statements go in schemas/quality_intelligence.sql first.\n\n"
+            "## See also\n\n"
+            "See scripts/lib/code_anchor_finder.py for implementation details.\n",
+            encoding="utf-8",
+        )
+
+        # Set up real Python source file for code_anchor
+        scripts_dir = self._base / "scripts" / "lib"
+        scripts_dir.mkdir(parents=True)
+        source_file = scripts_dir / "code_anchor_finder.py"
+        source_file.write_text(
+            "def fetch_code_anchors(dispatch_paths, instruction_text):\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        dispatch_path = "scripts/lib/code_anchor_finder.py"
+
+        prior_round_injector._fetch_cached.cache_clear()
+        original_prior_resolve = prior_round_injector._resolve_state_dir
+
+        def _patched_prior_resolve(state_dir=None):
+            return self._base
+
+        prior_round_injector._resolve_state_dir = _patched_prior_resolve
+
+        original_memory = self._patch_memory_dir(self._memory_dir)
+        operator_memory_indexer._CACHES.clear()
+
+        # Snapshot full INDEX state before mutation
+        original_adr_loaded_dir = adr_indexer._INDEX._loaded_dir
+        original_adr_entries = dict(adr_indexer._INDEX.entries)
+        original_adr_fta = dict(adr_indexer._INDEX.file_to_adrs)
+        original_adr_mtimes = dict(adr_indexer._INDEX._file_mtimes)
+        original_loaded_at = adr_indexer._INDEX.loaded_at
+        adr_indexer._INDEX.loaded_at = 0.0  # force reload
+
+        try:
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "om-test-003",
+                "dispatch_create",
+                pr_id="777",
+                skill_name="database-engineer",
+                dispatch_paths=[dispatch_path],
+                instruction_text="Edit fetch_code_anchors and database schema dispatch",
+            )
+            selector.close()
+        finally:
+            prior_round_injector._resolve_state_dir = original_prior_resolve
+            self._restore_memory_dir(original_memory)
+            # Fully restore INDEX singleton so we don't pollute other tests
+            adr_indexer._INDEX.loaded_at = original_loaded_at
+            adr_indexer._INDEX.entries = original_adr_entries
+            adr_indexer._INDEX.file_to_adrs = original_adr_fta
+            adr_indexer._INDEX._file_mtimes = original_adr_mtimes
+            adr_indexer._INDEX._loaded_dir = original_adr_loaded_dir
+
+        payload_size = len(json.dumps(result.to_payload_dict()))
+        self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2,
+                             f"Payload {payload_size} chars exceeds 2x limit")
+
+        # At least operator_memory should be present (prior_round also likely)
+        item_classes = [item.item_class for item in result.items]
+        self.assertIn("operator_memory", item_classes,
+                      f"Expected operator_memory in items, got: {item_classes}")
+
+    def test_operator_memory_class_in_direct_injection_set(self):
+        """operator_memory must be in _DIRECT_INJECTION_CLASSES (1500-char cap applies)."""
+        from intelligence_selector import _DIRECT_INJECTION_CLASSES
+        self.assertIn("operator_memory", _DIRECT_INJECTION_CLASSES)
+
+        # Also verify to_dict() does not truncate operator_memory content at 500
+        content = "o" * 1500
+        item = IntelligenceItem(
+            item_id="test-om",
+            item_class="operator_memory",
+            title="Test operator memory",
+            content=content,
+            confidence=1.0,
+            evidence_count=2,
+            last_seen="2026-05-10T00:00:00Z",
+            scope_tags=[],
+        )
+        serialized = item.to_dict()
+        self.assertEqual(
+            len(serialized["content"]),
+            1500,
+            "operator_memory content was truncated — should use MAX_CODE_ANCHOR_CHARS cap",
+        )
+
+
 class TestIntelligenceItemSerialization(unittest.TestCase):
     """Verify that to_dict() round-trips content for direct-injection item classes."""
 
