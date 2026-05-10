@@ -167,6 +167,14 @@ if __name__ == "__main__":
             "this scope.  When omitted, legacy pre_dispatch_dirty scoping is used."
         ),
     )
+    parser.add_argument(
+        "--pr-id",
+        default=None,
+        help=(
+            "PR identifier forwarded to IntelligenceSelector so prior_round_finding "
+            "items (codex/gemini gate results) fire in production (CFX-W5-2)."
+        ),
+    )
     args = parser.parse_args()
 
     # OI-1107: fall back to Role: header in instruction, then to a documented default.
@@ -187,5 +195,6 @@ if __name__ == "__main__":
         auto_commit=not args.no_auto_commit,
         gate=args.gate,
         dispatch_paths=_dispatch_paths,
+        pr_id=args.pr_id,
     )
     sys.exit(0 if ok else 1)

@@ -69,6 +69,7 @@ class DispatchMeta:
     role: Optional[str]        # "backend-developer", etc.
     gate: Optional[str]        # "f48-pr1", etc.
     raw_instruction: str       # full .md body
+    pr_id: Optional[str] = None  # PR identifier for Wave 5 intelligence injection (CFX-W5-2)
 
 
 _TARGET_RE  = re.compile(r"\[\[TARGET:(T\d+)\]\]")
@@ -76,10 +77,28 @@ _TRACK_RE   = re.compile(r"^Track:\s*(\S+)", re.MULTILINE)
 _ROLE_RE    = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
 _GATE_RE    = re.compile(r"^Gate:\s*(\S+)", re.MULTILINE)
 _FEATURE_RE = re.compile(r"^Feature:\s*(F\d+)", re.MULTILINE)
+# PR-ID: explicit field; fallback: PR-<digits> or PR #<digits> anywhere in text
+_PR_ID_RE   = re.compile(r"^PR-ID:\s*(\S+)", re.MULTILINE)
+_PR_NUM_RE  = re.compile(r"PR[- ]#?(\d+)")
+
+
+def _extract_pr_id(text: str) -> Optional[str]:
+    """Extract PR identifier from dispatch text.
+
+    Tries explicit 'PR-ID: <value>' header first, then falls back to the first
+    'PR-<digits>' or 'PR #<digits>' pattern found in the body.
+    """
+    m = _PR_ID_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _PR_NUM_RE.search(text)
+    if m:
+        return m.group(1)
+    return None
 
 
 def parse_dispatch_metadata(path: Path) -> Optional[DispatchMeta]:
-    """Extract TARGET, Track, Role, Gate from dispatch .md header."""
+    """Extract TARGET, Track, Role, Gate, PR-ID from dispatch .md header."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -98,6 +117,7 @@ def parse_dispatch_metadata(path: Path) -> Optional[DispatchMeta]:
         role=(_m.group(1) if (_m := _ROLE_RE.search(text)) else None),
         gate=(_m.group(1) if (_m := _GATE_RE.search(text)) else None),
         raw_instruction=text,
+        pr_id=_extract_pr_id(text),
     )
 
 
@@ -416,6 +436,7 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
             "role": meta.role,
             "gate": meta.gate or "",
             "max_retries": 1,
+            "pr_id": meta.pr_id,  # CFX-W5-2: forward pr_id so prior_round_finding fires
         }
         result = adapter.execute(meta.raw_instruction, context)
         return result.status == "done"
@@ -440,6 +461,7 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
             dispatch_id=meta.dispatch_id,
             role=meta.role,
             max_retries=1,
+            pr_id=meta.pr_id,  # CFX-W5-2: forward pr_id so prior_round_finding fires
         )
     except Exception as exc:
         logger.error("Delivery exception for %s: %s", meta.dispatch_id, exc)
