@@ -185,9 +185,11 @@ Agent hits 65% context → blocked from further tool calls
 
 Zero human intervention. Zero lost work. The receipt ledger maintains a complete chain across rotations.
 
-## What's new in v1.0.0-rc1 (May 2026)
+## What's new since v1.0.0-rc1 (May 2026)
 
-### Architectural stabilization — 14 ADRs locked
+> Strategic replan v1.2 organizes work into 6 waves. v1.0.0-rc1 itself shipped Wave 0 + 0.5 (architectural stabilization + Phase 6 P4 migration). Wave 1 (shadow read cutover) and Wave 5 P0/P1 (smart-context injection) shipped on top of the rc1 baseline and are still pending burn-in before the v1.0.0 final tag — see [CHANGELOG.md](CHANGELOG.md) "Unreleased" for the post-rc1 PR list.
+
+### Architectural stabilization — 14 ADRs locked (v1.0.0-rc1)
 Decisions previously implicit are now captured as numbered ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`). Highlights: ADR-003 OAuth-only Claude routing (no SDK), ADR-005 NDJSON ledger as primary substrate, ADR-008 dual-LLM adversarial review with `contract_hash` evidence binding, ADR-011 manager+worker hierarchy with Conditional/Pilot subagents, ADR-014 autonomous chain dispatch with SHA-256 consent token. From this release forward, dispatch envelope, receipt schema, and ledger format are backwards-compatibility-honoring.
 
 ### CI gate — no Anthropic SDK imports
