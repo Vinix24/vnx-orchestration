@@ -1389,5 +1389,142 @@ class TestShadowModeSelectIntegration(unittest.TestCase):
             _ps.current_project_id = original_pid
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 P0: IntelligenceSelector prior_round_finding integration tests
+# ---------------------------------------------------------------------------
+
+class TestPriorRoundFindingIntegration(unittest.TestCase):
+    """Integration tests for Wave 5 P0 prior_round_finding injection via select()."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_path = Path(self._tmp.name)
+        self._results_dir = self._tmp_path / "review_gates" / "results"
+        self._results_dir.mkdir(parents=True)
+
+        # Minimal quality DB (no patterns seeded — we test prior_round_finding isolation)
+        db_path = self._tmp_path / "quality.db"
+        conn = _setup_quality_db(db_path)
+        conn.close()
+        self._db_path = db_path
+
+        # Flush prior_round_injector LRU cache before each test
+        try:
+            import prior_round_injector
+            prior_round_injector._fetch_cached.cache_clear()
+        except Exception:
+            pass
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_gate_file(
+        self,
+        pr_id: str,
+        gate: str,
+        blocking: list | None = None,
+        advisory: list | None = None,
+        recorded_at: str = "2026-04-01T10:00:00Z",
+    ):
+        data = {
+            "gate": gate,
+            "pr_id": pr_id,
+            "blocking_findings": [{"message": m} for m in (blocking or [])],
+            "advisory_findings": [{"message": m} for m in (advisory or [])],
+            "recorded_at": recorded_at,
+            "contract_hash": "test_hash",
+            "status": "completed",
+        }
+        path = self._results_dir / f"pr-{pr_id}-{gate}.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_select_includes_prior_round_findings_when_pr_id_present(self):
+        import prior_round_injector
+        self._write_gate_file(
+            "200", "codex_gate",
+            blocking=["Missing table in migration scripts/lib/importer.py:42."],
+        )
+
+        original_resolve = prior_round_injector._resolve_state_dir
+
+        def _patched_resolve(state_dir=None):
+            if state_dir is not None:
+                return state_dir
+            return self._tmp_path
+
+        prior_round_injector._resolve_state_dir = _patched_resolve
+        try:
+            selector = IntelligenceSelector(quality_db_path=self._db_path)
+            result = selector.select(
+                "test-dispatch-p0-200",
+                "dispatch_create",
+                skill_name="backend-developer",
+                pr_id="200",
+            )
+            selector.close()
+        finally:
+            prior_round_injector._resolve_state_dir = original_resolve
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertIn("prior_round_finding", item_classes)
+
+        prf_item = next(i for i in result.items if i.item_class == "prior_round_finding")
+        self.assertEqual(prf_item.confidence, 1.0)
+        self.assertIn("Prior-round review findings on PR #200", prf_item.title)
+        self.assertIn("Missing table", prf_item.content)
+
+    def test_select_does_not_include_prior_round_findings_when_no_pr_id(self):
+        self._write_gate_file(
+            "201", "codex_gate",
+            blocking=["Some blocking issue."],
+        )
+
+        selector = IntelligenceSelector(quality_db_path=self._db_path)
+        result = selector.select(
+            "test-dispatch-no-prid",
+            "dispatch_create",
+            skill_name="backend-developer",
+        )
+        selector.close()
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertNotIn("prior_round_finding", item_classes)
+
+    def test_select_respects_budget_when_prior_findings_large(self):
+        import prior_round_injector
+
+        large_messages = [f"Advisory finding #{i}: " + ("x" * 150) for i in range(15)]
+        self._write_gate_file(
+            "202", "codex_gate",
+            advisory=large_messages,
+        )
+
+        original_resolve = prior_round_injector._resolve_state_dir
+
+        def _patched_resolve(state_dir=None):
+            if state_dir is not None:
+                return state_dir
+            return self._tmp_path
+
+        prior_round_injector._resolve_state_dir = _patched_resolve
+        try:
+            selector = IntelligenceSelector(quality_db_path=self._db_path)
+            result = selector.select(
+                "test-dispatch-budget-202",
+                "dispatch_create",
+                skill_name="backend-developer",
+                pr_id="202",
+            )
+            selector.close()
+        finally:
+            prior_round_injector._resolve_state_dir = original_resolve
+
+        # Payload must stay within MAX_PAYLOAD_CHARS
+        import json as _json
+        payload_size = len(_json.dumps(result.to_payload_dict()))
+        self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2,
+                             "Payload unexpectedly large — budget enforcement may have failed")
+
+
 if __name__ == "__main__":
     unittest.main()

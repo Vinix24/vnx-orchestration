@@ -35,6 +35,11 @@ except ImportError:
     _shadow_logger = None  # type: ignore[assignment]
 
 try:
+    import prior_round_injector as _prior_round_injector
+except ImportError:
+    _prior_round_injector = None  # type: ignore[assignment]
+
+try:
     from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
 except ImportError:
     _resolve_central_data_dir = None  # type: ignore[assignment]
@@ -505,6 +510,8 @@ class IntelligenceSelector:
         scope_tags: Optional[List[str]] = None,
         track: Optional[str] = None,
         gate: Optional[str] = None,
+        pr_id: Optional[str] = None,
+        dispatch_paths: Optional[List[str]] = None,
     ) -> InjectionResult:
         """Run the bounded selection algorithm and return an InjectionResult.
 
@@ -628,6 +635,34 @@ class IntelligenceSelector:
 
         # Enforce payload size limit (Section 2.3 step 6)
         selected = self._enforce_payload_limit(selected, suppressed)
+
+        # Wave 5 P0: inject prior-round review findings when pr_id is present.
+        # Added after standard enforcement so prior findings ride above the
+        # standard class budget and are only dropped as last resort.
+        if pr_id and _prior_round_injector is not None:
+            prior_findings = _prior_round_injector.fetch_prior_findings(
+                pr_id,
+                dispatch_paths=dispatch_paths or [],
+                max_chars=MAX_PAYLOAD_CHARS,
+            )
+            if prior_findings:
+                now_ts = _now_utc()
+                prior_item = IntelligenceItem(
+                    item_id=f"intel_prf_{pr_id}",
+                    item_class="prior_round_finding",
+                    title=f"Prior-round review findings on PR #{pr_id}",
+                    content=_prior_round_injector.format_findings_section(prior_findings),
+                    confidence=1.0,
+                    evidence_count=len(prior_findings),
+                    last_seen=now_ts,
+                    scope_tags=[],
+                    source_refs=[f"pr-{pr_id}-{f.gate}" for f in prior_findings],
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_CODE,
+                    content_hash="",
+                )
+                selected.insert(0, prior_item)
+                selected = self._enforce_payload_limit_with_prior(selected, suppressed)
 
         now = _now_utc()
         result = InjectionResult(
@@ -1910,6 +1945,51 @@ class IntelligenceSelector:
 
         # Drop in reverse priority order
         drop_order = list(reversed(ITEM_CLASS_PRIORITY))
+        for drop_class in drop_order:
+            to_drop = [i for i in selected if i.item_class == drop_class]
+            if not to_drop:
+                continue
+
+            selected = [i for i in selected if i.item_class != drop_class]
+            suppressed.append(SuppressionRecord(
+                item_class=drop_class,
+                reason=f"dropped to enforce payload limit ({payload_size} > {MAX_PAYLOAD_CHARS} chars)",
+            ))
+
+            payload_size = len(json.dumps({
+                "injection_point": "dispatch_create",
+                "injected_at": _now_utc(),
+                "items": [item.to_dict() for item in selected],
+                "suppressed": [s.to_dict() for s in suppressed],
+            }))
+
+            if payload_size <= MAX_PAYLOAD_CHARS:
+                break
+
+        return selected
+
+    def _enforce_payload_limit_with_prior(
+        self,
+        selected: List[IntelligenceItem],
+        suppressed: List[SuppressionRecord],
+    ) -> List[IntelligenceItem]:
+        """Re-enforce payload limit after a prior_round_finding item has been prepended.
+
+        Drops standard classes first (recent_comparable → failure_prevention →
+        proven_pattern) and only removes prior_round_finding as last resort,
+        since it is direct evidence with confidence 1.0.
+        """
+        payload_size = len(json.dumps({
+            "injection_point": "dispatch_create",
+            "injected_at": _now_utc(),
+            "items": [item.to_dict() for item in selected],
+            "suppressed": [s.to_dict() for s in suppressed],
+        }))
+
+        if payload_size <= MAX_PAYLOAD_CHARS:
+            return selected
+
+        drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + ["prior_round_finding"]
         for drop_class in drop_order:
             to_drop = [i for i in selected if i.item_class == drop_class]
             if not to_drop:
