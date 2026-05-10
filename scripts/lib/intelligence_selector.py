@@ -58,6 +58,11 @@ except ImportError:
     _operator_memory_indexer = None  # type: ignore[assignment]
 
 try:
+    import schema_section_indexer as _schema_section_indexer
+except ImportError:
+    _schema_section_indexer = None  # type: ignore[assignment]
+
+try:
     from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
 except ImportError:
     _resolve_central_data_dir = None  # type: ignore[assignment]
@@ -83,7 +88,13 @@ MAX_CODE_ANCHOR_CHARS = 1500
 # Item classes that carry pre-formatted sections and must not be clipped to the
 # 500-char standard limit.  These are direct-injection classes whose full content
 # (up to MAX_CODE_ANCHOR_CHARS) the worker is expected to read verbatim.
-_DIRECT_INJECTION_CLASSES = frozenset({"code_anchor", "prior_round_finding", "adr_relevant", "operator_memory"})
+_DIRECT_INJECTION_CLASSES = frozenset({
+    "code_anchor",
+    "prior_round_finding",
+    "adr_relevant",
+    "operator_memory",
+    "schema_section",
+})
 
 # Per-class confidence thresholds (Section 1.2 / 2.3)
 CONFIDENCE_THRESHOLDS = {
@@ -779,6 +790,36 @@ class IntelligenceSelector:
                 )
                 selected.append(memory_item)
                 selected = self._enforce_payload_limit_with_operator_memory(selected, suppressed)
+
+        # Wave 5 P4: inject schema sections (DDL grounding for DB workers) when dispatch
+        # touches schema/migration/importer paths or instruction mentions known table names.
+        # Pre-grounds the worker on the actual CREATE TABLE / ALTER TABLE statements so
+        # they don't need to grep schemas/ before acting.
+        if (dispatch_paths or instruction_text) and _schema_section_indexer is not None:
+            schema_sections = _schema_section_indexer.fetch_relevant_schema_sections(
+                dispatch_paths or [],
+                instruction_text or "",
+                max_chars=MAX_CODE_ANCHOR_CHARS,
+            )
+            if schema_sections:
+                now_ts = _now_utc()
+                unique_tables = len({s.table_name for s in schema_sections})
+                schema_item = IntelligenceItem(
+                    item_id=f"intel_ss_{dispatch_id}",
+                    item_class="schema_section",
+                    title=f"Schema sections for {unique_tables} touched table(s)",
+                    content=_schema_section_indexer.format_schema_sections(schema_sections),
+                    confidence=1.0,
+                    evidence_count=len(schema_sections),
+                    last_seen=now_ts,
+                    scope_tags=[],
+                    source_refs=[f"{s.file_path}:{s.table_name}" for s in schema_sections],
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_CODE,
+                    content_hash="",
+                )
+                selected.append(schema_item)
+                selected = self._enforce_payload_limit_with_schema_section(selected, suppressed)
 
         now = _now_utc()
         result = InjectionResult(
@@ -2245,6 +2286,54 @@ class IntelligenceSelector:
 
         drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + [
             "prior_round_finding", "adr_relevant", "code_anchor", "operator_memory"
+        ]
+        for drop_class in drop_order:
+            to_drop = [i for i in selected if i.item_class == drop_class]
+            if not to_drop:
+                continue
+
+            selected = [i for i in selected if i.item_class != drop_class]
+            suppressed.append(SuppressionRecord(
+                item_class=drop_class,
+                reason=f"dropped to enforce payload limit ({payload_size} > {MAX_PAYLOAD_CHARS} chars)",
+            ))
+
+            payload_size = len(json.dumps({
+                "injection_point": "dispatch_create",
+                "injected_at": _now_utc(),
+                "items": [item.to_dict() for item in selected],
+                "suppressed": [s.to_dict() for s in suppressed],
+            }))
+
+            if payload_size <= MAX_PAYLOAD_CHARS:
+                break
+
+        return selected
+
+    def _enforce_payload_limit_with_schema_section(
+        self,
+        selected: List[IntelligenceItem],
+        suppressed: List[SuppressionRecord],
+    ) -> List[IntelligenceItem]:
+        """Re-enforce payload limit after a schema_section item has been appended.
+
+        Drops standard classes first (recent_comparable -> failure_prevention ->
+        proven_pattern -> prior_round_finding -> adr_relevant -> code_anchor ->
+        operator_memory) and only removes schema_section as last resort since it
+        carries direct DDL evidence with confidence 1.0.
+        """
+        payload_size = len(json.dumps({
+            "injection_point": "dispatch_create",
+            "injected_at": _now_utc(),
+            "items": [item.to_dict() for item in selected],
+            "suppressed": [s.to_dict() for s in suppressed],
+        }))
+
+        if payload_size <= MAX_PAYLOAD_CHARS:
+            return selected
+
+        drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + [
+            "prior_round_finding", "adr_relevant", "code_anchor", "operator_memory", "schema_section"
         ]
         for drop_class in drop_order:
             to_drop = [i for i in selected if i.item_class == drop_class]
