@@ -1659,5 +1659,177 @@ class TestAdrRelevantIntegration(unittest.TestCase):
         self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2)
 
 
+# ---------------------------------------------------------------------------
+# Wave 5 P2: code_anchor integration tests
+# ---------------------------------------------------------------------------
+
+class TestCodeAnchorInjection(unittest.TestCase):
+    """Integration tests for Wave 5 P2 code anchor injection in IntelligenceSelector."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._base = Path(self._tmpdir.name)
+        self._quality_db_path = self._base / "quality_intelligence.db"
+        self._state_dir = self._base / "state"
+        self._state_dir.mkdir()
+        init_schema(str(self._state_dir))
+        db = _setup_quality_db(self._quality_db_path)
+        db.close()
+
+        # Write a real Python file that the selector can find anchors in
+        self._scripts_dir = self._base / "scripts"
+        self._scripts_dir.mkdir()
+        self._source_file = self._scripts_dir / "migrate_to_central_vnx.py"
+        self._source_file.write_text(
+            "# migration script\n"
+            "def _import_table(conn, table_name):\n"
+            "    conn.execute('INSERT OR IGNORE INTO ' + table_name)\n"
+            "    return True\n"
+            "\n"
+            "class MigrationRunner:\n"
+            "    def run(self):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        self._rel_path = str(
+            self._source_file.relative_to(self._base)
+        )
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_select_includes_code_anchor_when_paths_and_instruction_present(self):
+        """When dispatch_paths and instruction_text are provided with matching terms,
+        the selector includes a code_anchor item."""
+        selector = IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+        result = selector.select(
+            "ca-test-001",
+            "dispatch_create",
+            dispatch_paths=[self._rel_path],
+            instruction_text=(
+                "Edit _import_table to add INSERT OR IGNORE logic for MigrationRunner"
+            ),
+        )
+        selector.close()
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertIn("code_anchor", item_classes,
+                      f"Expected code_anchor in items, got: {item_classes}")
+
+        ca_items = [i for i in result.items if i.item_class == "code_anchor"]
+        self.assertEqual(len(ca_items), 1)
+        self.assertEqual(ca_items[0].confidence, 1.0)
+        self.assertGreater(ca_items[0].evidence_count, 0)
+        self.assertTrue(len(ca_items[0].source_refs) > 0)
+
+    def test_select_does_not_include_code_anchor_when_no_instruction_text(self):
+        """Without instruction_text, no code_anchor item is injected."""
+        selector = IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+        result = selector.select(
+            "ca-test-002",
+            "dispatch_create",
+            dispatch_paths=[self._rel_path],
+            instruction_text=None,
+        )
+        selector.close()
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertNotIn("code_anchor", item_classes)
+
+    def test_select_does_not_include_code_anchor_when_no_dispatch_paths(self):
+        """Without dispatch_paths, no code_anchor item is injected."""
+        selector = IntelligenceSelector(
+            quality_db_path=self._quality_db_path,
+            coord_db_state_dir=self._state_dir,
+        )
+        result = selector.select(
+            "ca-test-003",
+            "dispatch_create",
+            dispatch_paths=None,
+            instruction_text="_import_table INSERT OR IGNORE",
+        )
+        selector.close()
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertNotIn("code_anchor", item_classes)
+
+    def test_select_combines_prior_round_adr_and_code_anchor_within_budget(self):
+        """P0 (prior_round_finding) and P2 (code_anchor) can coexist within the payload budget.
+
+        Uses scripts/lib/code_anchor_finder.py as dispatch_path — it exists in the repo
+        and is not referenced by any ADR, so P1 (adr_relevant) does not fire. This lets
+        P0+P2 coexist without hitting the 2000-char budget ceiling.
+        """
+        import prior_round_injector
+
+        # Use a path with no ADR matches so adr_relevant doesn't fire and consume budget.
+        # code_anchor_finder.py exists in the real project and has matching identifiers.
+        dispatch_path = "scripts/lib/code_anchor_finder.py"
+
+        # Seed a prior-round finding (mock state_dir to point to tmpdir)
+        results_dir = self._base / "review_gates" / "results"
+        results_dir.mkdir(parents=True)
+        gate_file = results_dir / "pr-998-codex_gate.json"
+        gate_file.write_text(
+            json.dumps({
+                "recorded_at": "2026-05-01T12:00:00Z",
+                "contract_hash": "abc998",
+                "blocking_findings": [
+                    {"message": "fetch_code_anchors missing null guard in extract_terms"},
+                ],
+                "advisory_findings": [],
+            }),
+            encoding="utf-8",
+        )
+
+        # Clear LRU cache so stale entries don't mask the patched resolver
+        prior_round_injector._fetch_cached.cache_clear()
+
+        # Patch state_dir resolution so prior_round_injector finds the gate file
+        original_resolve = prior_round_injector._resolve_state_dir
+
+        def _patched_resolve(state_dir=None):
+            if state_dir is not None:
+                return state_dir
+            return self._base
+
+        prior_round_injector._resolve_state_dir = _patched_resolve
+
+        try:
+            selector = IntelligenceSelector(
+                quality_db_path=self._quality_db_path,
+                coord_db_state_dir=self._state_dir,
+            )
+            result = selector.select(
+                "ca-test-004",
+                "dispatch_create",
+                pr_id="998",
+                dispatch_paths=[dispatch_path],
+                instruction_text=(
+                    "Edit fetch_code_anchors and extract_terms to handle CodeAnchor edge cases"
+                ),
+            )
+            selector.close()
+        finally:
+            prior_round_injector._resolve_state_dir = original_resolve
+
+        item_classes = [item.item_class for item in result.items]
+        # Both P0 and P2 should be present (P1/adr_relevant not expected for this path)
+        self.assertIn("code_anchor", item_classes,
+                      f"Expected code_anchor in items, got: {item_classes}")
+        self.assertIn("prior_round_finding", item_classes,
+                      f"Expected prior_round_finding in items, got: {item_classes}")
+
+        # Payload must remain bounded
+        payload_size = len(json.dumps(result.to_payload_dict()))
+        self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2)
+
+
 if __name__ == "__main__":
     unittest.main()
