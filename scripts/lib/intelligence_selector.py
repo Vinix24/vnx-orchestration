@@ -40,6 +40,11 @@ except ImportError:
     _prior_round_injector = None  # type: ignore[assignment]
 
 try:
+    import adr_indexer as _adr_indexer
+except ImportError:
+    _adr_indexer = None  # type: ignore[assignment]
+
+try:
     from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
 except ImportError:
     _resolve_central_data_dir = None  # type: ignore[assignment]
@@ -663,6 +668,32 @@ class IntelligenceSelector:
                 )
                 selected.insert(0, prior_item)
                 selected = self._enforce_payload_limit_with_prior(selected, suppressed)
+
+        # Wave 5 P1: inject relevant ADR sections when dispatch_paths overlap ADR references.
+        # Added after prior_round enforcement so ADR context rides above standard class budget.
+        if dispatch_paths and _adr_indexer is not None:
+            relevant_adrs = _adr_indexer.fetch_relevant_adrs(
+                dispatch_paths,
+                max_chars=1500,
+            )
+            if relevant_adrs:
+                now_ts = _now_utc()
+                adr_item = IntelligenceItem(
+                    item_id=f"intel_adr_{'_'.join(a.adr_id for a in relevant_adrs[:3])}",
+                    item_class="adr_relevant",
+                    title=f"Relevant ADRs for {len(dispatch_paths)} touched files",
+                    content=_adr_indexer.format_adrs_section(relevant_adrs),
+                    confidence=1.0,
+                    evidence_count=len(relevant_adrs),
+                    last_seen=now_ts,
+                    scope_tags=[],
+                    source_refs=[a.adr_id for a in relevant_adrs],
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_CODE,
+                    content_hash="",
+                )
+                selected.append(adr_item)
+                selected = self._enforce_payload_limit_with_adr(selected, suppressed)
 
         now = _now_utc()
         result = InjectionResult(
@@ -1990,6 +2021,51 @@ class IntelligenceSelector:
             return selected
 
         drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + ["prior_round_finding"]
+        for drop_class in drop_order:
+            to_drop = [i for i in selected if i.item_class == drop_class]
+            if not to_drop:
+                continue
+
+            selected = [i for i in selected if i.item_class != drop_class]
+            suppressed.append(SuppressionRecord(
+                item_class=drop_class,
+                reason=f"dropped to enforce payload limit ({payload_size} > {MAX_PAYLOAD_CHARS} chars)",
+            ))
+
+            payload_size = len(json.dumps({
+                "injection_point": "dispatch_create",
+                "injected_at": _now_utc(),
+                "items": [item.to_dict() for item in selected],
+                "suppressed": [s.to_dict() for s in suppressed],
+            }))
+
+            if payload_size <= MAX_PAYLOAD_CHARS:
+                break
+
+        return selected
+
+    def _enforce_payload_limit_with_adr(
+        self,
+        selected: List[IntelligenceItem],
+        suppressed: List[SuppressionRecord],
+    ) -> List[IntelligenceItem]:
+        """Re-enforce payload limit after an adr_relevant item has been appended.
+
+        Drops standard classes first (recent_comparable → failure_prevention →
+        proven_pattern → prior_round_finding) and only removes adr_relevant as
+        last resort since it is direct governance evidence with confidence 1.0.
+        """
+        payload_size = len(json.dumps({
+            "injection_point": "dispatch_create",
+            "injected_at": _now_utc(),
+            "items": [item.to_dict() for item in selected],
+            "suppressed": [s.to_dict() for s in suppressed],
+        }))
+
+        if payload_size <= MAX_PAYLOAD_CHARS:
+            return selected
+
+        drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + ["prior_round_finding", "adr_relevant"]
         for drop_class in drop_order:
             to_drop = [i for i in selected if i.item_class == drop_class]
             if not to_drop:

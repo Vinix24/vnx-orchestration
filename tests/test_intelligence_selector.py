@@ -1526,5 +1526,138 @@ class TestPriorRoundFindingIntegration(unittest.TestCase):
                              "Payload unexpectedly large — budget enforcement may have failed")
 
 
+# ---------------------------------------------------------------------------
+# Tests: Wave 5 P1 — adr_relevant integration
+# ---------------------------------------------------------------------------
+
+_REAL_ADR_DIR = Path(__file__).resolve().parent.parent / "docs" / "governance" / "decisions"
+
+
+class TestAdrRelevantIntegration(unittest.TestCase):
+    """Integration tests for Wave 5 P1 adr_relevant injection via select()."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_path = Path(self._tmp.name)
+        self._results_dir = self._tmp_path / "review_gates" / "results"
+        self._results_dir.mkdir(parents=True)
+
+        db_path = self._tmp_path / "quality.db"
+        conn = _setup_quality_db(db_path)
+        conn.close()
+        self._db_path = db_path
+
+        # Reset _INDEX singleton so each test starts from a clean load
+        try:
+            import adr_indexer
+            adr_indexer._INDEX.loaded_at = 0.0
+        except Exception:
+            pass
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        # Reset singleton after test to not pollute other suites
+        try:
+            import adr_indexer
+            adr_indexer._INDEX.loaded_at = 0.0
+        except Exception:
+            pass
+
+    def test_select_includes_adr_relevant_when_dispatch_paths_match(self):
+        """dispatch on scripts/migrate_to_central_vnx.py auto-receives ADR-009 context."""
+        if not _REAL_ADR_DIR.is_dir():
+            self.skipTest("real ADR dir not available")
+
+        selector = IntelligenceSelector(quality_db_path=self._db_path)
+        result = selector.select(
+            "test-dispatch-adr-migrate-001",
+            "dispatch_create",
+            skill_name="backend-developer",
+            dispatch_paths=["scripts/migrate_to_central_vnx.py"],
+        )
+        selector.close()
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertIn("adr_relevant", item_classes,
+                      "Expected adr_relevant item for scripts/migrate_to_central_vnx.py path")
+
+        adr_item = next(i for i in result.items if i.item_class == "adr_relevant")
+        self.assertIn("ADR-009", adr_item.source_refs,
+                      "ADR-009 should be referenced since it mentions migrate_to_central_vnx.py")
+        self.assertEqual(adr_item.confidence, 1.0)
+        self.assertGreaterEqual(adr_item.evidence_count, 1)
+
+    def test_select_does_not_include_adr_relevant_when_no_paths_overlap(self):
+        """dispatch with unrelated paths produces no adr_relevant item."""
+        if not _REAL_ADR_DIR.is_dir():
+            self.skipTest("real ADR dir not available")
+
+        selector = IntelligenceSelector(quality_db_path=self._db_path)
+        result = selector.select(
+            "test-dispatch-no-adr-overlap",
+            "dispatch_create",
+            skill_name="backend-developer",
+            dispatch_paths=["scripts/totally_nonexistent_xyz_tool.py"],
+        )
+        selector.close()
+
+        item_classes = [item.item_class for item in result.items]
+        self.assertNotIn("adr_relevant", item_classes)
+
+    def test_select_combines_prior_round_and_adr_relevant_within_budget(self):
+        """When both pr_id and dispatch_paths are set, both item classes can appear."""
+        if not _REAL_ADR_DIR.is_dir():
+            self.skipTest("real ADR dir not available")
+
+        # Write a gate result for pr_id=300
+        gate_data = {
+            "gate": "codex_gate",
+            "pr_id": "300",
+            "blocking_findings": [
+                {"message": "Missing PRAGMA introspection in scripts/migrate_to_central_vnx.py:42."}
+            ],
+            "advisory_findings": [],
+            "recorded_at": "2026-05-10T10:00:00Z",
+            "contract_hash": "test_hash_adr_combo",
+            "status": "completed",
+        }
+        gate_path = self._results_dir / "pr-300-codex_gate.json"
+        gate_path.write_text(json.dumps(gate_data), encoding="utf-8")
+
+        import prior_round_injector
+        prior_round_injector._fetch_cached.cache_clear()
+
+        original_resolve = prior_round_injector._resolve_state_dir
+
+        def _patched_resolve(state_dir=None):
+            if state_dir is not None:
+                return state_dir
+            return self._tmp_path
+
+        prior_round_injector._resolve_state_dir = _patched_resolve
+        try:
+            selector = IntelligenceSelector(quality_db_path=self._db_path)
+            result = selector.select(
+                "test-dispatch-adr-prior-combo",
+                "dispatch_create",
+                skill_name="backend-developer",
+                pr_id="300",
+                dispatch_paths=["scripts/migrate_to_central_vnx.py"],
+            )
+            selector.close()
+        finally:
+            prior_round_injector._resolve_state_dir = original_resolve
+
+        item_classes = [item.item_class for item in result.items]
+        # At least one of the two high-priority classes should be present
+        self.assertTrue(
+            "prior_round_finding" in item_classes or "adr_relevant" in item_classes,
+            f"Expected at least one of prior_round_finding or adr_relevant, got: {item_classes}",
+        )
+        # Payload must stay bounded
+        payload_size = len(json.dumps(result.to_payload_dict()))
+        self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2)
+
+
 if __name__ == "__main__":
     unittest.main()
