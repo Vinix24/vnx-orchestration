@@ -84,6 +84,7 @@ class ReviewContract:
     non_goals: List[str] = field(default_factory=list)
     scope_files: List[str] = field(default_factory=list)
     changed_files: List[str] = field(default_factory=list)
+    deleted_files: List[str] = field(default_factory=list)
 
     quality_gate: Optional[QualityGate] = None
     test_evidence: Optional[TestEvidence] = None
@@ -154,6 +155,7 @@ class ReviewContract:
             non_goals=list(d.get("non_goals") or []),
             scope_files=list(d.get("scope_files") or []),
             changed_files=list(d.get("changed_files") or []),
+            deleted_files=list(d.get("deleted_files") or []),
             quality_gate=quality_gate,
             test_evidence=test_evidence,
             deterministic_findings=deterministic_findings,
@@ -291,6 +293,7 @@ def materialize_review_contract(
     pr_queue_content: str,
     branch: str = "",
     changed_files: Optional[List[str]] = None,
+    deleted_files: Optional[List[str]] = None,
     test_evidence: Optional[TestEvidence] = None,
     deterministic_findings: Optional[List[DeterministicFinding]] = None,
     dispatch_id: str = "",
