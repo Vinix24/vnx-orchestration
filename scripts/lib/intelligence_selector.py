@@ -4,7 +4,10 @@ VNX Intelligence Selector — Bounded injection for dispatch-create and resume p
 
 Implements the FP-C Intelligence Contract (docs/core/31_FPC_INTELLIGENCE_CONTRACT.md):
   - Selection algorithm (Section 2.3): one item per class, highest confidence wins
-  - Payload bounds (Section 2.2): max 3 items, max 500 chars/item, max 2000 chars total
+  - Payload bounds (Section 2.2): max 3 items, max 2000 chars total for standard classes
+    (proven_pattern, failure_prevention, recent_comparable); direct-injection classes
+    (code_anchor, prior_round_finding, adr_relevant) carry up to 1500 chars each and
+    the combined payload limit is raised to 4000 chars to allow two such items to coexist.
   - Evidence thresholds: proven_pattern >= 0.6, failure_prevention >= 0.5, recent_comparable >= 0.4
   - Task-class-aware filtering via scope_tags and task_class_filter
   - Injection and suppression events emitted to coordination_events
@@ -45,6 +48,11 @@ except ImportError:
     _adr_indexer = None  # type: ignore[assignment]
 
 try:
+    import code_anchor_finder as _code_anchor_finder
+except ImportError:
+    _code_anchor_finder = None  # type: ignore[assignment]
+
+try:
     from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
 except ImportError:
     _resolve_central_data_dir = None  # type: ignore[assignment]
@@ -63,8 +71,14 @@ except ImportError:  # pragma: no cover - lib path bootstrap
 
 MAX_ITEMS_PER_INJECTION = 3
 MAX_CONTENT_CHARS_PER_ITEM = 500
-MAX_PAYLOAD_CHARS = 2000
+MAX_PAYLOAD_CHARS = 4000
 MIN_EVIDENCE_COUNT = 1
+MAX_CODE_ANCHOR_CHARS = 1500
+
+# Item classes that carry pre-formatted sections and must not be clipped to the
+# 500-char standard limit.  These are direct-injection classes whose full content
+# (up to MAX_CODE_ANCHOR_CHARS) the worker is expected to read verbatim.
+_DIRECT_INJECTION_CLASSES = frozenset({"code_anchor", "prior_round_finding", "adr_relevant"})
 
 # Per-class confidence thresholds (Section 1.2 / 2.3)
 CONFIDENCE_THRESHOLDS = {
@@ -162,11 +176,16 @@ class IntelligenceItem:
     content_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
+        content_cap = (
+            MAX_CODE_ANCHOR_CHARS
+            if self.item_class in _DIRECT_INJECTION_CLASSES
+            else MAX_CONTENT_CHARS_PER_ITEM
+        )
         return {
             "item_id": self.item_id,
             "item_class": self.item_class,
             "title": self.title,
-            "content": self.content[:MAX_CONTENT_CHARS_PER_ITEM],
+            "content": self.content[:content_cap],
             "confidence": self.confidence,
             "evidence_count": self.evidence_count,
             "last_seen": self.last_seen,
@@ -517,6 +536,7 @@ class IntelligenceSelector:
         gate: Optional[str] = None,
         pr_id: Optional[str] = None,
         dispatch_paths: Optional[List[str]] = None,
+        instruction_text: Optional[str] = None,
     ) -> InjectionResult:
         """Run the bounded selection algorithm and return an InjectionResult.
 
@@ -694,6 +714,37 @@ class IntelligenceSelector:
                 )
                 selected.append(adr_item)
                 selected = self._enforce_payload_limit_with_adr(selected, suppressed)
+
+        # Wave 5 P2: inject code anchors (file:line snippets) when dispatch_paths and
+        # instruction_text are both present. Provides current-state grounding so workers
+        # don't need to grep before acting. Added after ADR enforcement; code_anchor is
+        # the most specific evidence so it survives payload trimming until last resort.
+        if dispatch_paths and instruction_text and _code_anchor_finder is not None:
+            anchors = _code_anchor_finder.fetch_code_anchors(
+                dispatch_paths,
+                instruction_text,
+                max_chars=MAX_CODE_ANCHOR_CHARS,
+            )
+            if anchors:
+                now_ts = _now_utc()
+                anchor_item = IntelligenceItem(
+                    item_id=f"intel_ca_{dispatch_id}",
+                    item_class="code_anchor",
+                    title=f"Code anchors for {len(dispatch_paths)} touched files",
+                    content=_code_anchor_finder.format_code_anchors_section(anchors),
+                    confidence=1.0,
+                    evidence_count=len(anchors),
+                    last_seen=now_ts,
+                    scope_tags=[],
+                    source_refs=[
+                        f"{a.file_path}:{a.line_start}-{a.line_end}" for a in anchors
+                    ],
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_CODE,
+                    content_hash="",
+                )
+                selected.append(anchor_item)
+                selected = self._enforce_payload_limit_with_code_anchor(selected, suppressed)
 
         now = _now_utc()
         result = InjectionResult(
@@ -2066,6 +2117,53 @@ class IntelligenceSelector:
             return selected
 
         drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + ["prior_round_finding", "adr_relevant"]
+        for drop_class in drop_order:
+            to_drop = [i for i in selected if i.item_class == drop_class]
+            if not to_drop:
+                continue
+
+            selected = [i for i in selected if i.item_class != drop_class]
+            suppressed.append(SuppressionRecord(
+                item_class=drop_class,
+                reason=f"dropped to enforce payload limit ({payload_size} > {MAX_PAYLOAD_CHARS} chars)",
+            ))
+
+            payload_size = len(json.dumps({
+                "injection_point": "dispatch_create",
+                "injected_at": _now_utc(),
+                "items": [item.to_dict() for item in selected],
+                "suppressed": [s.to_dict() for s in suppressed],
+            }))
+
+            if payload_size <= MAX_PAYLOAD_CHARS:
+                break
+
+        return selected
+
+    def _enforce_payload_limit_with_code_anchor(
+        self,
+        selected: List[IntelligenceItem],
+        suppressed: List[SuppressionRecord],
+    ) -> List[IntelligenceItem]:
+        """Re-enforce payload limit after a code_anchor item has been appended.
+
+        Drops standard classes first (recent_comparable → failure_prevention →
+        proven_pattern → prior_round_finding → adr_relevant) and only removes
+        code_anchor as last resort since it is direct file evidence with confidence 1.0.
+        """
+        payload_size = len(json.dumps({
+            "injection_point": "dispatch_create",
+            "injected_at": _now_utc(),
+            "items": [item.to_dict() for item in selected],
+            "suppressed": [s.to_dict() for s in suppressed],
+        }))
+
+        if payload_size <= MAX_PAYLOAD_CHARS:
+            return selected
+
+        drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + [
+            "prior_round_finding", "adr_relevant", "code_anchor"
+        ]
         for drop_class in drop_order:
             to_drop = [i for i in selected if i.item_class == drop_class]
             if not to_drop:
