@@ -64,7 +64,14 @@ def _resolve_effective_role(terminal_id: str, role: str | None) -> str | None:
         return None
 
 
-def _build_intelligence_section(dispatch_id: str, role: str | None) -> str:
+def _build_intelligence_section(
+    dispatch_id: str,
+    role: str | None,
+    *,
+    dispatch_paths: "list[str] | None" = None,
+    instruction_text: str | None = None,
+    pr_id: str | None = None,
+) -> str:
     """Return formatted intelligence items as markdown, or empty string (best-effort).
 
     Calls IntelligenceSelector to gather antipatterns, success patterns, and
@@ -73,6 +80,10 @@ def _build_intelligence_section(dispatch_id: str, role: str | None) -> str:
     + pattern_usage + dispatch_pattern_offered) so the post-dispatch confidence
     feedback loop has dispatch-scoped rows to update.  Any import or DB failure
     is caught and logged — dispatch proceeds without intelligence.
+
+    dispatch_paths, instruction_text, pr_id are forwarded to selector.select() so
+    W5 item classes (adr_relevant, code_anchor, operator_memory, schema_section,
+    prior_round_finding) can fire in production dispatches.
     """
     try:
         from intelligence_selector import IntelligenceSelector  # noqa: PLC0415
@@ -91,6 +102,9 @@ def _build_intelligence_section(dispatch_id: str, role: str | None) -> str:
                 dispatch_id=dispatch_id,
                 injection_point="dispatch_create",
                 skill_name=role or "",
+                dispatch_paths=dispatch_paths or [],
+                instruction_text=instruction_text or "",
+                pr_id=pr_id,
             )
             try:
                 selector.emit_event(result, coord_state_dir=state_dir)
@@ -183,7 +197,15 @@ def _inject_skill_context(
     # subprocess_dispatch namespace so test patches at the facade are honoured.
     import subprocess_dispatch as _sd
     _dispatch_id = (dispatch_metadata or {}).get("dispatch_id") or ""
-    intelligence_section = _sd._build_intelligence_section(_dispatch_id, role)
+    _dispatch_paths = (dispatch_metadata or {}).get("dispatch_paths") or []
+    _instruction_text = instruction
+    _pr_id = (dispatch_metadata or {}).get("pr_id") or (dispatch_metadata or {}).get("pr")
+    intelligence_section = _sd._build_intelligence_section(
+        _dispatch_id, role,
+        dispatch_paths=_dispatch_paths,
+        instruction_text=_instruction_text,
+        pr_id=_pr_id,
+    )
 
     assembled = _try_prompt_assembler(
         terminal_id, instruction, role, dispatch_metadata, intelligence_section,

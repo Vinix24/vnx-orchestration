@@ -85,6 +85,8 @@ def _assemble_instruction(
     dispatch_id: str,
     model: str,
     repo_map: str | None,
+    dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
 ) -> str:
     """Append repo map, layered skill context, then permission preamble."""
     import subprocess_dispatch as _sd
@@ -94,7 +96,12 @@ def _assemble_instruction(
         terminal_id,
         instruction,
         role=role,
-        dispatch_metadata={"dispatch_id": dispatch_id, "model": model},
+        dispatch_metadata={
+            "dispatch_id": dispatch_id,
+            "model": model,
+            "dispatch_paths": dispatch_paths,
+            "pr_id": pr_id,
+        },
     )
     return _sd._inject_permission_profile(terminal_id, role, instruction)
 
@@ -335,6 +342,8 @@ def _prepare_dispatch(
     role: str | None,
     repo_map: str | None,
     commit_hash_before: str,
+    dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
 ) -> tuple[str, "Path | None", "Path | None", str]:
     """Run pre-deliver phases: handover continuation, assembly, cwd, manifest write.
 
@@ -344,6 +353,7 @@ def _prepare_dispatch(
     instruction, pending_handover = _apply_handover_continuation(terminal_id, instruction)
     instruction = _assemble_instruction(
         terminal_id, instruction, role, dispatch_id, model, repo_map,
+        dispatch_paths=dispatch_paths, pr_id=pr_id,
     )
     agent_cwd = _resolve_agent_cwd_and_log_profile(role)
     manifest_path = _sd._write_manifest(
@@ -408,6 +418,8 @@ def deliver_via_subprocess(
     total_deadline: float = 900.0,
     health_monitor=None,
     commit_hash_before: str = "",
+    dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
 ) -> _SubprocessResult:
     """Deliver a dispatch via SubprocessAdapter and consume the event stream.
 
@@ -415,12 +427,17 @@ def deliver_via_subprocess(
     write, heartbeat thread, event consumption, completion classification, and
     cleanup.  Returns ``_SubprocessResult`` (success, session_id, event_count,
     manifest_path, touched_files).
+
+    dispatch_paths and pr_id are forwarded to dispatch_metadata so W5 item
+    classes (adr_relevant, code_anchor, operator_memory, schema_section,
+    prior_round_finding) fire in IntelligenceSelector.select() during assembly.
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = _apply_runtime_overrides(chunk_timeout, total_deadline)
 
     instruction, pending_handover, agent_cwd, manifest_path = _prepare_dispatch(
         terminal_id, instruction, model, dispatch_id, role, repo_map, commit_hash_before,
+        dispatch_paths=dispatch_paths, pr_id=pr_id,
     )
 
     resume_session = _load_resume_session(terminal_id)

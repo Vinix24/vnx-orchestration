@@ -3,14 +3,14 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
-from subprocess_dispatch import deliver_via_subprocess
+from subprocess_dispatch import deliver_via_subprocess, _build_intelligence_section
 
 
 @pytest.fixture
@@ -71,3 +71,49 @@ class TestDeliverViaSubprocess:
         mock_adapter.read_events_with_timeout.assert_called_once_with(
             "T1", chunk_timeout=300.0, total_deadline=900.0,
         )
+
+
+class TestBuildIntelligenceSectionW5Params:
+    """Assert that _build_intelligence_section forwards W5 params to selector.select()."""
+
+    @pytest.fixture(autouse=True)
+    def patch_state_dir(self, tmp_path):
+        with patch("subprocess_dispatch._default_state_dir", return_value=tmp_path):
+            yield
+
+    @pytest.fixture
+    def mock_selector(self):
+        mock_result = MagicMock()
+        mock_result.items = []
+        instance = MagicMock()
+        instance.select.return_value = mock_result
+        with patch(
+            "intelligence_selector.IntelligenceSelector",
+            return_value=instance,
+        ):
+            yield instance
+
+    def test_dispatch_paths_forwarded_to_select(self, mock_selector):
+        paths = ["scripts/lib/subprocess_dispatch.py", "schemas/quality_intelligence.sql"]
+        _build_intelligence_section("d-w5-sd-001", "backend-developer", dispatch_paths=paths)
+        kw = mock_selector.select.call_args.kwargs
+        assert kw["dispatch_paths"] == paths
+
+    def test_instruction_text_forwarded_to_select(self, mock_selector):
+        text = "Thread dispatch_paths through to IntelligenceSelector"
+        _build_intelligence_section("d-w5-sd-002", "backend-developer", instruction_text=text)
+        kw = mock_selector.select.call_args.kwargs
+        assert kw["instruction_text"] == text
+
+    def test_pr_id_forwarded_to_select(self, mock_selector):
+        _build_intelligence_section("d-w5-sd-003", "backend-developer", pr_id="459")
+        kw = mock_selector.select.call_args.kwargs
+        assert kw["pr_id"] == "459"
+
+    def test_backward_compat_no_new_params(self, mock_selector):
+        """Existing callers that don't pass W5 params get empty defaults — no TypeError."""
+        _build_intelligence_section("d-w5-sd-004", "backend-developer")
+        kw = mock_selector.select.call_args.kwargs
+        assert kw["dispatch_paths"] == []
+        assert kw["instruction_text"] == ""
+        assert kw["pr_id"] is None
