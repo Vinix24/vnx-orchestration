@@ -41,7 +41,8 @@ RUNTIME_PATH_MARKERS = (
     "scripts/commands/stop.sh",
 )
 
-# Net-deletion thresholds — aligned with pre_merge_gate.DELETION_FILE_*
+# Net-deletion thresholds: WARN matches pre_merge_gate (5); HOLD is higher here (20)
+# because a full Codex review is expensive — only require it for large-scale deletions.
 DELETION_FILE_WARN = 5
 DELETION_FILE_HOLD = 20
 
