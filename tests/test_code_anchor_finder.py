@@ -217,6 +217,39 @@ class TestFetchCodeAnchors(unittest.TestCase):
         anchors = fetch_code_anchors([rel], "fetch_code_anchors _import_table", repo_root=self._base)
         self.assertEqual(anchors, [])
 
+    def test_fetch_anchors_rejects_traversal_above_repo_root(self):
+        # A dispatch_path using ../ to escape the repo_root must return no anchors.
+        anchors = fetch_code_anchors(
+            ["../../../etc/passwd", "../../../../etc/hosts"],
+            "fetch_code_anchors migrate_table_data",
+            repo_root=self._base,
+        )
+        self.assertEqual(anchors, [])
+
+    def test_fetch_anchors_rejects_symlink_escape(self):
+        # A symlink inside the repo_root that points outside must be silently skipped.
+        outside_dir = tempfile.mkdtemp()
+        try:
+            # Create a real Python file outside the repo root
+            outside_file = Path(outside_dir) / "secret.py"
+            outside_file.write_text(
+                "def fetch_code_anchors():\n    pass\n", encoding="utf-8"
+            )
+            # Create a symlink inside the repo root pointing to that external file
+            symlink_path = self._base / "escape_link.py"
+            symlink_path.symlink_to(outside_file)
+            rel = "escape_link.py"
+
+            anchors = fetch_code_anchors(
+                [rel],
+                "fetch_code_anchors migrate_table_data",
+                repo_root=self._base,
+            )
+            self.assertEqual(anchors, [])
+        finally:
+            import shutil
+            shutil.rmtree(outside_dir, ignore_errors=True)
+
 
 class TestFormatCodeAnchorsSection(unittest.TestCase):
     def test_format_section_includes_anti_anchoring_instruction(self):

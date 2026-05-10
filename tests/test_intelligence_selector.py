@@ -1831,5 +1831,63 @@ class TestCodeAnchorInjection(unittest.TestCase):
         self.assertLessEqual(payload_size, MAX_PAYLOAD_CHARS * 2)
 
 
+class TestIntelligenceItemSerialization(unittest.TestCase):
+    """Verify that to_dict() round-trips content for direct-injection item classes."""
+
+    def _make_item(self, item_class: str, content: str) -> "IntelligenceItem":
+        return IntelligenceItem(
+            item_id="test-id",
+            item_class=item_class,
+            title="Test item",
+            content=content,
+            confidence=0.9,
+            evidence_count=2,
+            last_seen="2026-05-10T00:00:00",
+            scope_tags=["test"],
+        )
+
+    def test_intelligence_item_serialization_preserves_code_anchor_content(self):
+        # A code_anchor item with 1500 chars of content must not be truncated to 500.
+        content = "x" * 1500
+        item = self._make_item("code_anchor", content)
+        serialized = item.to_dict()
+        self.assertEqual(
+            len(serialized["content"]),
+            1500,
+            "code_anchor content was truncated below 1500 chars",
+        )
+
+    def test_intelligence_item_serialization_preserves_prior_round_finding_content(self):
+        content = "p" * 1500
+        item = self._make_item("prior_round_finding", content)
+        serialized = item.to_dict()
+        self.assertEqual(
+            len(serialized["content"]),
+            1500,
+            "prior_round_finding content was truncated below 1500 chars",
+        )
+
+    def test_intelligence_item_serialization_preserves_adr_relevant_content(self):
+        content = "a" * 1500
+        item = self._make_item("adr_relevant", content)
+        serialized = item.to_dict()
+        self.assertEqual(
+            len(serialized["content"]),
+            1500,
+            "adr_relevant content was truncated below 1500 chars",
+        )
+
+    def test_intelligence_item_serialization_still_caps_standard_classes(self):
+        # Standard item classes must still be capped at MAX_CONTENT_CHARS_PER_ITEM (500).
+        content = "y" * 1000
+        item = self._make_item("proven_pattern", content)
+        serialized = item.to_dict()
+        self.assertLessEqual(
+            len(serialized["content"]),
+            MAX_CONTENT_CHARS_PER_ITEM,
+            "proven_pattern content exceeded 500-char cap",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

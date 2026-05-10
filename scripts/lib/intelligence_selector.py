@@ -4,7 +4,10 @@ VNX Intelligence Selector — Bounded injection for dispatch-create and resume p
 
 Implements the FP-C Intelligence Contract (docs/core/31_FPC_INTELLIGENCE_CONTRACT.md):
   - Selection algorithm (Section 2.3): one item per class, highest confidence wins
-  - Payload bounds (Section 2.2): max 3 items, max 500 chars/item, max 2000 chars total
+  - Payload bounds (Section 2.2): max 3 items, max 2000 chars total for standard classes
+    (proven_pattern, failure_prevention, recent_comparable); direct-injection classes
+    (code_anchor, prior_round_finding, adr_relevant) carry up to 1500 chars each and
+    the combined payload limit is raised to 4000 chars to allow two such items to coexist.
   - Evidence thresholds: proven_pattern >= 0.6, failure_prevention >= 0.5, recent_comparable >= 0.4
   - Task-class-aware filtering via scope_tags and task_class_filter
   - Injection and suppression events emitted to coordination_events
@@ -68,9 +71,14 @@ except ImportError:  # pragma: no cover - lib path bootstrap
 
 MAX_ITEMS_PER_INJECTION = 3
 MAX_CONTENT_CHARS_PER_ITEM = 500
-MAX_PAYLOAD_CHARS = 2000
+MAX_PAYLOAD_CHARS = 4000
 MIN_EVIDENCE_COUNT = 1
 MAX_CODE_ANCHOR_CHARS = 1500
+
+# Item classes that carry pre-formatted sections and must not be clipped to the
+# 500-char standard limit.  These are direct-injection classes whose full content
+# (up to MAX_CODE_ANCHOR_CHARS) the worker is expected to read verbatim.
+_DIRECT_INJECTION_CLASSES = frozenset({"code_anchor", "prior_round_finding", "adr_relevant"})
 
 # Per-class confidence thresholds (Section 1.2 / 2.3)
 CONFIDENCE_THRESHOLDS = {
@@ -168,11 +176,16 @@ class IntelligenceItem:
     content_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
+        content_cap = (
+            MAX_CODE_ANCHOR_CHARS
+            if self.item_class in _DIRECT_INJECTION_CLASSES
+            else MAX_CONTENT_CHARS_PER_ITEM
+        )
         return {
             "item_id": self.item_id,
             "item_class": self.item_class,
             "title": self.title,
-            "content": self.content[:MAX_CONTENT_CHARS_PER_ITEM],
+            "content": self.content[:content_cap],
             "confidence": self.confidence,
             "evidence_count": self.evidence_count,
             "last_seen": self.last_seen,

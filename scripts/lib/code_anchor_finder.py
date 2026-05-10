@@ -83,6 +83,21 @@ def _is_binary(content_bytes: bytes) -> bool:
     return b'\x00' in content_bytes[:1024]
 
 
+def _is_inside_repo_root(path: Path, repo_root: Path) -> bool:
+    """Return True if path resolves to a location inside repo_root.
+
+    Resolves symlinks before checking so symlink-escape attacks are caught.
+    Silent (no exception) — caller skips on False.
+    """
+    try:
+        resolved_path = path.resolve()
+        resolved_root = repo_root.resolve()
+        resolved_path.relative_to(resolved_root)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _read_lines(file_path: Path) -> Optional[list[str]]:
     """Read file as lines; return None if unreadable or binary."""
     try:
@@ -160,6 +175,8 @@ def fetch_code_anchors(
     resolved_files: list[tuple[float, str, Path]] = []
     for dp in dispatch_paths:
         full_path = Path(repo_root) / dp
+        if not _is_inside_repo_root(full_path, repo_root):
+            continue  # silent skip — traversal escape or symlink outside root
         if not full_path.is_file():
             continue
         try:
