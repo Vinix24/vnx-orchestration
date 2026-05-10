@@ -28,12 +28,15 @@ from pre_merge_gate import (
     check_pr_size,
     check_artifacts,
     check_shell_syntax,
+    check_net_deletion,
     run_gate_checks,
     store_gate_result,
     format_human_readable,
     _find_dispatch_for_pr,
     _is_artifact_path,
     CQS_THRESHOLD,
+    DELETION_FILE_WARN,
+    DELETION_FILE_HOLD,
 )
 
 
@@ -324,6 +327,143 @@ class TestCheckShellSyntax:
 
 
 # ---------------------------------------------------------------------------
+# check_net_deletion
+# ---------------------------------------------------------------------------
+
+class TestCheckNetDeletion:
+
+    def _make_git_repo(self, tmp_path: Path) -> Path:
+        """Create a minimal git repo with one commit."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=str(repo), capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=str(repo), capture_output=True,
+        )
+        (repo / "base.py").write_text("# base\n")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=str(repo), capture_output=True,
+        )
+        return repo
+
+    def test_no_deletions(self, tmp_path):
+        repo = self._make_git_repo(tmp_path)
+        (repo / "new_file.py").write_text("# new\n")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add file"],
+            cwd=str(repo), capture_output=True,
+        )
+        result = check_net_deletion(repo)
+        assert result["status"] == "GO"
+        assert result["deleted_count"] == 0
+        assert result["deleted_files"] == []
+
+    def test_below_warn_threshold(self, tmp_path):
+        repo = self._make_git_repo(tmp_path)
+        for i in range(DELETION_FILE_WARN - 1):
+            (repo / f"file_{i}.py").write_text(f"# file {i}\n")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add files"],
+            cwd=str(repo), capture_output=True,
+        )
+        # Delete them in a second commit
+        for i in range(DELETION_FILE_WARN - 1):
+            (repo / f"file_{i}.py").unlink()
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete files"],
+            cwd=str(repo), capture_output=True,
+        )
+        result = check_net_deletion(repo)
+        assert result["status"] == "GO"
+        assert result["deleted_count"] == DELETION_FILE_WARN - 1
+
+    def test_at_warn_threshold_is_go(self, tmp_path):
+        repo = self._make_git_repo(tmp_path)
+        for i in range(DELETION_FILE_WARN):
+            (repo / f"file_{i}.py").write_text(f"# file {i}\n")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add files"],
+            cwd=str(repo), capture_output=True,
+        )
+        for i in range(DELETION_FILE_WARN):
+            (repo / f"file_{i}.py").unlink()
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete files"],
+            cwd=str(repo), capture_output=True,
+        )
+        result = check_net_deletion(repo)
+        assert result["status"] == "GO"
+        assert result["deleted_count"] == DELETION_FILE_WARN
+        assert str(DELETION_FILE_WARN) in result["detail"]
+
+    def test_at_hold_threshold_is_hold(self, tmp_path):
+        repo = self._make_git_repo(tmp_path)
+        for i in range(DELETION_FILE_HOLD):
+            (repo / f"file_{i}.py").write_text(f"# file {i}\n")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add files"],
+            cwd=str(repo), capture_output=True,
+        )
+        for i in range(DELETION_FILE_HOLD):
+            (repo / f"file_{i}.py").unlink()
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "delete files"],
+            cwd=str(repo), capture_output=True,
+        )
+        result = check_net_deletion(repo)
+        assert result["status"] == "HOLD"
+        assert result["deleted_count"] == DELETION_FILE_HOLD
+        assert len(result["deleted_files"]) == DELETION_FILE_HOLD
+
+    def test_hold_on_mass_deletion(self, tmp_path):
+        """More than HOLD threshold files deleted triggers HOLD."""
+        count = DELETION_FILE_HOLD + 3
+        repo = self._make_git_repo(tmp_path)
+        for i in range(count):
+            (repo / f"file_{i}.py").write_text(f"# file {i}\n")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "add files"],
+            cwd=str(repo), capture_output=True,
+        )
+        for i in range(count):
+            (repo / f"file_{i}.py").unlink()
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "mass delete"],
+            cwd=str(repo), capture_output=True,
+        )
+        result = check_net_deletion(repo)
+        assert result["status"] == "HOLD"
+        assert result["deleted_count"] == count
+
+    @patch("subprocess.run")
+    def test_git_failure_is_go(self, mock_run, tmp_path):
+        """If git command fails, check degrades gracefully to GO."""
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+        mock_result.stdout = ""
+        mock_run.return_value = mock_result
+        result = check_net_deletion(tmp_path)
+        assert result["status"] == "GO"
+        assert result["deleted_count"] is None
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -409,6 +549,7 @@ class TestRunGateChecks:
         assert "pr_size" in check_names
         assert "artifact_verification" in check_names
         assert "shell_syntax" in check_names
+        assert "net_deletion" in check_names
 
     def test_pytest_included_when_not_skipped(self, state_dir, dispatch_dir, tmp_path):
         result = run_gate_checks(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -40,6 +41,10 @@ RUNTIME_PATH_MARKERS = (
     "scripts/commands/stop.sh",
 )
 
+# Net-deletion thresholds — aligned with pre_merge_gate.DELETION_FILE_*
+DELETION_FILE_WARN = 5
+DELETION_FILE_HOLD = 20
+
 
 def _touches_governance_paths(changed_files: List[str]) -> bool:
     return is_governance_path(changed_files)
@@ -53,6 +58,38 @@ def _touches_runtime_paths(changed_files: List[str]) -> bool:
     return False
 
 
+def _count_deleted_files(project_root: Path) -> int:
+    """Count files deleted in current PR vs origin/main. Returns -1 on git failure."""
+    for base_ref in ("origin/main", "origin/master"):
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--diff-filter=D", "--name-only", f"{base_ref}...HEAD"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return len([f for f in result.stdout.strip().splitlines() if f.strip()])
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return len([f for f in result.stdout.strip().splitlines() if f.strip()])
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return -1
+
+
 @dataclass(frozen=True)
 class CodexGateEnforcementResult:
     """Result of evaluating whether a Codex final gate is required."""
@@ -64,12 +101,16 @@ class CodexGateEnforcementResult:
     touches_governance: bool
     touches_runtime: bool
     high_risk_by_path: bool
+    mass_deletion_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
-def enforce_codex_gate(contract: ReviewContract) -> CodexGateEnforcementResult:
+def enforce_codex_gate(
+    contract: ReviewContract,
+    project_root: Optional[Path] = None,
+) -> CodexGateEnforcementResult:
     """Determine whether a Codex final gate is required for this contract.
 
     Required when any of:
@@ -77,6 +118,7 @@ def enforce_codex_gate(contract: ReviewContract) -> CodexGateEnforcementResult:
     - review_stack includes "codex_gate" AND risk_class != "low"
     - changed files touch governance or runtime paths
     - auto_merge_policy says codex_final_gate_required
+    - PR deletes >= DELETION_FILE_HOLD files (when project_root provided)
     """
     reasons: List[str] = []
     risk = (contract.risk_class or "").strip().lower()
@@ -95,6 +137,12 @@ def enforce_codex_gate(contract: ReviewContract) -> CodexGateEnforcementResult:
     if "codex_gate" in contract.review_stack and risk != "low":
         reasons.append("codex_gate_in_review_stack")
 
+    deleted_count = 0
+    if project_root is not None:
+        deleted_count = _count_deleted_files(project_root)
+        if deleted_count >= DELETION_FILE_HOLD:
+            reasons.append("mass_file_deletion")
+
     return CodexGateEnforcementResult(
         required=len(reasons) > 0,
         reasons=reasons,
@@ -103,6 +151,7 @@ def enforce_codex_gate(contract: ReviewContract) -> CodexGateEnforcementResult:
         touches_governance=touches_gov,
         touches_runtime=touches_rt,
         high_risk_by_path=high_risk_path,
+        mass_deletion_count=deleted_count,
     )
 
 
@@ -315,6 +364,7 @@ def evaluate_and_record(
     *,
     codex_verdict: Optional[Dict[str, Any]] = None,
     output_path: Optional[Path] = None,
+    project_root: Optional[Path] = None,
 ) -> CodexFinalGateReceipt:
     """Evaluate enforcement, render prompt, and produce a final gate receipt.
 
@@ -324,7 +374,7 @@ def evaluate_and_record(
     If codex_verdict is None, the receipt is created in "pending" state with the
     prompt rendered but no verdict yet.
     """
-    enforcement = enforce_codex_gate(contract)
+    enforcement = enforce_codex_gate(contract, project_root=project_root)
 
     prompt_rendered = False
     try:
@@ -496,7 +546,7 @@ def _cmd_enforce(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return EXIT_IO
 
-    result = enforce_codex_gate(contract)
+    result = enforce_codex_gate(contract, project_root=SCRIPT_DIR.parent)
     print(json.dumps({"ok": True, **result.to_dict()}, indent=2))
     return EXIT_OK
 
@@ -522,6 +572,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
         contract,
         codex_verdict=codex_verdict,
         output_path=output_path,
+        project_root=SCRIPT_DIR.parent,
     )
 
     print(json.dumps({"ok": True, **receipt.to_dict()}, indent=2))
