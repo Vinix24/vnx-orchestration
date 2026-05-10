@@ -2378,5 +2378,63 @@ class TestSchemaSectionInjection(unittest.TestCase):
         )
 
 
+class TestInjectSkillContextEndToEnd(unittest.TestCase):
+    """End-to-end: _inject_skill_context with full dispatch_metadata fires W5 params.
+
+    Patches IntelligenceSelector so the test is DB-independent, then asserts
+    the metadata keys (dispatch_paths, pr_id, instruction_text) reach
+    selector.select() via the _build_intelligence_section call chain.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_path = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_inject_skill_context_threads_w5_metadata_to_select(self):
+        """_inject_skill_context with dispatch_metadata produces a call to
+        selector.select() carrying dispatch_paths, instruction_text, and pr_id."""
+        from unittest.mock import MagicMock, patch
+        import importlib
+        import subprocess_dispatch_internals.skill_injection as si
+
+        mock_result = MagicMock()
+        mock_result.items = []
+        selector_instance = MagicMock()
+        selector_instance.select.return_value = mock_result
+
+        instruction = "Plumb dispatch_paths and pr_id to IntelligenceSelector"
+        metadata = {
+            "dispatch_id": "d-e2e-inject-001",
+            "model": "sonnet",
+            "dispatch_paths": ["scripts/lib/subprocess_dispatch.py"],
+            "pr_id": "460",
+        }
+
+        with patch("subprocess_dispatch._default_state_dir", return_value=self._tmp_path):
+            with patch(
+                "intelligence_selector.IntelligenceSelector",
+                return_value=selector_instance,
+            ):
+                with patch.object(si, "_try_prompt_assembler", return_value=None):
+                    with patch.object(si, "_legacy_claude_md_resolution", return_value=instruction):
+                        si._inject_skill_context(
+                            "T1", instruction,
+                            role="backend-developer",
+                            dispatch_metadata=metadata,
+                        )
+
+        self.assertTrue(
+            selector_instance.select.called,
+            "selector.select() was not called — intelligence injection did not fire",
+        )
+        kw = selector_instance.select.call_args.kwargs
+        self.assertEqual(kw["dispatch_paths"], ["scripts/lib/subprocess_dispatch.py"])
+        self.assertEqual(kw["pr_id"], "460")
+        self.assertEqual(kw["instruction_text"], instruction)
+
+
 if __name__ == "__main__":
     unittest.main()

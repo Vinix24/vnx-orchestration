@@ -301,6 +301,8 @@ def _attempt_delivery(
     chunk_timeout: float,
     total_deadline: float,
     commit_hash_before: str,
+    dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
 ):
     """Single delivery attempt — proxies to ``deliver_via_subprocess``."""
     import subprocess_dispatch as _sd
@@ -313,6 +315,8 @@ def _attempt_delivery(
         total_deadline=total_deadline,
         health_monitor=monitor,
         commit_hash_before=commit_hash_before,
+        dispatch_paths=dispatch_paths,
+        pr_id=pr_id,
     )
 
 
@@ -371,6 +375,7 @@ def deliver_with_recovery(
     auto_commit: bool = True,
     gate: str = "",
     dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
 ) -> bool:
     """Deliver with automatic retry; success -> "done" receipt, final fail -> "failed".
 
@@ -379,6 +384,9 @@ def deliver_with_recovery(
     dispatch_paths (OI-1319): when provided, the CFX-1 path manifest is written
     before delivery starts so auto-commit/stash operations are correctly scoped
     even when this function is called as a library (not via the CLI __main__ block).
+
+    pr_id: when provided, forwarded to IntelligenceSelector.select() so
+    prior_round_finding items (codex/gemini gate results) fire in production.
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = _apply_runtime_overrides(chunk_timeout, total_deadline)
@@ -400,6 +408,8 @@ def deliver_with_recovery(
             heartbeat_interval=heartbeat_interval,
             chunk_timeout=chunk_timeout, total_deadline=total_deadline,
             commit_hash_before=commit_hash_before,
+            dispatch_paths=dispatch_paths,
+            pr_id=pr_id,
         )
         if sub_result.success:
             _handle_success(
