@@ -6,8 +6,8 @@ Implements the FP-C Intelligence Contract (docs/core/31_FPC_INTELLIGENCE_CONTRAC
   - Selection algorithm (Section 2.3): one item per class, highest confidence wins
   - Payload bounds (Section 2.2): max 3 items, max 2000 chars total for standard classes
     (proven_pattern, failure_prevention, recent_comparable); direct-injection classes
-    (code_anchor, prior_round_finding, adr_relevant) carry up to 1500 chars each and
-    the combined payload limit is raised to 4000 chars to allow two such items to coexist.
+    (code_anchor, prior_round_finding, adr_relevant, operator_memory) carry up to 1500 chars
+    each and the combined payload limit is raised to 4000 chars to allow multiple such items.
   - Evidence thresholds: proven_pattern >= 0.6, failure_prevention >= 0.5, recent_comparable >= 0.4
   - Task-class-aware filtering via scope_tags and task_class_filter
   - Injection and suppression events emitted to coordination_events
@@ -53,6 +53,11 @@ except ImportError:
     _code_anchor_finder = None  # type: ignore[assignment]
 
 try:
+    import operator_memory_indexer as _operator_memory_indexer
+except ImportError:
+    _operator_memory_indexer = None  # type: ignore[assignment]
+
+try:
     from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
 except ImportError:
     _resolve_central_data_dir = None  # type: ignore[assignment]
@@ -78,7 +83,7 @@ MAX_CODE_ANCHOR_CHARS = 1500
 # Item classes that carry pre-formatted sections and must not be clipped to the
 # 500-char standard limit.  These are direct-injection classes whose full content
 # (up to MAX_CODE_ANCHOR_CHARS) the worker is expected to read verbatim.
-_DIRECT_INJECTION_CLASSES = frozenset({"code_anchor", "prior_round_finding", "adr_relevant"})
+_DIRECT_INJECTION_CLASSES = frozenset({"code_anchor", "prior_round_finding", "adr_relevant", "operator_memory"})
 
 # Per-class confidence thresholds (Section 1.2 / 2.3)
 CONFIDENCE_THRESHOLDS = {
@@ -745,6 +750,35 @@ class IntelligenceSelector:
                 )
                 selected.append(anchor_item)
                 selected = self._enforce_payload_limit_with_code_anchor(selected, suppressed)
+
+        # Wave 5 P3: inject operator memories (curated wisdom) when role, dispatch_paths,
+        # or instruction_text are present. Provides accumulated operator feedback so workers
+        # inherit hard-won lessons without discovering them the hard way.
+        if (skill_name or dispatch_paths or instruction_text) and _operator_memory_indexer is not None:
+            memories = _operator_memory_indexer.fetch_relevant_memories(
+                skill_name,
+                dispatch_paths or [],
+                instruction_text or "",
+                max_chars=MAX_CODE_ANCHOR_CHARS,
+            )
+            if memories:
+                now_ts = _now_utc()
+                memory_item = IntelligenceItem(
+                    item_id=f"intel_om_{dispatch_id}",
+                    item_class="operator_memory",
+                    title=f"Relevant operator memories ({len(memories)})",
+                    content=_operator_memory_indexer.format_memories_section(memories),
+                    confidence=1.0,
+                    evidence_count=len(memories),
+                    last_seen=now_ts,
+                    scope_tags=[],
+                    source_refs=[m.name for m in memories],
+                    task_class_filter=[],
+                    pattern_category=PATTERN_CATEGORY_CODE,
+                    content_hash="",
+                )
+                selected.append(memory_item)
+                selected = self._enforce_payload_limit_with_operator_memory(selected, suppressed)
 
         now = _now_utc()
         result = InjectionResult(
@@ -2163,6 +2197,54 @@ class IntelligenceSelector:
 
         drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + [
             "prior_round_finding", "adr_relevant", "code_anchor"
+        ]
+        for drop_class in drop_order:
+            to_drop = [i for i in selected if i.item_class == drop_class]
+            if not to_drop:
+                continue
+
+            selected = [i for i in selected if i.item_class != drop_class]
+            suppressed.append(SuppressionRecord(
+                item_class=drop_class,
+                reason=f"dropped to enforce payload limit ({payload_size} > {MAX_PAYLOAD_CHARS} chars)",
+            ))
+
+            payload_size = len(json.dumps({
+                "injection_point": "dispatch_create",
+                "injected_at": _now_utc(),
+                "items": [item.to_dict() for item in selected],
+                "suppressed": [s.to_dict() for s in suppressed],
+            }))
+
+            if payload_size <= MAX_PAYLOAD_CHARS:
+                break
+
+        return selected
+
+    def _enforce_payload_limit_with_operator_memory(
+        self,
+        selected: List[IntelligenceItem],
+        suppressed: List[SuppressionRecord],
+    ) -> List[IntelligenceItem]:
+        """Re-enforce payload limit after an operator_memory item has been appended.
+
+        Drops standard classes first (recent_comparable → failure_prevention →
+        proven_pattern → prior_round_finding → adr_relevant → code_anchor) and
+        only removes operator_memory as last resort since it carries operator-curated
+        lessons with confidence 1.0.
+        """
+        payload_size = len(json.dumps({
+            "injection_point": "dispatch_create",
+            "injected_at": _now_utc(),
+            "items": [item.to_dict() for item in selected],
+            "suppressed": [s.to_dict() for s in suppressed],
+        }))
+
+        if payload_size <= MAX_PAYLOAD_CHARS:
+            return selected
+
+        drop_order = list(reversed(ITEM_CLASS_PRIORITY)) + [
+            "prior_round_finding", "adr_relevant", "code_anchor", "operator_memory"
         ]
         for drop_class in drop_order:
             to_drop = [i for i in selected if i.item_class == drop_class]
