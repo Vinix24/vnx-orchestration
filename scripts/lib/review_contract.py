@@ -109,9 +109,18 @@ class ReviewContract:
 
     @staticmethod
     def compute_content_hash(contract_dict: Dict[str, Any]) -> str:
-        """Compute a deterministic hash of contract content (excluding the hash field itself)."""
+        """Compute a deterministic hash of contract content (excluding the hash field itself).
+
+        Backwards-compat: deleted_files is omitted from the hash input when empty so that
+        contracts predating the deleted_files field (or without any deletions) hash to the
+        same value as before — cached gate results stay valid.
+        """
         d = dict(contract_dict)
         d.pop("content_hash", None)
+        # OI-1415 fix: omit empty deleted_files for hash backward-compat.
+        # Contracts with no deletions hash identically to pre-field contracts.
+        if not d.get("deleted_files"):
+            d.pop("deleted_files", None)
         canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
