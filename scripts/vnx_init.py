@@ -32,6 +32,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from vnx_paths import ensure_env
+from vnx_starter import init_starter
 
 # ---------------------------------------------------------------------------
 # Result model
@@ -240,7 +241,8 @@ def bootstrap_skills(paths: Dict[str, str]) -> StepResult:
 # ---------------------------------------------------------------------------
 
 def bootstrap_terminals(paths: Dict[str, str], force: bool = False,
-                        terminal_ids: Optional[List[str]] = None) -> StepResult:
+                        terminal_ids: Optional[List[str]] = None,
+                        pretrust_gemini: bool = True) -> StepResult:
     """Create .claude/terminals/{T0..T3}/ with CLAUDE.md and .mcp.json."""
     project_root = Path(paths["PROJECT_ROOT"])
     vnx_home = Path(paths["VNX_HOME"])
@@ -274,8 +276,8 @@ def bootstrap_terminals(paths: Dict[str, str], force: bool = False,
     # Generate .mcp.json per terminal (disable global MCPs)
     _generate_mcp_configs(terminals_dir, terminal_ids, force)
 
-    # Pre-trust for Gemini CLI
-    _pretrust_gemini(project_root)
+    if pretrust_gemini:
+        _pretrust_gemini(project_root)
 
     details = []
     if written:
@@ -326,7 +328,10 @@ def _pretrust_gemini(project_root: Path) -> None:
         return
 
     trust_file = Path.home() / ".gemini" / "trustedFolders.json"
-    trust_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        trust_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
 
     trust: Dict = {}
     if trust_file.exists():
@@ -348,9 +353,36 @@ def _pretrust_gemini(project_root: Path) -> None:
             changed = True
 
     if changed:
-        with open(trust_file, "w") as f:
-            json.dump(trust, f, indent=2)
-            f.write("\n")
+        try:
+            with open(trust_file, "w") as f:
+                json.dump(trust, f, indent=2)
+                f.write("\n")
+        except OSError:
+            return
+
+
+def bootstrap_starter_runtime(paths: Dict[str, str]) -> StepResult:
+    """Initialize starter runtime artifacts in the project-local data dir."""
+    config = init_starter(data_dir=paths["VNX_DATA_DIR"])
+    expected = [
+        Path(config.data_dir) / "mode.json",
+        Path(config.state_dir) / "terminal_state.json",
+        Path(config.state_dir) / "panes.json",
+    ]
+    missing = [str(path) for path in expected if not path.exists()]
+    if missing:
+        return StepResult(
+            "starter-runtime",
+            FAIL,
+            "Starter runtime initialization incomplete",
+            [f"Missing: {path}" for path in missing],
+        )
+    return StepResult(
+        "starter-runtime",
+        PASS,
+        "Starter runtime initialized",
+        [f"Wrote {path.name}" for path in expected],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +587,9 @@ def run_init(paths: Dict[str, str], skip_hooks: bool = False,
     results.append(bootstrap_skills(paths))
 
     if starter:
+        results.append(bootstrap_starter_runtime(paths))
         # Starter mode: only bootstrap T0
-        results.append(bootstrap_terminals(paths, terminal_ids=["T0"]))
+        results.append(bootstrap_terminals(paths, terminal_ids=["T0"], pretrust_gemini=False))
     else:
         results.append(bootstrap_terminals(paths))
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from project_root import resolve_data_dir  # noqa: E402
+from vnx_mode import VNXMode, read_mode  # noqa: E402
 
 
 # ── Color helpers ──────────────────────────────────────────────────────
@@ -105,6 +106,15 @@ def _load_t0_state(state_dir: Path) -> dict:
         return {}
 
 
+def _load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
 # ── Dashboard sections ────────────────────────────────────────────────
 
 def _active_waves(waves: list[dict], n: int = 3) -> list[dict]:
@@ -187,6 +197,76 @@ def _build_json_output(cs: dict, t0: dict) -> dict:
     }
 
 
+def _load_starter_status(data_dir: Path) -> dict:
+    state_dir = data_dir / "state"
+    dispatch_dir = data_dir / "dispatches"
+    terminal_state = _load_json(state_dir / "terminal_state.json")
+    panes = _load_json(state_dir / "panes.json")
+
+    receipt_file = data_dir / "receipts" / "t0_receipts.ndjson"
+    receipt_count = 0
+    if receipt_file.exists():
+        receipt_count = sum(1 for line in receipt_file.read_text().splitlines() if line.strip())
+
+    queues = {}
+    for status in ("pending", "active", "completed", "rejected", "failed"):
+        status_dir = dispatch_dir / status
+        queues[status] = len(list(status_dir.glob("*/bundle.json"))) if status_dir.exists() else 0
+
+    return {
+        "schema": "vnx_status/1.0",
+        "mode": "starter",
+        "initialized": True,
+        "focus": "",
+        "active_waves": [],
+        "open_prs": [],
+        "terminals": terminal_state.get("terminals", {}),
+        "recent_decisions": [],
+        "queues": queues,
+        "strategy_available": False,
+        "t0_state_available": False,
+        "starter_runtime_available": bool(terminal_state),
+        "provider": (panes.get("t0") or {}).get("provider", "claude_code"),
+        "receipts": receipt_count,
+        "data_dir": str(data_dir),
+    }
+
+
+def _print_starter_status(status: dict) -> None:
+    _header("Starter Mode")
+    print(f"  {_c('bold', 'initialized')}")
+    print(f"  provider: {status.get('provider', 'unknown')}")
+    print(f"  data dir: {status.get('data_dir', '(unknown)')}")
+
+    _header("Terminal Status")
+    terminals = status.get("terminals", {})
+    if not terminals:
+        print("  (no starter terminal state available)")
+    else:
+        for tid in sorted(terminals):
+            terminal = terminals[tid]
+            print(
+                f"  {_c('bold', tid)} "
+                f"{terminal.get('status', 'unknown')}  "
+                f"{_c('dim', terminal.get('last_activity', ''))}"
+            )
+
+    _header("Dispatch Queue")
+    queues = status.get("queues", {})
+    print(
+        "  pending={pending} active={active} completed={completed} rejected={rejected} failed={failed}".format(
+            pending=queues.get("pending", 0),
+            active=queues.get("active", 0),
+            completed=queues.get("completed", 0),
+            rejected=queues.get("rejected", 0),
+            failed=queues.get("failed", 0),
+        )
+    )
+
+    _header("Receipts")
+    print(f"  {status.get('receipts', 0)} receipt(s)")
+
+
 # ── Entry point ───────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
@@ -204,6 +284,20 @@ def main(argv: list[str] | None = None, data_dir: Path | None = None) -> int:
 
     if data_dir is None:
         data_dir = resolve_data_dir(__file__)
+
+    starter_data_dir = data_dir
+    if not (starter_data_dir / "mode.json").exists() and (starter_data_dir / ".vnx-data" / "mode.json").exists():
+        starter_data_dir = starter_data_dir / ".vnx-data"
+
+    mode = read_mode(str(starter_data_dir))
+    if mode == VNXMode.STARTER:
+        starter_status = _load_starter_status(starter_data_dir)
+        if args.emit_json:
+            print(json.dumps(starter_status, indent=2))
+        else:
+            _print_starter_status(starter_status)
+            print()
+        return 0
 
     strategy_dir = data_dir / "strategy"
     state_dir = data_dir / "state"

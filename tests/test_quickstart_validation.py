@@ -267,3 +267,10 @@ def test_quickstart_has_all_steps():
     content = (VNX_REPO / "docs" / "QUICKSTART.md").read_text()
     for step in range(1, 7):
         assert f"## Step {step}:" in content, f"Missing Step {step} in QUICKSTART.md"
+
+
+def test_quickstart_avoids_broken_dispatch_example():
+    """Quickstart should not advertise the broken hello-world dispatch path."""
+    content = (VNX_REPO / "docs" / "QUICKSTART.md").read_text()
+    assert "dispatch-agent" not in content
+    assert "hello-world" not in content
