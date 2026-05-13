@@ -66,7 +66,7 @@ class TestMigrateEnvelopeConcurrency:
         # Seed one record so the migrator has something to restamp
         envelope.write_text('{"initial":true}\n', encoding="utf-8")
 
-        events = [f'{{"seq":{i}}}' for i in range(100)]
+        events = [f'{{"dispatch_id":"test-d{i}","seq":{i}}}' for i in range(100)]
         results: list[str] = []
         results_lock = threading.Lock()
 
@@ -122,9 +122,22 @@ class TestMigrateEnvelopeConcurrency:
         t.start()
         assert migration_held.wait(timeout=2), "migration never acquired the lock"
 
-        # Writer should block until the sentinel is released
+        # Writer should block until the sentinel is released.
+        # Use a thread with a timeout so the test fails fast if locking regresses
+        # rather than hanging until CI timeout.
+        import concurrent.futures as _cf
         write_start_time.append(time.time())
-        append_dispatch_event(envelope, '{"event":"concurrent-write"}')
+        with ThreadPoolExecutor(max_workers=1) as _ex:
+            _fut = _ex.submit(
+                append_dispatch_event,
+                envelope,
+                '{"dispatch_id":"test-lock","event":"concurrent-write"}',
+            )
+            _done, _ = _cf.wait([_fut], timeout=5)
+            if not _done:
+                pytest.fail(
+                    "append_dispatch_event blocked for >5s — sentinel locking may have regressed"
+                )
         write_end_time.append(time.time())
 
         t.join(timeout=5)
@@ -139,7 +152,7 @@ class TestMigrateEnvelopeConcurrency:
         envelope = tmp_path / "dispatch_register.ndjson"
         # Write 20 events before any migration
         for i in range(20):
-            append_dispatch_event(envelope, f'{{"seq":{i},"phase":"pre"}}')
+            append_dispatch_event(envelope, f'{{"dispatch_id":"test-d{i}","seq":{i},"phase":"pre"}}')
 
         _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
 
@@ -158,7 +171,7 @@ class TestMigrateEnvelopeConcurrency:
         """Running _restamp_ndjson_inplace twice must not duplicate or lose events."""
         envelope = tmp_path / "dispatch_register.ndjson"
         for i in range(10):
-            append_dispatch_event(envelope, f'{{"seq":{i}}}')
+            append_dispatch_event(envelope, f'{{"dispatch_id":"test-d{i}","seq":{i}}}')
 
         _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
         _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
@@ -174,7 +187,7 @@ class TestMigrateEnvelopeConcurrency:
         total = 0
         for batch in range(5):
             for i in range(10):
-                append_dispatch_event(envelope, f'{{"batch":{batch},"seq":{i}}}')
+                append_dispatch_event(envelope, f'{{"dispatch_id":"test-b{batch}-s{i}","batch":{batch},"seq":{i}}}')
                 total += 1
             _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
 

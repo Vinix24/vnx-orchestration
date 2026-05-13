@@ -222,9 +222,26 @@ def append_dispatch_event(path: Path, raw_json: str) -> None:
     concurrent `_restamp_ndjson_inplace` callers.  Intended for migration
     helpers and test harnesses that produce raw NDJSON rather than structured
     lifecycle events; production callers should use `append_event` instead.
+
+    Raises ValueError on invalid JSON, non-dict shape, missing dispatch_id,
+    or unrecognised event_type — preventing corrupt rows from entering the
+    append-only log.
     """
-    record = json.loads(raw_json)
-    _write_event_locked(path, record)
+    try:
+        parsed = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"append_dispatch_event: invalid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"append_dispatch_event: row must be JSON object, got {type(parsed).__name__}"
+        )
+    if "event_type" in parsed and parsed["event_type"] not in VALID_EVENTS:
+        raise ValueError(
+            f"append_dispatch_event: invalid event_type {parsed['event_type']!r}"
+        )
+    if not parsed.get("dispatch_id"):
+        raise ValueError("append_dispatch_event: dispatch_id required")
+    _write_event_locked(path, parsed)
 
 
 def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
