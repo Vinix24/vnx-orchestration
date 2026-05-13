@@ -256,6 +256,13 @@ class TestBootstrapTerminals:
         mcp_data = json.loads(mcp_file.read_text())
         assert "mcpServers" in mcp_data
 
+    def test_starter_init_skips_gemini_pretrust(self, vnx_env):
+        with patch("vnx_init._pretrust_gemini") as pretrust:
+            results = run_init(vnx_env, skip_hooks=True, starter=True)
+
+        assert any(r.name == "starter-runtime" and r.status == PASS for r in results)
+        pretrust.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Init-DB tests

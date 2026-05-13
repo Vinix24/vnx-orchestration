@@ -117,15 +117,22 @@ def init_starter(data_dir: Optional[str] = None) -> StarterConfig:
         )
 
     paths = ensure_env()
+    resolved_data_dir = Path(data_dir).resolve() if data_dir else Path(paths["VNX_DATA_DIR"]).resolve()
+    state_dir = Path(paths["VNX_STATE_DIR"])
+    dispatch_dir = Path(paths["VNX_DISPATCH_DIR"])
+    receipts_dir = Path(paths["VNX_DATA_DIR"]) / "receipts"
+
     if data_dir:
-        paths["VNX_DATA_DIR"] = data_dir
+        state_dir = resolved_data_dir / "state"
+        dispatch_dir = resolved_data_dir / "dispatches"
+        receipts_dir = resolved_data_dir / "receipts"
 
     config = StarterConfig(
         project_root=paths["PROJECT_ROOT"],
-        data_dir=paths["VNX_DATA_DIR"],
-        state_dir=paths["VNX_STATE_DIR"],
-        dispatch_dir=paths["VNX_DISPATCH_DIR"],
-        receipts_dir=str(Path(paths["VNX_DATA_DIR"]) / "receipts"),
+        data_dir=str(resolved_data_dir),
+        state_dir=str(state_dir),
+        dispatch_dir=str(dispatch_dir),
+        receipts_dir=str(receipts_dir),
     )
 
     # Ensure directories
