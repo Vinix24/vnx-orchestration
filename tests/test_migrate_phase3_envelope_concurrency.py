@@ -131,13 +131,15 @@ class TestMigrateEnvelopeConcurrency:
             _fut = _ex.submit(
                 append_dispatch_event,
                 envelope,
-                '{"dispatch_id":"test-lock","event":"concurrent-write"}',
+                '{"dispatch_id":"test-lock","event":"dispatch_promoted"}',
             )
             _done, _ = _cf.wait([_fut], timeout=5)
             if not _done:
                 pytest.fail(
                     "append_dispatch_event blocked for >5s — sentinel locking may have regressed"
                 )
+            for f in _done:
+                f.result()  # raises if append raised (e.g. after sentinel release with regressed locking)
         write_end_time.append(time.time())
 
         t.join(timeout=5)

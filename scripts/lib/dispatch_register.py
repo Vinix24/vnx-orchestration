@@ -224,7 +224,7 @@ def append_dispatch_event(path: Path, raw_json: str) -> None:
     lifecycle events; production callers should use `append_event` instead.
 
     Raises ValueError on invalid JSON, non-dict shape, missing dispatch_id,
-    or unrecognised event_type — preventing corrupt rows from entering the
+    or unrecognised event — preventing corrupt rows from entering the
     append-only log.
     """
     try:
@@ -235,9 +235,13 @@ def append_dispatch_event(path: Path, raw_json: str) -> None:
         raise ValueError(
             f"append_dispatch_event: row must be JSON object, got {type(parsed).__name__}"
         )
-    if "event_type" in parsed and parsed["event_type"] not in VALID_EVENTS:
+    if "event_type" in parsed and "event" not in parsed:
         raise ValueError(
-            f"append_dispatch_event: invalid event_type {parsed['event_type']!r}"
+            "append_dispatch_event: use canonical 'event' field not 'event_type'"
+        )
+    if "event" in parsed and parsed["event"] not in VALID_EVENTS:
+        raise ValueError(
+            f"append_dispatch_event: invalid event {parsed['event']!r}"
         )
     if not parsed.get("dispatch_id"):
         raise ValueError("append_dispatch_event: dispatch_id required")
