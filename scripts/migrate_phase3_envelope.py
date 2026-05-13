@@ -91,76 +91,95 @@ def _stamp_line(record: Dict[str, Any], envelope: Dict[str, Optional[str]]) -> D
     return result
 
 
+def _acquire_sentinel_lock(envelope_path: Path):
+    """Open/create the per-file migration sentinel and acquire LOCK_EX.
+
+    Lock file: .{envelope_path.name}.migration.lock in the same directory.
+    Returns an open file handle — close it (or use as context manager) to release.
+
+    Using a sentinel file instead of locking the replaced inode prevents the
+    lost-append race: concurrent writers that acquire this same sentinel will block
+    until the rename is complete and will then open the new inode, not the old one.
+    The sentinel persists on disk so writers can coordinate on it in follow-up OIs.
+    """
+    lock_path = envelope_path.parent / f".{envelope_path.name}.migration.lock"
+    fp = open(lock_path, "w")
+    fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+    return fp
+
+
+def _migrate_envelope_atomically(
+    envelope_path: Path,
+    envelope: Optional[Dict[str, Optional[str]]] = None,
+) -> int:
+    """Atomically re-stamp envelope_path under the per-file sentinel lock.
+
+    Acquires .{envelope_path.name}.migration.lock, reads all NDJSON lines,
+    re-stamps with envelope fields (existing values preserved), then writes
+    a temp file and calls os.replace() — all under the sentinel lock.
+
+    Returns the number of JSON lines stamped. Empty/non-existent files return 0.
+    """
+    return _restamp_ndjson_inplace(envelope_path, envelope or {})
+
+
 def _restamp_ndjson_inplace(
     ndjson_path: Path,
     envelope: Dict[str, Optional[str]],
     *,
-    lock_path: Optional[Path] = None,
     dry_run: bool = False,
 ) -> int:
     """Re-stamp a single NDJSON file with envelope fields. Returns stamped line count.
 
-    Locking: acquires LOCK_EX on a directory-level sentinel (.state.lock) first,
-    then on lock_path (if given) or ndjson_path itself. Both locks are held through
-    the atomic rename.
-
-    The sentinel coordinates with dispatch_register._write_event_locked so that
-    writers that open the NDJSON file before the rename complete will always open
-    the new inode (they block on the sentinel, which is released only after rename).
+    Locking: acquires LOCK_EX on the per-file sentinel
+    (.{ndjson_path.name}.migration.lock) and holds it through the atomic rename.
+    Concurrent appenders that acquire the same sentinel will block until the new
+    inode is in place, preventing lost-event race conditions on the old inode.
     """
     if not ndjson_path.exists():
         return 0
 
-    sentinel = ndjson_path.parent / ".state.lock"
-    effective_lock = lock_path if lock_path is not None else ndjson_path
+    with _acquire_sentinel_lock(ndjson_path) as _sentinel_fh:
+        try:
+            content = ndjson_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return 0
 
-    with sentinel.open("a+", encoding="utf-8") as _sentinel_fh:
-        fcntl.flock(_sentinel_fh.fileno(), fcntl.LOCK_EX)
-
-        with effective_lock.open("a+", encoding="utf-8") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-
-            # Read under lock.
+        stamped_lines: List[str] = []
+        count = 0
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
             try:
-                content = ndjson_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                return 0
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                stamped_lines.append(stripped)
+                continue
+            stamped = _stamp_line(record, envelope)
+            stamped_lines.append(json.dumps(stamped, separators=(",", ":"), sort_keys=False))
+            count += 1
 
-            stamped_lines: List[str] = []
-            count = 0
-            for raw_line in content.splitlines():
-                stripped = raw_line.strip()
-                if not stripped:
-                    continue
-                try:
-                    record = json.loads(stripped)
-                except json.JSONDecodeError:
-                    stamped_lines.append(stripped)
-                    continue
-                stamped = _stamp_line(record, envelope)
-                stamped_lines.append(json.dumps(stamped, separators=(",", ":"), sort_keys=False))
-                count += 1
+        if dry_run:
+            return count
 
-            if dry_run:
-                return count
+        new_content = "\n".join(stamped_lines) + ("\n" if stamped_lines else "")
 
-            new_content = "\n".join(stamped_lines) + ("\n" if stamped_lines else "")
-
-            # Atomic rename under lock — concurrent appenders block until complete.
-            fd, tmp_str = tempfile.mkstemp(
-                prefix=ndjson_path.name + ".restamp.tmp.",
-                dir=str(ndjson_path.parent),
-            )
+        # Atomic rename under sentinel lock — concurrent appenders block until complete.
+        fd, tmp_str = tempfile.mkstemp(
+            prefix=ndjson_path.name + ".restamp.tmp.",
+            dir=str(ndjson_path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
+                tmp_fh.write(new_content)
+            os.replace(tmp_str, str(ndjson_path))
+        except Exception:
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as tmp_fh:
-                    tmp_fh.write(new_content)
-                os.replace(tmp_str, str(ndjson_path))
+                os.unlink(tmp_str)
             except Exception:
-                try:
-                    os.unlink(tmp_str)
-                except Exception:
-                    pass
-                raise
+                pass
+            raise
 
     return count
 
@@ -182,16 +201,14 @@ def restamp_project(
     envelope = _resolve_identity(project_id)
     results: Dict[str, int] = {}
 
-    # --- dispatch_register.ndjson (self-locked) ---
+    # --- dispatch_register.ndjson ---
     dr_path = state_dir / "dispatch_register.ndjson"
-    # Lock on the file itself (same as dispatch_register._write_event_locked).
-    n = _restamp_ndjson_inplace(dr_path, envelope, lock_path=None, dry_run=dry_run)
+    n = _restamp_ndjson_inplace(dr_path, envelope, dry_run=dry_run)
     results["dispatch_register.ndjson"] = n
 
-    # --- t0_receipts.ndjson (locked via append_receipt.lock) ---
+    # --- t0_receipts.ndjson ---
     receipts_path = state_dir / "t0_receipts.ndjson"
-    lock_path = state_dir / "append_receipt.lock"
-    n = _restamp_ndjson_inplace(receipts_path, envelope, lock_path=lock_path, dry_run=dry_run)
+    n = _restamp_ndjson_inplace(receipts_path, envelope, dry_run=dry_run)
     results["t0_receipts.ndjson"] = n
 
     # --- central paths (if they differ from primary) ---
@@ -200,14 +217,11 @@ def restamp_project(
             central_state = resolve_central_data_dir(project_id) / "state"
             if central_state.exists() and central_state.resolve() != state_dir.resolve():
                 c_dr = central_state / "dispatch_register.ndjson"
-                n = _restamp_ndjson_inplace(c_dr, envelope, lock_path=None, dry_run=dry_run)
+                n = _restamp_ndjson_inplace(c_dr, envelope, dry_run=dry_run)
                 results["central/dispatch_register.ndjson"] = n
 
                 c_receipts = central_state / "t0_receipts.ndjson"
-                c_lock = central_state / "append_receipt.lock"
-                n = _restamp_ndjson_inplace(
-                    c_receipts, envelope, lock_path=c_lock, dry_run=dry_run
-                )
+                n = _restamp_ndjson_inplace(c_receipts, envelope, dry_run=dry_run)
                 results["central/t0_receipts.ndjson"] = n
         except Exception:
             pass
