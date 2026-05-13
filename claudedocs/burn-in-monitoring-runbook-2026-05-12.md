@@ -96,7 +96,23 @@ Wave 5 measures dispatch quality success-rate. Baseline: 88.9% with naïve injec
 
 ### Per-dispatch injection evidence
 
-Each `subprocess_dispatch.py` invocation now logs which smart-context components fired. Check a recent dispatch:
+**Recorded injection facts** — the authoritative source is `intelligence_injections` in the
+quality DB (written by `IntelligenceSelector.record_injection`):
+
+```bash
+sqlite3 .vnx-data/state/quality_intelligence.db <<EOF
+.mode column
+.headers on
+SELECT dispatch_id, injection_type, role, created_at
+FROM intelligence_injections
+WHERE created_at > datetime('now', '-1 day')
+ORDER BY created_at DESC
+LIMIT 20;
+EOF
+```
+
+**Live event stream** — the archived events NDJSON is a secondary check for streamed
+event records (only present for subprocess-routed terminals; empty live file = look in archive):
 
 ```bash
 # Pick a recent dispatch_id
@@ -105,11 +121,11 @@ DISPATCH_ID=$(ls -t .vnx-data/dispatches/completed/ | head -1)
 # Read its manifest
 cat ".vnx-data/dispatches/completed/$DISPATCH_ID/manifest.json" | python3 -m json.tool
 
-# Find the dispatch's events archive
+# Find the dispatch's archived events
 EVENTS=".vnx-data/events/archive/T1/$DISPATCH_ID.ndjson"
 # (or T2/T3 — check whichever terminal handled it)
 
-# Filter for injection events
+# Filter for injection events in the live event stream
 grep -i "intelligence_injection\|smart_context\|adr_match\|prior_round\|code_anchor\|operator_memory\|schema_introspect" "$EVENTS" 2>/dev/null | python3 -c "
 import json, sys
 for line in sys.stdin:

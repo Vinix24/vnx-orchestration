@@ -99,7 +99,15 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
 
         role = context.get("role")
         dispatch_meta = context.get("dispatch_metadata", {})
-        prompt = self._build_prompt(instruction, changed_files, role=role, dispatch_metadata=dispatch_meta)
+        prompt = self._build_prompt(
+            instruction,
+            changed_files,
+            role=role,
+            dispatch_id=context.get("dispatch_id"),
+            pr_id=context.get("pr_id"),
+            dispatch_paths=context.get("dispatch_paths"),
+            dispatch_metadata=dispatch_meta,
+        )
 
         if _gemini_stream_enabled():
             return self._execute_streaming(
@@ -133,7 +141,15 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         self._current_terminal_id = terminal_id
         self._current_dispatch_id = dispatch_id
 
-        prompt = self._build_prompt(instruction, changed_files, role=role, dispatch_metadata=dispatch_meta)
+        prompt = self._build_prompt(
+            instruction,
+            changed_files,
+            role=role,
+            dispatch_id=context.get("dispatch_id"),
+            pr_id=context.get("pr_id"),
+            dispatch_paths=context.get("dispatch_paths"),
+            dispatch_metadata=dispatch_meta,
+        )
 
         if not _gemini_stream_enabled():
             # Legacy path: execute and yield a single synthetic result event
@@ -604,7 +620,11 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         self,
         instruction: str,
         changed_files: list[str],
+        *,
         role: Optional[str] = None,
+        dispatch_id: Optional[str] = None,
+        pr_id: Optional[str] = None,
+        dispatch_paths: Optional[list] = None,
         dispatch_metadata: Optional[dict] = None,
     ) -> str:
         """Build prompt from instruction + inline file contents.
@@ -613,21 +633,30 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         (L1 base rules + L2 role context + L3 instruction) with Wave 5 intelligence
         injected for gemini. Falls back to raw instruction+files when neither is
         given (backward compat).
+
+        Wave 5 selector inputs are sourced in priority order:
+          explicit kwargs > dispatch_metadata fallback > empty defaults.
+        This handles callers (headless_dispatch_daemon) that pass dispatch_id/pr_id
+        at the top level of the context dict rather than nested under dispatch_metadata.
         """
         payload = {"changed_files": changed_files}
         file_contents = collect_file_contents(payload, subprocess_run=subprocess.run)
         full_instruction = f"{instruction}\n\n{file_contents}" if file_contents else instruction
 
-        if role or dispatch_metadata:
+        if role or dispatch_metadata or dispatch_id or pr_id:
             from intelligence_selector import build_intelligence_context  # noqa: PLC0415
             from prompt_assembler import PromptAssembler, format_for_provider
 
             meta = dispatch_metadata or {}
+            eff_dispatch_id = dispatch_id or meta.get("dispatch_id") or ""
+            eff_pr_id = pr_id or meta.get("pr_id") or meta.get("pr")
+            eff_dispatch_paths = dispatch_paths or meta.get("dispatch_paths") or []
+
             intel_ctx = build_intelligence_context(
-                dispatch_id=(meta).get("dispatch_id", ""),
+                dispatch_id=eff_dispatch_id,
                 role=role or "",
-                pr_id=(meta).get("pr_id") or (meta).get("pr"),
-                dispatch_paths=(meta).get("dispatch_paths", []),
+                pr_id=eff_pr_id,
+                dispatch_paths=eff_dispatch_paths,
                 instruction_text=instruction,
             )
             intel_markdown = intel_ctx.serialize_for("gemini") if intel_ctx else ""

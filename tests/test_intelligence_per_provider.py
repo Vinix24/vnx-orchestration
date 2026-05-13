@@ -249,7 +249,8 @@ class TestCodexAdapterIncludesPriorRoundFindings:
     def test_no_role_skips_intelligence(self):
         from adapters.codex_adapter import CodexAdapter
 
-        with patch("intelligence_selector.build_intelligence_context") as mock_bic:
+        with patch("intelligence_selector.build_intelligence_context") as mock_bic, \
+             patch("adapters.codex_adapter.collect_file_contents", return_value=""):
             adapter = CodexAdapter("T3")
             prompt = adapter._build_prompt(
                 instruction="bare instruction",
@@ -300,7 +301,8 @@ class TestGeminiAdapterIncludesPriorRoundFindings:
     def test_no_role_skips_intelligence(self):
         from adapters.gemini_adapter import GeminiAdapter
 
-        with patch("intelligence_selector.build_intelligence_context") as mock_bic:
+        with patch("intelligence_selector.build_intelligence_context") as mock_bic, \
+             patch("adapters.gemini_adapter.collect_file_contents", return_value=""):
             adapter = GeminiAdapter("T2")
             prompt = adapter._build_prompt(
                 instruction="bare instruction",
@@ -311,3 +313,104 @@ class TestGeminiAdapterIncludesPriorRoundFindings:
 
         mock_bic.assert_not_called()
         assert prompt == "bare instruction"
+
+
+# ---------------------------------------------------------------------------
+# Top-level kwarg sourcing tests (codex round-1 fix)
+# ---------------------------------------------------------------------------
+
+class TestCodexAdapterTopLevelDispatchId:
+    """dispatch_id/pr_id passed at top level (not in dispatch_metadata) must work."""
+
+    def test_intelligence_with_top_level_dispatch_id(self):
+        from adapters.codex_adapter import CodexAdapter
+
+        ctx = _make_ctx_with_prior_finding("Gate skip is unacceptable")
+
+        with _patch_build_intelligence_context(ctx):
+            adapter = CodexAdapter("T3")
+            prompt = adapter._build_prompt(
+                instruction="Review PR",
+                changed_files=[],
+                role="reviewer",
+                dispatch_id="top-level-dispatch-001",
+                # intentionally no dispatch_metadata
+            )
+
+        assert "Gate skip is unacceptable" in prompt
+
+    def test_top_level_dispatch_id_forwarded_to_selector(self):
+        """build_intelligence_context must receive the top-level dispatch_id, not ''."""
+        import intelligence_selector as _mod
+        from adapters.codex_adapter import CodexAdapter
+
+        with patch.object(_mod, "build_intelligence_context", return_value=None) as mock_bic:
+            adapter = CodexAdapter("T3")
+            adapter._build_prompt(
+                instruction="Review PR",
+                changed_files=[],
+                role="reviewer",
+                dispatch_id="explicit-id-codex",
+                pr_id="474",
+            )
+
+        mock_bic.assert_called_once()
+        call_kwargs = mock_bic.call_args[1] if mock_bic.call_args[1] else mock_bic.call_args[0]
+        assert call_kwargs.get("dispatch_id") == "explicit-id-codex"
+        assert call_kwargs.get("pr_id") == "474"
+
+    def test_intelligence_fallback_to_metadata(self):
+        """Backward compat: dispatch_id in dispatch_metadata still works."""
+        from adapters.codex_adapter import CodexAdapter
+
+        ctx = _make_ctx_with_prior_finding("Always release lease after receipt")
+
+        with _patch_build_intelligence_context(ctx):
+            adapter = CodexAdapter("T3")
+            prompt = adapter._build_prompt(
+                instruction="Review PR",
+                changed_files=[],
+                role="reviewer",
+                dispatch_metadata={"dispatch_id": "meta-dispatch-001", "pr_id": "474"},
+            )
+
+        assert "Always release lease after receipt" in prompt
+
+
+class TestGeminiAdapterTopLevelDispatchId:
+    """Same top-level kwarg sourcing for GeminiAdapter."""
+
+    def test_intelligence_with_top_level_dispatch_id(self):
+        from adapters.gemini_adapter import GeminiAdapter
+
+        ctx = _make_ctx_with_prior_finding("Never skip gates before merge")
+
+        with _patch_build_intelligence_context(ctx):
+            adapter = GeminiAdapter("T2")
+            prompt = adapter._build_prompt(
+                instruction="Gemini review",
+                changed_files=[],
+                role="reviewer",
+                dispatch_id="top-level-gemini-001",
+            )
+
+        assert "Never skip gates before merge" in prompt
+
+    def test_top_level_dispatch_id_forwarded_to_selector(self):
+        import intelligence_selector as _mod
+        from adapters.gemini_adapter import GeminiAdapter
+
+        with patch.object(_mod, "build_intelligence_context", return_value=None) as mock_bic:
+            adapter = GeminiAdapter("T2")
+            adapter._build_prompt(
+                instruction="Gemini review",
+                changed_files=[],
+                role="reviewer",
+                dispatch_id="explicit-id-gemini",
+                pr_id="474",
+            )
+
+        mock_bic.assert_called_once()
+        call_kwargs = mock_bic.call_args[1] if mock_bic.call_args[1] else mock_bic.call_args[0]
+        assert call_kwargs.get("dispatch_id") == "explicit-id-gemini"
+        assert call_kwargs.get("pr_id") == "474"
