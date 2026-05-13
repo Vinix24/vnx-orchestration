@@ -10,10 +10,10 @@ Usage:
     python3 scripts/migrate_phase3_envelope.py --project-id vnx-dev --state-dir /path/to/.vnx-data/state
 
 Locking contract (race-free with concurrent appends during P5 cutover):
-- For dispatch_register.ndjson: acquires LOCK_EX on the NDJSON file itself
-  (same as dispatch_register._write_event_locked).
+- For dispatch_register.ndjson: acquires LOCK_EX on <dir>/.state.lock
+  (same sentinel dispatch_register._write_event_locked uses).
 - For t0_receipts.ndjson: acquires LOCK_EX on <dir>/append_receipt.lock
-  (same as append_receipt_internals.idempotency._write_receipt_under_lock).
+  (same sentinel append_receipt_internals uses).
 Lock is held through the atomic rename so concurrent writers block until
 the stamped file is in place.
 
@@ -91,32 +91,34 @@ def _stamp_line(record: Dict[str, Any], envelope: Dict[str, Optional[str]]) -> D
     return result
 
 
-def _acquire_sentinel_lock(envelope_path: Path):
-    """Open/create the per-file migration sentinel and acquire LOCK_EX.
+_DEFAULT_LOCK_FILENAME = ".state.lock"
+_LOCK_FILENAME_BY_TARGET: Dict[str, str] = {
+    "t0_receipts.ndjson": "append_receipt.lock",
+}
 
-    Lock file: .{envelope_path.name}.migration.lock in the same directory.
-    Returns an open file handle — close it (or use as context manager) to release.
 
-    Using a sentinel file instead of locking the replaced inode prevents the
-    lost-append race: concurrent writers that acquire this same sentinel will block
-    until the rename is complete and will then open the new inode, not the old one.
-    The sentinel persists on disk so writers can coordinate on it in follow-up OIs.
+def _lock_path_for(ndjson_path: Path) -> Path:
+    """Return the sentinel lock path that live writers use for ndjson_path.
+
+    Matches the convention in dual_writer._LOCK_FILENAME_BY_TARGET and
+    dispatch_register._write_event_locked so the migrator serializes on the
+    same mutex as concurrent appenders.
     """
-    lock_path = envelope_path.parent / f".{envelope_path.name}.migration.lock"
-    fp = open(lock_path, "w")
-    fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-    return fp
+    lock_name = _LOCK_FILENAME_BY_TARGET.get(ndjson_path.name, _DEFAULT_LOCK_FILENAME)
+    return ndjson_path.parent / lock_name
 
 
 def _migrate_envelope_atomically(
     envelope_path: Path,
     envelope: Optional[Dict[str, Optional[str]]] = None,
 ) -> int:
-    """Atomically re-stamp envelope_path under the per-file sentinel lock.
+    """Atomically re-stamp envelope_path under the existing writers' lock.
 
-    Acquires .{envelope_path.name}.migration.lock, reads all NDJSON lines,
-    re-stamps with envelope fields (existing values preserved), then writes
-    a temp file and calls os.replace() — all under the sentinel lock.
+    Acquires the same sentinel lock that live writers use (`.state.lock` for
+    dispatch_register.ndjson; `append_receipt.lock` for t0_receipts.ndjson),
+    reads all NDJSON lines, re-stamps with envelope fields (existing values
+    preserved), then writes a temp file and calls os.replace() — all under
+    that lock.
 
     Returns the number of JSON lines stamped. Empty/non-existent files return 0.
     """
@@ -131,15 +133,16 @@ def _restamp_ndjson_inplace(
 ) -> int:
     """Re-stamp a single NDJSON file with envelope fields. Returns stamped line count.
 
-    Locking: acquires LOCK_EX on the per-file sentinel
-    (.{ndjson_path.name}.migration.lock) and holds it through the atomic rename.
-    Concurrent appenders that acquire the same sentinel will block until the new
-    inode is in place, preventing lost-event race conditions on the old inode.
+    Locking: acquires LOCK_EX on the same sentinel lock that live writers use
+    (see _lock_path_for) and holds it through the atomic rename. Concurrent
+    appenders block on the same mutex, preventing lost-event races.
     """
     if not ndjson_path.exists():
         return 0
 
-    with _acquire_sentinel_lock(ndjson_path) as _sentinel_fh:
+    lock_path = _lock_path_for(ndjson_path)
+    with lock_path.open("a+", encoding="utf-8") as _sentinel_fh:
+        fcntl.flock(_sentinel_fh.fileno(), fcntl.LOCK_EX)
         try:
             content = ndjson_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
