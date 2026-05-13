@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import state_writer
+
 try:
     import shadow_verifier as _shadow_verifier
     import shadow_logger as _shadow_logger
@@ -203,15 +205,8 @@ def _merge_dedup_key(event: dict) -> tuple[str, str, str, str, str]:
 
 
 def _write_event_locked(path: Path, record: dict) -> None:
-    # Acquire directory-level sentinel BEFORE opening the file so that a
-    # concurrent re-stamper that holds the sentinel and is about to os.replace()
-    # cannot leave this writer holding an fd to the unlinked (old) inode.
-    sentinel = path.parent / ".state.lock"
-    with sentinel.open("a+", encoding="utf-8") as _sentinel_fh:
-        fcntl.flock(_sentinel_fh.fileno(), fcntl.LOCK_EX)
-        with path.open("a", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    """Backwards-compatible wrapper around the shared state writer."""
+    state_writer.append_locked(path, record)
 
 
 def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
