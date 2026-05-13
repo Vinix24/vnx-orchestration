@@ -13,6 +13,7 @@ Race condition being tested:
 """
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import fcntl
 import json
 import sys
@@ -28,8 +29,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
+import dispatch_register as _dr_mod
 import migrate_phase3_envelope
-from dispatch_register import append_dispatch_event
+from dispatch_register import append_event
 from migrate_phase3_envelope import _restamp_ndjson_inplace
 
 
@@ -53,38 +55,38 @@ def _count_seq_lines(path: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Test 1 — no event loss under concurrent writer + migrator
+# Tests
 # ---------------------------------------------------------------------------
 
 
 class TestMigrateEnvelopeConcurrency:
     """OI-1370 — verify writes during migration are not lost to unlinked inode."""
 
-    def test_concurrent_writer_does_not_lose_events(self, tmp_path: Path) -> None:
+    def test_concurrent_writer_does_not_lose_events(self, tmp_path: Path, monkeypatch) -> None:
         """Race 100 appends against a re-stamper run. All 100 must land in final file."""
         envelope = tmp_path / "dispatch_register.ndjson"
+        monkeypatch.setattr(_dr_mod, "_register_path", lambda: envelope)
         # Seed one record so the migrator has something to restamp
         envelope.write_text('{"initial":true}\n', encoding="utf-8")
 
-        events = [f'{{"dispatch_id":"test-d{i}","seq":{i}}}' for i in range(100)]
         results: list[str] = []
         results_lock = threading.Lock()
 
-        def writer(event_line: str) -> None:
-            try:
-                append_dispatch_event(envelope, event_line)
-                with results_lock:
-                    results.append("ok")
-            except Exception as exc:
-                with results_lock:
-                    results.append(f"err:{type(exc).__name__}")
+        def writer(idx: int) -> None:
+            ok = append_event(
+                event="dispatch_promoted",
+                dispatch_id=f"test-d{idx}",
+                extra={"seq": idx},
+            )
+            with results_lock:
+                results.append("ok" if ok else "err:append_event_returned_false")
 
         def migrator() -> None:
             time.sleep(0.01)  # let some writes happen first
             _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
 
         with ThreadPoolExecutor(max_workers=20) as ex:
-            write_futures = [ex.submit(writer, e) for e in events]
+            write_futures = [ex.submit(writer, i) for i in range(100)]
             mig_future = ex.submit(migrator)
             for f in write_futures:
                 f.result(timeout=10)
@@ -97,18 +99,18 @@ class TestMigrateEnvelopeConcurrency:
             f"writer errors: {[r for r in results if r != 'ok']}"
         )
 
-    def test_directory_lock_serializes_with_migration(self, tmp_path: Path) -> None:
+    def test_directory_lock_serializes_with_migration(self, tmp_path: Path, monkeypatch) -> None:
         """Directory-level sentinel blocks new appends while migration holds the lock."""
-        envelope = tmp_path / "envelope.ndjson"
-        envelope.write_text("init\n", encoding="utf-8")
+        register_path = tmp_path / "dispatch_register.ndjson"
+        monkeypatch.setattr(_dr_mod, "_register_path", lambda: register_path)
+        register_path.write_text("init\n", encoding="utf-8")
 
         migration_held = threading.Event()
-        write_done = threading.Event()
         write_start_time: list[float] = []
         write_end_time: list[float] = []
 
         # Sentinel path that both _write_event_locked and _restamp_ndjson_inplace use
-        sentinel_path = envelope.parent / ".state.lock"
+        sentinel_path = tmp_path / ".state.lock"
 
         def slow_migration_lock_holder() -> None:
             """Hold the sentinel lock for 0.5 s to simulate a slow migration."""
@@ -125,21 +127,16 @@ class TestMigrateEnvelopeConcurrency:
         # Writer should block until the sentinel is released.
         # Use a thread with a timeout so the test fails fast if locking regresses
         # rather than hanging until CI timeout.
-        import concurrent.futures as _cf
         write_start_time.append(time.time())
         with ThreadPoolExecutor(max_workers=1) as _ex:
-            _fut = _ex.submit(
-                append_dispatch_event,
-                envelope,
-                '{"dispatch_id":"test-lock","event":"dispatch_promoted"}',
-            )
+            _fut = _ex.submit(append_event, "dispatch_promoted", dispatch_id="test-lock")
             _done, _ = _cf.wait([_fut], timeout=5)
             if not _done:
                 pytest.fail(
-                    "append_dispatch_event blocked for >5s — sentinel locking may have regressed"
+                    "append_event blocked for >5s — sentinel locking may have regressed"
                 )
             for f in _done:
-                f.result()  # raises if append raised (e.g. after sentinel release with regressed locking)
+                f.result()
         write_end_time.append(time.time())
 
         t.join(timeout=5)
@@ -149,12 +146,17 @@ class TestMigrateEnvelopeConcurrency:
             f"write did not wait for migration lock (took {duration:.3f}s; expected >0.3s)"
         )
 
-    def test_restamp_reads_all_pre_lock_events(self, tmp_path: Path) -> None:
+    def test_restamp_reads_all_pre_lock_events(self, tmp_path: Path, monkeypatch) -> None:
         """Re-stamper must include all events written before it acquired the sentinel."""
         envelope = tmp_path / "dispatch_register.ndjson"
+        monkeypatch.setattr(_dr_mod, "_register_path", lambda: envelope)
         # Write 20 events before any migration
         for i in range(20):
-            append_dispatch_event(envelope, f'{{"dispatch_id":"test-d{i}","seq":{i},"phase":"pre"}}')
+            append_event(
+                event="dispatch_promoted",
+                dispatch_id=f"test-d{i}",
+                extra={"seq": i, "phase": "pre"},
+            )
 
         _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
 
@@ -169,11 +171,16 @@ class TestMigrateEnvelopeConcurrency:
                 f"missing project_id stamp on re-stamped line: {ln}"
             )
 
-    def test_restamp_idempotent_under_double_run(self, tmp_path: Path) -> None:
+    def test_restamp_idempotent_under_double_run(self, tmp_path: Path, monkeypatch) -> None:
         """Running _restamp_ndjson_inplace twice must not duplicate or lose events."""
         envelope = tmp_path / "dispatch_register.ndjson"
+        monkeypatch.setattr(_dr_mod, "_register_path", lambda: envelope)
         for i in range(10):
-            append_dispatch_event(envelope, f'{{"dispatch_id":"test-d{i}","seq":{i}}}')
+            append_event(
+                event="dispatch_promoted",
+                dispatch_id=f"test-d{i}",
+                extra={"seq": i},
+            )
 
         _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
         _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
@@ -181,15 +188,20 @@ class TestMigrateEnvelopeConcurrency:
         seq_count = _count_seq_lines(envelope)
         assert seq_count == 10, f"idempotency violation: expected 10, got {seq_count}"
 
-    def test_no_events_lost_across_multiple_migrations(self, tmp_path: Path) -> None:
+    def test_no_events_lost_across_multiple_migrations(self, tmp_path: Path, monkeypatch) -> None:
         """Multiple sequential migrations interleaved with writes must preserve all events."""
         envelope = tmp_path / "dispatch_register.ndjson"
+        monkeypatch.setattr(_dr_mod, "_register_path", lambda: envelope)
         envelope.write_text("", encoding="utf-8")
 
         total = 0
         for batch in range(5):
             for i in range(10):
-                append_dispatch_event(envelope, f'{{"dispatch_id":"test-b{batch}-s{i}","batch":{batch},"seq":{i}}}')
+                append_event(
+                    event="dispatch_promoted",
+                    dispatch_id=f"test-b{batch}-s{i}",
+                    extra={"batch": batch, "seq": i},
+                )
                 total += 1
             _restamp_ndjson_inplace(envelope, _EMPTY_ENVELOPE)
 

@@ -214,40 +214,6 @@ def _write_event_locked(path: Path, record: dict) -> None:
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
-def append_dispatch_event(path: Path, raw_json: str) -> None:
-    """Append a pre-formatted JSON line to path under the shared sentinel lock.
-
-    Parses raw_json and delegates to _write_event_locked so the same
-    directory-level sentinel (`.state.lock`) serialises this append with
-    concurrent `_restamp_ndjson_inplace` callers.  Intended for migration
-    helpers and test harnesses that produce raw NDJSON rather than structured
-    lifecycle events; production callers should use `append_event` instead.
-
-    Raises ValueError on invalid JSON, non-dict shape, missing dispatch_id,
-    or unrecognised event — preventing corrupt rows from entering the
-    append-only log.
-    """
-    try:
-        parsed = json.loads(raw_json)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"append_dispatch_event: invalid JSON: {e}") from e
-    if not isinstance(parsed, dict):
-        raise ValueError(
-            f"append_dispatch_event: row must be JSON object, got {type(parsed).__name__}"
-        )
-    if "event_type" in parsed and "event" not in parsed:
-        raise ValueError(
-            "append_dispatch_event: use canonical 'event' field not 'event_type'"
-        )
-    if "event" in parsed and parsed["event"] not in VALID_EVENTS:
-        raise ValueError(
-            f"append_dispatch_event: invalid event {parsed['event']!r}"
-        )
-    if not parsed.get("dispatch_id"):
-        raise ValueError("append_dispatch_event: dispatch_id required")
-    _write_event_locked(path, parsed)
-
-
 def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) -> None:
     """Best-effort mirror of a register event to the central path. Never raises.
 
