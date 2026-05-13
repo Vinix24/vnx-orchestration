@@ -441,6 +441,7 @@ def evaluate_and_record(
 def check_gate_clearance(
     contract: ReviewContract,
     receipt: Optional[CodexFinalGateReceipt],
+    project_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Check whether a PR can clear the Codex final gate.
 
@@ -449,7 +450,8 @@ def check_gate_clearance(
       reason: str — explanation
       blockers: list — specific blockers if not cleared
     """
-    enforcement = enforce_codex_gate(contract)
+    effective_root = project_root if project_root is not None else SCRIPT_DIR.parent
+    enforcement = enforce_codex_gate(contract, project_root=effective_root)
 
     if not enforcement.required:
         return {
@@ -595,7 +597,7 @@ def _cmd_check_clearance(args: argparse.Namespace) -> int:
             return EXIT_IO
         receipt = CodexFinalGateReceipt.from_json(rp.read_text(encoding="utf-8"))
 
-    result = check_gate_clearance(contract, receipt)
+    result = check_gate_clearance(contract, receipt, project_root=SCRIPT_DIR.parent)
     print(json.dumps({"ok": True, **result}, indent=2))
     return EXIT_OK
 
