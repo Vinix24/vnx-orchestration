@@ -8,12 +8,12 @@ with tests that mock subprocess.Popen).
 from __future__ import annotations
 
 import datetime
-import fcntl
-import json
 import logging
 import os
 from pathlib import Path
 from typing import Optional
+
+import state_writer
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
@@ -67,10 +67,7 @@ def emit_codex_gate_to_register(
             record["feature_id"] = feature_id_resolved
 
         path = _resolve_register_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        state_writer.append_locked(path, record)
         return True
     except Exception:
         return False

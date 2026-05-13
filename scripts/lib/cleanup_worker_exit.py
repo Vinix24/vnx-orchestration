@@ -39,6 +39,8 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+import state_writer
+
 try:
     from project_root import resolve_data_dir, resolve_state_dir
 except ImportError:  # pragma: no cover - bootstrap failure
@@ -325,8 +327,6 @@ def _append_audit_event_step(
 ) -> None:
     """Step 4: append worker_exited audit event to dispatch_register.ndjson."""
     try:
-        import fcntl  # noqa: PLC0415
-
         record = {
             "timestamp": _now_iso(),
             "event": "worker_exited",
@@ -339,10 +339,7 @@ def _append_audit_event_step(
         }
 
         path = _resolve_dispatch_register_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        state_writer.append_locked(path, record)
     except Exception as exc:
         result.errors.append(f"audit_append_failed:{exc}")
         _emit(
