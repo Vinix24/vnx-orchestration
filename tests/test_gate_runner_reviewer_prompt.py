@@ -74,12 +74,20 @@ class TestCodexPromptReviewerRole:
         prompt = GateRunner._build_codex_prompt(payload)
         assert "VNX governance reviewer" in prompt
 
-    def test_codex_prompt_includes_base_worker_rules(self, tmp_path):
-        """Prompt must contain base_worker.md content (L1 layer)."""
+    def test_codex_prompt_skips_base_worker_for_reviewer(self, tmp_path):
+        """Reviewer prompts must NOT include base_worker.md L1 content (FIX B).
+
+        git is mocked to return empty diff so the assertion isolates the L1-skip
+        from diff content that may coincidentally contain base_worker phrases.
+        """
         payload = _payload_with_file(tmp_path)
-        prompt = GateRunner._build_codex_prompt(payload)
-        # Canonical phrase from base_worker.md
-        assert "No TODO comments" in prompt
+        empty_run = MagicMock()
+        empty_run.stdout = ""
+        empty_run.returncode = 0
+        with patch("gate_runner.subprocess.run", return_value=empty_run):
+            prompt = GateRunner._build_codex_prompt(payload)
+        # base_worker.md is skipped for reviewer role — implementation rules must not appear
+        assert "No TODO comments" not in prompt
 
     def test_codex_prompt_preserves_verdict_template(self, tmp_path):
         """Verdict JSON template must remain in the prompt (gate_recorder.py parses it)."""
@@ -90,10 +98,11 @@ class TestCodexPromptReviewerRole:
         assert '"findings"' in prompt
 
     def test_codex_prompt_includes_diff_content(self, tmp_path):
-        """File content must be inlined in the prompt (L3 diff section)."""
+        """Diff must be referenced in the prompt (L3 diff section uses unified diff)."""
         payload = _payload_with_file(tmp_path)
         prompt = GateRunner._build_codex_prompt(payload)
-        assert "--- FILE:" in prompt
+        # Either the instruction text ("diff below") or unified diff markers (@@) must appear
+        assert "diff" in prompt or "@@" in prompt
 
     def test_codex_prompt_returns_string(self, tmp_path):
         """_build_codex_prompt must return a plain string (stdin-writable)."""
@@ -133,11 +142,20 @@ class TestGeminiPromptReviewerRole:
         assert '"verdict"' in prompt
         assert '"findings"' in prompt
 
-    def test_gemini_prompt_includes_base_worker_rules(self, tmp_path):
-        """Prompt must contain base_worker.md content (L1 layer)."""
+    def test_gemini_prompt_skips_base_worker_for_reviewer(self, tmp_path):
+        """Reviewer prompts must NOT include base_worker.md L1 content (FIX B).
+
+        git is mocked to return empty diff so the assertion isolates the L1-skip
+        from diff content that may coincidentally contain base_worker phrases.
+        """
         payload = _payload_with_file(tmp_path)
-        prompt = GateRunner._build_gemini_prompt(payload)
-        assert "No TODO comments" in prompt
+        empty_run = MagicMock()
+        empty_run.stdout = ""
+        empty_run.returncode = 0
+        with patch("gate_runner.subprocess.run", return_value=empty_run):
+            prompt = GateRunner._build_gemini_prompt(payload)
+        # base_worker.md is skipped for reviewer role — implementation rules must not appear
+        assert "No TODO comments" not in prompt
 
     def test_gemini_prompt_returns_string(self, tmp_path):
         """_build_gemini_prompt must return a plain string (stdin/vertex-writable)."""

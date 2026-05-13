@@ -126,14 +126,19 @@ class PromptAssembler:
         model = dispatch_metadata.get("model", "")
 
         # ---- Layer 1: Base worker context --------------------------------
-        layer1 = self._load_base()
+        # Reviewer role skips L1: reviewers return a JSON verdict, not a work report.
+        # base_worker.md instructs workers to commit/push/write reports — wrong for reviewers.
+        if role == "reviewer":
+            layer1 = ""
+        else:
+            layer1 = self._load_base()
         logger.debug("L1 loaded: %d chars", len(layer1))
 
         # ---- Layer 2: Role context ----------------------------------------
         layer2, role_resolved = self._load_role(role)
         logger.debug("L2 loaded: role=%s resolved=%s chars=%d", role, role_resolved, len(layer2))
 
-        context = f"{layer1}\n\n---\n\n{layer2}"
+        context = f"{layer1}\n\n---\n\n{layer2}" if layer1 else layer2
 
         # ---- Layer 3: Dispatch payload ------------------------------------
         cleaned_instruction = _TARGET_HEADER_RE.sub("", instruction).strip()

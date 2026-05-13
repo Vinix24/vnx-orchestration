@@ -213,6 +213,51 @@ class GateRunner:
         )
 
     @staticmethod
+    def _build_pr_diff_content(request_payload: Dict[str, Any]) -> str:
+        """Return unified diff for the PR's changed files using git diff.
+
+        Tries <base>...<head> first (scoped to non-absolute changed_files),
+        then falls back to main...HEAD. subprocess.run is resolved from gate_runner
+        module scope so tests can patch gate_runner.subprocess.run.
+        """
+        branch = request_payload.get("branch", "")
+        changed_files = request_payload.get("changed_files", [])
+        base = request_payload.get("base_ref", "") or request_payload.get("base", "")
+        head = request_payload.get("head_ref", "") or request_payload.get("head", "") or branch
+
+        if base and head:
+            ref_range = f"{base}...{head}"
+        elif head:
+            ref_range = f"main...{head}"
+        else:
+            ref_range = "main...HEAD"
+
+        # Absolute tmp/filesystem paths are not git-tracked; skip them
+        git_files = [f for f in changed_files if not os.path.isabs(f)]
+        cmd = ["git", "diff", "--no-color", ref_range]
+        if git_files:
+            cmd += ["--"] + git_files
+
+        diff_output = ""
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            diff_output = result.stdout
+        except Exception:
+            pass
+
+        if not diff_output.strip():
+            try:
+                fallback = ["git", "diff", "--no-color", "main...HEAD"]
+                if git_files:
+                    fallback += ["--"] + git_files
+                result = subprocess.run(fallback, capture_output=True, text=True, timeout=30)
+                diff_output = result.stdout
+            except Exception:
+                pass
+
+        return diff_output
+
+    @staticmethod
     def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
         """Build enriched prompt via PromptAssembler (reviewer role + L3 diff + verdict).
 
@@ -221,28 +266,20 @@ class GateRunner:
         """
         from prompt_assembler import PromptAssembler, format_for_provider
 
-        files = _vtx._gather_changed_files(
-            request_payload.get("changed_files", []), subprocess.run
-        )
         branch = request_payload.get("branch", "")
         risk = request_payload.get("risk_class", "medium")
         pr = request_payload.get("pr_number", "")
-        max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
 
-        file_content = _vtx._inline_file_contents(
-            files, max_bytes, branch=branch, subprocess_run=subprocess.run,
-        )
+        diff_content = GateRunner._build_pr_diff_content(request_payload)
 
         review_instructions = (
-            f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
-            f"Changed files: {', '.join(files)}\n\n"
-            "Perform a thorough code review of the file contents below.\n\n"
+            f"Review the diff below for PR #{pr} on branch {branch} (risk: {risk}). "
+            "Findings MUST cite specific NEW lines from this diff — do not flag pre-existing code.\n\n"
             "## Grounding rule (strict)\n\n"
-            "Only flag findings about code present in the FILE blocks below. "
+            "Only flag findings about code present in the diff below. "
             "Every symbol, decorator, function, class, or path you reference in a finding "
-            "must be quotable verbatim from one of the FILE blocks. "
-            "Do NOT invent file paths or names that are not in the 'Changed files' list above. "
-            "If you cannot point to a specific line in a FILE block, do not report the finding.\n\n"
+            "must be quotable verbatim from the diff. "
+            "Do NOT invent file paths or names not present in the diff.\n\n"
             "Respond with a structured JSON verdict only:\n"
             "```json\n"
             "{\n"
@@ -255,7 +292,7 @@ class GateRunner:
             "```\n"
         )
 
-        l3_instruction = f"{review_instructions}\n{file_content}"
+        l3_instruction = f"{review_instructions}\n\n{diff_content}"
 
         assembled = PromptAssembler().assemble(
             dispatch_metadata={
@@ -280,17 +317,11 @@ class GateRunner:
 
         branch = request_payload.get("branch", "")
         risk = request_payload.get("risk_class", "medium")
-        max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
 
-        files = _vtx._gather_changed_files(
-            request_payload.get("changed_files", []), subprocess.run
-        )
-        diff_content = _vtx._inline_file_contents(
-            files, max_bytes, branch=branch, subprocess_run=subprocess.run,
-        )
+        diff_content = GateRunner._build_pr_diff_content(request_payload)
 
         verdict_template = (
-            "Perform a thorough code review of the file contents above.\n\n"
+            "Perform a thorough code review of the diff above.\n\n"
             "## Severity rules (strict)\n\n"
             "Default `severity` is `warning`. Promote to `error` ONLY when the finding's impact includes one of:\n"
             "- Data loss or corruption (database, files, append-only logs)\n"
@@ -319,7 +350,8 @@ class GateRunner:
         )
 
         l3_instruction = (
-            f"Review the following code changes on branch {branch} (risk: {risk}).\n\n"
+            f"Review the diff below on branch {branch} (risk: {risk}). "
+            "Findings MUST cite specific NEW lines from this diff — do not flag pre-existing code.\n\n"
             f"{diff_content}\n\n"
             f"{verdict_template}"
         )

@@ -391,3 +391,23 @@ def test_for_litellm_provider_returns_messages_with_system_role(assembler: Promp
     assert result["messages"][1]["content"] == "litellm-test"
     assert "system" not in result
     assert result["metadata"]["provider"] == "kimi"
+
+
+# ---------------------------------------------------------------------------
+# Wave 4.5 PR-2b — reviewer role skips L1 base_worker
+# ---------------------------------------------------------------------------
+
+def test_assemble_skips_base_worker_for_reviewer_role(assembler: PromptAssembler) -> None:
+    """Reviewer role must skip Layer 1 base_worker.md — it returns a verdict, not a work report."""
+    result = assembler.assemble(
+        dispatch_metadata={"role": "reviewer", "terminal": "T3"},
+        instruction="Review this diff.",
+    )
+    # L1 must be empty for reviewer
+    assert result.metadata["layer1_chars"] == 0
+    # base_worker.md content must not appear in context
+    assert "No TODO comments" not in result.context
+    # reviewer.md (L2) must still be present in context
+    assert "VNX governance reviewer" in result.context
+    # Instruction (L3) unchanged
+    assert "Review this diff." in result.instruction
