@@ -405,6 +405,53 @@ If any terminal pane is missing, escalate before dispatching — do not send a d
 
 If panes.json contains stale IDs, update it manually or delete it and let path-based discovery take over on next delivery.
 
+### 9.2 Dispatch-routing — required via subprocess_dispatch.py
+
+Per ADR-010 (subprocess adapter as canonical Claude routing) and ADR-005 (NDJSON ledger as primary observability):
+
+For any feature work (code edit + PR + tests), dispatches to T1/T2/T3 MUST go via subprocess_dispatch.py. This path delivers Wave 5 smart-context injection (+30pp dispatch quality lift), Wave 1 shadow logging, receipt processor audit trail, lease management, and triple-gate contract_hash binding.
+
+#### Canonical dispatch command
+
+```bash
+export VNX_STATE_DIR=.vnx-data/state VNX_DATA_DIR=.vnx-data VNX_DISPATCH_DIR=.vnx-data/dispatches
+
+python3 .claude/vnx-system/scripts/lib/subprocess_dispatch.py \
+  --terminal-id T1 \
+  --dispatch-id "$(date +%Y%m%d-%H%M%S)-<slug>" \
+  --model sonnet \
+  --role backend-developer \
+  --pr-id "<PR-ID>" \
+  --dispatch-paths "<comma-separated-allowed-paths>" \
+  --instruction "<inline instruction text>"
+```
+
+Required flags: --terminal-id, --dispatch-id, --instruction. Strongly recommended: --role (skill injection), --pr-id (Wave 5 prior-round findings keyed by pr_id), --dispatch-paths (scope guard).
+
+#### FORBIDDEN for feature work
+
+```bash
+# DO NOT USE for code/PR work — bypasses Wave 5, audit, lease, governance:
+Bash(claude --print --model sonnet "...")
+Bash(claude -p "...")
+```
+
+Direct claude --print is acceptable ONLY for pure utility invocations (parsing, ad-hoc analysis, debug checks) that have no PR outcome and do not contribute to Wave 1/5 burn-in metrics.
+
+#### Decision rule
+
+| Task | Path |
+|---|---|
+| Code edit + PR + tests | subprocess_dispatch.py |
+| PR review gate (codex_gate, gemini_review) | scripts/review_gate_manager.py request-and-execute (or scripts/t0_gate_enforcement.sh wrapper) |
+| Burn-in measurement work | subprocess_dispatch.py REQUIRED |
+| Utility script (transcribe, parse) | direct Bash (no claude needed) |
+| Ad-hoc claude-as-utility | direct Bash claude --print acceptable |
+
+Gate execution (codex_gate, gemini_review) uses `scripts/review_gate_manager.py request-and-execute` OR `scripts/t0_gate_enforcement.sh` — these create the canonical `review_gates/requests` and `review_gates/results` artifacts that closure verification depends on. `subprocess_dispatch.py` dispatches feature work to T1/T2/T3 workers; its `--gate` flag is metadata for auto-commit tagging, not gate execution.
+
+Rule of thumb: Does the work produce a PR or a measurement? Then subprocess_dispatch.py. Does the work produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
+
 ## 10. Manager Block Quality Standard
 
 Every dispatch must include:
