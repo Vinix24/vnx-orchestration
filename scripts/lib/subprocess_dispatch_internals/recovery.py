@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from otel_exporter import emit_dispatch_completion
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +179,11 @@ def _handle_success(
         lease_generation=lease_generation,
         dispatch_file=_resolve_active_dispatch_file(dispatch_id),
     )
+    _duration = (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(dispatch_start_ts)
+    ).total_seconds()
+    emit_dispatch_completion(dispatch_id, terminal_id, "done", _duration)
 
 
 def _handle_final_failure(
@@ -237,6 +246,11 @@ def _handle_final_failure(
         lease_generation=lease_generation,
         dispatch_file=_resolve_active_dispatch_file(dispatch_id),
     )
+    _duration = (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(dispatch_start_ts)
+    ).total_seconds()
+    emit_dispatch_completion(dispatch_id, terminal_id, "failed", _duration)
 
 
 def _init_recovery_state(

@@ -9,7 +9,12 @@ description = "Governance-first multi-agent orchestration for AI CLI workers"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-dependencies = ["watchdog>=6.0.0"]
+dependencies = [
+    "watchdog>=6.0.0",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 
 [project.scripts]
 vnx = "vnx_cli.main:main"
