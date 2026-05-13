@@ -63,20 +63,17 @@ class AssembledPrompt:
         return self.to_pipe_input()
 
     def for_codex_subprocess(self) -> str:
-        """Codex header-style format: context + '# DISPATCH' markdown header."""
-        return f"{self.context}\n\n# DISPATCH\n\n{self.instruction}"
+        """Deprecated thin wrapper. Use format_for_provider(assembled, 'codex')['pipe_input'] instead."""
+        return format_for_provider(self, "codex")["pipe_input"]
 
     def for_gemini_subprocess(self) -> str:
-        """Gemini simple-separator format: context + '---' with no extra header."""
-        return f"{self.context}\n\n---\n\n{self.instruction}"
+        """Deprecated thin wrapper. Use format_for_provider(assembled, 'gemini') instead."""
+        result = format_for_provider(self, "gemini")
+        return f"{result['system_instruction']}\n\n---\n\n{result['prompt']}"
 
     def for_litellm_provider(self, provider_name: str) -> dict:
-        """OpenAI-shaped payload for LiteLLM-proxied providers (DeepSeek, Kimi, etc.)."""
-        return {
-            "system": self.context,
-            "messages": [{"role": "user", "content": self.instruction}],
-            "metadata": {"provider": provider_name, **self.metadata},
-        }
+        """Deprecated thin wrapper. Use format_for_provider(assembled, f'litellm:{provider_name}') instead."""
+        return format_for_provider(self, f"litellm:{provider_name}")
 
 
 class PromptAssembler:
@@ -263,9 +260,17 @@ def format_for_provider(assembled: "AssembledPrompt", provider: str) -> dict:
         {"system": "<L1+L2>", "prompt": "<L3>"}
         Ollama HTTP API has a native "system" field separate from "prompt".
 
+    litellm / litellm:<provider_name>:
+        {"messages": [{"role": "system", "content": "<L1+L2>"},
+                       {"role": "user", "content": "<L3>"}],
+         "metadata": {"provider": "<provider_name>", ...}}
+        OpenAI-compatible messages array. System context is a system-role message
+        (not a top-level "system" key) to match litellm.completion() actual contract.
+
     Args:
         assembled: AssembledPrompt from PromptAssembler.assemble().
-        provider:  One of "claude", "gemini", "codex", "ollama".
+        provider:  One of "claude", "gemini", "codex", "ollama", "litellm",
+                   or "litellm:<provider_name>" (e.g. "litellm:deepseek").
 
     Returns:
         Dict with provider-specific payload keys.
@@ -293,7 +298,17 @@ def format_for_provider(assembled: "AssembledPrompt", provider: str) -> dict:
             "prompt": assembled.instruction,
         }
 
+    if provider == "litellm" or provider.startswith("litellm:"):
+        provider_name = provider.split(":", 1)[1] if ":" in provider else "litellm"
+        return {
+            "messages": [
+                {"role": "system", "content": assembled.context},
+                {"role": "user", "content": assembled.instruction},
+            ],
+            "metadata": {"provider": provider_name, **assembled.metadata},
+        }
+
     raise ValueError(
         f"Unknown provider '{provider}'. "
-        "Supported: claude, gemini, codex, ollama"
+        "Supported: claude, gemini, codex, ollama, litellm, litellm:<provider_name>"
     )

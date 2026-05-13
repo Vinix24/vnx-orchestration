@@ -331,11 +331,12 @@ def test_for_claude_subprocess_equals_to_pipe_input(assembler: PromptAssembler) 
 
 
 def test_for_codex_subprocess_uses_dispatch_header(assembler: PromptAssembler) -> None:
-    """for_codex_subprocess() must use '# DISPATCH' markdown header."""
+    """for_codex_subprocess() delegates to format_for_provider('codex') — same as to_pipe_input()."""
     r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="x")
     pipe = r.for_codex_subprocess()
-    assert "# DISPATCH" in pipe
+    assert "DISPATCH INSTRUCTION:" in pipe
     assert pipe.endswith("x")
+    assert pipe == r.to_pipe_input()
 
 
 def test_for_gemini_subprocess_uses_simple_separator(assembler: PromptAssembler) -> None:
@@ -348,11 +349,45 @@ def test_for_gemini_subprocess_uses_simple_separator(assembler: PromptAssembler)
 
 
 def test_for_litellm_provider_openai_shape(assembler: PromptAssembler) -> None:
-    """for_litellm_provider() must return OpenAI-shaped dict with system + messages + metadata."""
+    """for_litellm_provider() must return messages-array dict with system role entry + metadata (ADV-1 fix)."""
     r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="x")
     result = r.for_litellm_provider("deepseek")
     assert isinstance(result, dict)
-    assert result["system"]
-    assert result["messages"][0]["role"] == "user"
-    assert result["messages"][0]["content"] == "x"
+    assert "system" not in result  # no top-level system key — system is in messages array
+    assert result["messages"][0]["role"] == "system"
+    assert result["messages"][0]["content"] == r.context
+    assert result["messages"][1]["role"] == "user"
+    assert result["messages"][1]["content"] == "x"
     assert result["metadata"]["provider"] == "deepseek"
+
+
+# ---------------------------------------------------------------------------
+# Wave 4.5 PR-2 — alignment + ADV-1 fix tests
+# ---------------------------------------------------------------------------
+
+def test_for_codex_subprocess_equals_format_for_provider_codex(assembler: PromptAssembler) -> None:
+    """for_codex_subprocess() output must equal format_for_provider(assembled, 'codex')['pipe_input']."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="align-check")
+    assert r.for_codex_subprocess() == format_for_provider(r, "codex")["pipe_input"]
+
+
+def test_for_gemini_subprocess_equals_format_for_provider_gemini(assembler: PromptAssembler) -> None:
+    """for_gemini_subprocess() must produce the same content as combining format_for_provider('gemini') fields."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="align-check")
+    ffp = format_for_provider(r, "gemini")
+    expected = f"{ffp['system_instruction']}\n\n---\n\n{ffp['prompt']}"
+    assert r.for_gemini_subprocess() == expected
+
+
+def test_for_litellm_provider_returns_messages_with_system_role(assembler: PromptAssembler) -> None:
+    """ADV-1 fix: system context must be messages[0] with role='system', not a top-level 'system' key."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="litellm-test")
+    result = r.for_litellm_provider("kimi")
+    assert isinstance(result.get("messages"), list)
+    assert len(result["messages"]) == 2
+    assert result["messages"][0]["role"] == "system"
+    assert result["messages"][0]["content"] == r.context
+    assert result["messages"][1]["role"] == "user"
+    assert result["messages"][1]["content"] == "litellm-test"
+    assert "system" not in result
+    assert result["metadata"]["provider"] == "kimi"
