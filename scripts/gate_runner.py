@@ -214,12 +214,126 @@ class GateRunner:
 
     @staticmethod
     def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
-        """Build enriched prompt; passes gate_runner.subprocess so tests can patch it."""
-        return _vtx.build_gemini_prompt(request_payload, subprocess_run=subprocess.run)
+        """Build enriched prompt via PromptAssembler (reviewer role + L3 diff + verdict).
+
+        subprocess.run is resolved from gate_runner module scope so tests can patch
+        gate_runner.subprocess.run without changing patch targets.
+        """
+        from prompt_assembler import PromptAssembler, format_for_provider
+
+        files = _vtx._gather_changed_files(
+            request_payload.get("changed_files", []), subprocess.run
+        )
+        branch = request_payload.get("branch", "")
+        risk = request_payload.get("risk_class", "medium")
+        pr = request_payload.get("pr_number", "")
+        max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
+
+        file_content = _vtx._inline_file_contents(
+            files, max_bytes, branch=branch, subprocess_run=subprocess.run,
+        )
+
+        review_instructions = (
+            f"Review PR #{pr} on branch {branch} (risk: {risk}).\n"
+            f"Changed files: {', '.join(files)}\n\n"
+            "Perform a thorough code review of the file contents below.\n\n"
+            "## Grounding rule (strict)\n\n"
+            "Only flag findings about code present in the FILE blocks below. "
+            "Every symbol, decorator, function, class, or path you reference in a finding "
+            "must be quotable verbatim from one of the FILE blocks. "
+            "Do NOT invent file paths or names that are not in the 'Changed files' list above. "
+            "If you cannot point to a specific line in a FILE block, do not report the finding.\n\n"
+            "Respond with a structured JSON verdict only:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "pass|fail|blocked",\n'
+            '  "findings": [{"severity": "error|warning|info", "message": "..."}],\n'
+            '  "residual_risk": "description of remaining risks or null",\n'
+            '  "rerun_required": false,\n'
+            '  "rerun_reason": null\n'
+            "}\n"
+            "```\n"
+        )
+
+        l3_instruction = f"{review_instructions}\n{file_content}"
+
+        assembled = PromptAssembler().assemble(
+            dispatch_metadata={
+                "role": "reviewer",
+                "pr_id": request_payload.get("pr_id", ""),
+                "branch": branch,
+                "risk_class": risk,
+            },
+            instruction=l3_instruction,
+        )
+        result = format_for_provider(assembled, "gemini")
+        return f"{result['system_instruction']}\n\n---\n\n{result['prompt']}"
 
     @staticmethod
     def _build_codex_prompt(request_payload: Dict[str, Any]) -> str:
-        return _vtx.build_codex_prompt(request_payload, subprocess_run=subprocess.run)
+        """Build enriched prompt via PromptAssembler (reviewer role + L3 diff + verdict).
+
+        subprocess.run is resolved from gate_runner module scope so tests can patch
+        gate_runner.subprocess.run without changing patch targets.
+        """
+        from prompt_assembler import PromptAssembler, format_for_provider
+
+        branch = request_payload.get("branch", "")
+        risk = request_payload.get("risk_class", "medium")
+        max_bytes = int(os.environ.get("VNX_GEMINI_MAX_PROMPT_BYTES", "100000"))
+
+        files = _vtx._gather_changed_files(
+            request_payload.get("changed_files", []), subprocess.run
+        )
+        diff_content = _vtx._inline_file_contents(
+            files, max_bytes, branch=branch, subprocess_run=subprocess.run,
+        )
+
+        verdict_template = (
+            "Perform a thorough code review of the file contents above.\n\n"
+            "## Severity rules (strict)\n\n"
+            "Default `severity` is `warning`. Promote to `error` ONLY when the finding's impact includes one of:\n"
+            "- Data loss or corruption (database, files, append-only logs)\n"
+            "- False-positive PR closure (closure_verifier passing when it should block)\n"
+            "- False-negative PR rejection (closure_verifier blocking when it should pass)\n"
+            "- Security boundary breach (auth bypass, secret leak, privilege escalation)\n"
+            "- Cross-dispatch state corruption (one dispatch's data leaking into another's audit trail)\n\n"
+            "Use `info` for advisory-only observations.\n\n"
+            "Findings about the following are NOT `error`-severity by default:\n"
+            "- Style, formatting, log shape (stderr vs stdout, plain vs JSON)\n"
+            "- Truncated-but-named hash fields (unless a caller compares to a real full SHA)\n"
+            "- Hardcoded test fixtures (only when tests run elsewhere, mark out-of-scope)\n"
+            "- Operator-toggled surfaces (when toggling resolves the issue)\n\n"
+            "Findings about lines NOT in this PR's diff: mark as `severity: info` AND set `\"out_of_scope\": true`.\n"
+            "Findings introduced by a previous fix-round commit: mark as `severity: warning` AND set `\"introduced_by_prior_fix\": true`.\n\n"
+            "Respond with a structured JSON verdict only:\n"
+            "```json\n"
+            "{\n"
+            '  "verdict": "pass|fail|blocked",\n'
+            '  "findings": [{"severity": "error|warning|info", "message": "...", "out_of_scope": false, "introduced_by_prior_fix": false}],\n'
+            '  "residual_risk": "description of remaining risks or null",\n'
+            '  "rerun_required": false,\n'
+            '  "rerun_reason": null\n'
+            "}\n"
+            "```\n"
+        )
+
+        l3_instruction = (
+            f"Review the following code changes on branch {branch} (risk: {risk}).\n\n"
+            f"{diff_content}\n\n"
+            f"{verdict_template}"
+        )
+
+        assembled = PromptAssembler().assemble(
+            dispatch_metadata={
+                "role": "reviewer",
+                "pr_id": request_payload.get("pr_id", ""),
+                "branch": branch,
+                "risk_class": risk,
+            },
+            instruction=l3_instruction,
+        )
+        return format_for_provider(assembled, "codex")["pipe_input"]
 
     # Subprocess execution — stays here so tests can patch gate_runner.subprocess.Popen,
     # gate_runner.os.read, gate_runner.select.select, gate_runner.os.getpgid
