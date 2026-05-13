@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -29,6 +30,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import shadow_verifier as _shadow_verifier
@@ -291,6 +294,64 @@ class InjectionResult:
             "payload_chars": self.payload_chars,
             "item_ids": [item.item_id for item in self.items],
         }
+
+
+# ---------------------------------------------------------------------------
+# IntelligenceContext — per-provider serialization container
+# ---------------------------------------------------------------------------
+
+def _format_items_markdown(items: List["IntelligenceItem"]) -> str:
+    """Group items by class and render as full markdown sections."""
+    by_class: Dict[str, List["IntelligenceItem"]] = {}
+    for item in items:
+        by_class.setdefault(item.item_class, []).append(item)
+    parts: List[str] = []
+    if "failure_prevention" in by_class:
+        parts.append("### Antipatterns to avoid")
+        for item in by_class["failure_prevention"]:
+            parts.append(f"- **[CRITICAL] {item.title}**: {item.content}")
+        parts.append("")
+    if "proven_pattern" in by_class:
+        parts.append("### Proven success patterns")
+        for item in by_class["proven_pattern"]:
+            parts.append(f"- **{item.title}**: {item.content}")
+        parts.append("")
+    if "recent_comparable" in by_class:
+        parts.append("### Tag warnings")
+        for item in by_class["recent_comparable"]:
+            parts.append(f"- **{item.title}**: {item.content}")
+        parts.append("")
+    return "\n".join(parts)
+
+
+def _format_items_compact(items: List["IntelligenceItem"]) -> str:
+    """Compact numbered format for providers where brevity is preferred."""
+    lines: List[str] = ["## Intelligence Context"]
+    for i, item in enumerate(items, 1):
+        cls = item.item_class.replace("_", " ").title()
+        lines.append(f"{i}. [{cls}] **{item.title}**: {item.content}")
+    return "\n".join(lines)
+
+
+@dataclass
+class IntelligenceContext:
+    """Provider-agnostic container for an intelligence injection result."""
+    result: InjectionResult
+    dispatch_id: str
+
+    def serialize_for(self, provider: str) -> str:
+        """Return provider-specific markdown for the prompt intelligence section.
+
+        Returns an empty string when the result contains no items.
+        Providers:
+          - 'codex': compact numbered list (brevity-first)
+          - 'gemini', 'litellm', others: full markdown sections with headers
+        """
+        if not self.result.items:
+            return ""
+        if provider == "codex":
+            return _format_items_compact(self.result.items)
+        return _format_items_markdown(self.result.items)
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +903,8 @@ class IntelligenceSelector:
 
         Returns the event_id or None if no coord DB available.
         """
+        if not result.dispatch_id or not str(result.dispatch_id).strip():
+            raise ValueError("emit_event: dispatch_id required for audit attribution")
         state_dir = coord_state_dir or self._coord_state_dir
         if state_dir is None:
             return None
@@ -884,6 +947,8 @@ class IntelligenceSelector:
         Also writes per-item rows to pattern_usage in quality_intelligence.db so
         the feedback loop can look up which patterns were offered for a dispatch.
         """
+        if not result.dispatch_id or not str(result.dispatch_id).strip():
+            raise ValueError("record_injection: dispatch_id required for audit attribution")
         state_dir = coord_state_dir or self._coord_state_dir
         if state_dir is None:
             return
@@ -2393,5 +2458,54 @@ def select_intelligence(
         selector.emit_event(result)
         selector.record_injection(result)
         return result
+    finally:
+        selector.close()
+
+
+def build_intelligence_context(
+    *,
+    dispatch_id: str = "",
+    role: str = "",
+    pr_id: Optional[str] = None,
+    dispatch_paths: Optional[List[str]] = None,
+    quality_db_path: Optional[Path] = None,
+    coord_state_dir: Optional[Path] = None,
+) -> Optional[IntelligenceContext]:
+    """Build an IntelligenceContext for adapter prompt assembly.
+
+    Returns None immediately when dispatch_id is empty or whitespace — no
+    audit rows are written (intelligence_injections / coordination_events).
+    Callers must supply a real dispatch_id for injection and audit to fire.
+
+    On success, returns an IntelligenceContext whose serialize_for(provider)
+    method yields provider-specific markdown (or '' when no items selected).
+    """
+    if not dispatch_id or not str(dispatch_id).strip():
+        logger.debug(
+            "build_intelligence_context: empty dispatch_id, skipping injection (no audit write)"
+        )
+        return None
+
+    selector = IntelligenceSelector(
+        quality_db_path=quality_db_path,
+        coord_db_state_dir=coord_state_dir,
+    )
+    try:
+        result = selector.select(
+            dispatch_id=dispatch_id,
+            injection_point="dispatch_create",
+            skill_name=role or "",
+            dispatch_paths=dispatch_paths or [],
+            pr_id=pr_id,
+        )
+        try:
+            selector.emit_event(result, coord_state_dir=coord_state_dir)
+        except Exception as exc:
+            logger.debug("build_intelligence_context: emit_event failed for %s: %s", dispatch_id, exc)
+        try:
+            selector.record_injection(result, coord_state_dir=coord_state_dir)
+        except Exception as exc:
+            logger.debug("build_intelligence_context: record_injection failed for %s: %s", dispatch_id, exc)
+        return IntelligenceContext(result=result, dispatch_id=dispatch_id)
     finally:
         selector.close()
