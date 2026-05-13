@@ -79,6 +79,55 @@ def fetch_merged_prs(limit: int = 100) -> list[dict]:
         return []
 
 
+def fetch_recent_git_merged_prs(days: int = 14) -> list[dict]:
+    """Read git log for commits with PR numbers in the last `days` days.
+
+    Works for both merge commits and squash-merged PRs (the common GitHub
+    pattern where squash-merge commit subject ends with '(#NNN)').
+
+    Returns list of dicts with keys: number, title, mergedAt, wave.
+    Falls back to [] on any failure.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git", "log",
+                f"--since={days} days ago",
+                "--format=%H\t%ai\t%s",
+            ],
+            capture_output=True, text=True, timeout=20,
+            cwd=str(_REPO_ROOT),
+        )
+        if result.returncode != 0:
+            return []
+        prs: list[dict] = []
+        _pr_re = re.compile(r"\(#(\d+)\)$")
+        _wave_re = re.compile(r"\b(wave[\s\-]?[\d.]+|w[\d.]+)\b", re.IGNORECASE)
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t", 2)
+            if len(parts) < 3:
+                continue
+            _sha, merged_at, subject = parts
+            pr_match = _pr_re.search(subject)
+            if pr_match is None:
+                continue
+            number = int(pr_match.group(1))
+            wave_match = _wave_re.search(subject)
+            wave = wave_match.group(0).lower() if wave_match else ""
+            prs.append({
+                "number": number,
+                "title": subject,
+                "mergedAt": merged_at,
+                "wave": wave,
+            })
+        return prs
+    except Exception:
+        return []
+
+
 def load_roadmap(roadmap_path: Optional[Path] = None) -> list[dict]:
     """Load planned features from ROADMAP.yaml; returns [] on any failure."""
     path = roadmap_path or (_REPO_ROOT / "ROADMAP.yaml")
@@ -230,11 +279,22 @@ def _pr_label(pr_nums: list[int], idx: int) -> str:
 # Markdown renderer
 # ---------------------------------------------------------------------------
 
+def _group_recent_by_wave(git_prs: list[dict]) -> dict[str, list[dict]]:
+    """Group git merge commits by wave tag. Key '' = no wave tag."""
+    groups: dict[str, list[dict]] = {}
+    for pr in git_prs:
+        wave = (pr.get("wave") or "").strip()
+        groups.setdefault(wave, []).append(pr)
+    return groups
+
+
 def generate_feature_plan(
     register_events: list[dict],
     merged_prs: list[dict],
     roadmap_features: list[dict],
     now: Optional[datetime] = None,
+    recent_git_prs: Optional[list[dict]] = None,
+    recent_days: int = 14,
 ) -> str:
     """Generate FEATURE_PLAN.md content from the three sources."""
     if now is None:
@@ -249,8 +309,25 @@ def generate_feature_plan(
         "",
     ]
 
+    # --- Recently Merged (from git log) ---
+    lines.append("## Recently Merged")
+    lines.append(f"_Last {recent_days} days — sourced from git merge commits._")
+    git_prs = recent_git_prs if recent_git_prs is not None else []
+    if git_prs:
+        by_wave = _group_recent_by_wave(git_prs)
+        for wave_key in sorted(by_wave.keys()):
+            label = f"**{wave_key.upper()}**" if wave_key else "**Other**"
+            lines.append(f"\n{label}")
+            for pr in by_wave[wave_key]:
+                number = pr.get("number", "?")
+                title = pr.get("title") or ""
+                merged_at = (pr.get("mergedAt") or "")[:10]
+                lines.append(f"- #{number} — {title} ({merged_at})")
+    else:
+        lines.append("\n_No merge commits found in the last 14 days (or git unavailable)._")
+
     # --- Active features ---
-    lines.append("## Active features")
+    lines.append("\n## Active features")
     if sections["active"]:
         for feat in sections["active"]:
             all_pr_nums = sorted(feat["merged_prs"] + feat["open_prs"])
@@ -309,6 +386,7 @@ def write_feature_plan(
     output_path: Optional[Path] = None,
     dry_run: bool = False,
     state_dir: Optional[Path] = None,
+    recent_days: int = 14,
 ) -> str:
     """Read all sources, generate content, write to output_path. Returns content."""
     if output_path is None:
@@ -317,8 +395,13 @@ def write_feature_plan(
     register_events = read_register_events(state_dir=state_dir)
     merged_prs = fetch_merged_prs()
     roadmap_features = load_roadmap()
+    recent_git_prs = fetch_recent_git_merged_prs(days=recent_days)
 
-    content = generate_feature_plan(register_events, merged_prs, roadmap_features)
+    content = generate_feature_plan(
+        register_events, merged_prs, roadmap_features,
+        recent_git_prs=recent_git_prs,
+        recent_days=recent_days,
+    )
 
     if not dry_run:
         output_path.parent.mkdir(parents=True, exist_ok=True)

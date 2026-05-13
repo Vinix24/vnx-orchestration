@@ -108,6 +108,39 @@ This is the architectural stabilization moment: dispatch envelope, receipt schem
 ### Known open items deferred to v1.0.0 final
 - OI-1374 (dashboard `/agent-stream` SSE lifecycle regression — separate-PR cleanup)
 
+### Added — Wave 4 OTel observability foundation (#468)
+- **PR-W4.1 (#468)** — opt-in OpenTelemetry export wired into subprocess_dispatch completion. Emits `dispatch_completion_count` metric + spans. Env-gated via `OTEL_EXPORTER_OTLP_ENDPOINT`; no-op when unset.
+
+### Added — Wave 2 package extraction foundation (#469, #478)
+- **PR-W2.0a (#469)** package skeleton with `pyproject.toml` + `vnx_core` + `vnx_cli` + smoke tests + `docs/operations/PACKAGE_BUILD.md`
+- **PR-W2.1a-redo (#478)** First module migration: `function_size_gate.py` → `vnx_core`, with `sys.path`-fallback shim in `scripts/lib/`. Demonstrates migration pattern for non-`__file__`-dependent modules.
+
+### Added — Wave 4.5 provider parity (#471, #472, #477, #479)
+- **PR-W4.5.1 (#471)** `PromptAssembler` provider-agnostic methods (`for_claude_subprocess`, `for_codex_subprocess`, `for_gemini_subprocess`, `for_litellm_provider`). Existing claude path byte-identical.
+- **PR-W4.5.2 (#472)** Codex + Gemini adapters use `PromptAssembler`. `AGENTS.md` + `GEMINI.md` tri-file activated by `vnx init` bootstrap.
+- **PR-W4.5.2b (#479)** Gate reviewer prompts use `gh pr diff` authoritative source. New `scripts/lib/prompts/roles/reviewer.md`. `PromptAssembler` skips L1 `base_worker` for reviewer role.
+- **PR-W4.5.3 (#477)** Intelligence injection per-provider with empty-`dispatch_id` guard (audit-safe).
+
+### Fixed — Security + governance
+- **OI-1369 (#465)** Path traversal in `vnx_paths.resolve_central_data_dir` — strict regex `^[a-z][a-z0-9-]{1,31}$`
+- **OI-1294 (#467)** `compact_open_items_digest` function-size 76→34 via mechanical `_coid_` helper extraction
+- **OI-1415 (#462)** `review_contract.content_hash` backward-compat (omit empty `deleted_files`)
+
+### Added — Infrastructure
+- **PR (#464)** T0 canonical `subprocess_dispatch.py` routing rule in templates + skill
+- **PR (#463)** Default `VNX_QUEUE_POPUP_ENABLED=0` in init-time preset templates
+- **PR (#480)** Vertex routing alternative for gemini quota workaround (`docs/operations/GEMINI_VERTEX_ROUTING.md`)
+
+### Plumbing
+- **PR (#462)** CFX-W5-2 — `pr_id` propagation + headless daemon entry points + `IndexCache` + net-deletion gate + `deleted_files` plumbing for Wave 5 smart-context
+
+### Deferred (with OIs for follow-up)
+- PR #466 OI-1370 race fix — needs systemic locking refactor across all writer paths
+- PR #470 Wave 2 Phase 1a `vnx_paths` — uses `__file__`, blocked until decoupled
+- PR #473 Wave 4.5 PR-2b superseded by #479
+- PR #474 Wave 4.5 PR-3 superseded by #477
+- PR #475 OI-1370 redo attempt — defer to systemic refactor
+
 ## v0.10.0 — 2026-04-30
 
 Chain summary: 27 PRs landed across governance hardening, headless audit parity, supervisor pack, CFX thematic refactors, P0 intelligence loop fixes.

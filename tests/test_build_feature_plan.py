@@ -28,6 +28,7 @@ from build_feature_plan import (
     _AUTOGEN_HEADER,
     _build_feature_sections,
     _group_consecutive,
+    _group_recent_by_wave,
     generate_feature_plan,
 )
 
@@ -218,3 +219,68 @@ class TestGenerateFeaturePlan:
     def test_no_planned_placeholder_when_empty(self):
         content = generate_feature_plan([], [], [], now=_NOW)
         assert "_No planned features" in content
+
+
+# ---------------------------------------------------------------------------
+# Recently Merged — git log integration
+# ---------------------------------------------------------------------------
+
+_GIT_PRS = [
+    {"number": 479, "title": "feat(wave4.5): PR-2b redo — gate reviewer prompts", "mergedAt": "2026-05-13T10:00:00+00:00", "wave": "wave4.5"},
+    {"number": 478, "title": "feat(wave2): Phase 1a redo — function_size_gate migration", "mergedAt": "2026-05-12T08:00:00+00:00", "wave": "wave2"},
+    {"number": 480, "title": "feat(gates): validate Vertex routing path", "mergedAt": "2026-05-13T12:00:00+00:00", "wave": ""},
+    {"number": 477, "title": "feat(wave4.5): PR-3 redo — intelligence injection per-provider", "mergedAt": "2026-05-12T14:00:00+00:00", "wave": "wave4.5"},
+]
+
+
+class TestRecentlyMergedSection:
+    def test_recently_merged_section_header_present(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=_GIT_PRS)
+        assert "## Recently Merged" in content
+
+    def test_merged_pr_numbers_appear(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=_GIT_PRS)
+        assert "#479" in content
+        assert "#478" in content
+        assert "#480" in content
+        assert "#477" in content
+
+    def test_wave_grouping_labels_appear(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=_GIT_PRS)
+        assert "WAVE4.5" in content or "wave4.5" in content.lower()
+        assert "WAVE2" in content or "wave2" in content.lower()
+
+    def test_no_wave_prs_grouped_as_other(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=_GIT_PRS)
+        assert "Other" in content
+
+    def test_empty_git_prs_shows_placeholder(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=[])
+        assert "No merge commits found" in content
+
+    def test_none_git_prs_shows_placeholder(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=None)
+        assert "No merge commits found" in content
+
+    def test_group_recent_by_wave_groups_correctly(self):
+        groups = _group_recent_by_wave(_GIT_PRS)
+        assert "wave4.5" in groups
+        assert len(groups["wave4.5"]) == 2
+        assert "wave2" in groups
+        assert len(groups["wave2"]) == 1
+        assert "" in groups
+        assert len(groups[""]) == 1
+
+    def test_group_recent_by_wave_empty_input(self):
+        groups = _group_recent_by_wave([])
+        assert groups == {}
+
+    def test_merged_at_date_shown(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=_GIT_PRS)
+        assert "2026-05-13" in content
+
+    def test_recently_merged_appears_before_active_section(self):
+        content = generate_feature_plan([], [], [], now=_NOW, recent_git_prs=_GIT_PRS)
+        recently_pos = content.index("## Recently Merged")
+        active_pos = content.index("## Active features")
+        assert recently_pos < active_pos
