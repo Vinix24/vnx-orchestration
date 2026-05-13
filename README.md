@@ -187,7 +187,24 @@ Zero human intervention. Zero lost work. The receipt ledger maintains a complete
 
 ## What's new since v1.0.0-rc1 (May 2026)
 
-> Strategic replan v1.2 organizes work into 6 waves. v1.0.0-rc1 itself shipped Wave 0 + 0.5 (architectural stabilization + Phase 6 P4 migration). Wave 1 (shadow read cutover) and Wave 5 P0/P1 (smart-context injection) shipped on top of the rc1 baseline and are still pending burn-in before the v1.0.0 final tag — see [CHANGELOG.md](CHANGELOG.md) "Unreleased" for the post-rc1 PR list.
+> Strategic replan v1.2 organizes work into 6 waves. v1.0.0-rc1 itself shipped Wave 0 + 0.5 (architectural stabilization + Phase 6 P4 migration). Wave 1 (shadow read cutover) and Wave 5 P0/P1 (smart-context injection) shipped on top of the rc1 baseline and are still pending burn-in before the v1.0.0 final tag. 12 additional PRs (#462–#480) shipped post-rc1 — see [CHANGELOG.md](CHANGELOG.md) "Unreleased" for the full PR list.
+
+### Wave 4.5 — Provider parity (#471, #472, #477, #479)
+`PromptAssembler` now has provider-agnostic methods for Claude, Codex, Gemini, and LiteLLM. Codex + Gemini adapters use it. Gate reviewer prompts use `gh pr diff` as the authoritative source (new `reviewer.md` role prompt). Intelligence injection is now per-provider with an audit-safe empty-`dispatch_id` guard.
+
+### Wave 2 — Package extraction foundation (#469, #478)
+`pyproject.toml` + `vnx_core` + `vnx_cli` package skeleton with smoke tests and `docs/operations/PACKAGE_BUILD.md`. First module migration: `function_size_gate.py` → `vnx_core` with a `sys.path`-fallback shim in `scripts/lib/` that demonstrates the migration pattern for non-`__file__`-dependent modules.
+
+### Wave 4 — OTel observability foundation (#468)
+Opt-in OpenTelemetry export wired into subprocess_dispatch completion. Emits `dispatch_completion_count` metric + spans. Env-gated via `OTEL_EXPORTER_OTLP_ENDPOINT`; fully no-op when unset — zero overhead for projects not using OTel.
+
+### Security + governance fixes (#462, #465, #467)
+- OI-1369 (#465): path traversal hardening in `vnx_paths.resolve_central_data_dir` — strict regex `^[a-z][a-z0-9-]{1,31}$`
+- OI-1294 (#467): `compact_open_items_digest` function-size 76→34 via mechanical helper extraction
+- OI-1415 (#462): `review_contract.content_hash` backward-compat for empty `deleted_files`
+
+### Infrastructure (#462, #463, #464, #480)
+T0 canonical `subprocess_dispatch.py` routing in templates + skill (#464). `VNX_QUEUE_POPUP_ENABLED=0` as default in preset templates (#463). Vertex routing documented for Gemini quota workarounds (`docs/operations/GEMINI_VERTEX_ROUTING.md`, #480). `pr_id` propagation + `IndexCache` + net-deletion gate + `deleted_files` plumbing for Wave 5 smart-context (#462).
 
 ### Architectural stabilization — 14 ADRs locked (v1.0.0-rc1)
 Decisions previously implicit are now captured as numbered ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`). Highlights: ADR-003 OAuth-only Claude routing (no SDK), ADR-005 NDJSON ledger as primary substrate, ADR-008 dual-LLM adversarial review with `contract_hash` evidence binding, ADR-011 manager+worker hierarchy with Conditional/Pilot subagents, ADR-014 autonomous chain dispatch with SHA-256 consent token. From this release forward, dispatch envelope, receipt schema, and ledger format are backwards-compatibility-honoring.
