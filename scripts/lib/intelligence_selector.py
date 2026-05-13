@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -29,6 +30,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+_logger = logging.getLogger(__name__)
 
 try:
     import shadow_verifier as _shadow_verifier
@@ -291,6 +294,128 @@ class InjectionResult:
             "payload_chars": self.payload_chars,
             "item_ids": [item.item_id for item in self.items],
         }
+
+
+# ---------------------------------------------------------------------------
+# Per-provider structured context
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IntelligenceContext:
+    """Structured intelligence payload for per-provider serialization.
+
+    Named fields hold Wave 5 direct-injection item classes.  _standard_items
+    stores failure_prevention / proven_pattern / recent_comparable items for
+    byte-identical Claude-path rendering.
+
+    Build via build_intelligence_context() — do not construct manually.
+    """
+
+    prior_round_findings: list  # IntelligenceItem objects (class "prior_round_finding")
+    adr_matches: list           # IntelligenceItem objects (class "adr_relevant")
+    code_anchors: list          # IntelligenceItem objects (class "code_anchor")
+    operator_memory: list       # IntelligenceItem objects (class "operator_memory")
+    schema_intro: dict | None   # first schema_section item dict, or None
+    _standard_items: list = field(default_factory=list)
+
+    @classmethod
+    def from_injection_result(cls, result: "InjectionResult") -> "IntelligenceContext":
+        """Build from InjectionResult, categorizing items by class."""
+        standard: list = []
+        prior: list = []
+        adrs: list = []
+        anchors: list = []
+        memory: list = []
+        schema: dict | None = None
+        for item in result.items:
+            c = item.item_class
+            if c == "prior_round_finding":
+                prior.append(item)
+            elif c == "adr_relevant":
+                adrs.append(item)
+            elif c == "code_anchor":
+                anchors.append(item)
+            elif c == "operator_memory":
+                memory.append(item)
+            elif c == "schema_section":
+                if schema is None:
+                    schema = item.to_dict()
+            else:
+                standard.append(item)
+        return cls(
+            prior_round_findings=prior,
+            adr_matches=adrs,
+            code_anchors=anchors,
+            operator_memory=memory,
+            schema_intro=schema,
+            _standard_items=standard,
+        )
+
+    def serialize_for(self, provider: str) -> str:
+        """Return intelligence as formatted text for the given provider.
+
+        claude / gemini / litellm:* / unknown — markdown with ### headers.
+        codex — same content prefixed with a CONTEXT: header line.
+
+        Byte-identity guarantee: when all Wave 5 fields are empty, output for
+        'claude' is identical to _format_intelligence_items(_standard_items).
+        """
+        content = self._render_markdown()
+        if not content:
+            return ""
+        if (provider or "").split(":")[0] == "codex":
+            return f"CONTEXT:\n\n{content}"
+        return content
+
+    def _render_markdown(self) -> str:
+        """Render all items as markdown sections."""
+        parts: list[str] = []
+        by_class: dict[str, list] = {}
+        for item in self._standard_items:
+            by_class.setdefault(item.item_class, []).append(item)
+        if "failure_prevention" in by_class:
+            parts.append("### Antipatterns to avoid")
+            for item in by_class["failure_prevention"]:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if "proven_pattern" in by_class:
+            parts.append("### Proven success patterns")
+            for item in by_class["proven_pattern"]:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if "recent_comparable" in by_class:
+            parts.append("### Tag warnings")
+            for item in by_class["recent_comparable"]:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if self.prior_round_findings:
+            parts.append("### Prior round findings")
+            for item in self.prior_round_findings:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if self.adr_matches:
+            parts.append("### ADR matches")
+            for item in self.adr_matches:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if self.code_anchors:
+            parts.append("### Code anchors")
+            for item in self.code_anchors:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if self.operator_memory:
+            parts.append("### Operator memory")
+            for item in self.operator_memory:
+                parts.append(f"- **{item.title}**: {item.content}")
+            parts.append("")
+        if self.schema_intro:
+            title = self.schema_intro.get("title", "Schema")
+            content = self.schema_intro.get("content", "")
+            if content:
+                parts.append("### Schema context")
+                parts.append(f"- **{title}**: {content}")
+                parts.append("")
+        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -2395,3 +2520,79 @@ def select_intelligence(
         return result
     finally:
         selector.close()
+
+
+def _resolve_state_dir() -> Path:
+    """Resolve VNX state directory from environment (mirrors state_paths._default_state_dir)."""
+    env = os.environ.get("VNX_STATE_DIR", "")
+    if env:
+        return Path(env)
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    if data_dir:
+        return Path(data_dir) / "state"
+    return Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
+
+
+def build_intelligence_context(
+    dispatch_id: str,
+    role: str,
+    *,
+    pr_id: Optional[str] = None,
+    dispatch_paths: Optional[List[str]] = None,
+    instruction_text: str = "",
+    state_dir: Optional[Path] = None,
+) -> Optional[IntelligenceContext]:
+    """Run IntelligenceSelector and return a structured IntelligenceContext (best-effort).
+
+    Performs all side effects: emit_event, record_injection, stamp_source_dispatch_ids.
+    Returns None when no items are selected or on any failure so callers can safely
+    skip intelligence injection.
+
+    Args:
+        dispatch_id:      Dispatch identifier for event emission and source stamping.
+        role:             Skill/role name used for task-class resolution.
+        pr_id:            Optional PR identifier forwarded to selector.
+        dispatch_paths:   Optional list of changed file paths forwarded to selector.
+        instruction_text: Raw instruction text forwarded to selector.
+        state_dir:        Override for the VNX state directory.  Defaults to
+                          VNX_STATE_DIR / VNX_DATA_DIR / .vnx-data/state resolution.
+    """
+    try:
+        resolved_state_dir = state_dir or _resolve_state_dir()
+        quality_db_path = resolved_state_dir / "quality_intelligence.db"
+        selector = IntelligenceSelector(
+            quality_db_path=quality_db_path,
+            coord_db_state_dir=resolved_state_dir,
+        )
+        try:
+            result = selector.select(
+                dispatch_id=dispatch_id,
+                injection_point="dispatch_create",
+                skill_name=role or "",
+                dispatch_paths=dispatch_paths or [],
+                instruction_text=instruction_text or "",
+                pr_id=pr_id,
+            )
+            try:
+                selector.emit_event(result, coord_state_dir=resolved_state_dir)
+            except Exception as exc:
+                _logger.debug("build_intelligence_context: emit_event failed %s: %s", dispatch_id, exc)
+            try:
+                selector.record_injection(result, coord_state_dir=resolved_state_dir)
+            except Exception as exc:
+                _logger.debug("build_intelligence_context: record_injection failed %s: %s", dispatch_id, exc)
+            try:
+                selector.stamp_source_dispatch_ids(result)
+            except Exception as exc:
+                _logger.debug(
+                    "build_intelligence_context: stamp_source_dispatch_ids failed %s: %s",
+                    dispatch_id, exc,
+                )
+        finally:
+            selector.close()
+        if not result.items:
+            return None
+        return IntelligenceContext.from_injection_result(result)
+    except Exception as exc:
+        _logger.warning("build_intelligence_context failed (%s); returning None", exc)
+        return None

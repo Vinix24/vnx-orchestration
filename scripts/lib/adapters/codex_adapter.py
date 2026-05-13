@@ -632,18 +632,32 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
         """Build prompt from instruction + inline file contents.
 
         When role or dispatch_metadata is provided, routes through PromptAssembler
-        (L1 base rules + L2 role context + L3 instruction). Falls back to raw
-        instruction+files when neither is given (backward compat).
+        (L1 base rules + L2 role context + L3 instruction) with Wave 5 intelligence
+        injected for codex. Falls back to raw instruction+files when neither is
+        given (backward compat).
         """
         payload = {"changed_files": changed_files}
         file_contents = collect_file_contents(payload, subprocess_run=subprocess.run)
         full_instruction = f"{instruction}\n\n{file_contents}" if file_contents else instruction
 
         if role or dispatch_metadata:
+            from intelligence_selector import build_intelligence_context  # noqa: PLC0415
             from prompt_assembler import PromptAssembler, format_for_provider
+
+            meta = dispatch_metadata or {}
+            intel_ctx = build_intelligence_context(
+                dispatch_id=(meta).get("dispatch_id", ""),
+                role=role or "",
+                pr_id=(meta).get("pr_id") or (meta).get("pr"),
+                dispatch_paths=(meta).get("dispatch_paths", []),
+                instruction_text=instruction,
+            )
+            intel_markdown = intel_ctx.serialize_for("codex") if intel_ctx else ""
+            l3_payload = f"{intel_markdown}\n\n{full_instruction}" if intel_markdown else full_instruction
+
             assembled = PromptAssembler().assemble(
-                dispatch_metadata={"role": role, **(dispatch_metadata or {})},
-                instruction=full_instruction,
+                dispatch_metadata={"role": role, **meta},
+                instruction=l3_payload,
             )
             return format_for_provider(assembled, "codex")["pipe_input"]
 

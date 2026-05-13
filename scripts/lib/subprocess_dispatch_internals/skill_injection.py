@@ -74,65 +74,29 @@ def _build_intelligence_section(
 ) -> str:
     """Return formatted intelligence items as markdown, or empty string (best-effort).
 
-    Calls IntelligenceSelector to gather antipatterns, success patterns, and
-    recent comparable dispatches from quality_intelligence.db.  After selecting,
-    emits the coordination event and records the injection (intelligence_injections
-    + pattern_usage + dispatch_pattern_offered) so the post-dispatch confidence
-    feedback loop has dispatch-scoped rows to update.  Any import or DB failure
-    is caught and logged — dispatch proceeds without intelligence.
+    Delegates to build_intelligence_context() for selection + side effects, then
+    serializes for the Claude provider.  The output is byte-identical to the prior
+    _format_intelligence_items path for standard item classes (regression-tested).
 
     dispatch_paths, instruction_text, pr_id are forwarded to selector.select() so
     W5 item classes (adr_relevant, code_anchor, operator_memory, schema_section,
     prior_round_finding) can fire in production dispatches.
     """
     try:
-        from intelligence_selector import IntelligenceSelector  # noqa: PLC0415
-        # Look up _default_state_dir via subprocess_dispatch namespace so test
-        # monkeypatches at the facade ("subprocess_dispatch._default_state_dir")
-        # are honoured when this helper is called directly by tests.
+        from intelligence_selector import build_intelligence_context  # noqa: PLC0415
         import subprocess_dispatch as _sd
         state_dir = _sd._default_state_dir()
-        quality_db_path = state_dir / "quality_intelligence.db"
-        selector = IntelligenceSelector(
-            quality_db_path=quality_db_path,
-            coord_db_state_dir=state_dir,
+        ctx = build_intelligence_context(
+            dispatch_id=dispatch_id,
+            role=role or "",
+            pr_id=pr_id,
+            dispatch_paths=dispatch_paths or [],
+            instruction_text=instruction_text or "",
+            state_dir=state_dir,
         )
-        try:
-            result = selector.select(
-                dispatch_id=dispatch_id,
-                injection_point="dispatch_create",
-                skill_name=role or "",
-                dispatch_paths=dispatch_paths or [],
-                instruction_text=instruction_text or "",
-                pr_id=pr_id,
-            )
-            try:
-                selector.emit_event(result, coord_state_dir=state_dir)
-            except Exception as exc:
-                logger.debug("emit_event failed for %s: %s", dispatch_id, exc)
-            try:
-                selector.record_injection(result, coord_state_dir=state_dir)
-            except Exception as exc:
-                logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
-            # Phase 1.5 PR-2 / OI-1315 / OI-1321: stamp source_dispatch_ids
-            # at the record_injection call site even when _record_pattern_usage
-            # is partially or fully skipped.  Without this, FRESHLY injected
-            # patterns can't be matched back to their source dispatch on
-            # receipt arrival (intelligence_persist.update_confidence_from_outcome
-            # filters by ``source_dispatch_ids LIKE '%dispatch_id%'``).  The
-            # call is idempotent and resilient — each item is wrapped
-            # individually so partial failure cannot lose subsequent stamps.
-            try:
-                selector.stamp_source_dispatch_ids(result)
-            except Exception as exc:
-                logger.debug(
-                    "stamp_source_dispatch_ids failed for %s: %s", dispatch_id, exc
-                )
-        finally:
-            selector.close()
-        if not result.items:
+        if ctx is None:
             return ""
-        return _format_intelligence_items(result.items)
+        return ctx.serialize_for("claude")
     except Exception as exc:
         logger.warning("intelligence injection failed (%s); proceeding without", exc)
         return ""
