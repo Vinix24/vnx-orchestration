@@ -443,12 +443,14 @@ Direct claude --print is acceptable ONLY for pure utility invocations (parsing, 
 | Task | Path |
 |---|---|
 | Code edit + PR + tests | subprocess_dispatch.py |
-| PR review (codex_gate, gemini_review) | subprocess_dispatch.py with --gate |
+| PR review gate (codex_gate, gemini_review) | scripts/review_gate_manager.py request-and-execute (or scripts/t0_gate_enforcement.sh wrapper) |
 | Burn-in measurement work | subprocess_dispatch.py REQUIRED |
 | Utility script (transcribe, parse) | direct Bash (no claude needed) |
 | Ad-hoc claude-as-utility | direct Bash claude --print acceptable |
 
-Rule of thumb: Does the work produce a PR, a gate result, or a measurement? Then subprocess_dispatch.py. Otherwise Bash is fine.
+Gate execution (codex_gate, gemini_review) uses `scripts/review_gate_manager.py request-and-execute` OR `scripts/t0_gate_enforcement.sh` — these create the canonical `review_gates/requests` and `review_gates/results` artifacts that closure verification depends on. `subprocess_dispatch.py` dispatches feature work to T1/T2/T3 workers; its `--gate` flag is metadata for auto-commit tagging, not gate execution.
+
+Rule of thumb: Does the work produce a PR or a measurement? Then subprocess_dispatch.py. Does the work produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
 
 ## 10. Manager Block Quality Standard
 
