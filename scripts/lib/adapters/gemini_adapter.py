@@ -612,10 +612,30 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         When role or dispatch_metadata is provided, routes through PromptAssembler
         (L1 base rules + L2 role context + L3 instruction). Falls back to raw
         instruction+files when neither is given (backward compat).
+
+        When dispatch_id is present in dispatch_metadata, injects per-provider
+        intelligence context (antipatterns, success patterns). Skipped silently
+        when dispatch_id is empty — no audit rows written.
         """
         payload = {"changed_files": changed_files}
         file_contents = collect_file_contents(payload, subprocess_run=subprocess.run)
         full_instruction = f"{instruction}\n\n{file_contents}" if file_contents else instruction
+
+        dispatch_id = (dispatch_metadata or {}).get("dispatch_id", "")
+        try:
+            from intelligence_selector import build_intelligence_context
+            intel_ctx = build_intelligence_context(
+                dispatch_id=dispatch_id or "",
+                role=role or "",
+                pr_id=(dispatch_metadata or {}).get("pr_id"),
+                dispatch_paths=(dispatch_metadata or {}).get("dispatch_paths"),
+            )
+            intel_markdown = intel_ctx.serialize_for("gemini") if intel_ctx else ""
+        except Exception:
+            intel_markdown = ""
+
+        if intel_markdown:
+            full_instruction = f"{full_instruction}\n\n{intel_markdown}"
 
         if role or dispatch_metadata:
             from prompt_assembler import PromptAssembler, format_for_provider
