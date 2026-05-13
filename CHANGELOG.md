@@ -141,6 +141,18 @@ This is the architectural stabilization moment: dispatch envelope, receipt schem
 - PR #474 Wave 4.5 PR-3 superseded by #477
 - PR #475 OI-1370 redo attempt — defer to systemic refactor
 
+### Fixed — OI-1370 systemic locking refactor (#482, #483, #484, #485, #486)
+
+The original `migrate_phase3_envelope` race (writer pre-rename appends to unlinked inode) required a system-wide locking refactor across all writer paths to envelope/state files. Three earlier scoped-fix attempts (PR #466, #475 round-2) were blocked by codex because each ad-hoc lock left other writers uncoordinated.
+
+- **PR #482** — OPUS architect plan in `claudedocs/oi1370-systemic-locking-refactor-plan-2026-05-13.md`. 4-PR phasing + Option-A sentinel-per-file recommendation.
+- **PR N1 (#483)** — `scripts/lib/state_writer.append_locked()` helper with sentinel registry. 100-thread × 100-write concurrency test passes.
+- **PR N2 (#484)** — migrate `scripts/lib/gate_register_emit.py` + `scripts/lib/cleanup_worker_exit.py` to helper.
+- **PR N3 (#485)** — migrate `scripts/compact_state.compact_receipts` + `scripts/backfill_headless_receipts._update_ndjson`.
+- **PR N4 (#486)** — final: migrate `scripts/migrate_phase3_envelope.py` + `scripts/lib/dispatch_register._write_event_locked`. Race eliminated by construction.
+
+All four implementation PRs (#483-486) implemented by **Codex CLI workers** (first production codex-worker dispatches in this codebase). Each PR codex_gate clean (0 blocking, max 1 advisory). OI-1370 closed.
+
 ## v0.10.0 — 2026-04-30
 
 Chain summary: 27 PRs landed across governance hardening, headless audit parity, supervisor pack, CFX thematic refactors, P0 intelligence loop fixes.
