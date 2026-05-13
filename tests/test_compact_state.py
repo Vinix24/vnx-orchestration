@@ -493,7 +493,11 @@ class TestTwoPhaseWrite:
         live = state / "t0_receipts.ndjson"
         live.write_text("".join(json.dumps({"seq": i}) + "\n" for i in range(15_000)))
 
-        monkeypatch.setattr(cs, "_atomic_write_text", lambda *_: (_ for _ in ()).throw(OSError("simulated live failure")))
+        def _fail_rewrite(path: Path, writer) -> None:
+            writer(path.read_bytes())
+            raise OSError("simulated live failure")
+
+        monkeypatch.setattr(cs.state_writer, "rewrite_locked", _fail_rewrite)
 
         rc = cs.compact_receipts(state)
 
@@ -538,7 +542,11 @@ class TestTwoPhaseWrite:
         live.write_text("".join(json.dumps({"seq": i}) + "\n" for i in range(15_000)))
 
         # First run: live write fails → archive not committed
-        monkeypatch.setattr(cs, "_atomic_write_text", lambda *_: (_ for _ in ()).throw(OSError("first-run failure")))
+        def _fail_rewrite(path: Path, writer) -> None:
+            writer(path.read_bytes())
+            raise OSError("first-run failure")
+
+        monkeypatch.setattr(cs.state_writer, "rewrite_locked", _fail_rewrite)
         rc1 = cs.compact_receipts(state)
         assert rc1 == 1
 
