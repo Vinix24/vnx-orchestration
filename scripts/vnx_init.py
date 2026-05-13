@@ -429,6 +429,61 @@ def init_db(paths: Dict[str, str]) -> StepResult:
 
 
 # ---------------------------------------------------------------------------
+# Step: generate tri-files (AGENTS.md + GEMINI.md mirror of CLAUDE.md)
+# ---------------------------------------------------------------------------
+
+_BOOTSTRAP_START = "<!-- VNX:BEGIN BOOTSTRAP -->"
+_BOOTSTRAP_END = "<!-- VNX:END BOOTSTRAP -->"
+
+
+def generate_tri_files(paths: Dict[str, str]) -> StepResult:
+    """Generate AGENTS.md + GEMINI.md mirroring CLAUDE.md bootstrap block.
+
+    Extracts the VNX bootstrap block from CLAUDE.md and writes/updates
+    AGENTS.md and GEMINI.md so all three provider instruction files stay
+    in sync. Idempotent: skips files whose bootstrap block is already current.
+    """
+    project_root = Path(paths["PROJECT_ROOT"])
+    claude_md = project_root / "CLAUDE.md"
+
+    if not claude_md.exists():
+        return StepResult("tri-files", SKIP, "CLAUDE.md not found; skipping tri-file generation")
+
+    content = claude_md.read_text(encoding="utf-8")
+    start_idx = content.find(_BOOTSTRAP_START)
+    end_idx = content.find(_BOOTSTRAP_END)
+    if start_idx == -1 or end_idx == -1:
+        return StepResult("tri-files", SKIP, "No VNX bootstrap block in CLAUDE.md; skipping")
+
+    bootstrap_block = content[start_idx:end_idx + len(_BOOTSTRAP_END)]
+
+    generated = []
+    for filename in ("AGENTS.md", "GEMINI.md"):
+        target = project_root / filename
+        if target.exists():
+            existing = target.read_text(encoding="utf-8")
+            if bootstrap_block in existing:
+                continue
+            s = existing.find(_BOOTSTRAP_START)
+            e = existing.find(_BOOTSTRAP_END)
+            if s != -1 and e != -1:
+                updated = existing[:s] + bootstrap_block + existing[e + len(_BOOTSTRAP_END):]
+            else:
+                updated = bootstrap_block + "\n"
+        else:
+            updated = bootstrap_block + "\n"
+
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(updated, encoding="utf-8")
+        os.replace(tmp, target)
+        generated.append(filename)
+
+    if generated:
+        return StepResult("tri-files", PASS, f"Generated/updated: {', '.join(generated)}")
+    return StepResult("tri-files", SKIP, "AGENTS.md + GEMINI.md already in sync with CLAUDE.md")
+
+
+# ---------------------------------------------------------------------------
 # Step: patch agent files
 # ---------------------------------------------------------------------------
 
@@ -508,6 +563,7 @@ def run_init(paths: Dict[str, str], skip_hooks: bool = False,
     if not skip_hooks:
         results.append(bootstrap_hooks(paths))
 
+    results.append(generate_tri_files(paths))
     results.append(patch_agent_files(paths))
     results.append(init_db(paths))
     results.append(intelligence_import(paths))
@@ -529,7 +585,7 @@ def main() -> int:
                         help="Initialize in operator mode (full tmux grid)")
     parser.add_argument("--step", choices=[
         "layout", "profiles", "config", "skills", "terminals",
-        "hooks", "agent-files", "init-db", "intelligence-import",
+        "hooks", "tri-files", "agent-files", "init-db", "intelligence-import",
     ], help="Run only a specific step")
     args = parser.parse_args()
 
@@ -543,6 +599,7 @@ def main() -> int:
             "skills": lambda: bootstrap_skills(paths),
             "terminals": lambda: bootstrap_terminals(paths),
             "hooks": lambda: bootstrap_hooks(paths),
+            "tri-files": lambda: generate_tri_files(paths),
             "agent-files": lambda: patch_agent_files(paths),
             "init-db": lambda: init_db(paths),
             "intelligence-import": lambda: intelligence_import(paths),

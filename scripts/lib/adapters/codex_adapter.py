@@ -98,7 +98,9 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
         event_store = context.get("event_store")
         changed_files = context.get("changed_files", [])
 
-        prompt = self._build_prompt(instruction, changed_files)
+        role = context.get("role")
+        dispatch_meta = context.get("dispatch_metadata", {})
+        prompt = self._build_prompt(instruction, changed_files, role=role, dispatch_metadata=dispatch_meta)
         cmd = self._build_cmd(model)
 
         self._current_terminal_id = terminal_id
@@ -128,8 +130,22 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             )
 
         if proc.stdin:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
+            try:
+                proc.stdin.write(prompt.encode("utf-8"))
+                proc.stdin.close()
+            except BrokenPipeError:
+                return AdapterResult(
+                    status="failed",
+                    output="stdin write failed (BrokenPipeError): codex process exited early",
+                    events=[],
+                    event_count=0,
+                    duration_seconds=0.0,
+                    committed=False,
+                    commit_hash=None,
+                    report_path=None,
+                    provider="codex",
+                    model=model,
+                )
 
         events: list[dict] = []
         findings_parts: list[str] = []
@@ -206,8 +222,10 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
         dispatch_id = context.get("dispatch_id", "unknown")
         event_store = context.get("event_store")
         changed_files = context.get("changed_files", [])
+        role = context.get("role")
+        dispatch_meta = context.get("dispatch_metadata", {})
 
-        prompt = self._build_prompt(instruction, changed_files)
+        prompt = self._build_prompt(instruction, changed_files, role=role, dispatch_metadata=dispatch_meta)
         cmd = self._build_cmd(model)
 
         self._current_terminal_id = terminal_id
@@ -226,8 +244,12 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             return
 
         if proc.stdin:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
+            try:
+                proc.stdin.write(prompt.encode("utf-8"))
+                proc.stdin.close()
+            except BrokenPipeError:
+                yield {"type": "error", "data": {"reason": "stdin write failed (BrokenPipeError)"}}
+                return
 
         for canonical_event in self.drain_stream(
             proc,
@@ -600,13 +622,32 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             pass
         return None
 
-    def _build_prompt(self, instruction: str, changed_files: list[str]) -> str:
-        """Combine instruction with inline file contents (no PR references)."""
+    def _build_prompt(
+        self,
+        instruction: str,
+        changed_files: list[str],
+        role: Optional[str] = None,
+        dispatch_metadata: Optional[dict] = None,
+    ) -> str:
+        """Build prompt from instruction + inline file contents.
+
+        When role or dispatch_metadata is provided, routes through PromptAssembler
+        (L1 base rules + L2 role context + L3 instruction). Falls back to raw
+        instruction+files when neither is given (backward compat).
+        """
         payload = {"changed_files": changed_files}
         file_contents = collect_file_contents(payload, subprocess_run=subprocess.run)
-        if file_contents:
-            return f"{instruction}\n\n{file_contents}"
-        return instruction
+        full_instruction = f"{instruction}\n\n{file_contents}" if file_contents else instruction
+
+        if role or dispatch_metadata:
+            from prompt_assembler import PromptAssembler, format_for_provider
+            assembled = PromptAssembler().assemble(
+                dispatch_metadata={"role": role, **(dispatch_metadata or {})},
+                instruction=full_instruction,
+            )
+            return format_for_provider(assembled, "codex")["pipe_input"]
+
+        return full_instruction
 
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
