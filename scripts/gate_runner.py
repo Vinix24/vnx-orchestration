@@ -28,6 +28,20 @@ from headless_adapter import gate_timeout, gate_stall_threshold
 import gate_recorder as _rec
 import gate_artifacts as _art
 import vertex_ai_runner as _vtx
+from prompt_assembler import PromptAssembler, format_for_provider
+
+_REVIEWER_VERDICT_TEMPLATE = (
+    "Respond with a structured JSON verdict only:\n"
+    "```json\n"
+    "{\n"
+    '  "verdict": "pass|fail|blocked",\n'
+    '  "findings": [{"severity": "error|warning|info", "message": "...", "out_of_scope": false, "introduced_by_prior_fix": false}],\n'
+    '  "residual_risk": "description of remaining risks or null",\n'
+    '  "rerun_required": false,\n'
+    '  "rerun_reason": null\n'
+    "}\n"
+    "```\n"
+)
 
 # Gate type → CLI binary mapping
 GATE_BINARIES: Dict[str, str] = {
@@ -213,13 +227,76 @@ class GateRunner:
         )
 
     @staticmethod
-    def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
-        """Build enriched prompt; passes gate_runner.subprocess so tests can patch it."""
-        return _vtx.build_gemini_prompt(request_payload, subprocess_run=subprocess.run)
+    def _fetch_gh_pr_diff(pr_number: Optional[int]) -> str:
+        """Fetch authoritative PR diff via gh pr diff.
+
+        Uses subprocess.run so tests can patch gate_runner.subprocess.run.
+        Raises ValueError when pr_number is missing.
+        Raises RuntimeError when gh pr diff exits non-zero.
+        Never returns empty on failure — callers get a loud error, not silent empty.
+        """
+        if not pr_number:
+            raise ValueError(
+                "pr_number is required for reviewer gate; "
+                "cannot fetch diff without a PR number"
+            )
+        result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number)],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"gh pr diff {pr_number} failed (exit {result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
+        return result.stdout
 
     @staticmethod
     def _build_codex_prompt(request_payload: Dict[str, Any]) -> str:
-        return _vtx.build_codex_prompt(request_payload, subprocess_run=subprocess.run)
+        """Build reviewer prompt for codex gate using gh pr diff as authoritative diff source.
+
+        Uses subprocess.run so tests can patch gate_runner.subprocess.run.
+        Raises on missing pr_number or gh pr diff failure — no silent empty-diff fallback.
+        """
+        branch = request_payload.get("branch", "")
+        risk = (request_payload.get("risk_class") or "medium")
+        pr_number = request_payload.get("pr_number")
+        diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        l3 = (
+            f"Review the PR diff below on branch {branch} (risk: {risk}). "
+            "Findings MUST cite specific NEW lines from this diff — "
+            "do not flag pre-existing code.\n\n"
+            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
+        )
+        assembled = PromptAssembler().assemble(
+            dispatch_metadata={"role": "reviewer"},
+            instruction=l3,
+        )
+        return format_for_provider(assembled, "codex")["pipe_input"]
+
+    @staticmethod
+    def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
+        """Build reviewer prompt for gemini gate using gh pr diff as authoritative diff source.
+
+        Uses subprocess.run so tests can patch gate_runner.subprocess.run.
+        Raises on missing pr_number or gh pr diff failure — no silent empty-diff fallback.
+        """
+        branch = request_payload.get("branch", "")
+        risk = (request_payload.get("risk_class") or "medium")
+        pr_number = request_payload.get("pr_number")
+        diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        l3 = (
+            f"Review the PR diff below on branch {branch} (risk: {risk}). "
+            "Findings MUST cite specific NEW lines from this diff — "
+            "do not flag pre-existing code.\n\n"
+            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
+        )
+        assembled = PromptAssembler().assemble(
+            dispatch_metadata={"role": "reviewer"},
+            instruction=l3,
+        )
+        formatted = format_for_provider(assembled, "gemini")
+        return f"{formatted['system_instruction']}\n\n---\n\n{formatted['prompt']}"
 
     # Subprocess execution — stays here so tests can patch gate_runner.subprocess.Popen,
     # gate_runner.os.read, gate_runner.select.select, gate_runner.os.getpgid
