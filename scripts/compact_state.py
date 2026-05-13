@@ -279,70 +279,90 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
     return 0
 
 
-def compact_open_items_digest(state_dir: Path, *, dry_run: bool = False) -> int:
-    """Evict open_items_digest.json entries where last_updated >30d. Returns 0 on success."""
-    digest_file = state_dir / "open_items_digest.json"
-
+def _coid_load_digest(digest_file: Path) -> tuple[dict | None, int]:
+    """Load and validate open_items_digest.json. Returns (digest, rc): rc=0 ok/skip, rc=1 error."""
     if not digest_file.exists():
         _emit("INFO", "open_items_digest_skip", reason="file_not_found", path=str(digest_file))
-        return 0
+        return None, 0
 
     try:
         digest: dict = json.loads(digest_file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         _emit("ERROR", "open_items_digest_parse_error", error=str(exc))
-        return 1
+        return None, 1
 
     if not isinstance(digest, dict):
         _emit("ERROR", "open_items_digest_unexpected_schema", type=type(digest).__name__)
-        return 1
+        return None, 1
 
-    cutoff = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=OPEN_ITEMS_STALE_DAYS)
+    return digest, 0
 
-    # Digest-level timestamp used as fallback when a list entry carries no per-entry timestamp.
-    # recent_closures entries only have {id, title, closed_reason, closed_at}; older digests
-    # written before closed_at existed have no timestamp at all.  Using digest_generated ensures
-    # those entries are still evicted once the whole digest is stale.
-    digest_ts_fallback: str | None = digest.get("digest_generated") or digest.get("last_updated")
 
-    def _is_stale(entry: object, *, fallback_ts: str | None = None) -> bool:
-        if not isinstance(entry, dict):
-            return False
-        # Check common timestamp fields; closed_at and updated_at are used by recent_closures.
-        raw = (
-            entry.get("last_updated")
-            or entry.get("closed_at")
-            or entry.get("updated_at")
-            or fallback_ts
-        )
-        if not raw:
-            return False
-        try:
-            ts = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=datetime.timezone.utc)
-            return ts < cutoff
-        except (ValueError, AttributeError):
-            return False
+def _coid_is_stale(entry: object, cutoff: datetime.datetime, fallback_ts: str | None = None) -> bool:
+    """Return True if entry's best timestamp is older than cutoff."""
+    if not isinstance(entry, dict):
+        return False
+    # Check common timestamp fields; closed_at and updated_at are used by recent_closures.
+    raw = (
+        entry.get("last_updated")
+        or entry.get("closed_at")
+        or entry.get("updated_at")
+        or fallback_ts
+    )
+    if not raw:
+        return False
+    try:
+        ts = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=datetime.timezone.utc)
+        return ts < cutoff
+    except (ValueError, AttributeError):
+        return False
 
+
+def _coid_compact_entries(
+    digest: dict,
+    cutoff: datetime.datetime,
+    digest_ts_fallback: str | None,
+) -> tuple[dict, int]:
+    """Evict stale list entries from digest dict. Returns (new_digest, total_evicted)."""
     new_digest: dict = {}
     total_evicted = 0
 
     for key, value in digest.items():
         if isinstance(value, list):
-            fresh = [e for e in value if not _is_stale(e, fallback_ts=digest_ts_fallback)]
+            fresh = [e for e in value if not _coid_is_stale(e, cutoff, fallback_ts=digest_ts_fallback)]
             evicted = len(value) - len(fresh)
             total_evicted += evicted
             new_digest[key] = fresh
         else:
             new_digest[key] = value
 
+    return new_digest, total_evicted
+
+
+def compact_open_items_digest(state_dir: Path, *, dry_run: bool = False) -> int:
+    """Evict open_items_digest.json entries where last_updated >30d. Returns 0 on success."""
+    digest_file = state_dir / "open_items_digest.json"
+
+    digest, rc = _coid_load_digest(digest_file)
+    if digest is None:
+        return rc
+
+    cutoff = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=OPEN_ITEMS_STALE_DAYS)
+    # Digest-level timestamp used as fallback when a list entry carries no per-entry timestamp.
+    # recent_closures entries only have {id, title, closed_reason, closed_at}; older digests
+    # written before closed_at existed have no timestamp at all.  Using digest_generated ensures
+    # those entries are still evicted once the whole digest is stale.
+    digest_ts_fallback: str | None = digest.get("digest_generated") or digest.get("last_updated")
+
+    new_digest, total_evicted = _coid_compact_entries(digest, cutoff, digest_ts_fallback)
+
     if total_evicted == 0:
         _emit("INFO", "open_items_digest_skip", reason="no_stale_entries")
         return 0
 
     _emit("INFO", "open_items_digest_evicting", evicted=total_evicted, dry_run=dry_run)
-
     if dry_run:
         return 0
 
