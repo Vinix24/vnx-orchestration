@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""Function-size guardrail tests for AS-05."""
+"""Function-size guardrail tests for AS-05 — vnx_core package version."""
 
 from __future__ import annotations
 
 from pathlib import Path
 import sys
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-
-# Ensure vnx_core is resolvable (handles both pip-installed and dev/worktree contexts)
-_pkg = Path(__file__).resolve().parents[1] / "dist" / "vnx-orchestration"
-if _pkg.is_dir() and str(_pkg) not in sys.path:
-    sys.path.insert(0, str(_pkg))
+SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
 
 from vnx_core.function_size_gate import FunctionBudget, evaluate_function_budgets, load_function_budgets, render_violations
 
