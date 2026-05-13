@@ -142,3 +142,57 @@ class TestInjectSkillContextExtractsMetadata:
         assert call_kwargs["instruction_text"] == instruction, (
             f"instruction_text not the raw instruction: {call_kwargs}"
         )
+
+
+# ---------------------------------------------------------------------------
+# CFX-W5-2: PromptAssembler receives both 'pr_id' and 'pr' keys
+# ---------------------------------------------------------------------------
+
+class TestPromptAssemblerReceivesBothPrKeys:
+    def test_both_pr_id_and_pr_keys_passed_to_assembler(self, mock_selector_class, tmp_path):
+        """When dispatch_metadata contains pr_id AND pr, PromptAssembler.assemble() sees both.
+
+        delivery.py sets metadata['pr'] = pr_id alongside metadata['pr_id'] so that
+        PromptAssembler's template render (which reads 'pr') and the Wave 5 intelligence
+        path (which reads 'pr_id') both find their key without guessing.
+        """
+        captured_meta: dict = {}
+
+        mock_assembled = MagicMock()
+        mock_assembled.to_pipe_input.return_value = "assembled output"
+        mock_assembled.metadata = {"layer1_chars": 10, "layer2_chars": 5, "layer3_chars": 0}
+
+        mock_assembler = MagicMock()
+        mock_assembler.assemble.side_effect = lambda dispatch_metadata, instruction: (
+            captured_meta.update(dispatch_metadata) or mock_assembled
+        )
+
+        mock_pa_module = MagicMock()
+        mock_pa_module.PromptAssembler.return_value = mock_assembler
+
+        metadata = {
+            "dispatch_id": "d-w5-dual-001",
+            "model": "sonnet",
+            "pr_id": "CFX-W5-2",
+            "pr": "CFX-W5-2",
+        }
+
+        with patch.dict("sys.modules", {"prompt_assembler": mock_pa_module}):
+            _inject_skill_context(
+                "T1", "implement the plumbing fix",
+                role="backend-developer",
+                dispatch_metadata=metadata,
+            )
+
+        assert "pr_id" in captured_meta, (
+            f"pr_id missing from PromptAssembler dispatch_metadata: {captured_meta}"
+        )
+        assert captured_meta["pr_id"] == "CFX-W5-2", (
+            f"Expected pr_id='CFX-W5-2', got {captured_meta.get('pr_id')!r}"
+        )
+        assert "pr" in captured_meta, (
+            f"'pr' key missing from PromptAssembler dispatch_metadata: {captured_meta}"
+        )
+        assert captured_meta["pr"] == "CFX-W5-2", (
+            f"Expected pr='CFX-W5-2', got {captured_meta.get('pr')!r}"
+        )

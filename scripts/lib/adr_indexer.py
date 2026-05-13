@@ -15,10 +15,12 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from index_cache import IndexCache
 
 ADR_DIR = Path("docs/governance/decisions")
 CACHE_TTL_SEC = 60
@@ -79,7 +81,7 @@ class AdrEntry:
 
 @dataclass
 class AdrIndex:
-    """In-memory ADR index. Reload via load() if files changed."""
+    """In-memory ADR index keyed by adr_id. Built by _scan_adrs; held by IndexCache."""
     entries: dict = field(default_factory=dict)
     file_to_adrs: dict = field(default_factory=dict)
     loaded_at: float = 0.0
@@ -89,53 +91,15 @@ class AdrIndex:
         self._loaded_dir: Optional[Path] = None
 
     def load(self, adr_dir: Optional[Path] = None) -> None:
-        """Scan ADR_DIR, build index."""
+        """Scan adr_dir and populate this index in-place."""
         resolved = _resolve_adr_dir(adr_dir)
         self._loaded_dir = resolved
-        new_entries: dict = {}
-        new_file_to_adrs: dict = {}
-        new_mtimes: dict = {}
-
-        if resolved.is_dir():
-            for adr_file in sorted(resolved.glob("ADR-*.md")):
-                try:
-                    stat = adr_file.stat()
-                    new_mtimes[str(adr_file)] = stat.st_mtime
-                    text = adr_file.read_text(encoding="utf-8")
-                except OSError:
-                    continue
-
-                adr_id = _parse_adr_id(adr_file.stem)
-                entry = AdrEntry(
-                    adr_id=adr_id,
-                    title=_parse_title(text),
-                    file_path=adr_file,
-                    referenced_files=_parse_referenced_files(text),
-                    excerpt=_parse_decision_excerpt(text),
-                )
-                new_entries[adr_id] = entry
-                for fp in entry.referenced_files:
-                    new_file_to_adrs.setdefault(fp, [])
-                    if adr_id not in new_file_to_adrs[fp]:
-                        new_file_to_adrs[fp].append(adr_id)
-
-        self.entries = new_entries
-        self.file_to_adrs = new_file_to_adrs
-        self._file_mtimes = new_mtimes
+        # _scan_adrs is defined after this class; safe to call at runtime
+        idx, mtimes = _scan_adrs(resolved)
+        self.entries = idx.entries
+        self.file_to_adrs = idx.file_to_adrs
+        self._file_mtimes = mtimes
         self.loaded_at = time.time()
-
-    def lookup(self, file_paths: List[str]) -> List[AdrEntry]:
-        """Return ADRs whose referenced_files overlap with given paths."""
-        seen: set = set()
-        result: List[AdrEntry] = []
-        for fp in file_paths:
-            for adr_id in self.file_to_adrs.get(fp, []):
-                if adr_id not in seen:
-                    seen.add(adr_id)
-                    entry = self.entries.get(adr_id)
-                    if entry is not None:
-                        result.append(entry)
-        return result
 
     def needs_refresh(self) -> bool:
         if (time.time() - self.loaded_at) > CACHE_TTL_SEC:
@@ -155,14 +119,58 @@ class AdrIndex:
                 return True
         return False
 
+    def lookup(self, file_paths: List[str]) -> List[AdrEntry]:
+        """Return ADRs whose referenced_files overlap with given paths."""
+        seen: set = set()
+        result: List[AdrEntry] = []
+        for fp in file_paths:
+            for adr_id in self.file_to_adrs.get(fp, []):
+                if adr_id not in seen:
+                    seen.add(adr_id)
+                    entry = self.entries.get(adr_id)
+                    if entry is not None:
+                        result.append(entry)
+        return result
 
-# Module-level singleton (cached)
-_INDEX = AdrIndex()
+
+def _scan_adrs(dir_path: Optional[Path]) -> Tuple[AdrIndex, dict]:
+    """Build AdrIndex from dir_path. Returns (AdrIndex, {path_str: mtime}).
+
+    Conforms to the IndexCache scanner contract:
+      scanner(dir_path) -> (T, {str: float})
+    where the dict maps every touched file path to its mtime.
+    """
+    index = AdrIndex()
+    mtimes: dict = {}
+    if dir_path is None or not dir_path.is_dir():
+        return index, mtimes
+    for adr_file in sorted(dir_path.glob("ADR-*.md")):
+        try:
+            mtimes[str(adr_file)] = adr_file.stat().st_mtime
+            text = adr_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        adr_id = _parse_adr_id(adr_file.stem)
+        entry = AdrEntry(
+            adr_id=adr_id,
+            title=_parse_title(text),
+            file_path=adr_file,
+            referenced_files=_parse_referenced_files(text),
+            excerpt=_parse_decision_excerpt(text),
+        )
+        index.entries[adr_id] = entry
+        for fp in entry.referenced_files:
+            index.file_to_adrs.setdefault(fp, [])
+            if adr_id not in index.file_to_adrs[fp]:
+                index.file_to_adrs[fp].append(adr_id)
+    return index, mtimes
 
 
-def _ensure_loaded(adr_dir: Optional[Path] = None) -> None:
-    if _INDEX.loaded_at == 0.0 or _INDEX.needs_refresh():
-        _INDEX.load(adr_dir)
+_ADR_CACHE: IndexCache = IndexCache(
+    ttl_sec=CACHE_TTL_SEC,
+    scanner=_scan_adrs,
+    glob_pattern="ADR-*.md",
+)
 
 
 def fetch_relevant_adrs(
@@ -172,8 +180,9 @@ def fetch_relevant_adrs(
     adr_dir: Optional[Path] = None,
 ) -> List[AdrEntry]:
     """Fetch ADRs whose referenced files overlap dispatch_paths, budget-bounded."""
-    _ensure_loaded(adr_dir)
-    matched = _INDEX.lookup(dispatch_paths)
+    resolved = _resolve_adr_dir(adr_dir)
+    index = _ADR_CACHE.get(resolved)
+    matched = index.lookup(dispatch_paths)
 
     trimmed: List[AdrEntry] = []
     for entry in matched:

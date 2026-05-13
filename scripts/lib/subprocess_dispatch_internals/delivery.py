@@ -101,6 +101,7 @@ def _assemble_instruction(
             "model": model,
             "dispatch_paths": dispatch_paths,
             "pr_id": pr_id,
+            "pr": pr_id,  # PromptAssembler renders metadata["pr"]; set both keys (CFX-W5-2)
         },
     )
     return _sd._inject_permission_profile(terminal_id, role, instruction)

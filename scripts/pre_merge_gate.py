@@ -50,6 +50,10 @@ CQS_THRESHOLD = 50.0
 PR_SIZE_WARN = 300
 PR_SIZE_HOLD = 600
 
+# Maximum files completely deleted before triggering net-deletion warning/hold
+DELETION_FILE_WARN = 5
+DELETION_FILE_HOLD = 10
+
 # Pytest timeout in seconds
 PYTEST_TIMEOUT = 120
 
@@ -546,6 +550,50 @@ def check_shell_syntax(project_root: Path) -> Dict[str, Any]:
     }
 
 
+def check_net_deletion(project_root: Path) -> Dict[str, Any]:
+    """Check for mass file deletion in the PR diff (last commit, HEAD~1..HEAD)."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return {
+                "check": "net_deletion",
+                "status": "GO",
+                "detail": "could not compute deleted files",
+                "deleted_count": None,
+            }
+
+        deleted = [f for f in result.stdout.strip().splitlines() if f]
+        deleted_count = len(deleted)
+
+        if deleted_count >= DELETION_FILE_HOLD:
+            status = "HOLD"
+            detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
+        else:
+            status = "GO"
+            detail = f"{deleted_count} file(s) deleted"
+
+        return {
+            "check": "net_deletion",
+            "status": status,
+            "detail": detail,
+            "deleted_count": deleted_count,
+            "deleted_files": deleted,
+        }
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        return {
+            "check": "net_deletion",
+            "status": "GO",
+            "detail": f"deletion check failed: {exc}",
+            "deleted_count": None,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -576,6 +624,38 @@ def _is_artifact_path(path: str) -> bool:
     return lower.endswith(".pdf") or lower.endswith(".xlsx") or lower.endswith(".xls")
 
 
+def _get_deleted_files(project_root: Path) -> Optional[List[str]]:
+    """Return list of files deleted in current PR branch vs base. None on failure."""
+    for base_ref in ("origin/main", "origin/master"):
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--diff-filter=D", "--name-only", f"{base_ref}...HEAD"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return [f for f in result.stdout.strip().splitlines() if f.strip()]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return [f for f in result.stdout.strip().splitlines() if f.strip()]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Gate orchestrator
 # ---------------------------------------------------------------------------
@@ -601,6 +681,7 @@ def run_gate_checks(
     checks.append(check_pr_size(project_root))
     checks.append(check_artifacts(pr_id, dispatch_dir, project_root))
     checks.append(check_shell_syntax(project_root))
+    checks.append(check_net_deletion(project_root))
 
     if not skip_pytest:
         checks.append(check_pytest(project_root))

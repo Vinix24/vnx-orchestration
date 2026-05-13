@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ class DispatchMeta:
     role: Optional[str]        # "backend-developer", etc.
     gate: Optional[str]        # "f48-pr1", etc.
     raw_instruction: str       # full .md body
+    pr_id: Optional[str] = None  # PR identifier for Wave 5 intelligence injection (CFX-W5-2)
 
 
 _TARGET_RE  = re.compile(r"\[\[TARGET:(T\d+)\]\]")
@@ -76,10 +77,28 @@ _TRACK_RE   = re.compile(r"^Track:\s*(\S+)", re.MULTILINE)
 _ROLE_RE    = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
 _GATE_RE    = re.compile(r"^Gate:\s*(\S+)", re.MULTILINE)
 _FEATURE_RE = re.compile(r"^Feature:\s*(F\d+)", re.MULTILINE)
+# PR-ID: explicit field; fallback: PR-<digits> or PR #<digits> anywhere in text
+_PR_ID_RE   = re.compile(r"^PR-ID:\s*(\S+)", re.MULTILINE)
+_PR_NUM_RE  = re.compile(r"PR[- ]#?(\d+)")
+
+
+def _extract_pr_id(text: str) -> Optional[str]:
+    """Extract PR identifier from dispatch text.
+
+    Tries explicit 'PR-ID: <value>' header first, then falls back to the first
+    'PR-<digits>' or 'PR #<digits>' pattern found in the body.
+    """
+    m = _PR_ID_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _PR_NUM_RE.search(text)
+    if m:
+        return m.group(1)
+    return None
 
 
 def parse_dispatch_metadata(path: Path) -> Optional[DispatchMeta]:
-    """Extract TARGET, Track, Role, Gate from dispatch .md header."""
+    """Extract TARGET, Track, Role, Gate, PR-ID from dispatch .md header."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -98,6 +117,7 @@ def parse_dispatch_metadata(path: Path) -> Optional[DispatchMeta]:
         role=(_m.group(1) if (_m := _ROLE_RE.search(text)) else None),
         gate=(_m.group(1) if (_m := _GATE_RE.search(text)) else None),
         raw_instruction=text,
+        pr_id=_extract_pr_id(text),
     )
 
 
@@ -366,7 +386,13 @@ def _find_capable_terminal(
     return None
 
 
-def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
+def _deliver(
+    meta: DispatchMeta,
+    active_path: Path,
+    state_dir: Path,
+    original_terminal: Optional[str] = None,
+    original_generation: Optional[int] = None,
+) -> Tuple[bool, str, int]:
     """Deliver dispatch via the ProviderAdapter layer.
 
     Resolves the adapter for the target terminal via resolve_adapter(), checks
@@ -374,12 +400,21 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
     adapter.execute().  Falls back to direct subprocess_dispatch when the
     adapter layer cannot be imported.
 
-    Returns True on success, False on failure.
+    When rerouting to an alternate terminal and original_generation is provided,
+    acquires the alternate's lease before releasing the original — ensuring no
+    dispatch runs on an unleased terminal and no two dispatches share one worker.
+
+    Returns (success, effective_terminal, effective_generation) so callers can
+    release the correct lease and write accurate audit records.
     """
     scripts_lib = _repo_root() / "scripts" / "lib"
     sys.path.insert(0, str(scripts_lib))
 
     model = os.environ.get("VNX_DISPATCH_MODEL", "sonnet")
+
+    # Track effective lease target — updated if reroute + lease swap occurs
+    eff_terminal = original_terminal if original_terminal is not None else meta.target_terminal
+    eff_generation = original_generation if original_generation is not None else 0
 
     # Attempt adapter-layer delivery
     try:
@@ -400,12 +435,26 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
                     adapter.name(),
                     meta.dispatch_id,
                 )
-                return False
+                return False, eff_terminal, eff_generation
             logger.info(
                 "Rerouting %s from %s (%s) to %s (required=%s)",
                 meta.dispatch_id, terminal, adapter.name(), alt,
                 {c.value for c in required_caps},
             )
+
+            # Acquire alt lease BEFORE releasing original — no window where both are free
+            if original_generation is not None:
+                alt_generation = _acquire_lease(alt, meta.dispatch_id)
+                if alt_generation is None:
+                    logger.warning(
+                        "Cannot acquire lease for alt terminal %s — dispatch %s not reroutable",
+                        alt, meta.dispatch_id,
+                    )
+                    return False, eff_terminal, eff_generation
+                _release_lease(original_terminal, original_generation)  # type: ignore[arg-type]
+                eff_terminal = alt
+                eff_generation = alt_generation
+
             terminal = alt
             adapter  = resolve_adapter(terminal)
 
@@ -416,9 +465,10 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
             "role": meta.role,
             "gate": meta.gate or "",
             "max_retries": 1,
+            "pr_id": meta.pr_id,  # CFX-W5-2: forward pr_id so prior_round_finding fires
         }
         result = adapter.execute(meta.raw_instruction, context)
-        return result.status == "done"
+        return result.status == "done", eff_terminal, eff_generation
 
     except ImportError as exc:
         logger.warning(
@@ -430,20 +480,22 @@ def _deliver(meta: DispatchMeta, active_path: Path, state_dir: Path) -> bool:
         from subprocess_dispatch import deliver_with_recovery  # noqa: PLC0415
     except ImportError as exc:
         logger.error("Cannot import subprocess_dispatch: %s", exc)
-        return False
+        return False, eff_terminal, eff_generation
 
     try:
-        return deliver_with_recovery(
+        success = deliver_with_recovery(
             terminal_id=meta.target_terminal,
             instruction=meta.raw_instruction,
             model=model,
             dispatch_id=meta.dispatch_id,
             role=meta.role,
             max_retries=1,
+            pr_id=meta.pr_id,  # CFX-W5-2: forward pr_id so prior_round_finding fires
         )
+        return bool(success), eff_terminal, eff_generation
     except Exception as exc:
         logger.error("Delivery exception for %s: %s", meta.dispatch_id, exc)
-        return False
+        return False, eff_terminal, eff_generation
 
 
 # ---------------------------------------------------------------------------
@@ -620,8 +672,14 @@ class DispatchDaemon:
 
         start_ts = time.monotonic()
         outcome = "failed"
+        eff_terminal = terminal
+        eff_generation = generation
         try:
-            success = _deliver(meta, active_path, self.state_dir)
+            success, eff_terminal, eff_generation = _deliver(
+                meta, active_path, self.state_dir,
+                original_terminal=terminal,
+                original_generation=generation,
+            )
             outcome = "done" if success else "failed"
         except Exception as exc:
             logger.error("Delivery error for %s: %s", dispatch_id, exc)
@@ -636,22 +694,22 @@ class DispatchDaemon:
         except OSError as exc:
             logger.warning("Cannot move %s to %s: %s", active_path.name, dest_dir.name, exc)
 
-        # Release lease
-        released = _release_lease(terminal, generation)
+        # Release lease — target the effective terminal (may differ after reroute)
+        released = _release_lease(eff_terminal, eff_generation)
         if not released:
-            logger.warning("Lease release failed for %s gen=%d", terminal, generation)
+            logger.warning("Lease release failed for %s gen=%d", eff_terminal, eff_generation)
 
         # Audit record
         _write_audit(self.data_dir, {
             "timestamp": _now_utc(),
             "dispatch_id": dispatch_id,
-            "terminal": terminal,
+            "terminal": eff_terminal,
             "track": meta.track,
             "role": meta.role,
             "gate": meta.gate,
             "outcome": outcome,
             "elapsed_seconds": round(elapsed, 2),
-            "lease_generation": generation,
+            "lease_generation": eff_generation,
             "lease_released": released,
         })
 

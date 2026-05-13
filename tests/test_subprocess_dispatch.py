@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Tests for subprocess_dispatch — event pipeline wiring."""
 
+import inspect
+import subprocess as _subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -117,3 +119,36 @@ class TestBuildIntelligenceSectionW5Params:
         assert kw["dispatch_paths"] == []
         assert kw["instruction_text"] == ""
         assert kw["pr_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# CFX-W5-2: --pr-id CLI flag
+# ---------------------------------------------------------------------------
+
+class TestCliPrIdFlag:
+    """Assert --pr-id CLI flag is defined and deliver_with_recovery accepts pr_id.
+
+    Tests at two levels:
+    1. CLI smoke: --pr-id appears in --help output (flag is registered).
+    2. Wiring: deliver_with_recovery signature has pr_id param so the CLI call
+       site at subprocess_dispatch.py:198 can forward it.
+    """
+
+    def test_pr_id_flag_in_cli_help(self):
+        """--pr-id is a registered CLI flag."""
+        result = _subprocess.run(
+            ["python3", str(SCRIPTS_LIB / "subprocess_dispatch.py"), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert "--pr-id" in result.stdout, (
+            f"--pr-id not found in CLI --help output:\n{result.stdout}"
+        )
+
+    def test_deliver_with_recovery_accepts_pr_id(self):
+        """deliver_with_recovery signature accepts pr_id so the CLI call site compiles."""
+        from subprocess_dispatch import deliver_with_recovery
+        sig = inspect.signature(deliver_with_recovery)
+        assert "pr_id" in sig.parameters, (
+            f"pr_id not in deliver_with_recovery signature: {list(sig.parameters)}"
+        )

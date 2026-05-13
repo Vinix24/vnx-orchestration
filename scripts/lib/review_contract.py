@@ -84,6 +84,7 @@ class ReviewContract:
     non_goals: List[str] = field(default_factory=list)
     scope_files: List[str] = field(default_factory=list)
     changed_files: List[str] = field(default_factory=list)
+    deleted_files: List[str] = field(default_factory=list)
 
     quality_gate: Optional[QualityGate] = None
     test_evidence: Optional[TestEvidence] = None
@@ -108,9 +109,18 @@ class ReviewContract:
 
     @staticmethod
     def compute_content_hash(contract_dict: Dict[str, Any]) -> str:
-        """Compute a deterministic hash of contract content (excluding the hash field itself)."""
+        """Compute a deterministic hash of contract content (excluding the hash field itself).
+
+        Backwards-compat: deleted_files is omitted from the hash input when empty so that
+        contracts predating the deleted_files field (or without any deletions) hash to the
+        same value as before — cached gate results stay valid.
+        """
         d = dict(contract_dict)
         d.pop("content_hash", None)
+        # OI-1415 fix: omit empty deleted_files for hash backward-compat.
+        # Contracts with no deletions hash identically to pre-field contracts.
+        if not d.get("deleted_files"):
+            d.pop("deleted_files", None)
         canonical = json.dumps(d, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
@@ -154,6 +164,7 @@ class ReviewContract:
             non_goals=list(d.get("non_goals") or []),
             scope_files=list(d.get("scope_files") or []),
             changed_files=list(d.get("changed_files") or []),
+            deleted_files=list(d.get("deleted_files") or []),
             quality_gate=quality_gate,
             test_evidence=test_evidence,
             deterministic_findings=deterministic_findings,
@@ -291,6 +302,7 @@ def materialize_review_contract(
     pr_queue_content: str,
     branch: str = "",
     changed_files: Optional[List[str]] = None,
+    deleted_files: Optional[List[str]] = None,
     test_evidence: Optional[TestEvidence] = None,
     deterministic_findings: Optional[List[DeterministicFinding]] = None,
     dispatch_id: str = "",
@@ -343,6 +355,7 @@ def materialize_review_contract(
         non_goals=non_goals,
         scope_files=scope_files,
         changed_files=sorted(changed_files or []),
+        deleted_files=sorted(deleted_files or []),
         quality_gate=quality_gate,
         test_evidence=test_evidence,
         deterministic_findings=list(deterministic_findings or []),
@@ -369,6 +382,7 @@ def materialize_review_contract(
         non_goals=contract_no_hash.non_goals,
         scope_files=contract_no_hash.scope_files,
         changed_files=contract_no_hash.changed_files,
+        deleted_files=contract_no_hash.deleted_files,
         quality_gate=contract_no_hash.quality_gate,
         test_evidence=contract_no_hash.test_evidence,
         deterministic_findings=contract_no_hash.deterministic_findings,
@@ -386,6 +400,7 @@ def materialize_from_files(
     pr_queue_path: Path,
     branch: str = "",
     changed_files: Optional[List[str]] = None,
+    deleted_files: Optional[List[str]] = None,
     test_evidence: Optional[TestEvidence] = None,
     deterministic_findings: Optional[List[DeterministicFinding]] = None,
     dispatch_id: str = "",
@@ -399,6 +414,7 @@ def materialize_from_files(
         pr_queue_content=pr_queue_content,
         branch=branch,
         changed_files=changed_files,
+        deleted_files=deleted_files,
         test_evidence=test_evidence,
         deterministic_findings=deterministic_findings,
         dispatch_id=dispatch_id,

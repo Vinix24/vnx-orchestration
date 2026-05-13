@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for adr_indexer.py (Wave 5 P1).
+"""Tests for adr_indexer.py (Wave 5 P1 + CFX-W5-2 IndexCache refactor).
 
 Covers:
-  - Index loading from real and fixture ADR directories
+  - Index building from real and fixture ADR directories
   - File-path reference extraction
   - Lookup by dispatch_paths overlap
   - Budget truncation
   - Anti-anchoring instruction presence
-  - TTL-based cache refresh
-  - Mtime-based cache invalidation
+  - Cache behavior via IndexCache (_ADR_CACHE)
 """
 
 from __future__ import annotations
@@ -30,8 +29,10 @@ from adr_indexer import (
     AdrEntry,
     AdrIndex,
     _parse_referenced_files,
+    _scan_adrs,
     format_adrs_section,
     fetch_relevant_adrs,
+    _ADR_CACHE,
 )
 
 # ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ def _write_adr(adr_dir: Path, num: str, title: str, context_files: str,
 
 
 # ---------------------------------------------------------------------------
-# Tests: loading
+# Tests: _scan_adrs (replaces old AdrIndex.load)
 # ---------------------------------------------------------------------------
 
 class TestAdrIndexLoad(unittest.TestCase):
@@ -86,30 +87,38 @@ class TestAdrIndexLoad(unittest.TestCase):
         if not _REAL_ADR_DIR.is_dir():
             self.skipTest("real ADR dir not available")
 
-        index = AdrIndex()
-        index.load(_REAL_ADR_DIR)
+        index, mtimes = _scan_adrs(_REAL_ADR_DIR)
 
         self.assertEqual(len(index.entries), 14, (
             f"Expected 14 ADRs, got {len(index.entries)}: {sorted(index.entries.keys())}"
         ))
+        self.assertEqual(len(mtimes), 14)
 
     def test_load_index_empty_dir(self):
         """Loading from an empty directory yields no entries."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            index = AdrIndex()
-            index.load(Path(tmpdir))
+            index, mtimes = _scan_adrs(Path(tmpdir))
             self.assertEqual(len(index.entries), 0)
             self.assertEqual(len(index.file_to_adrs), 0)
+            self.assertEqual(mtimes, {})
 
-    def test_loaded_at_updated_after_load(self):
+    def test_scan_populates_mtimes_for_each_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             adr_dir = Path(tmpdir)
             _write_adr(adr_dir, "001", "Test", "scripts/lib/foo.py",
                        "Do the thing.", "- `scripts/lib/foo.py`")
-            before = time.time()
-            index = AdrIndex()
-            index.load(adr_dir)
-            self.assertGreaterEqual(index.loaded_at, before)
+            index, mtimes = _scan_adrs(adr_dir)
+            self.assertEqual(len(index.entries), 1)
+            self.assertEqual(len(mtimes), 1)
+            for path_str, mtime in mtimes.items():
+                self.assertIsInstance(mtime, float)
+                self.assertGreater(mtime, 0.0)
+
+    def test_scan_none_dir_returns_empty(self):
+        """_scan_adrs(None) returns empty AdrIndex and empty mtimes."""
+        index, mtimes = _scan_adrs(None)
+        self.assertEqual(len(index.entries), 0)
+        self.assertEqual(mtimes, {})
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +138,7 @@ class TestExtractReferences(unittest.TestCase):
                 "- `scripts/migrate_to_central_vnx.py` — canonical helpers\n"
                 "- `tests/test_migrate_dry_run.py` — structural test",
             )
-            index = AdrIndex()
-            index.load(adr_dir)
+            index, _ = _scan_adrs(adr_dir)
             entry = index.entries.get("ADR-009")
             self.assertIsNotNone(entry)
             self.assertIn("scripts/migrate_to_central_vnx.py", entry.referenced_files)
@@ -178,8 +186,7 @@ class TestAdrIndexLookup(unittest.TestCase):
             "Write NDJSON before SQLite.",
             "- `scripts/receipt_processor.py`\n- `scripts/lib/vnx_paths.py`",
         )
-        index = AdrIndex()
-        index.load(adr_dir)
+        index, _ = _scan_adrs(adr_dir)
         return tmpdir, index
 
     def test_lookup_by_dispatch_paths_overlap(self):
@@ -318,52 +325,91 @@ class TestFormatAdrsSection(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: cache behavior
+# Tests: cache behavior via IndexCache
 # ---------------------------------------------------------------------------
 
 class TestCacheBehavior(unittest.TestCase):
 
     def test_cache_refreshes_after_ttl(self):
-        """needs_refresh() returns True when TTL has elapsed."""
-        index = AdrIndex()
-        # Manually set loaded_at to a time that's past the TTL
-        index.loaded_at = time.time() - CACHE_TTL_SEC - 1
-        self.assertTrue(index.needs_refresh())
+        """IndexCache re-scans when TTL has elapsed."""
+        from index_cache import IndexCache
+
+        call_count = [0]
+
+        def scanner(d):
+            call_count[0] += 1
+            return (AdrIndex(), {})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = IndexCache(ttl_sec=0.01, scanner=scanner, glob_pattern="ADR-*.md")
+            cache.get(Path(tmpdir))
+            time.sleep(0.05)
+            cache.get(Path(tmpdir))
+            self.assertEqual(call_count[0], 2)
 
     def test_cache_fresh_within_ttl(self):
-        """needs_refresh() returns False immediately after load."""
+        """IndexCache does not re-scan within TTL."""
+        from index_cache import IndexCache
+
+        call_count = [0]
+
+        def scanner(d):
+            call_count[0] += 1
+            return (AdrIndex(), {})
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            index = AdrIndex()
-            index.load(Path(tmpdir))
-            # Just loaded — should not need refresh
-            self.assertFalse(index.needs_refresh())
+            cache = IndexCache(ttl_sec=60, scanner=scanner, glob_pattern="ADR-*.md")
+            cache.get(Path(tmpdir))
+            cache.get(Path(tmpdir))
+            self.assertEqual(call_count[0], 1)
 
     def test_cache_invalidates_on_adr_file_mtime_change(self):
-        """needs_refresh() returns True when an ADR file mtime changes."""
+        """IndexCache re-scans when an ADR file mtime changes."""
+        from index_cache import IndexCache
+
         with tempfile.TemporaryDirectory() as tmpdir:
             adr_dir = Path(tmpdir)
             adr_file = _write_adr(
                 adr_dir, "001", "Test ADR", "scripts/foo.py",
                 "Do something.", "- `scripts/foo.py`"
             )
-            index = AdrIndex()
-            index.load(adr_dir)
-            # Should not need refresh right after load
-            self.assertFalse(index.needs_refresh())
 
-            # Advance the file's mtime by setting it to a future time
+            call_count = [0]
+
+            def scanner(d):
+                call_count[0] += 1
+                if d is None or not d.is_dir():
+                    return (AdrIndex(), {})
+                index, mtimes = _scan_adrs(d)
+                return (index, mtimes)
+
+            cache = IndexCache(ttl_sec=60, scanner=scanner, glob_pattern="ADR-*.md")
+            cache.get(adr_dir)
+            self.assertEqual(call_count[0], 1)
+
+            # Advance the file's mtime to a future time
             future_mtime = time.time() + 5
             os.utime(str(adr_file), (future_mtime, future_mtime))
 
-            # Now mtime differs from stored value → needs refresh
-            self.assertTrue(index.needs_refresh())
+            cache.get(adr_dir)
+            self.assertEqual(call_count[0], 2)
 
-    def test_needs_refresh_true_when_never_loaded(self):
-        """A fresh AdrIndex (loaded_at=0) always needs a refresh."""
-        index = AdrIndex()
-        # loaded_at == 0.0 → needs_refresh via the loaded_at == 0 branch
-        # We check this indirectly via fetch_relevant_adrs loading on first call
-        self.assertEqual(index.loaded_at, 0.0)
+    def test_fetch_relevant_adrs_loads_on_first_call(self):
+        """fetch_relevant_adrs populates index from adr_dir on first use."""
+        _ADR_CACHE.invalidate()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adr_dir = Path(tmpdir)
+            _write_adr(
+                adr_dir, "001", "Test", "scripts/foo.py",
+                "Do the thing.", "- `scripts/foo.py`"
+            )
+            results = fetch_relevant_adrs(["scripts/foo.py"], adr_dir=adr_dir)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].adr_id, "ADR-001")
+
+    def test_cache_ttl_constant_positive(self):
+        """CACHE_TTL_SEC is a positive number."""
+        self.assertGreater(CACHE_TTL_SEC, 0)
 
 
 if __name__ == "__main__":

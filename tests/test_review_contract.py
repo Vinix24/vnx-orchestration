@@ -217,6 +217,41 @@ class TestReviewContractSchema:
         d2 = {"pr_id": "PR-1", "pr_title": "Different"}
         assert ReviewContract.compute_content_hash(d1) != ReviewContract.compute_content_hash(d2)
 
+    def test_content_hash_backward_compat_empty_deleted_files(self):
+        """Empty deleted_files must hash identically to a contract without the field at all."""
+        legacy_dict = {
+            'dispatch_id': 'x', 'pr_id': 'PR-1', 'branch': 'main',
+            'commit_hash_before': 'abc', 'changed_files': ['a.py'],
+            'deliverables': [], 'quality_gate': None, 'test_evidence': None,
+            'review_stack': [], 'role': 'backend-developer', 'created_at': '2026-01-01',
+            'content_hash': '',
+        }
+        legacy_hash = ReviewContract.compute_content_hash(legacy_dict)
+
+        new_dict = dict(legacy_dict)
+        new_dict['deleted_files'] = []
+        new_hash = ReviewContract.compute_content_hash(new_dict)
+
+        assert legacy_hash == new_hash, f'backward-compat broken: {legacy_hash} != {new_hash}'
+
+    def test_content_hash_changes_when_deleted_files_populated(self):
+        """Non-empty deleted_files DOES change the hash (intended behavior)."""
+        base = {
+            'dispatch_id': 'x', 'pr_id': 'PR-1', 'branch': 'main',
+            'commit_hash_before': 'abc', 'changed_files': ['a.py'],
+            'deleted_files': [],
+            'deliverables': [], 'quality_gate': None, 'test_evidence': None,
+            'review_stack': [], 'role': 'backend-developer', 'created_at': '2026-01-01',
+            'content_hash': '',
+        }
+        empty_hash = ReviewContract.compute_content_hash(base)
+
+        populated = dict(base)
+        populated['deleted_files'] = ['old.py']
+        populated_hash = ReviewContract.compute_content_hash(populated)
+
+        assert empty_hash != populated_hash, 'deleted_files must affect hash when non-empty'
+
     def test_from_dict_with_none_optional_fields(self):
         d = {"pr_id": "PR-5", "quality_gate": None, "test_evidence": None}
         contract = ReviewContract.from_dict(d)
