@@ -58,6 +58,26 @@ class AssembledPrompt:
         """
         return f"{self.context}\n\n---\n\nDISPATCH INSTRUCTION:\n\n{self.instruction}"
 
+    def for_claude_subprocess(self) -> str:
+        """Claude-specific alias — byte-identical to to_pipe_input()."""
+        return self.to_pipe_input()
+
+    def for_codex_subprocess(self) -> str:
+        """Codex header-style format: context + '# DISPATCH' markdown header."""
+        return f"{self.context}\n\n# DISPATCH\n\n{self.instruction}"
+
+    def for_gemini_subprocess(self) -> str:
+        """Gemini simple-separator format: context + '---' with no extra header."""
+        return f"{self.context}\n\n---\n\n{self.instruction}"
+
+    def for_litellm_provider(self, provider_name: str) -> dict:
+        """OpenAI-shaped payload for LiteLLM-proxied providers (DeepSeek, Kimi, etc.)."""
+        return {
+            "system": self.context,
+            "messages": [{"role": "user", "content": self.instruction}],
+            "metadata": {"provider": provider_name, **self.metadata},
+        }
+
 
 class PromptAssembler:
     """Compose layered user messages for headless workers.

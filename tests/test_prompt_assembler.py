@@ -307,3 +307,52 @@ def test_no_enrichments_produces_minimal_layer3(assembler: PromptAssembler) -> N
     )
     assert prompt.instruction.strip() == instruction
     assert prompt.metadata["enrichments_applied"] == []
+
+
+# ---------------------------------------------------------------------------
+# Wave 4.5 PR-1 — provider-agnostic method tests
+# ---------------------------------------------------------------------------
+
+def test_to_pipe_input_unchanged_byte_identical(assembler: PromptAssembler) -> None:
+    """Regression: to_pipe_input output is byte-for-byte unchanged after Wave 4.5 PR-1 refactor."""
+    result = assembler.assemble(
+        dispatch_metadata={"role": "backend-developer", "terminal": "T1"},
+        instruction="test instruction",
+    )
+    pipe = result.to_pipe_input()
+    assert "\n\n---\n\nDISPATCH INSTRUCTION:\n\n" in pipe
+    assert pipe.endswith("test instruction")
+
+
+def test_for_claude_subprocess_equals_to_pipe_input(assembler: PromptAssembler) -> None:
+    """for_claude_subprocess() must be byte-identical to to_pipe_input()."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="x")
+    assert r.for_claude_subprocess() == r.to_pipe_input()
+
+
+def test_for_codex_subprocess_uses_dispatch_header(assembler: PromptAssembler) -> None:
+    """for_codex_subprocess() must use '# DISPATCH' markdown header."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="x")
+    pipe = r.for_codex_subprocess()
+    assert "# DISPATCH" in pipe
+    assert pipe.endswith("x")
+
+
+def test_for_gemini_subprocess_uses_simple_separator(assembler: PromptAssembler) -> None:
+    """for_gemini_subprocess() must use plain '---' separator with no 'DISPATCH INSTRUCTION' header."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="x")
+    pipe = r.for_gemini_subprocess()
+    assert "\n\n---\n\n" in pipe
+    assert "DISPATCH INSTRUCTION" not in pipe
+    assert pipe.endswith("x")
+
+
+def test_for_litellm_provider_openai_shape(assembler: PromptAssembler) -> None:
+    """for_litellm_provider() must return OpenAI-shaped dict with system + messages + metadata."""
+    r = assembler.assemble(dispatch_metadata={"role": "backend-developer"}, instruction="x")
+    result = r.for_litellm_provider("deepseek")
+    assert isinstance(result, dict)
+    assert result["system"]
+    assert result["messages"][0]["role"] == "user"
+    assert result["messages"][0]["content"] == "x"
+    assert result["metadata"]["provider"] == "deepseek"
