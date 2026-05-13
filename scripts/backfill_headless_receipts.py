@@ -40,6 +40,8 @@ from typing import Any, Dict, List, Optional, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+import state_writer
+
 try:
     from vnx_paths import ensure_env
     _PATHS = ensure_env()
@@ -338,9 +340,13 @@ def _update_ndjson(
     if not T0_RECEIPTS_NDJSON.exists():
         return 0, 0
     patched = skipped = 0
-    updated_lines: List[str] = []
-    with T0_RECEIPTS_NDJSON.open() as f:
-        for raw_line in f:
+    def _rewrite(current_content: bytes) -> bytes:
+        nonlocal patched, skipped
+
+        updated_lines: List[str] = []
+        patched = 0
+        skipped = 0
+        for raw_line in current_content.decode("utf-8", errors="replace").splitlines():
             raw_line = raw_line.rstrip("\n")
             if not raw_line.strip():
                 updated_lines.append(raw_line)
@@ -358,17 +364,15 @@ def _update_ndjson(
             else:
                 skipped += 1
                 updated_lines.append(raw_line)
-    if not dry_run:
-        tmp = T0_RECEIPTS_NDJSON.parent / (T0_RECEIPTS_NDJSON.name + ".backfill_tmp")
-        try:
-            with tmp.open("w") as f:
-                f.write("\n".join(updated_lines))
-                if updated_lines and updated_lines[-1]:
-                    f.write("\n")
-            tmp.replace(T0_RECEIPTS_NDJSON)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        updated_content = "\n".join(updated_lines)
+        if updated_lines and updated_lines[-1]:
+            updated_content += "\n"
+        return updated_content.encode("utf-8")
+
+    if dry_run:
+        _rewrite(T0_RECEIPTS_NDJSON.read_bytes())
+    else:
+        state_writer.rewrite_locked(T0_RECEIPTS_NDJSON, _rewrite)
     return patched, skipped
 
 

@@ -23,6 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from project_root import resolve_data_dir
+import state_writer
 
 INTELLIGENCE_ARCHIVE_MIN_MB = 50
 INTELLIGENCE_ARCHIVE_KEEP_DAYS = 7
@@ -215,48 +216,86 @@ def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> i
 def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
     """Cap t0_receipts.ndjson at 10000 lines, archive overflow. Returns 0 on success."""
     live_file = state_dir / "t0_receipts.ndjson"
+    archive_file = _archive_path(state_dir, "t0_receipts")
 
     if not live_file.exists():
         _emit("INFO", "receipts_skip", reason="file_not_found", path=str(live_file))
         return 0
 
-    lines = live_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-
-    if len(lines) <= RECEIPTS_MAX_RECORDS:
-        _emit("INFO", "receipts_skip", reason="within_cap", line_count=len(lines), cap=RECEIPTS_MAX_RECORDS)
-        return 0
-
-    archive_file = _archive_path(state_dir, "t0_receipts")
-    # Check for an already-committed archive; staging temps do not count (partial-failure remnants).
-    if archive_file.exists():
-        _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
-        return 0
-
-    keep = lines[-RECEIPTS_MAX_RECORDS:]
-    overflow = lines[: -RECEIPTS_MAX_RECORDS]
-
-    _emit(
-        "INFO",
-        "receipts_rotating",
-        live_path=str(live_file),
-        archive_path=str(archive_file),
-        archive_lines=len(overflow),
-        keep_lines=len(keep),
-        dry_run=dry_run,
-    )
-
     if dry_run:
+        lines = live_file.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+        if len(lines) <= RECEIPTS_MAX_RECORDS:
+            _emit("INFO", "receipts_skip", reason="within_cap", line_count=len(lines), cap=RECEIPTS_MAX_RECORDS)
+            return 0
+        if archive_file.exists():
+            _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
+            return 0
+        keep = lines[-RECEIPTS_MAX_RECORDS:]
+        overflow = lines[: -RECEIPTS_MAX_RECORDS]
+        _emit(
+            "INFO",
+            "receipts_rotating",
+            live_path=str(live_file),
+            archive_path=str(archive_file),
+            archive_lines=len(overflow),
+            keep_lines=len(keep),
+            dry_run=True,
+        )
         return 0
 
     # Two-phase write: stage archive content to a temp path so the real archive path
     # only appears after the live-file rewrite succeeds.  A partial failure leaves no
     # committed archive, allowing safe retry.
     archive_tmp: Path | None = None
+    plan: dict[str, object] = {}
     try:
-        archive_tmp = _stage_bytes(
-            archive_file.parent, gzip.compress("".join(overflow).encode("utf-8"))
+        def _rewrite(current_content: bytes) -> bytes:
+            nonlocal archive_tmp, plan
+
+            current_lines = current_content.decode("utf-8", errors="replace").splitlines(keepends=True)
+            if len(current_lines) <= RECEIPTS_MAX_RECORDS:
+                plan = {
+                    "action": "within_cap",
+                    "line_count": len(current_lines),
+                }
+                return current_content
+
+            if archive_file.exists():
+                plan = {
+                    "action": "archive_exists",
+                }
+                return current_content
+
+            current_keep = current_lines[-RECEIPTS_MAX_RECORDS:]
+            current_overflow = current_lines[: -RECEIPTS_MAX_RECORDS]
+            archive_tmp = _stage_bytes(
+                archive_file.parent,
+                gzip.compress("".join(current_overflow).encode("utf-8")),
+            )
+            plan = {
+                "action": "rotate",
+                "keep": current_keep,
+                "overflow": current_overflow,
+            }
+            return "".join(current_keep).encode("utf-8")
+
+        state_writer.rewrite_locked(live_file, _rewrite)
+        if plan.get("action") == "within_cap":
+            _emit("INFO", "receipts_skip", reason="within_cap", line_count=plan["line_count"], cap=RECEIPTS_MAX_RECORDS)
+            return 0
+        if plan.get("action") == "archive_exists":
+            _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
+            return 0
+
+        _emit(
+            "INFO",
+            "receipts_rotating",
+            live_path=str(live_file),
+            archive_path=str(archive_file),
+            archive_lines=len(plan["overflow"]),
+            keep_lines=len(plan["keep"]),
+            dry_run=dry_run,
         )
-        _atomic_write_text(live_file, "".join(keep))
         os.replace(archive_tmp, archive_file)
         archive_tmp = None
     except OSError as exc:
@@ -273,8 +312,8 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
         "INFO",
         "receipts_done",
         archive=str(archive_file),
-        archive_lines=len(overflow),
-        live_lines=len(keep),
+        archive_lines=len(plan["overflow"]),
+        live_lines=len(plan["keep"]),
     )
     return 0
 
