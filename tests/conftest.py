@@ -16,9 +16,14 @@ import pytest
 # Make scripts/lib importable for all tests
 _LIB_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 _SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+_VNX_PKG = Path(__file__).resolve().parent.parent / "dist" / "vnx-orchestration"
 
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
+
+# Fallback for non-installed vnx_core (mirrors shim in scripts/lib/vnx_paths.py)
+if _VNX_PKG.is_dir() and str(_VNX_PKG) not in sys.path:
+    sys.path.insert(0, str(_VNX_PKG))
 
 
 def pytest_configure(config: pytest.Config) -> None:
