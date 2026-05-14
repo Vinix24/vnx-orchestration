@@ -571,8 +571,8 @@ class IntelligenceSelector:
             return
         try:
             maybe_reconcile(self._quality_db_path)
-        except Exception:
-            pass
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("Reconciliation step skipped: %s", e)
 
     def _get_central_qi_conn(self) -> Optional[sqlite3.Connection]:
         """Open a fresh independent connection to the central quality_intelligence.db.
@@ -1012,8 +1012,8 @@ class IntelligenceSelector:
                         ),
                     )
                 conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            logger.warning("Failed to record injection audit: %s", e)
 
         # Write per-item pattern_usage rows so feedback loop can query by dispatch_id
         if result.items and self._quality_db_path is not None and self._quality_db_path.exists():
@@ -1023,8 +1023,8 @@ class IntelligenceSelector:
         # safe when _record_pattern_usage already did a partial stamp internally.
         try:
             self.stamp_source_dispatch_ids(result)
-        except Exception:
-            pass
+        except (sqlite3.Error, OSError) as e:
+            logger.debug("Failed to stamp source_dispatch_ids: %s", e)
 
     def _record_pattern_usage(self, result: InjectionResult) -> None:
         """Write one pattern_usage row per injected item so feedback can find them later.
@@ -1148,8 +1148,8 @@ class IntelligenceSelector:
                     )
                 self._stamp_source_dispatch_id(db, item, result.dispatch_id)
             db.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            logger.warning("Failed to record pattern usage: %s", e)
 
     def stamp_source_dispatch_ids(self, result: InjectionResult) -> int:
         """Public injection-time stamping helper (Phase 1.5 PR-2 / OI-1315).
@@ -1860,8 +1860,8 @@ class IntelligenceSelector:
                     pattern_category=pattern_category,
                     content_hash=_content_hash(title, content),
                 ))
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            logger.debug("Central proven-patterns query failed: %s", e)
         finally:
             conn.close()
         return items
@@ -1942,8 +1942,8 @@ class IntelligenceSelector:
                     pattern_category=PATTERN_CATEGORY_ANTIPATTERN_EVIDENCE,
                     content_hash=_content_hash(ap_title, content),
                 ))
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            logger.debug("Central failure-prevention query failed: %s", e)
         finally:
             conn.close()
         return items
@@ -2020,8 +2020,8 @@ class IntelligenceSelector:
                     pattern_category=PATTERN_CATEGORY_PROCESS,
                     content_hash=_content_hash(dm_title, content),
                 ))
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            logger.debug("Central recent-comparable query failed: %s", e)
         finally:
             conn.close()
         return items
@@ -2061,8 +2061,8 @@ class IntelligenceSelector:
                         cmp, project_id,
                         "IntelligenceSelector._query_proven_patterns",
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Shadow compare (proven_patterns) skipped: %s", e)
         return legacy
 
     def _query_failure_prevention(
@@ -2096,8 +2096,8 @@ class IntelligenceSelector:
                         cmp, project_id,
                         "IntelligenceSelector._query_failure_prevention",
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Shadow compare (failure_prevention) skipped: %s", e)
         return legacy
 
     def _query_recent_comparable(
@@ -2132,8 +2132,8 @@ class IntelligenceSelector:
                         cmp, project_id,
                         "IntelligenceSelector._query_recent_comparable",
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Shadow compare (recent_comparable) skipped: %s", e)
         return legacy
 
     # ------------------------------------------------------------------
