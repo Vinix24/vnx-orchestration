@@ -6,14 +6,18 @@ pattern matching, tag intelligence, and quality context enrichment.
 """
 
 import json
+import logging
 import os
 import sqlite3
+import subprocess
 import re
 import hashlib
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+
+log = logging.getLogger(__name__)
 
 from cli_output import emit_json, emit_human, parse_human_flag
 
@@ -294,8 +298,8 @@ class T0IntelligenceGatherer:
                 (now, now, pattern_id),
             )
             self.quality_db.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            log.debug("Failed to update pattern usage for %s: %s", pattern_id, e)
 
     def record_adoption_from_receipt(self, dispatch_id: str, terminal: str,
                                       report_path: str) -> Dict[str, Any]:
@@ -763,13 +767,13 @@ class T0IntelligenceGatherer:
                     now, now, now,
                     dispatch_id or None,
                 ))
-            except Exception:
-                pass
+            except sqlite3.Error as e:
+                log.debug("Failed to register offered pattern %s: %s", pattern_hash, e)
 
         try:
             self.quality_db.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            log.debug("Failed to commit pattern_usage registrations: %s", e)
 
     def _verify_pattern_freshness(self, pattern: Dict):
         """Verify pattern freshness by comparing source_commit_hash with current file state.
@@ -800,7 +804,6 @@ class T0IntelligenceGatherer:
             verified_at = row['verified_at']
 
             # Get current commit hash for the file
-            import subprocess
             result = subprocess.run(
                 ['git', 'log', '-1', '--format=%H', '--', file_path],
                 capture_output=True, text=True, timeout=5,
@@ -817,8 +820,8 @@ class T0IntelligenceGatherer:
                 'verified_at': verified_at
             }
 
-        except Exception:
-            pass
+        except (sqlite3.Error, subprocess.SubprocessError, OSError) as e:
+            log.debug("Failed to verify pattern freshness for %s: %s", file_path, e)
 
     def score_pattern_relevance(
         self,
@@ -1705,14 +1708,14 @@ def main():
         if gatherer.quality_db:
             try:
                 pattern_count = gatherer.quality_db.execute("SELECT COUNT(*) FROM code_snippets").fetchone()[0]
-            except Exception:
-                pass
+            except sqlite3.Error as e:
+                log.debug("Failed to query pattern count: %s", e)
         stats = {}
         if gatherer.tag_engine:
             try:
                 stats = gatherer.tag_engine.get_statistics()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Failed to get tag engine statistics: %s", e)
 
         if human:
             emit_human("VNX Intelligence Gatherer v1.4.0")
