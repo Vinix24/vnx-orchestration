@@ -13,11 +13,14 @@ from __future__ import annotations
 import datetime as _dt
 import fcntl
 import json
+import logging
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 import state_writer
 
@@ -189,8 +192,8 @@ def _project_id_from_state_dir(state_dir: Path) -> str:
             pid = resolved.parent.name
             if _PROJECT_ID_RE.match(pid):
                 return pid
-    except Exception:
-        pass
+    except OSError as e:
+        log.debug("_project_id_from_state_dir: path resolution failed: %s", e)
     return ""
 
 
@@ -230,8 +233,8 @@ def _mirror_event_to_central(record: dict, primary_path: Path, project_id: str) 
         except Exception:
             central_path.parent.mkdir(parents=True, exist_ok=True)
             _write_event_locked(central_path, record)
-    except Exception:
-        pass
+    except (ImportError, OSError) as e:
+        log.debug("Mirror to central register failed: %s", e)
 
 
 def append_event(
@@ -425,8 +428,8 @@ def _read_register_locked(path: Path) -> str:
                 _shadow_logger.write_comparison_result(
                     cmp, project_id, "_read_register_locked"
                 )
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+            log.debug("Shadow comparison failed in _read_register_locked: %s", e)
     return legacy_content
 
 
@@ -498,8 +501,8 @@ def read_events(*, since_iso: Optional[str] = None, state_dir: Optional[Path] = 
                 primary_resolved is None or central_path.resolve() != primary_resolved
             ):
                 central_events = _read_events_from_path(central_path, since_iso)
-        except Exception:
-            pass
+        except (ImportError, OSError) as e:
+            log.debug("Central register read skipped in read_events: %s", e)
 
     if not central_events:
         return primary_events
@@ -607,8 +610,8 @@ def _query_recent_dispatches(
             _shadow_logger.write_comparison_result(
                 cmp4, project_id, "_query_recent_dispatches"
             )
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+        log.debug("Shadow comparison failed in _query_recent_dispatches: %s", e)
     return legacy
 
 
