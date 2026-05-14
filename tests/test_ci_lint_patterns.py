@@ -1,5 +1,6 @@
 """Tests for scripts/ci_lint_patterns.py lint gate."""
 
+import subprocess
 import sys
 import os
 from pathlib import Path
@@ -109,3 +110,51 @@ def test_main_exit_0_for_no_findings(tmp_path, monkeypatch):
     monkeypatch.setattr(lint, "collect_files_from_dirs", lambda root: [])
     result = lint.main([])
     assert result == 0
+
+
+# --- collect_files_from_diff: merge-base and fail-closed ---
+
+def test_diff_uses_merge_base_form(tmp_path, monkeypatch):
+    """collect_files_from_diff must pass BASE_REF...HEAD (three-dot) to git."""
+    captured_argv: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        captured_argv.append(argv)
+        return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    lint.collect_files_from_diff("origin/main", tmp_path)
+    assert captured_argv, "subprocess.run was never called"
+    assert "origin/main...HEAD" in captured_argv[0], (
+        f"Expected three-dot form 'origin/main...HEAD' in argv, got: {captured_argv[0]}"
+    )
+    assert "origin/main" not in [a for a in captured_argv[0] if a == "origin/main"], (
+        "Plain base_ref without '...HEAD' must not appear as a standalone argument"
+    )
+
+
+def test_diff_returncode_nonzero_exits_2(tmp_path, monkeypatch, capsys):
+    """collect_files_from_diff exits with code 2 when git returns non-zero."""
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, returncode=128, stdout="", stderr="bad revision")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(SystemExit) as exc_info:
+        lint.collect_files_from_diff("origin/main", tmp_path)
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "ERROR" in captured.err
+    assert "128" in captured.err
+
+
+def test_diff_timeout_exits_2(tmp_path, monkeypatch, capsys):
+    """collect_files_from_diff exits with code 2 on TimeoutExpired."""
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, timeout=10)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(SystemExit) as exc_info:
+        lint.collect_files_from_diff("origin/main", tmp_path)
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "timed out" in captured.err

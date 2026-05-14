@@ -10,7 +10,10 @@ Pattern B — non-atomic state write:
   without os.replace / tempfile / state_writer in the following 10 lines.
   Whitelist: `# noqa: vnx-atomic-write`.
 
-Exit codes: 0 = clean, 1 = findings found.
+Exit codes:
+  0 = clean (no findings)
+  1 = findings present
+  2 = infrastructure error (cannot determine diff — git failed, timed out, or not found)
 
 Usage:
   python3 scripts/ci_lint_patterns.py
@@ -119,23 +122,40 @@ def collect_files_from_dirs(root: Path) -> list[str]:
 
 
 def collect_files_from_diff(base_ref: str, root: Path) -> list[str]:
+    # Three-dot (merge-base) form: diffs only commits reachable from HEAD but not base_ref.
+    # Plain `base_ref` would include files modified on main after this branch diverged,
+    # flagging pre-existing issues outside this PR's actual changeset.
     try:
         proc = subprocess.run(
-            ["git", "diff", "--name-only", base_ref],
+            ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
             cwd=root,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=10,
+            check=False,
         )
-        changed = proc.stdout.splitlines()
-    except (subprocess.SubprocessError, OSError):
-        changed = []
+        if proc.returncode != 0:
+            print(
+                f"ERROR: git diff failed (returncode={proc.returncode},"
+                f" stderr={proc.stderr.strip()[:200]})",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        changed = [
+            ln.strip()
+            for ln in proc.stdout.splitlines()
+            if ln.strip().endswith(".py")
+        ]
+    except subprocess.TimeoutExpired:
+        print("ERROR: git diff timed out after 10s", file=sys.stderr)
+        sys.exit(2)
+    except FileNotFoundError:
+        print("ERROR: git binary not found", file=sys.stderr)
+        sys.exit(2)
 
     result: list[str] = []
     allowed_prefixes = tuple(f"{d}/" for d in _SCAN_DIRS)
     for rel in changed:
-        if not rel.endswith(".py"):
-            continue
         if not rel.startswith(allowed_prefixes):
             continue
         abs_path = root / rel
@@ -145,11 +165,17 @@ def collect_files_from_diff(base_ref: str, root: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="VNX CI lint pattern gate")
+    parser = argparse.ArgumentParser(
+        description="VNX CI lint pattern gate. Exit codes: 0=clean, 1=findings, 2=infra-error.",
+    )
     parser.add_argument(
         "--diff",
         metavar="BASE_REF",
-        help="Scan only files changed vs BASE_REF (git diff --name-only)",
+        help=(
+            "Scan only files changed vs BASE_REF using merge-base diff "
+            "(git diff --name-only BASE_REF...HEAD). "
+            "Exits 2 if git fails, times out, or is not found."
+        ),
     )
     args = parser.parse_args(argv)
 
