@@ -28,6 +28,9 @@ from .idempotency import (
 )
 from .validation import _validate_receipt
 
+import logging
+log = logging.getLogger(__name__)
+
 
 def _maybe_reroute_to_gate_stream(receipt: Dict[str, Any], receipts_file: Optional[str]) -> Optional[str]:
     """Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson."""
@@ -70,12 +73,12 @@ def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
         _emit("WARN", "dispatch_register_post_hook_failed", error=str(exc))
     try:
         facade._maybe_trigger_state_rebuild(receipt)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("payload: state rebuild hook failed: %s", exc)
     try:
         facade._trigger_receipt_classifier(receipt)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("payload: receipt classifier hook failed: %s", exc)
 
 
 def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
@@ -97,10 +100,13 @@ def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from observability_tier import resolve_effective_tier
+    except ImportError:
+        return
+    try:
         tier = resolve_effective_tier(provider)
         receipt["observability_tier"] = tier
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("payload: failed to resolve observability tier for provider %r: %s", provider, exc)
 
 
 def resolve_central_data_dir(project_id: str) -> Path:
@@ -176,8 +182,8 @@ def _mirror_receipt_to_central(receipt: Dict[str, Any], primary_path: Path) -> N
         return
     try:
         _mirror_receipt_to_central_or_raise(receipt, primary_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("payload: central mirror failed for project %r: %s", project_id, exc)
 
 
 def _load_pending_mirrors(queue_path: Path) -> List[Dict[str, Any]]:
@@ -440,6 +446,9 @@ def _maybe_trigger_state_rebuild(receipt: Dict[str, Any]) -> None:
     try:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from state_rebuild_trigger import maybe_trigger_state_rebuild
+    except ImportError:
+        return
+    try:
         maybe_trigger_state_rebuild(event_type=event_type)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("payload: state rebuild trigger failed for event %r: %s", event_type, exc)
