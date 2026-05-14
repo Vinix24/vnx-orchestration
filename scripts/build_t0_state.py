@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -42,6 +43,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Path bootstrap — before importing any lib modules
@@ -173,8 +176,8 @@ def _init_and_check_db(state_dir: Path) -> bool:
         from coordination_db import init_schema
         init_schema(state_dir)
         return True
-    except Exception:
-        pass
+    except (ImportError, OSError, sqlite3.OperationalError) as e:
+        log.debug("coordination_db init failed, falling back: %s", e)
     # Fallback: check if DB already exists and has tables
     db_path = state_dir / "runtime_coordination.db"
     if not db_path.exists():
@@ -270,10 +273,10 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
                         dt = dt.replace(tzinfo=timezone.utc)
                     if dt.astimezone(timezone.utc) >= cutoff:
                         completed_last_hour += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except ValueError as e:
+                    log.debug("Malformed receipt timestamp: %s", e)
+        except OSError as e:
+            log.debug("Could not read receipts file %s: %s", receipts_path, e)
 
     return {
         "pending_count": pending,
@@ -294,10 +297,14 @@ def _build_tracks(state_dir: Path) -> Dict[str, Any]:
     yaml_data: Dict[str, Any] = {}
     try:
         import yaml
-        with open(progress_path, encoding="utf-8") as f:
-            yaml_data = yaml.safe_load(f) or {}
-    except Exception:
-        pass
+    except ImportError as e:
+        log.debug("yaml not installed, skipping progress_state.yaml: %s", e)
+    else:
+        try:
+            with open(progress_path, encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError) as e:
+            log.debug("Failed to load progress_state.yaml: %s", e)
 
     for track_id in ("A", "B", "C"):
         t = (yaml_data.get("tracks") or {}).get(track_id) or {}
@@ -901,8 +908,8 @@ def _build_active_work(dispatch_dir: Path) -> List[Dict[str, Any]]:
                 })
             except Exception:
                 continue
-    except Exception:
-        pass
+    except OSError as e:
+        log.debug("Failed to enumerate active dispatches in %s: %s", active_dir, e)
 
     return items[:5]
 
@@ -983,8 +990,8 @@ def _build_system_health(state_dir: Path, db_initialized: bool) -> Dict[str, Any
     if panes_path.exists():
         try:
             uptime_seconds = int(time.time() - panes_path.stat().st_mtime)
-        except Exception:
-            pass
+        except OSError as e:
+            log.debug("Could not stat panes.json for uptime: %s", e)
 
     # Degraded if we have neither terminal state nor any receipts
     status = "healthy"
@@ -1255,8 +1262,8 @@ def build_t0_state(
     if _build_pqs is not None:
         try:
             pr_queue = _build_pqs(state_dir)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("pr_queue_state build failed (best-effort): %s", e)
     strategic_state = _build_strategic_state(state_dir)
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     elapsed = time.monotonic() - start
@@ -1432,8 +1439,8 @@ def _write_detail_files(state: Dict[str, Any], detail_dir: Path) -> Dict[str, st
         except Exception:
             try:
                 os.unlink(tmp_str)
-            except Exception:
-                pass
+            except OSError as e:
+                log.debug("Could not remove temp file %s during detail write cleanup: %s", tmp_str, e)
     return manifest
 
 
@@ -1468,10 +1475,10 @@ def _gc_t0_detail(detail_dir: Path) -> int:
                 if p.stat().st_mtime < cutoff:
                     p.unlink()
                     deleted += 1
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except OSError as e:
+                log.debug("GC: could not remove stale detail file %s: %s", p, e)
+    except OSError as e:
+        log.debug("GC: could not enumerate detail dir %s: %s", detail_dir, e)
     return deleted
 
 
@@ -1489,8 +1496,8 @@ def _write_atomic(path: Path, data: Dict[str, Any]) -> None:
     except Exception:
         try:
             os.unlink(tmp_str)
-        except Exception:
-            pass
+        except OSError as e:
+            log.debug("Could not remove temp file %s during atomic write cleanup: %s", tmp_str, e)
         raise
 
 
@@ -1600,8 +1607,8 @@ def main() -> int:
                 rebuild_seconds=elapsed,
                 size_bytes=size_bytes,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("emit_state_mutation failed (non-critical): %s", e)
 
     try:
         from health_beacon import HealthBeacon
@@ -1617,8 +1624,8 @@ def main() -> int:
                 "elapsed_seconds": round(elapsed, 3),
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("HealthBeacon heartbeat failed (non-critical): %s", e)
 
     return 0  # Always exit 0
 
