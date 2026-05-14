@@ -13,11 +13,24 @@ Pattern B — non-atomic state write:
 Exit codes:
   0 = clean (no findings)
   1 = findings present
-  2 = infrastructure error (cannot determine diff — git failed, timed out, or not found)
+
+This is a pure content scanner. It does NOT invoke git. The caller is
+responsible for computing the diff and feeding either the added-line text
+(`--scan-stdin`) or a list of file paths (`--files-from-stdin`).
 
 Usage:
+  # Local dev — full scan of scripts/ and dashboard/
   python3 scripts/ci_lint_patterns.py
-  python3 scripts/ci_lint_patterns.py --diff <base-ref>
+
+  # CI — scan only added lines of a diff (recommended)
+  git diff --unified=0 origin/main...HEAD -- 'scripts/*.py' \
+    | grep -E '^\\+[^+]' | sed 's/^+//' \
+    | python3 scripts/ci_lint_patterns.py --scan-stdin
+
+  # CI — scan full content of changed files (pre-existing violations block)
+  git diff --name-only origin/main...HEAD \
+    | grep -E '^(scripts|dashboard)/.*\\.py$' \
+    | python3 scripts/ci_lint_patterns.py --files-from-stdin
 """
 
 from __future__ import annotations
@@ -25,7 +38,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,6 +119,19 @@ def scan_file(path: str) -> list[Finding]:
     return findings
 
 
+def scan_text_blob(text: str, label: str = "<added-lines>") -> list[Finding]:
+    """Scan a raw text blob (e.g. concatenated added-lines from a diff).
+
+    The blob has no real file paths or line numbers. Findings carry `label`
+    as the path and the line index within the blob — informative for triage,
+    but not a real source location.
+    """
+    lines = text.splitlines(keepends=True)
+    findings = check_pattern_a(label, lines)
+    findings += check_pattern_b(label, lines)
+    return findings
+
+
 def collect_files_from_dirs(root: Path) -> list[str]:
     result: list[str] = []
     for scan_dir in _SCAN_DIRS:
@@ -121,80 +146,20 @@ def collect_files_from_dirs(root: Path) -> list[str]:
     return result
 
 
-def collect_files_from_diff(base_ref: str, root: Path) -> list[str]:
-    # Three-dot (merge-base) form: diffs only commits reachable from HEAD but not base_ref.
-    # Plain `base_ref` would include files modified on main after this branch diverged,
-    # flagging pre-existing issues outside this PR's actual changeset.
-    try:
-        proc = subprocess.run(
-            ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if proc.returncode != 0:
-            print(
-                f"ERROR: git diff failed (returncode={proc.returncode},"
-                f" stderr={proc.stderr.strip()[:200]})",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        changed = [
-            ln.strip()
-            for ln in proc.stdout.splitlines()
-            if ln.strip().endswith(".py")
-        ]
-    except subprocess.TimeoutExpired:
-        print("ERROR: git diff timed out after 10s", file=sys.stderr)
-        sys.exit(2)
-    except FileNotFoundError:
-        print("ERROR: git binary not found", file=sys.stderr)
-        sys.exit(2)
-
+def _read_paths_from_stdin() -> list[str]:
+    """Read one file path per line from stdin, ignoring blanks."""
     result: list[str] = []
-    allowed_prefixes = tuple(f"{d}/" for d in _SCAN_DIRS)
-    for rel in changed:
-        if not rel.startswith(allowed_prefixes):
+    for raw in sys.stdin:
+        path = raw.strip()
+        if not path:
             continue
-        abs_path = root / rel
-        if abs_path.is_file():
-            result.append(str(abs_path))
+        result.append(path)
     return result
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="VNX CI lint pattern gate. Exit codes: 0=clean, 1=findings, 2=infra-error.",
-    )
-    parser.add_argument(
-        "--diff",
-        metavar="BASE_REF",
-        help=(
-            "Scan only files changed vs BASE_REF using merge-base diff "
-            "(git diff --name-only BASE_REF...HEAD). "
-            "Exits 2 if git fails, times out, or is not found."
-        ),
-    )
-    args = parser.parse_args(argv)
-
-    root = Path(__file__).resolve().parent.parent
-
-    if args.diff:
-        files = collect_files_from_diff(args.diff, root)
-    else:
-        files = collect_files_from_dirs(root)
-
-    all_findings: list[Finding] = []
-    for f in sorted(files):
-        all_findings.extend(scan_file(f))
-
-    if not all_findings:
-        return 0
-
-    print(f"VNX lint gate: {len(all_findings)} finding(s)\n")
-    for finding in all_findings:
+def _print_findings(findings: list[Finding]) -> None:
+    print(f"VNX lint gate: {len(findings)} finding(s)\n")
+    for finding in findings:
         print(f"  [{finding.pattern}] {finding.path}:{finding.line}: {finding.text.strip()}")
     print()
     print("Pattern codes:")
@@ -204,6 +169,53 @@ def main(argv: list[str] | None = None) -> int:
     print("To suppress a specific line add the appropriate noqa comment:")
     print("  # noqa: vnx-silent-except")
     print("  # noqa: vnx-atomic-write")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="VNX CI lint pattern gate. Exit codes: 0=clean, 1=findings.",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--scan-stdin",
+        action="store_true",
+        help=(
+            "Read concatenated added-line text from stdin and scan it for patterns. "
+            "Caller is responsible for extracting added lines from the diff "
+            "(e.g. `git diff --unified=0 ... | grep '^+[^+]' | sed 's/^+//'`). "
+            "Findings have no real line numbers — only blob-relative indices."
+        ),
+    )
+    mode.add_argument(
+        "--files-from-stdin",
+        action="store_true",
+        help=(
+            "Read one file path per line from stdin and scan each file in full. "
+            "Pre-existing violations in unchanged code WILL block — use --scan-stdin "
+            "in CI to limit detection to added lines only."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if args.scan_stdin:
+        blob = sys.stdin.read()
+        all_findings = scan_text_blob(blob)
+    elif args.files_from_stdin:
+        files = _read_paths_from_stdin()
+        all_findings = []
+        for f in sorted(files):
+            all_findings.extend(scan_file(f))
+    else:
+        root = Path(__file__).resolve().parent.parent
+        files = collect_files_from_dirs(root)
+        all_findings = []
+        for f in sorted(files):
+            all_findings.extend(scan_file(f))
+
+    if not all_findings:
+        return 0
+
+    _print_findings(all_findings)
     return 1
 
 

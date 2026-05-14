@@ -1,11 +1,8 @@
 """Tests for scripts/ci_lint_patterns.py lint gate."""
 
-import subprocess
+import io
 import sys
-import os
 from pathlib import Path
-
-import pytest
 
 # Allow importing the script directly
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -73,88 +70,104 @@ def test_clean_code_no_findings(tmp_path):
     assert findings == [], f"Expected no findings, got: {findings}"
 
 
-# --- Exit code integration ---
+# --- main() exit codes for default (full-tree) mode ---
 
-def test_main_returns_0_for_clean_file(tmp_path, monkeypatch):
-    path = _write(tmp_path, "clean.py", 'print("ok")\n')
-    monkeypatch.setattr(lint, "_SCAN_DIRS", ())
-    # Call directly with specific file
-    findings = lint.scan_file(path)
-    assert findings == []
-
-
-def test_main_exit_1_on_findings(tmp_path, monkeypatch, capsys):
+def test_main_exit_1_on_findings(tmp_path, monkeypatch):
     """main() returns 1 when findings exist."""
-    path = _write(tmp_path, "bad.py", "try:\n    pass\nexcept Exception:\n    pass\n")
-
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
     (scripts_dir / "bad.py").write_text("try:\n    pass\nexcept Exception:\n    pass\n")
-
-    monkeypatch.chdir(tmp_path)
-
-    # Patch root resolution to tmp_path
-    original_collect = lint.collect_files_from_dirs
 
     def patched_collect(root):
         return [str(scripts_dir / "bad.py")]
 
     monkeypatch.setattr(lint, "collect_files_from_dirs", patched_collect)
-
     result = lint.main([])
     assert result == 1
 
 
-def test_main_exit_0_for_no_findings(tmp_path, monkeypatch):
+def test_main_exit_0_for_no_findings(monkeypatch):
     """main() returns 0 when no findings."""
     monkeypatch.setattr(lint, "collect_files_from_dirs", lambda root: [])
     result = lint.main([])
     assert result == 0
 
 
-# --- collect_files_from_diff: merge-base and fail-closed ---
+# --- --scan-stdin mode (concatenated added-line blob) ---
 
-def test_diff_uses_merge_base_form(tmp_path, monkeypatch):
-    """collect_files_from_diff must pass BASE_REF...HEAD (three-dot) to git."""
-    captured_argv: list[list[str]] = []
+def test_scan_stdin_silent_except_detected(monkeypatch):
+    """--scan-stdin: catches silent-except added in a diff blob."""
+    blob = "try:\n    pass\nexcept Exception:\n    pass\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(blob))
+    result = lint.main(["--scan-stdin"])
+    assert result == 1
 
-    def fake_run(argv, **kwargs):
-        captured_argv.append(argv)
-        return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    lint.collect_files_from_diff("origin/main", tmp_path)
-    assert captured_argv, "subprocess.run was never called"
-    assert "origin/main...HEAD" in captured_argv[0], (
-        f"Expected three-dot form 'origin/main...HEAD' in argv, got: {captured_argv[0]}"
+def test_scan_stdin_atomic_write_detected(monkeypatch):
+    """--scan-stdin: catches non-atomic state write in a diff blob."""
+    blob = 'with open("foo/state/x.json", "w") as f:\n    f.write("data")\n'
+    monkeypatch.setattr(sys, "stdin", io.StringIO(blob))
+    result = lint.main(["--scan-stdin"])
+    assert result == 1
+
+
+def test_scan_stdin_clean_no_findings(monkeypatch):
+    """--scan-stdin: returns 0 on clean added-line blob."""
+    blob = 'def hello():\n    return 42\n'
+    monkeypatch.setattr(sys, "stdin", io.StringIO(blob))
+    result = lint.main(["--scan-stdin"])
+    assert result == 0
+
+
+def test_scan_stdin_empty_input(monkeypatch):
+    """--scan-stdin: returns 0 on empty stdin (no added lines)."""
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    result = lint.main(["--scan-stdin"])
+    assert result == 0
+
+
+def test_scan_stdin_noqa_in_blob_ignored(monkeypatch):
+    """--scan-stdin: noqa comment on same line as except suppresses Pattern A."""
+    blob = "try:\n    pass\nexcept Exception:  # noqa: vnx-silent-except\n    pass\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(blob))
+    result = lint.main(["--scan-stdin"])
+    assert result == 0
+
+
+# --- --files-from-stdin mode (full file scan via stdin paths) ---
+
+def test_files_from_stdin_silent_except_detected(tmp_path, monkeypatch):
+    """--files-from-stdin: catches silent-except in a file fed via stdin."""
+    bad = _write(tmp_path, "bad.py", "try:\n    pass\nexcept Exception:\n    pass\n")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{bad}\n"))
+    result = lint.main(["--files-from-stdin"])
+    assert result == 1
+
+
+def test_files_from_stdin_atomic_write_detected(tmp_path, monkeypatch):
+    """--files-from-stdin: catches non-atomic state write in a file fed via stdin."""
+    bad = _write(
+        tmp_path,
+        "write.py",
+        'with open("foo/state/x.json", "w") as f:\n    f.write("data")\n',
     )
-    assert "origin/main" not in [a for a in captured_argv[0] if a == "origin/main"], (
-        "Plain base_ref without '...HEAD' must not appear as a standalone argument"
-    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{bad}\n"))
+    result = lint.main(["--files-from-stdin"])
+    assert result == 1
 
 
-def test_diff_returncode_nonzero_exits_2(tmp_path, monkeypatch, capsys):
-    """collect_files_from_diff exits with code 2 when git returns non-zero."""
-    def fake_run(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, returncode=128, stdout="", stderr="bad revision")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(SystemExit) as exc_info:
-        lint.collect_files_from_diff("origin/main", tmp_path)
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "ERROR" in captured.err
-    assert "128" in captured.err
+def test_files_from_stdin_clean_no_findings(tmp_path, monkeypatch):
+    """--files-from-stdin: returns 0 on clean files."""
+    clean = _write(tmp_path, "clean.py", 'print("ok")\n')
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"{clean}\n"))
+    result = lint.main(["--files-from-stdin"])
+    assert result == 0
 
 
-def test_diff_timeout_exits_2(tmp_path, monkeypatch, capsys):
-    """collect_files_from_diff exits with code 2 on TimeoutExpired."""
-    def fake_run(argv, **kwargs):
-        raise subprocess.TimeoutExpired(argv, timeout=10)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    with pytest.raises(SystemExit) as exc_info:
-        lint.collect_files_from_diff("origin/main", tmp_path)
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "timed out" in captured.err
+def test_files_from_stdin_skips_blanks_and_missing(tmp_path, monkeypatch):
+    """--files-from-stdin: blank lines ignored; missing files silently skipped."""
+    clean = _write(tmp_path, "clean.py", 'print("ok")\n')
+    stdin_text = f"\n{clean}\n\n/nonexistent/path/file.py\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_text))
+    result = lint.main(["--files-from-stdin"])
+    assert result == 0

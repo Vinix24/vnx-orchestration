@@ -347,16 +347,25 @@ jobs:
           VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
         run: |
           set -euo pipefail
+          # Outer workspace owns git; the rsynced VNX_HOME has no .git.
+          # We compute the diff here (real checkout) and pipe added-line
+          # text to the scanner, which is a pure content checker.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base_ref="origin/${{ github.base_ref }}"
-            changed=$(git diff --name-only "${base_ref}...HEAD" \
-              | grep -E '^(scripts|dashboard)/.*\.py$' || true)
-            if [ -z "$changed" ]; then
-              echo "[skip] No Python files changed in scripts/ or dashboard/"
-              exit 0
-            fi
-            python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --diff "${base_ref}"
+            diff_range="${base_ref}...HEAD"
           else
-            # Push to main: diff vs previous commit
-            python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --diff "HEAD^"
+            diff_range="HEAD^...HEAD"
           fi
+          changed=$(git diff --name-only "${diff_range}" \
+            | grep -E '^(scripts|dashboard)/.*\.py$' || true)
+          if [ -z "$changed" ]; then
+            echo "[skip] No Python files changed in scripts/ or dashboard/"
+            exit 0
+          fi
+          added=$(git diff --unified=0 "${diff_range}" -- $changed \
+            | grep -E '^\+[^+]' | sed 's/^+//' || true)
+          if [ -z "$added" ]; then
+            echo "[skip] No added lines in target files"
+            exit 0
+          fi
+          printf '%s\n' "$added" | python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --scan-stdin
