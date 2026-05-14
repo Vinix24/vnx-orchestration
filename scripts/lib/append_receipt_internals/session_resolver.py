@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 from .common import _emit, _utc_now_iso, facade
 
@@ -38,8 +41,8 @@ def _rsi_check_env_session(
             try:
                 state_dir.mkdir(parents=True, exist_ok=True)
                 current_session_file.write_text(value, encoding="utf-8")
-            except Exception:
-                pass
+            except OSError as e:
+                log.debug("Failed to persist session id to %s: %s", current_session_file, e)
             return value
     return None
 
@@ -57,7 +60,8 @@ def _rsi_check_provider_files(terminal: str, state_dir: Path) -> Optional[str]:
                 value = current_file.read_text(encoding="utf-8").strip()
                 if value and value not in {"unknown", "null", "None"}:
                     return value
-        except Exception:
+        except OSError as e:
+            log.debug("Failed to read provider session file %s: %s", current_file, e)
             continue
     return None
 
@@ -93,8 +97,8 @@ def _resolve_session_id(receipt: Dict[str, Any], state_dir: Optional[Path] = Non
             value = current_session_file.read_text(encoding="utf-8").strip()
             if value and value not in {"unknown", "null", "None"}:
                 return value
-        except Exception:
-            pass
+        except OSError as e:
+            log.debug("Failed to read session file %s: %s", current_session_file, e)
 
     value = facade._rsi_check_env_session(terminal, state_dir, current_session_file)
     if value:
@@ -131,8 +135,8 @@ def _resolve_model_provider(terminal: str, state_dir: Path) -> Dict[str, str]:
                 if isinstance(entry, dict):
                     model = str(entry.get("model") or "unknown").strip() or "unknown"
                     provider = str(entry.get("provider") or "unknown").strip().lower() or "unknown"
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("Failed to parse panes.json at %s: %s", panes_json, e)
 
     if provider == "unknown":
         upper = terminal.upper()
@@ -229,8 +233,8 @@ def _build_session_metadata(receipt: Dict[str, Any], state_dir: Path) -> Dict[st
             token_usage = facade._extract_session_token_usage(session_id, terminal)
         if token_usage:
             metadata["token_usage"] = token_usage
-    except Exception:
-        pass
+    except (ImportError, OSError, ValueError, AttributeError) as e:
+        log.debug("Failed to get token usage for %s/%s: %s", provider, terminal, e)
 
     manifest_path = receipt.get("manifest_path")
     if manifest_path:
