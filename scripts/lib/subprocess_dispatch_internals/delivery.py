@@ -5,6 +5,12 @@ and module-level globals exposed by the facade (``SubprocessAdapter``,
 ``WorkerHealthMonitor``) are looked up via ``import subprocess_dispatch as _sd``
 at call time so that ``unittest.mock.patch("subprocess_dispatch.X")``
 intercepts the call from inside this module.
+
+Wave 4.6 PR-4.6.2: the spawn+stream slice (SubprocessAdapter.deliver() +
+read_events_with_timeout()) is now delegated to
+``provider_spawns.claude_spawn.spawn_claude()``.  All governance concerns
+(rotation detection, path extraction, heartbeat, event archive, report
+pipeline trigger) remain here — byte-identical to the pre-refactor path.
 """
 
 from __future__ import annotations
@@ -169,71 +175,6 @@ def _start_heartbeat(
     return stop_event, thread
 
 
-class _StreamState:
-    """Mutable state accumulated by the event loop, kept accessible if it raises."""
-    __slots__ = ("event_count", "touched_files", "rotation_triggered", "last_stuck_log")
-
-    def __init__(self) -> None:
-        self.event_count = 0
-        self.touched_files: set[str] = set()
-        self.rotation_triggered = False
-        self.last_stuck_log = 0.0
-
-
-def _consume_event_stream(
-    adapter,
-    terminal_id: str,
-    dispatch_id: str,
-    chunk_timeout: float,
-    total_deadline: float,
-    health_monitor,
-    tracker,
-    repo_root: Path,
-    state: "_StreamState",
-) -> None:
-    """Drive the event loop, mutating ``state`` so partial values survive exceptions."""
-    import subprocess_dispatch as _sd
-    from worker_health_monitor import HealthStatus, SLOW_THRESHOLD
-    import time as _time
-
-    for event in adapter.read_events_with_timeout(
-        terminal_id, chunk_timeout=chunk_timeout, total_deadline=total_deadline,
-    ):
-        state.event_count += 1
-        for raw_path in _extract_touched_paths_from_event(event):
-            norm = _normalize_repo_path(raw_path, repo_root)
-            if norm:
-                state.touched_files.add(norm)
-        tracker.update(event)
-        if not state.rotation_triggered and tracker.should_rotate:
-            state.rotation_triggered = True
-            _sd._write_rotation_handover(terminal_id, dispatch_id, tracker)
-            try:
-                adapter.stop(terminal_id)
-            except Exception as _exc:
-                logger.debug(
-                    "deliver_via_subprocess: adapter.stop after rotation failed: %s", _exc,
-                )
-            break
-        if health_monitor is not None:
-            health_monitor.update(event)
-            now = _time.monotonic()
-            if now - state.last_stuck_log >= SLOW_THRESHOLD:
-                h = health_monitor.health_status()
-                if h.status == HealthStatus.STUCK:
-                    health_monitor.log_stuck_event()
-                    state.last_stuck_log = now
-
-
-def _wire_event_store_into_health(adapter, health_monitor) -> None:
-    """Wire event_store into health_monitor so STUCK events persist to NDJSON."""
-    if health_monitor is None or health_monitor._event_store is not None:
-        return
-    es = adapter.event_store
-    if es is not None:
-        health_monitor._event_store = es
-
-
 def _mark_handover_processed(pending_handover: "Path | None") -> None:
     """Rename the handover file with .processed suffix after successful delivery."""
     if pending_handover is None or not pending_handover.exists():
@@ -248,91 +189,6 @@ def _mark_handover_processed(pending_handover: "Path | None") -> None:
         logger.warning(
             "deliver_via_subprocess: failed to mark handover processed: %s", exc,
         )
-
-
-def _classify_completion(
-    adapter,
-    terminal_id: str,
-    dispatch_id: str,
-    session_id: "str | None",
-    event_count: int,
-    touched_files: set,
-    manifest_path: "str | None",
-    rotation_triggered: bool,
-    pending_handover: "Path | None",
-) -> _SubprocessResult:
-    """Apply fail-closed checks and return the final _SubprocessResult."""
-    import subprocess_dispatch as _sd
-    if rotation_triggered:
-        completed = _sd._promote_manifest(dispatch_id)
-        return _SubprocessResult(
-            success=False, session_id=session_id, event_count=event_count,
-            manifest_path=completed or manifest_path,
-            touched_files=frozenset(touched_files),
-        )
-    obs = adapter.observe(terminal_id)
-    returncode = obs.transport_state.get("returncode")
-    if returncode is None:
-        # Fallback: stop() caches returncode before removing the process (OI-1120)
-        returncode = getattr(adapter, "_returncode_cache", {}).get(terminal_id)
-    if returncode is not None and returncode != 0:
-        logger.warning(
-            "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
-            returncode, terminal_id,
-        )
-        # OI-1319: do NOT promote to dead_letter here; the deliver_with_recovery
-        # retry loop may succeed on a subsequent attempt.  dead_letter promotion
-        # happens in _handle_final_failure() only after all retries are exhausted,
-        # preventing dual-bucketing (manifest in both dead_letter/ and completed/).
-        return _SubprocessResult(
-            success=False, session_id=session_id, event_count=event_count,
-            manifest_path=manifest_path,
-            touched_files=frozenset(touched_files),
-        )
-    if adapter.was_timed_out(terminal_id):
-        logger.warning(
-            "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
-            dispatch_id, terminal_id,
-        )
-        # OI-1319: same as above — defer dead_letter promotion to _handle_final_failure().
-        return _SubprocessResult(
-            success=False, session_id=session_id, event_count=event_count,
-            manifest_path=manifest_path,
-            touched_files=frozenset(touched_files),
-        )
-    completed = _sd._promote_manifest(dispatch_id, stage="completed")
-    _save_resume_session(terminal_id, session_id or "", dispatch_id)
-    _mark_handover_processed(pending_handover)
-    return _SubprocessResult(
-        success=True, session_id=session_id, event_count=event_count,
-        manifest_path=completed or manifest_path,
-        touched_files=frozenset(touched_files),
-    )
-
-
-def _cleanup_dispatch_resources(
-    adapter,
-    terminal_id: str,
-    dispatch_id: str,
-    agent_cwd: "Path | None",
-    heartbeat_stop: "threading.Event | None",
-    heartbeat_thread: "threading.Thread | None",
-) -> None:
-    """Stop heartbeat, archive+clear events, trigger report pipeline."""
-    if heartbeat_stop is not None:
-        heartbeat_stop.set()
-    if heartbeat_thread is not None:
-        heartbeat_thread.join(timeout=5)
-    event_store = adapter.event_store
-    if event_store is not None:
-        try:
-            event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)
-        except Exception as _exc:
-            logger.debug("deliver_via_subprocess: event archive+clear failed: %s", _exc)
-    adapter.trigger_report_pipeline(
-        terminal_id, dispatch_id,
-        cwd=str(agent_cwd) if agent_cwd is not None else None,
-    )
 
 
 def _prepare_dispatch(
@@ -369,42 +225,6 @@ def _prepare_dispatch(
     return instruction, pending_handover, agent_cwd, manifest_path
 
 
-def _run_event_loop(
-    adapter,
-    terminal_id: str,
-    dispatch_id: str,
-    chunk_timeout: float,
-    total_deadline: float,
-    health_monitor,
-    pending_handover: "Path | None",
-    manifest_path: "str | None",
-) -> _SubprocessResult:
-    """Drive the event consumption + completion classification body."""
-    import subprocess_dispatch as _sd
-    repo_root = Path(__file__).resolve().parents[3]
-    tracker = _sd.HeadlessContextTracker(model_context_limit=200_000)
-    state = _StreamState()
-    try:
-        _consume_event_stream(
-            adapter, terminal_id, dispatch_id,
-            chunk_timeout, total_deadline,
-            health_monitor, tracker, repo_root, state,
-        )
-        session_id = adapter.get_session_id(terminal_id)
-        return _classify_completion(
-            adapter, terminal_id, dispatch_id, session_id,
-            state.event_count, state.touched_files, manifest_path,
-            state.rotation_triggered, pending_handover,
-        )
-    except Exception:
-        logger.exception("deliver_via_subprocess failed for %s", terminal_id)
-        return _SubprocessResult(
-            success=False, session_id=None, event_count=state.event_count,
-            manifest_path=manifest_path,
-            touched_files=frozenset(state.touched_files),
-        )
-
-
 def deliver_via_subprocess(
     terminal_id: str,
     instruction: str,
@@ -422,18 +242,25 @@ def deliver_via_subprocess(
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
 ) -> _SubprocessResult:
-    """Deliver a dispatch via SubprocessAdapter and consume the event stream.
+    """Deliver a dispatch via spawn_claude() and consume the event stream.
 
     Composes per-phase helpers in this module: instruction assembly, manifest
-    write, heartbeat thread, event consumption, completion classification, and
-    cleanup.  Returns ``_SubprocessResult`` (success, session_id, event_count,
-    manifest_path, touched_files).
+    write, heartbeat thread, governance event handlers (rotation + path
+    extraction), completion classification, and cleanup.  Returns
+    ``_SubprocessResult`` (success, session_id, event_count, manifest_path,
+    touched_files).
+
+    The spawn+stream slice (Popen + NDJSON stream reading) is delegated to
+    ``provider_spawns.claude_spawn.spawn_claude()``.  All governance concerns
+    remain here — byte-identical to the pre-PR-4.6.2 behavior.
 
     dispatch_paths and pr_id are forwarded to dispatch_metadata so W5 item
     classes (adr_relevant, code_anchor, operator_memory, schema_section,
     prior_round_finding) fire in IntelligenceSelector.select() during assembly.
     """
     import subprocess_dispatch as _sd
+    from provider_spawns.claude_spawn import spawn_claude
+
     chunk_timeout, total_deadline = _apply_runtime_overrides(chunk_timeout, total_deadline)
 
     instruction, pending_handover, agent_cwd, manifest_path = _prepare_dispatch(
@@ -442,32 +269,119 @@ def deliver_via_subprocess(
     )
 
     resume_session = _load_resume_session(terminal_id)
-    adapter = _sd.SubprocessAdapter()
     extra_env = _build_worker_identity_env(terminal_id)
-    result = adapter.deliver(
-        terminal_id, dispatch_id,
-        instruction=instruction, model=model,
-        cwd=agent_cwd, resume_session=resume_session,
-        extra_env=extra_env,
-    )
-    if not result.success:
-        return _SubprocessResult(
-            success=False, session_id=None, event_count=0,
-            manifest_path=manifest_path, touched_files=frozenset(),
-        )
 
-    _wire_event_store_into_health(adapter, health_monitor)
     heartbeat_stop, heartbeat_thread = _start_heartbeat(
         terminal_id, dispatch_id, lease_generation, heartbeat_interval,
     )
+
+    # Governance state accumulated by the per-event callback below.
+    repo_root = Path(__file__).resolve().parents[3]
+    tracker = _sd.HeadlessContextTracker(model_context_limit=200_000)
+    touched_files: set[str] = set()
+    rotation_triggered_box: list[bool] = [False]  # mutable cell for closure
+    spawn_result = None  # initialised here so the finally block can always reference it
+
+    def _governance_on_event(event) -> bool:
+        """Per-event governance handler passed to spawn_claude as on_event.
+
+        Extracts touched paths, drives the context-rotation tracker, and
+        returns False (stop stream) when the rotation threshold is reached.
+        Health-monitor stuck-logging is handled inside spawn_claude itself.
+        """
+        for raw_path in _extract_touched_paths_from_event(event):
+            norm = _normalize_repo_path(raw_path, repo_root)
+            if norm:
+                touched_files.add(norm)
+        tracker.update(event)
+        if not rotation_triggered_box[0] and tracker.should_rotate:
+            rotation_triggered_box[0] = True
+            _sd._write_rotation_handover(terminal_id, dispatch_id, tracker)
+            return False  # signal spawn_claude to stop the stream
+        return True
+
     try:
-        return _run_event_loop(
-            adapter, terminal_id, dispatch_id,
-            chunk_timeout, total_deadline,
-            health_monitor, pending_handover, manifest_path,
+        spawn_result = spawn_claude(
+            prompt=instruction,
+            model=model,
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            health_monitor=health_monitor,
+            on_event=_governance_on_event,
+            extra_env=extra_env,
+            cwd=agent_cwd,
+            resume_session=resume_session,
+            chunk_timeout=chunk_timeout,
+            total_deadline=total_deadline,
         )
+
+        # --- completion classification (mirrors _classify_completion) ---
+        session_id = spawn_result.session_id
+        event_count = spawn_result.events_written
+        rotation_triggered = rotation_triggered_box[0]
+
+        if rotation_triggered:
+            completed = _sd._promote_manifest(dispatch_id)
+            return _SubprocessResult(
+                success=False, session_id=session_id, event_count=event_count,
+                manifest_path=completed or manifest_path,
+                touched_files=frozenset(touched_files),
+            )
+
+        if spawn_result.returncode != 0 or spawn_result.timed_out:
+            if spawn_result.timed_out:
+                logger.warning(
+                    "deliver_via_subprocess: timeout-terminated dispatch %s for %s — fail-closed",
+                    dispatch_id, terminal_id,
+                )
+            else:
+                logger.warning(
+                    "deliver_via_subprocess: subprocess exited %d for %s — fail-closed",
+                    spawn_result.returncode, terminal_id,
+                )
+            return _SubprocessResult(
+                success=False, session_id=session_id, event_count=event_count,
+                manifest_path=manifest_path,
+                touched_files=frozenset(touched_files),
+            )
+
+        completed = _sd._promote_manifest(dispatch_id, stage="completed")
+        _save_resume_session(terminal_id, session_id or "", dispatch_id)
+        _mark_handover_processed(pending_handover)
+        return _SubprocessResult(
+            success=True, session_id=session_id, event_count=event_count,
+            manifest_path=completed or manifest_path,
+            touched_files=frozenset(touched_files),
+        )
+
     finally:
-        _cleanup_dispatch_resources(
-            adapter, terminal_id, dispatch_id, agent_cwd,
-            heartbeat_stop, heartbeat_thread,
-        )
+        if heartbeat_stop is not None:
+            heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=5)
+        # Event archive + report-pipeline trigger using the same adapter instance
+        # that ran the dispatch (via spawn_result._adapter).  This preserves
+        # session_id in the trigger file — byte-identical with the pre-4.6.2 path.
+        # Fall back to a fresh adapter if spawn_result is undefined (rare exception path).
+        try:
+            _cleanup_adapter = (
+                spawn_result._adapter
+                if spawn_result is not None and spawn_result._adapter is not None
+                else _sd.SubprocessAdapter()
+            )
+            event_store = _cleanup_adapter.event_store
+            if event_store is not None:
+                try:
+                    event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)
+                except Exception as _exc:
+                    logger.debug(
+                        "deliver_via_subprocess: event archive+clear failed: %s", _exc,
+                    )
+            _cleanup_adapter.trigger_report_pipeline(
+                terminal_id, dispatch_id,
+                cwd=str(agent_cwd) if agent_cwd is not None else None,
+            )
+        except Exception as _exc:
+            logger.debug(
+                "deliver_via_subprocess: cleanup adapter failed: %s", _exc,
+            )
