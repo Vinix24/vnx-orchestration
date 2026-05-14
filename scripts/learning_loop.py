@@ -7,6 +7,7 @@ Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 import sys
@@ -16,6 +17,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 from collections import defaultdict
 import re
+
+log = logging.getLogger(__name__)
 
 script_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(script_dir / "lib"))
@@ -198,8 +201,8 @@ class LearningLoop:
             for row in cursor:
                 ignored_patterns[row['pattern_id']] = 1
 
-        except Exception:
-            pass
+        except sqlite3.OperationalError as e:
+            log.debug("DB fallback ignored-patterns query failed: %s", e)
 
         return ignored_patterns
 
@@ -274,8 +277,8 @@ class LearningLoop:
                     SET ignored_count = ignored_count + ?, updated_at = ?
                     WHERE pattern_id = ?
                 ''', (ignore_count, now, pattern_id))
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                log.debug("Failed to update ignored_count for %s: %s", pattern_id, e)
 
             self.learning_stats["confidence_adjustments"] += 1
             print(f"📉 Decayed {pattern_id}: {old_confidence:.3f} → {metric.confidence:.3f}")
@@ -283,8 +286,8 @@ class LearningLoop:
         # Commit ignored_count updates
         try:
             self.conn.commit()
-        except Exception:
-            pass
+        except sqlite3.OperationalError as e:
+            log.debug("Failed to commit ignored_count updates: %s", e)
 
     def extract_failure_patterns(self, start_time: datetime = None) -> List[Dict]:
         """Extract new failure patterns from recent terminal errors"""
@@ -547,8 +550,8 @@ class LearningLoop:
             print(f"❌ Error persisting to intelligence DB: {e}")
             try:
                 self.conn.rollback()
-            except Exception:
-                pass
+            except sqlite3.OperationalError as rb_err:
+                log.debug("Failed to rollback after persist error: %s", rb_err)
 
     def ingest_approved_rules(self):
         """Ingest operator-approved prevention rules from pending_rules.json into DB.
@@ -884,8 +887,8 @@ class LearningLoop:
                     "patterns_archived": self.learning_stats.get("patterns_archived", 0),
                 },
             )
-        except Exception:
-            pass
+        except (ImportError, OSError, KeyError) as e:
+            log.debug("HealthBeacon heartbeat skipped: %s", e)
 
         return report
 
