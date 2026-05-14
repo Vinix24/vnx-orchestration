@@ -320,3 +320,43 @@ jobs:
       - name: Run dashboard lint (fixture gate + typecheck)
         working-directory: dashboard/token-dashboard
         run: npm run test:lint
+
+  lint-patterns:
+    name: Lint Patterns (silent-except + atomic-write)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Prepare expected repo layout
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.claude"
+          rsync -a --exclude '.git' --exclude '.claude' ./ "$GITHUB_WORKSPACE/.claude/vnx-system/"
+
+      - name: Run lint gate
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_ref="origin/${{ github.base_ref }}"
+            changed=$(git diff --name-only "${base_ref}...HEAD" \
+              | grep -E '^(scripts|dashboard)/.*\.py$' || true)
+            if [ -z "$changed" ]; then
+              echo "[skip] No Python files changed in scripts/ or dashboard/"
+              exit 0
+            fi
+            python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --diff "${base_ref}"
+          else
+            # Push to main: diff vs previous commit
+            python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --diff "HEAD^"
+          fi
