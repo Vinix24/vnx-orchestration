@@ -95,8 +95,8 @@ def _op_shadow_write(cmp: object, project_id: str, read_site: str) -> None:
     if _op_shadow_logger is not None and getattr(cmp, "divergences", None):
         try:
             _op_shadow_logger.write_comparison_result(cmp, project_id, read_site)  # type: ignore[union-attr]
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Failed to write shadow comparison result: %s", e)
 
 
 # ---------- Dispatch Kanban helpers ----------
@@ -181,8 +181,8 @@ def _scan_receipts() -> dict[str, dict]:
             if "dispatch_id" in rec:
                 rec["report_file"] = path.name
                 receipts[rec["dispatch_id"]] = rec
-        except Exception:
-            pass
+        except OSError as e:
+            _logger.debug("Failed to read receipt %s: %s", path.name, e)
     return receipts
 
 
@@ -893,8 +893,8 @@ def _operator_get_system_health() -> dict:
                             )
                             _op_shadow_write(cmp, project_id, f"dashboard.api.system_health.{table}")
                         c_conn.close()
-                    except Exception:
-                        pass
+                    except sqlite3.Error as e:
+                        _logger.debug("Failed shadow comparison for system health: %s", e)
         else:
             status = "dead"
             intel_details["error"] = "quality_intelligence.db not found"
@@ -914,8 +914,8 @@ def _operator_get_system_health() -> dict:
             try:
                 data = json.loads(digest_path.read_text(encoding="utf-8"))
                 pattern_count_24h = data.get("recurring_pattern_count", 0)
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                _logger.debug("Failed to read governance digest for pattern count: %s", e)
             digest_status = "healthy" if age_seconds < 600 else "degraded"
             components["governance_digest"] = {
                 "status": digest_status,
@@ -1297,8 +1297,8 @@ def _operator_get_agents() -> dict:
                             # Convert role slug to display name
                             name = role.replace("-", " ").title()
                         break
-                except Exception:
-                    pass
+                except OSError as e:
+                    _logger.debug("Failed to read dispatch file %s: %s", dispatch_file.name, e)
 
         entry: dict = {
             "terminal": terminal_id,
