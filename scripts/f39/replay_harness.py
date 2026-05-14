@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -37,6 +38,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCENARIOS_DIR = _REPO_ROOT / "tests" / "f39" / "scenarios"
@@ -464,8 +467,8 @@ def run_replay(
     finally:
         try:
             os.unlink(tmp_state_path)
-        except Exception:
-            pass
+        except OSError as exc:
+            log.debug("Failed to unlink tmp state path: %s", exc)
 
     if dry_run:
         print(f"=== DRY RUN: {name} ===")
@@ -631,8 +634,8 @@ def run_chain_replay(
         finally:
             try:
                 os.unlink(tmp_state_path)
-            except Exception:
-                pass
+            except OSError as exc:
+                log.debug("Failed to unlink tmp state path: %s", exc)
 
         # 3. Inject prior decisions
         prior_section = _build_prior_decisions_section(step_results)
@@ -931,8 +934,8 @@ def main() -> int:
             try:
                 data = json.loads(scenario_path.read_text(encoding="utf-8"))
                 is_chain = data.get("type") == "chain"
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError) as exc:
+                log.debug("Failed to detect chain type from scenario file: %s", exc)
 
         if is_chain:
             result = run_chain_replay(

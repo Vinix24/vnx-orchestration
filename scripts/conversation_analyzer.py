@@ -722,13 +722,15 @@ class DigestGenerator:
             cur.execute(
                 "SELECT SUM(total_output_tokens) as total "
                 "FROM session_analytics WHERE session_date >= ?", (week_ago,))
-            this_week = (cur.fetchone() or {}).get("total", 0) or 0
+            row = cur.fetchone()
+            this_week = (row["total"] or 0) if row else 0
 
             cur.execute(
                 "SELECT SUM(total_output_tokens) as total "
                 "FROM session_analytics WHERE session_date >= ? AND session_date < ?",
                 (prev_week, week_ago))
-            last_week = (cur.fetchone() or {}).get("total", 0) or 0
+            row = cur.fetchone()
+            last_week = (row["total"] or 0) if row else 0
 
             if last_week > 0:
                 change = ((this_week - last_week) / last_week) * 100
@@ -739,7 +741,8 @@ class DigestGenerator:
             cur.execute(
                 "SELECT COUNT(*) as cnt FROM session_analytics "
                 "WHERE session_date >= ? AND has_error_recovery = 1", (week_ago,))
-            err_count = (cur.fetchone() or {}).get("cnt", 0) or 0
+            row = cur.fetchone()
+            err_count = (row["cnt"] or 0) if row else 0
             trends.append(f"Error recovery sessies: {err_count} (laatste 7 dagen)")
 
             # Most common activity
@@ -752,8 +755,8 @@ class DigestGenerator:
                 trends.append(f"Meest voorkomende activiteit: {row['primary_activity']} ({row['cnt']}x)")
 
             conn.close()
-        except Exception:
-            pass
+        except (sqlite3.Error, OSError) as exc:
+            log("WARNING", f"Failed to load trends from DB: {exc}")
         return trends
 
 
@@ -1041,8 +1044,8 @@ class ConversationAnalyzer:
             log("WARNING", f"  bridge_session_to_intelligence failed: {e}")
             try:
                 self.conn.rollback()
-            except Exception:
-                pass
+            except (sqlite3.Error, AttributeError) as rb_exc:
+                log("WARNING", f"  rollback failed: {rb_exc}")
 
     def _store_session(self, metrics: SessionMetrics, flags: SessionFlags,
                        deep_result: Optional[dict]):
@@ -1263,8 +1266,8 @@ def main():
                 "conversation_analyzer",
                 expected_interval_seconds=86400,
             ).heartbeat(status=run_status, details=details)
-        except Exception:
-            pass
+        except (ImportError, OSError, RuntimeError) as exc:
+            log("WARNING", f"health_beacon failed: {exc}")
 
     return rc
 
