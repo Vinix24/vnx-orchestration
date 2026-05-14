@@ -4,6 +4,10 @@
 
 Wave 1 (shadow-mode read cutover) + Wave 5 P0/P1 (smart-context smart injection) shipped on top of the v1.0.0-rc1 architectural baseline.
 
+### Added — Wave 4.6 provider dispatch generalization
+
+- **PR-4.6.1** `scripts/lib/provider_dispatch.py` — provider-agnostic dispatch entry-point (`--provider {claude,codex,gemini,litellm:<model>}`). Claude path delegates byte-identically to `subprocess_dispatch.deliver_with_recovery`; codex/gemini/litellm stubs exit 64 (EX_USAGE) with PR reference until spawn handlers land in PR-4.6.3/4.6.4/4.6.5. All existing `subprocess_dispatch.py` flags forwarded verbatim. No Anthropic SDK imported. See `claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md §PR-4.6.1`.
+
 ### Added — Wave 1 shadow-mode read cutover (#450–#454)
 - **PR-W1.1 (#450)** `scripts/lib/shadow_verifier.py` — independent comparator (no shared code with the migration) computing 6 zero-tolerance divergence metrics: wrong-project rows, scoping/blocking-finding mismatch, IntelligenceSelector top-3 divergence, count drift (0%) + checksum drift (<0.01%), lease-key collision count, p95-latency ratio (central ≤ 1.5× per-project).
 - **PR-W1.2 (#451)** `scripts/lib/shadow_logger.py` NDJSON writer + `scripts/shadow_report.py` CLI + `scripts/rotate_shadow_ledger.sh` timestamp-suffix rotation under flock; routes via `vnx_paths.resolve_paths()` (no `.vnx-data/state/` literals).
