@@ -17,7 +17,9 @@ SubprocessAdapter.  No Anthropic SDK is imported anywhere in this module.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -54,6 +56,8 @@ class ClaudeSpawnResult:
     # True when on_event() returned False, causing early stream termination
     # (e.g. context-rotation threshold crossed).
     stopped_early: bool = False
+    # Set when an exception terminated the stream read; forwarded to receipt.
+    error: Optional[str] = None
     # Internal: the SubprocessAdapter instance used for this spawn.
     # Callers may use this for post-spawn cleanup (event_store.clear,
     # trigger_report_pipeline) to ensure the same session_id and state are
@@ -230,9 +234,29 @@ def spawn_claude(
                         )
                     break
 
-    except Exception:
-        logger.exception(
-            "spawn_claude: unexpected error in event stream for %s", terminal_id
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as e:
+        logger.error(
+            "spawn_claude: stream read failure for dispatch=%s terminal=%s: %s",
+            dispatch_id,
+            terminal_id,
+            e,
+        )
+        # Fail closed: stop subprocess + return non-zero immediately.
+        try:
+            adapter.stop(terminal_id)
+        except Exception as _stop_exc:
+            logger.debug(
+                "spawn_claude: adapter.stop() in error handler raised: %s", _stop_exc
+            )
+        obs = adapter.observe(terminal_id)
+        _rc = obs.transport_state.get("returncode") or 1
+        return ClaudeSpawnResult(
+            returncode=_rc,
+            completion={},
+            events_written=events_written,
+            session_id=adapter.get_session_id(terminal_id),
+            timed_out=False,
+            error=str(e),
         )
 
     timed_out = adapter.was_timed_out(terminal_id)
@@ -241,7 +265,7 @@ def spawn_claude(
     if returncode is None:
         returncode = getattr(adapter, "_returncode_cache", {}).get(terminal_id)
     if returncode is None:
-        returncode = 0
+        returncode = 1
 
     return ClaudeSpawnResult(
         returncode=returncode,
