@@ -127,8 +127,8 @@ def _shadow_write_cmp(cmp: object, project_id: str, read_site: str) -> None:
     if _shadow_logger is not None and getattr(cmp, "divergences", None):
         try:
             _shadow_logger.write_comparison_result(cmp, project_id, read_site)  # type: ignore[union-attr]
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("shadow_write_cmp failed at %s: %s", read_site, e)
 
 
 def _open_qi_ro(db_path: Path) -> "sqlite3.Connection":
@@ -296,8 +296,8 @@ def _intelligence_get_patterns(params: dict) -> dict:
                 table="antipatterns",
             )
             _shadow_write_cmp(cmp, project_id, "dashboard.api.intelligence_patterns.antipatterns")
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("shadow verification failed for patterns: %s", e)
 
     return {"success_patterns": legacy_sp, "antipatterns": legacy_ap}
 
@@ -346,8 +346,8 @@ def _intelligence_get_injections(params: dict) -> dict:
             # Table may not exist yet
             pass
         con.close()
-    except Exception:
-        pass
+    except sqlite3.Error as e:
+        _logger.warning("Failed to query coordination_events from %s: %s", db_path, e)
 
     return {"injections": injections}
 
@@ -770,8 +770,8 @@ def _intelligence_get_confidence_trends(params: dict) -> dict:
                 table="antipatterns",
             )
             _shadow_write_cmp(cmp, project_id, "dashboard.api.confidence_trends.antipatterns")
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("shadow verification failed for confidence_trends: %s", e)
 
     return {"trends": _aggregate_trends(legacy_sp_rows, legacy_ap_rows)}
 
@@ -983,8 +983,8 @@ def _intelligence_get_learning_summary() -> tuple[dict, int]:
                 sql_template=_LEARNING_ANTI_COUNT_SQL,
             )
             _shadow_write_cmp(cmp, project_id, "dashboard.api.learning_summary.antipatterns_count")
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("shadow verification failed for learning_summary: %s", e)
 
     return _compute_learning_metrics(legacy_events, legacy_prev), 200
 
@@ -1284,7 +1284,7 @@ def _dispatch_get_events(dispatch_id: str) -> tuple[dict, int]:
                 if first_ts is None:
                     first_ts = ts_val
                 ts_offset = round(ts_val - first_ts, 1)
-            except Exception:
+            except ValueError:
                 pass
 
         if ev_type == "tool_use":
