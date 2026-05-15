@@ -17,7 +17,6 @@ BILLING SAFETY: No Anthropic SDK imports. Delegates to _litellm_runner.py subpro
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
@@ -54,70 +53,13 @@ def _normalize_litellm_event(
     dispatch_id: str,
     terminal_id: str,
 ) -> CanonicalEvent:
-    """Map an OpenAI-shaped NDJSON chunk to a CanonicalEvent.
+    """Backward-compat shim; delegates to normalize_litellm_event in litellm_spawn.
 
-    Priority order:
-      1. error_type key (runner error) -> error
-      2. delta.tool_calls non-empty    -> tool_use
-      3. finish_reason non-null        -> complete
-      4. delta.role == "assistant"
-         with empty content            -> init
-      5. all other                     -> text
+    Note: original signature was (chunk, dispatch_id, terminal_id); litellm_spawn uses
+    (chunk, terminal_id, dispatch_id) matching codex/gemini convention — args are swapped.
     """
-    error_type = chunk.get("error_type")
-    if error_type:
-        return CanonicalEvent(
-            dispatch_id=dispatch_id,
-            terminal_id=terminal_id,
-            provider="litellm",
-            event_type="error",
-            data={"error_type": error_type, "message": chunk.get("message", "")},
-            observability_tier=_TIER_STREAMING,
-        )
-
-    choices = chunk.get("choices") or []
-    choice = choices[0] if choices else {}
-    delta = choice.get("delta") or {}
-    finish_reason = choice.get("finish_reason")
-
-    if delta.get("tool_calls"):
-        return CanonicalEvent(
-            dispatch_id=dispatch_id,
-            terminal_id=terminal_id,
-            provider="litellm",
-            event_type="tool_use",
-            data={"tool_calls": delta["tool_calls"]},
-            observability_tier=_TIER_STREAMING,
-        )
-
-    if finish_reason in ("stop", "tool_calls", "end_turn", "length"):
-        return CanonicalEvent(
-            dispatch_id=dispatch_id,
-            terminal_id=terminal_id,
-            provider="litellm",
-            event_type="complete",
-            data={"finish_reason": finish_reason, "model": chunk.get("model", "")},
-            observability_tier=_TIER_STREAMING,
-        )
-
-    if delta.get("role") == "assistant" and not delta.get("content"):
-        return CanonicalEvent(
-            dispatch_id=dispatch_id,
-            terminal_id=terminal_id,
-            provider="litellm",
-            event_type="init",
-            data={"model": chunk.get("model", "")},
-            observability_tier=_TIER_STREAMING,
-        )
-
-    return CanonicalEvent(
-        dispatch_id=dispatch_id,
-        terminal_id=terminal_id,
-        provider="litellm",
-        event_type="text",
-        data={"content": delta.get("content") or ""},
-        observability_tier=_TIER_STREAMING,
-    )
+    from provider_spawns.litellm_spawn import normalize_litellm_event
+    return normalize_litellm_event(chunk, terminal_id, dispatch_id)
 
 
 class LiteLLMAdapter(StreamingDrainerMixin, ProviderAdapter):
@@ -174,80 +116,59 @@ class LiteLLMAdapter(StreamingDrainerMixin, ProviderAdapter):
             return False
 
     def execute(self, instruction: str, context: dict) -> AdapterResult:
-        """Spawn _litellm_runner.py, drain NDJSON stream, return AdapterResult."""
+        """Spawn _litellm_runner.py, drain NDJSON stream, return AdapterResult.
+
+        Delegates spawn+stream to spawn_litellm(); byte-identical to pre-delegation output.
+        """
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from provider_spawns.litellm_spawn import spawn_litellm
+
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "")
         model = context.get("model") or self._litellm_model
         chunk_timeout = float(context.get("chunk_timeout", _DEFAULT_CHUNK_TIMEOUT))
         total_deadline = float(context.get("total_deadline", _DEFAULT_TOTAL_DEADLINE))
         event_store = context.get("event_store")
+        runner_path = context.get("_runner_path", str(_RUNNER_PATH))
 
         self._dispatch_id = dispatch_id
 
-        payload = json.dumps({
-            "model": model,
-            "messages": [{"role": "user", "content": instruction}],
-        })
-
-        runner = context.get("_runner_path", str(_RUNNER_PATH))
-        try:
-            proc = subprocess.Popen(
-                [sys.executable, "-u", runner],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            return AdapterResult(
-                status="failed",
-                output=str(exc),
-                events=[],
-                event_count=0,
-                duration_seconds=0.0,
-                committed=False,
-                commit_hash=None,
-                report_path=None,
-                provider="litellm",
-                model=model,
-            )
-
-        if proc.stdin:
-            proc.stdin.write(payload.encode("utf-8"))
-            proc.stdin.close()
-
-        t0 = time.monotonic()
-        events: List[CanonicalEvent] = []
+        collected_dicts: List[dict] = []
         status = "done"
-        output_parts: List[str] = []
+        t0 = time.monotonic()
 
-        for event in self.drain_stream(
-            process=proc,
-            terminal_id=terminal_id,
+        def _writer(tid: str, event_dict: dict, dispatch_id: str = "") -> None:
+            collected_dicts.append(event_dict)
+
+        result = spawn_litellm(
+            prompt=instruction,
+            model=model,
             dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            event_writer=_writer,
             event_store=event_store,
+            runner_path=runner_path,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
-        ):
-            events.append(event)
-            if event.event_type == "text":
-                output_parts.append(event.data.get("content", ""))
-            elif event.event_type == "error":
-                status = "failed"
+        )
 
         duration = time.monotonic() - t0
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        if proc.returncode not in (None, 0) and status != "failed":
+        output_parts: List[str] = []
+        for event_dict in collected_dicts:
+            evt_type = event_dict.get("event_type", "")
+            if evt_type == "text":
+                output_parts.append((event_dict.get("data") or {}).get("content", ""))
+            elif evt_type == "error":
+                status = "failed"
+
+        if result.returncode not in (None, 0) and status != "failed":
             status = "failed"
 
         return AdapterResult(
             status=status,
             output="".join(output_parts),
-            events=[e.to_dict() for e in events],
-            event_count=len(events),
+            events=collected_dicts,
+            event_count=result.events_written,
             duration_seconds=duration,
             committed=False,
             commit_hash=None,
@@ -262,9 +183,14 @@ class LiteLLMAdapter(StreamingDrainerMixin, ProviderAdapter):
         yield from result.events
 
     def _normalize(self, raw_chunk: Dict[str, Any]) -> CanonicalEvent:
-        """Map raw litellm NDJSON chunk to CanonicalEvent (StreamingDrainerMixin hook)."""
-        return _normalize_litellm_event(
+        """Map raw litellm NDJSON chunk to CanonicalEvent (StreamingDrainerMixin hook).
+
+        Delegates to normalize_litellm_event for byte identity with spawn_litellm.
+        """
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from provider_spawns.litellm_spawn import normalize_litellm_event
+        return normalize_litellm_event(
             chunk=raw_chunk,
-            dispatch_id=self._dispatch_id,
             terminal_id=self._terminal_id,
+            dispatch_id=self._dispatch_id,
         )

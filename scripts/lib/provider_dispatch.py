@@ -3,6 +3,7 @@
 
 Routes dispatch execution to the appropriate provider spawn handler based on
 ``--provider``. PR-4.6.1: claude wired. PR-4.6.3: codex wired. PR-4.6.4: gemini wired.
+PR-4.6.5: litellm wired (litellm:<sub_provider> format).
 All other providers raise SystemExit(64) until their handlers land.
 
 See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md
@@ -26,10 +27,20 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "litellm"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
+
+# LiteLLM sub-provider defaults when VNX_LITELLM_MODEL is not set.
+_LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
+    "bedrock": "bedrock/claude-sonnet-4-6",
+    "deepseek": "deepseek/deepseek-v3",
+    "kimi": "openai/moonshot-v1-32k",
+    "glm-5.1": "zhipuai/glm-4",
+    "ollama": "ollama/llama3",
+    "anthropic": "anthropic/claude-sonnet-4-6",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -137,6 +148,64 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dispatch_litellm(args: argparse.Namespace) -> int:
+    """Route to spawn_litellm for litellm-provider dispatches (PR-4.6.5).
+
+    Accepts --provider litellm:<sub_provider>, e.g. litellm:deepseek.
+    Model resolved via VNX_LITELLM_MODEL env var, sub_provider default, or
+    "anthropic/claude-sonnet-4-6" fallback. Wires EventStore for NDJSON audit.
+    """
+    import os
+    from provider_spawns.litellm_spawn import spawn_litellm
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.warning(
+            "_dispatch_litellm: EventStore unavailable; NDJSON audit sink skipped: %s",
+            _es_exc,
+        )
+
+    parts = args.provider.split(":", 1)
+    sub_provider = parts[1] if len(parts) > 1 else ""
+
+    env_model = os.environ.get("VNX_LITELLM_MODEL", "")
+    if env_model:
+        model = env_model
+    elif sub_provider and sub_provider in _LITELLM_SUB_PROVIDER_DEFAULTS:
+        model = _LITELLM_SUB_PROVIDER_DEFAULTS[sub_provider]
+    elif sub_provider:
+        model = f"{sub_provider}/default"
+    else:
+        model = "anthropic/claude-sonnet-4-6"
+
+    result = spawn_litellm(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+        sub_provider=sub_provider or None,
+        event_writer=event_store.append if event_store is not None else None,
+    )
+    if result.error:
+        print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        print("spawn_litellm timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "litellm dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        return 2
+    return 0
+
+
 def _dispatch_gemini(args: argparse.Namespace) -> int:
     """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
 
@@ -192,13 +261,8 @@ def main(argv: list[str] | None = None) -> int:
     if provider == "gemini":
         return _dispatch_gemini(args)
 
-    if provider.startswith("litellm:"):
-        print(
-            f"Provider '{provider}' spawn handler lands in PR-4.6.5. "
-            "Use --provider claude for now.",
-            file=sys.stderr,
-        )
-        raise SystemExit(_EX_USAGE)
+    if provider.startswith("litellm:") or provider == "litellm":
+        return _dispatch_litellm(args)
 
     # Unknown literal — argparse-style error (exit code 2).
     parser.error(
