@@ -224,6 +224,9 @@ class GeminiSpawnResult:
     stopped_early: bool = False
     token_usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    # Number of times event_writer callback raised an exception.
+    # > 0 indicates audit-trail gaps the caller must investigate per ADR-005.
+    event_writer_failures: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -377,13 +380,14 @@ def _consume_gemini_stream(
     event_store: Optional[Any],
     chunk_timeout: float,
     total_deadline: float,
-) -> "tuple[str, int, Optional[Dict[str, Any]], bool, bool]":
-    """Drain the NDJSON stream; return (completion_text, events_written, token_usage, timed_out, stopped_early)."""
+) -> "tuple[str, int, Optional[Dict[str, Any]], bool, bool, int]":
+    """Drain the NDJSON stream; return (completion_text, events_written, token_usage, timed_out, stopped_early, event_writer_failures)."""
     events_written = 0
     completion_text = ""
     token_usage: Optional[Dict[str, Any]] = None
     stopped_early = False
     timed_out = False
+    _event_writer_failures = 0
 
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
@@ -410,10 +414,16 @@ def _consume_gemini_stream(
             health_monitor.update(canonical_event)
 
         if event_writer is not None:
+            # event_writer is caller-supplied (typically NDJSON ledger).
+            # Failures are ADR-005 audit gaps — log as ERROR + count for caller inspection.
             try:
                 event_writer(terminal_id, canonical_event.to_dict(), dispatch_id=dispatch_id)
             except Exception as _exc:
-                logger.debug("spawn_gemini: event_writer raised: %s", _exc)
+                logger.error(
+                    "spawn_gemini: event_writer callback failed (dispatch=%s, event_count=%d): %s",
+                    dispatch_id, events_written, _exc,
+                )
+                _event_writer_failures += 1
 
         if on_event is not None:
             if on_event(canonical_event) is False:
@@ -424,7 +434,7 @@ def _consume_gemini_stream(
                     logger.debug("spawn_gemini: kill after on_event=False failed: %s", _ke)
                 break
 
-    return completion_text, events_written, token_usage, timed_out, stopped_early
+    return completion_text, events_written, token_usage, timed_out, stopped_early, _event_writer_failures
 
 
 def _finalize_gemini_result(
@@ -434,6 +444,7 @@ def _finalize_gemini_result(
     token_usage: Optional[Dict[str, Any]],
     timed_out: bool,
     stopped_early: bool,
+    event_writer_failures: int = 0,
 ) -> GeminiSpawnResult:
     """Wait for process exit and return a GeminiSpawnResult."""
     try:
@@ -445,7 +456,7 @@ def _finalize_gemini_result(
     return GeminiSpawnResult(
         returncode=rc, completion_text=completion_text, events_written=events_written,
         session_id=None, timed_out=timed_out, stopped_early=stopped_early,
-        token_usage=token_usage,
+        token_usage=token_usage, event_writer_failures=event_writer_failures,
     )
 
 
@@ -475,7 +486,7 @@ def _spawn_streaming(
         return err_result
 
     host = _GeminiNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
-    completion_text, events_written, token_usage, timed_out, stopped_early = _consume_gemini_stream(
+    completion_text, events_written, token_usage, timed_out, stopped_early, _event_writer_failures = _consume_gemini_stream(
         proc=proc, host=host, on_event=on_event,
         health_monitor=health_monitor, event_writer=event_writer,
         terminal_id=terminal_id, dispatch_id=dispatch_id,
@@ -486,6 +497,7 @@ def _spawn_streaming(
         proc=proc, completion_text=completion_text,
         events_written=events_written, token_usage=token_usage,
         timed_out=timed_out, stopped_early=stopped_early,
+        event_writer_failures=_event_writer_failures,
     )
 
 
@@ -532,15 +544,23 @@ def _spawn_legacy(
     token_usage = _parse_gemini_token_usage(stdout)
     synthetic = {"type": "result", "data": text, "observability_tier": _TIER_LEGACY}
 
+    _event_writer_failures = 0
     if event_writer is not None:
+        # event_writer is caller-supplied (typically NDJSON ledger).
+        # Failures are ADR-005 audit gaps — log as ERROR + count for caller inspection.
         try:
             event_writer(terminal_id, synthetic, dispatch_id=dispatch_id)
         except Exception as _exc:
-            logger.debug("spawn_gemini: event_writer (legacy) raised: %s", _exc)
+            logger.error(
+                "spawn_gemini: event_writer callback failed (dispatch=%s, event_count=%d): %s",
+                dispatch_id, 1, _exc,
+            )
+            _event_writer_failures += 1
 
     return GeminiSpawnResult(
         returncode=0, completion_text=text, events_written=1,
         session_id=None, timed_out=False, token_usage=token_usage,
+        event_writer_failures=_event_writer_failures,
     )
 
 

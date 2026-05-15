@@ -241,6 +241,40 @@ class TestOnEventFalseStopsStreamEarly:
 
 
 # ---------------------------------------------------------------------------
+# Test: event_writer failure → logged as ERROR + counted in result
+# ---------------------------------------------------------------------------
+
+class TestEventWriterFailureLoggedAndCounted:
+
+    def test_event_writer_failure_is_logged_as_error_and_counted(self, caplog):
+        """event_writer always raising → result.event_writer_failures > 0 + ERROR in caplog."""
+        import logging
+
+        events = [
+            _make_canonical("text", {"text": "hello"}),
+        ]
+
+        def bad_writer(*args, **kwargs):
+            raise RuntimeError("simulated audit write failure")
+
+        with patch("subprocess.Popen", return_value=_FakeProc()), \
+             patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}), \
+             patch(
+                 "provider_spawns.gemini_spawn._GeminiNormalizerHost.drain_stream",
+                 return_value=iter(events),
+             ), \
+             caplog.at_level(logging.ERROR, logger="provider_spawns.gemini_spawn"):
+            result = spawn_gemini(
+                "prompt", "gemini-2.5-pro", "d1", "T3",
+                event_writer=bad_writer,
+            )
+
+        assert result.event_writer_failures > 0
+        error_msgs = [r.message for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("event_writer" in m for m in error_msgs)
+
+
+# ---------------------------------------------------------------------------
 # Test: BrokenPipeError on stdin write → structured failure
 # ---------------------------------------------------------------------------
 

@@ -116,14 +116,17 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
     Prompt is the raw instruction; file-content injection is caller's responsibility.
     """
     import os
+    from event_store import EventStore
     from provider_spawns.gemini_spawn import spawn_gemini
 
     model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    event_store = EventStore()
     result = spawn_gemini(
         prompt=args.instruction,
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
+        event_writer=event_store.append,
     )
     if result.error:
         print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
