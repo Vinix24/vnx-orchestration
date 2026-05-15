@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -34,6 +35,8 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 import state_writer
+
+_log = logging.getLogger(__name__)
 
 
 def _default_primary_state_dir(project_id: str) -> Path:
@@ -74,8 +77,8 @@ def _resolve_identity(project_id: str) -> Dict[str, Optional[str]]:
             result["operator_id"] = result["operator_id"] or identity.operator_id
             result["orchestrator_id"] = result["orchestrator_id"] or identity.orchestrator_id
             result["agent_id"] = result["agent_id"] or identity.agent_id
-    except Exception:
-        pass
+    except (ImportError, AttributeError) as e:
+        _log.debug("Failed to resolve VNX identity: %s", e)
     return result
 
 
@@ -198,8 +201,8 @@ def restamp_project(
                 c_receipts = central_state / "t0_receipts.ndjson"
                 n = _restamp_ndjson_inplace(c_receipts, envelope, dry_run=dry_run)
                 results["central/t0_receipts.ndjson"] = n
-        except Exception:
-            pass
+        except OSError as e:
+            _log.debug("Failed to re-stamp central state files: %s", e)
 
     return results
 
