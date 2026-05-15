@@ -12,7 +12,7 @@ def _source_and_echo_script_dir(caller_script_dir: str) -> subprocess.CompletedP
     script = f"""
 set -euo pipefail
 SCRIPT_DIR="{caller_script_dir}"
-source "{PROCESS_LIFECYCLE}" 2>/dev/null || true
+source "{PROCESS_LIFECYCLE}" || {{ echo "FATAL: source {PROCESS_LIFECYCLE} failed" >&2; exit 1; }}
 echo "$SCRIPT_DIR"
 """
     return subprocess.run(
@@ -25,6 +25,9 @@ echo "$SCRIPT_DIR"
 def test_script_dir_not_overwritten_after_source():
     caller_dir = "/tmp/test-caller-script-dir"
     result = _source_and_echo_script_dir(caller_dir)
+    assert result.returncode == 0, (
+        f"Sourcing process_lifecycle.sh failed (rc={result.returncode}):\n{result.stderr}"
+    )
     actual = result.stdout.strip()
     assert actual == caller_dir, (
         f"SCRIPT_DIR was clobbered after sourcing process_lifecycle.sh: "
@@ -36,6 +39,9 @@ def test_script_dir_not_overwritten_with_real_path():
     """Second caller value to ensure it's not hardcoded."""
     caller_dir = "/tmp/another-caller"
     result = _source_and_echo_script_dir(caller_dir)
+    assert result.returncode == 0, (
+        f"Sourcing process_lifecycle.sh failed (rc={result.returncode}):\n{result.stderr}"
+    )
     actual = result.stdout.strip()
     assert actual == caller_dir, (
         f"SCRIPT_DIR was clobbered: expected '{caller_dir}', got '{actual}'"
@@ -49,10 +55,13 @@ def test_ops_process_control_does_not_leak_script_dir():
     script = f"""
 set -euo pipefail
 SCRIPT_DIR="{caller_dir}"
-source "{ops_pc}" 2>/dev/null || true
+source "{ops_pc}" || {{ echo "FATAL: source {ops_pc} failed" >&2; exit 1; }}
 echo "$SCRIPT_DIR"
 """
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"Sourcing ops_process_control.sh failed (rc={result.returncode}):\n{result.stderr}"
+    )
     actual = result.stdout.strip()
     assert actual == caller_dir, (
         f"SCRIPT_DIR clobbered by ops_process_control.sh: "
