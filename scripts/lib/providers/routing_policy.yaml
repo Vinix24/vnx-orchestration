@@ -1,0 +1,52 @@
+# Wave 7 cost-routing policy
+# Maps task-class + complexity to preferred provider lane
+# Default: Anthropic Sonnet 4.6 (untouched safety default)
+
+version: 1
+default_lane: "claude/sonnet-4-6"
+
+# Task-class -> lane mapping
+# First match wins; no match -> default_lane
+rules:
+  - name: simple-cleanup
+    when:
+      task_class: ["lint-narrow", "doc-update", "oi-closure", "rename"]
+      complexity: ["low"]
+    lane: "claude/haiku-4-5"  # 3x cheaper than Sonnet, sufficient for simple work
+    rationale: "Low-complexity housekeeping; Haiku matches quality for these tasks at 1/3 cost"
+
+  - name: refactor-code-default
+    when:
+      task_class: ["refactor", "module-split", "feature-implementation"]
+      complexity: ["medium", "high"]
+    lane: "claude/sonnet-4-6"  # quality-default for code
+    rationale: "Refactor needs depth; Sonnet 4.6 remains baseline"
+
+  - name: cost-optimized-code
+    when:
+      task_class: ["refactor", "feature-implementation"]
+      complexity: ["medium"]
+      opt_in_flag: "VNX_USE_CHEAP_LANE"  # operator opt-in only
+    lane: "litellm:deepseek:deepseek-v4-pro"  # $0.28/$0.40 - 10x cheaper input than Sonnet
+    rationale: "Mid-complexity code with operator opt-in; DeepSeek V3.2 ranks competitive on coding"
+
+  - name: review-analysis
+    when:
+      task_class: ["code-review", "analysis", "summarization"]
+    lane: "litellm:moonshot:kimi-k2-0905-default"  # $0.60/$2.50 - 5x cheaper
+    rationale: "Long-context review benefits from Kimi K2-0905-preview's depth at lower cost"
+
+  - name: research-deep
+    when:
+      task_class: ["research", "design-doc", "system-architect"]
+      complexity: ["high"]
+    lane: "claude/opus"  # premium for deep research
+    rationale: "Architect-level work warrants Opus quality"
+
+# Fallback chain when preferred lane fails (API down, rate-limited, etc)
+fallback_chain:
+  "litellm:deepseek:*": ["litellm:moonshot:kimi-k2-0905-default", "claude/sonnet-4-6"]
+  "litellm:moonshot:*": ["litellm:deepseek:deepseek-v4-pro", "claude/sonnet-4-6"]
+  "litellm:zai:*": ["litellm:moonshot:kimi-k2-0905-default", "claude/sonnet-4-6"]
+  "claude/haiku-4-5": ["claude/sonnet-4-6"]
+  # Sonnet and Opus have no fallback (they are the safety net)
