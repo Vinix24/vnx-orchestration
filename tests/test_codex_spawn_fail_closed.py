@@ -12,6 +12,7 @@ Verifies fail-closed behaviour in spawn_codex():
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import List
@@ -250,3 +251,148 @@ class TestCodexSpawnNormalCompletion:
         assert result.stopped_early is False
         assert result.error is None
         assert "Analysis complete." in result.completion_text
+
+
+# ---------------------------------------------------------------------------
+# Test 6: event_writer failure is logged as ERROR and counted
+# ---------------------------------------------------------------------------
+
+class TestEventWriterFailureLogged:
+    """ADR-005: event_writer failures logged at ERROR level and counted in result."""
+
+    def _make_proc(self, MockPopen: MagicMock) -> MagicMock:
+        proc = MagicMock()
+        proc.pid = 99
+        proc.returncode = 0
+        proc.wait = MagicMock(return_value=0)
+        proc.poll = MagicMock(return_value=0)
+        proc.stdin = MagicMock()
+        MockPopen.return_value = proc
+        return proc
+
+    def test_event_writer_failure_is_logged_as_error_and_counted(self, caplog):
+        """When event_writer always raises, result.event_writer_failures > 0 and ERROR logged."""
+        events = [
+            CanonicalEvent(
+                dispatch_id="test-ew-fail",
+                terminal_id="T1",
+                provider="codex",
+                event_type="text",
+                data={"text": "hello"},
+                observability_tier=1,
+            ),
+            CanonicalEvent(
+                dispatch_id="test-ew-fail",
+                terminal_id="T1",
+                provider="codex",
+                event_type="complete",
+                data={},
+                observability_tier=1,
+            ),
+        ]
+
+        def _failing_writer(tid, event_dict, dispatch_id=None):
+            raise OSError("ndjson ledger unavailable")
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            self._make_proc(MockPopen)
+
+            with patch(
+                "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                return_value=iter(events),
+            ):
+                with caplog.at_level(logging.ERROR, logger="provider_spawns.codex_spawn"):
+                    result = spawn_codex(
+                        prompt="test",
+                        model="",
+                        dispatch_id="test-ew-fail",
+                        terminal_id="T1",
+                        event_writer=_failing_writer,
+                    )
+
+        assert result.event_writer_failures == 2, (
+            f"expected 2 writer failures (one per event), got {result.event_writer_failures}"
+        )
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(error_records) >= 1, "expected at least one ERROR log record"
+        assert any(
+            "event_writer callback failed" in r.message for r in error_records
+        ), f"ERROR log missing 'event_writer callback failed': {[r.message for r in error_records]}"
+
+    def test_event_writer_strict_raises_on_failure(self):
+        """event_writer_strict=True raises RuntimeError when event_writer fails."""
+        events = [
+            CanonicalEvent(
+                dispatch_id="test-strict",
+                terminal_id="T1",
+                provider="codex",
+                event_type="text",
+                data={"text": "hi"},
+                observability_tier=1,
+            ),
+        ]
+
+        def _failing_writer(tid, event_dict, dispatch_id=None):
+            raise ValueError("write failed")
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 0
+            proc.wait = MagicMock(return_value=0)
+            proc.poll = MagicMock(return_value=0)
+            proc.stdin = MagicMock()
+            MockPopen.return_value = proc
+
+            with patch(
+                "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                return_value=iter(events),
+            ):
+                with pytest.raises(RuntimeError, match="event_writer failed"):
+                    spawn_codex(
+                        prompt="test",
+                        model="",
+                        dispatch_id="test-strict",
+                        terminal_id="T1",
+                        event_writer=_failing_writer,
+                        event_writer_strict=True,
+                    )
+
+    def test_no_failures_result_field_zero(self):
+        """event_writer_failures=0 when writer never raises (regression guard)."""
+        events = [
+            CanonicalEvent(
+                dispatch_id="test-ok-ew",
+                terminal_id="T1",
+                provider="codex",
+                event_type="text",
+                data={"text": "ok"},
+                observability_tier=1,
+            ),
+        ]
+
+        collected: List[dict] = []
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 0
+            proc.wait = MagicMock(return_value=0)
+            proc.poll = MagicMock(return_value=0)
+            proc.stdin = MagicMock()
+            MockPopen.return_value = proc
+
+            with patch(
+                "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                return_value=iter(events),
+            ):
+                result = spawn_codex(
+                    prompt="test",
+                    model="",
+                    dispatch_id="test-ok-ew",
+                    terminal_id="T1",
+                    event_writer=lambda tid, ev, dispatch_id=None: collected.append(ev),
+                )
+
+        assert result.event_writer_failures == 0
+        assert len(collected) == 1

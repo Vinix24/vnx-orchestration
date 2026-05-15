@@ -55,6 +55,9 @@ class CodexSpawnResult:
     token_usage: Optional[Dict[str, Any]] = None
     # Set when an exception terminated the stream read.
     error: Optional[str] = None
+    # Number of times event_writer callback raised an exception.
+    # > 0 indicates audit-trail gaps the caller must investigate per ADR-005.
+    event_writer_failures: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +340,11 @@ def _process_one_event(
     HealthStatus: Any,
     SLOW_THRESHOLD: float,
     last_stuck_log: float,
-) -> Tuple[bool, float]:
+    events_written: int = 0,
+) -> Tuple[bool, float, bool]:
     """Process one canonical event: health tick, event_writer, on_event.
 
-    Returns (stop_requested, updated_last_stuck_log).
+    Returns (stop_requested, updated_last_stuck_log, writer_failed).
     """
     if health_monitor is not None:
         health_monitor.update(canonical_event)
@@ -352,6 +356,7 @@ def _process_one_event(
                     health_monitor.log_stuck_event()
                     last_stuck_log = now
 
+    writer_failed = False
     if event_writer is not None:
         try:
             event_writer(
@@ -360,11 +365,17 @@ def _process_one_event(
                 dispatch_id=dispatch_id,
             )
         except Exception as _exc:
-            logger.debug("spawn_codex: event_writer raised: %s", _exc)
+            # event_writer is caller-supplied (typically writes to NDJSON ledger).
+            # Failures are ADR-005 audit gaps — log as ERROR + count for caller inspection.
+            logger.error(
+                "spawn_codex: event_writer callback failed (dispatch=%s, event_count=%d): %s",
+                dispatch_id, events_written, _exc,
+            )
+            writer_failed = True
 
     if on_event is not None and on_event(canonical_event) is False:
-        return True, last_stuck_log
-    return False, last_stuck_log
+        return True, last_stuck_log, writer_failed
+    return False, last_stuck_log, writer_failed
 
 
 def _wait_proc(proc: subprocess.Popen, timeout: float = 5.0) -> None:
@@ -389,10 +400,11 @@ def _drain_stream(
     total_deadline: float,
     HealthStatus: Any,
     SLOW_THRESHOLD: float,
-) -> Tuple[list, int, Optional[str], bool, bool, Optional[Dict[str, Any]], Optional[str]]:
-    """Drain codex NDJSON stream; return (parts, count, session_id, timed_out, stopped, usage, error)."""
+) -> Tuple[list, int, Optional[str], bool, bool, Optional[Dict[str, Any]], Optional[str], int]:
+    """Drain codex NDJSON stream; return (parts, count, session_id, timed_out, stopped, usage, error, writer_failures)."""
     completion_parts: list = []
     events_written = 0
+    _event_writer_failures = 0
     session_id: Optional[str] = None
     timed_out = False
     stopped_early = False
@@ -420,11 +432,14 @@ def _drain_stream(
                 if "timeout" in (reason or "").lower():
                     timed_out = True
 
-            stop, last_stuck_log = _process_one_event(
+            stop, last_stuck_log, writer_failed = _process_one_event(
                 canonical_event, terminal_id, dispatch_id,
                 health_monitor, event_writer, on_event,
                 HealthStatus, SLOW_THRESHOLD, last_stuck_log,
+                events_written=events_written,
             )
+            if writer_failed:
+                _event_writer_failures += 1
             if stop:
                 stopped_early = True
                 try:
@@ -440,9 +455,9 @@ def _drain_stream(
         except Exception as _kill_exc:
             logger.debug("spawn_codex: kill in error handler failed: %s", _kill_exc)
         _wait_proc(proc)
-        return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, str(exc)
+        return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, str(exc), _event_writer_failures
 
-    return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, None
+    return completion_parts, events_written, session_id, timed_out, stopped_early, last_token_usage, None, _event_writer_failures
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +471,7 @@ def spawn_codex(
     terminal_id: str,
     *,
     event_writer: Optional[Callable[..., None]] = None,
+    event_writer_strict: bool = False,
     health_monitor: Optional[Any] = None,
     on_event: Optional[Callable[[Any], Optional[bool]]] = None,
     extra_env: Optional[Dict[str, str]] = None,
@@ -470,6 +486,9 @@ def spawn_codex(
     Returns CodexSpawnResult on completion (success OR controlled failure).
     Raises FileNotFoundError when the codex binary is absent.
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
+
+    event_writer_strict=True raises RuntimeError if any event_writer call failed,
+    for callers that require strict ADR-005 audit-trail integrity.
     """
     try:
         from worker_health_monitor import HealthStatus, SLOW_THRESHOLD
@@ -492,7 +511,7 @@ def spawn_codex(
 
     normalizer = _NormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
 
-    parts, events_written, session_id, timed_out, stopped_early, token_usage, error = _drain_stream(
+    parts, events_written, session_id, timed_out, stopped_early, token_usage, error, _event_writer_failures = _drain_stream(
         normalizer, proc, terminal_id, dispatch_id, event_store,
         health_monitor, event_writer, on_event,
         chunk_timeout, total_deadline, HealthStatus, SLOW_THRESHOLD,
@@ -503,6 +522,12 @@ def spawn_codex(
 
     returncode = proc.returncode if proc.returncode is not None else 1
 
+    if event_writer_strict and _event_writer_failures > 0:
+        raise RuntimeError(
+            f"spawn_codex: event_writer failed {_event_writer_failures} time(s) "
+            f"(dispatch={dispatch_id}) — strict audit mode requires zero failures"
+        )
+
     return CodexSpawnResult(
         returncode=returncode if error is None else (returncode if returncode != 0 else 1),
         completion_text="\n\n".join(parts),
@@ -512,6 +537,7 @@ def spawn_codex(
         stopped_early=stopped_early,
         token_usage=token_usage,
         error=error,
+        event_writer_failures=_event_writer_failures,
     )
 
 
