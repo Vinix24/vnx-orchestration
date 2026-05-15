@@ -10,15 +10,15 @@
 VNX needs cost-optimization via cheaper LLM providers (DeepSeek V4, Kimi K2.6, GLM-5.1) for tasks where Sonnet 4.6 quality is overkill. Three integration paths exist:
 
 - **Path A** (per-provider native): each provider gets its own spawn handler + provider_dispatch route. High maintenance.
-- **Path B** (LiteLLM bridge): LiteLLM as Python-library abstraction, ONE spawn handler (`litellm_spawn.py` from PR-4.6.5) routes to N providers via `--provider litellm:<sub>`. Recommended.
+- **Path B** (LiteLLM via subprocess bridge): LiteLLM runs as subprocess via `litellm_spawn.py` handler (from PR-4.6.5) + `_litellm_runner.py` helper. ONE spawn handler routes to N providers via `--provider litellm:<sub>`. Subprocess-only delivery preserves ADR-010 invariant (no in-process library calls into VNX worker code). Recommended.
 - **Path D** (Claude-harness redirect via BASE_URL): use `claude` CLI with `ANTHROPIC_BASE_URL` pointing to a non-Anthropic endpoint. **BLOCKED** since 2026-05-10 — `claude` v2.1.136 emits 8x telemetry requests to api.anthropic.com despite BASE_URL redirect. Tier-C network-namespace sandbox MANDATORY before Path D is safe.
 
 ## Decision
 
 Wave 7 adopts **Path B (LiteLLM bridge)** for first-class integration of DeepSeek V4, Kimi K2.6, and GLM-5.1.
 
-- Single spawn handler (`scripts/lib/provider_spawns/litellm_spawn.py`, PR-4.6.5) routes to all three via sub_provider routing.
-- LiteLLM v1.75.5+ natively supports `deepseek/*` and `moonshot/*` (Kimi). z.AI/GLM requires `litellm.CustomLLM` subclass or OpenRouter fallback.
+- Single subprocess spawn handler (`scripts/lib/provider_spawns/litellm_spawn.py`, PR-4.6.5) routes to all three via sub_provider routing. The handler spawns `_litellm_runner.py` as a subprocess process; no LiteLLM imports inside VNX worker code beyond the runner sidecar.
+- LiteLLM v1.75.5+ natively supports `deepseek/*` and `moonshot/*` (Kimi). z.AI/GLM requires `litellm.CustomLLM` subclass or OpenRouter fallback — both implemented inside the `_litellm_runner.py` subprocess, not in VNX worker code.
 - Cost-routing policy (`routing_policy.yaml`) decides per dispatch which provider lane (default Claude/Sonnet 4.6 unchanged).
 - Path D blocked until Tier-C sandbox lands. Tier-C is research-only in PR-7.6.
 
@@ -31,7 +31,7 @@ Wave 7 adopts **Path B (LiteLLM bridge)** for first-class integration of DeepSee
 - Cost reduction: DeepSeek V4 ~$0.28/$0.40 vs Sonnet $3/$15 = 10x cheaper input, 37x cheaper output
 
 **Negative:**
-- LiteLLM is a Python dependency (no Anthropic SDK, ADR-003 OK)
+- LiteLLM is a Python dependency for the `_litellm_runner.py` subprocess (no Anthropic SDK, ADR-003 OK; no in-process library calls in VNX worker code, ADR-010 OK)
 - z.AI gap: PR-7.3 needs CustomLLM subclass (medium effort, medium-high risk)
 - Sub-provider routing complexity in `provider_dispatch.py`
 
@@ -50,6 +50,10 @@ Wave 7 adopts **Path B (LiteLLM bridge)** for first-class integration of DeepSee
 | Moonshot | Kimi K2.6 | 0.95 | 4.00 | premium Kimi |
 | Moonshot | K2-0905-preview | 0.60 | 2.50 | default Kimi lane (5x cheaper than Sonnet) |
 | z.AI | GLM-5.1 | via OpenRouter | via OpenRouter | needs CustomLLM or OpenRouter fallback |
+
+## ADR-010 compliance
+
+Path B preserves ADR-010 (subprocess as canonical Claude routing, extended to all providers per Wave 4.6). LiteLLM lives inside the `_litellm_runner.py` subprocess; VNX worker code only spawns and communicates via the subprocess boundary. No `import litellm` appears in worker dispatch code paths. CI gate (`scripts/ci_enforce_adr010.sh` if present, else manual review) verifies the invariant.
 
 ## Rejected alternatives
 
