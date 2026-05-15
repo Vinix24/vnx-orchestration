@@ -549,8 +549,14 @@ def _kill_proc(proc: subprocess.Popen) -> None:
         os.killpg(pgid, _signal.SIGTERM)
         time.sleep(0.2)
         os.killpg(pgid, _signal.SIGKILL)
-    except OSError:
+    except (ProcessLookupError, OSError):
+        proc.kill()
         try:
-            proc.kill()
-        except OSError:
-            pass
+            proc.wait(timeout=2)
+        except (ProcessLookupError, subprocess.TimeoutExpired) as exc:
+            # Process already terminated or wait timed out — both acceptable
+            # at kill-fallback boundary. Log for forensics.
+            logger.warning(
+                "_kill_proc: fallback wait failed (pid=%s): %s",
+                proc.pid, exc,
+            )

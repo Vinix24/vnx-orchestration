@@ -13,6 +13,7 @@ Verifies fail-closed behaviour in spawn_codex():
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -22,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from provider_spawns.codex_spawn import CodexSpawnResult, spawn_codex
+from provider_spawns.codex_spawn import CodexSpawnResult, _kill_proc, spawn_codex
 from canonical_event import CanonicalEvent
 
 
@@ -396,3 +397,81 @@ class TestEventWriterFailureLogged:
 
         assert result.event_writer_failures == 0
         assert len(collected) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (R2): _kill_proc fallback wait failure is logged, not silently swallowed
+# ---------------------------------------------------------------------------
+
+class TestKillProcFallbackWaitFailure:
+    """R2 fix: fallback wait exceptions in _kill_proc must be logged as WARNING."""
+
+    def _make_proc(self, pid: int = 42) -> MagicMock:
+        proc = MagicMock(spec=subprocess.Popen)
+        type(proc).pid = MagicMock(return_value=pid)
+        proc.pid = pid
+        return proc
+
+    def test_kill_proc_fallback_wait_failure_is_logged(self, caplog):
+        """When proc.wait(timeout=2) raises ProcessLookupError, WARNING is emitted."""
+        proc = self._make_proc(pid=1234)
+        proc.wait.side_effect = ProcessLookupError("process already gone")
+
+        with patch("os.getpgid", side_effect=OSError("no pgid")), \
+             caplog.at_level(logging.WARNING, logger="provider_spawns.codex_spawn"):
+            _kill_proc(proc)
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("fallback wait failed" in m for m in warning_msgs), (
+            f"Expected WARNING containing 'fallback wait failed', got: {warning_msgs}"
+        )
+
+    def test_kill_proc_fallback_wait_failure_includes_pid(self, caplog):
+        """WARNING log must include the pid for forensics."""
+        proc = self._make_proc(pid=5678)
+        proc.wait.side_effect = ProcessLookupError("gone")
+
+        with patch("os.getpgid", side_effect=OSError("no pgid")), \
+             caplog.at_level(logging.WARNING, logger="provider_spawns.codex_spawn"):
+            _kill_proc(proc)
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("5678" in m for m in warning_msgs), (
+            f"pid 5678 not in WARNING messages: {warning_msgs}"
+        )
+
+    def test_kill_proc_timeout_expired_is_logged(self, caplog):
+        """When proc.wait(timeout=2) raises TimeoutExpired, WARNING is emitted."""
+        proc = self._make_proc(pid=99)
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=2)
+
+        with patch("os.getpgid", side_effect=OSError("no pgid")), \
+             caplog.at_level(logging.WARNING, logger="provider_spawns.codex_spawn"):
+            _kill_proc(proc)
+
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("fallback wait failed" in m for m in warning_msgs), (
+            f"Expected WARNING containing 'fallback wait failed', got: {warning_msgs}"
+        )
+
+    def test_kill_proc_returns_normally_on_process_lookup_error(self):
+        """_kill_proc must not propagate ProcessLookupError from proc.wait()."""
+        proc = self._make_proc(pid=11)
+        proc.wait.side_effect = ProcessLookupError("already gone")
+
+        with patch("os.getpgid", side_effect=OSError("no pgid")):
+            try:
+                _kill_proc(proc)
+            except Exception as exc:
+                pytest.fail(f"_kill_proc propagated unexpectedly: {exc!r}")
+
+    def test_kill_proc_returns_normally_on_timeout_expired(self):
+        """_kill_proc must not propagate TimeoutExpired from proc.wait()."""
+        proc = self._make_proc(pid=22)
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=2)
+
+        with patch("os.getpgid", side_effect=OSError("no pgid")):
+            try:
+                _kill_proc(proc)
+            except Exception as exc:
+                pytest.fail(f"_kill_proc propagated unexpectedly: {exc!r}")

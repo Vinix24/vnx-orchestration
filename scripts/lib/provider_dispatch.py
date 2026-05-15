@@ -15,10 +15,13 @@ subprocess only.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+logger = logging.getLogger(__name__)
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
@@ -95,9 +98,21 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
     Prompt is the raw instruction; file-content injection is caller's responsibility.
+    Wires EventStore as event_writer so codex dispatches produce a NDJSON audit trail
+    identical to the claude path (provider-agnostic audit completeness, ADR-005).
     """
     import os
     from provider_spawns.codex_spawn import spawn_codex
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.warning(
+            "_dispatch_codex: EventStore unavailable; NDJSON audit sink skipped: %s",
+            _es_exc,
+        )
 
     model = os.environ.get("VNX_CODEX_MODEL", "")
     result = spawn_codex(
@@ -105,6 +120,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
+        event_writer=event_store.append if event_store is not None else None,
     )
     if result.error:
         print(f"spawn_codex failed: {result.error}", file=sys.stderr)
