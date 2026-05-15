@@ -16,7 +16,9 @@ APPEND_RECEIPT_SCRIPT="$SCRIPTS_DIR/append_receipt.py"
 
 # PHASE 1C: Singleton enforcement - prevent duplicate processes
 source "$SCRIPTS_DIR/singleton_enforcer.sh"
-enforce_singleton "receipt_processor_v4.sh"
+if [ "${_RP_LIB_MODE:-0}" != "1" ]; then
+    enforce_singleton "receipt_processor_v4.sh"
+fi
 
 # Source the smart pane manager
 source "$SCRIPTS_DIR/pane_manager_v2.sh"
@@ -58,11 +60,11 @@ else
     _SHA256_FALLBACK_WARN="No sha256sum or shasum found; falling back to cksum (weaker)"
 fi
 
-# Create state files if they don't exist
-touch "$PROCESSED_HASHES" "$RECEIPT_FILE" "$PROCESSING_LOG"
-
-# Store PID
-echo $$ > "$PID_FILE"
+# Create state files if they don't exist (skipped in lib mode)
+if [ "${_RP_LIB_MODE:-0}" != "1" ]; then
+    touch "$PROCESSED_HASHES" "$RECEIPT_FILE" "$PROCESSING_LOG"
+    echo $$ > "$PID_FILE"
+fi
 
 # ── Helper libraries ──────────────────────────────────────────────────────────
 RP_LIB="$SCRIPT_DIR/lib/receipt_processor"
@@ -403,17 +405,32 @@ PY
         local _old_watermark
         _old_watermark=$(cat "$WATERMARK_FILE" 2>/dev/null || echo "0")
 
+        # Preflight: ensure events file is writable before mutating watermark.
+        # If audit cannot land, do not advance state — return 1 and keep current watermark.
+        local _bootstrap_event_file="${VNX_DATA_DIR}/events/receipt_processor.ndjson"
+        local _events_dir
+        _events_dir=$(dirname "$_bootstrap_event_file")
+        if ! mkdir -p "$_events_dir" 2>/dev/null; then
+            log "ERROR" "Bootstrap: cannot create events dir $_events_dir — aborting bootstrap, keeping current watermark"
+            return 1
+        fi
+        if ! touch "$_bootstrap_event_file" 2>/dev/null; then
+            log "ERROR" "Bootstrap: events file $_bootstrap_event_file not writable — aborting bootstrap, keeping current watermark"
+            return 1
+        fi
+
+        # Preflight passed — safe to mutate watermark.
         echo "$new_watermark" > "${WATERMARK_FILE}.tmp" \
             && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
 
-        # Audit the bootstrap skip per ADR-005.
-        local _bootstrap_event_file="${VNX_DATA_DIR}/events/receipt_processor.ndjson"
-        mkdir -p "$(dirname "$_bootstrap_event_file")" 2>/dev/null || true
+        # Emit audit event per ADR-005. Preflight already verified writability; log loudly on failure.
         local _now_iso
         _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\n' \
+        if ! printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\n' \
             "$_now_iso" "$watermark_age" "$BOOTSTRAP_MAX_AGE" "$_old_watermark" "$new_watermark" \
-            >> "$_bootstrap_event_file"
+            >> "$_bootstrap_event_file"; then
+            log "ERROR" "Bootstrap: audit emission FAILED after watermark mutation — manual reconciliation required"
+        fi
         log "INFO" "Bootstrap skip audited to $_bootstrap_event_file"
         log "INFO" "Bootstrap watermark set to $new_watermark"
         log "INFO" "If you need historical reports replayed, manually rewind watermark and restart."
@@ -449,6 +466,12 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
+
+# _RP_LIB_MODE=1 allows sourcing this script to load function definitions only,
+# without launching the polling loop. Used by test fixtures.
+if [ "${_RP_LIB_MODE:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 # Main execution
 log "INFO" "Receipt Processor v4 starting (PID: $$)"
