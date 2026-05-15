@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""provider_dispatch.py — Provider-agnostic dispatch entry-point (Wave 4.6 PR-4.6.1).
+"""provider_dispatch.py — Provider-agnostic dispatch entry-point (Wave 4.6).
 
 Routes dispatch execution to the appropriate provider spawn handler based on
-``--provider``.  In PR-4.6.1 only the ``claude`` provider is wired; all other
-providers raise NotImplementedError with exit code 64 (EX_USAGE) until their
-respective spawn handlers land in subsequent PRs.
+``--provider``. PR-4.6.1: claude wired. PR-4.6.3: codex wired. PR-4.6.4: gemini wired.
+All other providers raise SystemExit(64) until their handlers land.
 
-See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md §PR-4.6.1
+See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md
 
 BILLING SAFETY: this module does NOT import the Anthropic SDK.  Claude dispatch
 delegates entirely to ``subprocess_dispatch.py`` which invokes ``claude -p`` via
@@ -23,14 +22,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
-# Providers whose spawn handlers exist in this PR.
-_IMPLEMENTED_PROVIDERS = {"claude"}
+# Providers whose spawn handlers exist.
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
-_FUTURE_PR_MAP = {
-    "codex": "PR-4.6.3",
-    "gemini": "PR-4.6.4",
-}
+_FUTURE_PR_MAP: dict = {}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -93,6 +89,54 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _dispatch_codex(args: argparse.Namespace) -> int:
+    """Route to spawn_codex for codex-provider dispatches.
+
+    Builds a minimal context dict from CLI args and delegates to spawn_codex().
+    Prompt is the raw instruction — file-content injection and intelligence context
+    are the caller's responsibility (same contract as the claude path).
+    """
+    from provider_spawns.codex_spawn import spawn_codex
+    import os
+
+    model = os.environ.get("VNX_CODEX_MODEL", "")
+
+    result = spawn_codex(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+    )
+    return 0 if result.returncode == 0 else 1
+
+
+def _dispatch_gemini(args: argparse.Namespace) -> int:
+    """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
+
+    Prompt is the raw instruction; file-content injection is caller's responsibility.
+    """
+    import os
+    from event_store import EventStore
+    from provider_spawns.gemini_spawn import spawn_gemini
+
+    model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    event_store = EventStore()
+    result = spawn_gemini(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+        event_writer=event_store.append,
+    )
+    if result.error:
+        print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        print("spawn_gemini timed out", file=sys.stderr)
+        return 1
+    return 0 if result.returncode == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args, route to the correct provider handler, return exit code."""
     parser = _build_parser()
@@ -108,22 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch_claude(args)
 
     if provider == "codex":
-        future_pr = _FUTURE_PR_MAP["codex"]
-        print(
-            f"Provider 'codex' spawn handler lands in {future_pr}. "
-            "Use --provider claude for now.",
-            file=sys.stderr,
-        )
-        raise SystemExit(_EX_USAGE)
+        return _dispatch_codex(args)
 
     if provider == "gemini":
-        future_pr = _FUTURE_PR_MAP["gemini"]
-        print(
-            f"Provider 'gemini' spawn handler lands in {future_pr}. "
-            "Use --provider claude for now.",
-            file=sys.stderr,
-        )
-        raise SystemExit(_EX_USAGE)
+        return _dispatch_gemini(args)
 
     if provider.startswith("litellm:"):
         print(
