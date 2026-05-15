@@ -8,7 +8,12 @@ Each provider requires an API key set as an env var before dispatch.
 | Anthropic Claude | ANTHROPIC_API_KEY (or OAuth via subscription) | console.anthropic.com | Sonnet 4.6 $3/$15 | default |
 | DeepSeek | DEEPSEEK_API_KEY | platform.deepseek.com | V3.2 $0.28/$0.40 | Wave 7 PR-7.1 |
 | Moonshot (Kimi) | MOONSHOT_API_KEY | platform.moonshot.cn | K2-0905 $0.60/$2.50 | Wave 7 PR-7.2 |
-| Z.AI (GLM) | ZHIPU_API_KEY | open.bigmodel.cn | GLM-5.1 est. $0.50/$2.50 | Wave 7 PR-7.3 |
+| Z.AI (GLM) via OpenRouter | OPENROUTER_API_KEY | openrouter.ai | GLM-5.1 $0.50/$2.50 (pass-through) | Wave 7 PR-7.3 |
+
+**Note on GLM legacy versions:** GLM-4.5 and GLM-4.6 are deprecated. Only GLM-5.1 is
+accepted by the `litellm:zai` route. Passing `--model glm-4.5` or `--model glm-4.6`
+raises an error. Direct Zhipu API integration (no OpenRouter margin) is deferred to
+Wave 7.3.1 — see `scripts/lib/providers/z_ai_custom_provider.py`.
 
 Pricing shown as input/output per MTok. Sonnet 4.6 reference included for cost comparison.
 
@@ -63,6 +68,20 @@ Two model tiers available under `--provider litellm:moonshot`:
 - Dispatch: `--provider litellm:moonshot` (default) or `--provider litellm:moonshot:kimi-k2-6` (premium)
 - Missing `MOONSHOT_API_KEY` → immediate exit(64) before subprocess spawn
 - Context: 8,192 tokens (both models); streaming + tool calls supported
+
+## GLM-5.1 via OpenRouter / Z.AI (PR-7.3)
+
+GLM-5.1 routes through OpenRouter as `openrouter/z-ai/glm-5`:
+
+| Alias | LiteLLM name | Input/MTok | Output/MTok | Task classes |
+|---|---|---|---|---|
+| glm-5.1-default | openrouter/z-ai/glm-5 | $0.50 | $2.50 | coding, review |
+
+- Dispatch: `--provider litellm:zai`
+- Missing `OPENROUTER_API_KEY` → immediate exit(64) before subprocess spawn
+- Deprecated models GLM-4.5 and GLM-4.6 → ValueError on dispatch (explicit legacy guard)
+- Context: 8,192 tokens; streaming + tool calls supported
+- Direct Zhipu integration deferred to Wave 7.3.1 (see `z_ai_custom_provider.py`)
 
 ## Related
 

@@ -25,14 +25,15 @@ _EXIT_OK = 0
 _EXIT_CREDS = 1
 _EXIT_ERR = 2
 
-# Required env var per provider prefix (deepseek/*, moonshot/*, etc.)
+# Required env var per provider prefix (deepseek/*, moonshot/*, openrouter/*, etc.)
 _PROVIDER_KEY_REQS: dict = {
     "deepseek": "DEEPSEEK_API_KEY",
     "moonshot": "MOONSHOT_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",  # z.AI via OpenRouter (PR-7.3)
 }
 
 # Providers that support stream_options usage reporting via LiteLLM
-_USAGE_STREAM_PROVIDERS = frozenset({"deepseek", "moonshot"})
+_USAGE_STREAM_PROVIDERS = frozenset({"deepseek", "moonshot", "openrouter"})
 
 
 def _emit(obj: dict) -> None:

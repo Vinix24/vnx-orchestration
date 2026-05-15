@@ -37,7 +37,7 @@ _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "bedrock": "bedrock/claude-sonnet-4-6",
     "deepseek": "deepseek/deepseek-v3.2",
     "moonshot": "moonshot/kimi-k2-0905-preview",
-    "glm-5.1": "zhipuai/glm-4",
+    "zai": "openrouter/z-ai/glm-5",
     "ollama": "ollama/llama3",
     "anthropic": "anthropic/claude-sonnet-4-6",
 }
@@ -46,7 +46,11 @@ _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
 _SUB_PROVIDER_KEY_REQS: dict = {
     "deepseek": "DEEPSEEK_API_KEY",
     "moonshot": "MOONSHOT_API_KEY",
+    "zai": "OPENROUTER_API_KEY",
 }
+
+# GLM model names that are LEGACY — rejected on zai dispatch (PR-7.3)
+_DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6"})
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -190,6 +194,34 @@ def _resolve_moonshot_model(model_alias: "str | None" = None) -> str:
     return next(iter(cfg.models.values())).litellm_name
 
 
+def _validate_zai_model_not_legacy(model: str) -> None:
+    """Raise ValueError when model names a deprecated GLM version."""
+    model_lower = (model or "").lower().strip()
+    if model_lower in _DEPRECATED_ZAI_MODELS:
+        raise ValueError(f"GLM-4.5/4.6 are LEGACY, use GLM-5.1 (got: {model!r})")
+
+
+def _resolve_zai_model(model_alias: "str | None" = None) -> str:
+    """Load GLM-5.1 litellm_name from registry via OpenRouter.
+
+    Defaults to 'glm-5.1-default' (openrouter/z-ai/glm-5) when alias is absent.
+    Falls back to hardcoded default when registry is unavailable.
+    """
+    from providers import provider_registry as _reg
+    try:
+        registry = _reg.load()
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("provider_dispatch: registry resolve failed for zai: %s", e)
+        raise RuntimeError(f"provider registry resolution failed: {e}") from e
+    cfg = registry.get("zai")
+    if cfg is None or not cfg.enabled or not cfg.models:
+        return _LITELLM_SUB_PROVIDER_DEFAULTS["zai"]
+    target_key = model_alias or "glm-5.1-default"
+    if target_key in cfg.models:
+        return cfg.models[target_key].litellm_name
+    return next(iter(cfg.models.values())).litellm_name
+
+
 def _dispatch_litellm(args: argparse.Namespace) -> int:
     """Route to spawn_litellm for litellm-provider dispatches (PR-4.6.5).
 
@@ -233,6 +265,11 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         model = env_model or _resolve_deepseek_model()
     elif base_sub == "moonshot":
         model = env_model or _resolve_moonshot_model(model_alias)
+    elif base_sub == "zai":
+        _validate_zai_model_not_legacy(args.model)
+        if model_alias:
+            _validate_zai_model_not_legacy(model_alias)
+        model = env_model or _resolve_zai_model(model_alias)
     elif env_model:
         model = env_model
     elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
