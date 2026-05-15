@@ -15,10 +15,13 @@ subprocess only.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+logger = logging.getLogger(__name__)
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
@@ -90,24 +93,48 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
 
 
 def _dispatch_codex(args: argparse.Namespace) -> int:
-    """Route to spawn_codex for codex-provider dispatches.
+    """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
-    Builds a minimal context dict from CLI args and delegates to spawn_codex().
-    Prompt is the raw instruction — file-content injection and intelligence context
-    are the caller's responsibility (same contract as the claude path).
+    Prompt is the raw instruction; file-content injection is caller's responsibility.
+    Wires EventStore as event_writer so codex dispatches produce a NDJSON audit trail
+    identical to the claude path (provider-agnostic audit completeness, ADR-005).
     """
-    from provider_spawns.codex_spawn import spawn_codex
     import os
+    from provider_spawns.codex_spawn import spawn_codex
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.warning(
+            "_dispatch_codex: EventStore unavailable; NDJSON audit sink skipped: %s",
+            _es_exc,
+        )
 
     model = os.environ.get("VNX_CODEX_MODEL", "")
-
     result = spawn_codex(
         prompt=args.instruction,
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
+        event_writer=event_store.append if event_store is not None else None,
     )
-    return 0 if result.returncode == 0 else 1
+    if result.error:
+        print(f"spawn_codex failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        print("spawn_codex timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "codex dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        return 2
+    return 0
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -134,7 +161,15 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
     if result.timed_out:
         print("spawn_gemini timed out", file=sys.stderr)
         return 1
-    return 0 if result.returncode == 0 else 1
+    if result.returncode != 0:
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "gemini dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        return 2
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
