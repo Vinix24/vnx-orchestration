@@ -72,8 +72,8 @@ def _purge_expired_hashes(hashes: dict[str, str]) -> dict[str, str]:
             age = now_ts - datetime.fromisoformat(ts).timestamp()
             if age < _DUPLICATE_WINDOW_SECONDS:
                 result[h] = ts
-        except Exception:
-            pass
+        except ValueError as e:
+            _LOG.debug("Skipping hash with unparseable timestamp %r: %s", ts, e)
     return result
 
 
@@ -96,6 +96,11 @@ def _get_event_store(state_dir: Path) -> Any | None:
         return EventStore(events_dir=events_dir)
     except Exception:
         return None
+
+
+def _log_event_store_failure(dispatch_id: str, exc: Exception) -> None:
+    """Log event-store append failure without raising."""
+    _LOG.debug("Failed to append dispatch event to event store (dispatch=%s): %s", dispatch_id, exc)
 
 
 def _get_dispatch_writer():
@@ -208,8 +213,8 @@ def _handle_dispatch(
         if event_store:
             try:
                 event_store.append("T0", event, dispatch_id=dispatch_id)
-            except Exception:
-                pass
+            except (OSError, ValueError) as e:
+                _log_event_store_failure(dispatch_id, e)
         _log_decision_event(state_dir, event)
 
         return "dispatched"

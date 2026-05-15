@@ -409,6 +409,38 @@ class IntelligenceDaemon:
         """Delegate to dashboard builder."""
         self.dashboard_builder.write_intelligence_health()
 
+    def _emit_heartbeat(self) -> None:
+        """Emit health beacon heartbeat on success. Non-fatal on ImportError/OSError."""
+        try:
+            from health_beacon import HealthBeacon
+            _hb_paths = ensure_env()
+            HealthBeacon(
+                Path(_hb_paths["VNX_DATA_DIR"]),
+                "intelligence_daemon",
+                expected_interval_seconds=300,
+            ).heartbeat(
+                status="ok",
+                details={
+                    "uptime_seconds": self.health_status.get("uptime_seconds", 0),
+                    "daemon_status": self.health_status.get("status", "running"),
+                },
+            )
+        except (ImportError, OSError) as e:
+            logger.debug("Failed to emit health beacon heartbeat: %s", e)
+
+    def _emit_failure_heartbeat(self, error: Exception) -> None:
+        """Emit health beacon heartbeat on failure. Non-fatal on ImportError/OSError."""
+        try:
+            from health_beacon import HealthBeacon
+            _hb_paths = ensure_env()
+            HealthBeacon(
+                Path(_hb_paths["VNX_DATA_DIR"]),
+                "intelligence_daemon",
+                expected_interval_seconds=300,
+            ).heartbeat(status="fail", details={"error": str(error)})
+        except (ImportError, OSError) as e_hb:
+            logger.debug("Failed to emit health beacon failure heartbeat: %s", e_hb)
+
     def run(self):
         """Main daemon loop"""
         logger.info("=" * 60)
@@ -447,22 +479,7 @@ class IntelligenceDaemon:
                 self.dashboard_builder.write_intelligence_health()  # Write to dedicated file (PR #8 Fix)
                 self.dashboard_builder.write_health_status()  # Update dashboard every cycle for live sync
 
-                try:
-                    from health_beacon import HealthBeacon
-                    _hb_paths = ensure_env()
-                    HealthBeacon(
-                        Path(_hb_paths["VNX_DATA_DIR"]),
-                        "intelligence_daemon",
-                        expected_interval_seconds=300,
-                    ).heartbeat(
-                        status="ok",
-                        details={
-                            "uptime_seconds": self.health_status.get("uptime_seconds", 0),
-                            "daemon_status": self.health_status.get("status", "running"),
-                        },
-                    )
-                except Exception:
-                    pass
+                self._emit_heartbeat()
 
                 # Sleep for 60 seconds
                 time.sleep(60)
@@ -470,16 +487,7 @@ class IntelligenceDaemon:
             except Exception as e:
                 logger.error(f"Error in daemon loop: {e}")
                 self.health_status['status'] = 'error'
-                try:
-                    from health_beacon import HealthBeacon
-                    _hb_paths = ensure_env()
-                    HealthBeacon(
-                        Path(_hb_paths["VNX_DATA_DIR"]),
-                        "intelligence_daemon",
-                        expected_interval_seconds=300,
-                    ).heartbeat(status="fail", details={"error": str(e)})
-                except Exception:
-                    pass
+                self._emit_failure_heartbeat(e)
                 time.sleep(60)  # Continue after error
 
         # Graceful shutdown

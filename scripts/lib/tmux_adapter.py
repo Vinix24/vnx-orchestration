@@ -9,8 +9,10 @@ Feature flags: VNX_TMUX_ADAPTER_ENABLED, VNX_ADAPTER_PRIMARY.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -40,6 +42,8 @@ from adapter_types import (
     UnsupportedCapability,
 )
 from runtime_coordination import _append_event, get_connection, get_lease
+
+_log = logging.getLogger(__name__)
 
 
 def adapter_enabled() -> bool:
@@ -532,8 +536,8 @@ class TmuxAdapter:
                 _append_event(conn, event_type=event_type, entity_type="dispatch",
                     entity_id=dispatch_id, actor=actor, reason=reason, metadata=meta)
                 conn.commit()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            _log.debug("Failed to emit %s event for dispatch %s: %s", event_type, dispatch_id, e)
 
     def _record_success(
         self, target: PaneTarget, dispatch_id: str,
@@ -592,8 +596,8 @@ def _emit_remap_event(state_dir: Path, terminal_id: str, old_pane_id: str, new_p
                 reason=f"pane_id remapped from {old_pane_id!r} to {new_pane_id!r}",
                 metadata={"old_pane_id": old_pane_id, "new_pane_id": new_pane_id})
             conn.commit()
-    except Exception:
-        pass
+    except (ImportError, sqlite3.Error) as e:
+        _log.debug("Failed to emit pane remap event for %s: %s", terminal_id, e)
 
 
 def remap_pane(
