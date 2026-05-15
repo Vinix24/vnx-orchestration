@@ -1,0 +1,22 @@
+# Wave 7 model registry — LiteLLM-compatible model names + cost/MTok
+providers:
+  deepseek:
+    enabled: true
+    api_key_env: DEEPSEEK_API_KEY
+    models:
+      deepseek-v4-pro:
+        litellm_name: "deepseek/deepseek-v3.2"
+        cost_input_per_mtok: 0.28
+        cost_output_per_mtok: 0.40
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+  moonshot:
+    enabled: false  # PR-7.2 will enable
+    api_key_env: MOONSHOT_API_KEY
+    models: {}
+  zai:
+    enabled: false  # PR-7.3 will enable
+    api_key_env: ZHIPU_API_KEY
+    models: {}

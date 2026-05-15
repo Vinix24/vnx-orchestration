@@ -35,11 +35,16 @@ _FUTURE_PR_MAP: dict = {}
 # LiteLLM sub-provider defaults when VNX_LITELLM_MODEL is not set.
 _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "bedrock": "bedrock/claude-sonnet-4-6",
-    "deepseek": "deepseek/deepseek-v3",
+    "deepseek": "deepseek/deepseek-v3.2",
     "kimi": "openai/moonshot-v1-32k",
     "glm-5.1": "zhipuai/glm-4",
     "ollama": "ollama/llama3",
     "anthropic": "anthropic/claude-sonnet-4-6",
+}
+
+# Env vars required per sub-provider (fast-fail before subprocess spawn)
+_SUB_PROVIDER_KEY_REQS: dict = {
+    "deepseek": "DEEPSEEK_API_KEY",
 }
 
 
@@ -148,12 +153,25 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_deepseek_model() -> str:
+    """Load DeepSeek model litellm_name from registry, fallback to hardcoded default."""
+    try:
+        from providers import provider_registry as _reg
+        rec = _reg.get_default_model("deepseek")
+        if rec is not None:
+            return rec.litellm_name
+    except Exception:
+        pass
+    return _LITELLM_SUB_PROVIDER_DEFAULTS["deepseek"]
+
+
 def _dispatch_litellm(args: argparse.Namespace) -> int:
     """Route to spawn_litellm for litellm-provider dispatches (PR-4.6.5).
 
     Accepts --provider litellm:<sub_provider>, e.g. litellm:deepseek.
-    Model resolved via VNX_LITELLM_MODEL env var, sub_provider default, or
-    "anthropic/claude-sonnet-4-6" fallback. Wires EventStore for NDJSON audit.
+    Model resolved via VNX_LITELLM_MODEL env var, registry lookup, sub_provider default,
+    or "anthropic/claude-sonnet-4-6" fallback. Wires EventStore for NDJSON audit.
+    DeepSeek requires DEEPSEEK_API_KEY env var (fast-fail before subprocess spawn).
     """
     import os
     from provider_spawns.litellm_spawn import spawn_litellm
@@ -171,8 +189,19 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     parts = args.provider.split(":", 1)
     sub_provider = parts[1] if len(parts) > 1 else ""
 
+    # Fast-fail for providers that require an explicit API key
+    required_key = _SUB_PROVIDER_KEY_REQS.get(sub_provider)
+    if required_key and not os.environ.get(required_key):
+        print(
+            f"litellm:{sub_provider} requires {required_key} env var",
+            file=sys.stderr,
+        )
+        return _EX_USAGE
+
     env_model = os.environ.get("VNX_LITELLM_MODEL", "")
-    if env_model:
+    if sub_provider == "deepseek":
+        model = env_model or _resolve_deepseek_model()
+    elif env_model:
         model = env_model
     elif sub_provider and sub_provider in _LITELLM_SUB_PROVIDER_DEFAULTS:
         model = _LITELLM_SUB_PROVIDER_DEFAULTS[sub_provider]
