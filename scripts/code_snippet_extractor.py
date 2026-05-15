@@ -7,6 +7,7 @@ Purpose: Extract high-quality code patterns and populate FTS5 search database
 
 import sqlite3
 import ast
+import logging
 import re
 import sys
 import subprocess
@@ -28,6 +29,8 @@ VNX_BASE = Path(PATHS["VNX_HOME"])
 PROJECT_ROOT = Path(PATHS["PROJECT_ROOT"])
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 DB_PATH = STATE_DIR / "quality_intelligence.db"
+
+_log = logging.getLogger(__name__)
 
 # Snippet quality thresholds
 MIN_QUALITY_SCORE = 70  # Only extract from high-quality files
@@ -165,8 +168,8 @@ class SnippetAnalyzer:
                     if node.module:
                         dependencies.add(node.module)
 
-        except:
-            pass
+        except SyntaxError as e:
+            _log.debug("Failed to parse AST for dependency extraction: %s", e)
 
         # Also check for common framework references in function
         func_source = ast.get_source_segment(full_source, func_node)

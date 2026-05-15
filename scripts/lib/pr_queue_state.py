@@ -6,6 +6,7 @@ Schema: pr_queue/1.0
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+log = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -205,7 +208,7 @@ def write_pr_queue_state(
     except Exception:
         try:
             os.unlink(tmp_str)
-        except Exception:
-            pass
+        except OSError as e:
+            log.debug("Failed to clean up temp file %s: %s", tmp_str, e)
         raise
     return out

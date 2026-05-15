@@ -6,12 +6,15 @@ Allows environment overrides while defaulting to dist/runtime-relative paths.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
 import warnings
 from pathlib import Path
 from typing import Dict
+
+log = logging.getLogger(__name__)
 
 _PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
@@ -184,8 +187,8 @@ def project_id_from_state_dir(state_dir: Path) -> str:
             candidate = resolved.parent.name.strip()
             if _PROJECT_ID_RE.match(candidate):
                 return candidate
-    except Exception:
-        pass
+    except OSError as e:
+        log.debug("Failed to resolve vnx-data path: %s", e)
 
     for ancestor in [resolved, *resolved.parents]:
         project_file = ancestor / ".vnx-project-id"
