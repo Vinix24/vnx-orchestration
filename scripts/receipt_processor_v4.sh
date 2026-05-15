@@ -407,7 +407,8 @@ PY
             && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
 
         # Audit the bootstrap skip per ADR-005.
-        local _bootstrap_event_file="$STATE_DIR/events.ndjson"
+        local _bootstrap_event_file="${VNX_DATA_DIR}/events/receipt_processor.ndjson"
+        mkdir -p "$(dirname "$_bootstrap_event_file")" 2>/dev/null || true
         local _now_iso
         _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\n' \

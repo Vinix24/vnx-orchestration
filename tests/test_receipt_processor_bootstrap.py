@@ -68,7 +68,8 @@ PY
         echo "$new_watermark" > "${WATERMARK_FILE}.tmp" \\
             && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
 
-        local _bootstrap_event_file="$STATE_DIR/events.ndjson"
+        local _bootstrap_event_file="${VNX_DATA_DIR}/events/receipt_processor.ndjson"
+        mkdir -p "$(dirname "$_bootstrap_event_file")" 2>/dev/null || true
         local _now_iso
         _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\\n' \\
@@ -93,16 +94,18 @@ def _run_bootstrap(
     """
     Run _rp_apply_bootstrap_protection in an isolated bash subshell.
 
-    Returns (stderr, final_watermark_value, old_watermark_raw, events_ndjson_content).
+    Returns (stderr, final_watermark_value, old_watermark_raw, events_ndjson_content, events_dir_exists).
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         unified = tmp / "unified"
         headless = tmp / "headless"
         state = tmp / "state"
+        data_dir = tmp / "data"
         unified.mkdir()
         headless.mkdir()
         state.mkdir()
+        data_dir.mkdir()
 
         watermark_file = tmp / "watermark"
         now = int(time.time())
@@ -122,7 +125,7 @@ def _run_bootstrap(
             broken = unified / "broken_report.md"
             broken.symlink_to("/nonexistent_vnx_test_target/report.md")
 
-        events_file = state / "events.ndjson"
+        events_file = data_dir / "events" / "receipt_processor.ndjson"
 
         script = _BOOTSTRAP_FUNC_EXTRACT + f"""
 WATERMARK_FILE="{watermark_file}"
@@ -130,6 +133,7 @@ UNIFIED_REPORTS="{unified}"
 HEADLESS_REPORTS="{headless}"
 BOOTSTRAP_MAX_AGE="{bootstrap_max_age}"
 STATE_DIR="{state}"
+VNX_DATA_DIR="{data_dir}"
 
 _rp_apply_bootstrap_protection
 cat "$WATERMARK_FILE"
@@ -141,8 +145,9 @@ cat "$WATERMARK_FILE"
         )
         final_watermark = result.stdout.strip()
 
+        events_dir_exists = (data_dir / "events").is_dir()
         events_content = events_file.read_text() if events_file.exists() else ""
-        return result.stderr, final_watermark, str(old_ts), events_content
+        return result.stderr, final_watermark, str(old_ts), events_content, events_dir_exists
 
 
 def test_bootstrap_skips_old_watermark():
@@ -150,7 +155,7 @@ def test_bootstrap_skips_old_watermark():
     now = int(time.time())
     report_mtime = now - 3600  # report from 1h ago
 
-    stderr, final_wm, old_wm, _ = _run_bootstrap(
+    stderr, final_wm, old_wm, *_ = _run_bootstrap(
         watermark_age_secs=48 * 3600,
         bootstrap_max_age=86400,
         report_mtimes=[report_mtime],
@@ -169,7 +174,7 @@ def test_bootstrap_skips_old_watermark():
 
 def test_normal_catchup_under_threshold():
     """Watermark 1h old with 24h threshold → normal catchup, no bootstrap."""
-    stderr, final_wm, old_wm, _ = _run_bootstrap(
+    stderr, final_wm, old_wm, *_ = _run_bootstrap(
         watermark_age_secs=3600,
         bootstrap_max_age=86400,
     )
@@ -182,7 +187,7 @@ def test_normal_catchup_under_threshold():
 
 def test_disable_bootstrap_via_env():
     """BOOTSTRAP_MAX_AGE=0 disables bootstrap even with a very old watermark."""
-    stderr, final_wm, old_wm, _ = _run_bootstrap(
+    stderr, final_wm, old_wm, *_ = _run_bootstrap(
         watermark_age_secs=30 * 24 * 3600,  # 30 days old
         bootstrap_max_age=0,
     )
@@ -196,7 +201,7 @@ def test_bootstrap_fallback_to_now_when_no_reports():
     """Old watermark + no reports → bootstrap advances watermark to now (fallback)."""
     now = int(time.time())
 
-    stderr, final_wm, old_wm, _ = _run_bootstrap(
+    stderr, final_wm, old_wm, *_ = _run_bootstrap(
         watermark_age_secs=48 * 3600,
         bootstrap_max_age=86400,
         report_mtimes=[],  # no reports
@@ -215,7 +220,7 @@ def test_bootstrap_logs_stat_failure_to_stderr():
     now = int(time.time())
     report_mtime = now - 3600
 
-    stderr, final_wm, old_wm, _ = _run_bootstrap(
+    stderr, final_wm, old_wm, *_ = _run_bootstrap(
         watermark_age_secs=48 * 3600,
         bootstrap_max_age=86400,
         report_mtimes=[report_mtime],
@@ -234,14 +239,15 @@ def test_bootstrap_logs_stat_failure_to_stderr():
 
 
 def test_bootstrap_emits_ndjson_audit_event():
-    """Bootstrap skip → exactly one bootstrap_skip event in STATE_DIR/events.ndjson."""
-    stderr, final_wm, old_wm, events_content = _run_bootstrap(
+    """Bootstrap skip → exactly one bootstrap_skip event in VNX_DATA_DIR/events/receipt_processor.ndjson."""
+    stderr, final_wm, old_wm, events_content, events_dir_exists = _run_bootstrap(
         watermark_age_secs=48 * 3600,
         bootstrap_max_age=86400,
     )
 
     assert "BOOTSTRAP mode" in stderr, f"Expected BOOTSTRAP mode:\n{stderr}"
-    assert events_content, "events.ndjson must not be empty after bootstrap skip"
+    assert events_dir_exists, "VNX_DATA_DIR/events/ directory must be created by bootstrap"
+    assert events_content, "events/receipt_processor.ndjson must not be empty after bootstrap skip"
 
     lines = [ln for ln in events_content.strip().splitlines() if ln.strip()]
     bootstrap_lines = [ln for ln in lines if '"bootstrap_skip"' in ln]
