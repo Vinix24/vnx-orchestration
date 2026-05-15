@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Wave 4.6 PR-4.6.3 — provider_dispatch.py entry-point tests.
+"""Wave 4.6 PR-4.6.3/R3 — provider_dispatch.py entry-point tests.
 
 Covers:
 - Claude provider delegates to subprocess_dispatch with unchanged argv semantics.
 - Codex provider routes to _dispatch_codex (PR-4.6.3 wired).
-- Gemini/LiteLLM providers raise SystemExit(64) with PR reference in message.
+- Gemini provider routes to _dispatch_gemini (PR-4.6.4 wired).
+- LiteLLM provider raises SystemExit(64) with PR reference in message.
 - Unknown provider triggers argparse error (SystemExit(2)).
 """
 
@@ -175,25 +176,32 @@ class TestProviderCodexRouted:
 
 
 # ---------------------------------------------------------------------------
-# Test: gemini provider raises SystemExit(64) mentioning PR-4.6.4
+# Test: gemini provider is routed to _dispatch_gemini (PR-4.6.4 implemented)
 # ---------------------------------------------------------------------------
 
-class TestProviderGeminiRaisesNotImplemented:
+class TestProviderGeminiRouted:
 
-    def test_exit_code_64(self, capsys):
+    def test_gemini_routes_to_dispatch_gemini(self):
+        """--provider gemini calls _dispatch_gemini and returns 0 on success."""
         argv = ["--provider", "gemini", "--terminal-id", "T1",
-                "--dispatch-id", "test-gemini", "--instruction", "noop"]
-        with pytest.raises(SystemExit) as exc_info:
-            provider_dispatch.main(argv)
-        assert exc_info.value.code == 64
+                "--dispatch-id", "test-gemini-routed", "--instruction", "noop"]
 
-    def test_message_mentions_pr_4_6_4(self, capsys):
+        with patch("provider_dispatch._dispatch_gemini", return_value=0) as mock_dispatch:
+            rc = provider_dispatch.main(argv)
+
+        assert rc == 0
+        mock_dispatch.assert_called_once()
+
+    def test_gemini_does_not_raise_system_exit_64(self):
+        """--provider gemini must no longer raise SystemExit(64)."""
         argv = ["--provider", "gemini", "--terminal-id", "T1",
-                "--dispatch-id", "test-gemini", "--instruction", "noop"]
-        with pytest.raises(SystemExit):
-            provider_dispatch.main(argv)
-        captured = capsys.readouterr()
-        assert "PR-4.6.4" in captured.err
+                "--dispatch-id", "test-gemini-ok", "--instruction", "noop"]
+
+        with patch("provider_dispatch._dispatch_gemini", return_value=0):
+            try:
+                rc = provider_dispatch.main(argv)
+            except SystemExit as exc:
+                pytest.fail(f"provider gemini raised SystemExit({exc.code}): should be routed now")
 
 
 # ---------------------------------------------------------------------------

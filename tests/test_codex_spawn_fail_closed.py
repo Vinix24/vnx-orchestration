@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""test_codex_spawn_fail_closed.py — Wave 4.6 PR-4.6.3 fail-closed suite.
+"""test_codex_spawn_fail_closed.py — Wave 4.6 PR-4.6.3/R3 fail-closed suite.
 
 Verifies fail-closed behaviour in spawn_codex():
 
-  test_missing_binary_raises_file_not_found — FileNotFoundError propagates
+  test_spawn_returns_structured_result_when_binary_missing — missing binary → structured result (returncode=127)
   test_broken_pipe_returns_failed_result    — BrokenPipeError → error result
   test_chunk_timeout_returns_timed_out      — chunk_timeout breach → timed_out=True
   test_on_event_false_stops_stream_early    — on_event=False → stopped_early=True
@@ -29,23 +29,36 @@ from canonical_event import CanonicalEvent
 
 
 # ---------------------------------------------------------------------------
-# Test 1: missing binary raises FileNotFoundError
+# Test 1: missing binary returns structured CodexSpawnResult (R3 fix)
 # ---------------------------------------------------------------------------
 
 class TestCodexSpawnMissingBinary:
-    """spawn_codex raises FileNotFoundError when codex binary is absent."""
+    """spawn_codex returns structured result (returncode=127) when codex binary is absent."""
 
-    def test_missing_binary_raises_file_not_found(self):
+    def test_spawn_returns_structured_result_when_binary_missing(self):
         with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
             MockPopen.side_effect = FileNotFoundError("codex: not found")
 
-            with pytest.raises(FileNotFoundError):
-                spawn_codex(
-                    prompt="test",
-                    model="",
-                    dispatch_id="test-missing-binary",
-                    terminal_id="T1",
-                )
+            result = spawn_codex(
+                prompt="test",
+                model="",
+                dispatch_id="test-missing-binary",
+                terminal_id="T1",
+            )
+
+        assert isinstance(result, CodexSpawnResult), (
+            f"Expected CodexSpawnResult, got {type(result)}"
+        )
+        assert result.returncode == 127, (
+            f"Expected returncode=127 for missing binary, got {result.returncode}"
+        )
+        assert result.error is not None, "Expected error field to be set"
+        assert "not found" in (result.error or "").lower(), (
+            f"Expected 'not found' in error message, got: {result.error!r}"
+        )
+        assert result.events_written == 0
+        assert result.timed_out is False
+        assert result.completion_text == ""
 
 
 # ---------------------------------------------------------------------------

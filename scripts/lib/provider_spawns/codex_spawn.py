@@ -293,7 +293,7 @@ def _launch_codex_proc(
     """Start codex subprocess and write prompt to stdin.
 
     Returns (proc, None) on success, or (None, error_result) on failure.
-    Re-raises FileNotFoundError so callers distinguish missing binary.
+    Returns (None, CodexSpawnResult(returncode=127)) when binary is missing.
     """
     cmd = _build_cmd(model)
     env = {**os.environ, **(extra_env or {})}
@@ -309,8 +309,18 @@ def _launch_codex_proc(
             cwd=cwd_str,
             start_new_session=True,
         )
-    except FileNotFoundError:
-        raise
+    except FileNotFoundError as e:
+        return None, CodexSpawnResult(
+            returncode=127,
+            completion_text="",
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            stopped_early=False,
+            token_usage=None,
+            error=f"codex binary not found: {e}",
+            event_writer_failures=0,
+        )
     except OSError as exc:
         return None, CodexSpawnResult(
             returncode=1, completion_text="", events_written=0,
@@ -484,7 +494,7 @@ def spawn_codex(
     """Spawn `codex exec --json` and consume the NDJSON event stream.
 
     Returns CodexSpawnResult on completion (success OR controlled failure).
-    Raises FileNotFoundError when the codex binary is absent.
+    Returns CodexSpawnResult(returncode=127) when the codex binary is absent.
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
     event_writer_strict=True raises RuntimeError if any event_writer call failed,

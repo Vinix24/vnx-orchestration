@@ -2,8 +2,8 @@
 """provider_dispatch.py — Provider-agnostic dispatch entry-point (Wave 4.6).
 
 Routes dispatch execution to the appropriate provider spawn handler based on
-``--provider``. PR-4.6.1: claude wired. PR-4.6.3: codex wired. All other
-providers raise SystemExit(64) until their handlers land in subsequent PRs.
+``--provider``. PR-4.6.1: claude wired. PR-4.6.3: codex wired. PR-4.6.4: gemini wired.
+All other providers raise SystemExit(64) until their handlers land.
 
 See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md
 
@@ -26,12 +26,10 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
-_FUTURE_PR_MAP = {
-    "gemini": "PR-4.6.4",
-}
+_FUTURE_PR_MAP: dict = {}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -128,7 +126,50 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     if result.timed_out:
         print("spawn_codex timed out", file=sys.stderr)
         return 1
-    return 0 if result.returncode == 0 else 1
+    if result.returncode != 0:
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "codex dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        return 2
+    return 0
+
+
+def _dispatch_gemini(args: argparse.Namespace) -> int:
+    """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
+
+    Prompt is the raw instruction; file-content injection is caller's responsibility.
+    """
+    import os
+    from event_store import EventStore
+    from provider_spawns.gemini_spawn import spawn_gemini
+
+    model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    event_store = EventStore()
+    result = spawn_gemini(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+        event_writer=event_store.append,
+    )
+    if result.error:
+        print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        print("spawn_gemini timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "gemini dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        return 2
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,13 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch_codex(args)
 
     if provider == "gemini":
-        future_pr = _FUTURE_PR_MAP["gemini"]
-        print(
-            f"Provider 'gemini' spawn handler lands in {future_pr}. "
-            "Use --provider claude for now.",
-            file=sys.stderr,
-        )
-        raise SystemExit(_EX_USAGE)
+        return _dispatch_gemini(args)
 
     if provider.startswith("litellm:"):
         print(
