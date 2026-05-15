@@ -46,9 +46,10 @@ def test_unlink_oserror_does_not_propagate(tmp_path, caplog):
     scenario_path = tmp_path / "level1_test.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
 
-    # Patch assemble_t0_context to avoid filesystem/subprocess dependency
-    # Patch os.unlink to raise OSError to exercise the narrowed except path
-    with patch.object(rh, "assemble_t0_context", return_value="prompt text"):
+    # Patch assemble_t0_context where it is used (single_replay module) to avoid
+    # filesystem/subprocess dependency. Patch os.unlink to raise OSError to exercise
+    # the narrowed except path.
+    with patch("replay_harness.single_replay.assemble_t0_context", return_value="prompt text"):
         with patch("os.unlink", side_effect=OSError("mock unlink fail")):
             with caplog.at_level(logging.DEBUG, logger="replay_harness"):
                 result = rh.run_replay(scenario_path, dry_run=True)
@@ -84,6 +85,43 @@ def test_corrupt_scenario_json_logs_debug(tmp_path, caplog):
     debug_msgs = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
     assert any("failed" in m.lower() for m in debug_msgs), (
         f"Expected debug log from JSONDecodeError, got: {debug_msgs}"
+    )
+
+
+def test_chain_replay_dry_run_skips_prefilter():
+    """dry_run=True causes _run_chain_step_prefilter to return None regardless of prefilter decision.
+
+    Regression guard for codex R1 advisory: pre-refactor replay_harness.py:434 guarded
+    prefilter with `not dry_run`. Ensures LLM dry-run path is taken, not prefilter path.
+    """
+    import time
+    from unittest.mock import patch
+    from replay_harness.chain_replay import _run_chain_step_prefilter
+    from replay_harness.models import ChainScenario, ChainStep
+
+    chain = ChainScenario(
+        name="test_chain",
+        level=2,
+        description="",
+        initial_state={},
+        steps=[],
+    )
+    step = ChainStep(
+        step_name="test_step",
+        receipt={"dispatch_id": "d-dry-run-test", "status": "failure", "retry_count": 0},
+        state_delta={},
+        expected_decision="DISPATCH",
+        expected_next_action="",
+    )
+    current_state: dict = {}
+    step_start_ms = int(time.monotonic() * 1000)
+
+    with patch("replay_harness.chain_replay._code_prefilter", return_value="DISPATCH"):
+        result = _run_chain_step_prefilter(chain, step, current_state, step_start_ms, dry_run=True)
+
+    assert result is None, (
+        f"Expected None (LLM path) in dry_run mode, got: {result!r}. "
+        "Prefilter must be skipped when dry_run=True."
     )
 
 
