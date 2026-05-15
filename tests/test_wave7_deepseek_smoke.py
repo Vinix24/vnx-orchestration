@@ -159,17 +159,16 @@ class TestWave7ModelsYamlValid:
         assert model.supports_tool_calls is True
         assert "coding" in model.task_classes
 
-    def test_inactive_providers_disabled(self):
+    def test_active_providers_enabled(self):
         from providers import provider_registry
 
         registry = provider_registry.load()
 
-        # moonshot enabled by PR-7.2; zai still pending PR-7.3
         assert "moonshot" in registry, "moonshot provider missing from registry"
         assert registry["moonshot"].enabled is True, "moonshot must be enabled after PR-7.2"
 
         assert "zai" in registry, "zai provider missing from registry"
-        assert registry["zai"].enabled is False, "zai must be disabled (PR-7.3)"
+        assert registry["zai"].enabled is True, "zai must be enabled after PR-7.3"
 
     def test_get_default_model_returns_deepseek(self):
         from providers import provider_registry
@@ -180,11 +179,11 @@ class TestWave7ModelsYamlValid:
             f"unexpected litellm_name from default: {model.litellm_name!r}"
         )
 
-    def test_get_default_model_returns_none_for_still_disabled(self):
+    def test_get_default_model_returns_zai_after_pr73(self):
         from providers import provider_registry
 
-        # zai is still disabled until PR-7.3
         model = provider_registry.get_default_model("zai")
-        assert model is None, (
-            f"expected None for disabled zai provider, got {model!r}"
+        assert model is not None, "get_default_model('zai') should return a model after PR-7.3"
+        assert "openrouter" in model.litellm_name, (
+            f"expected openrouter in litellm_name, got {model.litellm_name!r}"
         )
