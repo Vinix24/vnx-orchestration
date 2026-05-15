@@ -56,20 +56,36 @@ def test_purge_expired_hashes_valid_entries_preserved():
 
 
 def test_event_store_append_oserror_swallowed(caplog, tmp_path):
-    """OSError from event_store.append is caught and logged at DEBUG."""
-    from decision_executor import _purge_expired_hashes
+    """OSError from event_store.append in _handle_dispatch is caught and logged at DEBUG.
 
+    Exercises the real _handle_dispatch production path with a mocked event store
+    that raises OSError on append.
+    """
+    import decision_executor
+
+    mock_write = MagicMock(return_value=tmp_path / "dispatch.md")
+    mock_gen_id = MagicMock(return_value="t0-auto-t1-test001")
     mock_store = MagicMock()
     mock_store.append.side_effect = OSError("write error")
 
-    with caplog.at_level(logging.DEBUG, logger="decision_executor"):
-        try:
-            mock_store.append("T0", {}, dispatch_id="test-001")
-        except (OSError, ValueError) as e:
-            import logging as _l
-            _l.getLogger("decision_executor").debug(
-                "Failed to append dispatch event to event store: %s", e
-            )
+    decision_executor.reset_cycle_counter()
 
+    with patch.object(decision_executor, "_get_dispatch_writer", return_value=(mock_write, mock_gen_id)), \
+         patch.object(decision_executor, "_get_event_store", return_value=mock_store), \
+         patch.object(decision_executor, "_log_decision_event"), \
+         caplog.at_level(logging.DEBUG, logger="decision_executor"):
+        result = decision_executor._handle_dispatch(
+            {
+                "decision": "DISPATCH",
+                "dispatch_target": "T1",
+                "dispatch_task": "unit test task for event store OSError",
+                "role": "backend-developer",
+            },
+            "test_trigger",
+            state_dir=tmp_path,
+            dry_run=False,
+        )
+
+    assert result == "dispatched"
     debug_msgs = " ".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
     assert "write error" in debug_msgs

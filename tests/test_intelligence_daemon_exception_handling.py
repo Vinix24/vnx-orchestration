@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Exception-handling regression tests for intelligence_daemon.py (OI-1437).
 
-Covers two narrowed sites:
-- line 464: (ImportError, OSError) from HealthBeacon heartbeat (success path)
-- line 481: (ImportError, OSError) from HealthBeacon heartbeat (error path)
+Covers two narrowed sites via extracted helper methods:
+- _emit_heartbeat: (ImportError, OSError) from HealthBeacon heartbeat (success path)
+- _emit_failure_heartbeat: (ImportError, OSError) from HealthBeacon heartbeat (error path)
 """
 
 from __future__ import annotations
@@ -26,48 +26,43 @@ def test_runs_clean_on_default_env():
 
 
 def test_health_beacon_import_error_in_success_path_swallowed(caplog):
-    """ImportError from HealthBeacon in the success heartbeat path is caught, logged at DEBUG."""
-    # We replicate the exact code pattern from the daemon's inner try block
-    # and verify (ImportError, OSError) is caught rather than propagated.
+    """ImportError from HealthBeacon in _emit_heartbeat is caught and logged at DEBUG.
+
+    Calls the real _emit_heartbeat production method directly — no synthetic helper.
+    """
     import intelligence_daemon as mod
 
-    caught = []
+    daemon = object.__new__(mod.IntelligenceDaemon)
+    daemon.health_status = {"uptime_seconds": 0, "status": "running"}
 
-    def _run_inner_block():
-        try:
-            raise ImportError("health_beacon not installed")
-        except (ImportError, OSError) as e:
-            logging.getLogger("intelligence_daemon").debug(
-                "Failed to emit health beacon heartbeat: %s", e
-            )
-            caught.append(e)
+    # Setting health_beacon=None in sys.modules causes `from health_beacon import HealthBeacon`
+    # inside _emit_heartbeat's try block to raise ImportError immediately.
+    with patch.dict(sys.modules, {"health_beacon": None}), \
+         caplog.at_level(logging.DEBUG, logger="intelligence_daemon"):
+        daemon._emit_heartbeat()
 
-    with caplog.at_level(logging.DEBUG, logger="intelligence_daemon"):
-        _run_inner_block()
-
-    assert len(caught) == 1
-    assert isinstance(caught[0], ImportError)
     debug_msgs = " ".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
-    assert "health_beacon" in debug_msgs
+    assert "Failed to emit health beacon heartbeat" in debug_msgs
 
 
 def test_health_beacon_oserror_in_error_path_swallowed(caplog):
-    """OSError from HealthBeacon in the error-recovery heartbeat path is caught, logged at DEBUG."""
-    caught = []
+    """OSError from ensure_env in _emit_failure_heartbeat is caught and logged at DEBUG.
 
-    def _run_error_block():
-        try:
-            raise OSError("socket timeout")
-        except (ImportError, OSError) as e_hb:
-            logging.getLogger("intelligence_daemon").debug(
-                "Failed to emit health beacon failure heartbeat: %s", e_hb
-            )
-            caught.append(e_hb)
+    Calls the real _emit_failure_heartbeat production method directly.
+    """
+    import intelligence_daemon as mod
 
-    with caplog.at_level(logging.DEBUG, logger="intelligence_daemon"):
-        _run_error_block()
+    daemon = object.__new__(mod.IntelligenceDaemon)
+    daemon.health_status = {"uptime_seconds": 0, "status": "running"}
 
-    assert len(caught) == 1
-    assert isinstance(caught[0], OSError)
+    mock_hb_module = MagicMock()
+
+    # Inject a mock health_beacon so the ImportError path is bypassed, then raise
+    # OSError from ensure_env — caught by the (ImportError, OSError) handler.
+    with patch.dict(sys.modules, {"health_beacon": mock_hb_module}), \
+         patch("intelligence_daemon.ensure_env", side_effect=OSError("socket timeout")), \
+         caplog.at_level(logging.DEBUG, logger="intelligence_daemon"):
+        daemon._emit_failure_heartbeat(Exception("original loop error"))
+
     debug_msgs = " ".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
     assert "socket timeout" in debug_msgs

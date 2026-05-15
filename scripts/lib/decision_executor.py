@@ -98,6 +98,11 @@ def _get_event_store(state_dir: Path) -> Any | None:
         return None
 
 
+def _log_event_store_failure(dispatch_id: str, exc: Exception) -> None:
+    """Log event-store append failure without raising."""
+    _LOG.debug("Failed to append dispatch event to event store (dispatch=%s): %s", dispatch_id, exc)
+
+
 def _get_dispatch_writer():
     """Import write_dispatch and generate_dispatch_id from headless_dispatch_writer."""
     lib_dir = Path(__file__).parent
@@ -209,7 +214,7 @@ def _handle_dispatch(
             try:
                 event_store.append("T0", event, dispatch_id=dispatch_id)
             except (OSError, ValueError) as e:
-                _LOG.debug("Failed to append dispatch event to event store: %s", e)
+                _log_event_store_failure(dispatch_id, e)
         _log_decision_event(state_dir, event)
 
         return "dispatched"

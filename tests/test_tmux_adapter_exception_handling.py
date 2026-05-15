@@ -62,14 +62,15 @@ def test_emit_remap_event_sqlite_error_swallowed(caplog, tmp_path):
 
 
 def test_emit_remap_event_import_error_swallowed(caplog, tmp_path):
-    """ImportError from runtime_coordination import in _emit_remap_event is caught."""
+    """ImportError from runtime_coordination import in _emit_remap_event is caught and logged at DEBUG."""
     import tmux_adapter
 
-    # Simulate ImportError by patching the module-level import used inside the function
-    # _emit_remap_event does `from runtime_coordination import ...` inside the try block
+    # Setting runtime_coordination=None in sys.modules causes the function-level
+    # `from runtime_coordination import ...` to raise ImportError, which the production
+    # code catches at the (ImportError, sqlite3.Error) handler.
     with patch.dict(sys.modules, {"runtime_coordination": None}), \
          caplog.at_level(logging.DEBUG, logger="tmux_adapter"):
-        try:
-            tmux_adapter._emit_remap_event(tmp_path, "T1", "old-pane", "new-pane")
-        except Exception:
-            pass  # If it raises something other than ImportError/sqlite3.Error, flag it
+        tmux_adapter._emit_remap_event(tmp_path, "T1", "old-pane", "new-pane")
+
+    debug_msgs = " ".join(r.message for r in caplog.records if r.levelno == logging.DEBUG)
+    assert "T1" in debug_msgs
