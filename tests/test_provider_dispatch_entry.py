@@ -205,33 +205,59 @@ class TestProviderGeminiRouted:
 
 
 # ---------------------------------------------------------------------------
-# Test: litellm:<model> raises SystemExit(64) mentioning PR-4.6.5
+# Test: litellm:<model> routes to _dispatch_litellm (PR-4.6.5 implemented)
 # ---------------------------------------------------------------------------
 
-class TestProviderLitellmRaisesNotImplemented:
+class TestProviderLitellmRouted:
 
-    def test_exit_code_64(self, capsys):
-        argv = ["--provider", "litellm:deepseek-v4-pro", "--terminal-id", "T1",
-                "--dispatch-id", "test-litellm", "--instruction", "noop"]
-        with pytest.raises(SystemExit) as exc_info:
-            provider_dispatch.main(argv)
-        assert exc_info.value.code == 64
+    def test_litellm_routes_to_dispatch_litellm(self):
+        """--provider litellm:deepseek calls _dispatch_litellm and returns 0 on success."""
+        argv = ["--provider", "litellm:deepseek", "--terminal-id", "T1",
+                "--dispatch-id", "test-litellm-routed", "--instruction", "noop"]
+        with patch("provider_dispatch._dispatch_litellm", return_value=0) as mock_dispatch:
+            rc = provider_dispatch.main(argv)
+        assert rc == 0
+        mock_dispatch.assert_called_once()
 
-    def test_message_mentions_pr_4_6_5(self, capsys):
-        argv = ["--provider", "litellm:deepseek-v4-pro", "--terminal-id", "T1",
-                "--dispatch-id", "test-litellm", "--instruction", "noop"]
-        with pytest.raises(SystemExit):
-            provider_dispatch.main(argv)
-        captured = capsys.readouterr()
-        assert "PR-4.6.5" in captured.err
+    def test_bare_litellm_routes_to_dispatch_litellm(self):
+        """--provider litellm (no sub-provider) also routes to _dispatch_litellm."""
+        argv = ["--provider", "litellm", "--terminal-id", "T1",
+                "--dispatch-id", "test-litellm-bare", "--instruction", "noop"]
+        with patch("provider_dispatch._dispatch_litellm", return_value=0) as mock_dispatch:
+            rc = provider_dispatch.main(argv)
+        assert rc == 0
+        mock_dispatch.assert_called_once()
 
-    def test_various_litellm_models(self, capsys):
-        for model in ("litellm:kimi-k2", "litellm:glm-5.1", "litellm:groq:llama3"):
-            argv = ["--provider", model, "--terminal-id", "T1",
-                    "--dispatch-id", "test-litellm", "--instruction", "noop"]
-            with pytest.raises(SystemExit) as exc_info:
-                provider_dispatch.main(argv)
-            assert exc_info.value.code == 64, f"Expected exit 64 for {model}"
+    def test_various_litellm_sub_providers_route(self):
+        """Various litellm:<sub> values all route to _dispatch_litellm."""
+        for provider_str in ("litellm:kimi-k2", "litellm:glm-5.1", "litellm:bedrock"):
+            argv = ["--provider", provider_str, "--terminal-id", "T1",
+                    "--dispatch-id", "test-litellm-sub", "--instruction", "noop"]
+            with patch("provider_dispatch._dispatch_litellm", return_value=0) as mock_dispatch:
+                rc = provider_dispatch.main(argv)
+            assert rc == 0, f"Expected 0 for {provider_str}"
+            mock_dispatch.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test: registry resolution failure raises RuntimeError (codex R1 fix)
+# ---------------------------------------------------------------------------
+
+class TestRegistryResolutionFailure:
+
+    def test_provider_dispatch_raises_on_registry_failure(self):
+        """_resolve_deepseek_model() raises RuntimeError when registry load fails."""
+        with patch("providers.provider_registry.get_default_model",
+                   side_effect=FileNotFoundError("wave7_models.yaml missing")):
+            with pytest.raises(RuntimeError, match="registry resolution failed"):
+                provider_dispatch._resolve_deepseek_model()
+
+    def test_provider_dispatch_raises_on_malformed_registry(self):
+        """_resolve_deepseek_model() raises RuntimeError when registry is malformed yaml."""
+        with patch("providers.provider_registry.get_default_model",
+                   side_effect=ValueError("malformed wave7_models.yaml: mapping error")):
+            with pytest.raises(RuntimeError, match="registry resolution failed"):
+                provider_dispatch._resolve_deepseek_model()
 
 
 # ---------------------------------------------------------------------------
