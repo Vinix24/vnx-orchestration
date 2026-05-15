@@ -380,6 +380,93 @@ def _archive_event_store_step(
         )
 
 
+def _normalize_exit_status(exit_status: str, dispatch_id: str) -> str:
+    """Validate exit_status; emit WARN and normalise to 'failure' if unknown."""
+    if exit_status not in VALID_EXIT_STATUSES:
+        _emit(
+            "WARN",
+            "unknown_exit_status",
+            exit_status=exit_status,
+            dispatch_id=dispatch_id,
+        )
+        return "failure"
+    return exit_status
+
+
+def _run_cleanup_steps(
+    *,
+    terminal_id: str,
+    dispatch_id: str,
+    exit_status: str,
+    lease_generation: Optional[int],
+    dispatch_file: Optional[Path],
+    state_dir: Path,
+    result: CleanupResult,
+) -> None:
+    """Run all five cleanup steps in order; each step is best-effort."""
+    _release_lease_step(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        lease_generation=lease_generation,
+        exit_status=exit_status,
+        state_dir=state_dir,
+        result=result,
+    )
+    _transition_worker_step(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        exit_status=exit_status,
+        state_dir=state_dir,
+        result=result,
+    )
+    _move_dispatch_file_step(
+        dispatch_file=dispatch_file,
+        exit_status=exit_status,
+        result=result,
+    )
+    _append_audit_event_step(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        exit_status=exit_status,
+        result=result,
+    )
+    _archive_event_store_step(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        result=result,
+    )
+
+
+def _emit_health_beacon(
+    *,
+    terminal_id: str,
+    dispatch_id: str,
+    exit_status: str,
+    resolved_state_dir: Path,
+    result: CleanupResult,
+) -> None:
+    """Best-effort HealthBeacon heartbeat; swallows import/OS/runtime errors."""
+    try:
+        from health_beacon import HealthBeacon  # noqa: PLC0415
+        HealthBeacon(
+            resolved_state_dir.parent,
+            "cleanup_worker_exit",
+            expected_interval_seconds=None,
+        ).heartbeat(
+            status="ok" if not result.errors else "fail",
+            details={
+                "terminal_id": terminal_id,
+                "dispatch_id": dispatch_id,
+                "exit_status": exit_status,
+                "lease_released": result.lease_released,
+                "worker_transitioned": result.worker_transitioned,
+                "errors": list(result.errors),
+            },
+        )
+    except (ImportError, OSError, RuntimeError) as exc:
+        _emit("WARN", "health_beacon_failed", error=str(exc))
+
+
 def cleanup_worker_exit(
     *,
     terminal_id: str,
@@ -415,74 +502,25 @@ def cleanup_worker_exit(
     Returns:
         CleanupResult — never raises.
     """
-    if exit_status not in VALID_EXIT_STATUSES:
-        _emit(
-            "WARN",
-            "unknown_exit_status",
-            exit_status=exit_status,
-            dispatch_id=dispatch_id,
-        )
-        exit_status = "failure"
-
-    result = CleanupResult()
+    exit_status = _normalize_exit_status(exit_status, dispatch_id)
     resolved_state_dir = state_dir if state_dir is not None else _resolve_state_dir()
-
-    _release_lease_step(
+    result = CleanupResult()
+    _run_cleanup_steps(
         terminal_id=terminal_id,
         dispatch_id=dispatch_id,
+        exit_status=exit_status,
         lease_generation=lease_generation,
-        exit_status=exit_status,
-        state_dir=resolved_state_dir,
-        result=result,
-    )
-
-    _transition_worker_step(
-        terminal_id=terminal_id,
-        dispatch_id=dispatch_id,
-        exit_status=exit_status,
-        state_dir=resolved_state_dir,
-        result=result,
-    )
-
-    _move_dispatch_file_step(
         dispatch_file=dispatch_file,
-        exit_status=exit_status,
+        state_dir=resolved_state_dir,
         result=result,
     )
-
-    _append_audit_event_step(
+    _emit_health_beacon(
         terminal_id=terminal_id,
         dispatch_id=dispatch_id,
         exit_status=exit_status,
+        resolved_state_dir=resolved_state_dir,
         result=result,
     )
-
-    _archive_event_store_step(
-        terminal_id=terminal_id,
-        dispatch_id=dispatch_id,
-        result=result,
-    )
-
-    try:
-        from health_beacon import HealthBeacon
-        HealthBeacon(
-            resolved_state_dir.parent,
-            "cleanup_worker_exit",
-            expected_interval_seconds=None,
-        ).heartbeat(
-            status="ok" if not result.errors else "fail",
-            details={
-                "terminal_id": terminal_id,
-                "dispatch_id": dispatch_id,
-                "exit_status": exit_status,
-                "lease_released": result.lease_released,
-                "worker_transitioned": result.worker_transitioned,
-                "errors": list(result.errors),
-            },
-        )
-    except (ImportError, OSError, RuntimeError) as exc:
-        _emit("WARN", "health_beacon_failed", error=str(exc))
-
     return result
 
 
