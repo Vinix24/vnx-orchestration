@@ -281,11 +281,8 @@ def spawn_gemini(
     **kwargs:
         Accepted for forward-compatibility; ignored.
 
-    Raises
-    ------
-    FileNotFoundError:
-        When the ``gemini`` binary is not found on PATH.  Propagated immediately
-        so callers can distinguish a missing binary from a transient failure.
+    A missing gemini binary returns returncode=127 with result.error set;
+    it does NOT raise FileNotFoundError. Check result.error to detect spawn failures.
     """
     try:
         chunk_timeout = float(os.environ.get("VNX_GEMINI_STALL_THRESHOLD", chunk_timeout))
@@ -317,38 +314,42 @@ def spawn_gemini(
 
 
 # ---------------------------------------------------------------------------
-# Streaming path
+# Subprocess spawn helpers
 # ---------------------------------------------------------------------------
 
-def _spawn_streaming(
-    *,
-    prompt: str,
-    model: str,
-    dispatch_id: str,
-    terminal_id: str,
-    event_writer: Optional[Callable],
-    health_monitor: Optional[Any],
-    on_event: Optional[Callable],
+def _build_gemini_cmd(model: str, output_format: str) -> list:
+    """Build the gemini argv list for the given model and output format."""
+    return ["gemini", "--model", model, "--output-format", output_format]
+
+
+def _start_gemini_subprocess(
+    cmd: list,
     env: Optional[Dict],
     cwd_str: Optional[str],
-    chunk_timeout: float,
-    total_deadline: float,
-    event_store: Optional[Any],
-) -> GeminiSpawnResult:
-    """Spawn ``gemini --output-format stream-json`` and drain the NDJSON event stream."""
-    cmd = ["gemini", "--model", model, "--output-format", "stream-json"]
+    prompt: str,
+) -> "tuple[subprocess.Popen | None, GeminiSpawnResult | None]":
+    """Start the gemini subprocess and write prompt to stdin.
+
+    Returns (proc, None) on success, or (None, GeminiSpawnResult) on spawn failure.
+    All subprocess-boundary errors convert to structured results; none are re-raised.
+    """
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, start_new_session=True,
             env=env, cwd=cwd_str,
         )
-    except FileNotFoundError:
-        raise
+    except FileNotFoundError as exc:
+        return None, GeminiSpawnResult(
+            returncode=127, completion_text="", events_written=0,
+            session_id=None, timed_out=False, stopped_early=False,
+            token_usage=None, error=f"gemini binary not found: {exc}",
+        )
     except OSError as exc:
-        return GeminiSpawnResult(
-            returncode=1, completion_text="", events_written=0,
-            session_id=None, timed_out=False, error=str(exc),
+        return None, GeminiSpawnResult(
+            returncode=126, completion_text="", events_written=0,
+            session_id=None, timed_out=False, stopped_early=False,
+            token_usage=None, error=f"failed to spawn gemini: {exc}",
         )
 
     if proc.stdin:
@@ -356,13 +357,28 @@ def _spawn_streaming(
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
         except BrokenPipeError as exc:
-            return GeminiSpawnResult(
+            return None, GeminiSpawnResult(
                 returncode=1, completion_text="", events_written=0,
                 session_id=None, timed_out=False,
                 error=f"stdin write failed (BrokenPipeError): {exc}",
             )
 
-    host = _GeminiNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
+    return proc, None
+
+
+def _consume_gemini_stream(
+    proc: subprocess.Popen,
+    host: "_GeminiNormalizerHost",
+    on_event: Optional[Callable],
+    health_monitor: Optional[Any],
+    event_writer: Optional[Callable],
+    terminal_id: str,
+    dispatch_id: str,
+    event_store: Optional[Any],
+    chunk_timeout: float,
+    total_deadline: float,
+) -> "tuple[str, int, Optional[Dict[str, Any]], bool, bool]":
+    """Drain the NDJSON stream; return (completion_text, events_written, token_usage, timed_out, stopped_early)."""
     events_written = 0
     completion_text = ""
     token_usage: Optional[Dict[str, Any]] = None
@@ -408,17 +424,68 @@ def _spawn_streaming(
                     logger.debug("spawn_gemini: kill after on_event=False failed: %s", _ke)
                 break
 
+    return completion_text, events_written, token_usage, timed_out, stopped_early
+
+
+def _finalize_gemini_result(
+    proc: subprocess.Popen,
+    completion_text: str,
+    events_written: int,
+    token_usage: Optional[Dict[str, Any]],
+    timed_out: bool,
+    stopped_early: bool,
+) -> GeminiSpawnResult:
+    """Wait for process exit and return a GeminiSpawnResult."""
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-
     rc = proc.returncode if proc.returncode is not None else 1
     return GeminiSpawnResult(
         returncode=rc, completion_text=completion_text, events_written=events_written,
         session_id=None, timed_out=timed_out, stopped_early=stopped_early,
         token_usage=token_usage,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming path
+# ---------------------------------------------------------------------------
+
+def _spawn_streaming(
+    *,
+    prompt: str,
+    model: str,
+    dispatch_id: str,
+    terminal_id: str,
+    event_writer: Optional[Callable],
+    health_monitor: Optional[Any],
+    on_event: Optional[Callable],
+    env: Optional[Dict],
+    cwd_str: Optional[str],
+    chunk_timeout: float,
+    total_deadline: float,
+    event_store: Optional[Any],
+) -> GeminiSpawnResult:
+    """Spawn ``gemini --output-format stream-json`` and drain the NDJSON event stream."""
+    cmd = _build_gemini_cmd(model, "stream-json")
+    proc, err_result = _start_gemini_subprocess(cmd, env, cwd_str, prompt)
+    if err_result is not None:
+        return err_result
+
+    host = _GeminiNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
+    completion_text, events_written, token_usage, timed_out, stopped_early = _consume_gemini_stream(
+        proc=proc, host=host, on_event=on_event,
+        health_monitor=health_monitor, event_writer=event_writer,
+        terminal_id=terminal_id, dispatch_id=dispatch_id,
+        event_store=event_store, chunk_timeout=chunk_timeout,
+        total_deadline=total_deadline,
+    )
+    return _finalize_gemini_result(
+        proc=proc, completion_text=completion_text,
+        events_written=events_written, token_usage=token_usage,
+        timed_out=timed_out, stopped_early=stopped_early,
     )
 
 
@@ -438,31 +505,10 @@ def _spawn_legacy(
     total_deadline: float,
 ) -> GeminiSpawnResult:
     """Spawn ``gemini --output-format json`` and collect a single buffered response."""
-    cmd = ["gemini", "--model", model, "--output-format", "json"]
-    try:
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=True,
-            env=env, cwd=cwd_str,
-        )
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        return GeminiSpawnResult(
-            returncode=1, completion_text="", events_written=0,
-            session_id=None, timed_out=False, error=str(exc),
-        )
-
-    if proc.stdin:
-        try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-        except BrokenPipeError as exc:
-            return GeminiSpawnResult(
-                returncode=1, completion_text="", events_written=0,
-                session_id=None, timed_out=False,
-                error=f"stdin write failed (BrokenPipeError): {exc}",
-            )
+    cmd = _build_gemini_cmd(model, "json")
+    proc, err_result = _start_gemini_subprocess(cmd, env, cwd_str, prompt)
+    if err_result is not None:
+        return err_result
 
     timeout_int = max(1, int(total_deadline))
     stdout, stderr, status = _drain_buffered(proc, timeout_int)

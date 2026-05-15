@@ -80,24 +80,28 @@ def _make_canonical(event_type: str, data: dict) -> CanonicalEvent:
 
 
 # ---------------------------------------------------------------------------
-# Test: binary missing → FileNotFoundError raised (fail closed)
+# Test: binary missing → structured GeminiSpawnResult (returncode=127)
 # ---------------------------------------------------------------------------
 
-class TestBinaryMissingRaisesFileNotFoundError:
+class TestBinaryMissingReturnsStructuredResult:
 
-    def test_streaming_path_raises_fnfe(self):
-        """spawn_gemini re-raises FileNotFoundError when gemini binary absent (streaming)."""
+    def test_streaming_path_returns_structured_result_on_fnfe(self):
+        """spawn_gemini returns GeminiSpawnResult(returncode=127) when gemini binary absent (streaming)."""
         with patch("subprocess.Popen", side_effect=FileNotFoundError("No such file: gemini")), \
              patch.dict(os.environ, {"VNX_GEMINI_STREAM": "1"}):
-            with pytest.raises(FileNotFoundError):
-                spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
+            result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
+        assert isinstance(result, GeminiSpawnResult)
+        assert result.returncode == 127
+        assert "not found" in (result.error or "").lower()
 
-    def test_legacy_path_raises_fnfe(self):
-        """spawn_gemini re-raises FileNotFoundError when gemini binary absent (legacy)."""
+    def test_legacy_path_returns_structured_result_on_fnfe(self):
+        """spawn_gemini returns GeminiSpawnResult(returncode=127) when gemini binary absent (legacy)."""
         with patch("subprocess.Popen", side_effect=FileNotFoundError("No such file: gemini")), \
              patch.dict(os.environ, {"VNX_GEMINI_STREAM": "0"}):
-            with pytest.raises(FileNotFoundError):
-                spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
+            result = spawn_gemini("prompt", "gemini-2.5-pro", "d1", "T3")
+        assert isinstance(result, GeminiSpawnResult)
+        assert result.returncode == 127
+        assert "not found" in (result.error or "").lower()
 
     def test_generic_oserror_returns_structured_failure(self):
         """Non-FileNotFoundError OSError returns GeminiSpawnResult with error, not raised."""
@@ -107,6 +111,19 @@ class TestBinaryMissingRaisesFileNotFoundError:
         assert result.returncode != 0
         assert result.error is not None
         assert "permission denied" in (result.error or "")
+
+    def test_spawn_returns_structured_result_when_binary_missing(self):
+        """With a PATH containing no gemini binary, spawn_gemini returns returncode=127, not FileNotFoundError."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as empty_bin:
+            result = spawn_gemini(
+                "prompt", "gemini-2.5-pro", "d1", "T3",
+                extra_env={"PATH": empty_bin},
+            )
+        assert isinstance(result, GeminiSpawnResult)
+        assert result.returncode == 127
+        assert result.error is not None
+        assert "not found" in (result.error or "").lower()
 
 
 # ---------------------------------------------------------------------------
