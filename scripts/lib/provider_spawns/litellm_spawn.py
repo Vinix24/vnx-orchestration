@@ -50,13 +50,21 @@ def normalize_litellm_event(
     chunk: Dict[str, Any],
     terminal_id: str,
     dispatch_id: str,
+    *,
+    sub_provider: Optional[str] = None,
+    lane: Optional[str] = None,
 ) -> CanonicalEvent:
     """Map an OpenAI-shaped NDJSON chunk to a CanonicalEvent (Tier-1).
 
     Both _LiteLLMNormalizerHost (used by spawn_litellm) and
     LiteLLMAdapter._normalize delegate here to guarantee byte identity.
     Priority: error_type -> tool_calls -> finish_reason -> init -> text.
+    sub_provider and lane are stored in CanonicalEvent for ADR-016 audit enrichment.
     """
+    provider_meta: Dict[str, Any] = {}
+    if lane is not None:
+        provider_meta["lane"] = lane
+
     def make(etype: str, data: dict) -> CanonicalEvent:
         return CanonicalEvent(
             dispatch_id=dispatch_id,
@@ -65,6 +73,8 @@ def normalize_litellm_event(
             event_type=etype,
             data=data,
             observability_tier=_TIER_STREAMING,
+            sub_provider=sub_provider,
+            provider_meta=provider_meta,
         )
 
     error_type = chunk.get("error_type")
@@ -98,12 +108,27 @@ class _LiteLLMNormalizerHost(StreamingDrainerMixin):
     provider_name = "litellm"
     provider_observability_tier = _TIER_STREAMING
 
-    def __init__(self, terminal_id: str, dispatch_id: str) -> None:
+    def __init__(
+        self,
+        terminal_id: str,
+        dispatch_id: str,
+        *,
+        sub_provider: Optional[str] = None,
+        lane: Optional[str] = None,
+    ) -> None:
         self._current_terminal_id = terminal_id
         self._current_dispatch_id = dispatch_id
+        self._sub_provider = sub_provider
+        self._lane = lane
 
     def _normalize(self, raw: Dict[str, Any]) -> CanonicalEvent:
-        return normalize_litellm_event(raw, self._current_terminal_id, self._current_dispatch_id)
+        return normalize_litellm_event(
+            raw,
+            self._current_terminal_id,
+            self._current_dispatch_id,
+            sub_provider=self._sub_provider,
+            lane=self._lane,
+        )
 
 
 
@@ -126,6 +151,26 @@ class LiteLLMSpawnResult:
     # Number of times event_writer callback raised an exception.
     # > 0 indicates audit-trail gaps the caller must investigate per ADR-005.
     event_writer_failures: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Contract enforcement helpers
+# ---------------------------------------------------------------------------
+
+def _validate_tool_shape(prompt: str, tool_call_shape: Optional[str]) -> None:
+    """Raise ValueError when prompt embeds tool definitions in the wrong format.
+
+    Detects Anthropic-format tool markers (input_schema) in prompts destined
+    for openai_tools lanes — a mismatch that would produce silent call failures.
+    Only fires when tool_call_shape is explicitly provided by a BehaviorContract.
+    """
+    if not tool_call_shape:
+        return
+    if tool_call_shape == "openai_tools" and '"input_schema"' in prompt:
+        raise ValueError(
+            f"Prompt embeds Anthropic tool format (input_schema) but lane "
+            f"contract expects {tool_call_shape!r} — tool calls would fail"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +341,8 @@ def _spawn_streaming(
     total_deadline: float,
     event_store: Optional[Any],
     runner_path: str,
+    sub_provider: Optional[str] = None,
+    lane: Optional[str] = None,
 ) -> LiteLLMSpawnResult:
     """Spawn _litellm_runner.py and drain the NDJSON event stream."""
     payload_json = json.dumps({
@@ -306,7 +353,12 @@ def _spawn_streaming(
     if err_result is not None:
         return err_result
 
-    host = _LiteLLMNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
+    host = _LiteLLMNormalizerHost(
+        terminal_id=terminal_id,
+        dispatch_id=dispatch_id,
+        sub_provider=sub_provider,
+        lane=lane,
+    )
     completion_text, events_written, timed_out, stopped_early, _ew_failures = _consume_litellm_stream(
         proc=proc, host=host, on_event=on_event,
         health_monitor=health_monitor, event_writer=event_writer,
@@ -332,6 +384,8 @@ def spawn_litellm(
     terminal_id: str,
     *,
     sub_provider: Optional[str] = None,
+    lane: Optional[str] = None,
+    tool_call_shape: Optional[str] = None,
     event_writer: Optional[Callable[..., None]] = None,
     health_monitor: Optional[Any] = None,
     on_event: Optional[Callable[[Any], Optional[bool]]] = None,
@@ -352,6 +406,10 @@ def spawn_litellm(
     model must be a full LiteLLM model string, e.g. "bedrock/claude-sonnet-4-6".
     When model is empty, falls back to VNX_LITELLM_MODEL env var or a sub_provider
     default, then to "anthropic/claude-sonnet-4-6".
+
+    lane and tool_call_shape are sourced from BehaviorContract (Wave 7 PR-7.5).
+    tool_call_shape triggers pre-spawn validation for format mismatch detection.
+    sub_provider and lane are propagated to audit events per ADR-016.
     """
     try:
         chunk_timeout = float(os.environ.get("VNX_LITELLM_STALL_THRESHOLD", chunk_timeout))
@@ -361,6 +419,14 @@ def spawn_litellm(
         total_deadline = float(os.environ.get("VNX_LITELLM_TIMEOUT", total_deadline))
     except (TypeError, ValueError):
         pass
+
+    try:
+        _validate_tool_shape(prompt, tool_call_shape)
+    except ValueError as exc:
+        return LiteLLMSpawnResult(
+            returncode=64, completion_text="", events_written=0,
+            session_id=None, timed_out=False, error=str(exc),
+        )
 
     if not model:
         env_model = os.environ.get("VNX_LITELLM_MODEL", "")
@@ -387,4 +453,6 @@ def spawn_litellm(
         total_deadline=total_deadline,
         event_store=event_store,
         runner_path=_runner,
+        sub_provider=sub_provider,
+        lane=lane,
     )
