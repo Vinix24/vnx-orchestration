@@ -4,6 +4,7 @@
 Routes dispatch execution to the appropriate provider spawn handler based on
 ``--provider``. PR-4.6.1: claude wired. PR-4.6.3: codex wired. PR-4.6.4: gemini wired.
 PR-4.6.5: litellm wired (litellm:<sub_provider> format).
+PR-4.6.7: claude-sdk wired (opt-in, API-key only, non-governed per ADR-003 amendment).
 All other providers raise SystemExit(64) until their handlers land.
 
 See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "litellm"}
+_IMPLEMENTED_PROVIDERS = {"claude", "claude-sdk", "codex", "gemini", "litellm"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -53,8 +54,8 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Provider to use for dispatch. "
-            "Accepted values: claude, codex, gemini, litellm:<model>. "
-            "Example: --provider claude, --provider litellm:deepseek-v4-pro"
+            "Accepted values: claude, codex, gemini, litellm:<model>, claude-sdk. "
+            "Example: --provider claude, --provider litellm:deepseek-v4-pro, --provider claude-sdk"
         ),
     )
     # Forward all existing subprocess_dispatch.py flags verbatim.
@@ -241,6 +242,52 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dispatch_claude_sdk(args: argparse.Namespace) -> int:
+    """Route to spawn_claude_sdk for opt-in non-governed API-key dispatches (PR-4.6.7).
+
+    ADR-003 amended: API-key only, OAuth runtime-refused. Not a replacement for
+    the governed claude -p subprocess path. Use cases: sandbox experiments,
+    fast iteration without audit-isolation requirements.
+    """
+    import os
+    from provider_spawns.claude_sdk_spawn import spawn_claude_sdk
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.warning(
+            "_dispatch_claude_sdk: EventStore unavailable; NDJSON audit sink skipped: %s",
+            _es_exc,
+        )
+
+    model = os.environ.get("VNX_CLAUDE_SDK_MODEL", args.model or "claude-sonnet-4-6")
+
+    result = spawn_claude_sdk(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+        event_writer=event_store.append if event_store is not None else None,
+    )
+    if result.error:
+        print(f"spawn_claude_sdk failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        print("spawn_claude_sdk timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "claude_sdk dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args, route to the correct provider handler, return exit code."""
     parser = _build_parser()
@@ -264,10 +311,13 @@ def main(argv: list[str] | None = None) -> int:
     if provider.startswith("litellm:") or provider == "litellm":
         return _dispatch_litellm(args)
 
+    if provider == "claude-sdk":
+        return _dispatch_claude_sdk(args)
+
     # Unknown literal — argparse-style error (exit code 2).
     parser.error(
         f"Unknown provider '{provider}'. "
-        "Accepted values: claude, codex, gemini, litellm:<model>."
+        "Accepted values: claude, codex, gemini, litellm:<model>, claude-sdk."
     )
     return 2  # unreachable; parser.error() exits
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-VALID_PROVIDERS = frozenset({"claude", "codex", "gemini", "litellm", "ollama"})
+VALID_PROVIDERS = frozenset({"claude", "claude_sdk", "codex", "gemini", "litellm", "ollama"})
 VALID_EVENT_TYPES = frozenset({"init", "text", "tool_use", "tool_result", "thinking", "complete", "error"})
 VALID_TIERS = frozenset({1, 2, 3})
 
@@ -206,6 +206,8 @@ class CanonicalEvent:
             return _from_gemini_event(raw, dispatch_id, terminal_id)
         if provider == "litellm":
             return _from_litellm_event(raw, dispatch_id, terminal_id, sub_provider=sub_provider)
+        if provider == "claude_sdk":
+            return _from_claude_sdk_event(raw, dispatch_id, terminal_id)
         # ollama fallback
         return _from_ollama_event(raw, dispatch_id, terminal_id)
 
@@ -376,6 +378,43 @@ def _from_litellm_event(
     if delta.get("role") == "assistant" and not delta.get("content"):
         return make("init", {"model": str(raw.get("model") or "")})
     return make("text", {"content": delta.get("content") or ""})
+
+
+def _from_claude_sdk_event(
+    raw: Dict[str, Any],
+    dispatch_id: str,
+    terminal_id: str,
+) -> CanonicalEvent:
+    """Map a raw Claude SDK event dict to a CanonicalEvent (Tier-2).
+
+    Used for round-trip deserialization of events written by claude_sdk_spawn.
+    SDK text chunks carry {"text": "..."}, complete events carry token counts.
+    """
+    def make(et: str, d: Dict[str, Any]) -> CanonicalEvent:
+        return CanonicalEvent(
+            dispatch_id=dispatch_id, terminal_id=terminal_id,
+            provider="claude_sdk", event_type=et, data=d,
+        )
+
+    raw_type = (raw.get("type") or raw.get("event_type") or "text")
+    event_type = _LEGACY_TYPE_MAP.get(raw_type, raw_type)
+
+    if event_type not in VALID_EVENT_TYPES:
+        return make("error", {"legacy_type": raw_type, "raw": str(raw)[:200]})
+
+    if event_type == "text":
+        return make("text", {"text": str(raw.get("text") or raw.get("data", {}).get("text") or "")})
+    if event_type == "complete":
+        data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        return make("complete", data or {})
+    if event_type == "error":
+        msg = raw.get("message") or raw.get("error") or ""
+        return make("error", {"message": str(msg) if msg else str(raw)[:200]})
+
+    data = raw.get("data", {})
+    if not isinstance(data, dict):
+        data = {"value": data}
+    return make(event_type, data)
 
 
 def _from_ollama_event(

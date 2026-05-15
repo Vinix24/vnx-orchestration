@@ -42,13 +42,30 @@ ALLOWLIST_COMMENT = "# vnx:allow-anthropic-sdk-import-with-justification"
 
 ADR_URL = "docs/governance/decisions/ADR-003-oauth-only-claude-routing.md"
 
+# Path-based allowlist: files permitted to import the Anthropic SDK (ADR-003 §Amendment 2026-05-15).
+# Use POSIX-style relative paths from repo root. Complement to the magic-comment mechanism.
+ALLOWED_SDK_PATHS: frozenset[str] = frozenset({
+    "scripts/lib/provider_spawns/claude_sdk_spawn.py",
+})
+
 # ---------------------------------------------------------------------------
 # Core gate logic
 # ---------------------------------------------------------------------------
 
 
-def check_file(path: Path) -> list[tuple[int, str]]:
-    """Return list of (lineno, line) violations for a single file."""
+def check_file(path: Path, root: Path) -> list[tuple[int, str]]:
+    """Return list of (lineno, line) violations for a single file.
+
+    Skips files listed in ALLOWED_SDK_PATHS (path-based allowlist, belt-and-suspenders
+    with the magic-comment mechanism for files that have explicit ADR-003 amendments).
+    """
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    if rel in ALLOWED_SDK_PATHS:
+        return []
+
     violations: list[tuple[int, str]] = []
     try:
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -75,7 +92,7 @@ def scan_repo(root: Path) -> list[tuple[Path, int, str]]:
         if not scan_dir.is_dir():
             continue
         for py_file in sorted(scan_dir.rglob("*.py")):
-            for lineno, line in check_file(py_file):
+            for lineno, line in check_file(py_file, root):
                 all_violations.append((py_file, lineno, line))
     return all_violations
 

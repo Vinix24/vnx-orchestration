@@ -84,6 +84,17 @@ This amendment makes the routing matrix explicit:
 
 The Wave 4.6 finalization PR may introduce Agent SDK as an opt-in fifth provider-spawn handler for **non-governed** use cases (sandbox experiments, fast iteration without audit requirements). That path uses API-key only and is mutually exclusive with the worker-dispatch governed-pad; it is not a replacement for `claude -p` subprocess.
 
+## Amendment (2026-05-15 evening): Wave 4.6 PR-4.6.7 — Agent SDK opt-in 5th provider
+
+Per strategic research (`claudedocs/agent-sdk-vs-claude-p-cli-strategic-comparison-2026-05-15.md`), the Anthropic Agent SDK is permitted as an **opt-in fifth provider** with the following hard constraints:
+
+1. **API-key only**: ANTHROPIC_API_KEY env var. OAuth tokens (`sk-ant-oat...` prefix) are runtime-refused.
+2. **Single module boundary**: `import anthropic` is permitted ONLY in `scripts/lib/provider_spawns/claude_sdk_spawn.py`. CI gate enforces no SDK imports elsewhere.
+3. **Non-governed pad**: this provider does NOT replace `claude -p` subprocess on the governed worker dispatch pad. Use cases: sandbox experiments, fast iteration without audit-isolation requirements.
+4. **CanonicalEvent compliance**: per ADR-016, events emitted by this handler MUST conform to the unified event shape.
+
+The governed worker pad (T1/T2/T3 dispatch) remains `claude -p` subprocess via `subprocess_dispatch.py`. This amendment only opens a fifth provider lane for non-critical workflows.
+
 ## See also
 
 - ADR-004 — VNX positioning as self-hosted alternative to Anthropic Managed Agents
