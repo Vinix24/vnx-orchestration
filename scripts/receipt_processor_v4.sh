@@ -393,15 +393,27 @@ for d in (unified, headless):
             mtime = int(f.stat().st_mtime)
             if mtime > max_mtime:
                 max_mtime = mtime
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"warning: stat failed for {f}: {e}", file=sys.stderr)
 print(max_mtime if max_mtime > 0 else fallback)
 PY
 )
         [ -z "$new_watermark" ] && new_watermark="$now"
 
+        local _old_watermark
+        _old_watermark=$(cat "$WATERMARK_FILE" 2>/dev/null || echo "0")
+
         echo "$new_watermark" > "${WATERMARK_FILE}.tmp" \
             && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
+
+        # Audit the bootstrap skip per ADR-005.
+        local _bootstrap_event_file="$STATE_DIR/events.ndjson"
+        local _now_iso
+        _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\n' \
+            "$_now_iso" "$watermark_age" "$BOOTSTRAP_MAX_AGE" "$_old_watermark" "$new_watermark" \
+            >> "$_bootstrap_event_file"
+        log "INFO" "Bootstrap skip audited to $_bootstrap_event_file"
         log "INFO" "Bootstrap watermark set to $new_watermark"
         log "INFO" "If you need historical reports replayed, manually rewind watermark and restart."
     else
