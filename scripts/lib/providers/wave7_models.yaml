@@ -13,9 +13,25 @@ providers:
         supports_tool_calls: true
         task_classes: ["coding", "review", "analysis"]
   moonshot:
-    enabled: false  # PR-7.2 will enable
+    enabled: true
     api_key_env: MOONSHOT_API_KEY
-    models: {}
+    models:
+      kimi-k2-0905-default:
+        litellm_name: "moonshot/kimi-k2-0905-preview"
+        cost_input_per_mtok: 0.60
+        cost_output_per_mtok: 2.50
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+      kimi-k2-6:
+        litellm_name: "moonshot/kimi-k2.6"
+        cost_input_per_mtok: 0.95
+        cost_output_per_mtok: 4.00
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium"]
   zai:
     enabled: false  # PR-7.3 will enable
     api_key_env: ZHIPU_API_KEY
