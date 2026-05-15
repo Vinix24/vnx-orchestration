@@ -120,6 +120,7 @@ class TestRoundTrip:
     def test_to_dict_keys(self):
         ev = _make_event()
         d = ev.to_dict()
+        # schema_version is always included; optional fields only when set
         assert set(d.keys()) == {
             "event_id",
             "dispatch_id",
@@ -130,6 +131,7 @@ class TestRoundTrip:
             "data",
             "observability_tier",
             "provider_meta",
+            "schema_version",
         }
 
     def test_from_dict_round_trip(self):

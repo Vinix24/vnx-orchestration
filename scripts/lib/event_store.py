@@ -70,12 +70,13 @@ class EventStore:
         event's own dispatch_id field. Omitting the kwarg (None) falls back to
         the event's field. Fixes OI-1349.
         """
-        from canonical_event import CanonicalEvent as _CE  # local import avoids circular dep at module load
+        from canonical_event import CanonicalEvent as _CE, EventShapeError  # noqa: F401 (used below)
 
         self._events_dir.mkdir(parents=True, exist_ok=True)
         path = self._terminal_path(terminal)
 
         if isinstance(event, _CE):
+            event.validate_shape()  # raises EventShapeError on schema violations
             effective_dispatch_id = dispatch_id if dispatch_id is not None else event.dispatch_id
             envelope: Dict[str, Any] = {
                 "type": event.event_type,
