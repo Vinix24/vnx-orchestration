@@ -52,6 +52,23 @@ _SUB_PROVIDER_KEY_REQS: dict = {
 # GLM model names that are LEGACY — rejected on zai dispatch (PR-7.3)
 _DEPRECATED_ZAI_MODELS = frozenset({"glm-4.5", "glm-4.6"})
 
+# Default model alias per sub-provider — used to build lane key for contract lookup
+_SUB_PROVIDER_DEFAULT_ALIAS: dict = {
+    "deepseek": "deepseek-v4-pro",
+    "moonshot": "kimi-k2-0905-default",
+    "zai": "glm-5.1-default",
+}
+
+
+def _build_lane_key(base_sub: str, model_alias: "str | None") -> str:
+    """Build a behavior_contracts lane key from sub-provider parts.
+
+    e.g. ("deepseek", None) -> "litellm:deepseek:deepseek-v4-pro"
+         ("moonshot", "kimi-k2-6") -> "litellm:moonshot:kimi-k2-6"
+    """
+    alias = model_alias or _SUB_PROVIDER_DEFAULT_ALIAS.get(base_sub, "default")
+    return f"litellm:{base_sub}:{alias}"
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -279,12 +296,33 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     else:
         model = "anthropic/claude-sonnet-4-6"
 
+    lane_key = _build_lane_key(base_sub, model_alias)
+    _contract = None
+    _tool_call_shape = None
+    try:
+        from providers.behavior_contracts import get_contract as _get_contract
+        _contract = _get_contract(lane_key)
+        _tool_call_shape = _contract.tool_call_shape
+        logger.debug(
+            "_dispatch_litellm: lane=%s cache_control=%s tool_shape=%s",
+            lane_key,
+            _contract.cache_control_supported,
+            _tool_call_shape,
+        )
+    except KeyError:
+        logger.warning(
+            "_dispatch_litellm: no behavior contract for lane %r — proceeding without contract enforcement",
+            lane_key,
+        )
+
     result = spawn_litellm(
         prompt=args.instruction,
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
         sub_provider=base_sub or None,
+        lane=lane_key,
+        tool_call_shape=_tool_call_shape,
         event_writer=event_store.append if event_store is not None else None,
     )
     if result.error:
