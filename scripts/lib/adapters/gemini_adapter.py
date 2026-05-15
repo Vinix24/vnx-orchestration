@@ -29,6 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _streaming_drainer import StreamingDrainerMixin
 from canonical_event import CanonicalEvent
 from provider_adapter import AdapterResult, Capability, ProviderAdapter
+from provider_spawns.gemini_spawn import (  # noqa: E402
+    normalize_gemini_event,
+    spawn_gemini,
+    _extract_gemini_usage_metadata as _spawn_extract_usage_metadata,
+    _extract_gemini_token_count as _spawn_extract_token_count,
+)
 from vertex_ai_runner import collect_file_contents
 
 logger = logging.getLogger(__name__)
@@ -84,16 +90,14 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         return shutil.which("gemini") is not None
 
     def execute(self, instruction: str, context: dict) -> AdapterResult:
-        """Run a Gemini review and return structured findings.
+        """Run a Gemini review. Delegates spawn+stream to spawn_gemini() (Wave 4.6 PR-4.6.4).
 
-        Routes through streaming drainer when VNX_GEMINI_STREAM=1,
-        otherwise uses the legacy buffered path.
+        Behavior is byte-identical to the pre-refactor inline path.
         """
         model = os.environ.get("VNX_GEMINI_MODEL", _DEFAULT_MODEL)
         terminal_id = context.get("terminal_id", self._terminal_id)
         dispatch_id = context.get("dispatch_id", "unknown")
         changed_files = context.get("changed_files", [])
-
         self._current_terminal_id = terminal_id
         self._current_dispatch_id = dispatch_id
 
@@ -101,15 +105,56 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
         dispatch_meta = context.get("dispatch_metadata", {})
         prompt = self._build_prompt(instruction, changed_files, role=role, dispatch_metadata=dispatch_meta)
 
-        if _gemini_stream_enabled():
-            return self._execute_streaming(
-                prompt=prompt,
-                model=model,
-                terminal_id=terminal_id,
-                dispatch_id=dispatch_id,
-                context=context,
+        chunk_timeout = float(os.environ.get(
+            "VNX_GEMINI_STALL_THRESHOLD", context.get("chunk_timeout", _DEFAULT_STALL_THRESHOLD)
+        ))
+        total_deadline = float(os.environ.get(
+            "VNX_GEMINI_TIMEOUT", context.get("total_deadline", _DEFAULT_TIMEOUT)
+        ))
+        event_store = context.get("event_store")
+
+        collected_events: list[dict] = []
+        findings_parts: list[str] = []
+
+        def _collect(tid: str, ev_dict: dict, dispatch_id: str = dispatch_id) -> None:
+            collected_events.append(ev_dict)
+            ev_type = ev_dict.get("event_type") or ev_dict.get("type", "")
+            if ev_type in ("text", "complete", "result"):
+                data = ev_dict.get("data")
+                text = data if isinstance(data, str) else (data or {}).get("text", "")
+                if text:
+                    findings_parts.append(text)
+
+        t0 = time.monotonic()
+        spawn_result = spawn_gemini(
+            prompt=prompt, model=model,
+            dispatch_id=dispatch_id, terminal_id=terminal_id,
+            event_writer=_collect,
+            chunk_timeout=chunk_timeout, total_deadline=total_deadline,
+            event_store=event_store,
+        )
+        duration = time.monotonic() - t0
+
+        if spawn_result.timed_out:
+            return AdapterResult(
+                status="timeout",
+                output=f"Gemini CLI exceeded {int(total_deadline)}s timeout",
+                events=collected_events, event_count=len(collected_events),
+                duration_seconds=duration, committed=False, commit_hash=None,
+                report_path=None, provider="gemini", model=model,
             )
-        return self._execute_legacy(prompt=prompt, model=model)
+
+        if spawn_result.token_usage:
+            self._write_token_cache(spawn_result.token_usage)
+
+        findings = "\n\n".join(findings_parts) if findings_parts else spawn_result.completion_text
+        status = "done" if spawn_result.returncode == 0 else "failed"
+        return AdapterResult(
+            status=status, output=findings, events=collected_events,
+            event_count=len(collected_events), duration_seconds=duration,
+            committed=False, commit_hash=None, report_path=None,
+            provider="gemini", model=model,
+        )
 
     def stream_events(self, instruction: str, context: dict) -> Iterator[dict]:
         """Stream Gemini events live (VNX_GEMINI_STREAM=1) or yield a single
@@ -185,89 +230,12 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
             proc.wait()
 
     # ------------------------------------------------------------------
-    # StreamingDrainerMixin: event normalizer
+    # StreamingDrainerMixin: event normalizer — delegates to standalone
     # ------------------------------------------------------------------
 
     def _normalize(self, raw: dict) -> CanonicalEvent:
-        """Map a raw Gemini stream-json event to a CanonicalEvent (Tier-1).
-
-        Gemini --output-format stream-json emits NDJSON where each line has a
-        "type" field. Mapping:
-
-          session_start / init      → init
-          message / text            → text (content in "text" or "content")
-          tool_call / tool_use      → tool_use (function name + args)
-          tool_result / tool_response → tool_result (output)
-          result / done / complete  → complete (with optional token_count)
-          error                     → error
-
-        Unknown types fall through to error with raw_type preserved.
-        """
-        terminal_id = self._current_terminal_id
-        dispatch_id = self._current_dispatch_id
-
-        def make(event_type: str, data: dict) -> CanonicalEvent:
-            return CanonicalEvent(
-                dispatch_id=dispatch_id,
-                terminal_id=terminal_id,
-                provider="gemini",
-                event_type=event_type,
-                data=data,
-                observability_tier=_TIER_STREAMING,
-            )
-
-        etype = raw.get("type", "")
-
-        # ── init ──────────────────────────────────────────────────────────
-        if etype in ("session_start", "init"):
-            return make("init", {"raw_type": etype})
-
-        # ── text / message ────────────────────────────────────────────────
-        if etype in ("message", "text", "content"):
-            text = raw.get("text") or raw.get("content") or raw.get("message") or ""
-            return make("text", {"text": str(text)})
-
-        # ── tool_use / tool_call ──────────────────────────────────────────
-        if etype in ("tool_use", "tool_call", "function_call"):
-            name = raw.get("name") or raw.get("function_name") or raw.get("tool", "")
-            args = raw.get("args") or raw.get("input") or raw.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {"raw": str(args)}
-            return make("tool_use", {"name": str(name), "args": args})
-
-        # ── tool_result / tool_response ───────────────────────────────────
-        if etype in ("tool_result", "tool_response", "function_response"):
-            output = raw.get("output") or raw.get("result") or raw.get("content") or ""
-            return make("tool_result", {"output": str(output)})
-
-        # ── result / done / complete ──────────────────────────────────────
-        if etype in ("result", "done", "complete", "finish"):
-            data: dict = {}
-            text = raw.get("text") or raw.get("content") or raw.get("output") or ""
-            if text:
-                data["text"] = str(text)
-            token_count = self._extract_gemini_token_count(raw)
-            if token_count:
-                data["token_count"] = token_count
-            return make("complete", data)
-
-        # ── error ─────────────────────────────────────────────────────────
-        if etype == "error":
-            msg = raw.get("message") or raw.get("error") or raw.get("text") or ""
-            return make("error", {"message": str(msg) if msg else str(raw)[:200]})
-
-        # ── usageMetadata (token telemetry emitted mid-stream) ────────────
-        if "usageMetadata" in raw:
-            token_count = self._extract_gemini_token_count(raw)
-            if token_count:
-                return make("text", {"text": "", "token_count": token_count})
-
-        # ── unknown → error ───────────────────────────────────────────────
-        return make("error", {
-            "reason": f"unrecognized gemini event type: {etype!r}",
-            "raw_type": etype,
-            "raw": str(raw)[:300],
-        })
+        """Delegate to normalize_gemini_event (single canonical implementation)."""
+        return normalize_gemini_event(raw, self._current_terminal_id, self._current_dispatch_id)
 
     # ------------------------------------------------------------------
     # Private: streaming execute path
@@ -495,41 +463,13 @@ class GeminiAdapter(StreamingDrainerMixin, ProviderAdapter):
 
     @staticmethod
     def _extract_gemini_token_count(raw: dict) -> Optional[dict]:
-        """Extract and normalize token counts from a Gemini stream event dict."""
-        usage_meta = raw.get("usageMetadata")
-        if isinstance(usage_meta, dict):
-            result = GeminiAdapter._extract_usage_metadata(usage_meta)
-            if result:
-                return result
-        # Also check top-level promptTokenCount (some stream shapes)
-        if "promptTokenCount" in raw or "candidatesTokenCount" in raw:
-            result = GeminiAdapter._extract_usage_metadata(raw)
-            if result:
-                return result
-        return None
+        """Delegate to standalone _extract_gemini_token_count (gemini_spawn owns logic)."""
+        return _spawn_extract_token_count(raw)
 
     @staticmethod
     def _extract_usage_metadata(data: dict) -> Optional[dict]:
-        """Extract usageMetadata from a parsed Gemini response dict.
-
-        Handles both top-level and nested usageMetadata. Field names follow the
-        Gemini REST API: promptTokenCount (input) and candidatesTokenCount (output).
-        """
-        usage_meta = data.get("usageMetadata")
-        if isinstance(usage_meta, dict):
-            data = usage_meta
-        prompt_t = data.get("promptTokenCount", 0) or 0
-        candidates_t = data.get("candidatesTokenCount", 0) or 0
-        if not isinstance(prompt_t, int) or not isinstance(candidates_t, int):
-            return None
-        if prompt_t == 0 and candidates_t == 0:
-            return None
-        return {
-            "input_tokens": prompt_t,
-            "output_tokens": candidates_t,
-            "cache_creation_tokens": 0,
-            "cache_read_tokens": 0,
-        }
+        """Delegate to standalone _extract_gemini_usage_metadata (gemini_spawn owns logic)."""
+        return _spawn_extract_usage_metadata(data)
 
     @staticmethod
     def _parse_token_usage_from_response(raw: str) -> Optional[dict]:
