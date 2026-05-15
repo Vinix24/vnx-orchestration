@@ -103,8 +103,8 @@ def _build_shadow_context(event: dict[str, Any], state_dir: Path) -> dict[str, A
     if state_file.exists():
         try:
             t0_state = json.loads(state_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            logger.debug("Failed to load t0_state.json: %s", e)
 
     event_type = event.get("event_type", "")
     return {

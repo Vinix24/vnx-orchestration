@@ -37,7 +37,9 @@ Governance:
 
 from __future__ import annotations
 
+import logging
 import os
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -71,6 +73,8 @@ from runtime_coordination import (
     _now_utc,
     get_connection,
 )
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -628,8 +632,8 @@ class MixedExecutionRouter:
                     metadata=metadata,
                 )
                 conn.commit()
-        except Exception:
-            pass
+        except (sqlite3.Error, OSError) as e:
+            log.debug("Failed to append routing event: %s", e)
 
 
 # ---------------------------------------------------------------------------

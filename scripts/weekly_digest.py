@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sqlite3
 import subprocess
 import sys
@@ -29,6 +30,8 @@ except Exception as exc:
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 DB_PATH = STATE_DIR / "quality_intelligence.db"
+
+log = logging.getLogger(__name__)
 RECEIPTS_PATH = STATE_DIR / "t0_receipts.ndjson"
 PENDING_PATH = STATE_DIR / "pending_edits.json"
 DIGEST_PATH = STATE_DIR / "weekly_digest.json"
@@ -102,8 +105,8 @@ def collect_metrics(days: int = 7) -> dict:
                 pass
 
             con.close()
-        except Exception:
-            pass
+        except sqlite3.Error as e:
+            log.debug("Failed to read intelligence DB metrics: %s", e)
 
     # --- Receipts outcomes ---
     if RECEIPTS_PATH.exists():

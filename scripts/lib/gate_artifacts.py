@@ -281,8 +281,8 @@ def materialize_artifacts(
                 pr_id=pr_id,
                 gate=gate,
             )
-        except Exception:
-            pass
+        except (ImportError, OSError) as e:
+            logger.debug("Failed to emit gate register event: %s", e)
     elif gate in ("gemini_review", "claude_github_optional"):
         logger.info("materialize_artifacts: register classification deferred for gate=%s", gate)
 

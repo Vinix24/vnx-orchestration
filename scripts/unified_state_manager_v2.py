@@ -25,6 +25,7 @@ Date: 2026-01-07
 Version: 2.2 - Cursor-based processing
 """
 
+import logging
 import os
 import json
 import glob
@@ -50,6 +51,8 @@ except Exception as exc:
     raise SystemExit(f"Failed to load python_singleton helper: {exc}")
 
 PATHS = ensure_env()
+
+log = logging.getLogger(__name__)
 
 # Configuration
 VNX_DIR = PATHS["VNX_HOME"]
@@ -413,8 +416,8 @@ class UnifiedStateManagerV2:
                 try:
                     if os.path.exists(T0_BRIEF_SCRIPT):
                         subprocess.run([T0_BRIEF_SCRIPT], timeout=2, check=False)
-                except Exception:
-                    pass
+                except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+                    log.debug("Failed to run T0 brief script: %s", e)
 
                 # Process ONLY NEW events through T0 Intelligence Aggregator
                 if t0_aggregator:

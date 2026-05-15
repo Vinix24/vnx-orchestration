@@ -4,6 +4,7 @@ Intelligence Daemon Monitor - Adds intelligence daemon status to dashboard
 To be called by unified_state_manager_v2.py
 """
 
+import logging
 import os
 import json
 import psutil
@@ -19,6 +20,8 @@ REQUIRED_MONITOR_TABLES = {
     "code_snippets": {"quality_score", "last_updated"},
     "success_patterns": {"confidence_score", "first_seen", "last_used"},
 }
+
+log = logging.getLogger(__name__)
 
 
 class SchemaCompatibilityError(RuntimeError):
@@ -147,8 +150,8 @@ def get_intelligence_daemon_status(paths: Dict[str, str]) -> dict[str, object]:
                 process = psutil.Process(pid)
                 create_time = process.create_time()
                 uptime_seconds = int(datetime.now().timestamp() - create_time)
-            except Exception:
-                pass
+            except psutil.Error as e:
+                log.debug("Failed to get uptime for pid %s: %s", pid, e)
 
         return {
             "status": "healthy" if daemon_running else "offline",

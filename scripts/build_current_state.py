@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from project_root import resolve_data_dir  # noqa: E402
 from strategy.roadmap import Roadmap, Phase, Wave, load_roadmap, next_actionable_wave, RoadmapValidationError  # noqa: E402
 from strategy.decisions import recent_decisions, Decision  # noqa: E402
+
+log = logging.getLogger(__name__)
 
 MAX_PRS = 5
 SECTION_HEADERS = [
@@ -78,8 +81,8 @@ def _fetch_prs(n: int = MAX_PRS) -> list[dict]:
         )
         if result.returncode == 0:
             return json.loads(result.stdout) or []
-    except Exception:
-        pass
+    except (subprocess.SubprocessError, FileNotFoundError, json.JSONDecodeError) as e:
+        log.debug("Failed to fetch PRs: %s", e)
     return []
 
 
