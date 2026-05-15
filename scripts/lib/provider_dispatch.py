@@ -36,7 +36,7 @@ _FUTURE_PR_MAP: dict = {}
 _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "bedrock": "bedrock/claude-sonnet-4-6",
     "deepseek": "deepseek/deepseek-v3.2",
-    "kimi": "openai/moonshot-v1-32k",
+    "moonshot": "moonshot/kimi-k2-0905-preview",
     "glm-5.1": "zhipuai/glm-4",
     "ollama": "ollama/llama3",
     "anthropic": "anthropic/claude-sonnet-4-6",
@@ -45,6 +45,7 @@ _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
 # Env vars required per sub-provider (fast-fail before subprocess spawn)
 _SUB_PROVIDER_KEY_REQS: dict = {
     "deepseek": "DEEPSEEK_API_KEY",
+    "moonshot": "MOONSHOT_API_KEY",
 }
 
 
@@ -166,6 +167,29 @@ def _resolve_deepseek_model() -> str:
     return _LITELLM_SUB_PROVIDER_DEFAULTS["deepseek"]
 
 
+def _resolve_moonshot_model(model_alias: "str | None" = None) -> str:
+    """Load Moonshot model litellm_name from registry.
+
+    When model_alias is given (e.g. 'kimi-k2-6'), looks up that specific model key.
+    Defaults to 'kimi-k2-0905-default' (cost-effective lane) when alias is absent.
+    Falls back to hardcoded default when registry is unavailable.
+    """
+    from providers import provider_registry as _reg
+    try:
+        registry = _reg.load()
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("provider_dispatch: registry resolve failed for moonshot: %s", e)
+        raise RuntimeError(f"provider registry resolution failed: {e}") from e
+    cfg = registry.get("moonshot")
+    if cfg is None or not cfg.enabled or not cfg.models:
+        return _LITELLM_SUB_PROVIDER_DEFAULTS["moonshot"]
+    target_key = model_alias or "kimi-k2-0905-default"
+    if target_key in cfg.models:
+        return cfg.models[target_key].litellm_name
+    # alias not found — fall back to first available model
+    return next(iter(cfg.models.values())).litellm_name
+
+
 def _dispatch_litellm(args: argparse.Namespace) -> int:
     """Route to spawn_litellm for litellm-provider dispatches (PR-4.6.5).
 
@@ -190,24 +214,31 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     parts = args.provider.split(":", 1)
     sub_provider = parts[1] if len(parts) > 1 else ""
 
+    # Normalize sub-sub-routing: litellm:moonshot:kimi-k2-6 -> base=moonshot, alias=kimi-k2-6
+    sub_parts = sub_provider.split(":", 1)
+    base_sub = sub_parts[0]
+    model_alias = sub_parts[1] if len(sub_parts) > 1 else None
+
     # Fast-fail for providers that require an explicit API key
-    required_key = _SUB_PROVIDER_KEY_REQS.get(sub_provider)
+    required_key = _SUB_PROVIDER_KEY_REQS.get(base_sub)
     if required_key and not os.environ.get(required_key):
         print(
-            f"litellm:{sub_provider} requires {required_key} env var",
+            f"litellm:{base_sub} requires {required_key} env var",
             file=sys.stderr,
         )
         return _EX_USAGE
 
     env_model = os.environ.get("VNX_LITELLM_MODEL", "")
-    if sub_provider == "deepseek":
+    if base_sub == "deepseek":
         model = env_model or _resolve_deepseek_model()
+    elif base_sub == "moonshot":
+        model = env_model or _resolve_moonshot_model(model_alias)
     elif env_model:
         model = env_model
-    elif sub_provider and sub_provider in _LITELLM_SUB_PROVIDER_DEFAULTS:
-        model = _LITELLM_SUB_PROVIDER_DEFAULTS[sub_provider]
-    elif sub_provider:
-        model = f"{sub_provider}/default"
+    elif base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
+        model = _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
+    elif base_sub:
+        model = f"{base_sub}/default"
     else:
         model = "anthropic/claude-sonnet-4-6"
 
@@ -216,7 +247,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
-        sub_provider=sub_provider or None,
+        sub_provider=base_sub or None,
         event_writer=event_store.append if event_store is not None else None,
     )
     if result.error:

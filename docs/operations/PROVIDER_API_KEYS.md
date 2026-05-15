@@ -50,6 +50,20 @@ dispatches — the flags control automatic routing policy (PR-7.4, not yet shipp
 - Dispatch: `--provider litellm:deepseek`
 - Missing `DEEPSEEK_API_KEY` → immediate exit(64) before subprocess spawn
 
+## Kimi K2 via Moonshot (PR-7.2)
+
+Two model tiers available under `--provider litellm:moonshot`:
+
+| Alias | LiteLLM name | Input/MTok | Output/MTok | Task classes |
+|---|---|---|---|---|
+| kimi-k2-0905-default | moonshot/kimi-k2-0905-preview | $0.60 | $2.50 | coding, review, analysis |
+| kimi-k2-6 | moonshot/kimi-k2.6 | $0.95 | $4.00 | coding-premium |
+
+- Default lane: `kimi-k2-0905-preview` (~5x cheaper than Claude Sonnet 4.6 output)
+- Dispatch: `--provider litellm:moonshot` (default) or `--provider litellm:moonshot:kimi-k2-6` (premium)
+- Missing `MOONSHOT_API_KEY` → immediate exit(64) before subprocess spawn
+- Context: 8,192 tokens (both models); streaming + tool calls supported
+
 ## Related
 
 - ADR-015: Wave 7 Path B decision + Path D deferral
