@@ -68,6 +68,22 @@ VNX's value proposition depends on a Claude credential model the operator alread
 - A CI gate against `import anthropic` / `import claude_agent_sdk` is required before this ADR can be considered fully enforced. Tracked as a Wave 0 task in the strategic replan.
 - Future SDK feature parity (e.g. Anthropic ships a new prompt-cache control surface) is implemented over the CLI subprocess output stream, not via SDK adoption.
 
+## Amendment (2026-05-15): API-key + CLI explicitly permitted
+
+After the June 15 2026 Anthropic Agent SDK credit changes, the operator commissioned strategic research (`claudedocs/agent-sdk-vs-claude-p-cli-strategic-comparison-2026-05-15.md`) comparing Agent SDK direct-API usage against `claude -p` subprocess on the same API key. The verdict: stay with `claude -p` subprocess for the governed worker dispatch path; Agent SDK can be a follow-up provider option for non-governed use cases.
+
+This amendment makes the routing matrix explicit:
+
+| Transport | Auth | Status | Reason |
+|---|---|---|---|
+| `claude -p` subprocess | OAuth subscription | **Permitted (current default)** | Lowest cost on Pro/Max tiers; ADR-005/010/013 invariants intact |
+| `claude -p` subprocess | API key | **Permitted (per-token billing)** | Identical audit surface as OAuth subscription path; switch is operator economic choice |
+| Agent SDK (in-process) | OAuth | **Banned** | OAuth credential abuse risk + SDK in-process loop breaks ADR-005/010/013 invariants |
+| Agent SDK (in-process) | API key | **Banned for governed worker dispatch** | API-key resolves the licensing concern but SDK still runs the agent loop in-process — incompatible with NDJSON capture, subprocess isolation, and PID-per-worker pools |
+| Anthropic Managed Agents | n/a | **Banned** (per ADR-004) | Vendor lock-in conflict with self-hosted positioning |
+
+The Wave 4.6 finalization PR may introduce Agent SDK as an opt-in fifth provider-spawn handler for **non-governed** use cases (sandbox experiments, fast iteration without audit requirements). That path uses API-key only and is mutually exclusive with the worker-dispatch governed-pad; it is not a replacement for `claude -p` subprocess.
+
 ## See also
 
 - ADR-004 — VNX positioning as self-hosted alternative to Anthropic Managed Agents
