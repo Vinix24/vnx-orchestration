@@ -46,9 +46,10 @@ def test_unlink_oserror_does_not_propagate(tmp_path, caplog):
     scenario_path = tmp_path / "level1_test.json"
     scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
 
-    # Patch assemble_t0_context to avoid filesystem/subprocess dependency
-    # Patch os.unlink to raise OSError to exercise the narrowed except path
-    with patch.object(rh, "assemble_t0_context", return_value="prompt text"):
+    # Patch assemble_t0_context where it is used (single_replay module) to avoid
+    # filesystem/subprocess dependency. Patch os.unlink to raise OSError to exercise
+    # the narrowed except path.
+    with patch("replay_harness.single_replay.assemble_t0_context", return_value="prompt text"):
         with patch("os.unlink", side_effect=OSError("mock unlink fail")):
             with caplog.at_level(logging.DEBUG, logger="replay_harness"):
                 result = rh.run_replay(scenario_path, dry_run=True)

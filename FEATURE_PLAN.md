@@ -1,12 +1,14 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-15T06:23:29.202994+00:00
+**Last updated**: 2026-05-15T14:05:51.809698+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #503 — fix(rp): bootstrap audit ordering + test infra hardening (close OI-1450/1451/1452) (#503) (2026-05-15)
+- #502 — fix(dispatcher): log stderr, script_dir leak, receipt processor bootstrap-mode (#502) (2026-05-15)
 - #500 — chore(hardening): narrow silent-except across replay_harness/cleanup_worker_exit/conversation_analyzer (9 findings, OI-1437) (#500) (2026-05-15)
 - #499 — chore(hardening): narrow silent-except in session_resolver.py (4 findings, OI-1437) (#499) (2026-05-14)
 - #498 — chore(hardening): narrow silent-except in api_operator.py (5 findings, OI-1437) (#498) (2026-05-14)
@@ -73,29 +75,6 @@ _Last 14 days — sourced from git merge commits._
 - #401 — feat(strategy): current_state.md auto-projector + retire vestigial state (W-UX-2) (#401) (2026-05-06)
 - #399 — docs(kickoff): reflect PR #398 MERGED + add Phase 1 PR #395+#396 retry guidance (#399) (2026-05-06)
 - #398 — docs(strategy): persist strategic state + 17 phase FEATURE_PLAN.md files (#398) (2026-05-06)
-- #394 — fix(followups): contract-based request_reviews + public event_store + session_id pop (W3J) (#394) (2026-05-01)
-- #393 — fix(infra): .geminiignore dashboard + role default + notification scope (W3I) (#393) (2026-05-01)
-- #392 — chore: audit + close deferred-PR OIs (W5D) (#392) (2026-05-01)
-- #389 — fix(misc): 5 small fixes (W5C) (#389) (2026-05-01)
-- #391 — fix(append_receipt): NDJSON-first ordering + flag derived from record (W4H) (#391) (2026-05-01)
-- #390 — fix(security/validator): tenant_id from session + D-8 blocking + slug-check push events (W3H) (#390) (2026-05-01)
-- #388 — fix(isolation): project-scoped sockets/locks/tmpfiles (W4G) (#388) (2026-05-01)
-- #387 — fix(subprocess): timeout misclassification + SIGKILL fallback + non-blocking readline (W3E) (#387) (2026-05-01)
-- #386 — fix(misc): runtime_core marker + report_path safety + tz datetime + heartbeat scope (W5B) (#386) (2026-05-01)
-- #385 — fix(gemini): dedupe file content + hallucination guardrail (W3G) (#385) (2026-05-01)
-- #384 — fix(subprocess): manifest-scoped git ops + worker attribution (W4F) (#384) (2026-05-01)
-- #383 — fix(gate-receipts): commit_sha + dispatch_id top-level + _mark_unavailable propagation (W3F) (#383) (2026-05-01)
-- #382 — fix(t0-state): feature_state schema split + any-ID filter (W4E) (#382) (2026-05-01)
-- #381 — fix(schema): add report_findings table for phase-3 session-dispatch-link (W4D) (#381) (2026-05-01)
-- #380 — fix(state): singleton lock race + session_ids refresh (W4C) (#380) (2026-05-01)
-- #379 — chore: CHANGELOG fix + GovernanceProfile rename + gate-status check (W5A) (#379) (2026-05-01)
-- #378 — fix(runtime): lease release on every completion path + heartbeat subprocess cleanup (W4B) (#378) (2026-05-01)
-- #377 — fix(gates): resolve PR-branch file content via git show, not cwd (W3D) (#377) (2026-05-01)
-- #375 — fix(session-store): fcntl.flock around read-modify-write (W4A) (#375) (2026-05-01)
-- #376 — fix(guards): haiku parser type guards + run_id regex + drain idempotency (W3C) (#376) (2026-05-01)
-- #374 — refactor(append_receipt): split into focused modules (W1C) (#374) (2026-05-01)
-- #373 — fix(hygiene): unused imports, import order, multi-import lines, validation, fail-closed git diff (W3B) (#373) (2026-05-01)
-- #372 — fix(gate-enforcement): set -e safe RC capture + BSD-portable grep (W3A) (#372) (2026-05-01)
 
 **W7**
 - #424 — feat(observability): tier labeling + governance gating (Phase 3 W7-G feature-end) (#424) (2026-05-06)
