@@ -94,7 +94,7 @@ def _emit(level: str, code: str, **fields: Any) -> None:
             json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str),
             file=sys.stderr,
         )
-    except Exception:  # pragma: no cover - logging must never raise
+    except (OSError, ValueError):  # pragma: no cover - logging must never raise
         pass
 
 
@@ -132,8 +132,8 @@ def _resolve_dispatch_register_path() -> Path:
     if resolve_state_dir is not None:
         try:
             return resolve_state_dir(__file__) / "dispatch_register.ndjson"
-        except Exception:
-            pass
+        except (OSError, RuntimeError, KeyError) as exc:
+            _emit("WARN", "dispatch_register_path_resolution_failed", error=str(exc))
     return _THIS_DIR.parent.parent / ".vnx-data" / "state" / "dispatch_register.ndjson"
 
 
@@ -480,8 +480,8 @@ def cleanup_worker_exit(
                 "errors": list(result.errors),
             },
         )
-    except Exception:
-        pass
+    except (ImportError, OSError, RuntimeError) as exc:
+        _emit("WARN", "health_beacon_failed", error=str(exc))
 
     return result
 
