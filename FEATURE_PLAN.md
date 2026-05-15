@@ -1,12 +1,30 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-13T18:08:15.599112+00:00
+**Last updated**: 2026-05-15T06:23:29.202994+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #500 — chore(hardening): narrow silent-except across replay_harness/cleanup_worker_exit/conversation_analyzer (9 findings, OI-1437) (#500) (2026-05-15)
+- #499 — chore(hardening): narrow silent-except in session_resolver.py (4 findings, OI-1437) (#499) (2026-05-14)
+- #498 — chore(hardening): narrow silent-except in api_operator.py (5 findings, OI-1437) (#498) (2026-05-14)
+- #497 — chore(hardening): narrow silent-except in append_receipt payload.py (5 findings, OI-1437) (#497) (2026-05-14)
+- #496 — chore(hardening): narrow silent-except in dispatch_register.py (5 findings, OI-1437) (#496) (2026-05-14)
+- #495 — chore(hardening): narrow silent-except in api_intelligence.py (6 findings, OI-1437) (#495) (2026-05-14)
+- #494 — chore(hardening): narrow silent-except in learning_loop.py (5 findings, OI-1437) (#494) (2026-05-14)
+- #493 — chore(hardening): narrow silent-except in gather_intelligence.py (6 findings, OI-1437) (#493) (2026-05-14)
+- #492 — chore(hardening): narrow silent-except in intelligence_selector.py (10 findings, OI-1437) (#492) (2026-05-14)
+- #491 — chore(hardening): narrow silent-except in build_t0_state.py (13 findings, OI-1437) (#491) (2026-05-14)
+- #489 — chore(contrib): add CONTRIBUTING.md + ci lint gate (atomic-write + silent-except) (#489) (2026-05-14)
+- #487 — chore(docs): CHANGELOG — OI-1370 systemic locking refactor series (#482-#486) (#487) (2026-05-13)
+- #486 — fix(oi-1370): PR N4 — final migration; close OI-1370 race comprehensively (#486) (2026-05-13)
+- #485 — feat(oi-1370): PR N3 — migrate compact_state.compact_receipts + backfill_headless_receipts to state_writer (#485) (2026-05-13)
+- #484 — feat(oi-1370): PR N2 — migrate gate_register_emit + cleanup_worker_exit to state_writer (#484) (2026-05-13)
+- #483 — feat(oi-1370): PR N1 — state_writer.append_locked helper (no behavior change) (#483) (2026-05-13)
+- #482 — docs(architect): OI-1370 systemic locking refactor plan (#482) (2026-05-13)
+- #481 — chore(docs): post-rc1 sprint refresh — CHANGELOG + README + FEATURE_PLAN regenerator (12 PRs) (#481) (2026-05-13)
 - #480 — feat(gates): validate + document Vertex routing path for gemini quota workaround (#480) (2026-05-13)
 - #467 — refactor(oi-1294): split compact_open_items_digest below 70-line threshold (#467) (2026-05-13)
 - #464 — chore(t0): canonical subprocess_dispatch.py routing in T0 template + skill (#464) (2026-05-13)
@@ -78,76 +96,6 @@ _Last 14 days — sourced from git merge commits._
 - #374 — refactor(append_receipt): split into focused modules (W1C) (#374) (2026-05-01)
 - #373 — fix(hygiene): unused imports, import order, multi-import lines, validation, fail-closed git diff (W3B) (#373) (2026-05-01)
 - #372 — fix(gate-enforcement): set -e safe RC capture + BSD-portable grep (W3A) (#372) (2026-05-01)
-- #371 — refactor(test_dispatch_register): split tests for size compliance (W2D) (#371) (2026-05-01)
-- #370 — refactor(dispatch_register): split append_event (W2C) (#370) (2026-05-01)
-- #368 — refactor(subprocess_dispatch): split into focused modules (W1A) (#368) (2026-05-01)
-- #369 — refactor(receipt_processor): split into sourced helper libs (W1B) (#369) (2026-05-01)
-- #367 — refactor(t0_decision_summarizer): split _parse_haiku + main (W2B) (#367) (2026-05-01)
-- #366 — refactor(gate_request_handler): split long methods (W2A) (#366) (2026-05-01)
-- #358 — fix(rebase): resolve intelligence_selector conflict — preserve CFX-5 + Migration P1 (#358) (2026-05-01)
-- #365 — docs(headless): missing transition doc + 4-mode matrix in README + adapter docs (#365) (2026-05-01)
-- #362 — fix(dispatcher): cross-project contamination guard (OI-1067) (#362) (2026-04-30)
-- #359 — fix(oi-1100): receipt processor recovers expired leases (#359) (2026-04-30)
-- #357 — feat(cfx-17): gate-side codex severity translator (#357) (2026-04-30)
-- #355 — test(dashboard): TS fixture-completeness gate (CFX-14) (#355) (2026-04-30)
-- #354 — fix(dashboard): SSE + timer unmount cleanup + lifecycle tests (CFX-13) (#354) (2026-04-30)
-- #352 — fix(intelligence): content-addressable pattern_id stability (CFX-5) (#352) (2026-04-30)
-- #353 — test(governance): codex stream parser version-fixture suite (CFX-9) (#353) (2026-04-30)
-- #351 — refactor(intelligence): tag_combination as JSON array (CFX-6) (#351) (2026-04-30)
-- #350 — test(dashboard): tighten console-error filter, never mask React warnings (CFX-15) (#350) (2026-04-30)
-- #349 — fix(governance): rc_release_on_failure cleanup_complete handling (CFX-16) (#349) (2026-04-30)
-- #348 — fix(scripts): path resolution sweep + smoke gate (CFX-11) (#348) (2026-04-30)
-- #346 — feat(operator): ARC pipeline → suggest CLI + dashboard widget (ARC-5) (#346) (2026-04-30)
-- #347 — feat(intelligence): F57 insights reader + recommendation aggregator (ARC-4) (#347) (2026-04-30)
-- #345 — feat(intelligence): receipt classifier with provider abstraction (ARC-3) (#345) (2026-04-30)
-- #344 — fix(intelligence): verify failure-decay end-to-end + regression tests (ARC-2) (#344) (2026-04-30)
-- #343 — fix(launchd): generic reload_plist.sh + active-jobs smoke test (ARC-1) (#343) (2026-04-30)
-- #342 — refactor(governance): summarizers use gate_status.is_pass() (CFX-12) (#342) (2026-04-30)
-- #341 — fix(observability): append_receipt stderr discipline (CFX-8) (#341) (2026-04-30)
-- #340 — fix(observability): use full SHA-256 for instruction_sha256 (CFX-10) (#340) (2026-04-30)
-- #338 — fix(intelligence): pattern dedup + injection diversity (P1 mid) (#338) (2026-04-30)
-- #339 — fix(governance): subprocess manifest lifecycle active->completed cleanup (CFX-7) (#339) (2026-04-30)
-- #337 — fix(intelligence): fcntl-lock worker_health.json RMW (CFX-4) (#337) (2026-04-30)
-- #336 — test(ci): smoke tests + nightly canary workflow (PR-T4) (#336) (2026-04-30)
-- #335 — test(intelligence): integration tests for end-to-end learning loop (PR-T2) (#335) (2026-04-30)
-- #334 — feat(multi-tenant): add project_id column (migration Phase 0) (#334) (2026-04-30)
-- #333 — docs(t0): codify policies + remove dead scripts + audit-driven cleanup (#333) (2026-04-30)
-- #332 — feat(observability): component health beacon framework (PR-T1) (#332) (2026-04-30)
-- #330 — fix(launchd): conversation analyzer plist path + smoke test (#330) (2026-04-30)
-- #329 — docs(manifesto): operator-narrative + v0.10.0 changelog + headless transition (#329) (2026-04-30)
-- #331 — fix(ci): tighten Legacy Path Gate regex to literal .vnx-data/state/ (#331) (2026-04-30)
-- #326 — fix(intelligence): stamp dispatch_id at injection time (P0) (#326) (2026-04-30)
-- #328 — feat(intelligence): activate T0 decision log + outcome reconciliation (P0) (#328) (2026-04-30)
-- #327 — fix(intelligence): reconcile pattern confidence stores (P0 quick win) (#327) (2026-04-30)
-- #301 — feat(governance): ci_gate audit type for review-gate framework (Tier 3) (#301) (2026-04-30)
-- #303 — fix(round3): codex round-2 findings PR #303 — StreamEvent compat + rotation timing (#303) (2026-04-30)
-- #302 — feat(observability): dispatch_created + dispatch_promoted register events (Tier 5) (#302) (2026-04-30)
-- #321 — fix(governance): closure_verifier CLI flag forwarding + E2E coverage (CFX-2) (#321) (2026-04-30)
-- #320 — fix(governance): subprocess dispatch git-scope manifest (CFX-1) (#320) (2026-04-30)
-- #317 — feat(supervisor): runtime_supervise + 60s dispatcher tick (SUP-PR3) (#317) (2026-04-30)
-- #300 — fix(round3): codex round-2 findings PR #300 — branch forwarding + contradictions detector (#300) (2026-04-30)
-- #311 — fix(governance): dedup confidence updates after VNX-R4 (Tier 4) (#311) (2026-04-30)
-- #305 — test(dashboard): F60 Playwright console + network error detection (Tier 6) (#305) (2026-04-30)
-- #325 — docs(readme): v0.10.0 — supervisor + observability + codex severity (16 PRs) (#325) (2026-04-30)
-- #316 — feat(supervisor): lease_sweep + dispatcher prelude tick (SUP-PR2) (#316) (2026-04-30)
-- #322 — refactor(governance): canonicalize gate result schema (CFX-3) (#322) (2026-04-29)
-- #315 — refactor(supervisor): single-owner cleanup_worker_exit helper (SUP-PR1) (#315) (2026-04-29)
-- #307 — feat(observability): codex+gemini token tracking in receipts (Tier 5 GAP-4) (#307) (2026-04-29)
-- #319 — feat(supervisor): receipt_processor_supervisor.sh + integration tests (SUP-PR4) (#319) (2026-04-29)
-- #306 — build(dashboard): tsc strict-mode tightening + typecheck script (Tier 6) (#306) (2026-04-29)
-- #308 — test(dashboard): F60 Playwright network failure scenarios (Tier 6) (#308) (2026-04-29)
-- #324 — fix(governance): codex severity prompt tightening (vertex_ai_runner) (#324) (2026-04-29)
-- #323 — fix(governance): codex severity prompt tightening (#323) (2026-04-29)
-
-**W1**
-- #356 — fix(night-w1-prebugs): consolidate 4 pre-existing main bugs (OI-1227..1230) (#356) (2026-04-30)
-
-**W2**
-- #361 — refactor(night-w2-cluster-a): split 5 oversize functions into helpers (#361) (2026-04-30)
-- #360 — fix(night-w2-oi1107): pass --role through subprocess delivery path (#360) (2026-04-30)
-
-**W3**
-- #363 — refactor(night-w3): split cluster B — 5 oversize functions (OI-1089/1090/1091/1200/1202) (#363) (2026-04-30)
 
 **W7**
 - #424 — feat(observability): tier labeling + governance gating (Phase 3 W7-G feature-end) (#424) (2026-05-06)
@@ -183,6 +131,10 @@ _Last 14 days — sourced from git merge commits._
 - #477 — feat(wave4.5): PR-3 redo — guard build_intelligence_context against empty dispatch_id (audit-safe) (#477) (2026-05-13)
 - #472 — feat(wave4.5): PR-2 — codex/gemini adapters use PromptAssembler + tri-file activation (#472) (2026-05-13)
 - #471 — feat(wave4.5): PromptAssembler provider-agnostic methods (codex, gemini, litellm) (#471) (2026-05-13)
+
+**WAVE4.6**
+- #490 — feat(wave4.6): PR-4.6.2 — extract claude_spawn from subprocess_dispatch (byte-identical) (#490) (2026-05-14)
+- #488 — feat(wave4.6): PR-4.6.1 — provider_dispatch.py entry-point (additive shim) (#488) (2026-05-14)
 
 **WAVE5**
 - #462 — feat(wave5): CFX-W5-2 — plumbing gaps (pr_id key + headless daemon entry points) (#462) (2026-05-13)

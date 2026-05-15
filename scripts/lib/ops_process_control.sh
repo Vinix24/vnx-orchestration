@@ -5,9 +5,9 @@
 __VNX_OPS_PROC_SHELLOPTS="$(set +o)"
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_OPS_PC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/process_lifecycle.sh
-source "$SCRIPT_DIR/process_lifecycle.sh"
+source "$_OPS_PC_SCRIPT_DIR/process_lifecycle.sh"
 
 vnx_stop_pid_if_matches() {
   local name="$1"
