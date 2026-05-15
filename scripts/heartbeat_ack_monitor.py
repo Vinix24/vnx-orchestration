@@ -487,7 +487,7 @@ class HeartbeatACKMonitor:
         try:
             # Get pane info from tmux
             cmd = f"tmux list-panes -a -F '#{{session_name}}:#{{window_name}} #{{pane_current_command}}' | grep -i {terminal}"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1)
+result = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=1)
 
             if result.returncode == 0 and result.stdout:
                 current_command = result.stdout.strip().split()[-1]
