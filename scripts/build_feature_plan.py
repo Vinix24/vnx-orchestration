@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -21,6 +22,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _AUTOGEN_HEADER = "<!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->"
@@ -56,8 +59,8 @@ def read_register_events(state_dir: Optional[Path] = None) -> list[dict]:
                         events.append(json.loads(line))
                     except json.JSONDecodeError:
                         pass
-    except Exception:
-        pass
+    except OSError as e:
+        log.debug("Failed to read events from %s: %s", path, e)
     return events
 
 

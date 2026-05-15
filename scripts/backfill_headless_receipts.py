@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 import state_writer
+
+log = logging.getLogger(__name__)
 
 try:
     from vnx_paths import ensure_env
@@ -117,8 +120,8 @@ def _build_dispatch_index() -> Dict[str, str]:
             with bundle.open() as f:
                 data = json.load(f)
             index[d.name] = data["dispatch_id"]
-        except Exception:
-            pass
+        except (json.JSONDecodeError, KeyError) as e:
+            log.debug("Failed to load bundle %s: %s", bundle, e)
     return index
 
 

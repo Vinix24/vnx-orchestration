@@ -7,12 +7,15 @@ so they can be used without a GateRunner instance.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from governance_receipts import utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 _GATE_ENV_FLAGS: Dict[str, str] = {
     "gemini_review": "VNX_GEMINI_REVIEW_ENABLED",
@@ -222,8 +225,8 @@ def record_failure(
                 pr_id=pr_id,
                 gate=gate,
             )
-        except Exception:
-            pass
+        except (ImportError, OSError) as e:
+            logger.debug("Failed to emit gate register event: %s", e)
 
     return failure_payload
 
