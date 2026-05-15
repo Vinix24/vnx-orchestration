@@ -461,8 +461,8 @@ class IntelligenceDaemon:
                             "daemon_status": self.health_status.get("status", "running"),
                         },
                     )
-                except Exception:
-                    pass
+                except (ImportError, OSError) as e:
+                    logger.debug("Failed to emit health beacon heartbeat: %s", e)
 
                 # Sleep for 60 seconds
                 time.sleep(60)
@@ -478,8 +478,8 @@ class IntelligenceDaemon:
                         "intelligence_daemon",
                         expected_interval_seconds=300,
                     ).heartbeat(status="fail", details={"error": str(e)})
-                except Exception:
-                    pass
+                except (ImportError, OSError) as e_hb:
+                    logger.debug("Failed to emit health beacon failure heartbeat: %s", e_hb)
                 time.sleep(60)  # Continue after error
 
         # Graceful shutdown

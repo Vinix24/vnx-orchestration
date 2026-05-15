@@ -599,8 +599,8 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             (cache_dir / f"{self._terminal_id}_usage.json").write_text(
                 json.dumps(usage), encoding="utf-8"
             )
-        except Exception:
-            pass
+        except OSError as e:
+            logger.debug("Failed to write token cache for %s: %s", self._terminal_id, e)
 
     @staticmethod
     def get_token_usage(terminal_id: str, state_dir: Optional[Path] = None) -> Optional[dict]:
@@ -618,8 +618,8 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             data = json.loads(cache_file.read_text(encoding="utf-8"))
             if isinstance(data, dict) and "input_tokens" in data and "output_tokens" in data:
                 return data
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError) as e:
+            logger.debug("Failed to read token cache for %s: %s", terminal_id, e)
         return None
 
     def _build_prompt(

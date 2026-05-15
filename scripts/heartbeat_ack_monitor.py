@@ -150,8 +150,8 @@ class HeartbeatACKMonitor:
                                 dt = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
                                 self.terminal_heartbeats[terminal] = dt
                                 logger.info(f"Initialized {terminal} heartbeat: {last_update}")
-                            except Exception:
-                                pass
+                            except ValueError as e:
+                                logger.debug("Failed to parse terminal heartbeat timestamp %r: %s", last_update, e)
         except Exception as e:
             logger.error(f"Error initializing heartbeats: {e}")
 
@@ -414,8 +414,8 @@ class HeartbeatACKMonitor:
                             'delay_seconds': delay,
                             'checksum_changed': True
                         }
-                except Exception:
-                    pass
+                except OSError as e:
+                    logger.debug("Failed to stat log file %s: %s", log_path, e)
             return None
 
         current_checksum = self._get_log_checksum(terminal)
