@@ -419,19 +419,21 @@ PY
             return 1
         fi
 
-        # Preflight passed — safe to mutate watermark.
-        echo "$new_watermark" > "${WATERMARK_FILE}.tmp" \
-            && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
-
-        # Emit audit event per ADR-005. Preflight already verified writability; log loudly on failure.
+        # Preflight passed — emit audit FIRST so state mutation is always paired with ledger entry.
+        # ADR-005 invariant: if audit write fails, abort — do NOT advance state.
         local _now_iso
         _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         if ! printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\n' \
             "$_now_iso" "$watermark_age" "$BOOTSTRAP_MAX_AGE" "$_old_watermark" "$new_watermark" \
             >> "$_bootstrap_event_file"; then
-            log "ERROR" "Bootstrap: audit emission FAILED after watermark mutation — manual reconciliation required"
+            log "ERROR" "Bootstrap: audit emission failed — aborting bootstrap, keeping current watermark"
+            return 1
         fi
         log "INFO" "Bootstrap skip audited to $_bootstrap_event_file"
+
+        # Audit landed — now safe to mutate state.
+        echo "$new_watermark" > "${WATERMARK_FILE}.tmp" \
+            && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
         log "INFO" "Bootstrap watermark set to $new_watermark"
         log "INFO" "If you need historical reports replayed, manually rewind watermark and restart."
     else
@@ -465,13 +467,14 @@ cleanup() {
     rm -f "$VNX_PIDS_DIR/receipt_processor_v4.sh.pid" "$VNX_PIDS_DIR/receipt_processor_v4.sh.pid.fingerprint"
 }
 
-trap cleanup EXIT INT TERM
-
 # _RP_LIB_MODE=1 allows sourcing this script to load function definitions only,
 # without launching the polling loop. Used by test fixtures.
+# Must happen BEFORE trap installation, otherwise sourcing replaces caller's EXIT trap.
 if [ "${_RP_LIB_MODE:-0}" = "1" ]; then
     return 0 2>/dev/null || exit 0
 fi
+
+trap cleanup EXIT INT TERM
 
 # Main execution
 log "INFO" "Receipt Processor v4 starting (PID: $$)"

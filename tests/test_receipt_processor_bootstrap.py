@@ -22,6 +22,7 @@ def _run_bootstrap(
     report_mtimes: list[int] | None = None,
     make_unreadable: bool = False,
     make_events_dir_unwritable: bool = False,
+    make_events_file_a_dir: bool = False,
 ) -> tuple[str, int, str, str, str, bool]:
     """
     Invoke the real _rp_apply_bootstrap_protection from receipt_processor_v4.sh
@@ -64,6 +65,12 @@ def _run_bootstrap(
             events_dir.mkdir(parents=True)
             events_dir.chmod(0o500)
 
+        if make_events_file_a_dir:
+            # Preflight (mkdir -p + touch) will succeed because touch on a directory returns 0.
+            # The subsequent `printf >>` will fail with EISDIR, triggering the new abort path.
+            events_dir.mkdir(parents=True)
+            (events_dir / "receipt_processor.ndjson").mkdir()
+
         bash_cmd = f"""
 set -e
 export _RP_LIB_MODE=1
@@ -92,9 +99,11 @@ exit $_rc
         # Restore permissions so TemporaryDirectory cleanup can remove the dir.
         if make_events_dir_unwritable and events_dir.exists():
             events_dir.chmod(0o700)
+        if make_events_file_a_dir and events_dir.exists():
+            events_dir.chmod(0o700)
 
         events_dir_exists = events_dir.is_dir()
-        events_content = events_file.read_text() if events_file.exists() else ""
+        events_content = events_file.read_text() if events_file.is_file() else ""
         return result.stderr, result.returncode, final_watermark, str(old_ts), events_content, events_dir_exists
 
 
@@ -245,3 +254,97 @@ def test_bootstrap_aborts_if_events_file_unwritable():
     assert not events_content, (
         f"No audit event should be written when abort: {events_content!r}"
     )
+
+
+def test_bootstrap_aborts_if_audit_emission_fails():
+    """Preflight passes but printf >> events_file fails (EISDIR) → watermark NOT advanced."""
+    # Pre-create events_file as a directory: touch on a dir returns 0 (preflight passes),
+    # but printf >> dir fails with EISDIR — this exercises the new audit-before-mutation path.
+    stderr, rc, final_wm, old_wm, events_content, _ = _run_bootstrap(
+        watermark_age_secs=48 * 3600,
+        bootstrap_max_age=86400,
+        make_events_file_a_dir=True,
+    )
+
+    assert rc != 0, (
+        f"Bootstrap should return non-zero when audit emission fails, got rc={rc}:\n{stderr}"
+    )
+    assert final_wm == old_wm, (
+        f"Watermark must not advance when audit fails: old={old_wm} final={final_wm}"
+    )
+    assert "audit emission failed" in stderr, (
+        f"Expected 'audit emission failed' in stderr:\n{stderr}"
+    )
+    assert "ERROR" in stderr, f"Expected ERROR log on audit failure:\n{stderr}"
+
+
+def test_audit_emit_precedes_state_mutation():
+    """Static order check: audit printf line must appear before mv watermark line in the function."""
+    script_text = RP_SCRIPT.read_text()
+    lines = script_text.splitlines()
+
+    # Find the function body of _rp_apply_bootstrap_protection
+    func_start = next(
+        (i for i, ln in enumerate(lines) if "_rp_apply_bootstrap_protection()" in ln), None
+    )
+    assert func_start is not None, "_rp_apply_bootstrap_protection() not found in script"
+
+    # Locate closing brace of the function (first line with only "}" after func_start)
+    func_end = next(
+        (i for i, ln in enumerate(lines[func_start:], start=func_start) if ln.strip() == "}"),
+        len(lines),
+    )
+
+    func_body = lines[func_start:func_end]
+
+    audit_line = next(
+        (i for i, ln in enumerate(func_body) if '"bootstrap_skip"' in ln and "printf" in ln),
+        None,
+    )
+    mv_line = next(
+        (i for i, ln in enumerate(func_body) if "mv" in ln and "WATERMARK_FILE" in ln and ".tmp" in ln),
+        None,
+    )
+
+    assert audit_line is not None, "Could not find audit printf line in _rp_apply_bootstrap_protection"
+    assert mv_line is not None, "Could not find mv watermark line in _rp_apply_bootstrap_protection"
+    assert audit_line < mv_line, (
+        f"ADR-005 violated: audit emit (body line {audit_line}) must come before "
+        f"mv watermark (body line {mv_line})"
+    )
+
+
+def test_lib_mode_does_not_install_trap():
+    """_RP_LIB_MODE=1 source must not override caller's EXIT trap."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        data_dir = tmp / "data"
+        state = tmp / "state"
+        pids = tmp / "pids"
+        locks = tmp / "locks"
+        unified = tmp / "unified"
+        headless = tmp / "headless"
+        for d in (data_dir, state, pids, locks, unified, headless):
+            d.mkdir(parents=True)
+
+        sentinel = tmp / "caller_trap_fired"
+        bash_cmd = f"""
+trap "touch '{sentinel}'" EXIT
+export _RP_LIB_MODE=1
+export VNX_DATA_DIR="{data_dir}"
+export VNX_STATE_DIR="{state}"
+export VNX_PIDS_DIR="{pids}"
+export VNX_LOCKS_DIR="{locks}"
+export VNX_REPORTS_DIR="{unified}"
+export VNX_HEADLESS_REPORTS_DIR="{headless}"
+source "{RP_SCRIPT}"
+"""
+        result = subprocess.run(["bash", "-c", bash_cmd], capture_output=True, text=True)
+        assert result.returncode == 0, (
+            f"Source with _RP_LIB_MODE=1 failed unexpectedly:\n{result.stderr}"
+        )
+        assert sentinel.exists(), (
+            "Caller's EXIT trap was not fired after lib-mode source — "
+            "cleanup trap may have replaced it.\n"
+            f"stderr: {result.stderr}"
+        )
