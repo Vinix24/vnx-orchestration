@@ -128,8 +128,15 @@ def _run_chain_step_prefilter(
     step: ChainStep,
     current_state: dict[str, Any],
     step_start_ms: int,
+    dry_run: bool = False,
 ) -> ChainStepResult | None:
-    """Run prefilter for a chain step. Returns result if deterministic, else None."""
+    """Run prefilter for a chain step. Returns result if deterministic, else None.
+
+    Dry-run mode skips prefilter entirely so LLM dry-run output is produced —
+    matches pre-refactor behavior (replay_harness.py:434 `not dry_run` guard).
+    """
+    if dry_run:
+        return None
     prefilter_decision = _code_prefilter(step.receipt, current_state)
     if prefilter_decision is None:
         return None
@@ -276,7 +283,7 @@ def run_chain_replay(
         current_state = _apply_state_delta(current_state, step.state_delta)
         step_start_ms = int(time.monotonic() * 1000)
 
-        prefilter_result = _run_chain_step_prefilter(chain, step, current_state, step_start_ms)
+        prefilter_result = _run_chain_step_prefilter(chain, step, current_state, step_start_ms, dry_run=dry_run)
         if prefilter_result is not None:
             step_results.append(prefilter_result)
             continue

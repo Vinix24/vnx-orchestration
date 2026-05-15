@@ -88,6 +88,43 @@ def test_corrupt_scenario_json_logs_debug(tmp_path, caplog):
     )
 
 
+def test_chain_replay_dry_run_skips_prefilter():
+    """dry_run=True causes _run_chain_step_prefilter to return None regardless of prefilter decision.
+
+    Regression guard for codex R1 advisory: pre-refactor replay_harness.py:434 guarded
+    prefilter with `not dry_run`. Ensures LLM dry-run path is taken, not prefilter path.
+    """
+    import time
+    from unittest.mock import patch
+    from replay_harness.chain_replay import _run_chain_step_prefilter
+    from replay_harness.models import ChainScenario, ChainStep
+
+    chain = ChainScenario(
+        name="test_chain",
+        level=2,
+        description="",
+        initial_state={},
+        steps=[],
+    )
+    step = ChainStep(
+        step_name="test_step",
+        receipt={"dispatch_id": "d-dry-run-test", "status": "failure", "retry_count": 0},
+        state_delta={},
+        expected_decision="DISPATCH",
+        expected_next_action="",
+    )
+    current_state: dict = {}
+    step_start_ms = int(time.monotonic() * 1000)
+
+    with patch("replay_harness.chain_replay._code_prefilter", return_value="DISPATCH"):
+        result = _run_chain_step_prefilter(chain, step, current_state, step_start_ms, dry_run=True)
+
+    assert result is None, (
+        f"Expected None (LLM path) in dry_run mode, got: {result!r}. "
+        "Prefilter must be skipped when dry_run=True."
+    )
+
+
 def test_missing_scenario_file_logs_debug(tmp_path, caplog):
     """OSError (missing file) in chain detection is caught and logged, not raised."""
     import replay_harness as rh
