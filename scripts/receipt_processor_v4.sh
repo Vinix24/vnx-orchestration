@@ -31,6 +31,7 @@ POLL_INTERVAL="${VNX_POLL_INTERVAL:-5}"          # seconds between report direct
 # FSWATCH_BACKOFF="${VNX_FSWATCH_BACKOFF:-5}"   # (disabled) seconds between fswatch restarts
 CONFIRMATION_GRACE_SECONDS="${VNX_CONFIRMATION_GRACE_SECONDS:-300}"  # Lease window for no-confirmation blocks
 FLOOD_LOCK_MAX_AGE="${VNX_FLOOD_LOCK_MAX_AGE:-300}"  # Auto-clear flood lock after N seconds (default 5 min)
+BOOTSTRAP_MAX_AGE="${VNX_RECEIPT_PROCESSOR_BOOTSTRAP_MAX_AGE:-86400}"  # Skip historical replay if watermark older than N seconds (default 24h; 0=disabled)
 
 # State files
 LAST_PROCESSED="$STATE_DIR/receipt_last_processed"
@@ -350,11 +351,83 @@ _mnr_startup_catchup() {
 # To re-enable: set VNX_USE_FSWATCH=1; see git history for the original code block.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Bootstrap protection: if the watermark is older than BOOTSTRAP_MAX_AGE seconds,
+# advance it to the newest existing report mtime so a long downtime does not replay
+# weeks of stale receipts into T0 on next startup.
+# Set VNX_RECEIPT_PROCESSOR_BOOTSTRAP_MAX_AGE=0 to disable and force normal catchup.
+_rp_apply_bootstrap_protection() {
+    if [ ! -f "$WATERMARK_FILE" ]; then
+        log "INFO" "No watermark file; skipping bootstrap check"
+        return 0
+    fi
+
+    local watermark_ts
+    watermark_ts=$(cat "$WATERMARK_FILE" 2>/dev/null || echo "")
+    if ! [[ "$watermark_ts" =~ ^[0-9]+$ ]]; then
+        log "WARN" "Watermark unreadable (not an integer); skipping bootstrap check"
+        return 0
+    fi
+
+    local now
+    now=$(date +%s)
+    local watermark_age=$(( now - watermark_ts ))
+
+    if [ "$BOOTSTRAP_MAX_AGE" -gt 0 ] && [ "$watermark_age" -gt "$BOOTSTRAP_MAX_AGE" ]; then
+        log "WARN" "Watermark is ${watermark_age}s old (>${BOOTSTRAP_MAX_AGE}s). Entering BOOTSTRAP mode."
+        log "WARN" "Marking current report state as baseline. Historical reports skipped."
+
+        # Find newest report mtime via Python for cross-platform compatibility.
+        local new_watermark
+        new_watermark=$(python3 - "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" "$now" <<'PY'
+import sys
+from pathlib import Path
+
+unified, headless, fallback = sys.argv[1], sys.argv[2], int(sys.argv[3])
+max_mtime = 0
+for d in (unified, headless):
+    p = Path(d)
+    if not p.is_dir():
+        continue
+    for f in p.glob("*.md"):
+        try:
+            mtime = int(f.stat().st_mtime)
+            if mtime > max_mtime:
+                max_mtime = mtime
+        except OSError as e:
+            print(f"warning: stat failed for {f}: {e}", file=sys.stderr)
+print(max_mtime if max_mtime > 0 else fallback)
+PY
+)
+        [ -z "$new_watermark" ] && new_watermark="$now"
+
+        local _old_watermark
+        _old_watermark=$(cat "$WATERMARK_FILE" 2>/dev/null || echo "0")
+
+        echo "$new_watermark" > "${WATERMARK_FILE}.tmp" \
+            && mv "${WATERMARK_FILE}.tmp" "$WATERMARK_FILE"
+
+        # Audit the bootstrap skip per ADR-005.
+        local _bootstrap_event_file="${VNX_DATA_DIR}/events/receipt_processor.ndjson"
+        mkdir -p "$(dirname "$_bootstrap_event_file")" 2>/dev/null || true
+        local _now_iso
+        _now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        printf '{"timestamp":"%s","event_type":"bootstrap_skip","source":"receipt_processor","file":"receipt_processor_watermark","trigger":"stale_watermark_bootstrap","watermark_age_seconds":%s,"max_age_seconds":%s,"old_watermark":"%s","new_watermark":"%s"}\n' \
+            "$_now_iso" "$watermark_age" "$BOOTSTRAP_MAX_AGE" "$_old_watermark" "$new_watermark" \
+            >> "$_bootstrap_event_file"
+        log "INFO" "Bootstrap skip audited to $_bootstrap_event_file"
+        log "INFO" "Bootstrap watermark set to $new_watermark"
+        log "INFO" "If you need historical reports replayed, manually rewind watermark and restart."
+    else
+        log "INFO" "Watermark age ${watermark_age}s (<= ${BOOTSTRAP_MAX_AGE}s). Running normal catchup."
+    fi
+}
+
 # Watch for new reports via polling. On startup, performs a catchup scan and
 # delivers any receipts pending since the last shutdown.
 monitor_new_reports() {
     log "INFO" "Starting MONITOR mode - only new reports will be processed"
     date '+%Y%m%d-%H%M%S' > "$LAST_PROCESSED"
+    _rp_apply_bootstrap_protection
     _mnr_startup_catchup
     _retry_pending_receipts
     _poll_new_reports

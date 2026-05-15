@@ -5,9 +5,9 @@
 __VNX_PROC_SHELLOPTS="$(set +o)"
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_PL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/vnx_paths.sh
-source "$SCRIPT_DIR/vnx_paths.sh"
+source "$_PL_SCRIPT_DIR/vnx_paths.sh"
 
 vnx_proc_realpath() {
   local path="$1"
