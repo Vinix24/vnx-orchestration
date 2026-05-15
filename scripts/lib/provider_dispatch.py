@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""provider_dispatch.py — Provider-agnostic dispatch entry-point (Wave 4.6 PR-4.6.1).
+"""provider_dispatch.py — Provider-agnostic dispatch entry-point (Wave 4.6).
 
 Routes dispatch execution to the appropriate provider spawn handler based on
-``--provider``.  In PR-4.6.1 only the ``claude`` provider is wired; all other
-providers raise NotImplementedError with exit code 64 (EX_USAGE) until their
-respective spawn handlers land in subsequent PRs.
+``--provider``. PR-4.6.1: claude wired. PR-4.6.3: codex wired. All other
+providers raise SystemExit(64) until their handlers land in subsequent PRs.
 
-See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md §PR-4.6.1
+See: claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md
 
 BILLING SAFETY: this module does NOT import the Anthropic SDK.  Claude dispatch
 delegates entirely to ``subprocess_dispatch.py`` which invokes ``claude -p`` via
@@ -23,12 +22,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
-# Providers whose spawn handlers exist in this PR.
-_IMPLEMENTED_PROVIDERS = {"claude"}
+# Providers whose spawn handlers exist.
+_IMPLEMENTED_PROVIDERS = {"claude", "codex"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP = {
-    "codex": "PR-4.6.3",
     "gemini": "PR-4.6.4",
 }
 
@@ -93,6 +91,30 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _dispatch_codex(args: argparse.Namespace) -> int:
+    """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
+
+    Prompt is the raw instruction; file-content injection is caller's responsibility.
+    """
+    import os
+    from provider_spawns.codex_spawn import spawn_codex
+
+    model = os.environ.get("VNX_CODEX_MODEL", "")
+    result = spawn_codex(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+    )
+    if result.error:
+        print(f"spawn_codex failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        print("spawn_codex timed out", file=sys.stderr)
+        return 1
+    return 0 if result.returncode == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args, route to the correct provider handler, return exit code."""
     parser = _build_parser()
@@ -108,13 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch_claude(args)
 
     if provider == "codex":
-        future_pr = _FUTURE_PR_MAP["codex"]
-        print(
-            f"Provider 'codex' spawn handler lands in {future_pr}. "
-            "Use --provider claude for now.",
-            file=sys.stderr,
-        )
-        raise SystemExit(_EX_USAGE)
+        return _dispatch_codex(args)
 
     if provider == "gemini":
         future_pr = _FUTURE_PR_MAP["gemini"]
