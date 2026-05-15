@@ -8,11 +8,14 @@ BILLING SAFETY: read-only data loader; no Anthropic SDK, no API calls.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 _REGISTRY_PATH = Path(__file__).parent / "wave7_models.yaml"
 
@@ -80,8 +83,12 @@ def get_default_model(
     """Return the first model entry for *sub_provider*, or None if not found/disabled."""
     try:
         registry = load(registry_path)
-    except Exception:
-        return None
+    except FileNotFoundError as e:
+        log.error("provider_registry: file missing at %s: %s", registry_path or _REGISTRY_PATH, e)
+        raise
+    except yaml.YAMLError as e:
+        log.error("provider_registry: malformed yaml at %s: %s", registry_path or _REGISTRY_PATH, e)
+        raise ValueError(f"malformed wave7_models.yaml: {e}") from e
     cfg = registry.get(sub_provider)
     if cfg is None or not cfg.enabled or not cfg.models:
         return None

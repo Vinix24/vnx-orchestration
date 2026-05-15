@@ -155,13 +155,14 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
 
 def _resolve_deepseek_model() -> str:
     """Load DeepSeek model litellm_name from registry, fallback to hardcoded default."""
+    from providers import provider_registry as _reg
     try:
-        from providers import provider_registry as _reg
         rec = _reg.get_default_model("deepseek")
-        if rec is not None:
-            return rec.litellm_name
-    except Exception:
-        pass
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("provider_dispatch: registry resolve failed for deepseek: %s", e)
+        raise RuntimeError(f"provider registry resolution failed: {e}") from e
+    if rec is not None:
+        return rec.litellm_name
     return _LITELLM_SUB_PROVIDER_DEFAULTS["deepseek"]
 
 

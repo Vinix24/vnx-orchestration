@@ -15,8 +15,11 @@ BILLING SAFETY: No Anthropic SDK imports. Uses litellm library only.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+
+log = logging.getLogger(__name__)
 
 _EXIT_OK = 0
 _EXIT_CREDS = 1
@@ -68,8 +71,9 @@ def _emit_usage(usage: object) -> None:
     else:
         try:
             usage_dict = dict(usage)  # type: ignore[call-overload]
-        except Exception:
-            return
+        except AttributeError as e:
+            log.warning("_litellm_runner: usage serialization fallback: %s", e)
+            usage_dict = {"input_tokens": 0, "output_tokens": 0, "usage_serialization_failed": True}
     _emit({"event_type": "usage_complete", "usage": usage_dict})
 
 
@@ -99,7 +103,6 @@ def main() -> int:
         return _EXIT_ERR
 
     # Silence litellm's own logging to avoid polluting stdout
-    import logging
     logging.getLogger("litellm").setLevel(logging.CRITICAL)
     litellm.suppress_debug_info = True
 
