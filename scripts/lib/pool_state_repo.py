@@ -79,9 +79,16 @@ class PoolStateRepository:
         self.project_id = project_id
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        # isolation_level=None: full autocommit; all transactions are explicit BEGIN … COMMIT.
+        # Without this, Python's sqlite3 implicit transaction management can conflict with
+        # our explicit BEGIN IMMEDIATE calls when two threads race on the same DB.
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")
+        # Belt-and-suspenders: set busy_timeout via PRAGMA in addition to the connect-level
+        # timeout so SQLite retries on SQLITE_BUSY regardless of how the busy handler was
+        # previously configured on this connection.
+        conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
