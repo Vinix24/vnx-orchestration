@@ -471,3 +471,8 @@ class PoolStateRepository:
             raise
         finally:
             conn.close()
+        self._emit_ledger("pool.config.updated", {
+            "pool_id": pool_id,
+            "updates": updates,
+            "now": time.time(),
+        })

@@ -97,6 +97,9 @@ def cmd_scale(args: argparse.Namespace) -> int:
     return 0 if not result.errors else 1
 
 
+_VALID_POLICIES = frozenset({"fixed", "queue_depth_v1", "queue_aware", "cost_aware_v1"})
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     """Update pool config fields (min/max/policy/cooldown)."""
     mgr = _make_manager(args.project, args.pool_id)
@@ -108,17 +111,41 @@ def cmd_config(args: argparse.Namespace) -> int:
 
     updates = {}
     if args.min is not None:
+        if args.min < 0:
+            print("ERROR: --min must be >= 0", file=sys.stderr)
+            return 1
         updates["min_workers"] = args.min
     if args.max is not None:
+        if args.max < 0:
+            print("ERROR: --max must be >= 0", file=sys.stderr)
+            return 1
         updates["max_workers"] = args.max
     if args.policy is not None:
+        if args.policy not in _VALID_POLICIES:
+            print(
+                f"ERROR: invalid policy {args.policy!r}; valid: {sorted(_VALID_POLICIES)}",
+                file=sys.stderr,
+            )
+            return 1
         updates["scaling_policy"] = args.policy
     if args.cooldown is not None:
+        if args.cooldown < 0:
+            print("ERROR: --cooldown must be >= 0", file=sys.stderr)
+            return 1
         updates["cooldown_seconds"] = args.cooldown
 
     if not updates:
         print("No changes")
         return 0
+
+    final_min = updates.get("min_workers", config.min_workers)
+    final_max = updates.get("max_workers", config.max_workers)
+    if final_min > final_max:
+        print(
+            f"ERROR: min ({final_min}) > max ({final_max}); invariant violated",
+            file=sys.stderr,
+        )
+        return 1
 
     mgr.repo.update_config(pool_id, updates)
     print(f"Updated config for {pool_id!r}: {updates}")

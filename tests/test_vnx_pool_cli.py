@@ -280,6 +280,54 @@ class TestCmdConfig:
         assert rc == 0
         mgr.repo.update_config.assert_called_once_with("default", {"max_workers": 10})
 
+    def test_config_rejects_negative_min(self, capsys):
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.repo.get_config.return_value = _make_config()
+            rc = cmd_config(self._args(min=-1))
+        assert rc == 1
+        assert "--min must be >= 0" in capsys.readouterr().err
+        mgr.repo.update_config.assert_not_called()
+
+    def test_config_rejects_negative_max(self, capsys):
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.repo.get_config.return_value = _make_config()
+            rc = cmd_config(self._args(max=-5))
+        assert rc == 1
+        assert "--max must be >= 0" in capsys.readouterr().err
+        mgr.repo.update_config.assert_not_called()
+
+    def test_config_rejects_invalid_policy(self, capsys):
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.repo.get_config.return_value = _make_config()
+            rc = cmd_config(self._args(policy="nonexistent_policy"))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "invalid policy" in err
+        assert "nonexistent_policy" in err
+        mgr.repo.update_config.assert_not_called()
+
+    def test_config_rejects_negative_cooldown(self, capsys):
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.repo.get_config.return_value = _make_config()
+            rc = cmd_config(self._args(cooldown=-10.0))
+        assert rc == 1
+        assert "--cooldown must be >= 0" in capsys.readouterr().err
+        mgr.repo.update_config.assert_not_called()
+
+    def test_config_rejects_min_greater_than_max(self, capsys):
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.repo.get_config.return_value = _make_config(min_workers=2, max_workers=6)
+            rc = cmd_config(self._args(min=8, max=4))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "min" in err and "max" in err and "invariant" in err
+        mgr.repo.update_config.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # reap tests

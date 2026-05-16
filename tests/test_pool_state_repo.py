@@ -175,3 +175,25 @@ def test_ledger_file_atomic_append(tmp_path):
         assert "event_type" in ev
         assert "timestamp" in ev
         assert "payload" in ev
+
+
+# ---------------------------------------------------------------------------
+# 6. update_config emits pool.config.updated ledger event (ADR-005)
+# ---------------------------------------------------------------------------
+
+def test_update_config_emits_ledger_event(tmp_path):
+    (tmp_path / "state").mkdir()
+    db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    repo = _make_repo(db)
+
+    updates = {"min_workers": 2, "max_workers": 8, "cooldown_seconds": 90}
+    repo.update_config("default", updates)
+
+    events = _read_ledger_events(db)
+    config_events = [e for e in events if e["event_type"] == "pool.config.updated"]
+    assert len(config_events) == 1
+    ev = config_events[0]
+    assert ev["payload"]["pool_id"] == "default"
+    assert ev["payload"]["updates"] == updates
+    assert "now" in ev["payload"]
+    assert "timestamp" in ev
