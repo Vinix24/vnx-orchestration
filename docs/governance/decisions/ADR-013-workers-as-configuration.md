@@ -1,6 +1,6 @@
 # ADR-013 — Worker Pool Size as Configuration, Not Constant (workers = N)
 
-**Status:** Accepted
+**Status:** Accepted — Implemented by Wave 6 (see ADR-018)
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Wave 4.5 prerequisite + PRD-VNX-UH-002 §6 FR-12 + inventory finding "Workers are hardcoded T0..T3 across 25+ files" (`claudedocs/2026-05-09-vnx-replan-inventory.md`)
@@ -87,6 +87,8 @@ Concrete contract:
 - ADR-010 — Subprocess adapter (the spawn mechanism per registered worker)
 - ADR-011 — Manager+worker hierarchy with depth>1 (consumes registry for sub-orchestrator pools)
 - ADR-012 — Hybrid interactive + headless (each registered worker can be tmux- or subprocess-routed)
+- ADR-018 — Elastic worker pool (Wave 6 implementation of this ADR; adds PoolManager, schema v13,
+  provider-mix per pool, queue-aware scaling)
 - `claudedocs/PRD-VNX-UH-002-v1.0-DRAFT.md` §6 FR-12 — the functional requirement this ADR redeems
 - `claudedocs/2026-05-09-vnx-replan-inventory.md` — the inventory that surfaced the 77-file blast radius
 - `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` §5 (Wave 4.5) — the wave this ADR unlocks

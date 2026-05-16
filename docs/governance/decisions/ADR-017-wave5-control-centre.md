@@ -71,3 +71,5 @@ Hard prereq: ADR-016 (Wave 4.6 PR-4.6.6 unified events) — merged.
 
 - `claudedocs/wave5-control-centre-architecture.md` — Wave 5 design doc
 - ADR-005, ADR-007, ADR-010, ADR-013, ADR-016
+- ADR-018 — Elastic worker pool (Wave 6 per-project pools; PR-6.8 extends Control Centre
+  with multi-project pool table and `pool_state_unified` aggregator view)
