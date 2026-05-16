@@ -248,3 +248,146 @@ def test_dispatch_failure_emits_receipt_with_status_failure_gemini(tmp_path):
     receipt = _last_receipt(tmp_path)
     assert receipt["status"] == "failure"
     assert receipt["provider"] == "gemini"
+
+
+# ---------------------------------------------------------------------------
+# Token usage extraction tests
+# ---------------------------------------------------------------------------
+
+def test_litellm_dispatch_extracts_token_usage(tmp_path, monkeypatch):
+    """LiteLLM usage uses OpenAI field names: prompt_tokens / completion_tokens."""
+    _mock_litellm_env(monkeypatch)
+    args = _make_args("litellm:deepseek", dispatch_id="litellm-usage-001")
+    result = _SpawnResult(
+        token_usage={
+            "prompt_tokens": 350,
+            "completion_tokens": 120,
+            "total_tokens": 470,
+            "prompt_tokens_details": {"cached_tokens": 50},
+        }
+    )
+    with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=result), \
+         patch("event_store.EventStore", MagicMock()), \
+         patch("providers.behavior_contracts.get_contract", side_effect=KeyError):
+        provider_dispatch._dispatch_litellm(args)
+    receipt = _last_receipt(tmp_path)
+    assert receipt["token_usage"]["input"] == 350
+    assert receipt["token_usage"]["output"] == 120
+    assert receipt["token_usage"]["cache_hit"] == 50
+
+
+def test_litellm_dispatch_extracts_token_usage_fallback_cache_field(tmp_path, monkeypatch):
+    """LiteLLM cache_hit falls back to top-level prompt_cache_hit_tokens when details absent."""
+    _mock_litellm_env(monkeypatch)
+    args = _make_args("litellm:deepseek", dispatch_id="litellm-usage-002")
+    result = _SpawnResult(
+        token_usage={
+            "prompt_tokens": 200,
+            "completion_tokens": 80,
+            "prompt_cache_hit_tokens": 30,
+        }
+    )
+    with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=result), \
+         patch("event_store.EventStore", MagicMock()), \
+         patch("providers.behavior_contracts.get_contract", side_effect=KeyError):
+        provider_dispatch._dispatch_litellm(args)
+    receipt = _last_receipt(tmp_path)
+    assert receipt["token_usage"]["input"] == 200
+    assert receipt["token_usage"]["output"] == 80
+    assert receipt["token_usage"]["cache_hit"] == 30
+
+
+def test_codex_dispatch_extracts_token_usage(tmp_path):
+    """Codex token_usage uses input_tokens / output_tokens / cache_read_tokens."""
+    args = _make_args("codex", dispatch_id="codex-usage-001")
+    result = _SpawnResult(
+        token_usage={
+            "input_tokens": 500,
+            "output_tokens": 200,
+            "cache_read_tokens": 100,
+        }
+    )
+    with patch("provider_spawns.codex_spawn.spawn_codex", return_value=result), \
+         patch("event_store.EventStore", MagicMock()):
+        provider_dispatch._dispatch_codex(args)
+    receipt = _last_receipt(tmp_path)
+    assert receipt["token_usage"]["input"] == 500
+    assert receipt["token_usage"]["output"] == 200
+    assert receipt["token_usage"]["cache_hit"] == 100
+
+
+def test_gemini_dispatch_extracts_token_usage(tmp_path):
+    """Gemini token_usage uses input_tokens / output_tokens (from usageMetadata)."""
+    args = _make_args("gemini", dispatch_id="gemini-usage-001")
+    result = _SpawnResult(
+        token_usage={
+            "input_tokens": 420,
+            "output_tokens": 160,
+            "cache_read_tokens": 0,
+        }
+    )
+    with patch("provider_spawns.gemini_spawn.spawn_gemini", return_value=result), \
+         patch("event_store.EventStore", MagicMock()):
+        provider_dispatch._dispatch_gemini(args)
+    receipt = _last_receipt(tmp_path)
+    assert receipt["token_usage"]["input"] == 420
+    assert receipt["token_usage"]["output"] == 160
+
+
+def test_claude_dispatch_extracts_token_usage(tmp_path):
+    """Claude token_usage is None (subprocess_dispatch does not return usage); receipt gets zeros."""
+    args = _make_args("claude", dispatch_id="claude-usage-001")
+    with patch("subprocess_dispatch.deliver_with_recovery", return_value=True):
+        provider_dispatch._dispatch_claude(args)
+    receipt = _last_receipt(tmp_path)
+    assert receipt["token_usage"]["input"] == 0
+    assert receipt["token_usage"]["output"] == 0
+
+
+def test_compute_cost_returns_none_when_tokens_zero():
+    """_compute_cost returns None when both input and output are 0."""
+    cost = provider_dispatch._compute_cost(
+        "litellm:deepseek", "deepseek/deepseek-v4-pro", {"input": 0, "output": 0, "cache_hit": 0}
+    )
+    assert cost is None
+
+
+def test_compute_cost_uses_yaml_pricing():
+    """_compute_cost reads wave7_models.yaml and returns a non-zero float for valid tokens."""
+    token_usage = {"input": 1_000_000, "output": 1_000_000, "cache_hit": 0}
+    cost = provider_dispatch._compute_cost("litellm:deepseek", "deepseek/deepseek-v4-pro", token_usage)
+    # deepseek-v4-pro: input $0.435/Mtok + output $0.87/Mtok = $1.305 for 1M+1M
+    assert cost is not None
+    assert cost > 0
+
+
+def test_litellm_dispatch_cost_usd_in_receipt(tmp_path, monkeypatch):
+    """When token counts are non-zero, cost_usd must be a positive float in the receipt."""
+    _mock_litellm_env(monkeypatch)
+    args = _make_args("litellm:deepseek", dispatch_id="litellm-cost-001")
+    result = _SpawnResult(
+        token_usage={
+            "prompt_tokens": 1_000_000,
+            "completion_tokens": 1_000_000,
+        }
+    )
+    with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=result), \
+         patch("event_store.EventStore", MagicMock()), \
+         patch("providers.behavior_contracts.get_contract", side_effect=KeyError):
+        provider_dispatch._dispatch_litellm(args)
+    receipt = _last_receipt(tmp_path)
+    assert receipt.get("cost_usd") is not None
+    assert receipt["cost_usd"] > 0
+
+
+def test_warning_logged_when_extraction_fails(caplog):
+    """_extract_token_usage logs a warning when token_usage is None."""
+    import logging
+
+    class _NullResult:
+        token_usage = None
+
+    with caplog.at_level(logging.WARNING, logger="provider_dispatch"):
+        usage = provider_dispatch._extract_token_usage(_NullResult(), "litellm:deepseek")
+    assert usage == {"input": 0, "output": 0, "cache_hit": 0}
+    assert any("token_usage extraction returned 0" in r.message for r in caplog.records)

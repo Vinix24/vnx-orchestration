@@ -81,6 +81,9 @@ def normalize_litellm_event(
     if error_type:
         return make("error", {"error_type": error_type, "message": chunk.get("message", "")})
 
+    if chunk.get("event_type") == "usage_complete":
+        return make("usage_complete", {"usage": chunk.get("usage") or {}})
+
     choices = chunk.get("choices") or []
     choice = choices[0] if choices else {}
     delta = choice.get("delta") or {}
@@ -245,13 +248,14 @@ def _consume_litellm_stream(
     event_store: Optional[Any],
     chunk_timeout: float,
     total_deadline: float,
-) -> Tuple[str, int, bool, bool, int]:
-    """Drain the NDJSON stream; return (completion_text, events_written, timed_out, stopped_early, writer_failures)."""
+) -> Tuple[str, int, bool, bool, int, Optional[Dict[str, Any]]]:
+    """Drain the NDJSON stream; return (completion_text, events_written, timed_out, stopped_early, writer_failures, token_usage)."""
     events_written = 0
     completion_parts: list = []
     stopped_early = False
     timed_out = False
     _event_writer_failures = 0
+    last_token_usage: Optional[Dict[str, Any]] = None
 
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
@@ -268,6 +272,10 @@ def _consume_litellm_stream(
             reason = ((canonical_event.data or {}).get("reason") or "").lower()
             if "timeout" in reason or "deadline" in reason:
                 timed_out = True
+        elif evt_type == "usage_complete":
+            usage = (canonical_event.data or {}).get("usage")
+            if isinstance(usage, dict):
+                last_token_usage = usage
 
         if health_monitor is not None:
             health_monitor.update(canonical_event)
@@ -291,7 +299,7 @@ def _consume_litellm_stream(
                     logger.debug("spawn_litellm: kill after on_event=False failed: %s", _ke)
                 break
 
-    return "".join(completion_parts), events_written, timed_out, stopped_early, _event_writer_failures
+    return "".join(completion_parts), events_written, timed_out, stopped_early, _event_writer_failures, last_token_usage
 
 
 def _finalize_litellm_result(
@@ -302,6 +310,7 @@ def _finalize_litellm_result(
     stopped_early: bool,
     event_writer_failures: int = 0,
     error: Optional[str] = None,
+    token_usage: Optional[Dict[str, Any]] = None,
 ) -> LiteLLMSpawnResult:
     """Wait for process exit and return a LiteLLMSpawnResult."""
     try:
@@ -319,6 +328,7 @@ def _finalize_litellm_result(
         stopped_early=stopped_early,
         event_writer_failures=event_writer_failures,
         error=error,
+        token_usage=token_usage,
     )
 
 
@@ -359,7 +369,7 @@ def _spawn_streaming(
         sub_provider=sub_provider,
         lane=lane,
     )
-    completion_text, events_written, timed_out, stopped_early, _ew_failures = _consume_litellm_stream(
+    completion_text, events_written, timed_out, stopped_early, _ew_failures, token_usage = _consume_litellm_stream(
         proc=proc, host=host, on_event=on_event,
         health_monitor=health_monitor, event_writer=event_writer,
         terminal_id=terminal_id, dispatch_id=dispatch_id,
@@ -370,6 +380,7 @@ def _spawn_streaming(
         proc=proc, completion_text=completion_text,
         events_written=events_written, timed_out=timed_out,
         stopped_early=stopped_early, event_writer_failures=_ew_failures,
+        token_usage=token_usage,
     )
 
 
