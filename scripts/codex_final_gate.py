@@ -59,8 +59,8 @@ def _touches_runtime_paths(changed_files: List[str]) -> bool:
     return False
 
 
-def _count_deleted_files(project_root: Path) -> int:
-    """Count files deleted in current PR vs origin/main. Returns -1 on git failure."""
+def _get_deleted_files(project_root: Path) -> Optional[List[str]]:
+    """Return list of files deleted in current PR vs origin/main. None on git failure."""
     for base_ref in ("origin/main", "origin/master"):
         try:
             result = subprocess.run(
@@ -71,7 +71,7 @@ def _count_deleted_files(project_root: Path) -> int:
                 timeout=10,
             )
             if result.returncode == 0:
-                return len([f for f in result.stdout.strip().splitlines() if f.strip()])
+                return [f for f in result.stdout.strip().splitlines() if f.strip()]
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
@@ -84,11 +84,17 @@ def _count_deleted_files(project_root: Path) -> int:
             timeout=10,
         )
         if result.returncode == 0:
-            return len([f for f in result.stdout.strip().splitlines() if f.strip()])
+            return [f for f in result.stdout.strip().splitlines() if f.strip()]
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
-    return -1
+    return None
+
+
+def _count_deleted_files(project_root: Path) -> int:
+    """Count files deleted in current PR vs origin/main. Returns -1 on git failure."""
+    files = _get_deleted_files(project_root)
+    return len(files) if files is not None else -1
 
 
 @dataclass(frozen=True)
@@ -103,7 +109,8 @@ class CodexGateEnforcementResult:
     touches_runtime: bool
     high_risk_by_path: bool
     mass_deletion_count: int = 0
-    deletion_warn: bool = False
+    mass_deletion_warn: bool = False
+    deleted_files: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -121,6 +128,7 @@ def enforce_codex_gate(
     - changed files touch governance or runtime paths
     - auto_merge_policy says codex_final_gate_required
     - PR deletes >= DELETION_FILE_HOLD files (when project_root provided)
+    - PR deletes >= DELETION_FILE_WARN files: gate required + mass_deletion_warning reason
     """
     reasons: List[str] = []
     risk = (contract.risk_class or "").strip().lower()
@@ -139,14 +147,19 @@ def enforce_codex_gate(
     if "codex_gate" in contract.review_stack and risk != "low":
         reasons.append("codex_gate_in_review_stack")
 
+    deleted_files: List[str] = []
     deleted_count = 0
-    deletion_warn = False
+    mass_deletion_warn = False
     if project_root is not None:
-        deleted_count = _count_deleted_files(project_root)
+        raw = _get_deleted_files(project_root)
+        if raw is not None:
+            deleted_files = raw
+            deleted_count = len(raw)
         if deleted_count >= DELETION_FILE_HOLD:
             reasons.append("mass_file_deletion")
         elif deleted_count >= DELETION_FILE_WARN:
-            deletion_warn = True
+            mass_deletion_warn = True
+            reasons.append("mass_deletion_warning")
 
     return CodexGateEnforcementResult(
         required=len(reasons) > 0,
@@ -157,7 +170,8 @@ def enforce_codex_gate(
         touches_runtime=touches_rt,
         high_risk_by_path=high_risk_path,
         mass_deletion_count=deleted_count,
-        deletion_warn=deletion_warn,
+        mass_deletion_warn=mass_deletion_warn,
+        deleted_files=deleted_files,
     )
 
 
@@ -165,12 +179,18 @@ def enforce_codex_gate(
 # Prompt renderer
 # ---------------------------------------------------------------------------
 
-def render_codex_prompt(contract: ReviewContract) -> str:
+def render_codex_prompt(
+    contract: ReviewContract,
+    deleted_files: Optional[List[str]] = None,
+) -> str:
     """Render a structured Codex final gate review prompt from a ReviewContract.
 
     The prompt includes all contract sections that Codex needs to evaluate:
     deliverables, non-goals, tests, changed files, deterministic findings,
     closure stage, and quality gate checks.
+
+    If deleted_files is provided, a Net-Deletion Alert section is added to
+    the prompt so the Codex reviewer can assess the scope of removed files.
 
     Raises ValueError if required contract fields are missing.
     """
@@ -231,6 +251,18 @@ def render_codex_prompt(contract: ReviewContract) -> str:
         sections.append(f"## Changed Files ({len(contract.changed_files)})")
         sections.append("")
         for f in contract.changed_files:
+            sections.append(f"- `{f}`")
+        sections.append("")
+
+    # Net-deletion alert
+    if deleted_files:
+        count = len(deleted_files)
+        level = "HOLD" if count >= DELETION_FILE_HOLD else "WARN"
+        sections.append(f"## Net-Deletion Alert [{level}] ({count} file(s) deleted)")
+        sections.append("")
+        sections.append(f"> **{count} file(s)** are fully deleted in this PR. Verify each deletion is intentional and covered by a deliverable or non-goal.")
+        sections.append("")
+        for f in deleted_files:
             sections.append(f"- `{f}`")
         sections.append("")
 
@@ -383,9 +415,11 @@ def evaluate_and_record(
     """
     enforcement = enforce_codex_gate(contract, project_root=project_root)
 
+    deleted_files_for_prompt = enforcement.deleted_files if enforcement.deleted_files else None
+
     prompt_rendered = False
     try:
-        render_codex_prompt(contract)
+        render_codex_prompt(contract, deleted_files=deleted_files_for_prompt)
         prompt_rendered = True
     except ValueError:
         prompt_rendered = False
@@ -409,7 +443,7 @@ def evaluate_and_record(
         rerun_required = False
         rerun_reason = None
 
-    if enforcement.deletion_warn:
+    if enforcement.mass_deletion_warn:
         findings = [
             {
                 "severity": "warning",
