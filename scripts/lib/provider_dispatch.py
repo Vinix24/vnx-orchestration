@@ -35,7 +35,7 @@ _FUTURE_PR_MAP: dict = {}
 # LiteLLM sub-provider defaults when VNX_LITELLM_MODEL is not set.
 _LITELLM_SUB_PROVIDER_DEFAULTS: dict = {
     "bedrock": "bedrock/claude-sonnet-4-6",
-    "deepseek": "deepseek/deepseek-v3.2",
+    "deepseek": "deepseek/deepseek-v4-pro",
     "moonshot": "moonshot/kimi-k2-0905-preview",
     "zai": "openrouter/z-ai/glm-5",
     "ollama": "ollama/llama3",
@@ -379,6 +379,8 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """Parse args, route to the correct provider handler, return exit code."""
+    from env_loader import load_env
+    load_env()
     parser = _build_parser()
 
     # argparse exits with code 2 on unrecognised provider values — but provider
