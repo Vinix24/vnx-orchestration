@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .common import _emit, _utc_now_iso, facade
+import sys
+
+from .common import _emit, _utc_now_iso, facade, SCRIPTS_DIR
 from .validation import _is_completion_event, _is_subprocess_intermediate_completion
 
 
@@ -183,6 +185,31 @@ def _enrich_oi_delta(enriched: Dict[str, Any], state_dir: Path) -> None:
         _emit("WARN", "oi_delta_enrichment_failed", error=str(exc))
 
 
+def _enrich_timing(enriched: Dict[str, Any], state_dir: Path) -> None:
+    """Add timing block from event archive (idempotent, best-effort).
+
+    Skipped when timing is already present or dispatch_id missing.
+    state_dir is .vnx-data/state; parent is the vnx_data_dir.
+    """
+    if enriched.get("timing") is not None:
+        return
+    dispatch_id = str(
+        enriched.get("dispatch_id")
+        or (enriched.get("metadata") or {}).get("dispatch_id")
+        or ""
+    ).strip()
+    if not dispatch_id:
+        return
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from timing_metrics import _build_timing_block
+        timing = _build_timing_block(dispatch_id, state_dir.parent)
+        if timing is not None:
+            enriched["timing"] = timing
+    except Exception as exc:
+        _emit("WARN", "timing_enrichment_failed", error=str(exc))
+
+
 def _enrich_cqs(enriched: Dict[str, Any], state_dir: Path) -> None:
     try:
         db_path = state_dir / "quality_intelligence.db"
@@ -265,6 +292,7 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
 
     _enrich_quality_advisory(enriched, receipt, repo_root)
     _enrich_oi_delta(enriched, state_dir)
+    _enrich_timing(enriched, state_dir)
 
     if "open_items_created" not in enriched:
         enriched["open_items_created"] = facade._count_quality_violations_against_store(enriched)
