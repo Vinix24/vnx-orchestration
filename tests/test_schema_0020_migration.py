@@ -24,6 +24,7 @@ Coverage:
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ import pytest
 _MIGRATION_DIR = Path(__file__).parent.parent / "schemas" / "migrations"
 _UP_SQL_PATH = _MIGRATION_DIR / "0020_elastic_worker_pool.sql"
 _DOWN_SQL_PATH = _MIGRATION_DIR / "0020_elastic_worker_pool_down.sql"
+_APPLY_SCRIPT = Path(__file__).parent.parent / "scripts" / "lib" / "migrations" / "apply_0020.py"
 
 _TARGET_VERSION = 14
 
@@ -371,6 +373,65 @@ def test_apply_down_migration_fn_skips_when_below_v14(tmp_path):
 
     result = apply_down_migration(db_path, _DOWN_SQL_PATH, tmp_path)
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Strict version guard — refuse on v15+ (subprocess)
+# ---------------------------------------------------------------------------
+
+def _make_file_db_at_version(tmp_path: Path, version: int) -> Path:
+    """Return a file-backed DB stamped at the given schema version."""
+    db_path = tmp_path / f"rc_v{version}.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(f"""
+    CREATE TABLE runtime_schema_version (
+        version     INTEGER PRIMARY KEY,
+        description TEXT,
+        applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    INSERT INTO runtime_schema_version(version, description)
+    VALUES ({version}, 'test v{version}');
+
+    CREATE TABLE terminal_leases (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        terminal_id TEXT    NOT NULL,
+        project_id  TEXT    NOT NULL,
+        state       TEXT    NOT NULL DEFAULT 'free',
+        lease_token TEXT    NOT NULL DEFAULT '',
+        UNIQUE(terminal_id, project_id)
+    );
+    """)
+    conn.close()
+    return db_path
+
+
+def test_up_migration_refuses_when_at_v15(tmp_path):
+    """Up-migration must refuse with exit code 1 when DB is at v15 (above target)."""
+    db_path = _make_file_db_at_version(tmp_path, 15)
+    result = subprocess.run(
+        ["python3", str(_APPLY_SCRIPT), "--db", str(db_path), "--vnx-data-dir", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "requires schema" in result.stderr.lower() or "refusing to apply" in result.stderr.lower()
+
+
+def test_down_migration_refuses_when_at_v15(tmp_path):
+    """Down-migration must refuse with exit code 1 when DB is at v15 (above target)."""
+    db_path = _make_file_db_at_version(tmp_path, 15)
+    result = subprocess.run(
+        [
+            "python3", str(_APPLY_SCRIPT),
+            "--db", str(db_path),
+            "--vnx-data-dir", str(tmp_path),
+            "--down",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "requires schema v14" in result.stderr.lower() or "refusing to apply" in result.stderr.lower()
 
 
 # ---------------------------------------------------------------------------

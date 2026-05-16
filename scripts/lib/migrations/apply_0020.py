@@ -5,7 +5,8 @@ runtime_coordination.db. Adds pool_config, worker_pools, and
 worker_pool_membership tables; inserts bootstrap rows for 'vnx-dev/default'.
 
 Idempotent: reads MAX(version) from runtime_schema_version. Skips if already
-at v14 or higher (the version stamped by the migration).
+at v14 (the version stamped by the migration). Strict equality guards prevent
+applying to wrong schema versions (e.g. v12 up, v15 down).
 
 Atomic: the SQL script uses an explicit BEGIN/COMMIT transaction. If the script
 fails mid-way, the uncommitted transaction is rolled back when the connection
@@ -23,6 +24,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,13 +76,17 @@ def apply_migration(
         row = cur.fetchone()
         current_version = int(row[0]) if (row and row[0] is not None) else 0
 
-        if current_version >= _TARGET_VERSION:
-            log.info(
-                "apply_0020: already at v%s (target v%s), skip",
-                current_version,
-                _TARGET_VERSION,
-            )
+        if current_version == _TARGET_VERSION:
+            log.info("apply_0020: already at v%s; idempotent skip", _TARGET_VERSION)
             return False
+        if current_version != _TARGET_VERSION - 1:
+            msg = (
+                f"ERROR: up-migration requires schema v{_TARGET_VERSION - 1}; "
+                f"got v{current_version}. Refusing to apply."
+            )
+            print(msg, file=sys.stderr)
+            log.error("apply_0020: %s", msg)
+            raise SystemExit(1)
 
         _emit_migration_event(
             vnx_data_dir,
@@ -138,13 +144,17 @@ def apply_down_migration(
         row = cur.fetchone()
         current_version = int(row[0]) if (row and row[0] is not None) else 0
 
-        if current_version < _TARGET_VERSION:
-            log.info(
-                "apply_0020 down: at v%s, already below v%s, skip",
-                current_version,
-                _TARGET_VERSION,
-            )
+        if current_version == _TARGET_VERSION - 1:
+            log.info("apply_0020 down: already at v%s; idempotent skip", _TARGET_VERSION - 1)
             return False
+        if current_version != _TARGET_VERSION:
+            msg = (
+                f"ERROR: down-migration requires schema v{_TARGET_VERSION}; "
+                f"got v{current_version}. Refusing to apply."
+            )
+            print(msg, file=sys.stderr)
+            log.error("apply_0020 down: %s", msg)
+            raise SystemExit(1)
 
         _emit_migration_event(
             vnx_data_dir,
