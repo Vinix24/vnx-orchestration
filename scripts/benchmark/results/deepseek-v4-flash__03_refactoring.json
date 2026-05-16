@@ -1,0 +1,25 @@
+{
+  "model_id": "deepseek-v4-flash",
+  "task_id": "03_refactoring",
+  "dispatch_id": "bench-deepseek-v4-flash-03_refactoring-1778970087",
+  "duration_seconds": 19.278,
+  "exit_code": 0,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 360,
+      "output": 1009,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.000333
+  },
+  "response": "## Instruction\n\nRefactor the following Python function. Requirements: extract sub-functions with clear single responsibilities, improve naming throughout (no abbreviations, no single-letter vars), add type hints (Python 3.10+ style), preserve exact behavior.\n\n```python\ndef proc(d, t, cfg):\n    res = []\n    errs = []\n    for i, item in enumerate(d):\n        if item.get('s') != 'active':\n            continue\n        ts = item.get('ts')\n        if ts is None:\n            errs.append({'idx': i, 'msg': 'missing ts', 'id': item.get('id')})\n            continue\n        if ts > t:\n            continue\n        val = item.get('v', 0)\n        lim = cfg.get('max_v', 100)\n        if val > lim:\n            val = lim\n            item['capped'] = True\n        mn = cfg.get('min_v', 0)\n        if val < mn:\n            errs.append({'idx': i, 'msg': 'below min', 'id': item.get('id'), 'val': val})\n            continue\n        m = cfg.get('mult', 1.0)\n        val = val * m\n        if cfg.get('round'):\n            val = round(val, cfg.get('round_dp', 2))\n        res.append({\n            'id': item.get('id'),\n            'v': val,\n            'ts': ts,\n            'src': item.get('src', 'unknown'),\n        })\n    return res, errs\n```\n\nOutput the refactored code only. No explanatory prose before or after. The function signature must become `def process_active_items(items: list[dict], cutoff_timestamp: float, config: dict) -> tuple[list[dict], list[dict]]:`.\n\n\n## Response\n\n```python\ndef process_active_items(items: list[dict], cutoff_timestamp: float, config: dict) -> tuple[list[dict], list[dict]]:\n    def _is_active(item: dict) -> bool:\n        return item.get('s') == 'active'\n\n    def _extract_timestamp(\n        item: dict, index: int, errors: list[dict]\n    ) -> float | None:\n        timestamp = item.get('ts')\n        if timestamp is None:\n            errors.append({\n                'idx': index,\n                'msg': 'missing ts',\n                'id': item.get('id'),\n            })\n            return None\n        return timestamp\n\n    def _cap_value(\n        value: float, maximum: float, item: dict\n    ) -> float:\n        if value > maximum:\n            value = maximum\n            item['capped'] = True\n        return value\n\n    def _check_below_minimum(\n        value: float, minimum: float,\n        item: dict, index: int, errors: list[dict]\n    ) -> bool:\n        if value < minimum:\n            errors.append({\n                'idx': index,\n                'msg': 'below min',\n                'id': item.get('id'),\n                'val': value,\n            })\n            return True\n        return False\n\n    def _apply_multiplier_and_round(value: float, configuration: dict) -> float:\n        multiplier = configuration.get('mult', 1.0)\n        value *= multiplier\n        if configuration.get('round'):\n            decimal_places = configuration.get('round_dp', 2)\n            value = round(value, decimal_places)\n        return value\n\n    def _build_result_item(item: dict, value: float, timestamp: float) -> dict:\n        return {\n            'id': item.get('id'),\n            'v': value,\n            'ts': timestamp,\n            'src': item.get('src', 'unknown'),\n        }\n\n    processed_items: list[dict] = []\n    errors: list[dict] = []\n\n    for index, item in enumerate(items):\n        if not _is_active(item):\n            continue\n\n        timestamp = _extract_timestamp(item, index, errors)\n        if timestamp is None:\n            continue\n\n        if timestamp > cutoff_timestamp:\n            continue\n\n        value: float = item.get('v', 0)\n        maximum_value: float = config.get('max_v', 100)\n        value = _cap_value(value, maximum_value, item)\n\n        minimum_value: float = config.get('min_v', 0)\n        if _check_below_minimum(value, minimum_value, item, index, errors):\n            continue\n\n        value = _apply_multiplier_and_round(value, config)\n        processed_items.append(_build_result_item(item, value, timestamp))\n\n    return processed_items, errors\n```\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 8,
+    "correctness": true,
+    "completeness_score": 9,
+    "notable_issues": "Response includes extraneous '## Instruction', '## Response', and '## Findings' wrappers despite instruction to output only the refactored code."
+  },
+  "cost_usd_estimated": 0.000333
+}

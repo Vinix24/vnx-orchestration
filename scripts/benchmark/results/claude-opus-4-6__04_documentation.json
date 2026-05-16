@@ -1,0 +1,25 @@
+{
+  "model_id": "claude-opus-4-6",
+  "task_id": "04_documentation",
+  "dispatch_id": "bench-claude-opus-4-6-04_documentation-1778966352",
+  "duration_seconds": 49.27,
+  "exit_code": 0,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 851,
+      "output": 26,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.014715
+  },
+  "response": "## Summary\nAuto-generated stub \u2014 worker completed without writing a manual unified report.\n\n## Open Items",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "Response is a stub auto-generated summary with no README content; the task to write a README.md was not performed."
+  },
+  "cost_usd_estimated": 0.014715
+}
