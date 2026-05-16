@@ -205,6 +205,20 @@ def project_id_from_state_dir(state_dir: Path) -> str:
     return ""
 
 
+def resolve_state_dir(project_root: "Path | None" = None) -> Path:
+    """Return the VNX state directory.
+
+    When project_root is supplied, derives the state dir from that root
+    (project_root / '.vnx-data' / 'state') without reading any env var.
+
+    When project_root is None, returns VNX_STATE_DIR from resolve_paths().
+    """
+    if project_root is not None:
+        return (Path(project_root) / ".vnx-data" / "state").resolve()
+    paths = resolve_paths()
+    return Path(paths["VNX_STATE_DIR"])
+
+
 def resolve_central_data_dir(project_id: str) -> Path:
     """Return ``~/.vnx-data/<project_id>/`` — the central per-project data directory.
 
