@@ -5,10 +5,20 @@ providers:
     api_key_env: DEEPSEEK_API_KEY
     models:
       deepseek-v4-pro:
-        litellm_name: "deepseek/deepseek-v3.2"
-        cost_input_per_mtok: 0.28
-        cost_output_per_mtok: 0.40
-        max_tokens: 8192
+        litellm_name: "deepseek/deepseek-v4-pro"
+        cost_input_per_mtok: 0.435   # currently 75% discount; full $1.74 input
+        cost_output_per_mtok: 0.87   # full $3.48 output
+        max_tokens: 384000           # 384K output ceiling
+        context_window: 1000000      # 1M context
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+      deepseek-v4-flash:
+        litellm_name: "deepseek/deepseek-v4-flash"
+        cost_input_per_mtok: 0.14    # legacy "chat" model evolved
+        cost_output_per_mtok: 0.28
+        max_tokens: 384000
+        context_window: 1000000
         supports_streaming: true
         supports_tool_calls: true
         task_classes: ["coding", "review", "analysis"]
