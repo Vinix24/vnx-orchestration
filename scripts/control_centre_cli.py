@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""control_centre_cli.py — Wave 5 PR-5.5: Control Centre operator CLI.
+"""control_centre_cli.py — Wave 5 PR-5.5/PR-5.6: Control Centre operator CLI.
 
 Operator-facing tool that routes /cc-* commands to the appropriate managers.
 Each command instantiates T0LifecycleManager, StateAggregator, and/or
@@ -12,6 +12,7 @@ via StateAggregator.submit() using project_id=cc-system for global ops.
 Usage:
     python3 scripts/control_centre_cli.py status
     python3 scripts/control_centre_cli.py dispatch --project <id> --task "..."
+    python3 scripts/control_centre_cli.py track <dispatch_id>
     python3 scripts/control_centre_cli.py heartbeat --project <id>
     python3 scripts/control_centre_cli.py kill --project <id>
     python3 scripts/control_centre_cli.py reap
@@ -44,6 +45,11 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.aggregator.state_aggregator import ProjectStateUpdate, StateAggregator
 from scripts.aggregator.t0_lifecycle import T0LifecycleManager
+from scripts.control_centre.dispatch_lifecycle_tracker import (
+    DispatchLifecycleTracker,
+    DispatchStatus,
+)
+from scripts.control_centre.receipt_tail import ProjectConfig, ReceiptTail
 from scripts.lib.intelligence_aggregator import IntelligenceAggregator
 from scripts.lib.vnx_paths import resolve_state_dir
 
@@ -277,9 +283,6 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     tmp.write_text(json.dumps(dispatch_payload, indent=2), encoding="utf-8")
     os.replace(tmp, dispatch_json)
 
-    print(f"Dispatch created: {dispatch_id}")
-    print(f"  -> {dispatch_json}")
-
     vnx_data_dir = _repo_vnx_data()
     agg = _make_aggregator(vnx_data_dir)
     _emit_audit(agg, project_id, "cc.dispatch.forwarded", {
@@ -287,6 +290,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "project": project_id,
         "task_preview": args.task[:120],
     })
+
+    print(dispatch_id)
+    print(f"  -> {dispatch_json}", file=sys.stderr)
     return 0
 
 
@@ -457,6 +463,52 @@ def cmd_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_track(args: argparse.Namespace) -> int:
+    """Block until dispatch completes (receipt arrives) or timeout expires."""
+    dispatch_id = args.dispatch_id
+    timeout = float(args.timeout)
+
+    registry = _load_registry(Path(args.registry))
+
+    project_configs = [
+        ProjectConfig(
+            project_id=p["id"],
+            root=Path(p["root"]),
+        )
+        for p in registry
+    ]
+
+    tail = ReceiptTail(projects=project_configs, poll_interval=1.0)
+    tracker = DispatchLifecycleTracker(receipt_tail=tail)
+
+    project_id = _validate_project_id(args.project)
+
+    print(f"Tracking dispatch {dispatch_id} (timeout={timeout}s) ...", file=sys.stderr)
+    outcome = tracker.track(
+        dispatch_id=dispatch_id,
+        project_id=project_id,
+        timeout_seconds=timeout,
+    )
+    tail.stop()
+
+    status_line = f"status={outcome.status.value}"
+    if outcome.status == DispatchStatus.COMPLETED:
+        print(f"[ok] {dispatch_id}: {status_line}")
+        return 0
+    if outcome.status == DispatchStatus.FAILED:
+        print(f"[x] {dispatch_id}: {status_line}", file=sys.stderr)
+        return 1
+    if outcome.status == DispatchStatus.TIMEOUT:
+        print(
+            f"[!] {dispatch_id}: TIMEOUT after {timeout}s — no receipt received",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"[~] {dispatch_id}: {status_line}", file=sys.stderr)
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -529,12 +581,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("aggregate", help="Refresh global intelligence facet")
 
+    tp = sub.add_parser("track", help="Block until dispatch completes")
+    tp.add_argument("dispatch_id", help="Dispatch ID to track")
+    tp.add_argument(
+        "--project",
+        required=True,
+        help="Project ID that owns the dispatch (required for isolation)",
+    )
+    tp.add_argument(
+        "--timeout",
+        type=float,
+        default=600,
+        help="Max wait in seconds (default: 600)",
+    )
+
     return parser
 
 
 _COMMANDS = {
     "status": cmd_status,
     "dispatch": cmd_dispatch,
+    "track": cmd_track,
     "heartbeat": cmd_heartbeat,
     "kill": cmd_kill,
     "reap": cmd_reap,
