@@ -279,10 +279,11 @@ class PoolStateRepository:
         now: float,
     ) -> None:
         released_iso = _iso_now(now)
+        event_id = _uuid7()  # OI-1484: per-event idempotency key
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE worker_pool_membership
                 SET released_at   = ?,
@@ -292,6 +293,12 @@ class PoolStateRepository:
                 """,
                 (released_iso, reason, membership_id),
             )
+            if cursor.rowcount == 0:  # OI-1482: no row matched — skip ledger emit
+                conn.rollback()
+                log.warning(
+                    "mark_member_reaped: no row matched for membership_id=%s", membership_id
+                )
+                return
             conn.commit()
             log.debug("mark_member_reaped: membership_id=%s reason=%s", membership_id, reason)
         except Exception:
@@ -299,11 +306,17 @@ class PoolStateRepository:
             raise
         finally:
             conn.close()
-        self._emit_ledger("pool.member.reaped", {
-            "membership_id": membership_id,
-            "reason": reason,
-            "now": now,
-        })
+        try:  # OI-1484: wrap ledger emit; DB mutation is authoritative
+            self._emit_ledger("pool.member.reaped", {
+                "event_id": event_id,
+                "membership_id": membership_id,
+                "reason": reason,
+                "now": now,
+            })
+        except Exception:
+            log.error(
+                "mark_member_reaped: ledger emit failed for membership_id=%s", membership_id
+            )
 
     def update_heartbeat(self, membership_id: str, now: float) -> None:
         hb_iso = _iso_now(now)
@@ -393,12 +406,22 @@ class PoolStateRepository:
                 decision.action,
                 decision_id,
             )
-            return decision_id
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+        self._emit_ledger("pool.decision.recorded", {  # OI-1482: emit ledger after commit
+            "pool_id": pool_id,
+            "decision_id": decision_id,
+            "action": decision.action,
+            "delta": decision.delta,
+            "reason": decision.reason,
+            "targets": list(decision.targets),
+            "cooldown_remaining_s": decision.cooldown_remaining_s,
+            "now": now,
+        })
+        return decision_id
 
     def get_current_size(self, pool_id: str) -> int:
         conn = self._connect()

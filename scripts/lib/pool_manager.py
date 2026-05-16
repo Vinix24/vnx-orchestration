@@ -337,13 +337,16 @@ class PoolManager:
 
     def _execute_scale_down(self, decision: PoolDecision, now: float) -> ExecResult:
         result = ExecResult(decision=decision)
-        config, _, members = self.load_state()
 
-        membership_ids = select_for_scale_down(
-            members=members,
-            provider_mix=config.provider_mix,
-            delta=decision.delta,
-        )
+        if decision.targets:  # OI-1483: use pre-computed targets from decide()
+            membership_ids = list(decision.targets)
+        else:
+            config, _, members = self.load_state()
+            membership_ids = select_for_scale_down(
+                members=members,
+                provider_mix=config.provider_mix,
+                delta=decision.delta,
+            )
 
         for membership_id in membership_ids:
             try:

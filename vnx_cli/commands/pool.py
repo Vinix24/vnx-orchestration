@@ -88,6 +88,10 @@ def cmd_scale(args: argparse.Namespace) -> int:
         reason=f"operator request --to {target}",
     )
     result: ExecResult = mgr.execute(decision)
+    now = time.time()
+    mgr.repo.record_decision(mgr.pool_id, decision, now)  # OI-1485: audit trail
+    if result.spawned or result.reaped:
+        mgr.repo.update_last_scaled_at(mgr.pool_id, now)  # OI-1485: cooldown anchor
     print(f"Decision: {decision.action} delta={delta}")
     print(f"Spawned: {len(result.spawned)} {result.spawned}")
     print(f"Reaped: {len(result.reaped)} {result.reaped}")

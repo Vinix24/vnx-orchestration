@@ -100,9 +100,11 @@ def allocate_for_scale_up(
             fallback_used=[fallback_provider] * delta,
         )
 
-    new_size = len(members) + delta
+    # OI-1483: use active-only count for both new_size and current_shares
+    active = [m for m in members if m.status == "active"]
+    new_size = len(active) + delta
     target_shares = compute_target_shares(provider_mix, new_size)
-    current_shares = Counter(m.provider for m in members if m.status == "active")
+    current_shares = Counter(m.provider for m in active)
 
     allocations: List[str] = []
     fallback_used: List[str] = []

@@ -34,7 +34,7 @@ def make_config(
     pool_id: str = "default",
     min_workers: int = 1,
     max_workers: int = 4,
-    scaling_policy: str = "queue_aware",
+    scaling_policy: str = "queue_depth_v1",
     provider_mix: Optional[list] = None,
     cooldown_seconds: float = 60.0,
     heartbeat_stale_seconds: float = 300.0,
@@ -179,7 +179,7 @@ def create_test_db(
     min_workers: int = 1,
     max_workers: int = 4,
     target_workers: int = 2,
-    scale_policy: str = "queue_aware",
+    scale_policy: str = "queue_depth_v1",
     cooldown_seconds: int = 60,
     provider_mix_json: str = '["claude"]',
 ) -> sqlite3.Connection:
@@ -218,7 +218,7 @@ def create_test_db_file(
     min_workers: int = 1,
     max_workers: int = 4,
     target_workers: int = 2,
-    scale_policy: str = "queue_aware",
+    scale_policy: str = "queue_depth_v1",
     cooldown_seconds: int = 60,
     provider_mix_json: str = '["claude"]',
 ) -> Path:

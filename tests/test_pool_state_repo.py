@@ -197,3 +197,72 @@ def test_update_config_emits_ledger_event(tmp_path):
     assert ev["payload"]["updates"] == updates
     assert "now" in ev["payload"]
     assert "timestamp" in ev
+
+
+# ---------------------------------------------------------------------------
+# 7. record_decision emits pool.decision.recorded ledger event (OI-1482)
+# ---------------------------------------------------------------------------
+
+def test_record_decision_emits_ledger_event(tmp_path):
+    from pool_decision_engine import PoolDecision  # noqa: E402
+
+    (tmp_path / "state").mkdir()
+    db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    repo = _make_repo(db)
+
+    decision = PoolDecision(action="scale_up", delta=2, reason="queue backlog")
+    repo.record_decision("default", decision, time.time())
+
+    events = _read_ledger_events(db)
+    decision_events = [e for e in events if e["event_type"] == "pool.decision.recorded"]
+    assert len(decision_events) == 1
+    ev = decision_events[0]
+    assert ev["payload"]["pool_id"] == "default"
+    assert ev["payload"]["action"] == "scale_up"
+    assert ev["payload"]["delta"] == 2
+    assert "decision_id" in ev["payload"]
+    assert "timestamp" in ev
+
+
+# ---------------------------------------------------------------------------
+# 8. mark_member_reaped no-op when membership_id has no matching row (OI-1482)
+# ---------------------------------------------------------------------------
+
+def test_mark_reaped_no_match_no_ledger_emit(tmp_path):
+    (tmp_path / "state").mkdir()
+    db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    repo = _make_repo(db)
+
+    events_file = db.parent.parent / "events" / "pool_events.ndjson"
+
+    # Call with a non-existent membership_id
+    repo.mark_member_reaped("nonexistent-membership-id", "scale_down", time.time())
+
+    # No ledger event should be emitted for a no-op UPDATE
+    if events_file.exists():
+        events = _read_ledger_events(db)
+        reap_events = [e for e in events if e["event_type"] == "pool.member.reaped"]
+        assert reap_events == [], "No reap event should be emitted when no row matched"
+
+
+# ---------------------------------------------------------------------------
+# 9. mark_member_reaped includes event_id in ledger payload (OI-1484)
+# ---------------------------------------------------------------------------
+
+def test_mark_reaped_event_id_in_payload(tmp_path):
+    (tmp_path / "state").mkdir()
+    db = create_test_db_file(tmp_path / "state" / "runtime_coordination.db")
+    repo = _make_repo(db)
+
+    now = time.time()
+    membership_id = repo.add_member("default", "T-oi1484-01", "claude", "backend-developer", now)
+
+    events_file = db.parent.parent / "events" / "pool_events.ndjson"
+    events_file.write_bytes(b"")
+
+    repo.mark_member_reaped(membership_id, "heartbeat_stale", now + 1)
+
+    events = _read_ledger_events(db)
+    reap_events = [e for e in events if e["event_type"] == "pool.member.reaped"]
+    assert len(reap_events) == 1
+    assert "event_id" in reap_events[0]["payload"], "event_id must be present for idempotency"
