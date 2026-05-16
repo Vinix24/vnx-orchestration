@@ -32,6 +32,40 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def _enrich_timing_block(receipt: Dict[str, Any]) -> None:
+    """Idempotent: stamp timing block on completion receipts if archive exists.
+
+    Skips if timing already present or dispatch_id missing. Never raises.
+    """
+    if receipt.get("timing") is not None:
+        return
+    dispatch_id = str(receipt.get("dispatch_id") or "").strip()
+    if not dispatch_id:
+        return
+    event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
+    COMPLETION_EVENTS = {
+        "task_complete", "task_completed", "completion", "complete",
+        "task_failed", "task_timeout",
+    }
+    if event_type not in COMPLETION_EVENTS:
+        return
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+        from timing_metrics import _build_timing_block
+    except ImportError:
+        return
+    try:
+        paths = facade.ensure_env()
+        vnx_data_dir = Path(paths.get("VNX_DATA_DIR", ""))
+        if not vnx_data_dir or not vnx_data_dir.exists():
+            return
+    except Exception:
+        return
+    timing = _build_timing_block(dispatch_id, vnx_data_dir)
+    if timing is not None:
+        receipt["timing"] = timing
+
+
 def _maybe_reroute_to_gate_stream(receipt: Dict[str, Any], receipts_file: Optional[str]) -> Optional[str]:
     """Route ghost gate receipts (dispatch_id="unknown" + gate event) to gate_events.ndjson."""
     if receipts_file is not None or not facade.should_route_to_gate_stream(receipt):
@@ -79,6 +113,10 @@ def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
         facade._trigger_receipt_classifier(receipt)
     except Exception as exc:
         log.warning("payload: receipt classifier hook failed: %s", exc)
+    try:
+        _enrich_timing_block(receipt)
+    except Exception as exc:
+        log.warning("payload: timing enrichment hook failed: %s", exc)
 
 
 def _stamp_observability_tier(receipt: Dict[str, Any]) -> None:
