@@ -1,0 +1,59 @@
+# six_worker_pool.yaml — elastic pool with queue-based scaling.
+# Use for high-throughput installations where dispatch volume varies.
+# Workers T4-T5 are held in reserve and promoted when queue depth exceeds threshold.
+schema_version: 1
+
+workers:
+  - terminal_id: T0
+    role: orchestrator
+    provider: claude
+    model: opus
+    pool_id: control
+    aliases: []
+  - terminal_id: T1
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: primary
+    aliases: []
+  - terminal_id: T2
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: primary
+    aliases: []
+  - terminal_id: T3
+    role: reviewer
+    provider: claude
+    model: sonnet
+    pool_id: primary
+    aliases: []
+  - terminal_id: T4
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: reserve
+    aliases: []
+  - terminal_id: T5
+    role: test-engineer
+    provider: claude
+    model: sonnet
+    pool_id: reserve
+    aliases: []
+
+pools:
+  - pool_id: control
+    min_workers: 1
+    max_workers: 1
+    scaling_policy: fixed
+    provider_mix: []
+  - pool_id: primary
+    min_workers: 3
+    max_workers: 3
+    scaling_policy: fixed
+    provider_mix: []
+  - pool_id: reserve
+    min_workers: 0
+    max_workers: 2
+    scaling_policy: queue_aware
+    provider_mix: []

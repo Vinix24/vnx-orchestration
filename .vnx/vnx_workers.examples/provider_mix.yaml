@@ -1,0 +1,61 @@
+# provider_mix.yaml — multi-provider pool with 2 claude + 1 codex per pool.
+# Use when routing specific roles to cost-optimized or specialized providers.
+# T0 always uses Claude Opus (orchestration quality requirement).
+# T1/T2 route to Claude Sonnet for primary implementation.
+# T3 routes to Codex for code-review tasks (strong static analysis).
+schema_version: 1
+
+workers:
+  - terminal_id: T0
+    role: orchestrator
+    provider: claude
+    model: opus
+    pool_id: control
+    aliases: []
+  - terminal_id: T1
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: mixed
+    aliases: []
+  - terminal_id: T2
+    role: backend-developer
+    provider: litellm:openai
+    model: gpt-4o
+    pool_id: mixed
+    aliases: [openai-backend]
+  - terminal_id: T3
+    role: reviewer
+    provider: codex
+    model: codex-1
+    pool_id: mixed
+    aliases: [codex-review]
+  - terminal_id: T4
+    role: backend-developer
+    provider: litellm:deepseek
+    model: deepseek-chat
+    pool_id: extended
+    aliases: [deepseek-impl]
+  - terminal_id: T5
+    role: test-engineer
+    provider: litellm:openai
+    model: gpt-4o-mini
+    pool_id: extended
+    aliases: []
+
+pools:
+  - pool_id: control
+    min_workers: 1
+    max_workers: 1
+    scaling_policy: fixed
+    provider_mix: [claude]
+  - pool_id: mixed
+    min_workers: 3
+    max_workers: 3
+    scaling_policy: fixed
+    provider_mix: [claude, litellm:openai, codex]
+  - pool_id: extended
+    min_workers: 0
+    max_workers: 2
+    scaling_policy: queue_aware
+    provider_mix: [litellm:deepseek, litellm:openai]
