@@ -76,6 +76,10 @@ testing/
 .env
 .env.*
 
+# VNX provider secrets
+vnx.env
+.vnx/vnx.env
+
 # macOS
 .DS_Store
 

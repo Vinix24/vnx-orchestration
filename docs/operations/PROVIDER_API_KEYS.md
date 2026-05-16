@@ -6,7 +6,7 @@ Each provider requires an API key set as an env var before dispatch.
 | Provider | Env var | Where to get | Pricing | Status |
 |---|---|---|---|---|
 | Anthropic Claude | ANTHROPIC_API_KEY (or OAuth via subscription) | console.anthropic.com | Sonnet 4.6 $3/$15 | default |
-| DeepSeek | DEEPSEEK_API_KEY | platform.deepseek.com | V3.2 $0.28/$0.40 | Wave 7 PR-7.1 |
+| DeepSeek | DEEPSEEK_API_KEY | platform.deepseek.com | V4-Pro $0.435/$0.87, V4-Flash $0.14/$0.28 | Wave 7 PR-7.1 |
 | Moonshot (Kimi) | MOONSHOT_API_KEY | platform.moonshot.cn | K2-0905 $0.60/$2.50 | Wave 7 PR-7.2 |
 | Z.AI (GLM) via OpenRouter | OPENROUTER_API_KEY | openrouter.ai | GLM-5.1 $0.50/$2.50 (pass-through) | Wave 7 PR-7.3 |
 
@@ -19,11 +19,20 @@ Pricing shown as input/output per MTok. Sonnet 4.6 reference included for cost c
 
 ## Provisioning
 
-Set keys via shell export or `.env` before invoking `provider_dispatch.py`:
+Set keys via shell export, or store them in `vnx.env` at repo root (gitignored):
 
 ```bash
+# Option A: shell export (wins over file)
 export DEEPSEEK_API_KEY="sk-..."
+
+# Option B: file-based (loaded automatically by provider_dispatch.py)
+# Copy vnx.env.example to vnx.env and fill in your keys.
+cp vnx.env.example vnx.env
 ```
+
+`vnx.env` is loaded by `scripts/lib/env_loader.py` at the start of every
+`provider_dispatch.py` invocation. Shell env always wins over file values.
+A user-level file at `~/.vnx/vnx.env` is also supported as a fallback.
 
 Keys are consumed by `_litellm_runner.py` subprocess — they never reach VNX worker code.
 The repo-level secret scan (`scripts/lib/secret_scanner.py`) covers leak prevention.
@@ -49,10 +58,17 @@ dispatches — the flags control automatic routing policy (PR-7.4, not yet shipp
 
 ## DeepSeek V4 (PR-7.1)
 
-- LiteLLM model string: `deepseek/deepseek-v3.2`
-- Context: 163,840 tokens
+Two model tiers available under `--provider litellm:deepseek`:
+
+| Alias | LiteLLM name | Input/MTok | Output/MTok | Max output | Task classes |
+|---|---|---|---|---|---|
+| deepseek-v4-pro (default) | deepseek/deepseek-v4-pro | $0.435 | $0.87 | 384K | coding-premium, review, analysis |
+| deepseek-v4-flash | deepseek/deepseek-v4-flash | $0.14 | $0.28 | 384K | coding, review, analysis |
+
+- Context window: 1M tokens (both models)
 - Tool calls: yes, streaming: yes
-- Dispatch: `--provider litellm:deepseek`
+- Default lane: `deepseek-v4-pro` (~75% discount active; full price $1.74/$3.48)
+- Dispatch: `--provider litellm:deepseek` (default) or `VNX_LITELLM_MODEL=deepseek/deepseek-v4-flash` (flash)
 - Missing `DEEPSEEK_API_KEY` → immediate exit(64) before subprocess spawn
 
 ## Kimi K2 via Moonshot (PR-7.2)
