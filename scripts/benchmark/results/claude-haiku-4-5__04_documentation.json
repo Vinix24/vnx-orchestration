@@ -4,7 +4,6 @@
   "dispatch_id": "bench-claude-haiku-4-5-04_documentation-1778968464",
   "duration_seconds": 15.821,
   "exit_code": 0,
-  "stderr": "worker_permissions: terminal 'T2' is assigned role 'test-engineer' but dispatch specifies role 'backend-developer'\nreceipt_must_have_commit: no commits with 'Dispatch-ID: bench-claude-haiku-4-5-04_documentation-1778968464' found since 2026-05-16T21:54:24.456313+00:00 (commit attribution scoped to this dispatch)\nauto_commit: manifest_paths absent for dispatch bench-claude-haiku-4-5-04_documentation-1778968464 \u2014 using legacy pre_dispatch_dirty scoping only (callers should declare paths via dispatc",
   "receipt": {
     "token_usage_estimated": {
       "input": 851,

@@ -4,7 +4,6 @@
   "dispatch_id": "bench-glm-5-1-03_refactoring-1778970242",
   "duration_seconds": 0.853,
   "exit_code": 1,
-  "stderr": "event_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\nevent_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\ntoken_usage extraction returned 0 for provider=litellm:zai; check spawn_result shape\nReceipt: .vnx-data/state/t0_receipts.ndjson\nReport: .vnx-data/unified_reports/bench-glm-5-1-03_refa",
   "receipt": {
     "token_usage_estimated": {
       "input": 360,

@@ -4,7 +4,6 @@
   "dispatch_id": "bench-deepseek-v4-flash-01_code_generation-1778970001",
   "duration_seconds": 56.119,
   "exit_code": 0,
-  "stderr": "_streaming_drainer: _normalize() raised for T2 (line: '{\"event_type\": \"usage_complete\", \"usage\": {\"completion_tokens\": 1604, \"prompt_tokens\": 223, \"total_tokens\": 1827, \"completion_tokens_details\": {\"accepted_prediction_tokens\": null, \"audio_tokens\": null'): Invalid event_type 'usage_complete'; must be one of ['complete', 'error', 'init', 'text', 'thinking', 'tool_result', 'tool_use']\ntoken_usage extraction returned 0 for provider=litellm:deepseek; check spawn_result shape\nReceipt: .vnx-data/sta",
   "receipt": {
     "token_usage_estimated": {
       "input": 240,

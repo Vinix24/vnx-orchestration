@@ -4,7 +4,6 @@
   "dispatch_id": "bench-claude-opus-4-6-04_documentation-1778966352",
   "duration_seconds": 49.27,
   "exit_code": 0,
-  "stderr": "worker_permissions: terminal 'T2' is assigned role 'test-engineer' but dispatch specifies role 'backend-developer'\nreceipt_must_have_commit: no commits with 'Dispatch-ID: bench-claude-opus-4-6-04_documentation-1778966352' found since 2026-05-16T21:19:12.168221+00:00 (commit attribution scoped to this dispatch)\nauto_commit: manifest_paths absent for dispatch bench-claude-opus-4-6-04_documentation-1778966352 \u2014 using legacy pre_dispatch_dirty scoping only (callers should declare paths via dispatch_",
   "receipt": {
     "token_usage_estimated": {
       "input": 851,

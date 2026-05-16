@@ -4,7 +4,6 @@
   "dispatch_id": "bench-claude-haiku-4-5-07_translation-1778968645",
   "duration_seconds": 31.572,
   "exit_code": 0,
-  "stderr": "worker_permissions: terminal 'T2' is assigned role 'test-engineer' but dispatch specifies role 'backend-developer'\ntoken_usage extraction returned 0 for provider=claude; check spawn_result shape\nReceipt: .vnx-data/state/t0_receipts.ndjson\nReport: .vnx-data/unified_reports/bench-claude-haiku-4-5-07_translation-1778968645.md\n",
   "receipt": {
     "token_usage_estimated": {
       "input": 548,
