@@ -50,6 +50,30 @@ def _maybe_reroute_to_gate_stream(receipt: Dict[str, Any], receipts_file: Option
         return receipts_file
 
 
+def _enrich_receipt_timing(receipt: Dict[str, Any]) -> None:
+    """Idempotent: stamp timing block from NDJSON archive onto completion receipt.
+
+    Skipped silently when archive is unavailable or timing already present.
+    """
+    if receipt.get("timing") is not None:
+        return
+    dispatch_id = str(receipt.get("dispatch_id") or "").strip()
+    if not dispatch_id or dispatch_id == "unknown":
+        return
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+        from timing_metrics import _build_timing_block
+        paths = facade.ensure_env()
+        vnx_data_dir = Path(paths.get("VNX_DATA_DIR", "")).expanduser()
+        if not vnx_data_dir.is_dir():
+            return
+        block = _build_timing_block(dispatch_id, vnx_data_dir)
+        if block is not None:
+            receipt["timing"] = block
+    except Exception as exc:
+        log.warning("payload: timing enrichment failed for %r: %s", dispatch_id, exc)
+
+
 def _run_post_append_hooks(receipt: Dict[str, Any]) -> None:
     """Best-effort hooks fired after a receipt is successfully appended.
 
@@ -338,6 +362,7 @@ def append_receipt_payload(
 
     if not skip_enrichment:
         receipt = facade._enrich_completion_receipt(receipt)
+        _enrich_receipt_timing(receipt)
 
     receipt.setdefault("open_items_created", facade._count_quality_violations(receipt))
 
