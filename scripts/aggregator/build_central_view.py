@@ -8,6 +8,11 @@ Read-only at the source: writes only happen against the central view DB
 under `~/.vnx-aggregator/`. The operator can delete that directory at
 any moment without data loss.
 
+Also creates ``coordination_events_unified`` — a SQLite table fed from
+per-project ``t0_receipts.ndjson`` files via the Wave 5 receipt_tail reader.
+Schema: project_id TEXT, dispatch_id TEXT, event_type TEXT, timestamp TEXT,
+payload_json TEXT.
+
 CLI:
     python3 scripts/aggregator/build_central_view.py            # build
     python3 scripts/aggregator/build_central_view.py --dry-run  # plan only
@@ -24,7 +29,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List
 
 from scripts.aggregator import (
     DEFAULT_AGGREGATOR_DB,
@@ -139,6 +144,78 @@ def _copy_table(
         rows,
     )
     return len(rows)
+
+
+_COORD_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS coordination_events_unified (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    dispatch_id TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT '',
+    timestamp TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}'
+)
+"""
+
+_COORD_EVENTS_INSERT = """
+INSERT INTO coordination_events_unified
+    (project_id, dispatch_id, event_type, timestamp, payload_json)
+VALUES (?, ?, ?, ?, ?)
+"""
+
+
+def build_coordination_events_unified(
+    con: sqlite3.Connection,
+    projects: List[ProjectEntry],
+) -> int:
+    """Populate coordination_events_unified from per-project t0_receipts.ndjson.
+
+    Safe to call multiple times: the table is created with IF NOT EXISTS.
+    Existing rows are NOT deduplicated across calls; callers that need
+    idempotency should drop+recreate the table before calling.
+    """
+    con.execute(_COORD_EVENTS_DDL)
+
+    inserted = 0
+    for proj in projects:
+        receipt_path = proj.state_dir / "t0_receipts.ndjson"
+        if not receipt_path.exists():
+            continue
+        try:
+            text = receipt_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            LOG.warning("build_coordination_events_unified: cannot read %s: %s", receipt_path, exc)
+            continue
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                LOG.warning(
+                    "build_coordination_events_unified: malformed JSON in %s: %s",
+                    receipt_path,
+                    exc,
+                )
+                continue
+
+            dispatch_id = raw.get("dispatch_id") or ""
+            event_type = raw.get("event_type") or raw.get("event", "")
+            timestamp = raw.get("timestamp") or ""
+            project_id = raw.get("project_id") or proj.project_id
+            payload = {k: v for k, v in raw.items() if k not in (
+                "dispatch_id", "event_type", "timestamp", "project_id", "event",
+            )}
+            con.execute(
+                _COORD_EVENTS_INSERT,
+                (project_id, dispatch_id, event_type, timestamp, json.dumps(payload)),
+            )
+            inserted += 1
+
+    con.commit()
+    return inserted
 
 
 def materialize_views(
@@ -261,6 +338,11 @@ def materialize_views(
                 {"table": f"{table}_unified", "rows": row_total, "per_project": per_proj}
             )
             LOG.info("materialized %s_unified rows=%d", table, row_total)
+
+        # Populate coordination_events_unified from per-project NDJSON receipts.
+        coord_rows = build_coordination_events_unified(con, projects)
+        plan["coordination_events_rows"] = coord_rows
+        LOG.info("materialized coordination_events_unified rows=%d", coord_rows)
 
         con.commit()
     finally:
