@@ -287,10 +287,10 @@ def build_coordination_events_unified(
 ) -> int:
     """Populate coordination_events_unified from per-project t0_receipts.ndjson.
 
-    Safe to call multiple times: the table is created with IF NOT EXISTS.
-    Existing rows are NOT deduplicated across calls; callers that need
-    idempotency should drop+recreate the table before calling.
+    Idempotent: drops and recreates the table on each call so calling twice
+    produces the same row count (OI-1477).
     """
+    con.execute("DROP TABLE IF EXISTS coordination_events_unified")
     con.execute(_COORD_EVENTS_DDL)
 
     inserted = 0

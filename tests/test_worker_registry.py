@@ -315,8 +315,9 @@ class TestTerminalIdValidation:
         with pytest.raises(ValueError, match="Invalid terminal_id"):
             _registry_from_yaml(bad_yaml)
 
-    def test_valid_custom_prefix_terminal_id(self):
-        ok_yaml = textwrap.dedent("""\
+    def test_custom_prefix_terminal_id_rejected(self):
+        """OI-1478: strict ^T[0-9]+$ rejects custom prefixes like WORKER1."""
+        bad_yaml = textwrap.dedent("""\
             schema_version: 1
             workers:
               - terminal_id: WORKER1
@@ -332,8 +333,52 @@ class TestTerminalIdValidation:
                 scaling_policy: fixed
                 provider_mix: []
         """)
-        reg = _registry_from_yaml(ok_yaml)
-        assert reg.by_id("WORKER1") is not None
+        with pytest.raises(ValueError, match="Invalid terminal_id"):
+            _registry_from_yaml(bad_yaml)
+
+    def test_non_t_prefix_rejected(self):
+        """OI-1478: IDs like 'Foo', 'Bar', 'A1' must be rejected."""
+        for bad_id in ("Foo", "Bar", "A1", "T", "t0"):
+            bad_yaml = textwrap.dedent(f"""\
+                schema_version: 1
+                workers:
+                  - terminal_id: {bad_id!r}
+                    role: backend-developer
+                    provider: claude
+                    model: sonnet
+                    pool_id: p
+                    aliases: []
+                pools:
+                  - pool_id: p
+                    min_workers: 1
+                    max_workers: 1
+                    scaling_policy: fixed
+                    provider_mix: []
+            """)
+            with pytest.raises(ValueError, match="Invalid terminal_id"):
+                _registry_from_yaml(bad_yaml)
+
+    def test_valid_t_format_terminal_ids(self):
+        """OI-1478: backward-compat — T0, T1, T2, T3, T99 all valid."""
+        for tid in ("T0", "T1", "T2", "T3", "T99"):
+            ok_yaml = textwrap.dedent(f"""\
+                schema_version: 1
+                workers:
+                  - terminal_id: {tid!r}
+                    role: backend-developer
+                    provider: claude
+                    model: sonnet
+                    pool_id: p
+                    aliases: []
+                pools:
+                  - pool_id: p
+                    min_workers: 1
+                    max_workers: 1
+                    scaling_policy: fixed
+                    provider_mix: []
+            """)
+            reg = _registry_from_yaml(ok_yaml)
+            assert reg.by_id(tid) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +551,7 @@ class TestOperatorYamlOverride:
         operator_yaml.write_text(textwrap.dedent("""\
             schema_version: 1
             workers:
-              - terminal_id: A1
+              - terminal_id: T5
                 role: backend-developer
                 provider: claude
                 model: haiku
@@ -524,7 +569,7 @@ class TestOperatorYamlOverride:
         reg = _load_registry(repo_root=tmp_path)
         workers = reg.list_workers()
         assert len(workers) == 1
-        assert workers[0].terminal_id == "A1"
+        assert workers[0].terminal_id == "T5"
 
     def test_missing_yaml_falls_back_to_hardcoded_default(self, tmp_path: Path):
         reg = _load_registry(repo_root=tmp_path)

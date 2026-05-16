@@ -19,7 +19,9 @@ import pytest
 
 from scripts.aggregator.build_central_view import (
     UNIFIED_TABLES,
+    ProjectEntry,
     attach_readonly,
+    build_coordination_events_unified,
     load_registry,
     main,
     materialize_views,
@@ -365,6 +367,46 @@ def test_unified_tables_constants_consistent():
 # ---------------------------------------------------------------------------
 # CLI wiring
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# OI-1477: build_coordination_events_unified idempotency
+# ---------------------------------------------------------------------------
+
+
+def test_build_coordination_events_idempotent(tmp_path: Path):
+    """OI-1477: calling build_coordination_events_unified twice yields the same row count."""
+    # Create a project with a t0_receipts.ndjson that has 3 events.
+    proj_path = tmp_path / "proj1"
+    state_dir = proj_path / ".vnx-data" / "state"
+    state_dir.mkdir(parents=True)
+    receipt_lines = [
+        '{"dispatch_id": "d1", "event_type": "dispatch_created", "timestamp": "2026-01-01T00:00:00Z", "project_id": "vnx-dev"}',
+        '{"dispatch_id": "d1", "event_type": "dispatch_completed", "timestamp": "2026-01-01T00:01:00Z", "project_id": "vnx-dev"}',
+        '{"dispatch_id": "d2", "event_type": "t0_heartbeat", "timestamp": "2026-01-01T00:02:00Z", "project_id": "vnx-dev"}',
+    ]
+    (state_dir / "t0_receipts.ndjson").write_text("\n".join(receipt_lines))
+    projects = [ProjectEntry(name="proj1", path=proj_path, project_id="vnx-dev")]
+
+    view_db = tmp_path / "agg.db"
+    con = sqlite3.connect(view_db)
+    try:
+        build_coordination_events_unified(con, projects)
+        first_count = con.execute(
+            "SELECT COUNT(*) FROM coordination_events_unified"
+        ).fetchone()[0]
+
+        build_coordination_events_unified(con, projects)
+        second_count = con.execute(
+            "SELECT COUNT(*) FROM coordination_events_unified"
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert first_count == 3, f"Expected 3 rows on first call, got {first_count}"
+    assert second_count == first_count, (
+        f"Idempotency violated: first={first_count}, second={second_count}"
+    )
 
 
 def test_cli_dry_run_exits_zero_and_prints_plan(four_project_fixture, tmp_path: Path, capsys):
