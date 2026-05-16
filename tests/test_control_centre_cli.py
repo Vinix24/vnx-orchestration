@@ -34,6 +34,7 @@ from scripts.control_centre_cli import (
     _load_registry,
     _project_vnx_data,
     _token_digest,
+    _validate_project_id,
     build_parser,
     cmd_aggregate,
     cmd_dispatch,
@@ -557,3 +558,88 @@ def test_dispatch_no_tmp_file_leftover(tmp_path: Path) -> None:
     # No .tmp files left behind
     tmp_files = list(dispatch_dir.glob("*.tmp"))
     assert tmp_files == [], f"Leftover .tmp files found: {tmp_files}"
+
+
+# ---------------------------------------------------------------------------
+# test_project_id_validation_rejects_path_traversal
+# ---------------------------------------------------------------------------
+
+
+def test_project_id_validation_rejects_path_traversal() -> None:
+    """_validate_project_id raises ValueError for path-traversal and unsafe inputs."""
+    invalid_inputs = [
+        "../../etc",
+        "evil/payload",
+        "..",
+        "",
+        "../secret",
+        "UPPERCASE",
+        "has space",
+        "dot.in.name",
+        "/absolute",
+        "a" * 65,  # exceeds 64-char limit
+    ]
+    for bad in invalid_inputs:
+        with pytest.raises(ValueError, match="invalid project id"):
+            _validate_project_id(bad)
+
+
+# ---------------------------------------------------------------------------
+# test_project_id_validation_accepts_valid
+# ---------------------------------------------------------------------------
+
+
+def test_project_id_validation_accepts_valid() -> None:
+    """_validate_project_id passes for well-formed project IDs."""
+    valid_inputs = ["vnx-dev", "sales_copilot", "proj01", "a", "x1", "my-project-123"]
+    for good in valid_inputs:
+        result = _validate_project_id(good)
+        assert result == good
+
+
+# ---------------------------------------------------------------------------
+# test_kill_emits_audit_on_failure
+# ---------------------------------------------------------------------------
+
+
+def test_kill_emits_audit_on_failure(tmp_path: Path) -> None:
+    """Kill command emits audit event even when kill operation fails (ADR-005)."""
+    proj = _make_project(tmp_path, "kill-fail-proj")
+    lease_token = "fail-token-abc"
+    coord_db = Path(proj["root"]) / ".vnx-data" / "state" / "runtime_coordination.db"
+    _seed_coord_db(coord_db, "kill-fail-proj", lease_token, pid=77777)
+    registry_path = _write_registry(tmp_path, [proj])
+
+    mock_kill_result = MagicMock()
+    mock_kill_result.signaled = False
+    mock_kill_result.verified_dead = False
+    mock_kill_result.lease_released = False
+    mock_kill_result.escalated_to_sigkill = False
+    mock_kill_result.duration_ms = None
+    mock_kill_result.error = "SIGTERM failed: process not found"
+
+    mock_mgr = MagicMock()
+    mock_mgr.kill.return_value = mock_kill_result
+    mock_agg = MagicMock()
+
+    with (
+        patch("scripts.control_centre_cli.T0LifecycleManager", return_value=mock_mgr),
+        patch("scripts.control_centre_cli._make_aggregator", return_value=mock_agg),
+        patch("scripts.control_centre_cli._repo_vnx_data", return_value=tmp_path / ".vnx-data"),
+    ):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--registry", str(registry_path),
+            "kill",
+            "--project", "kill-fail-proj",
+        ])
+        rc = cmd_kill(args)
+
+    assert rc == 1
+    # Audit MUST be emitted even when kill fails
+    mock_agg.submit.assert_called_once()
+    update = mock_agg.submit.call_args[0][0]
+    assert update.event_type == "cc.kill.requested"
+    assert update.payload["success"] is False
+    assert update.payload["error"] == "SIGTERM failed: process not found"
+    assert update.payload["token_digest"] == _token_digest(lease_token)

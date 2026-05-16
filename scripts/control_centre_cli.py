@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -54,12 +55,28 @@ _DEFAULT_REGISTRY = _REPO_ROOT / "scripts" / "control_centre_projects.yaml"
 _CC_AUDIT_PROJECT = "cc-system"
 _CC_EVENTS_SUBPATH = "events/control_centre.ndjson"
 
+_PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _validate_project_id(project_id: str) -> str:
+    """Strict validation for project_id used as filesystem path component.
+
+    Allows lowercase alphanumerics, hyphens, and underscores; max 64 chars.
+    Rejects slashes, dots, uppercase to prevent path traversal and casing collisions.
+    """
+    if not _PROJECT_ID_RE.match(project_id or ""):
+        raise ValueError(
+            f"invalid project id: {project_id!r} "
+            f"(must match {_PROJECT_ID_RE.pattern})"
+        )
+    return project_id
 
 
 def _now_iso() -> str:
@@ -217,10 +234,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
     """Forward a dispatch instruction to a project T0 via its pending/ queue."""
+    project_id = _validate_project_id(args.project)
     registry = _load_registry(Path(args.registry))
-    project = _find_project(registry, args.project)
+    project = _find_project(registry, project_id)
     if project is None:
-        print(f"Project not found in registry: {args.project}", file=sys.stderr)
+        print(f"Project not found in registry: {project_id}", file=sys.stderr)
         return 1
 
     root = Path(project["root"])
@@ -229,7 +247,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     pending_dir.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-    dispatch_id = f"cc-{ts}-{args.project}"
+    dispatch_id = f"cc-{ts}-{project_id}"
     dispatch_dir = pending_dir / dispatch_id
     dispatch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -246,11 +264,11 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         "priority": "P2",
         "cognition": "normal",
         "parent_dispatch": "",
-        "reason": f"Control Centre forwarded dispatch to {args.project}",
+        "reason": f"Control Centre forwarded dispatch to {project_id}",
         "branch": "",
         "worktree": str(root),
         "instruction_path": "instruction.md",
-        "project_id": args.project,
+        "project_id": project_id,
         "source": "control-centre",
     }
 
@@ -264,9 +282,9 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     vnx_data_dir = _repo_vnx_data()
     agg = _make_aggregator(vnx_data_dir)
-    _emit_audit(agg, args.project, "cc.dispatch.forwarded", {
+    _emit_audit(agg, project_id, "cc.dispatch.forwarded", {
         "dispatch_id": dispatch_id,
-        "project": args.project,
+        "project": project_id,
         "task_preview": args.task[:120],
     })
     return 0
@@ -274,16 +292,17 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
 def cmd_heartbeat(args: argparse.Namespace) -> int:
     """Update heartbeat for a running T0."""
+    project_id = _validate_project_id(args.project)
     registry = _load_registry(Path(args.registry))
-    project = _find_project(registry, args.project)
+    project = _find_project(registry, project_id)
     if project is None:
-        print(f"Project not found in registry: {args.project}", file=sys.stderr)
+        print(f"Project not found in registry: {project_id}", file=sys.stderr)
         return 1
 
     coord_db = _coord_db_path(project)
     lease = _get_active_lease(coord_db)
     if lease is None:
-        print(f"No active T0 lease for project: {args.project}", file=sys.stderr)
+        print(f"No active T0 lease for project: {project_id}", file=sys.stderr)
         return 1
 
     vnx_data_dir = _repo_vnx_data()
@@ -292,16 +311,16 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
 
     pid = lease["metadata"].get("pid", -1)
     token = lease["lease_token"]
-    ok = mgr.heartbeat(args.project, pid=pid, lease_token=token)
+    ok = mgr.heartbeat(project_id, pid=pid, lease_token=token)
 
     if ok:
-        print(f"Heartbeat recorded for {args.project} (pid={pid})")
+        print(f"Heartbeat recorded for {project_id} (pid={pid})")
     else:
-        print(f"Heartbeat failed for {args.project} — lease mismatch or expired", file=sys.stderr)
+        print(f"Heartbeat failed for {project_id} — lease mismatch or expired", file=sys.stderr)
         return 1
 
-    _emit_audit(agg, args.project, "cc.heartbeat.sent", {
-        "project": args.project,
+    _emit_audit(agg, project_id, "cc.heartbeat.sent", {
+        "project": project_id,
         "pid": pid,
         "token_digest": _token_digest(token),
         "result": ok,
@@ -311,16 +330,17 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
 
 def cmd_kill(args: argparse.Namespace) -> int:
     """Graceful shutdown of project T0 (SIGTERM -> wait -> SIGKILL)."""
+    project_id = _validate_project_id(args.project)
     registry = _load_registry(Path(args.registry))
-    project = _find_project(registry, args.project)
+    project = _find_project(registry, project_id)
     if project is None:
-        print(f"Project not found in registry: {args.project}", file=sys.stderr)
+        print(f"Project not found in registry: {project_id}", file=sys.stderr)
         return 1
 
     coord_db = _coord_db_path(project)
     lease = _get_active_lease(coord_db)
     if lease is None:
-        print(f"No active T0 lease for project: {args.project}", file=sys.stderr)
+        print(f"No active T0 lease for project: {project_id}", file=sys.stderr)
         return 1
 
     vnx_data_dir = _repo_vnx_data()
@@ -328,9 +348,20 @@ def cmd_kill(args: argparse.Namespace) -> int:
     mgr = T0LifecycleManager(coord_db_path=coord_db, aggregator=agg)
 
     token = lease["lease_token"]
-    result = mgr.kill(args.project, lease_token=token, source="control-centre")
+    result = mgr.kill(project_id, lease_token=token, source="control-centre")
 
-    print(f"Kill result for {args.project}:")
+    # Always emit audit — ADR-005 requires all state transitions, including failures.
+    _emit_audit(agg, project_id, "cc.kill.requested", {
+        "project": project_id,
+        "token_digest": _token_digest(token),
+        "verified_dead": result.verified_dead,
+        "lease_released": result.lease_released,
+        "success": not bool(result.error),
+        "error": result.error or None,
+        "signaled": getattr(result, "signaled", None),
+    })
+
+    print(f"Kill result for {project_id}:")
     print(f"  signaled:           {result.signaled}")
     print(f"  verified_dead:      {result.verified_dead}")
     print(f"  lease_released:     {result.lease_released}")
@@ -341,12 +372,6 @@ def cmd_kill(args: argparse.Namespace) -> int:
         print(f"  error:              {result.error}", file=sys.stderr)
         return 1
 
-    _emit_audit(agg, args.project, "cc.kill.requested", {
-        "project": args.project,
-        "token_digest": _token_digest(token),
-        "verified_dead": result.verified_dead,
-        "lease_released": result.lease_released,
-    })
     return 0
 
 
@@ -384,28 +409,29 @@ def cmd_reap(args: argparse.Namespace) -> int:
 
 def cmd_intel(args: argparse.Namespace) -> int:
     """Show cross-project intelligence recommendations for target project."""
+    project_id = _validate_project_id(args.project)
     registry = _load_registry(Path(args.registry))
-    project = _find_project(registry, args.project)
+    project = _find_project(registry, project_id)
     if project is None:
-        print(f"Project not found in registry: {args.project}", file=sys.stderr)
+        print(f"Project not found in registry: {project_id}", file=sys.stderr)
         return 1
 
     db_paths = _build_intel_db_paths(registry)
     ia = IntelligenceAggregator(project_db_paths=db_paths)
 
-    recs = ia.recommend_cross_project(args.project)
+    recs = ia.recommend_cross_project(project_id)
     if not recs:
-        print(f"No cross-project recommendations for {args.project}.")
+        print(f"No cross-project recommendations for {project_id}.")
     else:
-        print(f"Cross-project recommendations for {args.project}:")
+        print(f"Cross-project recommendations for {project_id}:")
         for rec in recs:
             print(f"  [{rec.confidence:.2f}] from={rec.source_project}")
             print(f"    {rec.rationale}")
 
     vnx_data_dir = _repo_vnx_data()
     agg = _make_aggregator(vnx_data_dir)
-    _emit_audit(agg, args.project, "cc.intel.requested", {
-        "target_project": args.project,
+    _emit_audit(agg, project_id, "cc.intel.requested", {
+        "target_project": project_id,
         "recommendation_count": len(recs),
     })
     return 0
@@ -528,7 +554,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if handler is None:
         parser.print_help()
         return 2
-    return handler(args)
+    try:
+        return handler(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
