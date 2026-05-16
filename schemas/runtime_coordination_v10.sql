@@ -29,13 +29,14 @@ CREATE TABLE IF NOT EXISTS terminal_leases (
     terminal_id         TEXT    NOT NULL,
     project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
     state               TEXT    NOT NULL DEFAULT 'idle',
-    dispatch_id         TEXT    REFERENCES dispatches (dispatch_id),
+    dispatch_id         TEXT,
     generation          INTEGER NOT NULL DEFAULT 1,
     leased_at           TEXT,
     expires_at          TEXT,
     last_heartbeat_at   TEXT,
     released_at         TEXT,
     metadata_json       TEXT    DEFAULT '{}',
+    FOREIGN KEY (dispatch_id, project_id) REFERENCES dispatches(dispatch_id, project_id),
     UNIQUE(terminal_id, project_id)
 );
 

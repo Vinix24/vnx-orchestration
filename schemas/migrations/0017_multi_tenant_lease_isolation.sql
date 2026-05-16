@@ -54,6 +54,7 @@ CREATE TABLE terminal_leases_v10 (
     last_heartbeat_at   TEXT,
     released_at         TEXT,
     metadata_json       TEXT    DEFAULT '{}',
+    FOREIGN KEY (dispatch_id, project_id) REFERENCES dispatches(dispatch_id, project_id),
     UNIQUE(terminal_id, project_id)
 );
 
@@ -104,6 +105,40 @@ CREATE INDEX IF NOT EXISTS idx_dispatch_state    ON dispatches(state, updated_at
 CREATE INDEX IF NOT EXISTS idx_dispatch_terminal ON dispatches(terminal_id, state);
 CREATE INDEX IF NOT EXISTS idx_dispatch_created  ON dispatches(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dispatches_project ON dispatches(project_id);
+
+-- ============================================================================
+-- 3.5. dispatch_attempts: fix broken FK after dispatches composite UNIQUE
+--      REFERENCES dispatches(dispatch_id) is now invalid — upgrade to composite.
+--      project_id already present (added by migration 0010).
+-- ============================================================================
+
+CREATE TABLE dispatch_attempts_v10 (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id      TEXT    NOT NULL UNIQUE,
+    dispatch_id     TEXT    NOT NULL,
+    attempt_number  INTEGER NOT NULL DEFAULT 1,
+    terminal_id     TEXT    NOT NULL,
+    state           TEXT    NOT NULL DEFAULT 'pending',
+    started_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    ended_at        TEXT,
+    failure_reason  TEXT,
+    metadata_json   TEXT    DEFAULT '{}',
+    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+    FOREIGN KEY (dispatch_id, project_id) REFERENCES dispatches(dispatch_id, project_id)
+);
+
+INSERT INTO dispatch_attempts_v10
+    SELECT id, attempt_id, dispatch_id, attempt_number, terminal_id,
+           state, started_at, ended_at, failure_reason, metadata_json, project_id
+    FROM dispatch_attempts;
+
+DROP TABLE dispatch_attempts;
+ALTER TABLE dispatch_attempts_v10 RENAME TO dispatch_attempts;
+
+CREATE INDEX IF NOT EXISTS idx_attempt_dispatch  ON dispatch_attempts(dispatch_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_attempt_state     ON dispatch_attempts(state, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attempt_terminal  ON dispatch_attempts(terminal_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_attempt_project   ON dispatch_attempts(project_id);
 
 -- ============================================================================
 -- 4. Version stamp
