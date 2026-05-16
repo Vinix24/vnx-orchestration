@@ -741,9 +741,18 @@ class T0LifecycleManager:
                 "lifecycle_state": LIFECYCLE_RUNNING,
                 "lease_token": lease_token,
             }
-            self._write_lease_row(
-                conn, project_id, prior, lease_token, new_generation, started_at, metadata
-            )
+            try:
+                self._write_lease_row(
+                    conn, project_id, prior, lease_token, new_generation, started_at, metadata
+                )
+            except Exception:
+                # Subprocess is alive but lease write failed — kill it to prevent orphan.
+                self._force_kill_subprocess(pid)
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
 
             committed_pid = pid
 
@@ -963,7 +972,18 @@ class T0LifecycleManager:
             raise LeaseTokenMismatchError(project_id, lease_token, db_token)
 
         meta = self._parse_metadata(row["metadata_json"])
-        stored_pid = meta.get("pid", -1)
+        stored_pid = meta.get("pid")
+        if not isinstance(stored_pid, int) or stored_pid <= 0:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.debug("kill: ROLLBACK on invalid-pid suppressed")
+            return -1, KillResult(
+                project_id=project_id,
+                lease_token=lease_token,
+                pid=-1,
+                error=f"invalid stored pid: {stored_pid!r} (corrupt metadata)",
+            )
         meta["lifecycle_state"] = LIFECYCLE_TERMINATING
         meta["kill_signal_sent_at"] = _now_iso()
         meta["kill_initiated_by"] = source
@@ -1009,7 +1029,11 @@ class T0LifecycleManager:
             result.error = "permission_denied"
             return True
 
-        if outcome != "already_dead":
+        if outcome.startswith("error:"):
+            result.error = outcome
+            return True
+
+        if outcome == "sent":
             result.signaled = True
             self._emit_event(
                 project_id,
@@ -1038,6 +1062,7 @@ class T0LifecycleManager:
                     self._wait_for_exit(
                         pid, self._sigkill_wait_timeout_seconds, lease_token=lease_token
                     )
+        # outcome == "already_dead": fall through to _is_alive check below
 
         if self._is_alive(pid, lease_token=lease_token):
             err = "sigkill_zombie" if result.escalated_to_sigkill else "alive_after_wait"

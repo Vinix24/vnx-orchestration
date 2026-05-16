@@ -59,83 +59,99 @@ _MIGRATION_0019_SQL = _REPO_ROOT / "schemas" / "migrations" / "0019_t0_lifecycle
 # ---------------------------------------------------------------------------
 
 
-def _create_v12_db(db_path: Path) -> None:
-    """Bootstrap a runtime_coordination.db at schema v12 (after migration 0017).
+def _seed_schema_meta_v12(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE runtime_schema_version (
+            version     INTEGER PRIMARY KEY,
+            applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            description TEXT NOT NULL
+        )
+    """)
+    conn.execute("INSERT INTO runtime_schema_version VALUES (11, datetime('now'), 'v11 baseline')")
 
-    Replicates the helper from tests/test_schema_0017_migration.py:
-    create v11 baseline, then apply 0017 to land at v12.
-    """
+
+def _create_dispatches_table_v12(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE dispatches (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id     TEXT    NOT NULL UNIQUE,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+            state           TEXT    NOT NULL DEFAULT 'queued',
+            terminal_id     TEXT,
+            track           TEXT,
+            priority        TEXT    DEFAULT 'P2',
+            pr_ref          TEXT,
+            gate            TEXT,
+            attempt_count   INTEGER NOT NULL DEFAULT 0,
+            bundle_path     TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            expires_after   TEXT,
+            metadata_json   TEXT    DEFAULT '{}'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE dispatch_attempts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            attempt_id      TEXT    NOT NULL UNIQUE,
+            dispatch_id     TEXT    NOT NULL REFERENCES dispatches (dispatch_id),
+            attempt_number  INTEGER NOT NULL DEFAULT 1,
+            terminal_id     TEXT    NOT NULL,
+            state           TEXT    NOT NULL DEFAULT 'pending',
+            started_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            ended_at        TEXT,
+            failure_reason  TEXT,
+            metadata_json   TEXT    DEFAULT '{}',
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev'
+        )
+    """)
+
+
+def _create_terminal_leases_table_v12(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE terminal_leases (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            terminal_id         TEXT    NOT NULL UNIQUE,
+            project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+            state               TEXT    NOT NULL DEFAULT 'idle',
+            dispatch_id         TEXT,
+            generation          INTEGER NOT NULL DEFAULT 1,
+            leased_at           TEXT,
+            expires_at          TEXT,
+            last_heartbeat_at   TEXT,
+            released_at         TEXT,
+            metadata_json       TEXT    DEFAULT '{}'
+        )
+    """)
+
+
+def _create_worker_states_table_v12(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE worker_states (
+            terminal_id      TEXT    NOT NULL PRIMARY KEY,
+            dispatch_id      TEXT    NOT NULL,
+            state            TEXT    NOT NULL DEFAULT 'initializing',
+            last_output_at   TEXT,
+            state_entered_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            stall_count      INTEGER NOT NULL DEFAULT 0,
+            blocked_reason   TEXT,
+            metadata_json    TEXT,
+            created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+    """)
+
+
+def _create_v12_db(db_path: Path) -> None:
+    """Bootstrap a runtime_coordination.db at schema v12 (after migration 0017)."""
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.executescript("""
-            PRAGMA journal_mode = WAL;
-
-            CREATE TABLE runtime_schema_version (
-                version     INTEGER PRIMARY KEY,
-                applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                description TEXT NOT NULL
-            );
-            INSERT INTO runtime_schema_version VALUES (11, datetime('now'), 'v11 baseline');
-
-            CREATE TABLE dispatches (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                dispatch_id     TEXT    NOT NULL UNIQUE,
-                project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
-                state           TEXT    NOT NULL DEFAULT 'queued',
-                terminal_id     TEXT,
-                track           TEXT,
-                priority        TEXT    DEFAULT 'P2',
-                pr_ref          TEXT,
-                gate            TEXT,
-                attempt_count   INTEGER NOT NULL DEFAULT 0,
-                bundle_path     TEXT,
-                created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                expires_after   TEXT,
-                metadata_json   TEXT    DEFAULT '{}'
-            );
-
-            CREATE TABLE terminal_leases (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                terminal_id         TEXT    NOT NULL UNIQUE,
-                project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
-                state               TEXT    NOT NULL DEFAULT 'idle',
-                dispatch_id         TEXT,
-                generation          INTEGER NOT NULL DEFAULT 1,
-                leased_at           TEXT,
-                expires_at          TEXT,
-                last_heartbeat_at   TEXT,
-                released_at         TEXT,
-                metadata_json       TEXT    DEFAULT '{}'
-            );
-
-            CREATE TABLE worker_states (
-                terminal_id      TEXT    NOT NULL PRIMARY KEY,
-                dispatch_id      TEXT    NOT NULL,
-                state            TEXT    NOT NULL DEFAULT 'initializing',
-                last_output_at   TEXT,
-                state_entered_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                stall_count      INTEGER NOT NULL DEFAULT 0,
-                blocked_reason   TEXT,
-                metadata_json    TEXT,
-                created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                updated_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            );
-
-            CREATE TABLE dispatch_attempts (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                attempt_id      TEXT    NOT NULL UNIQUE,
-                dispatch_id     TEXT    NOT NULL REFERENCES dispatches (dispatch_id),
-                attempt_number  INTEGER NOT NULL DEFAULT 1,
-                terminal_id     TEXT    NOT NULL,
-                state           TEXT    NOT NULL DEFAULT 'pending',
-                started_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                ended_at        TEXT,
-                failure_reason  TEXT,
-                metadata_json   TEXT    DEFAULT '{}',
-                project_id      TEXT    NOT NULL DEFAULT 'vnx-dev'
-            );
-        """)
+        conn.execute("PRAGMA journal_mode = WAL")
+        _seed_schema_meta_v12(conn)
+        _create_dispatches_table_v12(conn)
+        _create_terminal_leases_table_v12(conn)
+        _create_worker_states_table_v12(conn)
+        conn.commit()
     finally:
         conn.close()
 
@@ -276,7 +292,7 @@ def test_spawn_race_condition_serialized_by_exclusive(tmp_path: Path) -> None:
             inst = results[0]
             try:
                 mgr.kill("proj-race", inst.lease_token, wait_timeout=3.0)
-            except Exception:
+            except (LeaseTokenMismatchError, OSError, sqlite3.Error):
                 pass
 
 
@@ -334,7 +350,7 @@ def test_spawn_rollback_kills_subprocess_on_insert_failure(tmp_path: Path) -> No
         try:
             real_sleeper.kill()
             real_sleeper.wait(timeout=2)
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
 
@@ -390,7 +406,7 @@ def test_spawn_rollback_on_audit_emit_failure(tmp_path: Path) -> None:
         try:
             real_sleeper.kill()
             real_sleeper.wait(timeout=2)
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
 
@@ -796,11 +812,11 @@ def test_reap_dead_process_skips_signal(tmp_path: Path, monkeypatch) -> None:
         # Subprocess was real; clean up.
         try:
             mgr.force_release_lease(inst.lease_token, "test cleanup")
-        except Exception:
+        except (OSError, sqlite3.Error):
             pass
         try:
             os.kill(inst.pid, signal.SIGKILL)
-        except Exception:
+        except OSError:
             pass
 
 
