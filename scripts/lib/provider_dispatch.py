@@ -111,13 +111,11 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
     return usage
 
 
-def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
-    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
-    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str, float]]:
+    """Load {input, output} pricing per MTok from wave7_models.yaml. Returns None on miss."""
+    sub = provider.split(":", 1)[1] if provider.startswith("litellm:") and ":" in provider else ""
+    if not sub:
         return None
-    if not provider.startswith("litellm:"):
-        return None
-    sub = provider.split(":", 1)[1] if ":" in provider else ""
     try:
         from providers import provider_registry as _reg
         registry = _reg.load()
@@ -125,17 +123,28 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Opt
         if cfg is None or not cfg.models:
             return None
         model_key = model.split("/")[-1] if "/" in model else model
-        entry = cfg.models.get(model_key)
-        if entry is None:
-            entry = next(iter(cfg.models.values()), None)
+        entry = cfg.models.get(model_key) or next(iter(cfg.models.values()), None)
         if entry is None:
             return None
-        cost_in = (token_usage.get("input", 0) / 1_000_000) * float(entry.cost_input_per_mtok)
-        cost_out = (token_usage.get("output", 0) / 1_000_000) * float(entry.cost_output_per_mtok)
-        return round(cost_in + cost_out, 8)
+        return {
+            "input": float(entry.cost_input_per_mtok),
+            "output": float(entry.cost_output_per_mtok),
+        }
     except Exception as exc:
-        logger.debug("_compute_cost: lookup failed for provider=%s model=%s: %s", provider, model, exc)
+        logger.debug("_load_pricing_from_registry: failed for provider=%s model=%s: %s", provider, model, exc)
         return None
+
+
+def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
+    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
+    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+        return None
+    pricing = _load_pricing_from_registry(provider, model)
+    if not pricing:
+        return None
+    cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
+    cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
+    return round(cost_in + cost_out, 8)
 
 
 def _emit_governance(
