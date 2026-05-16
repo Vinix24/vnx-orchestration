@@ -25,6 +25,12 @@
 --   terminal_leases  — UNIQUE(terminal_id, project_id)
 --   dispatches       — UNIQUE(dispatch_id, project_id)
 --   worker_states    — project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+--
+-- Section order: dispatches rebuilt BEFORE terminal_leases.
+--   terminal_leases carries FK → dispatches(dispatch_id, project_id).
+--   SQLite FK resolution requires the referenced composite UNIQUE to exist
+--   on the referenced table at the time FK enforcement is active. Rebuilding
+--   dispatches first satisfies this constraint regardless of FK pragma state.
 
 PRAGMA foreign_keys = OFF;
 
@@ -38,41 +44,10 @@ ALTER TABLE worker_states ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev';
 CREATE INDEX IF NOT EXISTS idx_worker_states_project ON worker_states(project_id);
 
 -- ============================================================================
--- 2. terminal_leases: composite UNIQUE(terminal_id, project_id)
---    SQLite cannot ALTER a constraint — requires table rebuild.
--- ============================================================================
-
-CREATE TABLE terminal_leases_v10 (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    terminal_id         TEXT    NOT NULL,
-    project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
-    state               TEXT    NOT NULL DEFAULT 'idle',
-    dispatch_id         TEXT,
-    generation          INTEGER NOT NULL DEFAULT 1,
-    leased_at           TEXT,
-    expires_at          TEXT,
-    last_heartbeat_at   TEXT,
-    released_at         TEXT,
-    metadata_json       TEXT    DEFAULT '{}',
-    FOREIGN KEY (dispatch_id, project_id) REFERENCES dispatches(dispatch_id, project_id),
-    UNIQUE(terminal_id, project_id)
-);
-
-INSERT INTO terminal_leases_v10
-    SELECT id, terminal_id, project_id, state, dispatch_id, generation,
-           leased_at, expires_at, last_heartbeat_at, released_at, metadata_json
-    FROM terminal_leases;
-
-DROP TABLE terminal_leases;
-ALTER TABLE terminal_leases_v10 RENAME TO terminal_leases;
-
-CREATE INDEX IF NOT EXISTS idx_lease_state             ON terminal_leases(state);
-CREATE INDEX IF NOT EXISTS idx_lease_dispatch          ON terminal_leases(dispatch_id);
-CREATE INDEX IF NOT EXISTS idx_lease_project           ON terminal_leases(project_id);
-CREATE INDEX IF NOT EXISTS idx_lease_terminal_project  ON terminal_leases(terminal_id, project_id);
-
--- ============================================================================
--- 3. dispatches: composite UNIQUE(dispatch_id, project_id)
+-- 2. dispatches: composite UNIQUE(dispatch_id, project_id)
+--    Rebuilt FIRST because terminal_leases carries a FK → dispatches
+--    (dispatch_id, project_id). The composite UNIQUE must exist on the
+--    referenced table before the referencing table is built.
 --    Composite rather than natural-key only — prevents cross-tenant collision
 --    when dispatch_id prefixes are reused under ADR-007 §3.
 -- ============================================================================
@@ -107,9 +82,10 @@ CREATE INDEX IF NOT EXISTS idx_dispatch_created  ON dispatches(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dispatches_project ON dispatches(project_id);
 
 -- ============================================================================
--- 3.5. dispatch_attempts: fix broken FK after dispatches composite UNIQUE
---      REFERENCES dispatches(dispatch_id) is now invalid — upgrade to composite.
---      project_id already present (added by migration 0010).
+-- 3. dispatch_attempts: fix broken FK after dispatches composite UNIQUE
+--    REFERENCES dispatches(dispatch_id) is now invalid — upgrade to composite.
+--    project_id already present (added by migration 0010).
+--    Rebuilt after dispatches so the new composite FK target already exists.
 -- ============================================================================
 
 CREATE TABLE dispatch_attempts_v10 (
@@ -141,7 +117,43 @@ CREATE INDEX IF NOT EXISTS idx_attempt_terminal  ON dispatch_attempts(terminal_i
 CREATE INDEX IF NOT EXISTS idx_attempt_project   ON dispatch_attempts(project_id);
 
 -- ============================================================================
--- 4. Version stamp
+-- 4. terminal_leases: composite UNIQUE(terminal_id, project_id)
+--    SQLite cannot ALTER a constraint — requires table rebuild.
+--    Rebuilt AFTER dispatches so FK → dispatches(dispatch_id, project_id)
+--    targets an already-existing composite UNIQUE constraint.
+-- ============================================================================
+
+CREATE TABLE terminal_leases_v10 (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    terminal_id         TEXT    NOT NULL,
+    project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+    state               TEXT    NOT NULL DEFAULT 'idle',
+    dispatch_id         TEXT,
+    generation          INTEGER NOT NULL DEFAULT 1,
+    leased_at           TEXT,
+    expires_at          TEXT,
+    last_heartbeat_at   TEXT,
+    released_at         TEXT,
+    metadata_json       TEXT    DEFAULT '{}',
+    FOREIGN KEY (dispatch_id, project_id) REFERENCES dispatches(dispatch_id, project_id),
+    UNIQUE(terminal_id, project_id)
+);
+
+INSERT INTO terminal_leases_v10
+    SELECT id, terminal_id, project_id, state, dispatch_id, generation,
+           leased_at, expires_at, last_heartbeat_at, released_at, metadata_json
+    FROM terminal_leases;
+
+DROP TABLE terminal_leases;
+ALTER TABLE terminal_leases_v10 RENAME TO terminal_leases;
+
+CREATE INDEX IF NOT EXISTS idx_lease_state             ON terminal_leases(state);
+CREATE INDEX IF NOT EXISTS idx_lease_dispatch          ON terminal_leases(dispatch_id);
+CREATE INDEX IF NOT EXISTS idx_lease_project           ON terminal_leases(project_id);
+CREATE INDEX IF NOT EXISTS idx_lease_terminal_project  ON terminal_leases(terminal_id, project_id);
+
+-- ============================================================================
+-- 5. Version stamp
 -- ============================================================================
 
 INSERT OR IGNORE INTO runtime_schema_version (version, description)

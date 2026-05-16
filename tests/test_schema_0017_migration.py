@@ -298,6 +298,40 @@ PRAGMA foreign_keys = ON;
     assert "error" in failed
 
 
+def test_migration_order_creates_dispatches_before_leases(tmp_path: Path) -> None:
+    """Migration must rebuild dispatches before terminal_leases.
+
+    terminal_leases carries FK → dispatches(dispatch_id, project_id).
+    If terminal_leases is rebuilt first, that FK references a composite key
+    that does not yet exist, causing IntegrityError when FK enforcement is
+    active during the INSERT phase.
+
+    This test exercises that failure mode by stripping the migration's own
+    PRAGMA foreign_keys = OFF so FK enforcement stays ON throughout. With
+    correct ordering (dispatches first) the migration completes without error.
+    """
+    db = tmp_path / "coord.db"
+    _create_pre_migration_db(db)
+
+    raw_sql = MIGRATION_SQL.read_text()
+    # Remove the FK-off guard so SQLite enforces FK constraints during the run.
+    # This exposes ordering bugs: if terminal_leases is rebuilt before
+    # dispatches, the INSERT into terminal_leases_v10 will fail with
+    # IntegrityError because the composite UNIQUE on dispatches doesn't exist yet.
+    sql_with_fk_on = raw_sql.replace("PRAGMA foreign_keys = OFF;", "PRAGMA foreign_keys = ON;")
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executescript(sql_with_fk_on)
+    finally:
+        conn.close()
+
+    # Verify migration reached the expected end-state.
+    assert _max_version(db) == 12
+    assert _has_composite_unique(db, "dispatches", frozenset({"dispatch_id", "project_id"}))
+    assert _has_composite_unique(db, "terminal_leases", frozenset({"terminal_id", "project_id"}))
+
+
 def test_composite_fk_referencing_dispatches(tmp_path: Path) -> None:
     db = tmp_path / "coord.db"
     _create_pre_migration_db(db)
