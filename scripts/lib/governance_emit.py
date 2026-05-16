@@ -116,7 +116,7 @@ def emit_unified_report(
     duration_seconds: float,
     data_dir: Path,
 ) -> Path:
-    """Atomic write to unified_reports/<dispatch_id>_report.md. Returns path.
+    """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
@@ -127,7 +127,7 @@ def emit_unified_report(
     reports_dir = Path(data_dir) / "unified_reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    report_path = reports_dir / f"{dispatch_id}_report.md"
+    report_path = reports_dir / f"{dispatch_id}.md"
     if report_path.exists():
         return report_path
 

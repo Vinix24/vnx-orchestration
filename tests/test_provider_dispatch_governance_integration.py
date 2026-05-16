@@ -86,7 +86,7 @@ def _last_receipt(tmp_path):
 
 def _report_exists(tmp_path, dispatch_id):
     data_dir = tmp_path / "data"
-    return (data_dir / "unified_reports" / f"{dispatch_id}_report.md").exists()
+    return (data_dir / "unified_reports" / f"{dispatch_id}.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ def test_unified_report_created_for_each_provider(tmp_path, monkeypatch):
          patch("providers.behavior_contracts.get_contract", side_effect=KeyError):
         provider_dispatch._dispatch_litellm(args)
     assert _report_exists(tmp_path, dispatch_id)
-    report_path = tmp_path / "data" / "unified_reports" / f"{dispatch_id}_report.md"
+    report_path = tmp_path / "data" / "unified_reports" / f"{dispatch_id}.md"
     content = report_path.read_text()
     assert "Provider: litellm:deepseek" in content
     assert "litellm response text" in content
@@ -391,3 +391,19 @@ def test_warning_logged_when_extraction_fails(caplog):
         usage = provider_dispatch._extract_token_usage(_NullResult(), "litellm:deepseek")
     assert usage == {"input": 0, "output": 0, "cache_hit": 0}
     assert any("token_usage extraction returned 0" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# OI-1480: unified report .md suffix (no _report suffix)
+# ---------------------------------------------------------------------------
+
+def test_unified_report_uses_clean_md_suffix(tmp_path):
+    """emit_unified_report must write <dispatch_id>.md, not <dispatch_id>_report.md."""
+    args = _make_args("claude", dispatch_id="suffix-check-001")
+    with patch("subprocess_dispatch.deliver_with_recovery", return_value=True):
+        provider_dispatch._dispatch_claude(args)
+    data_dir = tmp_path / "data"
+    clean_path = data_dir / "unified_reports" / "suffix-check-001.md"
+    legacy_path = data_dir / "unified_reports" / "suffix-check-001_report.md"
+    assert clean_path.exists(), f"Expected {clean_path} to exist"
+    assert not legacy_path.exists(), f"Legacy path {legacy_path} must not exist"

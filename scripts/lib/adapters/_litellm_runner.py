@@ -32,10 +32,6 @@ _PROVIDER_KEY_REQS: dict = {
     "openrouter": "OPENROUTER_API_KEY",  # z.AI via OpenRouter (PR-7.3)
 }
 
-# Providers that support stream_options usage reporting via LiteLLM
-_USAGE_STREAM_PROVIDERS = frozenset({"deepseek", "moonshot", "openrouter"})
-
-
 def _emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
@@ -56,11 +52,8 @@ def _validate_provider_key(model: str) -> tuple[bool, str]:
 
 
 def _completion_kwargs(model: str) -> dict:
-    """Extra keyword args for litellm.completion per provider prefix."""
-    prefix = _provider_prefix(model)
-    if prefix in _USAGE_STREAM_PROVIDERS:
-        return {"stream_options": {"include_usage": True}}
-    return {}
+    """Extra keyword args for litellm.completion — always request usage in stream."""
+    return {"stream_options": {"include_usage": True}}
 
 
 def _emit_usage(usage: object) -> None:
