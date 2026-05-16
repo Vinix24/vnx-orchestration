@@ -173,8 +173,8 @@ SELECT
     pc.min_workers,
     pc.max_workers,
     pc.scale_policy AS scaling_policy,
-    COUNT(CASE WHEN m.released_at IS NULL THEN 1 END)     AS active_count,
-    COUNT(CASE WHEN m.released_at IS NOT NULL THEN 1 END) AS reaped_count,
+    COUNT(CASE WHEN m.id IS NOT NULL AND m.released_at IS NULL THEN 1 END)     AS active_count,
+    COUNT(CASE WHEN m.released_at IS NOT NULL THEN 1 END)                      AS reaped_count,
     MAX(m.joined_at) AS last_join_at
 FROM {alias}.pool_config pc
 LEFT JOIN {alias}.worker_pool_membership m

@@ -15,6 +15,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +23,10 @@ from typing import Dict, List
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_EVENTS_PATH = Path("~/.vnx-aggregator/events/pool_decisions.ndjson")
+
+def _default_events_path() -> Path:
+    data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+    return data_dir / "events" / "pool_decisions.ndjson"
 
 
 def list_all_pools(aggregator_db: Path) -> List[Dict]:
@@ -86,7 +90,7 @@ def run_supervision_tick(
 
     Returns a summary dict suitable for logging or reporting.
     """
-    resolved_events = (events_path or _DEFAULT_EVENTS_PATH).expanduser()
+    resolved_events = (events_path or _default_events_path()).expanduser()
 
     pools = list_all_pools(aggregator_db)
     if not pools:

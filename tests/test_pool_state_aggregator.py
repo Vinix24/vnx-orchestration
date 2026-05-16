@@ -388,3 +388,95 @@ def test_projects_without_pool_tables_skipped(tmp_path):
     # Should complete without error; pool_state_unified table exists but is empty
     pools = list_all_pools(view_db)
     assert pools == []
+
+
+# ---------------------------------------------------------------------------
+# 9. Regression: LEFT JOIN NULL row must not count as active (BLOCKING fix)
+# ---------------------------------------------------------------------------
+
+def test_empty_pool_active_count_is_zero(tmp_path):
+    """Pool with 0 members must report active_count=0, not 1 (LEFT JOIN null row bug)."""
+    proj_dir = tmp_path / "proj-empty"
+    _make_project_db(
+        proj_dir / ".vnx-data" / "state", "proj-empty",
+        min_workers=2, max_workers=4,
+        active_members=0, reaped_members=0,
+    )
+    view_db = tmp_path / "data.db"
+    projects = [ProjectEntry(name="proj-empty", path=proj_dir, project_id="proj-empty")]
+    materialize_views(view_db, projects)
+
+    pools = list_all_pools(view_db)
+    assert len(pools) == 1
+    pool = pools[0]
+    assert pool["active_count"] == 0, (
+        f"Empty pool reported active_count={pool['active_count']}; "
+        "LEFT JOIN null row is being counted as active"
+    )
+    assert pool["reaped_count"] == 0
+
+
+def test_empty_pool_triggers_starvation(tmp_path):
+    """Empty pool (active_count=0) with min_workers=2 must appear in starvation list."""
+    proj_dir = tmp_path / "proj-starved"
+    _make_project_db(
+        proj_dir / ".vnx-data" / "state", "proj-starved",
+        min_workers=2, max_workers=4,
+        active_members=0, reaped_members=0,
+    )
+    view_db = tmp_path / "data.db"
+    projects = [ProjectEntry(name="proj-starved", path=proj_dir, project_id="proj-starved")]
+    materialize_views(view_db, projects)
+
+    pools = list_all_pools(view_db)
+    starved = detect_starvation(pools)
+    assert len(starved) == 1
+    assert starved[0]["project_id"] == "proj-starved"
+
+
+# ---------------------------------------------------------------------------
+# 10. Regression: supervisor ledger must use VNX_DATA_DIR, not ~/.vnx-aggregator
+# ---------------------------------------------------------------------------
+
+def test_supervisor_ledger_respects_vnx_data_dir(tmp_path, monkeypatch):
+    """run_supervision_tick must write pool_decisions.ndjson under VNX_DATA_DIR."""
+    data_dir = tmp_path / "custom-data"
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+
+    # Import after monkeypatching so env is visible at call time
+    from scripts.control_centre.pool_supervisor import run_supervision_tick
+
+    # Create a project with an active pool so a starvation event fires
+    proj_dir = tmp_path / "proj-ledger"
+    _make_project_db(
+        proj_dir / ".vnx-data" / "state", "proj-ledger",
+        min_workers=2, max_workers=4,
+        active_members=0,
+    )
+    view_db = tmp_path / "data.db"
+    projects = [ProjectEntry(name="proj-ledger", path=proj_dir, project_id="proj-ledger")]
+    materialize_views(view_db, projects)
+
+    run_supervision_tick(view_db)
+
+    expected_ledger = data_dir / "events" / "pool_decisions.ndjson"
+    assert expected_ledger.exists(), (
+        f"Ledger not written to VNX_DATA_DIR={data_dir}; ADR-005 violation"
+    )
+    lines = [l for l in expected_ledger.read_text().splitlines() if l.strip()]
+    assert len(lines) >= 1
+    ev = json.loads(lines[0])
+    assert ev["event_type"] == "pool.supervisor.starvation"
+
+
+def test_supervisor_ledger_default_path_no_home_dir(tmp_path, monkeypatch):
+    """Without VNX_DATA_DIR, ledger must default to .vnx-data/events/ (not ~/.vnx-aggregator/)."""
+    monkeypatch.delenv("VNX_DATA_DIR", raising=False)
+    from scripts.control_centre.pool_supervisor import _default_events_path
+
+    path = _default_events_path()
+    # Must NOT reference ~/.vnx-aggregator
+    assert ".vnx-aggregator" not in str(path), (
+        f"Default ledger path uses deprecated ~/.vnx-aggregator: {path}"
+    )
+    assert ".vnx-data" in str(path)
