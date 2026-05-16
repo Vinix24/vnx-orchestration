@@ -43,6 +43,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from scripts.aggregator.state_aggregator import ProjectStateUpdate, StateAggregator
 from scripts.aggregator.t0_lifecycle import T0LifecycleManager
 from scripts.lib.intelligence_aggregator import IntelligenceAggregator
+from scripts.lib.vnx_paths import resolve_state_dir
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -76,15 +77,18 @@ def _load_registry(registry_path: Path) -> List[Dict[str, Any]]:
 def _project_vnx_data(project: Dict[str, Any]) -> Path:
     """Resolve .vnx-data dir for a project."""
     root = Path(project["root"])
-    coord_db_rel = project.get("coord_db", ".vnx-data/state/runtime_coordination.db")
-    # .vnx-data is two levels up from coord_db
-    return root / Path(coord_db_rel).parts[0]
+    coord_db_rel = project.get("coord_db")
+    if coord_db_rel:
+        return root / Path(coord_db_rel).parts[0]
+    return resolve_state_dir(root).parent
 
 
 def _coord_db_path(project: Dict[str, Any]) -> Path:
     root = Path(project["root"])
-    coord_db_rel = project.get("coord_db", ".vnx-data/state/runtime_coordination.db")
-    return root / coord_db_rel
+    coord_db_rel = project.get("coord_db")
+    if coord_db_rel:
+        return root / coord_db_rel
+    return resolve_state_dir(root) / "runtime_coordination.db"
 
 
 def _make_aggregator(vnx_data_dir: Path) -> StateAggregator:
@@ -432,11 +436,11 @@ def _build_intel_db_paths(registry: List[Dict[str, Any]]) -> Dict[str, Path]:
     result: Dict[str, Path] = {}
     for project in registry:
         root = Path(project["root"])
-        intel_db = project.get(
-            "intel_db",
-            ".vnx-data/state/quality_intelligence.db",
-        )
-        result[project["id"]] = root / intel_db
+        intel_db_rel = project.get("intel_db")
+        if intel_db_rel:
+            result[project["id"]] = root / intel_db_rel
+        else:
+            result[project["id"]] = resolve_state_dir(root) / "quality_intelligence.db"
     return result
 
 

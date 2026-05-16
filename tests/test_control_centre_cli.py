@@ -401,3 +401,64 @@ def test_dispatch_unknown_project_returns_error(tmp_path: Path) -> None:
 
     assert rc == 1
     mock_agg.submit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Path-resolver regression tests (Legacy path gate CI fix)
+# ---------------------------------------------------------------------------
+
+
+def test_project_vnx_data_default_uses_resolver(tmp_path: Path) -> None:
+    """_project_vnx_data without coord_db returns root/.vnx-data via resolver."""
+    project = {"id": "x", "root": str(tmp_path)}
+    result = _project_vnx_data(project)
+    assert result == (tmp_path / ".vnx-data").resolve()
+
+
+def test_project_vnx_data_explicit_coord_db(tmp_path: Path) -> None:
+    """_project_vnx_data with explicit coord_db uses first path component."""
+    project = {"id": "x", "root": str(tmp_path), "coord_db": "mydata/state/coord.db"}
+    result = _project_vnx_data(project)
+    assert result == tmp_path / "mydata"
+
+
+def test_coord_db_path_default_uses_resolver(tmp_path: Path) -> None:
+    """_coord_db_path without coord_db key builds path from resolve_state_dir."""
+    project = {"id": "x", "root": str(tmp_path)}
+    result = _coord_db_path(project)
+    assert result == (tmp_path / ".vnx-data" / "state").resolve() / "runtime_coordination.db"
+
+
+def test_coord_db_path_explicit(tmp_path: Path) -> None:
+    """_coord_db_path with explicit coord_db uses it verbatim."""
+    project = {"id": "x", "root": str(tmp_path), "coord_db": "custom/coord.db"}
+    assert _coord_db_path(project) == tmp_path / "custom" / "coord.db"
+
+
+def test_build_intel_db_paths_default_uses_resolver(tmp_path: Path) -> None:
+    """_build_intel_db_paths without intel_db builds path from resolve_state_dir."""
+    registry = [{"id": "x", "root": str(tmp_path)}]
+    result = _build_intel_db_paths(registry)
+    expected = (tmp_path / ".vnx-data" / "state").resolve() / "quality_intelligence.db"
+    assert result["x"] == expected
+
+
+def test_build_intel_db_paths_explicit(tmp_path: Path) -> None:
+    """_build_intel_db_paths with explicit intel_db uses it verbatim."""
+    registry = [{"id": "x", "root": str(tmp_path), "intel_db": "custom/intel.db"}]
+    result = _build_intel_db_paths(registry)
+    assert result["x"] == tmp_path / "custom" / "intel.db"
+
+
+def test_no_hardcoded_legacy_path_in_cli_source() -> None:
+    """control_centre_cli.py must not contain literal .vnx-data/state/ string."""
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    src = (_REPO_ROOT / "scripts" / "control_centre_cli.py").read_text()
+    assert ".vnx-data/state/" not in src
+
+
+def test_no_hardcoded_legacy_path_in_yaml_example() -> None:
+    """control_centre_projects.yaml.example must not contain literal .vnx-data/state/ string."""
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    content = (_REPO_ROOT / "scripts" / "control_centre_projects.yaml.example").read_text()
+    assert ".vnx-data/state/" not in content

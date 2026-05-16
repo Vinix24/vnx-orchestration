@@ -11,26 +11,28 @@
 # Fields:
 #   id:       project_id (required) — must be unique
 #   root:     absolute path to project root (required)
-#   coord_db: path relative to root for runtime_coordination.db (optional)
-#   intel_db: path relative to root for quality_intelligence.db (optional)
+#   coord_db: path relative to root for runtime_coordination.db (optional,
+#             defaults to project state dir resolved via resolve_state_dir())
+#   intel_db: path relative to root for quality_intelligence.db (optional,
+#             defaults to project state dir resolved via resolve_state_dir())
 
 projects:
   - id: vnx-dev
-    root: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt
-    coord_db: .vnx-data/state/runtime_coordination.db
-    intel_db: .vnx-data/state/quality_intelligence.db
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db    # resolved via VNX_STATE_DIR
+    intel_db: <state>/quality_intelligence.db
 
   - id: sales-copilot
-    root: /Users/vincentvandeth/Desktop/BUSINESS/development/sales-copilot
-    coord_db: .vnx-data/state/runtime_coordination.db
-    intel_db: .vnx-data/state/quality_intelligence.db
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db
+    intel_db: <state>/quality_intelligence.db
 
   - id: mc
-    root: /Users/vincentvandeth/Desktop/BUSINESS/development/mission-control
-    coord_db: .vnx-data/state/runtime_coordination.db
-    intel_db: .vnx-data/state/quality_intelligence.db
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db
+    intel_db: <state>/quality_intelligence.db
 
   - id: seocrawler-v2
-    root: /Users/vincentvandeth/Development/SEOcrawler_v2
-    coord_db: .vnx-data/state/runtime_coordination.db
-    intel_db: .vnx-data/state/quality_intelligence.db
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db
+    intel_db: <state>/quality_intelligence.db
