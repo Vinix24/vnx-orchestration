@@ -26,7 +26,7 @@ def _make_registry_from_yaml(yaml_text: str):
     import yaml
     from worker_registry import _build_registry
     data = yaml.safe_load(yaml_text)
-    return _build_registry(data, frozenset())
+    return _build_registry(data)  # allowlist=None → skip validation
 
 
 FOUR_WORKER_YAML = textwrap.dedent("""\

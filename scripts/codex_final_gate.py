@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -129,7 +129,15 @@ def enforce_codex_gate(
     - changed files touch governance or runtime paths
     - auto_merge_policy says codex_final_gate_required
     - PR deletes >= DELETION_FILE_HOLD files (when project_root provided)
-    - PR deletes >= DELETION_FILE_WARN files: gate required + mass_deletion_warning reason
+
+    Mass-deletion threshold semantics:
+    - WARN level: `mass_deletion_warn=True`, added to `warnings` list. Does NOT promote
+      required to True and does NOT add to `reasons`.
+    - BLOCK level (>= DELETION_FILE_HOLD): adds "mass_file_deletion" to `reasons` and
+      sets required=True.
+
+    Operator visibility: WARN surfaces in receipt findings and PR comment but does not
+    block merge. Current implementation has WARN-only path; BLOCK threshold is future work.
     """
     reasons: List[str] = []
     risk = (contract.risk_class or "").strip().lower()
@@ -182,6 +190,130 @@ def enforce_codex_gate(
 # Prompt renderer
 # ---------------------------------------------------------------------------
 
+def _format_metadata_header(contract: ReviewContract) -> List[str]:
+    """Return prompt lines for the PR metadata header block."""
+    lines: List[str] = [
+        f"# Codex Final Gate Review: {contract.pr_id}",
+        "",
+        f"**PR**: {contract.pr_id} — {contract.pr_title}",
+        f"**Feature**: {contract.feature_title}",
+        f"**Branch**: {contract.branch}",
+        f"**Track**: {contract.track}",
+        f"**Risk Class**: {contract.risk_class}",
+        f"**Merge Policy**: {contract.merge_policy}",
+        f"**Closure Stage**: {contract.closure_stage}",
+    ]
+    if contract.dispatch_id:
+        lines.append(f"**Dispatch ID**: {contract.dispatch_id}")
+    lines += [f"**Content Hash**: {contract.content_hash}", ""]
+    return lines
+
+
+def _format_deleted_files_alert(deleted_files: List[str]) -> List[str]:
+    """Return prompt lines for the Net-Deletion Alert section."""
+    count = len(deleted_files)
+    level = "HOLD" if count >= DELETION_FILE_HOLD else "WARN"
+    lines: List[str] = [
+        f"## Net-Deletion Alert [{level}] ({count} file(s) deleted)",
+        "",
+        f"> **{count} file(s)** are fully deleted in this PR. Verify each deletion is intentional and covered by a deliverable or non-goal.",
+        "",
+    ]
+    for f in deleted_files:
+        lines.append(f"- `{f}`")
+    lines.append("")
+    return lines
+
+
+def _format_evidence_sections(contract: ReviewContract) -> List[str]:
+    """Return prompt lines for changed files, scope, test evidence, findings, and deps."""
+    lines: List[str] = []
+
+    if contract.changed_files:
+        lines += [f"## Changed Files ({len(contract.changed_files)})", ""]
+        for f in contract.changed_files:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    if contract.scope_files:
+        lines += [f"## Declared Scope Files ({len(contract.scope_files)})", ""]
+        for f in contract.scope_files:
+            lines.append(f"- `{f}`")
+        lines.append("")
+
+    if contract.test_evidence:
+        lines += ["## Test Evidence", ""]
+        if contract.test_evidence.test_files:
+            lines.append("**Test files**:")
+            for tf in contract.test_evidence.test_files:
+                lines.append(f"- `{tf}`")
+        if contract.test_evidence.test_command:
+            lines.append(f"**Test command**: `{contract.test_evidence.test_command}`")
+        if contract.test_evidence.expected_assertions:
+            lines.append(f"**Expected assertions**: {contract.test_evidence.expected_assertions}")
+        lines.append("")
+
+    if contract.deterministic_findings:
+        lines += [f"## Deterministic Findings ({len(contract.deterministic_findings)})", ""]
+        for finding in contract.deterministic_findings:
+            loc = f" ({finding.file_path}:{finding.line})" if finding.file_path else ""
+            lines.append(f"- **[{finding.severity}]** [{finding.source}]{loc}: {finding.message}")
+        lines.append("")
+
+    if contract.dependencies:
+        lines += [f"## Dependencies: {', '.join(contract.dependencies)}", ""]
+
+    return lines
+
+
+def _format_review_instructions() -> List[str]:
+    """Return prompt lines for the review instructions and severity rules sections."""
+    return [
+        "## Review Instructions",
+        "",
+        "You are the Codex final gate reviewer. Evaluate this PR against its contract:",
+        "",
+        "1. **Deliverable completeness**: Are all listed deliverables addressed by the changed files?",
+        "2. **Scope discipline**: Do the changes stay within scope and not violate non-goals?",
+        "3. **Quality gate checks**: Can each quality gate check be verified from the evidence?",
+        "4. **Test coverage**: Are declared tests present and do they cover the deliverables?",
+        "5. **Deterministic findings**: Are all error-severity findings resolved?",
+        "6. **Net deletion sanity**: Count files listed as entirely removed in the diff. If ≥5 files are deleted, include a warning finding with the count and confirm the deletions are intentional (not accidental scope reduction).",
+        "7. **Residual risk**: What risks remain after this PR merges?",
+        "",
+        "## Severity rules (strict)",
+        "",
+        "Default `severity` is `warning`. Promote to `error` ONLY when the finding's impact includes one of:",
+        "- Data loss or corruption (database, files, append-only logs)",
+        "- False-positive PR closure (closure_verifier passing when it should block)",
+        "- False-negative PR rejection (closure_verifier blocking when it should pass)",
+        "- Security boundary breach (auth bypass, secret leak, privilege escalation)",
+        "- Cross-dispatch state corruption (one dispatch's data leaking into another's audit trail)",
+        "",
+        "Use `info` for advisory-only observations.",
+        "",
+        "Findings about the following are NOT `error`-severity by default:",
+        "- Style, formatting, log shape (stderr vs stdout, plain vs JSON)",
+        "- Truncated-but-named hash fields (unless a caller compares to a real full SHA)",
+        "- Hardcoded test fixtures (only when tests run elsewhere, mark out-of-scope)",
+        "- Operator-toggled surfaces (when toggling resolves the issue)",
+        "",
+        "Mark findings about lines NOT in this PR's diff as `severity: info` AND include `\"out_of_scope\": true` field.",
+        "Mark findings introduced by a previous fix-round commit as `severity: warning` AND include `\"introduced_by_prior_fix\": true` field.",
+        "",
+        "Respond with a structured JSON verdict:",
+        "```json",
+        '{',
+        '  "verdict": "pass|fail|blocked",',
+        '  "findings": [{"severity": "error|warning|info", "message": "...", "out_of_scope": false, "introduced_by_prior_fix": false}],',
+        '  "residual_risk": "description of remaining risks or null",',
+        '  "rerun_required": false,',
+        '  "rerun_reason": null',
+        '}',
+        "```",
+    ]
+
+
 def render_codex_prompt(
     contract: ReviewContract,
     deleted_files: Optional[List[str]] = None,
@@ -209,145 +341,31 @@ def render_codex_prompt(
     if errors:
         raise ValueError(f"Cannot render Codex prompt: missing required fields: {', '.join(errors)}")
 
-    sections: List[str] = []
+    sections: List[str] = _format_metadata_header(contract)
 
-    # Header
-    sections.append(f"# Codex Final Gate Review: {contract.pr_id}")
-    sections.append("")
-    sections.append(f"**PR**: {contract.pr_id} — {contract.pr_title}")
-    sections.append(f"**Feature**: {contract.feature_title}")
-    sections.append(f"**Branch**: {contract.branch}")
-    sections.append(f"**Track**: {contract.track}")
-    sections.append(f"**Risk Class**: {contract.risk_class}")
-    sections.append(f"**Merge Policy**: {contract.merge_policy}")
-    sections.append(f"**Closure Stage**: {contract.closure_stage}")
-    if contract.dispatch_id:
-        sections.append(f"**Dispatch ID**: {contract.dispatch_id}")
-    sections.append(f"**Content Hash**: {contract.content_hash}")
-    sections.append("")
-
-    # Deliverables
-    sections.append("## Deliverables")
-    sections.append("")
+    sections += ["## Deliverables", ""]
     for i, d in enumerate(contract.deliverables, 1):
         sections.append(f"{i}. [{d.category}] {d.description}")
     sections.append("")
 
-    # Non-goals
     if contract.non_goals:
-        sections.append("## Non-Goals (Explicitly Out of Scope)")
-        sections.append("")
+        sections += ["## Non-Goals (Explicitly Out of Scope)", ""]
         for ng in contract.non_goals:
             sections.append(f"- {ng}")
         sections.append("")
 
-    # Quality gate
     if contract.quality_gate:
-        sections.append(f"## Quality Gate: `{contract.quality_gate.gate_id}`")
-        sections.append("")
+        sections += [f"## Quality Gate: `{contract.quality_gate.gate_id}`", ""]
         for check in contract.quality_gate.checks:
             sections.append(f"- [ ] {check}")
         sections.append("")
 
-    # Changed files
-    if contract.changed_files:
-        sections.append(f"## Changed Files ({len(contract.changed_files)})")
-        sections.append("")
-        for f in contract.changed_files:
-            sections.append(f"- `{f}`")
-        sections.append("")
+    sections.extend(_format_evidence_sections(contract))
 
-    # Net-deletion alert
     if deleted_files:
-        count = len(deleted_files)
-        level = "HOLD" if count >= DELETION_FILE_HOLD else "WARN"
-        sections.append(f"## Net-Deletion Alert [{level}] ({count} file(s) deleted)")
-        sections.append("")
-        sections.append(f"> **{count} file(s)** are fully deleted in this PR. Verify each deletion is intentional and covered by a deliverable or non-goal.")
-        sections.append("")
-        for f in deleted_files:
-            sections.append(f"- `{f}`")
-        sections.append("")
+        sections.extend(_format_deleted_files_alert(deleted_files))
 
-    # Scope files
-    if contract.scope_files:
-        sections.append(f"## Declared Scope Files ({len(contract.scope_files)})")
-        sections.append("")
-        for f in contract.scope_files:
-            sections.append(f"- `{f}`")
-        sections.append("")
-
-    # Test evidence
-    if contract.test_evidence:
-        sections.append("## Test Evidence")
-        sections.append("")
-        if contract.test_evidence.test_files:
-            sections.append("**Test files**:")
-            for tf in contract.test_evidence.test_files:
-                sections.append(f"- `{tf}`")
-        if contract.test_evidence.test_command:
-            sections.append(f"**Test command**: `{contract.test_evidence.test_command}`")
-        if contract.test_evidence.expected_assertions:
-            sections.append(f"**Expected assertions**: {contract.test_evidence.expected_assertions}")
-        sections.append("")
-
-    # Deterministic findings
-    if contract.deterministic_findings:
-        sections.append(f"## Deterministic Findings ({len(contract.deterministic_findings)})")
-        sections.append("")
-        for finding in contract.deterministic_findings:
-            loc = f" ({finding.file_path}:{finding.line})" if finding.file_path else ""
-            sections.append(f"- **[{finding.severity}]** [{finding.source}]{loc}: {finding.message}")
-        sections.append("")
-
-    # Dependencies
-    if contract.dependencies:
-        sections.append(f"## Dependencies: {', '.join(contract.dependencies)}")
-        sections.append("")
-
-    # Review instructions
-    sections.append("## Review Instructions")
-    sections.append("")
-    sections.append("You are the Codex final gate reviewer. Evaluate this PR against its contract:")
-    sections.append("")
-    sections.append("1. **Deliverable completeness**: Are all listed deliverables addressed by the changed files?")
-    sections.append("2. **Scope discipline**: Do the changes stay within scope and not violate non-goals?")
-    sections.append("3. **Quality gate checks**: Can each quality gate check be verified from the evidence?")
-    sections.append("4. **Test coverage**: Are declared tests present and do they cover the deliverables?")
-    sections.append("5. **Deterministic findings**: Are all error-severity findings resolved?")
-    sections.append("6. **Net deletion sanity**: Count files listed as entirely removed in the diff. If ≥5 files are deleted, include a warning finding with the count and confirm the deletions are intentional (not accidental scope reduction).")
-    sections.append("7. **Residual risk**: What risks remain after this PR merges?")
-    sections.append("")
-    sections.append("## Severity rules (strict)")
-    sections.append("")
-    sections.append("Default `severity` is `warning`. Promote to `error` ONLY when the finding's impact includes one of:")
-    sections.append("- Data loss or corruption (database, files, append-only logs)")
-    sections.append("- False-positive PR closure (closure_verifier passing when it should block)")
-    sections.append("- False-negative PR rejection (closure_verifier blocking when it should pass)")
-    sections.append("- Security boundary breach (auth bypass, secret leak, privilege escalation)")
-    sections.append("- Cross-dispatch state corruption (one dispatch's data leaking into another's audit trail)")
-    sections.append("")
-    sections.append("Use `info` for advisory-only observations.")
-    sections.append("")
-    sections.append("Findings about the following are NOT `error`-severity by default:")
-    sections.append("- Style, formatting, log shape (stderr vs stdout, plain vs JSON)")
-    sections.append("- Truncated-but-named hash fields (unless a caller compares to a real full SHA)")
-    sections.append("- Hardcoded test fixtures (only when tests run elsewhere, mark out-of-scope)")
-    sections.append("- Operator-toggled surfaces (when toggling resolves the issue)")
-    sections.append("")
-    sections.append("Mark findings about lines NOT in this PR's diff as `severity: info` AND include `\"out_of_scope\": true` field.")
-    sections.append("Mark findings introduced by a previous fix-round commit as `severity: warning` AND include `\"introduced_by_prior_fix\": true` field.")
-    sections.append("")
-    sections.append("Respond with a structured JSON verdict:")
-    sections.append("```json")
-    sections.append('{')
-    sections.append('  "verdict": "pass|fail|blocked",')
-    sections.append('  "findings": [{"severity": "error|warning|info", "message": "...", "out_of_scope": false, "introduced_by_prior_fix": false}],')
-    sections.append('  "residual_risk": "description of remaining risks or null",')
-    sections.append('  "rerun_required": false,')
-    sections.append('  "rerun_reason": null')
-    sections.append('}')
-    sections.append("```")
+    sections.extend(_format_review_instructions())
 
     return "\n".join(sections)
 
@@ -401,6 +419,51 @@ class CodexFinalGateReceipt:
         return cls.from_dict(json.loads(text))
 
 
+def _apply_mass_deletion_warning(
+    enforcement: CodexGateEnforcementResult,
+    findings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Prepend a WARN-level finding when mass-deletion threshold is reached.
+
+    WARN does not make the gate required; it surfaces as an advisory finding.
+    """
+    if not enforcement.mass_deletion_warn:
+        return findings
+    warning = {
+        "severity": "warning",
+        "message": (
+            f"Net deletion warning: {enforcement.mass_deletion_count} file(s) deleted "
+            f"(>= {DELETION_FILE_WARN} threshold) — verify intentional scope reduction"
+        ),
+    }
+    return [warning] + findings
+
+
+def _persist_result(
+    receipt: CodexFinalGateReceipt,
+    output_path: Optional[Path],
+    contract: ReviewContract,
+) -> None:
+    """Write receipt to disk (if output_path given) and emit governance receipt."""
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(receipt.to_json() + "\n", encoding="utf-8")
+
+    emit_governance_receipt(
+        "codex_final_gate",
+        status=receipt.verdict,
+        terminal="T0",
+        pr_id=contract.pr_id,
+        gate="codex_final_gate",
+        required=receipt.required,
+        enforcement_reasons=receipt.enforcement_reasons,
+        residual_risk=receipt.residual_risk,
+        rerun_required=receipt.rerun_required,
+        rerun_reason=receipt.rerun_reason,
+        content_hash=contract.content_hash,
+    )
+
+
 def evaluate_and_record(
     contract: ReviewContract,
     *,
@@ -446,16 +509,7 @@ def evaluate_and_record(
         rerun_required = False
         rerun_reason = None
 
-    if enforcement.mass_deletion_warn:
-        findings = [
-            {
-                "severity": "warning",
-                "message": (
-                    f"Net deletion warning: {enforcement.mass_deletion_count} file(s) deleted "
-                    f"(>= {DELETION_FILE_WARN} threshold) — verify intentional scope reduction"
-                ),
-            }
-        ] + findings
+    findings = _apply_mass_deletion_warning(enforcement, findings)
 
     receipt = CodexFinalGateReceipt(
         pr_id=contract.pr_id,
@@ -471,24 +525,7 @@ def evaluate_and_record(
         recorded_at=utc_now_iso(),
     )
 
-    if output_path:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(receipt.to_json() + "\n", encoding="utf-8")
-
-    emit_governance_receipt(
-        "codex_final_gate",
-        status=verdict,
-        terminal="T0",
-        pr_id=contract.pr_id,
-        gate="codex_final_gate",
-        required=enforcement.required,
-        enforcement_reasons=enforcement.reasons,
-        residual_risk=residual_risk,
-        rerun_required=rerun_required,
-        rerun_reason=rerun_reason,
-        content_hash=contract.content_hash,
-    )
-
+    _persist_result(receipt, output_path, contract)
     return receipt
 
 

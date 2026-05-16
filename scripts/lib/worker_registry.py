@@ -31,7 +31,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ def _validate_pool_ref(worker: Worker, pool_ids: frozenset) -> None:
 # Load registry from data dict
 # ---------------------------------------------------------------------------
 
-def _build_registry(data: dict, valid_roles: Optional[frozenset]) -> WorkerRegistry:
+def _build_registry(data: dict, valid_roles: Optional[FrozenSet[str]] = None) -> WorkerRegistry:
     """Parse, validate, and construct WorkerRegistry from raw YAML dict."""
     raw_workers = data.get("workers", [])
     raw_pools = data.get("pools", [])
