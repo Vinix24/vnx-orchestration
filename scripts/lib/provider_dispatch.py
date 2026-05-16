@@ -68,16 +68,47 @@ def _extract_response_text(result: Any) -> str:
     return (getattr(result, "completion_text", None) or "")
 
 
-def _extract_token_usage(result: Any) -> Dict[str, int]:
-    """Normalize token_usage from any spawn result to {input, output, cache_hit}."""
+def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
+    """Normalize token_usage from any spawn result to {input, output, cache_hit}.
+
+    Each provider emits usage under different field names:
+    - litellm:*  — prompt_tokens / completion_tokens (OpenAI format from _litellm_runner.py)
+    - codex      — input_tokens / output_tokens / cache_read_tokens
+    - gemini     — input_tokens / output_tokens / cache_read_tokens
+    - claude     — token_usage is None (subprocess_dispatch does not yet return usage)
+    """
+    usage = {"input": 0, "output": 0, "cache_hit": 0}
     raw = getattr(result, "token_usage", None)
     if not isinstance(raw, dict):
-        return {"input": 0, "output": 0, "cache_hit": 0}
-    return {
-        "input": int(raw.get("input_tokens", raw.get("input", 0)) or 0),
-        "output": int(raw.get("output_tokens", raw.get("output", 0)) or 0),
-        "cache_hit": int(raw.get("cache_read_tokens", raw.get("cache_hit", 0)) or 0),
-    }
+        logger.warning(
+            "token_usage extraction returned 0 for provider=%s; check spawn_result shape", provider
+        )
+        return usage
+
+    if provider.startswith("litellm:"):
+        usage["input"] = int(raw.get("prompt_tokens", 0) or 0)
+        usage["output"] = int(raw.get("completion_tokens", 0) or 0)
+        details = raw.get("prompt_tokens_details") or {}
+        cache = int(details.get("cached_tokens", 0) or 0) or int(raw.get("prompt_cache_hit_tokens", 0) or 0)
+        usage["cache_hit"] = cache
+    elif provider in ("codex", "gemini"):
+        usage["input"] = int(raw.get("input_tokens", 0) or 0)
+        usage["output"] = int(raw.get("output_tokens", 0) or 0)
+        usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
+    elif provider == "claude":
+        usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
+        usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
+        usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
+    else:
+        usage["input"] = int(raw.get("input_tokens", raw.get("prompt_tokens", raw.get("input", 0))) or 0)
+        usage["output"] = int(raw.get("output_tokens", raw.get("completion_tokens", raw.get("output", 0))) or 0)
+        usage["cache_hit"] = int(raw.get("cache_read_tokens", raw.get("cache_hit", 0)) or 0)
+
+    if usage["input"] == 0 and usage["output"] == 0:
+        logger.warning(
+            "token_usage extraction returned 0 for provider=%s; check spawn_result shape", provider
+        )
+    return usage
 
 
 def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
@@ -122,7 +153,7 @@ def _emit_governance(
     state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
     data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
     duration = (end_time - start_time).total_seconds()
-    token_usage = _extract_token_usage(result)
+    token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
     try:
