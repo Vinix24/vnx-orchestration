@@ -28,6 +28,10 @@ from pool_decision_engine import (  # noqa: E402
     PoolState,
     decide,
 )
+from pool_provider_allocator import (  # noqa: E402
+    allocate_for_scale_up,
+    select_for_scale_down,
+)
 from pool_state_repo import PoolStateRepository  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -214,14 +218,17 @@ class PoolManager:
 
     def _execute_scale_up(self, decision: PoolDecision, now: float) -> ExecResult:
         result = ExecResult(decision=decision)
-        config, _, _ = self.load_state()
+        config, _, members = self.load_state()
 
-        for i in range(abs(decision.delta)):
+        allocation = allocate_for_scale_up(
+            members=members,
+            provider_mix=config.provider_mix,
+            delta=abs(decision.delta),
+            fallback_provider="claude",
+        )
+
+        for i, provider in enumerate(allocation.providers):
             terminal_id = f"{self.project_id}-P{int(now * 1000) % 100000}-{i}"
-            provider = self._provider_for_slot(config, i)
-            role = config.provider_mix[0] if config.provider_mix else "backend-developer"
-            # role comes from pool config role_mix; provider_mix has providers
-            # For PR-6.3, derive role from worker_registry if available
             role = _resolve_role(config, i)
 
             try:
@@ -255,8 +262,15 @@ class PoolManager:
 
     def _execute_scale_down(self, decision: PoolDecision, now: float) -> ExecResult:
         result = ExecResult(decision=decision)
+        config, _, members = self.load_state()
 
-        for membership_id in decision.targets:
+        membership_ids = select_for_scale_down(
+            members=members,
+            provider_mix=config.provider_mix,
+            delta=decision.delta,
+        )
+
+        for membership_id in membership_ids:
             try:
                 self.repo.mark_member_reaped(
                     membership_id, "scale_down", now
