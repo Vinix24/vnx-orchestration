@@ -275,7 +275,7 @@ def test_spawn_race_condition_serialized_by_exclusive(tmp_path: Path) -> None:
         if results:
             inst = results[0]
             try:
-                mgr.kill("proj-race", inst.pid, inst.lease_token, wait_timeout=3.0)
+                mgr.kill("proj-race", inst.lease_token, wait_timeout=3.0)
             except Exception:
                 pass
 
@@ -501,7 +501,7 @@ def test_kill_state_transitions_to_terminating_before_signal(tmp_path: Path, mon
 
         monkeypatch.setattr(T0LifecycleManager, "_signal_process", staticmethod(spy_signal))
 
-        kr = mgr.kill("proj-term", inst.pid, inst.lease_token, wait_timeout=3.0)
+        kr = mgr.kill("proj-term", inst.lease_token, wait_timeout=3.0)
 
         assert kr.verified_dead, f"kill should succeed: {kr}"
         assert observed_state["meta"]["lifecycle_state"] == LIFECYCLE_TERMINATING
@@ -538,7 +538,7 @@ def test_kill_only_releases_after_verified_dead(tmp_path: Path, monkeypatch) -> 
             return True
 
         # Test the original semantic instead: real kill of real child.
-        kr = mgr.kill("proj-verify", inst.pid, inst.lease_token, wait_timeout=3.0)
+        kr = mgr.kill("proj-verify", inst.lease_token, wait_timeout=3.0)
         assert kr.verified_dead is True
         assert kr.lease_released is True
 
@@ -576,7 +576,7 @@ def test_kill_eperm_keeps_lease_terminating_state(tmp_path: Path, monkeypatch) -
             staticmethod(lambda pid, sig: "permission_denied"),
         )
 
-        kr = mgr.kill("proj-eperm", inst.pid, inst.lease_token, wait_timeout=1.0)
+        kr = mgr.kill("proj-eperm", inst.lease_token, wait_timeout=1.0)
         assert kr.error == "permission_denied"
         assert kr.verified_dead is False
         assert kr.lease_released is False
@@ -863,14 +863,14 @@ def test_kill_result_dataclass_contracts(tmp_path: Path, monkeypatch) -> None:
 
     try:
         # Path 1: no active lease.
-        kr_no_lease = mgr.kill("proj-nope", 99999, "fake-token", wait_timeout=0.1)
+        kr_no_lease = mgr.kill("proj-nope", "fake-token", wait_timeout=0.1)
         assert kr_no_lease.error == "no_active_lease"
         assert kr_no_lease.verified_dead is False
         assert kr_no_lease.lease_released is False
 
         # Path 2: successful kill of real subprocess.
         inst = _spawn_test_t0(mgr, "proj-ok")
-        kr_ok = mgr.kill("proj-ok", inst.pid, inst.lease_token, wait_timeout=3.0)
+        kr_ok = mgr.kill("proj-ok", inst.lease_token, wait_timeout=3.0)
         assert kr_ok.verified_dead is True
         assert kr_ok.lease_released is True
         assert kr_ok.signaled is True
@@ -880,6 +880,42 @@ def test_kill_result_dataclass_contracts(tmp_path: Path, monkeypatch) -> None:
         # Path 3: token mismatch raises.
         inst2 = _spawn_test_t0(mgr, "proj-mismatch")
         with pytest.raises(LeaseTokenMismatchError):
-            mgr.kill("proj-mismatch", inst2.pid, "wrong-token", wait_timeout=0.1)
+            mgr.kill("proj-mismatch", "wrong-token", wait_timeout=0.1)
+    finally:
+        _cleanup_children(mgr)
+
+
+# ---------------------------------------------------------------------------
+# Test 17: kill uses stored pid from metadata, not any caller-supplied value
+# ---------------------------------------------------------------------------
+
+
+def test_kill_uses_stored_pid_from_metadata(tmp_path: Path, monkeypatch) -> None:
+    """kill() sources pid from metadata_json.pid (source of truth).
+
+    Verifies that the pid passed to os.kill is the one stored in the DB
+    lease row, confirming the blocking finding from codex R1 is addressed.
+    """
+    db = _bootstrap_db(tmp_path)
+    agg = _make_aggregator(tmp_path)
+    mgr = T0LifecycleManager(db, agg)
+
+    try:
+        inst = _spawn_test_t0(mgr, "proj-stored-pid")
+
+        signaled_pids: List[int] = []
+        original_signal = T0LifecycleManager._signal_process
+
+        def capturing_signal(pid, sig):
+            signaled_pids.append(pid)
+            return original_signal(pid, sig)
+
+        monkeypatch.setattr(T0LifecycleManager, "_signal_process", staticmethod(capturing_signal))
+
+        kr = mgr.kill("proj-stored-pid", inst.lease_token, wait_timeout=3.0)
+
+        assert kr.verified_dead is True
+        assert kr.pid == inst.pid, "KillResult.pid must equal metadata-stored pid"
+        assert signaled_pids[0] == inst.pid, "os.kill must use the metadata-stored pid"
     finally:
         _cleanup_children(mgr)

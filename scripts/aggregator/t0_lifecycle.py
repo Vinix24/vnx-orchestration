@@ -584,6 +584,135 @@ class T0LifecycleManager:
         with self._lock:
             return self._spawn_locked(project_id, argv, project_root, env)
 
+    def _emit_spawn_requested(
+        self, project_id: str, lease_token: str, resolved_root: str
+    ) -> None:
+        try:
+            self._emit_event(
+                project_id,
+                "t0.spawn.requested",
+                {"lease_token": lease_token, "project_root": resolved_root},
+            )
+        except (OSError, RuntimeError, ValueError) as e:
+            raise T0AuditEmitError(
+                f"audit emit failed for t0.spawn.requested: {e}"
+            ) from e
+
+    def _check_no_active_lease(
+        self, conn: sqlite3.Connection, project_id: str
+    ) -> Optional[sqlite3.Row]:
+        """Validate no active lease. Returns prior row (for generation) or None.
+
+        Raises T0AlreadyRunningError if a leased row exists. Caller must hold
+        BEGIN EXCLUSIVE before calling.
+        """
+        existing = self._get_active_row(conn, project_id)
+        if existing is not None:
+            existing_meta = self._parse_metadata(existing["metadata_json"])
+            existing_pid = existing_meta.get("pid")
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.debug("t0_lifecycle: ROLLBACK on AlreadyRunning suppressed")
+            raise T0AlreadyRunningError(project_id, existing_pid)
+        cur = conn.execute(
+            "SELECT generation FROM terminal_leases "
+            "WHERE terminal_id = ? AND project_id = ?",
+            (T0_TERMINAL, project_id),
+        )
+        return cur.fetchone()
+
+    def _start_subprocess_proc(
+        self,
+        argv: Optional[List[str]],
+        resolved_root: str,
+        env: Optional[Dict[str, str]],
+        conn: sqlite3.Connection,
+        project_id: str,
+    ) -> tuple:
+        """Spawn subprocess. Returns (proc, pid).
+
+        Raises T0SpawnFailedError on Popen failure or T0SubprocessExitedEarly
+        on early exit. Rolls back the open transaction on failure.
+        """
+        spawn_argv = argv or [sys.executable, "-c", "import time; time.sleep(60)"]
+        try:
+            proc = self._subprocess_factory(
+                spawn_argv,
+                cwd=resolved_root,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            pid = proc.pid
+        except OSError as e:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.debug("t0_lifecycle: ROLLBACK on spawn OSError suppressed")
+            raise T0SpawnFailedError(
+                f"subprocess.Popen failed for {project_id}: {e}"
+            ) from e
+
+        time.sleep(0.05)
+        returncode = proc.poll()
+        if returncode is not None:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.debug("t0_lifecycle: ROLLBACK on early-exit suppressed")
+            self._drain_zombie(pid)
+            raise T0SubprocessExitedEarly(returncode)
+
+        return proc, pid
+
+    def _write_lease_row(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        prior: Optional[sqlite3.Row],
+        lease_token: str,
+        new_generation: int,
+        started_at: str,
+        metadata: Dict[str, Any],
+    ) -> None:
+        if prior is not None:
+            conn.execute(
+                "UPDATE terminal_leases SET "
+                "state = ?, generation = ?, lease_token = ?, "
+                "leased_at = ?, last_heartbeat_at = ?, released_at = NULL, "
+                "metadata_json = ? "
+                "WHERE terminal_id = ? AND project_id = ?",
+                (
+                    DB_STATE_LEASED,
+                    new_generation,
+                    lease_token,
+                    started_at,
+                    started_at,
+                    json.dumps(metadata),
+                    T0_TERMINAL,
+                    project_id,
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO terminal_leases "
+                "(terminal_id, project_id, state, generation, lease_token, "
+                " leased_at, last_heartbeat_at, metadata_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    T0_TERMINAL,
+                    project_id,
+                    DB_STATE_LEASED,
+                    new_generation,
+                    lease_token,
+                    started_at,
+                    started_at,
+                    json.dumps(metadata),
+                ),
+            )
+
     def _spawn_locked(
         self,
         project_id: str,
@@ -593,81 +722,17 @@ class T0LifecycleManager:
     ) -> T0Instance:
         lease_token = _new_lease_token()
         resolved_root = project_root or os.getcwd()
-
-        # Emit t0.spawn.requested BEFORE any DB-mutation or subprocess spawn,
-        # so a crash inside the EXCLUSIVE block leaves a forensic breadcrumb.
-        try:
-            self._emit_event(
-                project_id,
-                "t0.spawn.requested",
-                {
-                    "lease_token": lease_token,
-                    "project_root": resolved_root,
-                },
-            )
-        except (OSError, RuntimeError, ValueError) as e:
-            raise T0AuditEmitError(
-                f"audit emit failed for t0.spawn.requested: {e}"
-            ) from e
+        self._emit_spawn_requested(project_id, lease_token, resolved_root)
 
         conn = self._connect()
         proc: Optional[subprocess.Popen] = None
         pid: int = -1
         try:
             self._begin_exclusive_with_retry(conn)
-
-            existing = self._get_active_row(conn, project_id)
-            if existing is not None:
-                existing_meta = self._parse_metadata(existing["metadata_json"])
-                existing_pid = existing_meta.get("pid")
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    log.debug("t0_lifecycle: ROLLBACK on AlreadyRunning suppressed")
-                raise T0AlreadyRunningError(project_id, existing_pid)
-
-            # Existing row may be in 'released' state; we will UPSERT.
-            cur = conn.execute(
-                "SELECT generation FROM terminal_leases "
-                "WHERE terminal_id = ? AND project_id = ?",
-                (T0_TERMINAL, project_id),
-            )
-            prior = cur.fetchone()
+            prior = self._check_no_active_lease(conn, project_id)
             new_generation = (prior["generation"] + 1) if prior else 1
 
-            # Spawn subprocess.
-            spawn_argv = argv or [sys.executable, "-c", "import time; time.sleep(60)"]
-            try:
-                proc = self._subprocess_factory(
-                    spawn_argv,
-                    cwd=resolved_root,
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                pid = proc.pid
-            except OSError as e:
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    log.debug("t0_lifecycle: ROLLBACK on spawn OSError suppressed")
-                raise T0SpawnFailedError(
-                    f"subprocess.Popen failed for {project_id}: {e}"
-                ) from e
-
-            # Detect early-exit (exec failure, etc.).
-            time.sleep(0.05)
-            returncode = proc.poll()
-            if returncode is not None:
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    log.debug("t0_lifecycle: ROLLBACK on early-exit suppressed")
-                # Try to drain in case of zombie.
-                self._drain_zombie(pid)
-                raise T0SubprocessExitedEarly(returncode)
-
+            proc, pid = self._start_subprocess_proc(argv, resolved_root, env, conn, project_id)
             started_at = _now_iso()
             metadata = {
                 "pid": pid,
@@ -676,48 +741,14 @@ class T0LifecycleManager:
                 "lifecycle_state": LIFECYCLE_RUNNING,
                 "lease_token": lease_token,
             }
-
-            if prior is not None:
-                conn.execute(
-                    "UPDATE terminal_leases SET "
-                    "state = ?, generation = ?, lease_token = ?, "
-                    "leased_at = ?, last_heartbeat_at = ?, released_at = NULL, "
-                    "metadata_json = ? "
-                    "WHERE terminal_id = ? AND project_id = ?",
-                    (
-                        DB_STATE_LEASED,
-                        new_generation,
-                        lease_token,
-                        started_at,
-                        started_at,
-                        json.dumps(metadata),
-                        T0_TERMINAL,
-                        project_id,
-                    ),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO terminal_leases "
-                    "(terminal_id, project_id, state, generation, lease_token, "
-                    " leased_at, last_heartbeat_at, metadata_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        T0_TERMINAL,
-                        project_id,
-                        DB_STATE_LEASED,
-                        new_generation,
-                        lease_token,
-                        started_at,
-                        started_at,
-                        json.dumps(metadata),
-                    ),
-                )
+            self._write_lease_row(
+                conn, project_id, prior, lease_token, new_generation, started_at, metadata
+            )
 
             committed_pid = pid
 
             def _rollback_subprocess() -> None:
                 self._force_kill_subprocess(committed_pid)
-                # Best-effort spawn-aborted audit so forensics knows why.
                 try:
                     self._emit_event(
                         project_id,
@@ -730,9 +761,7 @@ class T0LifecycleManager:
                         },
                     )
                 except Exception as e:  # noqa: BLE001 — best-effort
-                    log.error(
-                        "t0_lifecycle: spawn.aborted emit failed: %s", e
-                    )
+                    log.error("t0_lifecycle: spawn.aborted emit failed: %s", e)
 
             self._commit_with_audit(
                 conn,
@@ -748,7 +777,6 @@ class T0LifecycleManager:
                 rollback_action=_rollback_subprocess,
             )
 
-            # Retain Popen handle so we can call waitpid as the actual parent.
             if proc is not None:
                 self._popen_handles[lease_token] = proc
 
@@ -879,116 +907,109 @@ class T0LifecycleManager:
     def kill(
         self,
         project_id: str,
-        pid: int,
         lease_token: str,
         *,
         signal_type: int = signal.SIGTERM,
         wait_timeout: Optional[float] = None,
         source: str = "operator",
     ) -> KillResult:
-        """Terminate a specific T0 incarnation.
+        """Terminate a specific T0 incarnation identified by lease_token.
 
-        Sequence: TERMINATING state → signal → wait → verify dead → release.
-        Lease is released ONLY after ProcessLookupError confirms process death.
+        PID is sourced from metadata_json.pid (source of truth) — caller
+        supplies only the lease_token to address this incarnation.
+        Sequence: TERMINATING → signal → wait → verify dead → release.
+        Lease is released ONLY after process death is verified.
         """
         with self._lock:
             return self._kill_locked(
                 project_id,
-                pid,
                 lease_token,
                 signal_type=signal_type,
                 wait_timeout=wait_timeout,
                 source=source,
             )
 
-    def _kill_locked(
+    def _kill_acquire_lease(
+        self,
+        conn: sqlite3.Connection,
+        project_id: str,
+        lease_token: str,
+        signal_type: int,
+        source: str,
+    ) -> tuple:
+        """BEGIN + validate token + transition TERMINATING + commit audit.
+
+        Returns (stored_pid, None) on success.
+        Returns (-1, KillResult) when no active lease exists.
+        Raises LeaseTokenMismatchError on token mismatch.
+        """
+        conn.execute("BEGIN")
+        row = self._get_active_row(conn, project_id)
+        if row is None:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.debug("kill: ROLLBACK on no-active-lease suppressed")
+            return -1, KillResult(
+                project_id=project_id, lease_token=lease_token, pid=-1, error="no_active_lease"
+            )
+
+        db_token = row["lease_token"] or ""
+        if db_token != lease_token:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                log.debug("kill: ROLLBACK on token-mismatch suppressed")
+            raise LeaseTokenMismatchError(project_id, lease_token, db_token)
+
+        meta = self._parse_metadata(row["metadata_json"])
+        stored_pid = meta.get("pid", -1)
+        meta["lifecycle_state"] = LIFECYCLE_TERMINATING
+        meta["kill_signal_sent_at"] = _now_iso()
+        meta["kill_initiated_by"] = source
+        conn.execute(
+            "UPDATE terminal_leases SET metadata_json = ? "
+            "WHERE terminal_id = ? AND project_id = ? AND lease_token = ?",
+            (json.dumps(meta), T0_TERMINAL, project_id, lease_token),
+        )
+        self._commit_with_audit(
+            conn,
+            project_id,
+            "t0.kill.requested",
+            {
+                "lease_token": lease_token,
+                "pid": stored_pid,
+                "signal_type": int(signal_type),
+                "source": source,
+            },
+        )
+        return stored_pid, None
+
+    def _kill_signal_phase(
         self,
         project_id: str,
-        pid: int,
         lease_token: str,
-        *,
+        pid: int,
         signal_type: int,
-        wait_timeout: Optional[float],
-        source: str,
-    ) -> KillResult:
-        started_ms = _now_ms()
-        wait = wait_timeout if wait_timeout is not None else self._kill_wait_timeout_seconds
+        wait: float,
+        result: KillResult,
+    ) -> bool:
+        """Send signal, wait, escalate to SIGKILL if needed.
 
-        conn = self._connect()
-        try:
-            conn.execute("BEGIN")
-            row = self._get_active_row(conn, project_id)
-            if row is None:
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    log.debug("kill: ROLLBACK on no-active-lease suppressed")
-                return KillResult(
-                    project_id=project_id,
-                    lease_token=lease_token,
-                    pid=pid,
-                    error="no_active_lease",
-                )
-
-            db_token = row["lease_token"] or ""
-            if db_token != lease_token:
-                try:
-                    conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    log.debug("kill: ROLLBACK on token-mismatch suppressed")
-                raise LeaseTokenMismatchError(project_id, lease_token, db_token)
-
-            # Transition to TERMINATING (persist via metadata_json).
-            meta = self._parse_metadata(row["metadata_json"])
-            meta["lifecycle_state"] = LIFECYCLE_TERMINATING
-            meta["kill_signal_sent_at"] = _now_iso()
-            meta["kill_initiated_by"] = source
-            conn.execute(
-                "UPDATE terminal_leases SET metadata_json = ? "
-                "WHERE terminal_id = ? AND project_id = ? AND lease_token = ?",
-                (json.dumps(meta), T0_TERMINAL, project_id, lease_token),
-            )
-
-            self._commit_with_audit(
-                conn,
-                project_id,
-                "t0.kill.requested",
-                {
-                    "lease_token": lease_token,
-                    "pid": pid,
-                    "signal_type": int(signal_type),
-                    "source": source,
-                },
-            )
-        finally:
-            conn.close()
-
-        # Signal phase — outside transaction.
-        result = KillResult(
-            project_id=project_id,
-            lease_token=lease_token,
-            pid=pid,
-        )
-
+        Mutates result fields. Returns True if process is still alive after
+        all wait windows (caller should return without releasing the lease).
+        """
         outcome = self._signal_process(pid, signal_type)
         if outcome == "permission_denied":
             self._emit_event(
                 project_id,
                 "t0.kill.permission_denied",
-                {
-                    "lease_token": lease_token,
-                    "pid": pid,
-                    "errno": errno.EPERM,
-                },
+                {"lease_token": lease_token, "pid": pid, "errno": errno.EPERM},
             )
             result.error = "permission_denied"
-            result.duration_ms = _now_ms() - started_ms
-            return result
+            return True
 
-        if outcome == "already_dead":
-            # Skip signal phase, go straight to verify+release.
-            result.signaled = False
-        else:
+        if outcome != "already_dead":
             result.signaled = True
             self._emit_event(
                 project_id,
@@ -1000,55 +1021,49 @@ class T0LifecycleManager:
                     "escalation": False,
                 },
             )
-
-            # Wait for exit.
             exited = self._wait_for_exit(pid, wait, lease_token=lease_token)
-            if not exited:
-                if signal_type == signal.SIGTERM:
-                    # Escalate to SIGKILL.
-                    result.escalated_to_sigkill = True
-                    escalate_outcome = self._signal_process(pid, signal.SIGKILL)
-                    if escalate_outcome == "sent":
-                        self._emit_event(
-                            project_id,
-                            "t0.kill.signaled",
-                            {
-                                "lease_token": lease_token,
-                                "pid": pid,
-                                "signal_type": int(signal.SIGKILL),
-                                "escalation": True,
-                            },
-                        )
-                        self._wait_for_exit(
-                            pid,
-                            self._sigkill_wait_timeout_seconds,
-                            lease_token=lease_token,
-                        )
+            if not exited and signal_type == signal.SIGTERM:
+                result.escalated_to_sigkill = True
+                if self._signal_process(pid, signal.SIGKILL) == "sent":
+                    self._emit_event(
+                        project_id,
+                        "t0.kill.signaled",
+                        {
+                            "lease_token": lease_token,
+                            "pid": pid,
+                            "signal_type": int(signal.SIGKILL),
+                            "escalation": True,
+                        },
+                    )
+                    self._wait_for_exit(
+                        pid, self._sigkill_wait_timeout_seconds, lease_token=lease_token
+                    )
 
-        # Verify death.
         if self._is_alive(pid, lease_token=lease_token):
-            result.error = (
-                "sigkill_zombie"
-                if result.escalated_to_sigkill
-                else "alive_after_wait"
-            )
-            result.duration_ms = _now_ms() - started_ms
+            err = "sigkill_zombie" if result.escalated_to_sigkill else "alive_after_wait"
+            result.error = err
             self._emit_event(
                 project_id,
                 "t0.error.kill",
                 {
                     "lease_token": lease_token,
                     "pid": pid,
-                    "error_type": result.error,
+                    "error_type": err,
                     "message": "process still alive after wait window",
                 },
             )
-            return result
+            return True
+        return False
 
-        result.verified_dead = True
-        self._drain_zombie(pid, lease_token=lease_token)
-
-        # Final release transaction.
+    def _kill_release(
+        self,
+        project_id: str,
+        lease_token: str,
+        pid: int,
+        result: KillResult,
+        started_ms: int,
+    ) -> None:
+        """Final release transaction after verified process death."""
         conn = self._connect()
         try:
             conn.execute("BEGIN")
@@ -1059,7 +1074,7 @@ class T0LifecycleManager:
                 except sqlite3.Error:
                     log.debug("kill: ROLLBACK on already-released suppressed")
                 result.duration_ms = _now_ms() - started_ms
-                return result
+                return
 
             meta = self._parse_metadata(row["metadata_json"])
             meta["lifecycle_state"] = LIFECYCLE_REAPED
@@ -1067,15 +1082,8 @@ class T0LifecycleManager:
             conn.execute(
                 "UPDATE terminal_leases SET state = ?, released_at = ?, metadata_json = ? "
                 "WHERE terminal_id = ? AND lease_token = ?",
-                (
-                    DB_STATE_RELEASED,
-                    meta["reaped_at"],
-                    json.dumps(meta),
-                    T0_TERMINAL,
-                    lease_token,
-                ),
+                (DB_STATE_RELEASED, meta["reaped_at"], json.dumps(meta), T0_TERMINAL, lease_token),
             )
-
             result.duration_ms = _now_ms() - started_ms
             self._commit_with_audit(
                 conn,
@@ -1090,9 +1098,45 @@ class T0LifecycleManager:
             )
             result.lease_released = True
             self._release_popen_handle(lease_token)
-            return result
         finally:
             conn.close()
+
+    def _kill_locked(
+        self,
+        project_id: str,
+        lease_token: str,
+        *,
+        signal_type: int,
+        wait_timeout: Optional[float],
+        source: str,
+    ) -> KillResult:
+        started_ms = _now_ms()
+        wait = wait_timeout if wait_timeout is not None else self._kill_wait_timeout_seconds
+
+        conn = self._connect()
+        try:
+            stored_pid, error_result = self._kill_acquire_lease(
+                conn, project_id, lease_token, signal_type, source
+            )
+        finally:
+            conn.close()
+
+        if error_result is not None:
+            return error_result
+
+        result = KillResult(project_id=project_id, lease_token=lease_token, pid=stored_pid)
+
+        still_alive = self._kill_signal_phase(
+            project_id, lease_token, stored_pid, signal_type, wait, result
+        )
+        if still_alive:
+            result.duration_ms = _now_ms() - started_ms
+            return result
+
+        result.verified_dead = True
+        self._drain_zombie(stored_pid, lease_token=lease_token)
+        self._kill_release(project_id, lease_token, stored_pid, result, started_ms)
+        return result
 
     # ------------------------------------------------------------------
     # Public API: force_release_lease (operator escape hatch)
@@ -1221,22 +1265,21 @@ class T0LifecycleManager:
 
         return results
 
-    def _reap_one(self, cand: Dict[str, Any], threshold: int) -> ReapResult:
-        project_id = cand["project_id"]
-        lease_token = cand["lease_token"]
-        pid = cand["pid"]
-
-        # Emit stale.detected before any action.
+    def _reap_emit_stale(
+        self,
+        project_id: str,
+        lease_token: str,
+        pid: int,
+        last_heartbeat_ms: int,
+    ) -> Optional[ReapResult]:
+        """Emit t0.stale.detected. Returns error ReapResult on failure, else None."""
         try:
             self._emit_event(
                 project_id,
                 "t0.stale.detected",
-                {
-                    "lease_token": lease_token,
-                    "pid": pid,
-                    "last_heartbeat_ms": cand["last_heartbeat_ms"],
-                },
+                {"lease_token": lease_token, "pid": pid, "last_heartbeat_ms": last_heartbeat_ms},
             )
+            return None
         except (OSError, RuntimeError, ValueError) as e:
             log.error("reap: stale.detected emit failed: %s", e)
             return ReapResult(
@@ -1247,12 +1290,19 @@ class T0LifecycleManager:
                 error=f"audit_emit_failed: {e}",
             )
 
-        # Liveness check.
+    def _reap_liveness(
+        self,
+        project_id: str,
+        lease_token: str,
+        pid: int,
+    ) -> tuple:
+        """Liveness probe. Returns (alive: bool, error_result: Optional[ReapResult])."""
         try:
             alive = self._is_alive(pid, lease_token=lease_token) if pid > 0 else False
+            return alive, None
         except OSError as e:
             log.error("reap: liveness check failed for pid=%s: %s", pid, e)
-            return ReapResult(
+            return False, ReapResult(
                 project_id=project_id,
                 lease_token=lease_token,
                 pid=pid,
@@ -1260,11 +1310,18 @@ class T0LifecycleManager:
                 error=f"liveness_check_failed: {e}",
             )
 
-        if not alive:
-            # Already-dead path: emit reap.completed + release lease.
-            return self._reap_release_dead(project_id, lease_token, pid)
+    def _reap_check_fresh_heartbeat(
+        self,
+        project_id: str,
+        lease_token: str,
+        pid: int,
+        threshold: int,
+    ) -> Optional[ReapResult]:
+        """Re-check heartbeat for alive process.
 
-        # Alive: re-check heartbeat (may have refreshed).
+        Returns refuted_alive ReapResult if heartbeat refreshed, error ReapResult
+        if lease row is missing, or None (still stale — proceed to kill).
+        """
         conn = self._connect()
         try:
             cur = conn.execute(
@@ -1288,7 +1345,6 @@ class T0LifecycleManager:
         fresh_hb = _parse_iso(row["last_heartbeat_at"] or "")
         fresh_ms = int(fresh_hb.timestamp() * 1000) if fresh_hb else 0
         if fresh_ms >= threshold:
-            # Heartbeat caught up: refuted_alive.
             try:
                 self._emit_event(
                     project_id,
@@ -1303,8 +1359,15 @@ class T0LifecycleManager:
                 pid=pid,
                 classification="refuted_alive",
             )
+        return None
 
-        # Alive + still stale: run kill() as if operator triggered it.
+    def _reap_kill_stale(
+        self,
+        project_id: str,
+        lease_token: str,
+        pid: int,
+    ) -> ReapResult:
+        """Kill an alive + still-stale lease via _kill_locked."""
         try:
             self._emit_event(
                 project_id,
@@ -1317,14 +1380,12 @@ class T0LifecycleManager:
         try:
             kr = self._kill_locked(
                 project_id,
-                pid,
                 lease_token,
                 signal_type=signal.SIGTERM,
                 wait_timeout=self._kill_wait_timeout_seconds,
                 source="reap",
             )
         except LeaseTokenMismatchError as e:
-            # Successor lease was spawned concurrently; abandon this iteration.
             return ReapResult(
                 project_id=project_id,
                 lease_token=lease_token,
@@ -1332,7 +1393,6 @@ class T0LifecycleManager:
                 classification="error",
                 error=f"token_mismatch: {e}",
             )
-
         return ReapResult(
             project_id=project_id,
             lease_token=lease_token,
@@ -1341,6 +1401,28 @@ class T0LifecycleManager:
             lease_released=kr.lease_released,
             error=kr.error,
         )
+
+    def _reap_one(self, cand: Dict[str, Any], threshold: int) -> ReapResult:
+        project_id = cand["project_id"]
+        lease_token = cand["lease_token"]
+        pid = cand["pid"]
+
+        err = self._reap_emit_stale(project_id, lease_token, pid, cand["last_heartbeat_ms"])
+        if err is not None:
+            return err
+
+        alive, err = self._reap_liveness(project_id, lease_token, pid)
+        if err is not None:
+            return err
+
+        if not alive:
+            return self._reap_release_dead(project_id, lease_token, pid)
+
+        stale_result = self._reap_check_fresh_heartbeat(project_id, lease_token, pid, threshold)
+        if stale_result is not None:
+            return stale_result
+
+        return self._reap_kill_stale(project_id, lease_token, pid)
 
     def _reap_release_dead(
         self,

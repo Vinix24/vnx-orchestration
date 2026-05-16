@@ -115,7 +115,6 @@ def _cmd_kill(args: argparse.Namespace) -> int:
     try:
         kr = mgr.kill(
             args.project_id,
-            args.pid,
             args.lease_token,
             signal_type=sig,
             wait_timeout=args.wait,
@@ -186,7 +185,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp_kill = sub.add_parser("kill", help="Kill a specific T0 incarnation")
     sp_kill.add_argument("project_id")
-    sp_kill.add_argument("--pid", type=int, required=True)
     sp_kill.add_argument("--lease-token", required=True)
     sp_kill.add_argument("--sigkill", action="store_true", help="Use SIGKILL instead of SIGTERM")
     sp_kill.add_argument("--wait", type=float, default=None, help="Wait timeout seconds")
