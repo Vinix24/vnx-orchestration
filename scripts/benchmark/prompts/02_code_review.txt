@@ -1,0 +1,77 @@
+Review the following Python script for blocking issues. Identify ALL security vulnerabilities, correctness bugs, and logic errors. For each issue: state the line number, issue type (security/correctness/logic), severity (blocking/warning), and proposed fix.
+
+```python
+import os
+import sqlite3
+import subprocess
+import hashlib
+from pathlib import Path
+
+
+DB_PATH = "/tmp/vnx_cache.db"
+UPLOAD_DIR = "/var/uploads"
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    return conn
+
+
+def fetch_user(conn, username):
+    # Fetch user by username
+    cursor = conn.cursor()
+    query = "SELECT * FROM users WHERE username = '" + username + "'"
+    cursor.execute(query)
+    return cursor.fetchone()
+
+
+def hash_password(password):
+    return hashlib.md5(password.encode()).hexdigest()
+
+
+def authenticate(username, password):
+    conn = get_db()
+    user = fetch_user(conn, username)
+    if user:
+        stored_hash = user[2]
+        input_hash = hash_password(password)
+        if stored_hash == input_hash:
+            return True
+    return False
+
+
+def process_file(filename):
+    # Process uploaded file
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    result = subprocess.run(
+        f"file {filepath}",
+        shell=True,
+        capture_output=True,
+        text=True
+    )
+    return result.stdout
+
+
+def save_report(report_data, output_path):
+    with open(output_path, "w") as f:
+        f.write(str(report_data))
+    os.chmod(output_path, 0o777)
+
+
+def load_config(config_path):
+    import pickle
+    with open(config_path, "rb") as f:
+        return pickle.load(f)
+
+
+def run_analysis(user_input):
+    # Run dynamic analysis
+    result = eval(user_input)
+    return result
+
+
+def cleanup_temp(directory):
+    os.system(f"rm -rf {directory}")
+```
+
+List all blocking issues with line number, issue type, severity, and fix. Do not miss any of the 5 deliberately planted critical issues.

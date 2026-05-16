@@ -1,0 +1,51 @@
+Identify the root cause of the following Python error and propose a minimal fix.
+
+Traceback:
+```
+Traceback (most recent call last):
+  File "scripts/lib/pool_state_repo.py", line 187, in update_worker_status
+    self._conn.execute(
+sqlite3.OperationalError: database is locked
+  File "scripts/lib/pool_manager.py", line 94, in tick
+    repo.update_worker_status(worker_id, status)
+  File "scripts/dispatch_loop.py", line 42, in run_forever
+    pool_manager.tick()
+  File "scripts/dispatch_loop.py", line 58, in run_forever
+    time.sleep(0.5)
+```
+
+Relevant code:
+
+```python
+# pool_state_repo.py
+class PoolStateRepo:
+    def __init__(self, db_path: Path):
+        self._conn = sqlite3.connect(str(db_path))
+        self._conn.execute("PRAGMA journal_mode=WAL")
+
+    def update_worker_status(self, worker_id: str, status: str) -> None:
+        self._conn.execute(
+            "UPDATE workers SET status=?, updated_at=? WHERE worker_id=?",
+            (status, time.time(), worker_id),
+        )
+        self._conn.commit()
+
+    def get_all_workers(self) -> list[dict]:
+        cursor = self._conn.execute("SELECT * FROM workers")
+        return [dict(row) for row in cursor.fetchall()]
+
+
+# pool_manager.py
+class PoolManager:
+    def __init__(self, db_path: Path):
+        self._repo = PoolStateRepo(db_path)
+        self._repo2 = PoolStateRepo(db_path)  # second connection for reads
+
+    def tick(self):
+        workers = self._repo2.get_all_workers()
+        for w in workers:
+            new_status = self._compute_status(w)
+            self._repo.update_worker_status(w["worker_id"], new_status)
+```
+
+State: root cause + minimal fix + explanation of why the fix works.

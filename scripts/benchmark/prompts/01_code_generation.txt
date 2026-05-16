@@ -1,0 +1,13 @@
+Design a SQLite migration adding a `tenant_id` column to a 50M-row table named `events`.
+
+Requirements:
+- NOT NULL constraint applied AFTER a backfill step (never set NOT NULL on an empty column in a large table)
+- Idempotent: safe to run twice without error or data corruption
+- Audit trail: log migration start, batch count, total rows migrated, and finish timestamp to a `migration_log` table
+- Rollback script: companion SQL that undoes the migration cleanly
+- Concurrent-write tolerant: table remains readable and writable during migration (no full table lock)
+- Batch size: process 10,000 rows per transaction to limit lock duration and WAL growth
+
+Output: two files
+1. `migrate_add_tenant_id.sql` — DDL + batched UPDATE + constraint + audit inserts
+2. `migrate_add_tenant_id_runner.py` — Python script using sqlite3 standard library with BEGIN/COMMIT per batch, progress reporting every 100 batches, and error recovery (resume from last committed row_id)

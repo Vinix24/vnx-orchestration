@@ -1,0 +1,48 @@
+models:
+  - id: claude-opus-4-6
+    provider: claude
+    model_arg: opus
+    cost_input_mtok: 15.00
+    cost_output_mtok: 75.00
+
+  - id: claude-sonnet-4-6
+    provider: claude
+    model_arg: sonnet
+    cost_input_mtok: 3.00
+    cost_output_mtok: 15.00
+
+  - id: claude-haiku-4-5
+    provider: claude
+    model_arg: haiku
+    cost_input_mtok: 1.00
+    cost_output_mtok: 5.00
+
+  - id: deepseek-v4-pro
+    provider: litellm:deepseek
+    model_arg: deepseek-v4-pro
+    cost_input_mtok: 0.435
+    cost_output_mtok: 0.87
+
+  - id: deepseek-v4-flash
+    provider: litellm:deepseek
+    model_arg: deepseek-v4-flash
+    cost_input_mtok: 0.14
+    cost_output_mtok: 0.28
+
+  - id: kimi-k2-6
+    provider: litellm:moonshot
+    model_arg: kimi-k2.6
+    cost_input_mtok: 0.95
+    cost_output_mtok: 4.00
+
+  - id: kimi-k2-0905
+    provider: litellm:moonshot
+    model_arg: kimi-k2-0905-preview
+    cost_input_mtok: 0.60
+    cost_output_mtok: 2.50
+
+  - id: glm-5-1
+    provider: litellm:openrouter
+    model_arg: z-ai/glm-5
+    cost_input_mtok: 0.50
+    cost_output_mtok: 2.50

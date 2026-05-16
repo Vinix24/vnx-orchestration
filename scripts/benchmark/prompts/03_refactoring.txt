@@ -1,0 +1,38 @@
+Refactor the following Python function. Requirements: extract sub-functions with clear single responsibilities, improve naming throughout (no abbreviations, no single-letter vars), add type hints (Python 3.10+ style), preserve exact behavior.
+
+```python
+def proc(d, t, cfg):
+    res = []
+    errs = []
+    for i, item in enumerate(d):
+        if item.get('s') != 'active':
+            continue
+        ts = item.get('ts')
+        if ts is None:
+            errs.append({'idx': i, 'msg': 'missing ts', 'id': item.get('id')})
+            continue
+        if ts > t:
+            continue
+        val = item.get('v', 0)
+        lim = cfg.get('max_v', 100)
+        if val > lim:
+            val = lim
+            item['capped'] = True
+        mn = cfg.get('min_v', 0)
+        if val < mn:
+            errs.append({'idx': i, 'msg': 'below min', 'id': item.get('id'), 'val': val})
+            continue
+        m = cfg.get('mult', 1.0)
+        val = val * m
+        if cfg.get('round'):
+            val = round(val, cfg.get('round_dp', 2))
+        res.append({
+            'id': item.get('id'),
+            'v': val,
+            'ts': ts,
+            'src': item.get('src', 'unknown'),
+        })
+    return res, errs
+```
+
+Output the refactored code only. No explanatory prose before or after. The function signature must become `def process_active_items(items: list[dict], cutoff_timestamp: float, config: dict) -> tuple[list[dict], list[dict]]:`.
