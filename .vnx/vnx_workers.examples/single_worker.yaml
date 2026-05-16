@@ -1,0 +1,24 @@
+# single_worker.yaml — minimal install with T0 (orchestrator) + T1 (implementer).
+# Use when running a solo session or small task where T2/T3 aren't needed.
+schema_version: 1
+
+workers:
+  - terminal_id: T0
+    role: orchestrator
+    provider: claude
+    model: opus
+    pool_id: core
+    aliases: []
+  - terminal_id: T1
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: core
+    aliases: [backend, impl]
+
+pools:
+  - pool_id: core
+    min_workers: 2
+    max_workers: 2
+    scaling_policy: fixed
+    provider_mix: []

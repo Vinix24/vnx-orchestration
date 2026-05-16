@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from adapter_types import (
@@ -34,6 +35,7 @@ from adapter_types import (
 )
 from result_contract import Result, result_error, result_ok
 from tmux_adapter import TmuxAdapter
+from worker_registry import WORKER_REGISTRY
 
 
 @dataclass
@@ -46,7 +48,13 @@ class RuntimeOutcome:
     error: Optional[str] = None
 
 
-CANONICAL_TERMINALS = ("T0", "T1", "T2", "T3")
+def canonical_terminals() -> List[str]:
+    """Returns ordered list of terminal IDs from the worker registry."""
+    return [w.terminal_id for w in WORKER_REGISTRY.list_workers()]
+
+
+# Compat alias: legacy code that reads CANONICAL_TERMINALS at import time continues to work.
+CANONICAL_TERMINALS = tuple(canonical_terminals())
 
 
 def _resolve_state_dir() -> str:
@@ -196,7 +204,7 @@ class RuntimeFacade:
         """Aggregate health across terminals. Returns Result with dict."""
         if not self.has_capability(CAPABILITY_SESSION_HEALTH):
             return result_error("unsupported", "SESSION_HEALTH not supported")
-        ids = list(CANONICAL_TERMINALS if terminal_ids is None else terminal_ids)
+        ids = canonical_terminals() if terminal_ids is None else list(terminal_ids)
         result = self._adapter.session_health(ids)
         summary = {
             "session_exists": result.session_exists,
