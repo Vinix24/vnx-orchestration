@@ -1,0 +1,26 @@
+{
+  "model_id": "kimi-k2-0905",
+  "task_id": "03_refactoring",
+  "dispatch_id": "bench-kimi-k2-0905-03_refactoring-1778970234",
+  "duration_seconds": 1.143,
+  "exit_code": 1,
+  "stderr": "event_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\nevent_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\ntoken_usage extraction returned 0 for provider=litellm:moonshot; check spawn_result shape\nReceipt: .vnx-data/state/t0_receipts.ndjson\nReport: .vnx-data/unified_reports/bench-kimi-k2-09",
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 360,
+      "output": 378,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.001161
+  },
+  "response": "## Instruction\n\nRefactor the following Python function. Requirements: extract sub-functions with clear single responsibilities, improve naming throughout (no abbreviations, no single-letter vars), add type hints (Python 3.10+ style), preserve exact behavior.\n\n```python\ndef proc(d, t, cfg):\n    res = []\n    errs = []\n    for i, item in enumerate(d):\n        if item.get('s') != 'active':\n            continue\n        ts = item.get('ts')\n        if ts is None:\n            errs.append({'idx': i, 'msg': 'missing ts', 'id': item.get('id')})\n            continue\n        if ts > t:\n            continue\n        val = item.get('v', 0)\n        lim = cfg.get('max_v', 100)\n        if val > lim:\n            val = lim\n            item['capped'] = True\n        mn = cfg.get('min_v', 0)\n        if val < mn:\n            errs.append({'idx': i, 'msg': 'below min', 'id': item.get('id'), 'val': val})\n            continue\n        m = cfg.get('mult', 1.0)\n        val = val * m\n        if cfg.get('round'):\n            val = round(val, cfg.get('round_dp', 2))\n        res.append({\n            'id': item.get('id'),\n            'v': val,\n            'ts': ts,\n            'src': item.get('src', 'unknown'),\n        })\n    return res, errs\n```\n\nOutput the refactored code only. No explanatory prose before or after. The function signature must become `def process_active_items(items: list[dict], cutoff_timestamp: float, config: dict) -> tuple[list[dict], list[dict]]:`.\n\n\n## Response\n\n(no response captured)\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "No response was captured; the model produced no refactored code."
+  },
+  "cost_usd_estimated": 0.001161
+}

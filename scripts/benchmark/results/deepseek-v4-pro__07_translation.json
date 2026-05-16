@@ -1,0 +1,26 @@
+{
+  "model_id": "deepseek-v4-pro",
+  "task_id": "07_translation",
+  "dispatch_id": "bench-deepseek-v4-pro-07_translation-1778969951",
+  "duration_seconds": 50.202,
+  "exit_code": 0,
+  "stderr": "_streaming_drainer: _normalize() raised for T2 (line: '{\"event_type\": \"usage_complete\", \"usage\": {\"completion_tokens\": 389, \"prompt_tokens\": 638, \"total_tokens\": 1027, \"completion_tokens_details\": {\"accepted_prediction_tokens\": null, \"audio_tokens\": null,'): Invalid event_type 'usage_complete'; must be one of ['complete', 'error', 'init', 'text', 'thinking', 'tool_result', 'tool_use']\ntoken_usage extraction returned 0 for provider=litellm:deepseek; check spawn_result shape\nReceipt: .vnx-data/sta",
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 548,
+      "output": 937,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.001054
+  },
+  "response": "## Instruction\n\nVertaal de onderstaande Nederlandstalige technische blogpost naar het Engels. Bewaar de opmaak (Markdown headers, bullets, codeblokken). Vertaal technische termen letterlijk (bijv. \"dispatch\" blijft \"dispatch\", \"governance\" blijft \"governance\", \"receipt\" blijft \"receipt\"). Behoud de persoonlijke, directe toon.\n\n---\n\n# Waarom ik geen LangGraph gebruik \u2014 en wat ik in plaats daarvan bouw\n\nTwee jaar geleden begon ik met AI-agents bouwen. Het eerste wat iedereen aanraadde: LangGraph.\n\nIk heb het geprobeerd. Ik begreep het. En daarna heb ik het weggegooid.\n\n## Het fundamentele probleem\n\nLangGraph composeert workers als in-process Runnable nodes. Dat betekent: geen processisolatie, geen echte parallellisatie, en \u2014 het ergste \u2014 geen audit trail die een financi\u00eble audit zou overleven.\n\nIn mijn praktijk werk ik voor organisaties die ISO- en ISAE-gecertificeerd zijn. \"The model decided\" is geen antwoord dat ze accepteren. Ze willen weten *welk model*, *welke versie*, *welke input*, *welke output*, *hoe lang*, en *wie heeft het goedgekeurd*.\n\nLangGraph geeft je dat niet standaard. Je moet het er zelf inbouwen \u2014 en dan bouw je eigenlijk een eigen governance-laag bovenop een framework dat daar niet voor ontworpen is.\n\n## Wat ik gebouwd heb\n\nVNX Orchestration is een governance-first runtime. Elke dispatch krijgt een uniek ID. Elke response wordt vastgelegd als NDJSON receipt met:\n\n```json\n{\n  \"dispatch_id\": \"20260514-feat-auth-T1\",\n  \"model\": \"claude-sonnet-4-6\",\n  \"provider\": \"claude\",\n  \"input_tokens\": 4821,\n  \"output_tokens\": 1203,\n  \"duration_seconds\": 14.2,\n  \"exit_code\": 0,\n  \"timestamp\": \"2026-05-14T09:41:22Z\"\n}\n```\n\nNiets gaat de keten uit zonder dat er een receipt is. Niets wordt gemerged zonder dat een gate groen is.\n\n## De afruil\n\nIs het meer werk? Ja. VNX heeft 1.100+ receipts, 860+ sessies geanalyseerd, en 11 agents in productie.\n\nMaar ik slaap goed. En mijn klanten ook.\n\n---\n\nTranslate the above to English. Maintain all Markdown formatting exactly as-is. Preserve technical terms in English where they are already English (dispatch, receipt, governance, NDJSON). The blog post uses first-person singular (\"ik\" \u2192 \"I\", \"mijn\" \u2192 \"my\") \u2014 maintain that throughout.\n\n\n## Response\n\n# Why I Don't Use LangGraph \u2014 and What I Build Instead\n\nTwo years ago I started building AI agents. The first thing everyone recommended: LangGraph.\n\nI tried it. I understood it. And then I threw it away.\n\n## The Fundamental Problem\n\nLangGraph composes workers as in-process Runnable nodes. That means: no process isolation, no real parallelism, and \u2014 worst of all \u2014 no audit trail that would survive a financial audit.\n\nIn my practice I work for organizations that are ISO and ISAE certified. \"The model decided\" is not an answer they accept. They want to know *which model*, *which version*, *which input*, *which output*, *how long*, and *who approved it*.\n\nLangGraph doesn't give you that out of the box. You have to build it in yourself \u2014 and then you're essentially building your own governance layer on top of a framework that wasn't designed for that.\n\n## What I Built\n\nVNX Orchestration is a governance-first runtime. Each dispatch gets a unique ID. Every response is recorded as an NDJSON receipt with:\n\n```json\n{\n  \"dispatch_id\": \"20260514-feat-auth-T1\",\n  \"model\": \"claude-sonnet-4-6\",\n  \"provider\": \"claude\",\n  \"input_tokens\": 4821,\n  \"output_tokens\": 1203,\n  \"duration_seconds\": 14.2,\n  \"exit_code\": 0,\n  \"timestamp\": \"2026-05-14T09:41:22Z\"\n}\n```\n\nNothing leaves the chain without a receipt. Nothing is merged unless a gate is green.\n\n## The Trade-off\n\nIs it more work? Yes. VNX has analyzed 1,100+ receipts, 860+ sessions, and 11 agents in production.\n\nBut I sleep well. And my clients do too.\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 8,
+    "correctness": true,
+    "completeness_score": 9,
+    "notable_issues": "Slightly alters meaning in stats sentence ('analyzed 1,100+ receipts, 860+ sessions, and 11 agents in production' incorrectly attaches 'analyzed' to agents); appends an extraneous 'Findings: None' section not in the source."
+  },
+  "cost_usd_estimated": 0.001054
+}

@@ -1,0 +1,26 @@
+{
+  "model_id": "deepseek-v4-pro",
+  "task_id": "03_refactoring",
+  "dispatch_id": "bench-deepseek-v4-pro-03_refactoring-1778969042",
+  "duration_seconds": 108.872,
+  "exit_code": 0,
+  "stderr": "_streaming_drainer: _normalize() raised for T2 (line: '{\"event_type\": \"usage_complete\", \"usage\": {\"completion_tokens\": 596, \"prompt_tokens\": 378, \"total_tokens\": 974, \"completion_tokens_details\": {\"accepted_prediction_tokens\": null, \"audio_tokens\": null, '): Invalid event_type 'usage_complete'; must be one of ['complete', 'error', 'init', 'text', 'thinking', 'tool_result', 'tool_use']\ntoken_usage extraction returned 0 for provider=litellm:deepseek; check spawn_result shape\nReceipt: .vnx-data/sta",
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 360,
+      "output": 972,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.001002
+  },
+  "response": "## Instruction\n\nRefactor the following Python function. Requirements: extract sub-functions with clear single responsibilities, improve naming throughout (no abbreviations, no single-letter vars), add type hints (Python 3.10+ style), preserve exact behavior.\n\n```python\ndef proc(d, t, cfg):\n    res = []\n    errs = []\n    for i, item in enumerate(d):\n        if item.get('s') != 'active':\n            continue\n        ts = item.get('ts')\n        if ts is None:\n            errs.append({'idx': i, 'msg': 'missing ts', 'id': item.get('id')})\n            continue\n        if ts > t:\n            continue\n        val = item.get('v', 0)\n        lim = cfg.get('max_v', 100)\n        if val > lim:\n            val = lim\n            item['capped'] = True\n        mn = cfg.get('min_v', 0)\n        if val < mn:\n            errs.append({'idx': i, 'msg': 'below min', 'id': item.get('id'), 'val': val})\n            continue\n        m = cfg.get('mult', 1.0)\n        val = val * m\n        if cfg.get('round'):\n            val = round(val, cfg.get('round_dp', 2))\n        res.append({\n            'id': item.get('id'),\n            'v': val,\n            'ts': ts,\n            'src': item.get('src', 'unknown'),\n        })\n    return res, errs\n```\n\nOutput the refactored code only. No explanatory prose before or after. The function signature must become `def process_active_items(items: list[dict], cutoff_timestamp: float, config: dict) -> tuple[list[dict], list[dict]]:`.\n\n\n## Response\n\n```python\ndef _is_item_active(item: dict) -> bool:\n    return item.get('s') == 'active'\n\n\ndef _validate_timestamp(\n    item: dict,\n    index: int,\n    cutoff: float\n) -> tuple[bool, float | None, dict | None]:\n    timestamp = item.get('ts')\n    if timestamp is None:\n        error = {'idx': index, 'msg': 'missing ts', 'id': item.get('id')}\n        return (False, None, error)\n    if timestamp > cutoff:\n        return (False, None, None)\n    return (True, timestamp, None)\n\n\ndef _cap_value(value: float, maximum: float, item: dict) -> float:\n    if value > maximum:\n        item['capped'] = True\n        return maximum\n    return value\n\n\ndef _check_minimum(value: float, minimum: float, item: dict, index: int) -> dict | None:\n    if value < minimum:\n        return {'idx': index, 'msg': 'below min', 'id': item.get('id'), 'val': value}\n    return None\n\n\ndef _apply_multiplier_and_round(\n    value: float,\n    multiplier: float,\n    should_round: bool,\n    round_decimals: int\n) -> float:\n    value = value * multiplier\n    if should_round:\n        value = round(value, round_decimals)\n    return value\n\n\ndef process_active_items(\n    items: list[dict],\n    cutoff_timestamp: float,\n    config: dict\n) -> tuple[list[dict], list[dict]]:\n    results: list[dict] = []\n    errors: list[dict] = []\n\n    maximum_value = config.get('max_v', 100)\n    minimum_value = config.get('min_v', 0)\n    multiplier = config.get('mult', 1.0)\n    should_round = config.get('round', False)\n    round_decimals = config.get('round_dp', 2)\n\n    for index, item in enumerate(items):\n        if not _is_item_active(item):\n            continue\n\n        is_valid, timestamp, error = _validate_timestamp(item, index, cutoff_timestamp)\n        if error is not None:\n            errors.append(error)\n            continue\n        if not is_valid:\n            continue\n\n        value = item.get('v', 0)\n        value = _cap_value(value, maximum_value, item)\n\n        minimum_error = _check_minimum(value, minimum_value, item, index)\n        if minimum_error is not None:\n            errors.append(minimum_error)\n            continue\n\n        value = _apply_multiplier_and_round(value, multiplier, should_round, round_decimals)\n\n        results.append({\n            'id': item.get('id'),\n            'v': value,\n            'ts': timestamp,\n            'src': item.get('src', 'unknown'),\n        })\n\n    return results, errors\n```\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 8,
+    "correctness": true,
+    "completeness_score": 9,
+    "notable_issues": "Config values are read once before the loop rather than per-iteration as in the original, a minor behavioral nuance if config mutates mid-iteration."
+  },
+  "cost_usd_estimated": 0.001002
+}

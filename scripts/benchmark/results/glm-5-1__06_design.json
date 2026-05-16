@@ -1,0 +1,26 @@
+{
+  "model_id": "glm-5-1",
+  "task_id": "06_design",
+  "dispatch_id": "bench-glm-5-1-06_design-1778970245",
+  "duration_seconds": 0.98,
+  "exit_code": 1,
+  "stderr": "event_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\nevent_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\ntoken_usage extraction returned 0 for provider=litellm:zai; check spawn_result shape\nReceipt: .vnx-data/state/t0_receipts.ndjson\nReport: .vnx-data/unified_reports/bench-glm-5-1-06_desi",
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 342,
+      "output": 360,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.001071
+  },
+  "response": "## Instruction\n\nDesign a system to handle 1,000,000 dispatches per day across 10 projects with cost-routing between three LLM providers: Claude (premium, $3-15/MTok), DeepSeek (mid, $0.14-0.87/MTok), and Kimi (budget, $0.60-4.00/MTok).\n\nSpecify:\n\n1. **Architecture** \u2014 components, their responsibilities, how they communicate (sync vs async, queue vs direct call)\n2. **Data flow** \u2014 a dispatch from creation to completion: what data is written where, at what step, with what guarantees\n3. **Cost routing logic** \u2014 how the system decides which provider handles a given dispatch (task type, latency SLO, budget envelope, fallback chain)\n4. **Failure modes** \u2014 at least 5 failure scenarios with detection mechanism, recovery strategy, and blast radius\n5. **SLOs** \u2014 define p50/p95/p99 latency targets for each tier, throughput floor, error budget, and how violations are detected\n\nConstraints:\n- No proprietary cloud services (no SQS, no Pub/Sub) \u2014 self-hosted only\n- State must survive a single-node restart without losing in-flight dispatches\n- Cost tracking must be accurate to \u00b12% per provider per day\n- The system must support a human approval gate for dispatches above a cost threshold\n\nFormat: structured markdown with headers per section. Use concrete numbers. No vague statements like \"the system scales horizontally\" without specifying what the scaling unit is and at what load.\n\n\n## Response\n\n(no response captured)\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "No response was captured; the model produced no output to evaluate against any of the five required sections."
+  },
+  "cost_usd_estimated": 0.001071
+}

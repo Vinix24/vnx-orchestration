@@ -1,0 +1,26 @@
+{
+  "model_id": "kimi-k2-6",
+  "task_id": "01_code_generation",
+  "dispatch_id": "bench-kimi-k2-6-01_code_generation-1778970223",
+  "duration_seconds": 1.611,
+  "exit_code": 1,
+  "stderr": "event_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\nevent_store: /Users/vincentvandeth/Development/vnx-roadmap-autopilot-wt/.vnx-data/events/T2.ndjson exceeds 10485760 bytes \u2014 operator intervention recommended\ntoken_usage extraction returned 0 for provider=litellm:moonshot; check spawn_result shape\nReceipt: .vnx-data/state/t0_receipts.ndjson\nReport: .vnx-data/unified_reports/bench-kimi-k2-6-",
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 240,
+      "output": 258,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.00126
+  },
+  "response": "## Instruction\n\nDesign a SQLite migration adding a `tenant_id` column to a 50M-row table named `events`.\n\nRequirements:\n- NOT NULL constraint applied AFTER a backfill step (never set NOT NULL on an empty column in a large table)\n- Idempotent: safe to run twice without error or data corruption\n- Audit trail: log migration start, batch count, total rows migrated, and finish timestamp to a `migration_log` table\n- Rollback script: companion SQL that undoes the migration cleanly\n- Concurrent-write tolerant: table remains readable and writable during migration (no full table lock)\n- Batch size: process 10,000 rows per transaction to limit lock duration and WAL growth\n\nOutput: two files\n1. `migrate_add_tenant_id.sql` \u2014 DDL + batched UPDATE + constraint + audit inserts\n2. `migrate_add_tenant_id_runner.py` \u2014 Python script using sqlite3 standard library with BEGIN/COMMIT per batch, progress reporting every 100 batches, and error recovery (resume from last committed row_id)\n\n\n## Response\n\n(no response captured)\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "No response captured; model produced no output for the migration task."
+  },
+  "cost_usd_estimated": 0.00126
+}
