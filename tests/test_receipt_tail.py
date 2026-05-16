@@ -196,3 +196,100 @@ def test_no_event_drops_at_high_throughput(tmp_path: Path) -> None:
     seen_ids = {e.dispatch_id for e in events}
     expected_ids = {f"stress-{i}" for i in range(n)}
     assert seen_ids == expected_ids, "No events must be dropped at synthetic load"
+
+
+def test_partial_write_does_not_lose_data(tmp_path: Path) -> None:
+    """Finding 2 regression: partial write (no trailing newline) must not drop the line."""
+    cfg = _make_config(tmp_path, "proj-partial")
+    path = cfg.ndjson_path
+
+    tail = ReceiptTail(projects=[cfg], poll_interval=0.05)
+    ps = tail._projects[0]
+
+    # Write first complete event
+    _write_event(path, {"dispatch_id": "first", "event_type": "task_complete", "timestamp": "T0"})
+    events_first = tail._poll_project(ps)
+    assert len(events_first) == 1
+    assert events_first[0].dispatch_id == "first"
+
+    offset_after_first = ps.offset
+
+    # Write partial second event (no newline — simulates writer mid-flush)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write('{"dispatch_id": "second", "event_type": "task_complete", "timestamp": "T1"}')
+
+    # Poll while partial — offset must NOT advance, event must NOT be yielded
+    events_partial = tail._poll_project(ps)
+    assert events_partial == [], "Partial write must yield no events"
+    assert ps.offset == offset_after_first, "Offset must not advance on partial write"
+
+    # Complete the line (add newline)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("\n")
+
+    # Now poll — must yield the second event
+    events_complete = tail._poll_project(ps)
+    assert len(events_complete) == 1
+    assert events_complete[0].dispatch_id == "second", "Second event must be received after newline"
+
+    tail.stop()
+
+
+def test_truly_malformed_line_skipped_with_warning_and_advance(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Finding 2: genuine malformed JSON (full line) is skipped with warning; offset advances."""
+    cfg = _make_config(tmp_path, "proj-malformed")
+    path = cfg.ndjson_path
+
+    path.write_text(
+        "{bad json here}\n"
+        + json.dumps({"dispatch_id": "after-bad", "event_type": "task_complete", "timestamp": "T1"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    tail = ReceiptTail(projects=[cfg], poll_interval=0.05)
+    ps = tail._projects[0]
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="scripts.control_centre.receipt_tail"):
+        events = tail._poll_project(ps)
+
+    assert len(events) == 1
+    assert events[0].dispatch_id == "after-bad"
+    assert any("malformed" in r.message.lower() for r in caplog.records), (
+        "malformed line must emit a WARNING"
+    )
+    assert ps.offset == path.stat().st_size, "Offset must advance past malformed line"
+
+    tail.stop()
+
+
+def test_offset_only_advances_after_successful_parse(tmp_path: Path) -> None:
+    """Finding 2: offset stays at line_start for partial write, advances on parse success."""
+    cfg = _make_config(tmp_path, "proj-offset")
+    path = cfg.ndjson_path
+
+    tail = ReceiptTail(projects=[cfg], poll_interval=0.05)
+    ps = tail._projects[0]
+
+    # Write partial line (no closing brace or newline)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"dispatch_id": "d1"')
+
+    # Poll — offset must stay at 0 (partial write)
+    tail._poll_project(ps)
+    assert ps.offset == 0, f"Offset must stay at 0 for partial write, got {ps.offset}"
+
+    # Complete the line
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(', "event_type": "task_complete", "timestamp": "T0"}\n')
+
+    # Poll — offset must now advance
+    events = tail._poll_project(ps)
+    assert len(events) == 1
+    assert events[0].dispatch_id == "d1"
+    assert ps.offset == path.stat().st_size, "Offset must equal file size after successful parse"
+
+    tail.stop()

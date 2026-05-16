@@ -1,12 +1,13 @@
 """dispatch_lifecycle_tracker.py — Wave 5 PR-5.6: dispatch lifecycle tracker.
 
-Maps dispatch_id → project_id → completion-receipt. Consumes a ReceiptTail
+Maps (project_id, dispatch_id) → completion-receipt. Consumes a ReceiptTail
 stream and tracks dispatch state transitions:
 
     PENDING → RUNNING → COMPLETED | FAILED | TIMEOUT
 
-Per-project isolation is enforced: each dispatch_id is pinned to its declared
-project_id. Events from other projects never update another dispatch's state.
+Per-project isolation is enforced via TrackingKey: the composite key prevents
+a second project sharing the same dispatch_id from overwriting another project's
+tracking entry. Events from mismatched projects are silently ignored.
 """
 
 from __future__ import annotations
@@ -21,6 +22,12 @@ from typing import Dict, Iterator, Optional
 from scripts.control_centre.receipt_tail import MergedEvent, ReceiptTail
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TrackingKey:
+    project_id: str
+    dispatch_id: str
 
 
 class DispatchStatus(str, Enum):
@@ -100,6 +107,9 @@ class DispatchLifecycleTracker:
     Thread-safe. Multiple dispatches can be tracked concurrently — see
     ``test_parallel_dispatches_no_crosstalk`` for the acceptance criterion.
 
+    Entry keys are ``TrackingKey(project_id, dispatch_id)`` tuples. Two
+    projects that happen to share a dispatch_id are tracked independently.
+
     The tracker consumes events from ``receipt_tail.stream()`` in a background
     thread. ``track()`` blocks until a completion event arrives or timeout
     expires.
@@ -107,7 +117,7 @@ class DispatchLifecycleTracker:
 
     def __init__(self, receipt_tail: ReceiptTail) -> None:
         self._tail = receipt_tail
-        self._entries: Dict[str, _DispatchEntry] = {}
+        self._entries: Dict[TrackingKey, _DispatchEntry] = {}
         self._lock = threading.Lock()
         self._consumer_thread: Optional[threading.Thread] = None
         self._started = False
@@ -132,11 +142,11 @@ class DispatchLifecycleTracker:
         if not dispatch_id:
             return
 
+        key = TrackingKey(project_id=event.project_id, dispatch_id=dispatch_id)
+
         with self._lock:
-            entry = self._entries.get(dispatch_id)
+            entry = self._entries.get(key)
             if entry is None:
-                return
-            if entry.project_id != event.project_id:
                 return
             if entry.status in (
                 DispatchStatus.COMPLETED,
@@ -150,7 +160,7 @@ class DispatchLifecycleTracker:
             return
 
         with self._lock:
-            entry = self._entries.get(dispatch_id)
+            entry = self._entries.get(key)
             if entry is None:
                 return
             if entry.status in (
@@ -166,18 +176,20 @@ class DispatchLifecycleTracker:
 
     def register(self, dispatch_id: str, project_id: str) -> None:
         """Register a dispatch for tracking before dropping it in pending/."""
+        key = TrackingKey(project_id=project_id, dispatch_id=dispatch_id)
         with self._lock:
-            if dispatch_id not in self._entries:
-                self._entries[dispatch_id] = _DispatchEntry(
+            if key not in self._entries:
+                self._entries[key] = _DispatchEntry(
                     dispatch_id=dispatch_id,
                     project_id=project_id,
                 )
         self._ensure_started()
 
-    def status(self, dispatch_id: str) -> DispatchStatus:
+    def status(self, dispatch_id: str, project_id: str) -> DispatchStatus:
         """Non-blocking: return current state."""
+        key = TrackingKey(project_id=project_id, dispatch_id=dispatch_id)
         with self._lock:
-            entry = self._entries.get(dispatch_id)
+            entry = self._entries.get(key)
         if entry is None:
             return DispatchStatus.PENDING
         return entry.status
@@ -189,21 +201,22 @@ class DispatchLifecycleTracker:
         timeout_seconds: float = 600,
     ) -> DispatchOutcome:
         """Block until dispatch completes or timeout. Returns DispatchOutcome."""
+        key = TrackingKey(project_id=project_id, dispatch_id=dispatch_id)
         with self._lock:
-            entry = self._entries.get(dispatch_id)
+            entry = self._entries.get(key)
             if entry is None:
                 entry = _DispatchEntry(
                     dispatch_id=dispatch_id,
                     project_id=project_id,
                 )
-                self._entries[dispatch_id] = entry
+                self._entries[key] = entry
 
         self._ensure_started()
 
         signaled = entry.event.wait(timeout=timeout_seconds)
 
         with self._lock:
-            entry = self._entries[dispatch_id]
+            entry = self._entries[key]
             if not signaled and entry.status not in (
                 DispatchStatus.COMPLETED,
                 DispatchStatus.FAILED,

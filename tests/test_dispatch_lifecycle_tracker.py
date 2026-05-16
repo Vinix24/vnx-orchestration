@@ -123,7 +123,7 @@ def test_status_non_blocking_returns_current_state(tmp_path: Path) -> None:
     dispatch_id = "disp-status"
     tracker.register(dispatch_id, "proj-a")
 
-    assert tracker.status(dispatch_id) == DispatchStatus.PENDING
+    assert tracker.status(dispatch_id, "proj-a") == DispatchStatus.PENDING
 
     _write_event(cfg.ndjson_path, {
         "dispatch_id": dispatch_id,
@@ -133,13 +133,13 @@ def test_status_non_blocking_returns_current_state(tmp_path: Path) -> None:
     })
 
     deadline = time.monotonic() + 3.0
-    while tracker.status(dispatch_id) == DispatchStatus.PENDING:
+    while tracker.status(dispatch_id, "proj-a") == DispatchStatus.PENDING:
         time.sleep(0.05)
         if time.monotonic() > deadline:
             break
 
     tail.stop()
-    assert tracker.status(dispatch_id) == DispatchStatus.COMPLETED
+    assert tracker.status(dispatch_id, "proj-a") == DispatchStatus.COMPLETED
 
 
 def test_parallel_dispatches_no_crosstalk(tmp_path: Path) -> None:
@@ -212,9 +212,97 @@ def test_cross_project_events_do_not_affect_other_dispatch(tmp_path: Path) -> No
     })
 
     time.sleep(0.3)
-    status = tracker.status(dispatch_id)
+    status = tracker.status(dispatch_id, "proj-a")
     tail.stop()
 
     assert status == DispatchStatus.PENDING, (
         "Event from proj-b must NOT update dispatch registered under proj-a"
     )
+
+
+def test_same_dispatch_id_across_projects_tracked_separately(tmp_path: Path) -> None:
+    """Finding 1 regression: same dispatch_id in two projects must be independent entries."""
+    cfg_a = _make_config(tmp_path, "proj-a")
+    cfg_b = _make_config(tmp_path, "proj-b")
+    tail, tracker = _make_tail_and_tracker([cfg_a, cfg_b])
+
+    shared_id = "collision-dispatch"
+    tracker.register(shared_id, "proj-a")
+    tracker.register(shared_id, "proj-b")
+
+    # Both should start as PENDING — separate entries, not one overwriting the other
+    assert tracker.status(shared_id, "proj-a") == DispatchStatus.PENDING
+    assert tracker.status(shared_id, "proj-b") == DispatchStatus.PENDING
+
+    # Complete only proj-a's version
+    _write_event(cfg_a.ndjson_path, {
+        "dispatch_id": shared_id,
+        "event_type": "task_complete",
+        "status": "success",
+        "timestamp": "2026-05-16T12:00:00.000+00:00",
+    })
+
+    deadline = time.monotonic() + 3.0
+    while tracker.status(shared_id, "proj-a") == DispatchStatus.PENDING:
+        time.sleep(0.05)
+        if time.monotonic() > deadline:
+            break
+
+    tail.stop()
+
+    assert tracker.status(shared_id, "proj-a") == DispatchStatus.COMPLETED, (
+        "proj-a dispatch must complete from its own receipt"
+    )
+    assert tracker.status(shared_id, "proj-b") == DispatchStatus.PENDING, (
+        "proj-b dispatch must stay PENDING — it shares dispatch_id but is isolated"
+    )
+
+
+def test_parallel_dispatches_isolated_by_project(tmp_path: Path) -> None:
+    """Finding 1 regression: parallel track() calls with same dispatch_id must not crosstalk."""
+    cfg_a = _make_config(tmp_path, "proj-a")
+    cfg_b = _make_config(tmp_path, "proj-b")
+    tail, tracker = _make_tail_and_tracker([cfg_a, cfg_b])
+
+    shared_id = "shared-parallel"
+    outcomes: dict[str, DispatchOutcome] = {}
+
+    def _track_a() -> None:
+        outcomes["a"] = tracker.track(shared_id, "proj-a", timeout_seconds=5.0)
+
+    def _track_b() -> None:
+        outcomes["b"] = tracker.track(shared_id, "proj-b", timeout_seconds=5.0)
+
+    threads = [
+        threading.Thread(target=_track_a, daemon=True),
+        threading.Thread(target=_track_b, daemon=True),
+    ]
+    for t in threads:
+        t.start()
+
+    time.sleep(0.1)
+
+    _write_event(cfg_a.ndjson_path, {
+        "dispatch_id": shared_id,
+        "event_type": "task_complete",
+        "status": "success",
+        "timestamp": "2026-05-16T12:00:00.000+00:00",
+    })
+    _write_event(cfg_b.ndjson_path, {
+        "dispatch_id": shared_id,
+        "event_type": "task_failed",
+        "status": "failure",
+        "timestamp": "2026-05-16T12:00:01.000+00:00",
+    })
+
+    for t in threads:
+        t.join(timeout=6.0)
+
+    tail.stop()
+
+    assert "a" in outcomes, "proj-a tracker did not complete"
+    assert "b" in outcomes, "proj-b tracker did not complete"
+    assert outcomes["a"].status == DispatchStatus.COMPLETED, "proj-a must complete"
+    assert outcomes["b"].status == DispatchStatus.FAILED, "proj-b must fail"
+    assert outcomes["a"].project_id == "proj-a"
+    assert outcomes["b"].project_id == "proj-b"

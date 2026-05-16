@@ -60,6 +60,7 @@ class _ProjectState:
     offset: int = 0
     sequence: int = 0
     last_size: int = 0
+    malformed_skip_count: int = 0
 
 
 class ReceiptTail:
@@ -123,42 +124,60 @@ class ReceiptTail:
         if ps.offset >= size:
             return []
 
+        events: List[MergedEvent] = []
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                fh.seek(ps.offset)
-                new_text = fh.read()
-                ps.offset = fh.tell()
+                for raw in self._read_new_lines(ps, fh):
+                    ps.sequence += 1
+                    ts = raw.get("timestamp") or ""
+                    events.append(
+                        MergedEvent(
+                            project_id=ps.config.project_id,
+                            timestamp=ts,
+                            sequence=ps.sequence,
+                            raw=raw,
+                            dispatch_id=raw.get("dispatch_id") or "",
+                            event_type=raw.get("event_type") or raw.get("event", ""),
+                        )
+                    )
         except OSError as exc:
             log.warning("receipt_tail: cannot read %s: %s", path, exc)
             return []
 
-        events: List[MergedEvent] = []
-        for line in new_text.splitlines():
-            line = line.strip()
+        return events
+
+    def _read_new_lines(self, ps: _ProjectState, fh) -> Iterator[Dict]:
+        """Read new lines, advancing offset only after successful parse.
+
+        Partial write (no trailing newline): rewinds to line start, stops
+        reading — the incomplete line is retried on the next poll cycle.
+        Genuine malformed JSON (full line, bad content): logs warning,
+        advances past the bad line, continues — prevents infinite loop.
+        """
+        fh.seek(ps.offset)
+        while True:
+            line_start = fh.tell()
+            line = fh.readline()
             if not line:
+                break
+            if not line.endswith("\n"):
+                # Writer hasn't flushed newline yet — preserve offset for retry
+                fh.seek(line_start)
+                break
+            stripped = line.strip()
+            if not stripped:
+                ps.offset = fh.tell()
                 continue
             try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
+                raw = json.loads(stripped)
+            except json.JSONDecodeError:
                 log.warning(
-                    "receipt_tail: malformed JSON in %s at offset ~%d: %s",
-                    path,
-                    ps.offset,
-                    exc,
+                    "receipt_tail: malformed JSON in %s at offset %d, skipping line",
+                    ps.config.receipt_path(),
+                    line_start,
                 )
+                ps.malformed_skip_count += 1
+                ps.offset = fh.tell()
                 continue
-
-            ps.sequence += 1
-            ts = raw.get("timestamp") or ""
-            events.append(
-                MergedEvent(
-                    project_id=ps.config.project_id,
-                    timestamp=ts,
-                    sequence=ps.sequence,
-                    raw=raw,
-                    dispatch_id=raw.get("dispatch_id") or "",
-                    event_type=raw.get("event_type") or raw.get("event", ""),
-                )
-            )
-
-        return events
+            ps.offset = fh.tell()
+            yield raw

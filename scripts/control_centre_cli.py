@@ -481,7 +481,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     tail = ReceiptTail(projects=project_configs, poll_interval=1.0)
     tracker = DispatchLifecycleTracker(receipt_tail=tail)
 
-    project_id = args.project or _CC_AUDIT_PROJECT
+    project_id = _validate_project_id(args.project)
 
     print(f"Tracking dispatch {dispatch_id} (timeout={timeout}s) ...", file=sys.stderr)
     outcome = tracker.track(
@@ -585,8 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
     tp.add_argument("dispatch_id", help="Dispatch ID to track")
     tp.add_argument(
         "--project",
-        default=None,
-        help="Project ID owning the dispatch (required for correct isolation)",
+        required=True,
+        help="Project ID that owns the dispatch (required for isolation)",
     )
     tp.add_argument(
         "--timeout",
