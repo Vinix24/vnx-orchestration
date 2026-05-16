@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import sys
 import threading
 from pathlib import Path
@@ -144,6 +145,48 @@ def test_canonical_event_emitted_per_submit(tmp_path: Path) -> None:
         assert "event_id" in record
         assert record["schema_version"] == 1
         assert record["provider"] == "aggregator"
+
+
+def test_invalid_project_id_rejected(tmp_path: Path) -> None:
+    agg = StateAggregator(vnx_data_dir=tmp_path)
+    with pytest.raises(ValueError, match="Invalid project_id"):
+        agg.submit(ProjectStateUpdate(
+            project_id="../etc",
+            timestamp="2026-05-16T12:00:00Z",
+            event_type="dispatch_created",
+            payload={},
+        ))
+
+
+def _mp_worker(data_dir: str, project_id: str, n: int) -> None:
+    _root = str(Path(__file__).resolve().parent.parent)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from scripts.aggregator.state_aggregator import ProjectStateUpdate, StateAggregator
+    agg = StateAggregator(vnx_data_dir=Path(data_dir))
+    for i in range(n):
+        agg.submit(ProjectStateUpdate(
+            project_id=project_id,
+            timestamp=f"2026-05-16T12:00:{i:02d}Z",
+            event_type="dispatch_created",
+            payload={"i": i},
+        ))
+
+
+def test_concurrent_processes_no_lost_updates(tmp_path: Path) -> None:
+    procs = [
+        multiprocessing.Process(target=_mp_worker, args=(str(tmp_path), "vnx-dev", 20))
+        for _ in range(5)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join()
+        assert p.exitcode == 0, f"worker process exited with {p.exitcode}"
+
+    agg = StateAggregator(vnx_data_dir=tmp_path)
+    central = agg.read_central()
+    assert central["projects"]["vnx-dev"]["event_counts"]["dispatch_created"] == 100
 
 
 def test_phase6_read_pad_compatibility(tmp_path: Path) -> None:

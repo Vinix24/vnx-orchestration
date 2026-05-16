@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -23,7 +24,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+try:
+    import fcntl as _fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _fcntl = None  # type: ignore[assignment]
+    _HAS_FCNTL = False
+
 log = logging.getLogger(__name__)
+
+_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
 VALID_EVENT_TYPES = frozenset({
     "dispatch_created",
@@ -35,6 +45,19 @@ VALID_EVENT_TYPES = frozenset({
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _validate_project_id(project_id: str) -> str:
+    """Strict project_id validation. Raises ValueError on invalid input.
+
+    Pattern: lowercase alphanum + hyphens, 2-32 chars, starts with letter.
+    Matches scripts/lib/vnx_paths.py:208-225 strictness.
+    """
+    if not _PROJECT_ID_RE.match(project_id or ""):
+        raise ValueError(
+            f"Invalid project_id {project_id!r}: must match {_PROJECT_ID_RE.pattern}"
+        )
+    return project_id
 
 
 @dataclass
@@ -57,17 +80,31 @@ class StateAggregator:
         self._central_path = vnx_data_dir / "aggregator" / "central_state.json"
         self._facet_dir = vnx_data_dir / "aggregator" / "projects"
         self._events_path = vnx_data_dir / "events" / "state_aggregator.ndjson"
+        self._lock_path = vnx_data_dir / "aggregator" / ".central_state.lock"
         self._lock = threading.Lock()
         self._central_path.parent.mkdir(parents=True, exist_ok=True)
         self._facet_dir.mkdir(parents=True, exist_ok=True)
         self._events_path.parent.mkdir(parents=True, exist_ok=True)
+        if not _HAS_FCNTL:
+            log.warning(
+                "state_aggregator: fcntl unavailable on Windows. "
+                "Multi-process safety NOT guaranteed. Use single-process deployment."
+            )
 
     def submit(self, update: ProjectStateUpdate) -> None:
         """Submit a state update. Atomic: emit event + update facet + central view."""
-        with self._lock:
-            self._emit_event(update)
-            self._update_project_facet(update)
-            self._update_central_view(update)
+        _validate_project_id(update.project_id)
+        with self._lock:                                    # thread-lock
+            with open(self._lock_path, "w") as lockf:      # cross-process lock
+                if _HAS_FCNTL:
+                    _fcntl.flock(lockf.fileno(), _fcntl.LOCK_EX)
+                try:
+                    self._emit_event(update)
+                    self._update_project_facet(update)
+                    self._update_central_view(update)
+                finally:
+                    if _HAS_FCNTL:
+                        _fcntl.flock(lockf.fileno(), _fcntl.LOCK_UN)
 
     def _emit_event(self, update: ProjectStateUpdate) -> None:
         record = {
