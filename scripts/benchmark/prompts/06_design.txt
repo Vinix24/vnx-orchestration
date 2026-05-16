@@ -1,0 +1,17 @@
+Design a system to handle 1,000,000 dispatches per day across 10 projects with cost-routing between three LLM providers: Claude (premium, $3-15/MTok), DeepSeek (mid, $0.14-0.87/MTok), and Kimi (budget, $0.60-4.00/MTok).
+
+Specify:
+
+1. **Architecture** — components, their responsibilities, how they communicate (sync vs async, queue vs direct call)
+2. **Data flow** — a dispatch from creation to completion: what data is written where, at what step, with what guarantees
+3. **Cost routing logic** — how the system decides which provider handles a given dispatch (task type, latency SLO, budget envelope, fallback chain)
+4. **Failure modes** — at least 5 failure scenarios with detection mechanism, recovery strategy, and blast radius
+5. **SLOs** — define p50/p95/p99 latency targets for each tier, throughput floor, error budget, and how violations are detected
+
+Constraints:
+- No proprietary cloud services (no SQS, no Pub/Sub) — self-hosted only
+- State must survive a single-node restart without losing in-flight dispatches
+- Cost tracking must be accurate to ±2% per provider per day
+- The system must support a human approval gate for dispatches above a cost threshold
+
+Format: structured markdown with headers per section. Use concrete numbers. No vague statements like "the system scales horizontally" without specifying what the scaling unit is and at what load.
