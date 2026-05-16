@@ -146,6 +146,123 @@ def _copy_table(
     return len(rows)
 
 
+_POOL_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS pool_state_unified (
+    project_id    TEXT NOT NULL,
+    pool_id       TEXT NOT NULL,
+    min_workers   INTEGER NOT NULL DEFAULT 0,
+    max_workers   INTEGER NOT NULL DEFAULT 0,
+    scaling_policy TEXT NOT NULL DEFAULT '',
+    active_count  INTEGER NOT NULL DEFAULT 0,
+    reaped_count  INTEGER NOT NULL DEFAULT 0,
+    last_join_at  TEXT
+)
+"""
+
+_POOL_STATE_INSERT = """
+INSERT INTO pool_state_unified
+    (project_id, pool_id, min_workers, max_workers, scaling_policy,
+     active_count, reaped_count, last_join_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_POOL_STATE_QUERY = """
+SELECT
+    pc.project_id,
+    pc.pool_id,
+    pc.min_workers,
+    pc.max_workers,
+    pc.scale_policy AS scaling_policy,
+    COUNT(CASE WHEN m.id IS NOT NULL AND m.released_at IS NULL THEN 1 END)     AS active_count,
+    COUNT(CASE WHEN m.released_at IS NOT NULL THEN 1 END)                      AS reaped_count,
+    MAX(m.joined_at) AS last_join_at
+FROM {alias}.pool_config pc
+LEFT JOIN {alias}.worker_pool_membership m
+    ON m.pool_id = pc.pool_id AND m.project_id = pc.project_id
+GROUP BY pc.project_id, pc.pool_id
+"""
+
+
+def build_pool_state_unified(
+    con: sqlite3.Connection,
+    projects: List[ProjectEntry],
+) -> int:
+    """Materialize pool_state_unified by cross-project attach of runtime_coordination.db.
+
+    Drops and recreates the table each run for full idempotency. Read-only
+    attaches ensure no writes to source project DBs.
+    """
+    con.execute("DROP TABLE IF EXISTS pool_state_unified")
+    con.execute(_POOL_STATE_DDL)
+
+    inserted = 0
+    for idx, proj in enumerate(projects):
+        src_path = proj.state_dir / "runtime_coordination.db"
+        if not src_path.is_file():
+            continue
+        alias = f"pool_src_{idx}"
+        try:
+            attach_readonly(con, alias, src_path)
+        except sqlite3.Error as exc:
+            LOG.warning(
+                "build_pool_state_unified: attach failed project=%s err=%s",
+                proj.project_id,
+                exc,
+            )
+            continue
+
+        try:
+            if not _table_exists(con, alias, "pool_config"):
+                LOG.debug(
+                    "build_pool_state_unified: pool_config absent in project=%s, skipping",
+                    proj.project_id,
+                )
+                continue
+
+            has_membership = _table_exists(con, alias, "worker_pool_membership")
+            if has_membership:
+                query = _POOL_STATE_QUERY.format(alias=alias)
+            else:
+                query = f"""
+                    SELECT
+                        pc.project_id,
+                        pc.pool_id,
+                        pc.min_workers,
+                        pc.max_workers,
+                        pc.scale_policy,
+                        0 AS active_count,
+                        0 AS reaped_count,
+                        NULL AS last_join_at
+                    FROM {alias}.pool_config pc
+                    GROUP BY pc.project_id, pc.pool_id
+                """
+
+            rows = con.execute(query).fetchall()
+            normalized = [
+                (
+                    (r[0] or proj.project_id),
+                    r[1], r[2], r[3], r[4], r[5], r[6], r[7],
+                )
+                for r in rows
+            ]
+            if normalized:
+                con.executemany(_POOL_STATE_INSERT, normalized)
+                inserted += len(normalized)
+
+        except sqlite3.Error as exc:
+            LOG.warning(
+                "build_pool_state_unified: query failed project=%s err=%s",
+                proj.project_id,
+                exc,
+            )
+        finally:
+            con.commit()
+            con.execute(f"DETACH DATABASE {alias}")
+
+    con.commit()
+    return inserted
+
+
 _COORD_EVENTS_DDL = """
 CREATE TABLE IF NOT EXISTS coordination_events_unified (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -338,6 +455,11 @@ def materialize_views(
                 {"table": f"{table}_unified", "rows": row_total, "per_project": per_proj}
             )
             LOG.info("materialized %s_unified rows=%d", table, row_total)
+
+        # Materialize pool_state_unified from per-project runtime_coordination.db.
+        pool_rows = build_pool_state_unified(con, projects)
+        plan["pool_state_rows"] = pool_rows
+        LOG.info("materialized pool_state_unified rows=%d", pool_rows)
 
         # Populate coordination_events_unified from per-project NDJSON receipts.
         coord_rows = build_coordination_events_unified(con, projects)
