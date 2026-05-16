@@ -267,7 +267,7 @@ def test_unified_report_includes_provider_in_header(tmp_data):
 
 def test_unified_report_created_at_correct_path(tmp_data):
     emit_unified_report(**_base_report_kwargs(tmp_data))
-    expected = tmp_data / "unified_reports" / "test-dispatch-002_report.md"
+    expected = tmp_data / "unified_reports" / "test-dispatch-002.md"
     assert expected.exists()
 
 
