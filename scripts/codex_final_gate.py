@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -439,6 +440,15 @@ def _apply_mass_deletion_warning(
     return [warning] + findings
 
 
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Atomic write: tmp → fsync → os.replace. Prevents partial-state on crash/disk-full."""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
+
+
 def _persist_result(
     receipt: CodexFinalGateReceipt,
     output_path: Optional[Path],
@@ -447,7 +457,7 @@ def _persist_result(
     """Write receipt to disk (if output_path given) and emit governance receipt."""
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(receipt.to_json() + "\n", encoding="utf-8")
+        _atomic_write_text(output_path, receipt.to_json() + "\n")
 
     emit_governance_receipt(
         "codex_final_gate",
@@ -625,7 +635,7 @@ def _cmd_render_prompt(args: argparse.Namespace) -> int:
     if args.output:
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(prompt + "\n", encoding="utf-8")
+        _atomic_write_text(out, prompt + "\n")
         print(json.dumps({"ok": True, "path": str(out), "pr_id": contract.pr_id}))
     else:
         print(prompt)

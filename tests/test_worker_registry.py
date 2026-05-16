@@ -19,6 +19,7 @@ from worker_registry import (
     Worker,
     WorkerRegistry,
     _build_registry,
+    _fetch_valid_roles,
     _find_yaml_file,
     _HARDCODED_FALLBACK,
     _load_registry,
@@ -402,15 +403,34 @@ class TestRoleValidation:
         reg = _registry_from_yaml(yaml_text, valid_roles=None)
         assert reg.by_id("T1").role == "any-role-at-all"
 
-    def test_role_validation_raises_on_subprocess_crash(self, tmp_path):
-        """_load_registry propagates CalledProcessError when validate_skill.py exits non-zero."""
+    def test_role_validation_skipped_on_subprocess_crash(self, tmp_path):
+        """_fetch_valid_roles returns None (not raises) when validate_skill.py exits non-zero."""
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir(parents=True)
         (scripts_dir / "validate_skill.py").write_text("# stub — exists so file check passes")
 
         with patch("worker_registry.subprocess.run", side_effect=CalledProcessError(1, "validate_skill.py")):
-            with pytest.raises(CalledProcessError):
-                _load_registry(repo_root=tmp_path)
+            result = _fetch_valid_roles(repo_root=tmp_path)
+
+        assert result is None
+
+    def test_role_validation_skipped_on_validate_skill_missing(self, tmp_path):
+        """_fetch_valid_roles returns None when validate_skill.py file does not exist."""
+        result = _fetch_valid_roles(repo_root=tmp_path)
+        assert result is None
+
+    def test_load_registry_succeeds_when_role_tool_crashes(self, tmp_path):
+        """_load_registry uses hardcoded fallback even when validate_skill.py crashes."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "validate_skill.py").write_text("# stub — exists so file check passes")
+
+        with patch("worker_registry.subprocess.run", side_effect=CalledProcessError(1, "validate_skill.py")):
+            registry = _load_registry(repo_root=tmp_path)
+
+        assert registry is not None
+        ids = [w.terminal_id for w in registry.list_workers()]
+        assert ids == ["T0", "T1", "T2", "T3"]
 
 
 # ---------------------------------------------------------------------------

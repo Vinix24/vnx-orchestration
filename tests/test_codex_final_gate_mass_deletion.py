@@ -22,6 +22,7 @@ from codex_final_gate import (
     DELETION_FILE_HOLD,
     DELETION_FILE_WARN,
     CodexFinalGateReceipt,
+    _persist_result,
     check_gate_clearance,
     enforce_codex_gate,
     evaluate_and_record,
@@ -229,3 +230,61 @@ class TestDeletionWarnLevel:
             if "Net deletion" in f.get("message", "")
         ]
         assert len(deletion_warnings) == 0
+
+
+class TestPersistResultAtomicWrite:
+    """_persist_result must write via atomic tmp → fsync → os.replace, no partial-state."""
+
+    def _make_receipt(self) -> CodexFinalGateReceipt:
+        return CodexFinalGateReceipt(
+            pr_id="PR-atomic",
+            verdict="pass",
+            required=True,
+            enforcement_reasons=["risk_class_high"],
+            findings=[],
+            content_hash="deadbeef",
+            prompt_rendered=True,
+            recorded_at="2026-05-16T00:00:00Z",
+        )
+
+    def test_no_tmp_artifact_after_success(self, tmp_path):
+        """After successful write, no .tmp file remains next to the receipt."""
+        contract = _make_contract(pr_id="PR-atomic", content_hash="deadbeef")
+        receipt = self._make_receipt()
+        output_path = tmp_path / "gate_results" / "receipt.json"
+
+        with patch("codex_final_gate.emit_governance_receipt"):
+            _persist_result(receipt, output_path, contract)
+
+        assert output_path.exists(), "receipt file must be written"
+        tmp_artifact = output_path.with_suffix(output_path.suffix + ".tmp")
+        assert not tmp_artifact.exists(), "no .tmp artifact should remain after success"
+
+    def test_receipt_content_is_valid_json(self, tmp_path):
+        """Written receipt must be parseable JSON matching the receipt object."""
+        import json as _json
+        contract = _make_contract(pr_id="PR-atomic", content_hash="deadbeef")
+        receipt = self._make_receipt()
+        output_path = tmp_path / "receipt.json"
+
+        with patch("codex_final_gate.emit_governance_receipt"):
+            _persist_result(receipt, output_path, contract)
+
+        parsed = _json.loads(output_path.read_text())
+        assert parsed["pr_id"] == "PR-atomic"
+        assert parsed["verdict"] == "pass"
+
+    def test_canonical_file_not_written_when_replace_fails(self, tmp_path):
+        """If os.replace fails, the canonical file must not contain partial data."""
+        import codex_final_gate as cgf
+        contract = _make_contract(pr_id="PR-atomic", content_hash="deadbeef")
+        receipt = self._make_receipt()
+        output_path = tmp_path / "receipt.json"
+
+        sentinel = OSError("simulated disk-full on replace")
+        with patch("codex_final_gate.os.replace", side_effect=sentinel):
+            with patch("codex_final_gate.emit_governance_receipt"):
+                with pytest.raises(OSError):
+                    _persist_result(receipt, output_path, contract)
+
+        assert not output_path.exists(), "canonical file must not exist when os.replace fails"

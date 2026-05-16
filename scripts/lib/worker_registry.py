@@ -114,11 +114,9 @@ def _fetch_valid_roles(repo_root: Path) -> Optional[frozenset]:
 
     Returns:
         frozenset of role names — use for validation (may be empty).
-        None — tool not found; caller should skip role validation.
+        None — tool unavailable or failed; caller skips role validation.
 
-    Raises:
-        subprocess.CalledProcessError — tool exists but exited non-zero.
-        subprocess.TimeoutExpired — tool hung.
+    Never raises — import-time reliability over strict validation.
     """
     script = repo_root / "scripts" / "validate_skill.py"
     if not script.is_file():
@@ -131,11 +129,14 @@ def _fetch_valid_roles(repo_root: Path) -> Optional[frozenset]:
             capture_output=True, text=True, timeout=10,
         )
     except subprocess.CalledProcessError as e:
-        logger.error("validate_skill.py failed (exit %d): %s", e.returncode, e.stderr)
-        raise
+        logger.warning(
+            "validate_skill.py failed (exit %d), role validation disabled. stderr: %s",
+            e.returncode, (e.stderr or "")[:200],
+        )
+        return None
     except subprocess.TimeoutExpired:
-        logger.error("validate_skill.py timed out")
-        raise
+        logger.warning("validate_skill.py timed out, role validation disabled")
+        return None
     roles: set = set()
     for line in result.stdout.splitlines():
         stripped = line.strip()
