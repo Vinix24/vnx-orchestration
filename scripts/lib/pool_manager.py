@@ -4,11 +4,14 @@ Called from T0-tick. Reads state via PoolStateRepository, computes decision via
 pool_decision_engine.decide(), executes spawns/reaps, records the decision.
 
 Wave 6 PR-6.3 — ADR-018 elastic worker pool.
+Wave 6 PR-6.6 — Health monitoring + dead-worker reap (tick = reap → decide → execute).
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import sys
 import time
 import uuid
@@ -32,6 +35,7 @@ from pool_provider_allocator import (  # noqa: E402
     allocate_for_scale_up,
     select_for_scale_down,
 )
+from pool_reaper import ReapConfig, ReapTarget, identify_reap_targets  # noqa: E402
 from pool_state_repo import PoolStateRepository  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -126,6 +130,7 @@ class PoolManager:
         db = db_path or _default_db_path(project_id)
         self.repo = PoolStateRepository(db, project_id)
         self._spawn_fn: SpawnFn = spawn_fn or _spawn_via_provider_dispatch
+        self.reap_config = ReapConfig()  # use defaults; operator can override
 
     # ------------------------------------------------------------------
     # Public API
@@ -170,21 +175,91 @@ class PoolManager:
 
         return result
 
-    def tick(self) -> ExecResult:
-        """Full T0-tick cycle: decide + execute + record.
+    def reap_dead(self) -> List[ReapTarget]:
+        """Identify + kill + release stuck/stale workers.
 
-        Called once per T0 tick. Records the decision in the DB and updates
-        last_scaled_at only when workers were actually spawned or reaped.
+        Returns list of successfully reaped targets for audit/observability.
+        Kill failures do not block membership release — process may already be gone.
         """
-        config, state, members = self.load_state()
-        decision = decide(config, state, members)
+        _config, _state, members = self.load_state()
+        now = time.time()
 
+        targets = identify_reap_targets(members, now, self.reap_config)
+        reaped: List[ReapTarget] = []
+
+        for target in targets:
+            try:
+                self._kill_subprocess(target.terminal_id, target.pid)
+            except Exception as exc:
+                log.warning("reap: kill failed for %s: %s", target.terminal_id, exc)
+
+            try:
+                self.repo.mark_member_reaped(target.membership_id, target.reason, now)
+                self.repo._emit_ledger("pool.worker.dead_reaped", {
+                    "pool_id": self.pool_id,
+                    "membership_id": target.membership_id,
+                    "terminal_id": target.terminal_id,
+                    "actor": "pool_reaper",
+                    "reason": target.reason,
+                    "now": now,
+                })
+                reaped.append(target)
+            except Exception as exc:
+                log.error(
+                    "reap: membership release failed for %s: %s",
+                    target.membership_id,
+                    exc,
+                )
+
+        return reaped
+
+    def _kill_subprocess(self, terminal_id: str, pid: Optional[int]) -> None:
+        """Two-step SIGTERM → 5s wait → SIGKILL. pid <= 0 is never killed."""
+        if pid is None or pid <= 0:
+            log.warning("reap: no valid pid for %s; skipping kill", terminal_id)
+            return
+
+        try:
+            from cleanup_worker_exit import terminate_subprocess  # type: ignore[attr-defined]
+            terminate_subprocess(pid, terminal_id=terminal_id, timeout_s=5.0)
+            return
+        except ImportError:
+            pass
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return  # Already dead
+
+        time.sleep(5.0)
+
+        try:
+            os.kill(pid, 0)  # Probe: raises ProcessLookupError if already dead
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # Exited cleanly after SIGTERM
+
+    def tick(self) -> ExecResult:
+        """tick = reap → decide → execute.
+
+        Reap runs FIRST so decide() sees post-reap pool state.
+        """
+        reaped_targets = self.reap_dead()
+
+        decision = self.decide()
         result = self.execute(decision)
+
+        result_with_reap = ExecResult(
+            decision=result.decision,
+            spawned=result.spawned,
+            reaped=result.reaped + [t.membership_id for t in reaped_targets],
+            errors=result.errors,
+        )
 
         now = time.time()
         self.repo.record_decision(self.pool_id, decision, now)
 
-        if result.spawned or result.reaped:
+        if result_with_reap.spawned or result_with_reap.reaped:
             self.repo.update_last_scaled_at(self.pool_id, now)
             current_size = self.repo.get_current_size(self.pool_id)
             self.repo.update_pool_size(self.pool_id, current_size)
@@ -193,12 +268,12 @@ class PoolManager:
             "tick: pool=%s action=%s spawned=%d reaped=%d errors=%d reason=%s",
             self.pool_id,
             decision.action,
-            len(result.spawned),
-            len(result.reaped),
-            len(result.errors),
+            len(result_with_reap.spawned),
+            len(result_with_reap.reaped),
+            len(result_with_reap.errors),
             decision.reason,
         )
-        return result
+        return result_with_reap
 
     # ------------------------------------------------------------------
     # Private execution helpers
