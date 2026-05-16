@@ -1,0 +1,38 @@
+# Control Centre Projects Registry
+#
+# Copy to scripts/control_centre_projects.yaml and adjust paths.
+# This file is gitignored. The .example is tracked.
+#
+# project_id rules (from state_aggregator.py _PROJECT_ID_RE):
+#   - lowercase alphanum + hyphens
+#   - 2-32 chars
+#   - must start with a letter
+#
+# Fields:
+#   id:       project_id (required) — must be unique
+#   root:     absolute path to project root (required)
+#   coord_db: path relative to root for runtime_coordination.db (optional,
+#             defaults to project state dir resolved via resolve_state_dir())
+#   intel_db: path relative to root for quality_intelligence.db (optional,
+#             defaults to project state dir resolved via resolve_state_dir())
+
+projects:
+  - id: vnx-dev
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db    # resolved via VNX_STATE_DIR
+    intel_db: <state>/quality_intelligence.db
+
+  - id: sales-copilot
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db
+    intel_db: <state>/quality_intelligence.db
+
+  - id: mc
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db
+    intel_db: <state>/quality_intelligence.db
+
+  - id: seocrawler-v2
+    root: /path/to/project
+    coord_db: <state>/runtime_coordination.db
+    intel_db: <state>/quality_intelligence.db
