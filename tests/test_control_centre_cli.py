@@ -643,3 +643,19 @@ def test_kill_emits_audit_on_failure(tmp_path: Path) -> None:
     assert update.payload["success"] is False
     assert update.payload["error"] == "SIGTERM failed: process not found"
     assert update.payload["token_digest"] == _token_digest(lease_token)
+
+
+# ---------------------------------------------------------------------------
+# test_track_requires_project_flag
+# ---------------------------------------------------------------------------
+
+
+def test_track_requires_project_flag(tmp_path: Path) -> None:
+    """Finding 3: track subcommand must exit with SystemExit when --project is missing."""
+    registry_path = _write_registry(tmp_path, [])
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["--registry", str(registry_path), "track", "some-dispatch-id"])
+
+    assert exc_info.value.code != 0, "--project omitted must exit non-zero"
