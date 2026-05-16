@@ -166,5 +166,6 @@ The Anthropic-documented Django parallel-search example (4 Explore subagents, 3m
 - ADR-003 — OAuth-only Claude routing (no SDK)
 - ADR-010 — Subprocess adapter as the depth>1 spawn mechanism
 - ADR-012 — Hybrid interactive + headless execution (every depth>1 worker can run in either mode)
+- ADR-018 — Elastic worker pool (Wave 6 implementation of per-project pools; each pool member is a process-isolated worker per the isolation primitive defined here)
 - WebSearch verification 2026-05-09: code.claude.com/docs/en/hooks; releasebot.io/updates/anthropic/claude-code; Developers Digest "Claude Code Agent Teams, Subagents, and MCP: The 2026 Playbook"; ofox.ai "Claude Code: Hooks, Subagents, and Skills — Complete Guide (2026)"; boringbot.substack.com "Claude Code: Skills, Subagents, Hooks, Plugins, and Harnesses for Production Multi-Agent Workflows"
 - `CLAUDE.md` (project root) — VNX governance system overview, dispatch-and-receipt rules
