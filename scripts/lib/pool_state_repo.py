@@ -9,6 +9,7 @@ Wave 6 PR-6.3 — ADR-018 elastic worker pool.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import math
@@ -17,7 +18,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pool_decision_engine import Membership, PoolConfig, PoolDecision, PoolState
 
@@ -210,6 +211,23 @@ class PoolStateRepository:
     # Write methods — all use BEGIN IMMEDIATE to prevent lost-update
     # ------------------------------------------------------------------
 
+    def _emit_ledger(self, event_type: str, payload: Dict) -> None:
+        """Append canonical event to .vnx-data/events/pool_events.ndjson (ADR-005)."""
+        events_dir = self.db_path.parent.parent / "events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+        events_file = events_dir / "pool_events.ndjson"
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "event_type": event_type,
+            "payload": payload,
+        }
+        with open(events_file, "ab") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write((json.dumps(event) + "\n").encode("utf-8"))
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
     def add_member(
         self,
         pool_id: str,
@@ -239,12 +257,20 @@ class PoolStateRepository:
                 terminal_id,
                 membership_id,
             )
-            return membership_id
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+        self._emit_ledger("pool.member.added", {
+            "pool_id": pool_id,
+            "membership_id": membership_id,
+            "terminal_id": terminal_id,
+            "provider": provider,
+            "role": role,
+            "now": now,
+        })
+        return membership_id
 
     def mark_member_reaped(
         self,
@@ -273,6 +299,11 @@ class PoolStateRepository:
             raise
         finally:
             conn.close()
+        self._emit_ledger("pool.member.reaped", {
+            "membership_id": membership_id,
+            "reason": reason,
+            "now": now,
+        })
 
     def update_heartbeat(self, membership_id: str, now: float) -> None:
         hb_iso = _iso_now(now)
@@ -345,18 +376,12 @@ class PoolStateRepository:
                 """
                 UPDATE worker_pools
                 SET last_decision_json = ?,
-                    last_scale_action  = ?,
-                    last_scaled_at     = CASE
-                        WHEN ? IN ('scale_up', 'scale_down', 'reap') THEN ?
-                        ELSE last_scaled_at
-                    END
+                    last_scale_action  = ?
                 WHERE project_id = ? AND pool_id = ?
                 """,
                 (
                     decision_json,
                     decision.action,
-                    decision.action,
-                    scaled_iso,
                     self.project_id,
                     pool_id,
                 ),

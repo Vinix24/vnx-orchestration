@@ -412,3 +412,68 @@ def test_scale_down_releases_membership(tmp_path):
 
     if result.decision.action == "scale_down":
         assert released > 0, "Expected released rows after scale_down"
+
+
+# ---------------------------------------------------------------------------
+# 12. Cooldown NOT advanced when all spawns fail (codex R1 regression)
+# ---------------------------------------------------------------------------
+
+def test_cooldown_not_advanced_on_failed_spawn(tmp_path):
+    """Failed spawn must NOT advance the cooldown anchor.
+
+    Before the fix, record_decision() updated last_scaled_at on any scale_up
+    decision — even when all spawns failed. This blocked retry until cooldown
+    expired. The fix makes record_decision() pure audit; only update_last_scaled_at()
+    (gated on result.spawned) may advance the anchor.
+    """
+    db = create_test_db_file(
+        tmp_path / "test.db", min_workers=2, max_workers=4, cooldown_seconds=300
+    )
+
+    sentinel = "2026-01-01T00:00:00.000000Z"
+    conn = sqlite3.connect(str(db))
+    conn.execute(f"UPDATE worker_pools SET last_scaled_at='{sentinel}'")
+    conn.commit()
+    conn.close()
+
+    mgr = _make_manager(db, spawn_fn=_always_fail)
+    result = mgr.tick()
+
+    assert len(result.spawned) == 0, "No workers should have been spawned"
+    assert len(result.errors) > 0, "Expected spawn errors"
+
+    conn = sqlite3.connect(str(db))
+    row = conn.execute("SELECT last_scaled_at FROM worker_pools").fetchone()
+    conn.close()
+
+    assert row[0] == sentinel, (
+        f"last_scaled_at must not advance when all spawns fail; got {row[0]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. Cooldown IS advanced when spawn succeeds
+# ---------------------------------------------------------------------------
+
+def test_cooldown_advanced_on_successful_spawn(tmp_path):
+    """Successful spawn must advance the cooldown anchor."""
+    db = create_test_db_file(
+        tmp_path / "test.db", min_workers=2, max_workers=4, cooldown_seconds=0
+    )
+
+    sentinel = "2026-01-01T00:00:00.000000Z"
+    conn = sqlite3.connect(str(db))
+    conn.execute(f"UPDATE worker_pools SET last_scaled_at='{sentinel}'")
+    conn.commit()
+    conn.close()
+
+    mgr = _make_manager(db, spawn_fn=_always_succeed)
+    result = mgr.tick()
+
+    if result.spawned:
+        conn = sqlite3.connect(str(db))
+        row = conn.execute("SELECT last_scaled_at FROM worker_pools").fetchone()
+        conn.close()
+        assert row[0] != sentinel, (
+            "last_scaled_at should advance after successful spawn"
+        )

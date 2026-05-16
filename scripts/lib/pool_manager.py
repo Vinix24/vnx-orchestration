@@ -47,7 +47,7 @@ SpawnFn = Callable[[str, str, str, str, str], SpawnResult]
 
 
 def _default_db_path(project_id: str) -> Path:
-    """Resolve default DB path: .vnx-data/state/runtime_coordination.db."""
+    """Resolve default DB path under VNX_STATE_DIR (via vnx_paths.resolve_state_dir)."""
     try:
         from project_root import resolve_project_root  # type: ignore
         root = resolve_project_root(__file__)
@@ -105,7 +105,7 @@ class PoolManager:
         project_id:  VNX project identifier.
         pool_id:     Pool name (default "default").
         db_path:     Path to runtime_coordination.db.
-                     Defaults to .vnx-data/state/runtime_coordination.db.
+                     Defaults to <state-dir>/runtime_coordination.db where <state-dir> = VNX_STATE_DIR or vnx_paths default.
         spawn_fn:    Injected for testability. Signature matches SpawnFn.
     """
 
