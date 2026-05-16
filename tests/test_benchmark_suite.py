@@ -329,3 +329,143 @@ def test_pareto_frontier_empty_when_no_costs():
     records[0]["cost_usd"] = None
     pareto = analyze_results.build_pareto_frontier(records)
     assert pareto == []
+
+
+# ---------------------------------------------------------------------------
+# test_atomic_write_creates_tmp_then_replace
+# ---------------------------------------------------------------------------
+
+def test_atomic_write_creates_tmp_then_replace(tmp_path: Path):
+    target = tmp_path / "result.json"
+    obj = {"model_id": "claude-sonnet-4-6", "task_id": "01_alpha", "cost_usd": 0.01}
+    run_benchmark._atomic_write_json(target, obj)
+    assert target.exists()
+    # tmp file must be gone after replace
+    assert not (tmp_path / "result.json.tmp").exists()
+    loaded = json.loads(target.read_text())
+    assert loaded["model_id"] == "claude-sonnet-4-6"
+
+
+def test_atomic_write_overwrites_existing(tmp_path: Path):
+    target = tmp_path / "result.json"
+    target.write_text(json.dumps({"old": True}))
+    run_benchmark._atomic_write_json(target, {"new": True})
+    loaded = json.loads(target.read_text())
+    assert loaded == {"new": True}
+
+
+# ---------------------------------------------------------------------------
+# test_litellm_model_arg_passed_via_env
+# ---------------------------------------------------------------------------
+
+def test_litellm_model_arg_passed_via_env(tmp_path: Path, tmp_prompts: Path, tmp_models_yaml: Path):
+    model = run_benchmark.load_models(tmp_models_yaml)[1]  # deepseek-v4-pro, provider=litellm:deepseek
+    assert model["provider"] == "litellm:deepseek"
+    task = run_benchmark.load_tasks(tmp_prompts)[0]
+    dispatch_id = "bench-test-litellm-456"
+
+    receipts_dir = tmp_path / ".vnx-data" / "receipts"
+    receipts_dir.mkdir(parents=True)
+    (receipts_dir / "t0_receipts.ndjson").write_text("")
+
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = ""
+    fake_proc.stderr = ""
+
+    captured_env = {}
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured_env.update(env or {})
+        return fake_proc
+
+    with patch("subprocess.run", side_effect=fake_run), \
+         patch.object(run_benchmark, "REPO_ROOT", tmp_path):
+        run_benchmark.run_single(model, task, dispatch_id)
+
+    assert "VNX_LITELLM_MODEL" in captured_env
+    assert captured_env["VNX_LITELLM_MODEL"] == "deepseek/deepseek-v4-pro"
+
+
+def test_claude_model_arg_passed_via_cmd_not_env(tmp_path: Path, tmp_prompts: Path, tmp_models_yaml: Path):
+    model = run_benchmark.load_models(tmp_models_yaml)[0]  # claude-sonnet-4-6
+    assert model["provider"] == "claude"
+    task = run_benchmark.load_tasks(tmp_prompts)[0]
+    dispatch_id = "bench-test-claude-789"
+
+    receipts_dir = tmp_path / ".vnx-data" / "receipts"
+    receipts_dir.mkdir(parents=True)
+    (receipts_dir / "t0_receipts.ndjson").write_text("")
+
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.stdout = ""
+    fake_proc.stderr = ""
+
+    captured_cmd = []
+    captured_env = {}
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured_cmd.extend(cmd)
+        captured_env.update(env or {})
+        return fake_proc
+
+    with patch("subprocess.run", side_effect=fake_run), \
+         patch.object(run_benchmark, "REPO_ROOT", tmp_path):
+        run_benchmark.run_single(model, task, dispatch_id)
+
+    assert "--model" in captured_cmd
+    assert "VNX_LITELLM_MODEL" not in captured_env
+
+
+# ---------------------------------------------------------------------------
+# test_glm_uses_zai_provider
+# ---------------------------------------------------------------------------
+
+def test_glm_uses_zai_provider():
+    models = run_benchmark.load_models()
+    glm = next((m for m in models if m["id"] == "glm-5-1"), None)
+    assert glm is not None, "glm-5-1 not found in models.yaml"
+    assert glm["provider"] == "litellm:zai", f"Expected litellm:zai, got {glm['provider']}"
+    assert glm["model_arg"] == "glm-5", f"Expected glm-5, got {glm['model_arg']}"
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_warns_on_malformed_files
+# ---------------------------------------------------------------------------
+
+def test_analyze_warns_on_malformed_files(tmp_path: Path, capsys):
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+
+    # One valid file
+    good = _make_result_record("claude-sonnet-4-6", "01_alpha", 0.01, 8)
+    (results_dir / "claude-sonnet-4-6__01_alpha.json").write_text(json.dumps(good))
+
+    # One malformed file
+    (results_dir / "broken__01_alpha.json").write_text("this is not valid json {{{")
+
+    records = analyze_results.load_results(results_dir)
+
+    captured = capsys.readouterr()
+    assert len(records) == 1
+    assert records[0]["model_id"] == "claude-sonnet-4-6"
+    assert "WARNING" in captured.err
+    assert "1 unreadable result" in captured.err
+
+
+def test_analyze_warns_on_unreadable_file(tmp_path: Path, capsys):
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+
+    good = _make_result_record("model-a", "task1", 0.01, 7)
+    (results_dir / "model-a__task1.json").write_text(json.dumps(good))
+
+    bad_path = results_dir / "bad__task1.json"
+    bad_path.write_text("")  # OSError equivalent: empty → JSONDecodeError
+
+    records = analyze_results.load_results(results_dir)
+    captured = capsys.readouterr()
+
+    assert len(records) == 1
+    assert "WARNING" in captured.err

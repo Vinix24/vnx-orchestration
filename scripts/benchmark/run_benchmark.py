@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import time
 import sys
@@ -51,6 +52,14 @@ def load_tasks(prompts_dir: Optional[Path] = None) -> List[Dict]:
     return tasks
 
 
+def _atomic_write_json(path: Path, obj: object) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2))
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def run_single(model: Dict, task: Dict, dispatch_id: str) -> Dict:
     """Dispatch single (model, task) pair. Return result dict."""
     start = time.time()
@@ -63,11 +72,16 @@ def run_single(model: Dict, task: Dict, dispatch_id: str) -> Dict:
         "--role", "backend-developer",
         "--instruction", task["prompt"],
     ]
-    if model.get("model_arg") and model["provider"] == "claude":
-        cmd.extend(["--model", model["model_arg"]])
+    env = os.environ.copy()
+    if model.get("model_arg"):
+        if model["provider"] == "claude":
+            cmd.extend(["--model", model["model_arg"]])
+        elif model["provider"].startswith("litellm:"):
+            provider_name = model["provider"].split(":", 1)[1]
+            env["VNX_LITELLM_MODEL"] = f"{provider_name}/{model['model_arg']}"
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=900)
     except BrokenPipeError:
         return _error_result(model, task, dispatch_id, "BrokenPipeError from provider", time.time() - start)
 
@@ -197,7 +211,7 @@ def main() -> int:
             try:
                 result = run_single(model, task, dispatch_id)
                 result_path = output_dir / f"{model['id']}__{task['id']}.json"
-                result_path.write_text(json.dumps(result, indent=2))
+                _atomic_write_json(result_path, result)
                 cost = result.get("cost_usd")
                 dur = result["duration_seconds"]
                 cost_str = f"${cost:.4f}" if cost is not None else "?"

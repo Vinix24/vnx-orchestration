@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 import yaml
 
@@ -30,11 +33,19 @@ ROUTING_OUTPUT = REPO_ROOT / "scripts" / "lib" / "providers" / "routing_recommen
 
 def load_results(results_dir: Path) -> List[Dict]:
     records = []
+    skipped = []
     for path in sorted(results_dir.glob("*.json")):
         try:
             records.append(json.loads(path.read_text()))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("analyze: skipping %s: %s", path, e)
+            skipped.append(str(path))
             continue
+    if skipped:
+        print(
+            f"WARNING: skipped {len(skipped)} unreadable result files: {skipped[:3]}{'...' if len(skipped) > 3 else ''}",
+            file=sys.stderr,
+        )
     return records
 
 

@@ -42,7 +42,7 @@ models:
     cost_output_mtok: 2.50
 
   - id: glm-5-1
-    provider: litellm:openrouter
-    model_arg: z-ai/glm-5
+    provider: litellm:zai
+    model_arg: glm-5
     cost_input_mtok: 0.50
     cost_output_mtok: 2.50
