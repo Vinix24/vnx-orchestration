@@ -285,12 +285,31 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--view-db", type=Path, default=None, help="Override view DB path")
     parser.add_argument("--json", action="store_true", help="Emit plan/result as JSON to stdout")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--read-write-pad",
+        type=Path,
+        default=None,
+        metavar="VNX_DATA_DIR",
+        help=(
+            "Read central state from the Wave 5 write-pad aggregator instead of scanning "
+            "SQLite DBs. Provide the .vnx-data directory written by StateAggregator."
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    if args.read_write_pad is not None:
+        from scripts.aggregator.state_aggregator import StateAggregator
+
+        agg = StateAggregator(args.read_write_pad)
+        result = agg.read_central()
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        return 0
 
     registry_path = args.registry or _default_registry_path()
     view_db_path = args.view_db or _default_view_db_path()
