@@ -433,3 +433,41 @@ class PoolStateRepository:
             raise
         finally:
             conn.close()
+
+    def update_config(self, pool_id: str, updates: Dict) -> None:
+        """Update pool_config fields. Keys map to PoolConfig field names."""
+        _FIELD_MAP = {
+            "min_workers": "min_workers",
+            "max_workers": "max_workers",
+            "scaling_policy": "scale_policy",
+            "cooldown_seconds": "cooldown_seconds",
+        }
+        cols: List[str] = []
+        vals: List = []
+        for key, value in updates.items():
+            col = _FIELD_MAP.get(key)
+            if col is None:
+                raise ValueError(f"Unknown config field: {key}")
+            cols.append(f"{col} = ?")
+            vals.append(value)
+
+        if not cols:
+            return
+
+        now_iso = _iso_now(time.time())
+        cols.append("updated_at = ?")
+        vals.append(now_iso)
+        vals.extend([self.project_id, pool_id])
+
+        sql = f"UPDATE pool_config SET {', '.join(cols)} WHERE project_id = ? AND pool_id = ?"
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(sql, vals)
+            conn.commit()
+            log.debug("update_config: pool=%s updates=%s", pool_id, updates)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()

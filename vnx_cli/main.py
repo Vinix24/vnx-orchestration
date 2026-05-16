@@ -94,6 +94,17 @@ def main() -> None:
         help="project directory (default: current directory)",
     )
 
+    # pool subcommand — delegates to vnx_cli.commands.pool for sub-subcommand parsing
+    pool_parser = subparsers.add_parser(
+        "pool",
+        help="manage elastic worker pools (status/scale/config/reap)",
+    )
+    pool_parser.add_argument(
+        "pool_args",
+        nargs=argparse.REMAINDER,
+        help="pool subcommand and arguments",
+    )
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -111,6 +122,10 @@ def main() -> None:
     elif args.command == "dispatch-agent":
         from vnx_cli.commands.dispatch_agent import vnx_dispatch_agent
         sys.exit(vnx_dispatch_agent(args))
+
+    elif args.command == "pool":
+        from vnx_cli.commands.pool import main as pool_main
+        sys.exit(pool_main(argv=getattr(args, "pool_args", None) or None))
 
     else:
         parser.print_help()
