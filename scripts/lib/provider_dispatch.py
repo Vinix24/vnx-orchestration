@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -58,6 +61,106 @@ _SUB_PROVIDER_DEFAULT_ALIAS: dict = {
     "moonshot": "kimi-k2-0905-default",
     "zai": "glm-5.1-default",
 }
+
+
+def _extract_response_text(result: Any) -> str:
+    """Return completion_text from any spawn result, or empty string."""
+    return (getattr(result, "completion_text", None) or "")
+
+
+def _extract_token_usage(result: Any) -> Dict[str, int]:
+    """Normalize token_usage from any spawn result to {input, output, cache_hit}."""
+    raw = getattr(result, "token_usage", None)
+    if not isinstance(raw, dict):
+        return {"input": 0, "output": 0, "cache_hit": 0}
+    return {
+        "input": int(raw.get("input_tokens", raw.get("input", 0)) or 0),
+        "output": int(raw.get("output_tokens", raw.get("output", 0)) or 0),
+        "cache_hit": int(raw.get("cache_read_tokens", raw.get("cache_hit", 0)) or 0),
+    }
+
+
+def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
+    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
+    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+        return None
+    if not provider.startswith("litellm:"):
+        return None
+    sub = provider.split(":", 1)[1] if ":" in provider else ""
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+        cfg = registry.get(sub)
+        if cfg is None or not cfg.models:
+            return None
+        model_key = model.split("/")[-1] if "/" in model else model
+        entry = cfg.models.get(model_key)
+        if entry is None:
+            entry = next(iter(cfg.models.values()), None)
+        if entry is None:
+            return None
+        cost_in = (token_usage.get("input", 0) / 1_000_000) * float(entry.cost_input_per_mtok)
+        cost_out = (token_usage.get("output", 0) / 1_000_000) * float(entry.cost_output_per_mtok)
+        return round(cost_in + cost_out, 8)
+    except Exception as exc:
+        logger.debug("_compute_cost: lookup failed for provider=%s model=%s: %s", provider, model, exc)
+        return None
+
+
+def _emit_governance(
+    args: argparse.Namespace,
+    provider: str,
+    model_used: str,
+    result: Any,
+    start_time: datetime,
+    end_time: datetime,
+    status: str,
+) -> None:
+    """Emit dispatch receipt + unified report after every spawn handler call."""
+    from governance_emit import emit_dispatch_receipt, emit_unified_report
+
+    state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+    data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
+    duration = (end_time - start_time).total_seconds()
+    token_usage = _extract_token_usage(result)
+    cost_usd = _compute_cost(provider, model_used, token_usage)
+
+    try:
+        receipt_path = emit_dispatch_receipt(
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            provider=provider,
+            model=model_used,
+            pr_id=getattr(args, "pr_id", None),
+            status=status,
+            completion_pct=100 if status == "success" else 0,
+            risk=0.0,
+            findings=[],
+            duration_seconds=duration,
+            token_usage=token_usage,
+            cost_usd=cost_usd,
+            state_dir=state_dir,
+        )
+        print(f"Receipt: {receipt_path}", file=sys.stderr)
+    except (ValueError, RuntimeError) as exc:
+        logger.error("governance_emit: receipt failed dispatch=%s: %s", args.dispatch_id, exc)
+        raise SystemExit(1) from exc
+
+    try:
+        report_path = emit_unified_report(
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            provider=provider,
+            instruction=args.instruction,
+            response_text=_extract_response_text(result),
+            findings=[],
+            duration_seconds=duration,
+            data_dir=data_dir,
+        )
+        print(f"Report: {report_path}", file=sys.stderr)
+    except RuntimeError as exc:
+        logger.error("governance_emit: unified report failed dispatch=%s: %s", args.dispatch_id, exc)
+        raise SystemExit(1) from exc
 
 
 def _build_lane_key(base_sub: str, model_alias: "str | None") -> str:
@@ -115,6 +218,7 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     if args.dispatch_paths.strip():
         dispatch_paths = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
 
+    start_time = datetime.now(timezone.utc)
     ok = sd.deliver_with_recovery(
         terminal_id=args.terminal_id,
         instruction=args.instruction,
@@ -127,6 +231,14 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
         dispatch_paths=dispatch_paths,
         pr_id=args.pr_id,
     )
+    end_time = datetime.now(timezone.utc)
+
+    class _ClaudeResult:
+        completion_text = ""
+        token_usage = None
+
+    status = "success" if ok else "failure"
+    _emit_governance(args, "claude", args.model, _ClaudeResult(), start_time, end_time, status)
     return 0 if ok else 1
 
 
@@ -137,7 +249,6 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     Wires EventStore as event_writer so codex dispatches produce a NDJSON audit trail
     identical to the claude path (provider-agnostic audit completeness, ADR-005).
     """
-    import os
     from provider_spawns.codex_spawn import spawn_codex
 
     event_store = None
@@ -151,6 +262,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         )
 
     model = os.environ.get("VNX_CODEX_MODEL", "")
+    start_time = datetime.now(timezone.utc)
     result = spawn_codex(
         prompt=args.instruction,
         model=model,
@@ -158,20 +270,27 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         terminal_id=args.terminal_id,
         event_writer=event_store.append if event_store is not None else None,
     )
+    end_time = datetime.now(timezone.utc)
+
     if result.error:
+        _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
         print(f"spawn_codex failed: {result.error}", file=sys.stderr)
         return 1
     if result.timed_out:
+        _emit_governance(args, "codex", model, result, start_time, end_time, "timeout")
         print("spawn_codex timed out", file=sys.stderr)
         return 1
     if result.returncode != 0:
+        _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
         return 1
     if result.event_writer_failures > 0:
         logger.error(
             "codex dispatch completed but %d event_writer failures occurred — audit gap",
             result.event_writer_failures,
         )
+        _emit_governance(args, "codex", model, result, start_time, end_time, "success")
         return 2
+    _emit_governance(args, "codex", model, result, start_time, end_time, "success")
     return 0
 
 
@@ -247,7 +366,6 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     or "anthropic/claude-sonnet-4-6" fallback. Wires EventStore for NDJSON audit.
     DeepSeek requires DEEPSEEK_API_KEY env var (fast-fail before subprocess spawn).
     """
-    import os
     from provider_spawns.litellm_spawn import spawn_litellm
 
     event_store = None
@@ -315,6 +433,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             lane_key,
         )
 
+    start_time = datetime.now(timezone.utc)
     result = spawn_litellm(
         prompt=args.instruction,
         model=model,
@@ -325,20 +444,27 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         tool_call_shape=_tool_call_shape,
         event_writer=event_store.append if event_store is not None else None,
     )
+    end_time = datetime.now(timezone.utc)
+
     if result.error:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
         print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
         return 1
     if result.timed_out:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout")
         print("spawn_litellm timed out", file=sys.stderr)
         return 1
     if result.returncode != 0:
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
         return 1
     if result.event_writer_failures > 0:
         logger.error(
             "litellm dispatch completed but %d event_writer failures occurred — audit gap",
             result.event_writer_failures,
         )
+        _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
         return 2
+    _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
     return 0
 
 
@@ -347,12 +473,12 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     Prompt is the raw instruction; file-content injection is caller's responsibility.
     """
-    import os
     from event_store import EventStore
     from provider_spawns.gemini_spawn import spawn_gemini
 
     model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     event_store = EventStore()
+    start_time = datetime.now(timezone.utc)
     result = spawn_gemini(
         prompt=args.instruction,
         model=model,
@@ -360,20 +486,27 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
         terminal_id=args.terminal_id,
         event_writer=event_store.append,
     )
+    end_time = datetime.now(timezone.utc)
+
     if result.error:
+        _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
         print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
         return 1
     if result.timed_out:
+        _emit_governance(args, "gemini", model, result, start_time, end_time, "timeout")
         print("spawn_gemini timed out", file=sys.stderr)
         return 1
     if result.returncode != 0:
+        _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
         return 1
     if result.event_writer_failures > 0:
         logger.error(
             "gemini dispatch completed but %d event_writer failures occurred — audit gap",
             result.event_writer_failures,
         )
+        _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
         return 2
+    _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
     return 0
 
 
