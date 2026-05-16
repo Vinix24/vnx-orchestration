@@ -83,6 +83,7 @@ from subprocess_dispatch_internals.receipt_writer import (
     _ensure_unified_report,
     _write_receipt,
 )
+from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: F401 — re-exported for callers
 from subprocess_dispatch_internals.recovery import deliver_with_recovery
 from subprocess_dispatch_internals.skill_injection import (
     _build_intelligence_section,
@@ -137,6 +138,8 @@ __all__ = [
     "_ensure_unified_report",
     "_auto_commit_changes",
     "_auto_stash_changes",
+    "emit_dispatch_receipt",
+    "emit_unified_report",
     "_capture_dispatch_parameters",
     "_capture_dispatch_outcome",
     "_update_pattern_confidence",
