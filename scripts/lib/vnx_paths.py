@@ -8,15 +8,22 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 import warnings
 from pathlib import Path
 from typing import Dict
 
-log = logging.getLogger(__name__)
+# Self-bootstrap: ensure scripts/lib is on sys.path so sibling imports work
+# regardless of whether the caller set up the repo root or lib dir.
+import sys as _sys
+_lib = str(Path(__file__).resolve().parent)
+if _lib not in _sys.path:
+    _sys.path.insert(0, _lib)
 
-_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+# Single source of truth — do not redefine; import from vnx_ids.
+from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
+
+log = logging.getLogger(__name__)
 
 
 def _resolve_vnx_home() -> Path:

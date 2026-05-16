@@ -33,6 +33,7 @@ from scripts.control_centre_cli import (
     _get_active_lease,
     _load_registry,
     _project_vnx_data,
+    _resolve_placeholders,
     _token_digest,
     _validate_project_id,
     build_parser,
@@ -45,6 +46,7 @@ from scripts.control_centre_cli import (
     cmd_status,
     main,
 )
+from scripts.lib.vnx_ids import PROJECT_ID_RE
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +579,10 @@ def test_project_id_validation_rejects_path_traversal() -> None:
         "has space",
         "dot.in.name",
         "/absolute",
-        "a" * 65,  # exceeds 64-char limit
+        "a" * 33,        # exceeds 32-char limit
+        "sales_copilot", # underscore not allowed
+        "a",             # single char (needs 2-32)
+        "1proj",         # must start with a letter
     ]
     for bad in invalid_inputs:
         with pytest.raises(ValueError, match="invalid project id"):
@@ -591,7 +596,7 @@ def test_project_id_validation_rejects_path_traversal() -> None:
 
 def test_project_id_validation_accepts_valid() -> None:
     """_validate_project_id passes for well-formed project IDs."""
-    valid_inputs = ["vnx-dev", "sales_copilot", "proj01", "a", "x1", "my-project-123"]
+    valid_inputs = ["vnx-dev", "sales-copilot", "proj01", "x1", "my-project-123"]
     for good in valid_inputs:
         result = _validate_project_id(good)
         assert result == good
@@ -659,3 +664,92 @@ def test_track_requires_project_flag(tmp_path: Path) -> None:
         parser.parse_args(["--registry", str(registry_path), "track", "some-dispatch-id"])
 
     assert exc_info.value.code != 0, "--project omitted must exit non-zero"
+
+
+# ---------------------------------------------------------------------------
+# OI-1476: project_id regex alignment + yaml placeholder substitution
+# ---------------------------------------------------------------------------
+
+
+def test_project_id_regex_matches_state_aggregator() -> None:
+    """CLI _validate_project_id and PROJECT_ID_RE share the same pattern as StateAggregator."""
+    from scripts.aggregator.state_aggregator import _PROJECT_ID_RE as _SA_RE
+
+    # Same compiled pattern
+    assert PROJECT_ID_RE.pattern == _SA_RE.pattern, (
+        f"Regex divergence: CLI={PROJECT_ID_RE.pattern!r} SA={_SA_RE.pattern!r}"
+    )
+
+    # Shared accept set
+    accept = ["proj", "vnx-dev", "sales-copilot", "ab", "seocrawler-v2", "cc-system"]
+    for pid in accept:
+        assert PROJECT_ID_RE.match(pid), f"Should accept: {pid!r}"
+        assert _validate_project_id(pid) == pid
+
+    # Shared reject set
+    reject = [
+        "proj/x",       # slash
+        "Project",      # uppercase
+        "a",            # single char
+        "has_under",    # underscore
+        "1start",       # starts with digit
+        "dot.name",     # dot
+        "",             # empty
+        "a" * 33,       # too long
+    ]
+    for pid in reject:
+        assert not PROJECT_ID_RE.match(pid or ""), f"Should reject: {pid!r}"
+        with pytest.raises(ValueError):
+            _validate_project_id(pid)
+
+
+def test_placeholders_resolved_to_absolute_paths(tmp_path: Path) -> None:
+    """_load_registry resolves {root} and {state} to absolute paths."""
+    root = tmp_path / "my-proj"
+    root.mkdir()
+    expected_state = root / ".vnx-data" / "state"
+
+    # Write registry with {state} placeholders (mirrors the .example format)
+    registry_path = tmp_path / "projects.yaml"
+    registry_path.write_text(
+        f"projects:\n"
+        f"  - id: my-proj\n"
+        f"    root: {root}\n"
+        f'    coord_db: "{{state}}/runtime_coordination.db"\n'
+        f'    intel_db: "{{state}}/quality_intelligence.db"\n',
+        encoding="utf-8",
+    )
+
+    projects = _load_registry(registry_path)
+    assert len(projects) == 1
+    proj = projects[0]
+
+    assert proj["coord_db"] == str(expected_state / "runtime_coordination.db"), (
+        f"coord_db not resolved: {proj['coord_db']!r}"
+    )
+    assert proj["intel_db"] == str(expected_state / "quality_intelligence.db"), (
+        f"intel_db not resolved: {proj['intel_db']!r}"
+    )
+    # Verify absolute — must not contain literal placeholder
+    assert "{state}" not in proj["coord_db"]
+    assert "{root}" not in proj["coord_db"]
+
+
+def test_resolve_placeholders_both_tokens(tmp_path: Path) -> None:
+    """_resolve_placeholders substitutes {root} and {state} independently."""
+    root = tmp_path / "proj"
+    assert _resolve_placeholders("{root}/custom.db", root) == str(root / "custom.db")
+    assert _resolve_placeholders("{state}/coord.db", root) == str(
+        root / ".vnx-data" / "state" / "coord.db"
+    )
+    # Literal relative paths pass through unchanged
+    assert _resolve_placeholders("rel/path/coord.db", root) == "rel/path/coord.db"
+
+
+def test_yaml_example_uses_placeholder_syntax() -> None:
+    """yaml.example uses {state} placeholders, not <state> or hardcoded paths."""
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    content = (_REPO_ROOT / "scripts" / "control_centre_projects.yaml.example").read_text()
+    assert "<state>" not in content, "Old <state> placeholder still present"
+    assert "{state}" in content, "New {state} placeholder not found"
+    assert ".vnx-data/state/" not in content
