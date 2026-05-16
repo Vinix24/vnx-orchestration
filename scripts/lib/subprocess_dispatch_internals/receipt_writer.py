@@ -1,4 +1,12 @@
-"""receipt_writer — receipt persistence + auto-commit/auto-stash for dispatches."""
+"""receipt_writer — receipt persistence + auto-commit/auto-stash for dispatches.
+
+DEPRECATED (Wave 7 PR-7.6): _write_receipt is subprocess-adapter-specific and
+retained for backward compatibility. New code should call
+``governance_emit.emit_dispatch_receipt`` / ``governance_emit.emit_unified_report``
+for the canonical governance receipt format (includes provider, model, token_usage).
+``emit_dispatch_receipt`` is re-exported below for callers already importing from
+this internal module path.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +22,16 @@ from .path_utils import _get_dirty_files
 from .state_paths import _default_state_dir
 
 logger = logging.getLogger(__name__)
+
+# Re-export shared module surface so callers can migrate at their own pace.
+try:
+    import sys as _sys
+    _lib_dir = str(Path(__file__).resolve().parents[1])
+    if _lib_dir not in _sys.path:
+        _sys.path.insert(0, _lib_dir)
+    from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: F401
+except ImportError:
+    pass  # governance_emit not yet on path — callers will import directly
 
 
 def _ensure_unified_report(
