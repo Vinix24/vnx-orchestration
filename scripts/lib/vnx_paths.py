@@ -13,8 +13,15 @@ import warnings
 from pathlib import Path
 from typing import Dict
 
+# Self-bootstrap: ensure scripts/lib is on sys.path so sibling imports work
+# regardless of whether the caller set up the repo root or lib dir.
+import sys as _sys
+_lib = str(Path(__file__).resolve().parent)
+if _lib not in _sys.path:
+    _sys.path.insert(0, _lib)
+
 # Single source of truth — do not redefine; import from vnx_ids.
-from scripts.lib.vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
+from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 log = logging.getLogger(__name__)
 
