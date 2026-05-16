@@ -15,7 +15,7 @@ Public API:
 - resolve_alias(alias) -> Optional[Worker]
 
 Validation:
-- terminal_id matches r"^[A-Za-z][A-Za-z0-9]*[0-9]+$" or is a plain letter+digit combo
+- terminal_id matches r"^T[0-9]+$" (T followed by one or more digits)
 - role validated against validate_skill.py --list output
 - provider in {claude, codex, gemini, litellm:<sub>}
 - aliases unique across all workers
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_TERMINAL_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
+_TERMINAL_ID_RE = re.compile(r"^T[0-9]+$")
 _VALID_SCALING_POLICIES = frozenset({"fixed", "queue_aware"})
 _VALID_PROVIDERS_BASE = frozenset({"claude", "codex", "gemini"})
 # System roles that are valid but not listed in validate_skill.py (non-worker roles).
@@ -238,7 +238,7 @@ def _validate_terminal_id(terminal_id: str) -> None:
     if not _TERMINAL_ID_RE.match(terminal_id):
         raise ValueError(
             f"Invalid terminal_id {terminal_id!r}. "
-            "Must start with a letter, followed by alphanumeric chars."
+            "Must match ^T[0-9]+$ (e.g. T0, T1, T2, T99)."
         )
 
 

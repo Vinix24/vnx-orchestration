@@ -284,6 +284,41 @@ class TestEdgeCases:
         assert counts.get("claude", 0) == 5
         assert counts.get("codex", 0) == 5
 
+
+# ---------------------------------------------------------------------------
+# OI-1483: allocate_for_scale_up uses active-only count (not all members)
+# ---------------------------------------------------------------------------
+
+class TestActiveOnlyCount:
+    def test_reaped_members_excluded_from_new_size(self):
+        """OI-1483: new_size = len(active) + delta, not len(all) + delta."""
+        reset_counter()
+        # 2 active + 1 reaped; delta=1 -> new_size=3, not 4
+        active1 = m("claude", t=1.0, status="active", mid="a1")
+        active2 = m("codex", t=2.0, status="active", mid="a2")
+        reaped1 = m("claude", t=0.5, status="reaped", mid="r1")
+
+        mix = ["claude", "codex"]
+        result = allocate_for_scale_up([active1, active2, reaped1], mix, delta=1)
+        # new_size=3; target={claude:2,codex:1}; current_active={claude:1,codex:1}
+        # claude gap=1, codex gap=0 -> allocate claude
+        assert len(result.providers) == 1
+        assert result.providers[0] == "claude"
+
+    def test_pending_members_excluded_from_current_shares(self):
+        """OI-1483: pending/draining members don't count toward current_shares."""
+        reset_counter()
+        active_claude = m("claude", t=1.0, status="active", mid="ac1")
+        pending_codex = m("codex", t=2.0, status="pending", mid="pc1")
+
+        mix = ["claude", "codex"]
+        # Only active=1 (claude), new_size=3 (1+delta=2), target={claude:2, codex:1}
+        # current_shares={claude:1}; gaps: claude=1, codex=1 -> allocate both
+        result = allocate_for_scale_up([active_claude, pending_codex], mix, delta=2)
+        assert len(result.providers) == 2
+        # codex should appear since pending_codex is not counted in current_shares
+        assert "codex" in result.providers
+
     def test_allocation_result_is_pure_no_side_effects(self):
         """Calling allocate twice with same args returns same result."""
         reset_counter()
