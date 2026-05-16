@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -33,7 +32,8 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+# Single source of truth — do not redefine; import from vnx_ids.
+from scripts.lib.vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 VALID_EVENT_TYPES = frozenset({
     "dispatch_created",

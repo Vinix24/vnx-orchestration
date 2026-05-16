@@ -8,15 +8,15 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess
 import warnings
 from pathlib import Path
 from typing import Dict
 
-log = logging.getLogger(__name__)
+# Single source of truth — do not redefine; import from vnx_ids.
+from scripts.lib.vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
-_PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+log = logging.getLogger(__name__)
 
 
 def _resolve_vnx_home() -> Path:

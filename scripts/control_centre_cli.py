@@ -27,7 +27,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -51,6 +50,7 @@ from scripts.control_centre.dispatch_lifecycle_tracker import (
 )
 from scripts.control_centre.receipt_tail import ProjectConfig, ReceiptTail
 from scripts.lib.intelligence_aggregator import IntelligenceAggregator
+from scripts.lib.vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 from scripts.lib.vnx_paths import resolve_state_dir
 
 # ---------------------------------------------------------------------------
@@ -60,8 +60,6 @@ from scripts.lib.vnx_paths import resolve_state_dir
 _DEFAULT_REGISTRY = _REPO_ROOT / "scripts" / "control_centre_projects.yaml"
 _CC_AUDIT_PROJECT = "cc-system"
 _CC_EVENTS_SUBPATH = "events/control_centre.ndjson"
-
-_PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 log = logging.getLogger(__name__)
 
@@ -74,8 +72,9 @@ log = logging.getLogger(__name__)
 def _validate_project_id(project_id: str) -> str:
     """Strict validation for project_id used as filesystem path component.
 
-    Allows lowercase alphanumerics, hyphens, and underscores; max 64 chars.
-    Rejects slashes, dots, uppercase to prevent path traversal and casing collisions.
+    Pattern matches PROJECT_ID_RE from scripts.lib.vnx_ids (shared with
+    StateAggregator and vnx_paths). Rejects underscores, uppercase, slashes,
+    dots, single chars, and IDs longer than 32 chars.
     """
     if not _PROJECT_ID_RE.match(project_id or ""):
         raise ValueError(
@@ -105,13 +104,25 @@ def _atomic_write_text(target: Path, content: str) -> None:
     os.replace(tmp, target)
 
 
+def _resolve_placeholders(value: str, project_root: Path) -> str:
+    """Resolve {root} and {state} placeholders in registry yaml values."""
+    state_dir = project_root / ".vnx-data" / "state"
+    return value.replace("{root}", str(project_root)).replace("{state}", str(state_dir))
+
+
 def _load_registry(registry_path: Path) -> List[Dict[str, Any]]:
     """Load project registry from YAML. Returns list of project dicts."""
     if not registry_path.exists():
         return []
     with open(registry_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return (data or {}).get("projects", [])
+    projects = (data or {}).get("projects", [])
+    for project in projects:
+        root = Path(project.get("root", ""))
+        for field in ("coord_db", "intel_db"):
+            if field in project and isinstance(project[field], str):
+                project[field] = _resolve_placeholders(project[field], root)
+    return projects
 
 
 def _project_vnx_data(project: Dict[str, Any]) -> Path:
