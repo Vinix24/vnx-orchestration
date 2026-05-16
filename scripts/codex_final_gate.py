@@ -103,6 +103,7 @@ class CodexGateEnforcementResult:
     touches_runtime: bool
     high_risk_by_path: bool
     mass_deletion_count: int = 0
+    deletion_warn: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -139,10 +140,13 @@ def enforce_codex_gate(
         reasons.append("codex_gate_in_review_stack")
 
     deleted_count = 0
+    deletion_warn = False
     if project_root is not None:
         deleted_count = _count_deleted_files(project_root)
         if deleted_count >= DELETION_FILE_HOLD:
             reasons.append("mass_file_deletion")
+        elif deleted_count >= DELETION_FILE_WARN:
+            deletion_warn = True
 
     return CodexGateEnforcementResult(
         required=len(reasons) > 0,
@@ -153,6 +157,7 @@ def enforce_codex_gate(
         touches_runtime=touches_rt,
         high_risk_by_path=high_risk_path,
         mass_deletion_count=deleted_count,
+        deletion_warn=deletion_warn,
     )
 
 
@@ -275,7 +280,8 @@ def render_codex_prompt(contract: ReviewContract) -> str:
     sections.append("3. **Quality gate checks**: Can each quality gate check be verified from the evidence?")
     sections.append("4. **Test coverage**: Are declared tests present and do they cover the deliverables?")
     sections.append("5. **Deterministic findings**: Are all error-severity findings resolved?")
-    sections.append("6. **Residual risk**: What risks remain after this PR merges?")
+    sections.append("6. **Net deletion sanity**: Count files listed as entirely removed in the diff. If ≥5 files are deleted, include a warning finding with the count and confirm the deletions are intentional (not accidental scope reduction).")
+    sections.append("7. **Residual risk**: What risks remain after this PR merges?")
     sections.append("")
     sections.append("## Severity rules (strict)")
     sections.append("")
@@ -386,7 +392,7 @@ def evaluate_and_record(
 
     if codex_verdict is not None:
         verdict = codex_verdict.get("verdict", "fail")
-        findings = codex_verdict.get("findings") or []
+        findings = list(codex_verdict.get("findings") or [])
         residual_risk = codex_verdict.get("residual_risk")
         rerun_required = codex_verdict.get("rerun_required", False)
         rerun_reason = codex_verdict.get("rerun_reason")
@@ -402,6 +408,17 @@ def evaluate_and_record(
         residual_risk = None
         rerun_required = False
         rerun_reason = None
+
+    if enforcement.deletion_warn:
+        findings = [
+            {
+                "severity": "warning",
+                "message": (
+                    f"Net deletion warning: {enforcement.mass_deletion_count} file(s) deleted "
+                    f"(>= {DELETION_FILE_WARN} threshold) — verify intentional scope reduction"
+                ),
+            }
+        ] + findings
 
     receipt = CodexFinalGateReceipt(
         pr_id=contract.pr_id,

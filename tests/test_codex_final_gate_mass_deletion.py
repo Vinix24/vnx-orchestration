@@ -20,9 +20,11 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 from codex_final_gate import (
     DELETION_FILE_HOLD,
+    DELETION_FILE_WARN,
     CodexFinalGateReceipt,
     check_gate_clearance,
     enforce_codex_gate,
+    evaluate_and_record,
 )
 from review_contract import Deliverable, ReviewContract
 
@@ -134,3 +136,96 @@ class TestMassDeletionTrigger:
 
         assert result["cleared"] is True
         assert result["reason"] == "codex_gate_passed"
+
+
+class TestDeletionWarnLevel:
+    """WARN-level deletion (>= DELETION_FILE_WARN, < DELETION_FILE_HOLD) sets deletion_warn=True."""
+
+    def test_warn_level_sets_flag(self, tmp_path):
+        """WARN threshold sets deletion_warn without triggering gate requirement."""
+        contract = _make_contract()
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_WARN + 1)]
+
+        with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+
+        assert result.deletion_warn is True
+        assert "mass_file_deletion" not in result.reasons
+        assert result.required is False
+
+    def test_warn_exact_threshold(self, tmp_path):
+        """Exactly DELETION_FILE_WARN deleted files sets deletion_warn."""
+        contract = _make_contract()
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_WARN)]
+
+        with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+
+        assert result.deletion_warn is True
+        assert result.mass_deletion_count == DELETION_FILE_WARN
+
+    def test_below_warn_no_flag(self, tmp_path):
+        """Below DELETION_FILE_WARN, deletion_warn stays False."""
+        contract = _make_contract()
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_WARN - 1)]
+
+        with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+
+        assert result.deletion_warn is False
+        assert result.required is False
+
+    def test_hold_level_no_warn_flag(self, tmp_path):
+        """At HOLD threshold, deletion_warn is False (mass_file_deletion takes over)."""
+        contract = _make_contract()
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_HOLD)]
+
+        with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+
+        assert result.deletion_warn is False
+        assert "mass_file_deletion" in result.reasons
+        assert result.required is True
+
+    def test_warn_injects_finding_in_receipt(self, tmp_path):
+        """evaluate_and_record injects a warning finding when deletion_warn is active."""
+        contract = _make_contract(
+            pr_id="PR-warn",
+            pr_title="Warn level deletion",
+            deliverables=[Deliverable(description="remove stale helpers", category="infrastructure")],
+            review_stack=["codex_gate"],
+            content_hash="warn1234",
+        )
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_WARN + 2)]
+
+        with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
+            with patch("codex_final_gate.emit_governance_receipt"):
+                receipt = evaluate_and_record(contract, project_root=tmp_path)
+
+        warning_findings = [
+            f for f in receipt.findings
+            if f.get("severity") == "warning" and "Net deletion warning" in f.get("message", "")
+        ]
+        assert len(warning_findings) == 1
+        assert str(DELETION_FILE_WARN) in warning_findings[0]["message"]
+
+    def test_no_warn_finding_below_threshold(self, tmp_path):
+        """evaluate_and_record does not inject deletion warning when below WARN threshold."""
+        contract = _make_contract(
+            pr_id="PR-clean",
+            pr_title="Clean PR",
+            deliverables=[Deliverable(description="add feature", category="feature")],
+            review_stack=["codex_gate"],
+            content_hash="clean5678",
+        )
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_WARN - 1)]
+
+        with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
+            with patch("codex_final_gate.emit_governance_receipt"):
+                receipt = evaluate_and_record(contract, project_root=tmp_path)
+
+        deletion_warnings = [
+            f for f in receipt.findings
+            if "Net deletion" in f.get("message", "")
+        ]
+        assert len(deletion_warnings) == 0
