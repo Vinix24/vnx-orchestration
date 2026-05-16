@@ -4,13 +4,21 @@ No SQLite, no filesystem, no subprocess. Pure functions over PoolState +
 PoolConfig + Membership list. Returns PoolDecision.
 
 Wave 6 PR-6.3 — ADR-018 elastic worker pool.
+Wave 6 PR-6.4 — Pluggable policy registry via pool_scaling_policies.
 """
 
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Literal, Optional
+
+# Ensure pool_scaling_policies sub-package is importable.
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
 
 
 @dataclass(frozen=True)
@@ -18,10 +26,11 @@ class PoolConfig:
     pool_id: str
     min_workers: int
     max_workers: int
-    scaling_policy: str          # "fixed" | "queue_aware"
+    scaling_policy: str          # "fixed" | "queue_aware" | "queue_depth_v1" | "cost_aware_v1"
     provider_mix: List[str]      # e.g. ["claude", "claude", "litellm:deepseek"]
     cooldown_seconds: float = 60.0
     heartbeat_stale_seconds: float = 300.0
+    cost_ceiling_usd: Optional[float] = None  # used by cost_aware_v1
 
 
 @dataclass(frozen=True)
@@ -61,9 +70,11 @@ def decide(
     Evaluation order:
     1. Stale heartbeats -> reap with targets
     2. Cooldown active -> noop with cooldown_remaining
-    3. Scaling policy: fixed | queue_aware
-    4. Clamp delta to [min - current, max - current]
+    3. Policy registry lookup (fixed | queue_aware | queue_depth_v1 | cost_aware_v1)
+    4. Compute delta and return scale_up / scale_down / noop
     """
+    from pool_scaling_policies import POLICIES  # lazy import avoids circular dep
+
     active = [m for m in members if m.status == "active"]
     current = len(active)
 
@@ -88,12 +99,14 @@ def decide(
                 cooldown_remaining_s=remaining,
             )
 
-    target = _compute_target(config, state)
-    if target is None:
+    policy_fn = POLICIES.get(config.scaling_policy)
+    if policy_fn is None:
         return PoolDecision(
             action="noop",
-            reason=f"unknown scaling policy: {config.scaling_policy}",
+            reason=f"unknown policy: {config.scaling_policy}",
         )
+
+    target = policy_fn(config, state, members)
 
     delta = target - current
     if delta > 0:
@@ -112,15 +125,6 @@ def decide(
             targets=targets,
         )
     return PoolDecision(action="noop", reason="at target")
-
-
-def _compute_target(config: PoolConfig, state: PoolState) -> Optional[int]:
-    if config.scaling_policy == "fixed":
-        return config.min_workers
-    if config.scaling_policy == "queue_aware":
-        raw = _ceil_div(state.queue_depth, 2) if state.queue_depth > 0 else config.min_workers
-        return max(config.min_workers, min(raw, config.max_workers))
-    return None
 
 
 def _is_stale(member: Membership, now: float, threshold: float) -> bool:
