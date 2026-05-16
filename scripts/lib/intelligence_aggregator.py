@@ -84,7 +84,7 @@ def normalize_family_key(text: str) -> str:
     """Strip project-specific noise from a title to produce a stable family key.
 
     Removes:
-    - Absolute filesystem paths  (/Users/foo/bar → <path>)
+    - Absolute filesystem paths  (/path/to/data → <path>)
     - Dispatch-ID-shaped tokens  (20260516-wave5-pr4-foo → <dispatch_id>)
     - UUID-shaped tokens         (hex UUIDs → <uuid>)
     """
