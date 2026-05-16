@@ -63,6 +63,7 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "smoke", "package-check",
     "dispatch", "gate",
     "snapshot", "restore", "quiesce-check",
+    "pool",
 })
 
 TIER_DEMO_ONLY: FrozenSet[str] = frozenset({

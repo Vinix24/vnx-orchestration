@@ -166,6 +166,12 @@ Worktree commands:
   worktree-refresh   Update intelligence snapshot from main
   worktree-status    Show worktree isolation status
 
+Pool commands (elastic worker pool management):
+  pool status [--project <id>] [--pool-id <p>] [--json]  Show pool state
+  pool scale --project <id> --to <N>                     Force scale to N workers
+  pool config --project <id> [--min N] [--max N] [--policy <name>] [--cooldown <s>]
+  pool reap --project <id> [--pool-id <p>] [--force]     Reap stale workers
+
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
@@ -1930,6 +1936,9 @@ main() {
       ;;
     demo)
       cmd_demo "$@"
+      ;;
+    pool)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
       ;;
     help|-h|--help)
       usage
