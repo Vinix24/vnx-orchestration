@@ -20,7 +20,7 @@ def recent_cost_per_hour(
 ) -> float:
     """Estimate hourly cost based on recent receipts.
 
-    Reads .vnx-data/state/t0_receipts.ndjson (last ~200 lines), filters by
+    Reads t0_receipts.ndjson from VNX_STATE_DIR (last ~200 lines), filters by
     timestamp window and provider, then computes avg cost_usd per dispatch
     multiplied by estimated dispatches/hour per worker.
 
