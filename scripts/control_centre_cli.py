@@ -211,7 +211,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     pending_dir = vnx_data_project / "dispatches" / "pending"
     pending_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     dispatch_id = f"cc-{ts}-{args.project}"
     dispatch_dir = pending_dir / dispatch_id
     dispatch_dir.mkdir(parents=True, exist_ok=True)

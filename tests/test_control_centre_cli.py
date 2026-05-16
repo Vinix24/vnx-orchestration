@@ -195,7 +195,10 @@ def test_dispatch_forwards_to_project_t0(tmp_path: Path) -> None:
     assert payload["project_id"] == "vnx-dev"
     assert payload["terminal_id"] == "T0"
     assert payload["source"] == "control-centre"
-    assert payload["dispatch_id"].startswith("cc-")
+    import re
+    assert re.match(r"^cc-\d{8}-\d{6}-\d{6}-", payload["dispatch_id"]), (
+        f"dispatch_id missing microsecond component: {payload['dispatch_id']!r}"
+    )
 
     assert instruction_md.read_text(encoding="utf-8") == "Refactor authentication module"
 
