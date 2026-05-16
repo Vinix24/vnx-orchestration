@@ -1,0 +1,37 @@
+# Default vnx_workers.yaml — ships with 4 workers matching legacy T0-T3.
+# Edit to add custom pools, providers, or workers.
+# Copy this file to .vnx/vnx_workers.yaml and modify for your installation.
+schema_version: 1
+
+workers:
+  - terminal_id: T0
+    role: orchestrator
+    provider: claude
+    model: opus
+    pool_id: default
+    aliases: []
+  - terminal_id: T1
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: default
+    aliases: []
+  - terminal_id: T2
+    role: backend-developer
+    provider: claude
+    model: sonnet
+    pool_id: default
+    aliases: []
+  - terminal_id: T3
+    role: reviewer
+    provider: claude
+    model: sonnet
+    pool_id: default
+    aliases: []
+
+pools:
+  - pool_id: default
+    min_workers: 4
+    max_workers: 4
+    scaling_policy: fixed
+    provider_mix: []

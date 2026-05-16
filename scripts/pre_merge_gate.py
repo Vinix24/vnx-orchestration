@@ -551,47 +551,35 @@ def check_shell_syntax(project_root: Path) -> Dict[str, Any]:
 
 
 def check_net_deletion(project_root: Path) -> Dict[str, Any]:
-    """Check for mass file deletion in the PR diff (last commit, HEAD~1..HEAD)."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return {
-                "check": "net_deletion",
-                "status": "GO",
-                "detail": "could not compute deleted files",
-                "deleted_count": None,
-            }
-
-        deleted = [f for f in result.stdout.strip().splitlines() if f]
-        deleted_count = len(deleted)
-
-        if deleted_count >= DELETION_FILE_HOLD:
-            status = "HOLD"
-            detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
-        else:
-            status = "GO"
-            detail = f"{deleted_count} file(s) deleted"
-
-        return {
-            "check": "net_deletion",
-            "status": status,
-            "detail": detail,
-            "deleted_count": deleted_count,
-            "deleted_files": deleted,
-        }
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+    """Check for mass file deletion in the PR diff vs origin/main (full branch scope)."""
+    deleted = _get_deleted_files(project_root)
+    if deleted is None:
         return {
             "check": "net_deletion",
             "status": "GO",
-            "detail": f"deletion check failed: {exc}",
+            "detail": "could not compute deleted files",
             "deleted_count": None,
         }
+
+    deleted_count = len(deleted)
+
+    if deleted_count >= DELETION_FILE_HOLD:
+        status = "HOLD"
+        detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
+    elif deleted_count >= DELETION_FILE_WARN:
+        status = "GO"
+        detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_WARN} — review deletions before merge)"
+    else:
+        status = "GO"
+        detail = f"{deleted_count} file(s) deleted"
+
+    return {
+        "check": "net_deletion",
+        "status": status,
+        "detail": detail,
+        "deleted_count": deleted_count,
+        "deleted_files": deleted,
+    }
 
 
 # ---------------------------------------------------------------------------
