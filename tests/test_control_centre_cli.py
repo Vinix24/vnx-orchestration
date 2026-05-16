@@ -10,6 +10,7 @@ Validates:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -32,6 +33,7 @@ from scripts.control_centre_cli import (
     _get_active_lease,
     _load_registry,
     _project_vnx_data,
+    _token_digest,
     build_parser,
     cmd_aggregate,
     cmd_dispatch,
@@ -259,7 +261,8 @@ def test_kill_calls_t0_lifecycle_manager(tmp_path: Path) -> None:
     update = mock_agg.submit.call_args[0][0]
     assert update.project_id == "sales-copilot"
     assert update.event_type == "cc.kill.requested"
-    assert update.payload["token"] == lease_token
+    assert "token" not in update.payload, "raw lease token must not appear in audit payload"
+    assert update.payload["token_digest"] == _token_digest(lease_token)
 
 
 # ---------------------------------------------------------------------------
@@ -465,3 +468,92 @@ def test_no_hardcoded_legacy_path_in_yaml_example() -> None:
     _REPO_ROOT = Path(__file__).resolve().parent.parent
     content = (_REPO_ROOT / "scripts" / "control_centre_projects.yaml.example").read_text()
     assert ".vnx-data/state/" not in content
+
+
+# ---------------------------------------------------------------------------
+# test_token_digest_properties
+# ---------------------------------------------------------------------------
+
+
+def test_token_digest_is_non_reversible_and_fixed_length() -> None:
+    """_token_digest returns a 16-char hex string and is deterministic."""
+    token = "super-secret-lease-token-abc"
+    digest = _token_digest(token)
+    assert len(digest) == 16
+    assert all(c in "0123456789abcdef" for c in digest)
+    assert _token_digest(token) == _token_digest(token)
+    expected = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    assert digest == expected
+
+
+def test_token_digest_empty_token_returns_empty() -> None:
+    """_token_digest returns empty string for empty input."""
+    assert _token_digest("") == ""
+
+
+def test_heartbeat_audit_uses_token_digest_not_raw_token(tmp_path: Path) -> None:
+    """Heartbeat audit payload contains token_digest, not raw lease_token."""
+    proj = _make_project(tmp_path, "hb-proj")
+    lease_token = "raw-heartbeat-token-xyz"
+    coord_db = Path(proj["root"]) / ".vnx-data" / "state" / "runtime_coordination.db"
+    _seed_coord_db(coord_db, "hb-proj", lease_token, pid=55000)
+    registry_path = _write_registry(tmp_path, [proj])
+
+    mock_mgr = MagicMock()
+    mock_mgr.heartbeat.return_value = True
+    mock_agg = MagicMock()
+
+    with (
+        patch("scripts.control_centre_cli.T0LifecycleManager", return_value=mock_mgr),
+        patch("scripts.control_centre_cli._make_aggregator", return_value=mock_agg),
+        patch("scripts.control_centre_cli._repo_vnx_data", return_value=tmp_path / ".vnx-data"),
+    ):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--registry", str(registry_path),
+            "heartbeat",
+            "--project", "hb-proj",
+        ])
+        rc = cmd_heartbeat(args)
+
+    assert rc == 0
+    mock_agg.submit.assert_called_once()
+    update = mock_agg.submit.call_args[0][0]
+    assert update.event_type == "cc.heartbeat.sent"
+    assert "token" not in update.payload, "raw lease token must not appear in heartbeat audit payload"
+    assert update.payload["token_digest"] == _token_digest(lease_token)
+
+
+def test_dispatch_no_tmp_file_leftover(tmp_path: Path) -> None:
+    """Atomic write leaves no .tmp file behind after successful dispatch."""
+    proj = _make_project(tmp_path, "atomic-proj")
+    registry_path = _write_registry(tmp_path, [proj])
+
+    mock_agg = MagicMock()
+
+    with (
+        patch("scripts.control_centre_cli._make_aggregator", return_value=mock_agg),
+        patch("scripts.control_centre_cli._repo_vnx_data", return_value=tmp_path / ".vnx-data"),
+    ):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--registry", str(registry_path),
+            "dispatch",
+            "--project", "atomic-proj",
+            "--task", "Atomic write test task",
+        ])
+        rc = cmd_dispatch(args)
+
+    assert rc == 0
+    project_root = Path(proj["root"])
+    pending_dir = project_root / ".vnx-data" / "dispatches" / "pending"
+    dispatch_dirs = list(pending_dir.iterdir())
+    assert len(dispatch_dirs) == 1
+    dispatch_dir = dispatch_dirs[0]
+    # instruction.md must exist and contain correct content
+    instruction_md = dispatch_dir / "instruction.md"
+    assert instruction_md.exists()
+    assert instruction_md.read_text(encoding="utf-8") == "Atomic write test task"
+    # No .tmp files left behind
+    tmp_files = list(dispatch_dir.glob("*.tmp"))
+    assert tmp_files == [], f"Leftover .tmp files found: {tmp_files}"

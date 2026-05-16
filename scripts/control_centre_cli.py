@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -63,6 +64,22 @@ log = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _token_digest(token: str) -> str:
+    """Non-reversible hash for audit logging — keeps uniqueness, removes credential."""
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Atomic file write: write to .tmp, fsync, then rename into place."""
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    with open(tmp, "rb") as f:
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
 
 
 def _load_registry(registry_path: Path) -> List[Dict[str, Any]]:
@@ -217,7 +234,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     dispatch_dir.mkdir(parents=True, exist_ok=True)
 
     instruction_path = dispatch_dir / "instruction.md"
-    instruction_path.write_text(args.task, encoding="utf-8")
+    _atomic_write_text(instruction_path, args.task)
 
     dispatch_payload = {
         "dispatch_id": dispatch_id,
@@ -286,7 +303,7 @@ def cmd_heartbeat(args: argparse.Namespace) -> int:
     _emit_audit(agg, args.project, "cc.heartbeat.sent", {
         "project": args.project,
         "pid": pid,
-        "token": token,
+        "token_digest": _token_digest(token),
         "result": ok,
     })
     return 0
@@ -326,7 +343,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
     _emit_audit(agg, args.project, "cc.kill.requested", {
         "project": args.project,
-        "token": token,
+        "token_digest": _token_digest(token),
         "verified_dead": result.verified_dead,
         "lease_released": result.lease_released,
     })
