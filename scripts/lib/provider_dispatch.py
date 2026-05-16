@@ -68,25 +68,54 @@ def _extract_response_text(result: Any) -> str:
     return (getattr(result, "completion_text", None) or "")
 
 
-def _extract_token_usage(result: Any) -> Dict[str, int]:
-    """Normalize token_usage from any spawn result to {input, output, cache_hit}."""
+def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
+    """Normalize token_usage from any spawn result to {input, output, cache_hit}.
+
+    Each provider emits usage under different field names:
+    - litellm:*  — prompt_tokens / completion_tokens (OpenAI format from _litellm_runner.py)
+    - codex      — input_tokens / output_tokens / cache_read_tokens
+    - gemini     — input_tokens / output_tokens / cache_read_tokens
+    - claude     — token_usage is None (subprocess_dispatch does not yet return usage)
+    """
+    usage = {"input": 0, "output": 0, "cache_hit": 0}
     raw = getattr(result, "token_usage", None)
     if not isinstance(raw, dict):
-        return {"input": 0, "output": 0, "cache_hit": 0}
-    return {
-        "input": int(raw.get("input_tokens", raw.get("input", 0)) or 0),
-        "output": int(raw.get("output_tokens", raw.get("output", 0)) or 0),
-        "cache_hit": int(raw.get("cache_read_tokens", raw.get("cache_hit", 0)) or 0),
-    }
+        logger.warning(
+            "token_usage extraction returned 0 for provider=%s; check spawn_result shape", provider
+        )
+        return usage
+
+    if provider.startswith("litellm:"):
+        usage["input"] = int(raw.get("prompt_tokens", 0) or 0)
+        usage["output"] = int(raw.get("completion_tokens", 0) or 0)
+        details = raw.get("prompt_tokens_details") or {}
+        cache = int(details.get("cached_tokens", 0) or 0) or int(raw.get("prompt_cache_hit_tokens", 0) or 0)
+        usage["cache_hit"] = cache
+    elif provider in ("codex", "gemini"):
+        usage["input"] = int(raw.get("input_tokens", 0) or 0)
+        usage["output"] = int(raw.get("output_tokens", 0) or 0)
+        usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
+    elif provider == "claude":
+        usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
+        usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
+        usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
+    else:
+        usage["input"] = int(raw.get("input_tokens", raw.get("prompt_tokens", raw.get("input", 0))) or 0)
+        usage["output"] = int(raw.get("output_tokens", raw.get("completion_tokens", raw.get("output", 0))) or 0)
+        usage["cache_hit"] = int(raw.get("cache_read_tokens", raw.get("cache_hit", 0)) or 0)
+
+    if usage["input"] == 0 and usage["output"] == 0:
+        logger.warning(
+            "token_usage extraction returned 0 for provider=%s; check spawn_result shape", provider
+        )
+    return usage
 
 
-def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
-    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
-    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str, float]]:
+    """Load {input, output} pricing per MTok from wave7_models.yaml. Returns None on miss."""
+    sub = provider.split(":", 1)[1] if provider.startswith("litellm:") and ":" in provider else ""
+    if not sub:
         return None
-    if not provider.startswith("litellm:"):
-        return None
-    sub = provider.split(":", 1)[1] if ":" in provider else ""
     try:
         from providers import provider_registry as _reg
         registry = _reg.load()
@@ -94,17 +123,28 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Opt
         if cfg is None or not cfg.models:
             return None
         model_key = model.split("/")[-1] if "/" in model else model
-        entry = cfg.models.get(model_key)
-        if entry is None:
-            entry = next(iter(cfg.models.values()), None)
+        entry = cfg.models.get(model_key) or next(iter(cfg.models.values()), None)
         if entry is None:
             return None
-        cost_in = (token_usage.get("input", 0) / 1_000_000) * float(entry.cost_input_per_mtok)
-        cost_out = (token_usage.get("output", 0) / 1_000_000) * float(entry.cost_output_per_mtok)
-        return round(cost_in + cost_out, 8)
+        return {
+            "input": float(entry.cost_input_per_mtok),
+            "output": float(entry.cost_output_per_mtok),
+        }
     except Exception as exc:
-        logger.debug("_compute_cost: lookup failed for provider=%s model=%s: %s", provider, model, exc)
+        logger.debug("_load_pricing_from_registry: failed for provider=%s model=%s: %s", provider, model, exc)
         return None
+
+
+def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
+    """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
+    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+        return None
+    pricing = _load_pricing_from_registry(provider, model)
+    if not pricing:
+        return None
+    cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
+    cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
+    return round(cost_in + cost_out, 8)
 
 
 def _emit_governance(
@@ -122,7 +162,7 @@ def _emit_governance(
     state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
     data_dir = Path(os.environ.get("VNX_DATA_DIR", ".vnx-data"))
     duration = (end_time - start_time).total_seconds()
-    token_usage = _extract_token_usage(result)
+    token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
     try:
