@@ -1,0 +1,46 @@
+Vertaal de onderstaande Nederlandstalige technische blogpost naar het Engels. Bewaar de opmaak (Markdown headers, bullets, codeblokken). Vertaal technische termen letterlijk (bijv. "dispatch" blijft "dispatch", "governance" blijft "governance", "receipt" blijft "receipt"). Behoud de persoonlijke, directe toon.
+
+---
+
+# Waarom ik geen LangGraph gebruik — en wat ik in plaats daarvan bouw
+
+Twee jaar geleden begon ik met AI-agents bouwen. Het eerste wat iedereen aanraadde: LangGraph.
+
+Ik heb het geprobeerd. Ik begreep het. En daarna heb ik het weggegooid.
+
+## Het fundamentele probleem
+
+LangGraph composeert workers als in-process Runnable nodes. Dat betekent: geen processisolatie, geen echte parallellisatie, en — het ergste — geen audit trail die een financiële audit zou overleven.
+
+In mijn praktijk werk ik voor organisaties die ISO- en ISAE-gecertificeerd zijn. "The model decided" is geen antwoord dat ze accepteren. Ze willen weten *welk model*, *welke versie*, *welke input*, *welke output*, *hoe lang*, en *wie heeft het goedgekeurd*.
+
+LangGraph geeft je dat niet standaard. Je moet het er zelf inbouwen — en dan bouw je eigenlijk een eigen governance-laag bovenop een framework dat daar niet voor ontworpen is.
+
+## Wat ik gebouwd heb
+
+VNX Orchestration is een governance-first runtime. Elke dispatch krijgt een uniek ID. Elke response wordt vastgelegd als NDJSON receipt met:
+
+```json
+{
+  "dispatch_id": "20260514-feat-auth-T1",
+  "model": "claude-sonnet-4-6",
+  "provider": "claude",
+  "input_tokens": 4821,
+  "output_tokens": 1203,
+  "duration_seconds": 14.2,
+  "exit_code": 0,
+  "timestamp": "2026-05-14T09:41:22Z"
+}
+```
+
+Niets gaat de keten uit zonder dat er een receipt is. Niets wordt gemerged zonder dat een gate groen is.
+
+## De afruil
+
+Is het meer werk? Ja. VNX heeft 1.100+ receipts, 860+ sessies geanalyseerd, en 11 agents in productie.
+
+Maar ik slaap goed. En mijn klanten ook.
+
+---
+
+Translate the above to English. Maintain all Markdown formatting exactly as-is. Preserve technical terms in English where they are already English (dispatch, receipt, governance, NDJSON). The blog post uses first-person singular ("ik" → "I", "mijn" → "my") — maintain that throughout.
