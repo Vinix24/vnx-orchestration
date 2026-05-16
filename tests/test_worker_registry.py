@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import textwrap
 from pathlib import Path
+from subprocess import CalledProcessError
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -27,10 +29,10 @@ from worker_registry import (
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_ALL_ROLES: frozenset = frozenset()  # empty = skip role validation in most tests
+_ALL_ROLES: Optional[frozenset] = None  # None = skip role validation in most tests
 
 
-def _registry_from_yaml(text: str, valid_roles: frozenset = _ALL_ROLES) -> WorkerRegistry:
+def _registry_from_yaml(text: str, valid_roles: Optional[frozenset] = _ALL_ROLES) -> WorkerRegistry:
     data = yaml.safe_load(text)
     return _build_registry(data, valid_roles)
 
@@ -230,6 +232,64 @@ class TestDuplicateAlias:
 
 
 # ---------------------------------------------------------------------------
+# Duplicate terminal_id detection
+# ---------------------------------------------------------------------------
+
+class TestDuplicateTerminalId:
+    def test_duplicate_terminal_id_raises_on_load(self):
+        bad_yaml = textwrap.dedent("""\
+            schema_version: 1
+            workers:
+              - terminal_id: T1
+                role: backend-developer
+                provider: claude
+                model: sonnet
+                pool_id: pool1
+                aliases: []
+              - terminal_id: T1
+                role: reviewer
+                provider: claude
+                model: sonnet
+                pool_id: pool1
+                aliases: []
+            pools:
+              - pool_id: pool1
+                min_workers: 2
+                max_workers: 2
+                scaling_policy: fixed
+                provider_mix: []
+        """)
+        with pytest.raises(ValueError, match="duplicate terminal_id"):
+            _registry_from_yaml(bad_yaml)
+
+    def test_unique_terminal_ids_load_fine(self):
+        ok_yaml = textwrap.dedent("""\
+            schema_version: 1
+            workers:
+              - terminal_id: T1
+                role: backend-developer
+                provider: claude
+                model: sonnet
+                pool_id: pool1
+                aliases: []
+              - terminal_id: T2
+                role: reviewer
+                provider: claude
+                model: sonnet
+                pool_id: pool1
+                aliases: []
+            pools:
+              - pool_id: pool1
+                min_workers: 2
+                max_workers: 2
+                scaling_policy: fixed
+                provider_mix: []
+        """)
+        reg = _registry_from_yaml(ok_yaml)
+        assert len(reg.list_workers()) == 2
+
+
+# ---------------------------------------------------------------------------
 # Terminal ID validation
 # ---------------------------------------------------------------------------
 
@@ -322,7 +382,7 @@ class TestRoleValidation:
         reg = _registry_from_yaml(yaml_text, valid_roles=valid_roles)
         assert reg.by_id("T0").role == "orchestrator"
 
-    def test_empty_valid_roles_skips_validation(self):
+    def test_none_valid_roles_skips_validation(self):
         yaml_text = textwrap.dedent("""\
             schema_version: 1
             workers:
@@ -339,8 +399,18 @@ class TestRoleValidation:
                 scaling_policy: fixed
                 provider_mix: []
         """)
-        reg = _registry_from_yaml(yaml_text, valid_roles=frozenset())
+        reg = _registry_from_yaml(yaml_text, valid_roles=None)
         assert reg.by_id("T1").role == "any-role-at-all"
+
+    def test_role_validation_raises_on_subprocess_crash(self, tmp_path):
+        """_load_registry propagates CalledProcessError when validate_skill.py exits non-zero."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (scripts_dir / "validate_skill.py").write_text("# stub — exists so file check passes")
+
+        with patch("worker_registry.subprocess.run", side_effect=CalledProcessError(1, "validate_skill.py")):
+            with pytest.raises(CalledProcessError):
+                _load_registry(repo_root=tmp_path)
 
 
 # ---------------------------------------------------------------------------

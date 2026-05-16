@@ -149,7 +149,7 @@ class TestDeletionWarnLevel:
         with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
             result = enforce_codex_gate(contract, project_root=tmp_path)
 
-        assert result.deletion_warn is True
+        assert result.mass_deletion_warn is True
         assert "mass_file_deletion" not in result.reasons
         assert result.required is False
 
@@ -161,7 +161,7 @@ class TestDeletionWarnLevel:
         with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
             result = enforce_codex_gate(contract, project_root=tmp_path)
 
-        assert result.deletion_warn is True
+        assert result.mass_deletion_warn is True
         assert result.mass_deletion_count == DELETION_FILE_WARN
 
     def test_below_warn_no_flag(self, tmp_path):
@@ -172,7 +172,7 @@ class TestDeletionWarnLevel:
         with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
             result = enforce_codex_gate(contract, project_root=tmp_path)
 
-        assert result.deletion_warn is False
+        assert result.mass_deletion_warn is False
         assert result.required is False
 
     def test_hold_level_no_warn_flag(self, tmp_path):
@@ -183,7 +183,7 @@ class TestDeletionWarnLevel:
         with patch("codex_final_gate.subprocess.run", return_value=_mock_git_deleted(deleted)):
             result = enforce_codex_gate(contract, project_root=tmp_path)
 
-        assert result.deletion_warn is False
+        assert result.mass_deletion_warn is False
         assert "mass_file_deletion" in result.reasons
         assert result.required is True
 

@@ -109,27 +109,40 @@ class Pool:
 # Role validation — cached once at module import
 # ---------------------------------------------------------------------------
 
-def _fetch_valid_roles(repo_root: Path) -> frozenset:
-    """Run validate_skill.py --list and parse valid role names."""
+def _fetch_valid_roles(repo_root: Path) -> Optional[frozenset]:
+    """Run validate_skill.py --list and parse valid role names.
+
+    Returns:
+        frozenset of role names — use for validation (may be empty).
+        None — tool not found; caller should skip role validation.
+
+    Raises:
+        subprocess.CalledProcessError — tool exists but exited non-zero.
+        subprocess.TimeoutExpired — tool hung.
+    """
     script = repo_root / "scripts" / "validate_skill.py"
     if not script.is_file():
         logger.warning("validate_skill.py not found at %s; skipping role validation", script)
-        return frozenset()
+        return None
     try:
         result = subprocess.run(
             [sys.executable, str(script), "--list"],
+            check=True,
             capture_output=True, text=True, timeout=10,
         )
-        roles: set = set()
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("@"):
-                name = stripped.lstrip("@").split()[0]
-                roles.add(name)
-        return frozenset(roles)
-    except Exception as exc:
-        logger.warning("Could not fetch valid roles: %s", exc)
-        return frozenset()
+    except subprocess.CalledProcessError as e:
+        logger.error("validate_skill.py failed (exit %d): %s", e.returncode, e.stderr)
+        raise
+    except subprocess.TimeoutExpired:
+        logger.error("validate_skill.py timed out")
+        raise
+    roles: set = set()
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("@"):
+            name = stripped.lstrip("@").split()[0]
+            roles.add(name)
+    return frozenset(roles)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +168,11 @@ class WorkerRegistry:
     """Registry of workers and pools loaded from vnx_workers.yaml."""
 
     def __init__(self, workers: List[Worker], pools: List[Pool]) -> None:
+        seen_ids: set = set()
+        for w in workers:
+            if w.terminal_id in seen_ids:
+                raise ValueError(f"duplicate terminal_id: {w.terminal_id!r}")
+            seen_ids.add(w.terminal_id)
         self._workers: List[Worker] = workers
         self._pools: Dict[str, Pool] = {p.pool_id: p for p in pools}
         self._by_id: Dict[str, Worker] = {w.terminal_id: w for w in workers}
@@ -223,11 +241,11 @@ def _validate_terminal_id(terminal_id: str) -> None:
         )
 
 
-def _validate_role(role: str, valid_roles: frozenset) -> None:
+def _validate_role(role: str, valid_roles: Optional[frozenset]) -> None:
     if role in _SYSTEM_ROLES:
         return
-    if not valid_roles:
-        return  # Skip validation when validate_skill.py unavailable
+    if valid_roles is None:
+        return  # Tool unavailable — skip validation
     if role not in valid_roles:
         raise ValueError(
             f"Invalid role {role!r}. Run 'python3 scripts/validate_skill.py --list' "
@@ -255,7 +273,7 @@ def _validate_pool_ref(worker: Worker, pool_ids: frozenset) -> None:
 # Load registry from data dict
 # ---------------------------------------------------------------------------
 
-def _build_registry(data: dict, valid_roles: frozenset) -> WorkerRegistry:
+def _build_registry(data: dict, valid_roles: Optional[frozenset]) -> WorkerRegistry:
     """Parse, validate, and construct WorkerRegistry from raw YAML dict."""
     raw_workers = data.get("workers", [])
     raw_pools = data.get("pools", [])

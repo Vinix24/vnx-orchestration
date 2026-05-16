@@ -110,6 +110,7 @@ class CodexGateEnforcementResult:
     high_risk_by_path: bool
     mass_deletion_count: int = 0
     mass_deletion_warn: bool = False
+    warnings: List[str] = field(default_factory=list)
     deleted_files: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -150,6 +151,7 @@ def enforce_codex_gate(
     deleted_files: List[str] = []
     deleted_count = 0
     mass_deletion_warn = False
+    warnings_list: List[str] = []
     if project_root is not None:
         raw = _get_deleted_files(project_root)
         if raw is not None:
@@ -159,7 +161,7 @@ def enforce_codex_gate(
             reasons.append("mass_file_deletion")
         elif deleted_count >= DELETION_FILE_WARN:
             mass_deletion_warn = True
-            reasons.append("mass_deletion_warning")
+            warnings_list.append("mass_deletion_warning")
 
     return CodexGateEnforcementResult(
         required=len(reasons) > 0,
@@ -171,6 +173,7 @@ def enforce_codex_gate(
         high_risk_by_path=high_risk_path,
         mass_deletion_count=deleted_count,
         mass_deletion_warn=mass_deletion_warn,
+        warnings=warnings_list,
         deleted_files=deleted_files,
     )
 
