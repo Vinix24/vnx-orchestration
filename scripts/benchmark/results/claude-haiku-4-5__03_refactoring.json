@@ -1,0 +1,25 @@
+{
+  "model_id": "claude-haiku-4-5",
+  "task_id": "03_refactoring",
+  "dispatch_id": "bench-claude-haiku-4-5-03_refactoring-1778968435",
+  "duration_seconds": 29.261,
+  "exit_code": 0,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 360,
+      "output": 26,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.00049
+  },
+  "response": "## Summary\nAuto-generated stub \u2014 worker completed without writing a manual unified report.\n\n## Open Items",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "Response contains no refactored code, only an auto-generated stub indicating the worker failed to produce output."
+  },
+  "cost_usd_estimated": 0.00049
+}

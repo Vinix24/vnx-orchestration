@@ -1,0 +1,25 @@
+{
+  "model_id": "glm-5-1",
+  "task_id": "04_documentation",
+  "dispatch_id": "bench-glm-5-1-04_documentation-1778970243",
+  "duration_seconds": 0.868,
+  "exit_code": 1,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 851,
+      "output": 869,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.002598
+  },
+  "response": "## Instruction\n\nWrite a README.md for the following Python module. Include: overview paragraph, installation (pip + requirements), API reference for every public function with parameter types and return types, two usage examples (basic + advanced), and a section on error handling.\n\n```python\n\"\"\"dispatch_router.py \u2014 Route dispatch requests to the correct provider backend.\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport logging\nfrom dataclasses import dataclass\nfrom pathlib import Path\nfrom typing import Optional\n\nlogger = logging.getLogger(__name__)\n\nSUPPORTED_PROVIDERS = (\"claude\", \"litellm\", \"codex\", \"gemini\")\n\n\n@dataclass\nclass DispatchResult:\n    success: bool\n    provider: str\n    model: str\n    output: str\n    input_tokens: int\n    output_tokens: int\n    duration_seconds: float\n    error: Optional[str] = None\n\n\ndef route(provider: str, model: str, instruction: str, timeout: int = 300) -> DispatchResult:\n    \"\"\"Route instruction to provider, return structured result.\n\n    Raises ValueError for unsupported provider.\n    Raises TimeoutError if provider exceeds timeout.\n    \"\"\"\n    if provider not in SUPPORTED_PROVIDERS:\n        raise ValueError(f\"Unsupported provider: {provider!r}. Must be one of {SUPPORTED_PROVIDERS}\")\n    handler = _get_handler(provider)\n    return handler(model=model, instruction=instruction, timeout=timeout)\n\n\ndef _get_handler(provider: str):\n    handlers = {\n        \"claude\": _claude_handler,\n        \"litellm\": _litellm_handler,\n        \"codex\": _codex_handler,\n        \"gemini\": _gemini_handler,\n    }\n    return handlers[provider]\n\n\ndef _claude_handler(model: str, instruction: str, timeout: int) -> DispatchResult:\n    import subprocess\n    start = __import__(\"time\").time()\n    proc = subprocess.run(\n        [\"claude\", \"-p\", \"--model\", model, instruction],\n        capture_output=True, text=True, timeout=timeout\n    )\n    duration = __import__(\"time\").time() - start\n    return DispatchResult(\n        success=proc.returncode == 0,\n        provider=\"claude\",\n        model=model,\n        output=proc.stdout,\n        input_tokens=0,\n        output_tokens=0,\n        duration_seconds=duration,\n        error=proc.stderr if proc.returncode != 0 else None,\n    )\n\n\ndef _litellm_handler(model: str, instruction: str, timeout: int) -> DispatchResult:\n    raise NotImplementedError(\"LiteLLM handler: configure via VNX_LITELLM_BASE_URL\")\n\n\ndef _codex_handler(model: str, instruction: str, timeout: int) -> DispatchResult:\n    raise NotImplementedError(\"Codex handler: requires CODEX_API_KEY\")\n\n\ndef _gemini_handler(model: str, instruction: str, timeout: int) -> DispatchResult:\n    raise NotImplementedError(\"Gemini handler: requires GEMINI_API_KEY\")\n\n\ndef load_routing_config(config_path: Path) -> dict:\n    \"\"\"Load routing configuration from JSON file. Returns empty dict if file absent.\"\"\"\n    if not config_path.exists():\n        return {}\n    return json.loads(config_path.read_text())\n\n\ndef select_model(task_class: str, config: dict) -> tuple[str, str]:\n    \"\"\"Select (provider, model) for a task class from routing config.\n\n    Falls back to ('claude', 'sonnet') if task_class not in config.\n    \"\"\"\n    routing = config.get(\"routing\", {})\n    entry = routing.get(task_class, {\"provider\": \"claude\", \"model\": \"sonnet\"})\n    return entry[\"provider\"], entry[\"model\"]\n```\n\nOutput only the README.md content. Start directly with the `# dispatch_router` heading.\n\n\n## Response\n\n(no response captured)\n\n## Findings\n\nNone",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "The model produced no response; the output simply echoes the instruction with '(no response captured)' and no README content."
+  },
+  "cost_usd_estimated": 0.002598
+}

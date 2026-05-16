@@ -1,0 +1,232 @@
+routing_by_task:
+  01_code_generation:
+  - avg_duration_seconds: 512.145
+    composite_score: 8.0
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 330.317
+    composite_score: 7.5
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 56.119
+    composite_score: 5.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 212.345
+    composite_score: 5.0
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 222.333
+    composite_score: 4.5
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 0.807
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.217
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.611
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
+  02_code_review:
+  - avg_duration_seconds: 90.934
+    composite_score: 10.0
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 72.516
+    composite_score: 9.5
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 29.571
+    composite_score: 9.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 152.5
+    composite_score: 9.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 25.713
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 0.775
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.163
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.121
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
+  03_refactoring:
+  - avg_duration_seconds: 209.001
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 19.278
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 108.872
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 29.261
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 35.453
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 0.853
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.143
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.234
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
+  04_documentation:
+  - avg_duration_seconds: 12.627
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 62.115
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 55.474
+    composite_score: 1.5
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 15.821
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 49.27
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 0.868
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.096
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.196
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
+  05_debugging:
+  - avg_duration_seconds: 148.798
+    composite_score: 7.5
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 43.752
+    composite_score: 6.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 417.102
+    composite_score: 6.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 13.443
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 91.1
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 0.911
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.319
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.134
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
+  06_design:
+  - avg_duration_seconds: 151.936
+    composite_score: 9.5
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 273.321
+    composite_score: 9.0
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 321.34
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 56.228
+    composite_score: 7.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 288.278
+    composite_score: 6.5
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 0.98
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.29
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.317
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
+  07_translation:
+  - avg_duration_seconds: 4.251
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-flash
+  - avg_duration_seconds: 50.202
+    composite_score: 8.5
+    cost_usd_per_call: null
+    model_id: deepseek-v4-pro
+  - avg_duration_seconds: 31.572
+    composite_score: 5.5
+    cost_usd_per_call: null
+    model_id: claude-haiku-4-5
+  - avg_duration_seconds: 75.225
+    composite_score: 5.0
+    cost_usd_per_call: null
+    model_id: claude-opus-4-6
+  - avg_duration_seconds: 59.843
+    composite_score: 5.0
+    cost_usd_per_call: null
+    model_id: claude-sonnet-4-6
+  - avg_duration_seconds: 0.888
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: glm-5-1
+  - avg_duration_seconds: 1.243
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-0905
+  - avg_duration_seconds: 1.249
+    composite_score: 1.0
+    cost_usd_per_call: null
+    model_id: kimi-k2-6
