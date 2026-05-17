@@ -42,6 +42,7 @@ class Membership:
     status: str                  # "pending" | "active" | "draining" | "reaped"
     joined_at: float             # unix timestamp
     last_heartbeat: Optional[float] = None
+    pid: Optional[int] = None
 
 
 @dataclass(frozen=True)

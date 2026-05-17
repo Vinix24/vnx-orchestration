@@ -217,6 +217,7 @@ class TestPoolManagerMockSpawn:
                 terminal_id TEXT,
                 project_id TEXT,
                 last_heartbeat_at TEXT,
+                worker_pid INTEGER,
                 PRIMARY KEY (terminal_id, project_id)
             )
         """)

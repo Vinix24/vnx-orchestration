@@ -146,8 +146,27 @@ __all__ = [
 ]
 
 
+def _pool_heartbeat_loop(
+    terminal_id: str,
+    project_id: str,
+    db_path: "Path",
+    stop_event: "threading.Event",
+    interval: float = 15.0,
+) -> None:
+    """Update terminal_leases.last_heartbeat_at every *interval* seconds."""
+    import threading as _thr
+    while not stop_event.wait(timeout=interval):
+        try:
+            from pool_state_repo import PoolStateRepository
+            repo = PoolStateRepository(db_path, project_id)
+            repo.update_heartbeat_by_terminal(terminal_id, time.time())
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     import argparse
+    import threading
 
     parser = argparse.ArgumentParser(description="Deliver dispatch via SubprocessAdapter")
     parser.add_argument("--terminal-id", required=True)
@@ -235,16 +254,40 @@ if __name__ == "__main__":
                 _routing_exc, args.model,
             )
 
-    ok = deliver_with_recovery(
-        terminal_id=args.terminal_id,
-        instruction=args.instruction,
-        model=_effective_model,
-        dispatch_id=args.dispatch_id,
-        role=args.role,
-        max_retries=args.max_retries,
-        auto_commit=not args.no_auto_commit,
-        gate=args.gate,
-        dispatch_paths=_dispatch_paths,
-        pr_id=args.pr_id,
+    _state_dir = _default_state_dir()
+    _db_path = _state_dir / "runtime_coordination.db"
+    _project_id = os.environ.get("VNX_PROJECT_ID", "vnx-dev")
+
+    try:
+        from pool_state_repo import PoolStateRepository
+        _pid_repo = PoolStateRepository(_db_path, _project_id)
+        _pid_repo.store_worker_pid(args.terminal_id, os.getpid())
+    except Exception:
+        pass
+
+    _hb_stop = threading.Event()
+    _hb_thread = threading.Thread(
+        target=_pool_heartbeat_loop,
+        args=(args.terminal_id, _project_id, _db_path, _hb_stop),
+        daemon=True,
     )
+    _hb_thread.start()
+
+    try:
+        ok = deliver_with_recovery(
+            terminal_id=args.terminal_id,
+            instruction=args.instruction,
+            model=_effective_model,
+            dispatch_id=args.dispatch_id,
+            role=args.role,
+            max_retries=args.max_retries,
+            auto_commit=not args.no_auto_commit,
+            gate=args.gate,
+            dispatch_paths=_dispatch_paths,
+            pr_id=args.pr_id,
+        )
+    finally:
+        _hb_stop.set()
+        _hb_thread.join(timeout=5)
+
     sys.exit(0 if ok else 1)
