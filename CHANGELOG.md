@@ -11,6 +11,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Added
 - feat(skill-coverage): `scripts/check_skill_coverage.py` pre-flight scanner — finds project skill-refs vs central+overrides availability. Prevents mission-control style product-skill loss on central rollout. Pre-centralization must-have #9.
+- fix(skill-coverage): replace silent `except Exception: pass` in `_scan_local_skills_dir` + `_list_skills_in_dir` with narrow `(yaml.YAMLError, OSError)` + `logger.warning` + skipped report surfaced in `--json` output (codex 2 blockers)
 
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)

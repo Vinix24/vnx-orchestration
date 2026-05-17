@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, List, Set
+
+import yaml
+
+logger = logging.getLogger(__name__)
 
 
 def _norm(name: str) -> str:
@@ -73,29 +78,30 @@ def _scan_code_roles(project_root: Path) -> Set[str]:
     return refs
 
 
-def _scan_local_skills_dir(project_root: Path) -> Set[str]:
+def _scan_local_skills_dir(project_root: Path) -> tuple[Set[str], List[dict]]:
     refs: Set[str] = set()
+    skipped: List[dict] = []
     skills_dir = _discover_skills_dir(project_root)
     if skills_dir is None:
-        return refs
+        return refs, skipped
     skills_yaml = skills_dir / "skills.yaml"
     if skills_yaml.is_file():
         try:
-            import yaml
-
             data = yaml.safe_load(_read_text(skills_yaml)) or {}
             for key in data.get("skills", {}):
                 refs.add(_norm(key))
-        except Exception:
-            pass
+        except (yaml.YAMLError, OSError) as e:
+            logger.warning("skill_coverage: skipped %s due to %s: %s", skills_yaml, type(e).__name__, e)
+            skipped.append({"path": str(skills_yaml), "error": f"{type(e).__name__}: {e}"})
     for child in skills_dir.iterdir():
         if child.is_dir() and not child.name.startswith("."):
             refs.add(_norm(child.name))
-    return refs
+    return refs, skipped
 
 
-def scan_skill_references(project_root: Path) -> Set[str]:
-    return _scan_dispatches(project_root) | _scan_code_roles(project_root) | _scan_local_skills_dir(project_root)
+def scan_skill_references(project_root: Path) -> tuple[Set[str], List[dict]]:
+    local_refs, skipped = _scan_local_skills_dir(project_root)
+    return _scan_dispatches(project_root) | _scan_code_roles(project_root) | local_refs, skipped
 
 
 def _resolve_central_skills(central: Path | None) -> Path | None:
@@ -111,43 +117,56 @@ def _resolve_central_skills(central: Path | None) -> Path | None:
     return default if default.is_dir() else None
 
 
-def _list_skills_in_dir(skills_dir: Path) -> Dict[str, Path]:
+def _list_skills_in_dir(skills_dir: Path) -> tuple[Dict[str, Path], List[dict]]:
     available: Dict[str, Path] = {}
+    skipped: List[dict] = []
     if not skills_dir.is_dir():
-        return available
+        return available, skipped
     skills_yaml = skills_dir / "skills.yaml"
     if skills_yaml.is_file():
         try:
-            import yaml
-
             data = yaml.safe_load(_read_text(skills_yaml)) or {}
             for key, meta in data.get("skills", {}).items():
                 available[_norm(key)] = skills_dir / meta.get("file", key)
-        except Exception:
-            pass
+        except (yaml.YAMLError, OSError) as e:
+            logger.warning("skill_coverage: skipped %s due to %s: %s", skills_yaml, type(e).__name__, e)
+            skipped.append({"path": str(skills_yaml), "error": f"{type(e).__name__}: {e}"})
     for child in skills_dir.iterdir():
         if child.is_dir() and not child.name.startswith("."):
             name = _norm(child.name)
             if name not in available:
                 available[name] = child
-    return available
+    return available, skipped
 
 
-def list_available_skills(central: Path | None, overrides: Path | None) -> Dict[str, Path]:
+def list_available_skills(central: Path | None, overrides: Path | None) -> tuple[Dict[str, Path], List[dict]]:
     available: Dict[str, Path] = {}
+    skipped: List[dict] = []
     central_dir = _resolve_central_skills(central)
     if central_dir is not None:
-        available |= _list_skills_in_dir(central_dir)
+        avail, sk = _list_skills_in_dir(central_dir)
+        available |= avail
+        skipped += sk
     if overrides is not None and overrides.is_dir():
-        available |= _list_skills_in_dir(overrides)
-    return available
+        avail, sk = _list_skills_in_dir(overrides)
+        available |= avail
+        skipped += sk
+    return available, skipped
 
 
 def compute_missing(refs: Set[str], available: Dict[str, Path]) -> Set[str]:
     return {r for r in refs if r and _norm(r) not in available}
 
 
-def format_report(refs: Set[str], available: Dict[str, Path], missing: Set[str], json_mode: bool) -> str:
+def format_report(
+    refs: Set[str],
+    available: Dict[str, Path],
+    missing: Set[str],
+    json_mode: bool,
+    skipped: List[dict] | None = None,
+) -> str:
+    if skipped is None:
+        skipped = []
     if json_mode:
         return json.dumps(
             {
@@ -157,11 +176,16 @@ def format_report(refs: Set[str], available: Dict[str, Path], missing: Set[str],
                 "missing": sorted(missing),
                 "missing_count": len(missing),
                 "covered": len(missing) == 0,
+                "skipped": skipped,
             },
             indent=2,
         )
     lines = [f"skills referenced: {len(refs)}", f"skills available: {len(available)}"]
     lines.append(f"MISSING: {', '.join(sorted(missing))}" if missing else "All referenced skills are covered.")
+    if skipped:
+        lines.append(f"SKIPPED (errors): {len(skipped)}")
+        for entry in skipped:
+            lines.append(f"  - {entry['path']}: {entry['error']}")
     return "\n".join(lines)
 
 
@@ -189,15 +213,17 @@ def main(argv: list[str] | None = None) -> int:
     project_root = args.project_root.expanduser().resolve()
     overrides = args.overrides.expanduser().resolve() if args.overrides else project_root / ".vnx-overrides" / "skills"
 
-    refs = scan_skill_references(project_root)
-    available = list_available_skills(args.central_skills, overrides)
+    refs, refs_skipped = scan_skill_references(project_root)
+    available, avail_skipped = list_available_skills(args.central_skills, overrides)
+    skipped = refs_skipped + avail_skipped
     missing = compute_missing(refs, available)
 
-    print(format_report(refs, available, missing, args.json))
+    print(format_report(refs, available, missing, args.json, skipped))
 
     if args.add_to_overrides and missing:
         _copy_to_overrides(missing, project_root)
-        available = list_available_skills(args.central_skills, overrides)
+        available, avail_skipped2 = list_available_skills(args.central_skills, overrides)
+        skipped += avail_skipped2
         missing = compute_missing(refs, available)
         if missing:
             print(f"Still missing after overrides: {', '.join(sorted(missing))}")
