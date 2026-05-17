@@ -1,12 +1,46 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-15T14:05:51.809698+00:00
+**Last updated**: 2026-05-17T18:40:18.751052+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #580 — fix(smart-router): end-to-end auto-route wiring + enforcer false-positive on Kimi CLI provider (2 blockers) (#580) (2026-05-17)
+- #578 — fix(governance): atomic OI saves + WAL migrations + closure_verifier self-reference loop (3 blockers + 4 high) (#578) (2026-05-17)
+- #576 — fix(security): PRAGMA allowlist + project_id_fn multi-tenant + missing contracts + dup ImportError (2 blockers + 4 medium) (#576) (2026-05-17)
+- #574 — fix(intelligence): payload 2000 + dead method removal + project_id_fn + silent except logging (3 blockers + dead code) (#574) (2026-05-17)
+- #573 — fix(bench): BENCH terminal-id + stdin judge prompt + anonymized model-id + drop duplicate + count-leak (3 blockers + 2 warns) (#573) (2026-05-17)
+- #572 — fix(wiring-gate): use ${VNX_STATE_DIR} placeholder in docstring (Legacy-path-gate false-positive) (#572) (2026-05-17)
+- #571 — feat(gate): wiring-gate dead-code detection (#571) (2026-05-17)
+- #568 — fix(receipts): persist token_usage + cost_usd + pr_id for subprocess worker dispatches (#568) (2026-05-17)
+- #567 — fix(pool): integration-fix PR-6.5a tests after PR-6.5b worktree-create + e2e integration test (#567) (2026-05-17)
+- #565 — feat(pr-sr-4): smart_router wiring + route_decisions.ndjson (opt-in via --auto-route) (#565) (2026-05-17)
+- #566 — feat(pr-6.5b): per-worker git worktree manager (#566) (2026-05-17)
+- #564 — feat(pr-6.5c): worker heartbeat + PID validation in reaper (#564) (2026-05-17)
+- #563 — fix(kimi-spawn): handle Kimi CLI Wire Protocol camelCase events (TurnBegin/ContentPart/TextPart/etc) (#563) (2026-05-17)
+- #562 — feat(pr-6.5e): per-worker .vnx-data/workers/<terminal_id>/ subdirectory (#562) (2026-05-17)
+- #559 — feat(pr-sr-2): constraint enforcer with HardConstraintViolation + shell guard (#559) (2026-05-17)
+- #561 — feat(pr-sr-3): smart_router classifier + recommendation lookup (pure, unwired) (#561) (2026-05-17)
+- #560 — feat(pr-d5-f): provider spawns emit unified_report v1 frontmatter (shadow-mode) (#560) (2026-05-17)
+- #558 — feat(pr-6.5a): real subprocess spawn in pool_manager (replaces stub from PR-6.3) (#558) (2026-05-17)
+- #557 — feat(pr-6.5d): migration auto-apply hook in T0 state bootstrap (#557) (2026-05-17)
+- #556 — feat(pr-d5-e): unified report schema enforcement (JSONSchema + validator + guardrail) (#556) (2026-05-17)
+- #555 — feat(sr-1): provider constraints SSOT (7 hard guard-rails) (#555) (2026-05-17)
+- #554 — refactor(intelligence): split intelligence_selector.py (2511 LOC) per source module (#554) (2026-05-17)
+- #552 — feat(p0b): token usage + cost tracking end-to-end for all 5 providers (#552) (2026-05-17)
+- #551 — feat(p0a): intelligence injection for all providers (codex/gemini/litellm) (#551) (2026-05-17)
+- #548 — data(benchmark): 56-dispatch model comparison results + routing recommendations (#548) (2026-05-17)
+- #547 — feat(benchmark): suite infrastructure (9 models x 7 tasks orchestrator + judge + analyzer) (#547) (2026-05-16)
+- #537 — fix(oi-1479): token_usage extraction + cost_usd computation per provider (#537) (2026-05-16)
+- #533 — fix(oi-1476): align project_id regex + yaml placeholder substitution (#533) (2026-05-16)
+- #508 — chore(hardening): narrow silent-except across 7 hot files (14 findings, OI-1437) (#508) (2026-05-15)
+- #509 — chore(hardening): narrow silent-except across 13 singleton files (13 findings, OI-1437) (#509) (2026-05-15)
+- #506 — refactor(replay_harness): modularize into package — close OI-1443/1444/1445/1446/1447 (#506) (2026-05-15)
+- #507 — refactor(cleanup_worker_exit): decompose 104-line function — close OI-1448 (#507) (2026-05-15)
+- #505 — docs(adr-003): clarify API-key + CLI permitted; SDK still banned (#505) (2026-05-15)
+- #504 — refactor(conversation_analyzer): modularize into package — close OI-1438/1439/1440/1441/1442 (#504) (2026-05-15)
 - #503 — fix(rp): bootstrap audit ordering + test infra hardening (close OI-1450/1451/1452) (#503) (2026-05-15)
 - #502 — fix(dispatcher): log stderr, script_dir leak, receipt processor bootstrap-mode (#502) (2026-05-15)
 - #500 — chore(hardening): narrow silent-except across replay_harness/cleanup_worker_exit/conversation_analyzer (9 findings, OI-1437) (#500) (2026-05-15)
@@ -91,6 +125,12 @@ _Last 14 days — sourced from git merge commits._
 **WAVE 1**
 - #457 — docs: refresh README + CHANGELOG for post-rc1 work (Wave 1 + Wave 5 P0/P1) (#457) (2026-05-10)
 
+**WAVE 5**
+- #569 — docs: Wave 5/6/7/8 documentation overhaul (#569) (2026-05-17)
+
+**WAVE 8**
+- #570 — fix(wiring): activate 4 dead-code modules from Wave 8 fast-path (auto_apply, validator class, schema-emit, smart_router.route) (#570) (2026-05-17)
+
 **WAVE1**
 - #454 — feat(wave1): PR-W1.5 — Dashboard shadow wiring + canary divergence test pack + rollback docs (#454) (2026-05-10)
 - #453 — feat(wave1): PR-W1.4 — IntelligenceSelector + DispatchRegister shadow wiring (5 read sites) (#453) (2026-05-09)
@@ -112,10 +152,22 @@ _Last 14 days — sourced from git merge commits._
 - #471 — feat(wave4.5): PromptAssembler provider-agnostic methods (codex, gemini, litellm) (#471) (2026-05-13)
 
 **WAVE4.6**
+- #513 — feat(wave4.6): PR-4.6.6 — unified event shape via CanonicalEvent + EventStore enforcement (#513) (2026-05-15)
+- #512 — feat(wave4.6): PR-4.6.5 — litellm_spawn handler extracted from litellm_adapter (#512) (2026-05-15)
+- #511 — feat(wave4.6): PR-4.6.3 — codex_spawn handler extracted from codex_adapter (#511) (2026-05-15)
+- #510 — feat(wave4.6): PR-4.6.4 — gemini_spawn handler extracted from gemini_adapter (#510) (2026-05-15)
 - #490 — feat(wave4.6): PR-4.6.2 — extract claude_spawn from subprocess_dispatch (byte-identical) (#490) (2026-05-14)
 - #488 — feat(wave4.6): PR-4.6.1 — provider_dispatch.py entry-point (additive shim) (#488) (2026-05-14)
 
 **WAVE5**
+- #532 — feat(wave5): PR-5.7 — operator demo runbook + Control Centre docs + completion report (#532) (2026-05-16)
+- #530 — feat(wave5): PR-5.6 — hybrid dispatch routing with receipt-tail lifecycle tracker (#530) (2026-05-16)
+- #528 — feat(wave5): PR-5.5 — Control Centre CLI shell skill + operator commands (#528) (2026-05-16)
+- #525 — feat(wave5): PR-5.2 — per-project T0 lifecycle management (spawn/heartbeat/kill/reap) (#525) (2026-05-16)
+- #524 — feat(wave5): PR-5.4 — cross-project intelligence aggregator (global + per-project facets) (#524) (2026-05-16)
+- #523 — feat(wave5): PR-5.3 — multi-tenant lease isolation (schema v12) (#523) (2026-05-16)
+- #522 — feat(wave5): PR-5.1 — multi-project state aggregator write-pad (#522) (2026-05-16)
+- #521 — docs(wave5): PR-5.0 — ADR-017 Control Centre product-shape architecture (#521) (2026-05-16)
 - #462 — feat(wave5): CFX-W5-2 — plumbing gaps (pr_id key + headless daemon entry points) (#462) (2026-05-13)
 - #461 — feat(wave5): PR-W5.5 — production plumbing for P0-P4 context-bundle classes (#461) (2026-05-10)
 - #460 — feat(wave5): PR-W5.4 — schema introspection injection (DDL grounding for DB workers) (#460) (2026-05-10)
@@ -124,14 +176,40 @@ _Last 14 days — sourced from git merge commits._
 - #456 — feat(wave5): PR-W5.1 — ADR injection by file-touch (governance context to dispatches) (#456) (2026-05-10)
 - #455 — feat(wave5): PR-W5.0 — prior-round findings injection (highest signal-to-effort smart-context) (#455) (2026-05-10)
 
+**WAVE6**
+- #575 — fix(wave6): real spawn impl + config field reads + single heartbeat threshold (3 blockers) (#575) (2026-05-17)
+- #546 — fix(wave6): OI cleanup group 1 (idempotency + regex + ledger + audit) (#546) (2026-05-16)
+- #544 — feat(wave6): PR-6.8 — Control Centre pool-integration (cross-project pool view + supervisor) (#544) (2026-05-16)
+- #543 — feat(wave6): PR-6.7 — vnx pool CLI (status/scale/config/reap subcommands) (#543) (2026-05-16)
+- #542 — feat(wave6): PR-6.6 — health monitoring + dead-worker reap (tick = reap → decide → execute) (#542) (2026-05-16)
+- #541 — feat(wave6): PR-6.5 — provider-mix per pool with lowest-share-first allocation (#541) (2026-05-16)
+- #540 — feat(wave6): PR-6.4 — pluggable scaling policies (queue_depth_v1 + cost_aware_v1) (#540) (2026-05-16)
+- #539 — feat(wave6): PR-6.3 — PoolManager core (decision engine + state repo + manager) (#539) (2026-05-16)
+- #538 — feat(wave6): PR-6.2 — schema v14 elastic worker pool tables + migration scripts (#538) (2026-05-16)
+- #535 — feat(wave6): PR-6.1 — vnx_workers.yaml + WORKER_REGISTRY (ADR-013 implementation) (#535) (2026-05-16)
+- #534 — feat(wave6): PR-6.0 — ADR-018 elastic worker pool design freeze (#534) (2026-05-16)
+
+**WAVE7**
+- #579 — fix(wave7): claude cost tracking + kimi audit-gap status + redact prompt in logs (3 blockers) (#579) (2026-05-17)
+- #577 — fix(wave7): claude cost tracking + kimi audit-gap status + redact prompt in logs (3 blockers) (#577) (2026-05-17)
+- #550 — feat(wave7): PR-7.7 — Kimi CLI as 5th provider (OAuth via kimi login) (#550) (2026-05-17)
+- #545 — fix(wave7): OI cleanup group 2 — litellm usage stream + unified report .md suffix (#545) (2026-05-16)
+- #536 — feat(wave7): PR-7.6 — provider governance unification (receipt + unified report for all providers) (#536) (2026-05-16)
+- #531 — feat(wave7): vnx.env loader + DeepSeek V4-Pro/V4-Flash model registry update (#531) (2026-05-16)
+- #520 — feat(wave7): PR-7.5 — provider behavior contracts (capabilities + tool-shape + cache-control) (#520) (2026-05-15)
+- #519 — feat(wave7): PR-7.4 — cost-routing policy engine (feature-flag gated) (#519) (2026-05-15)
+- #518 — feat(wave7): PR-7.3 — GLM-5.1 lane via OpenRouter (z.AI direct deferred) (#518) (2026-05-15)
+- #517 — feat(wave7): PR-7.2 — Kimi K2.6 + K2-0905 lane via LiteLLM Moonshot endpoint (#517) (2026-05-15)
+- #516 — feat(wave7): PR-7.1 — DeepSeek V4 lane via LiteLLM subprocess bridge (#516) (2026-05-15)
+- #515 — feat(wave7): PR-7.0 — ADR-015 LiteLLM Path B for DeepSeek/Kimi/GLM integration (#515) (2026-05-15)
+
 ## Active features
 
 _No active features._
 
 ## Completed
 
-### F43
-All PRs merged. (#402)
+_No completed features found in register or PR history._
 
 ## Planned (from ROADMAP.yaml)
 
