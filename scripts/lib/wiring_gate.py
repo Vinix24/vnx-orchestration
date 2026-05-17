@@ -4,7 +4,7 @@ AST-parses new public definitions (functions, classes) added in a PR diff,
 then greps the codebase for callers. Definitions with zero callers outside
 their own file (excluding tests) are flagged as unwired dead code.
 
-Skip-list: .vnx-data/state/wiring_skip.yaml supports library-exports,
+Skip-list: ${VNX_STATE_DIR}/wiring_skip.yaml supports library-exports,
 decorator-registry entries, __all__ re-exports, and CLI dispatch-dicts.
 
 Env: VNX_WIRING_GATE_REQUIRED (default "0" = shadow/advisory, "1" = blocking).
