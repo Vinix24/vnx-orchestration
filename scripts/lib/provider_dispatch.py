@@ -419,8 +419,8 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     end_time = datetime.now(timezone.utc)
 
     # Read token_usage from delivery side-channel (populated by spawn_claude).
-    # recovery._resolve_token_usage_and_cost uses .get() to leave the entry
-    # available for this governance-receipt path; we .pop() here to clean up.
+    # recovery._resolve_token_usage_and_cost uses get_token_usage() to leave the entry
+    # available for this governance-receipt path; we clear here to clean up.
     _claude_token_usage = None
     try:
         from subprocess_dispatch_internals.delivery import clear_token_usage as _clear_tu
