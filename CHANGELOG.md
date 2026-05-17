@@ -11,6 +11,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Added
 - feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
+- feat(gate): net-deletion annotation injected into codex + gemini reviewer prompts when PR deletes >= 5 files (WARN) or >= 20 files (HOLD); `_NET_DELETION_WARN_THRESHOLD` / `_NET_DELETION_HOLD_THRESHOLD` module-level constants replace inline magic numbers.
 - feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
 - feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
 - feat(vnx_paths): override-resolver `_resolve_overrides_dir()` + `get_skill_path()` — per-project `.vnx-overrides/skills,schemas,configs/` directory takes precedence over central VNX_HOME. Enables mission-control-style custom assets without central pollution. (Pre-centralization must-have #5)
@@ -18,6 +19,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - feat(schema): migration 0021 `central_install_pins` + `central_install_events` tables met `scripts/lib/central_install_db.py` helper. Bookkeeping voor project pin tracking + install/update/rollback event history. Pre-centralization must-have #10.
 
 ### Fixed
+- fix(gate): net-line-deletion sanity check in `_request_codex`: `_get_net_line_deletion_in_pr()` + `_CODEX_NET_LINE_DELETION_HOLD=500` constant; `net_line_deletion_flagged` now contributes to `required=True` at request time, matching `enforce_codex_gate` execution-time decision. Payload carries `net_line_deletion` + `net_line_deletion_flagged`. 13 new tests.
+- fix(dispatch): add threading.Lock around mutable global _dispatch_token_usage dict (Kimi audit race-condition finding). Provides get_token_usage / set_token_usage / clear_token_usage thread-safe accessors.
 - fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
 - fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
 - fix(vnx_paths): validate skill_name + resolved-path confinement check in get_skill_path (codex path-traversal blocker)

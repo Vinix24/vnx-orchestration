@@ -229,3 +229,146 @@ class TestFetchGhPrDiff:
             ["gh", "pr", "diff", "42"],
             capture_output=True, text=True, timeout=60,
         )
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity check
+# ---------------------------------------------------------------------------
+
+def _make_diff_with_deletions(n: int, add_lines: bool = True) -> str:
+    """Build a minimal unified diff that deletes n files."""
+    parts = []
+    for i in range(n):
+        parts.append(f"diff --git a/old/file_{i}.py b/old/file_{i}.py")
+        parts.append("deleted file mode 100644")
+        parts.append(f"index abc{i:04d}..0000000")
+        parts.append(f"--- a/old/file_{i}.py")
+        parts.append("+++ /dev/null")
+        if add_lines:
+            parts.append("@@ -1,2 +0,0 @@")
+            parts.append("-line one")
+            parts.append("-line two")
+    return "\n".join(parts) + "\n"
+
+
+class TestCountDiffFileDeletions:
+    """_count_diff_file_deletions must count 'deleted file mode' headers in a diff."""
+
+    def test_counts_deleted_files(self):
+        diff = _make_diff_with_deletions(7)
+        assert GateRunner._count_diff_file_deletions(diff) == 7
+
+    def test_zero_on_empty_diff(self):
+        assert GateRunner._count_diff_file_deletions("") == 0
+
+    def test_zero_on_add_only_diff(self):
+        diff = "diff --git a/new.py b/new.py\nnew file mode 100644\n+line\n"
+        assert GateRunner._count_diff_file_deletions(diff) == 0
+
+    def test_mixed_diff_counts_only_deletions(self):
+        add_diff = "diff --git a/new.py b/new.py\nnew file mode 100644\n+line\n"
+        del_diff = _make_diff_with_deletions(3)
+        assert GateRunner._count_diff_file_deletions(add_diff + del_diff) == 3
+
+    def test_single_deletion(self):
+        diff = _make_diff_with_deletions(1)
+        assert GateRunner._count_diff_file_deletions(diff) == 1
+
+
+class TestNetDeletionAnnotation:
+    """_net_deletion_annotation must emit correct level and count."""
+
+    def test_warn_level_below_hold_threshold(self):
+        from gate_runner import _NET_DELETION_HOLD_THRESHOLD
+        result = GateRunner._net_deletion_annotation(_NET_DELETION_HOLD_THRESHOLD - 1)
+        assert "WARN" in result
+        assert "HOLD" not in result
+
+    def test_hold_level_at_hold_threshold(self):
+        from gate_runner import _NET_DELETION_HOLD_THRESHOLD
+        result = GateRunner._net_deletion_annotation(_NET_DELETION_HOLD_THRESHOLD)
+        assert "HOLD" in result
+
+    def test_count_appears_in_annotation(self):
+        result = GateRunner._net_deletion_annotation(8)
+        assert "8" in result
+
+    def test_annotation_is_nonempty_string(self):
+        result = GateRunner._net_deletion_annotation(5)
+        assert isinstance(result, str) and len(result) > 10
+
+
+class TestCodexNetDeletionInjection:
+    """_build_codex_prompt must inject deletion alert when diff has >= threshold deletions."""
+
+    def test_annotation_injected_at_warn_threshold(self):
+        from gate_runner import _NET_DELETION_WARN_THRESHOLD
+        diff = _make_diff_with_deletions(_NET_DELETION_WARN_THRESHOLD)
+        payload = _make_payload(pr_number=10)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" in result
+
+    def test_annotation_injected_above_warn_threshold(self):
+        diff = _make_diff_with_deletions(9)
+        payload = _make_payload(pr_number=11)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" in result
+        assert "9" in result
+
+    def test_no_annotation_below_warn_threshold(self):
+        from gate_runner import _NET_DELETION_WARN_THRESHOLD
+        diff = _make_diff_with_deletions(_NET_DELETION_WARN_THRESHOLD - 1)
+        payload = _make_payload(pr_number=12)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" not in result
+
+    def test_no_annotation_on_empty_diff(self):
+        payload = _make_payload(pr_number=13)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout="", stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" not in result
+
+    def test_net_deletion_sanity_instruction_always_present(self):
+        diff = _make_diff_with_deletions(1)
+        payload = _make_payload(pr_number=14)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net deletion sanity" in result
+
+    def test_hold_level_annotation_on_large_deletion(self):
+        from gate_runner import _NET_DELETION_HOLD_THRESHOLD
+        diff = _make_diff_with_deletions(_NET_DELETION_HOLD_THRESHOLD + 2)
+        payload = _make_payload(pr_number=15)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "HOLD" in result
+
+
+class TestGeminiNetDeletionParity:
+    """_build_gemini_prompt must apply the same net-deletion injection as codex."""
+
+    def test_annotation_injected_at_warn_threshold(self):
+        from gate_runner import _NET_DELETION_WARN_THRESHOLD
+        diff = _make_diff_with_deletions(_NET_DELETION_WARN_THRESHOLD)
+        payload = _make_payload(pr_number=20)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_gemini_prompt(payload)
+        assert "Net-Deletion Alert" in result
+
+    def test_no_annotation_below_warn_threshold(self):
+        from gate_runner import _NET_DELETION_WARN_THRESHOLD
+        diff = _make_diff_with_deletions(_NET_DELETION_WARN_THRESHOLD - 1)
+        payload = _make_payload(pr_number=21)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_gemini_prompt(payload)
+        assert "Net-Deletion Alert" not in result
+
+    def test_net_deletion_sanity_instruction_always_present(self):
+        diff = _make_diff_with_deletions(2)
+        payload = _make_payload(pr_number=22)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_gemini_prompt(payload)
+        assert "Net deletion sanity" in result
