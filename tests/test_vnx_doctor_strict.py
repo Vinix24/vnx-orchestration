@@ -255,6 +255,34 @@ class TestSkillCoverage:
 
         assert result.status == PASS
 
+    def test_unreadable_dispatch_warns_in_default_mode(self, tmp_path):
+        project = _make_project(tmp_path)
+        dispatch = project / ".vnx-data" / "dispatches" / "pending" / "locked.md"
+        dispatch.write_text("Role: backend-developer\n\nDo some work.\n")
+        dispatch.chmod(0o000)
+
+        try:
+            result = _check_skill_coverage(project, strict=False)
+        finally:
+            dispatch.chmod(0o644)
+
+        assert result.status == WARN
+        assert "cannot read" in result.detail
+
+    def test_unreadable_dispatch_fails_in_strict_mode(self, tmp_path):
+        project = _make_project(tmp_path)
+        dispatch = project / ".vnx-data" / "dispatches" / "pending" / "locked.md"
+        dispatch.write_text("Role: backend-developer\n\nDo some work.\n")
+        dispatch.chmod(0o000)
+
+        try:
+            result = _check_skill_coverage(project, strict=True)
+        finally:
+            dispatch.chmod(0o644)
+
+        assert result.status == FAIL
+        assert "cannot audit" in result.detail
+
 
 # ---------------------------------------------------------------------------
 # Test 6: active dispatch count warns

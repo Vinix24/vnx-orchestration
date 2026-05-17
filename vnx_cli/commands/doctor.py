@@ -2,12 +2,15 @@
 """vnx doctor — validate prerequisites and project structure."""
 
 import json
+import logging
 import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
+
+logger = logging.getLogger(__name__)
 
 PASS = "PASS"
 WARN = "WARN"
@@ -230,7 +233,7 @@ def _skill_resolvable(skill_ref: str, skill_dirs: list[Path]) -> bool:
     return False
 
 
-def _check_skill_coverage(project_dir: Path) -> Check:
+def _check_skill_coverage(project_dir: Path, strict: bool = False) -> Check:
     """Audit skill/role refs in pending dispatches against resolvable skill directories."""
     dispatch_dir = project_dir / ".vnx-data" / "dispatches" / "pending"
     if not dispatch_dir.is_dir():
@@ -252,11 +255,14 @@ def _check_skill_coverage(project_dir: Path) -> Check:
 
     dispatch_files = list(dispatch_dir.glob("*.md")) + list(dispatch_dir.glob("*.txt"))
     missing: list[str] = []
+    unreadable: list[dict] = []
 
     for df in dispatch_files:
         try:
             content = df.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as e:
+            logger.warning("doctor: cannot read dispatch %s: %s", df, e)
+            unreadable.append({"path": str(df), "error": str(e)})
             continue
         for line in content.splitlines():
             stripped = line.strip()
@@ -265,6 +271,20 @@ def _check_skill_coverage(project_dir: Path) -> Check:
                     ref = stripped[len(prefix):].strip().split()[0] if stripped[len(prefix):].strip() else ""
                     if ref and not _skill_resolvable(ref, skill_dirs):
                         missing.append(f"{df.name}:{ref}")
+
+    if unreadable and strict:
+        return Check(
+            name="skills:coverage",
+            status=FAIL,
+            detail=f"cannot audit {len(unreadable)} dispatch(es): {', '.join(u['path'] for u in unreadable[:3])}",
+        )
+
+    if unreadable:
+        return Check(
+            name="skills:coverage",
+            status=WARN,
+            detail=f"cannot read {len(unreadable)} dispatch file(s) — skill audit incomplete",
+        )
 
     if missing:
         return Check(
@@ -429,7 +449,7 @@ def vnx_doctor(args) -> int:
     checks.append(_check_install_mode(project_dir))
     checks.append(_check_dual_install(project_dir))
     checks.extend(_check_schema_versions(project_dir))
-    checks.append(_check_skill_coverage(project_dir))
+    checks.append(_check_skill_coverage(project_dir, strict=strict))
     checks.append(_check_overrides(project_dir))
     checks.extend(_check_worktree_orphans(project_dir))
     checks.append(_check_active_drain(project_dir))

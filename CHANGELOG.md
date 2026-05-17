@@ -35,10 +35,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
 - fix(install-central): unlink+ln fallback voor macOS atomic symlink swap (codex edge-case blocker: mv -f kan dest-symlink-naar-dir verkeerd interpreteren)
 - fix(install-central): atomic symlink swap via tempfile + mv (no rm-before-replace); cleanup_on_failure raises EX_SOFTWARE on rollback failure (codex round-2 atomicity blocker)
-=======
-### Added
-- feat(doctor): `vnx doctor --strict` flag with central-mode detection (install mode, dual-install warning, schema PRAGMA user_version check, skill coverage audit, overrides listing, worktree orphan detection, active dispatch drain check). Pre-centralization must-have #8.
->>>>>>> bdde09a (feat(doctor): vnx doctor --strict for central-install pre-flight validation)
+- fix(doctor): replace silent `except OSError: continue` in skill-coverage gate with `logger.warning` + unreadable list surfaced in strict mode (codex blocker)
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
