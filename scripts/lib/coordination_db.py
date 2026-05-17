@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
+import schema_migration
+
 DB_FILENAME = "runtime_coordination.db"
 
 # ---------------------------------------------------------------------------
@@ -171,6 +173,10 @@ def _append_event(
 def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -> None:
     """Initialize (or migrate) the runtime coordination database. Idempotent.
 
+    Tracks applied migrations via PRAGMA user_version (primary) and
+    runtime_schema_version table (secondary, preserved for backward compat).
+    Base schema = user_version 1; each versioned SQL file increments by 1.
+
     Uses a single connection for the entire init+migration sequence to
     prevent TOCTOU races between version check and migration apply.
     """
@@ -184,32 +190,30 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
     schema_sql = schema_sql_path.read_text(encoding="utf-8")
 
     with get_connection(state_dir) as conn:
-        conn.executescript(schema_sql)
-        conn.commit()
+        # V1: base schema (executescript commits automatically)
+        if schema_migration.get_user_version(conn) < 1:
+            conn.executescript(schema_sql)
+            # Stamp the version in a new transaction after executescript committed
+            conn.execute('SAVEPOINT "vnx_coord_v1"')
+            conn.execute("PRAGMA user_version = 1")
+            conn.execute('RELEASE SAVEPOINT "vnx_coord_v1"')
 
-        current_version = 1
-        try:
-            row = conn.execute(
-                "SELECT MAX(version) FROM runtime_schema_version"
-            ).fetchone()
-            if row and row[0] is not None:
-                current_version = row[0]
-        except sqlite3.OperationalError:
-            pass
-
+        # Versioned migration files: runtime_coordination_v2.sql, v3.sql, ...
         schemas_dir = schema_sql_path.parent
-        version = 2
+        v = 2
         while True:
-            migration = schemas_dir / f"runtime_coordination_v{version}.sql"
-            if not migration.exists():
+            migration_path = schemas_dir / f"runtime_coordination_v{v}.sql"
+            if not migration_path.exists():
                 break
-            if version <= current_version:
-                version += 1
-                continue
-            migration_sql = migration.read_text(encoding="utf-8")
-            conn.executescript(migration_sql)
-            conn.commit()
-            version += 1
+            if schema_migration.get_user_version(conn) < v:
+                migration_sql = migration_path.read_text(encoding="utf-8")
+                conn.executescript(migration_sql)
+                # Stamp version after executescript committed
+                sp = f'"vnx_coord_v{v}"'
+                conn.execute(f"SAVEPOINT {sp}")
+                conn.execute(f"PRAGMA user_version = {v}")
+                conn.execute(f"RELEASE SAVEPOINT {sp}")
+            v += 1
 
 
 # ---------------------------------------------------------------------------
