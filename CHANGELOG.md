@@ -6,8 +6,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
-### Fixed
-- fix(provider_dispatch): rotate per-terminal NDJSON ring buffer post-dispatch (D5 Gap 2) — `event_store.clear(terminal_id, archive_dispatch_id=dispatch_id)` now called in finally-blocks of all 4 non-Claude provider handlers (`_dispatch_codex`, `_dispatch_gemini`, `_dispatch_kimi`, `_dispatch_litellm`); prevents unbounded growth of `.vnx-data/events/T{n}.ndjson` on non-Claude dispatches
+### Changed
+- chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
 
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)
