@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -29,7 +30,7 @@ JUDGE_PROMPT_TEMPLATE = """Score this AI response on three dimensions. Be object
 Original task:
 {task_prompt}
 
-Response from model "{model_id}":
+Response from {anon_label}:
 {response}
 
 Output ONLY a JSON object with exactly these fields:
@@ -51,22 +52,37 @@ _FALLBACK_SCORE = {
 }
 
 
+def anonymize_model_id(model_id: str) -> str:
+    """Deterministic anonymized label so judge cannot recognize the model."""
+    short_hash = hashlib.sha256(model_id.encode()).hexdigest()[:8]
+    return f"X-anon-{short_hash}"
+
+
 def _load_task_prompt(task_id: str, prompts_dir: Path) -> str:
     path = prompts_dir / f"{task_id}.txt"
     return path.read_text() if path.exists() else f"(prompt file not found: {task_id}.txt)"
 
 
 def _call_judge(prompt: str, model: str, timeout: int) -> str:
-    """Invoke claude -p and return stdout. Raises subprocess.TimeoutExpired on timeout."""
-    proc = subprocess.run(
-        ["claude", "-p", "--model", model, prompt],
-        capture_output=True,
+    """Invoke claude -p with prompt on stdin (avoids ARG_MAX and process-table exposure)."""
+    proc = subprocess.Popen(
+        ["claude", "-p", "--model", model],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
     )
+    try:
+        stdout, stderr = proc.communicate(input=prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    except BrokenPipeError:
+        raise RuntimeError("BrokenPipeError: claude process terminated before accepting prompt")
     if proc.returncode != 0:
-        raise RuntimeError(f"claude returned {proc.returncode}: {proc.stderr[:200]}")
-    return proc.stdout.strip()
+        raise RuntimeError(f"claude returned {proc.returncode}: {(stderr or '')[:200]}")
+    return stdout.strip()
 
 
 def _parse_judge_response(raw: str) -> Dict:
@@ -98,9 +114,10 @@ def judge_result_file(result_path: Path, prompts_dir: Path, model: str, timeout:
     response = data.get("response", "")
 
     task_prompt = _load_task_prompt(task_id, prompts_dir)
+    anon_label = anonymize_model_id(model_id)
     judge_prompt = JUDGE_PROMPT_TEMPLATE.format(
         task_prompt=task_prompt,
-        model_id=model_id,
+        anon_label=anon_label,
         response=response or "(empty response)",
     )
 
