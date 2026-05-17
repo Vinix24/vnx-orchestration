@@ -28,7 +28,10 @@ if TYPE_CHECKING:
 try:
     from project_scope import current_project_id
 except ImportError:
-    from project_scope import current_project_id  # type: ignore
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from project_scope import current_project_id  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 

@@ -28,6 +28,7 @@ class ProviderModel:
     max_tokens: int
     supports_streaming: bool
     supports_tool_calls: bool
+    context_window: Optional[int] = None
     task_classes: List[str] = field(default_factory=list)
 
 
@@ -39,6 +40,7 @@ class ProviderConfig:
 
 
 def _parse_model(data: dict) -> ProviderModel:
+    context_window_raw = data.get("context_window")
     return ProviderModel(
         litellm_name=str(data["litellm_name"]),
         cost_input_per_mtok=float(data["cost_input_per_mtok"]),
@@ -46,6 +48,7 @@ def _parse_model(data: dict) -> ProviderModel:
         max_tokens=int(data["max_tokens"]),
         supports_streaming=bool(data["supports_streaming"]),
         supports_tool_calls=bool(data["supports_tool_calls"]),
+        context_window=int(context_window_raw) if context_window_raw is not None else None,
         task_classes=list(data.get("task_classes") or []),
     )
 

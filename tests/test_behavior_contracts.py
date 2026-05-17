@@ -55,10 +55,10 @@ class TestAllKnownLanesHaveContracts:
         missing = [lane for lane in routing_lanes if lane not in CONTRACTS]
         assert missing == [], f"Lanes in routing_policy.yaml missing contracts: {missing}"
 
-    def test_eight_contracts_registered(self):
-        """Registry has exactly 8 contracts (all current lanes)."""
-        assert len(CONTRACTS) == 8, (
-            f"Expected 8 contracts, got {len(CONTRACTS)}. "
+    def test_ten_contracts_registered(self):
+        """Registry has exactly 10 contracts (all current lanes)."""
+        assert len(CONTRACTS) == 10, (
+            f"Expected 10 contracts, got {len(CONTRACTS)}. "
             f"Keys: {sorted(CONTRACTS.keys())}"
         )
 
