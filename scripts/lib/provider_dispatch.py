@@ -460,35 +460,41 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
     model = os.environ.get("VNX_CODEX_MODEL", "")
     enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
-    result = spawn_codex(
-        prompt=enriched_instruction,
-        model=model,
-        dispatch_id=args.dispatch_id,
-        terminal_id=args.terminal_id,
-        event_writer=event_store.append if event_store is not None else None,
-    )
-    end_time = datetime.now(timezone.utc)
-
-    if result.error:
-        _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
-        print(f"spawn_codex failed: {result.error}", file=sys.stderr)
-        return 1
-    if result.timed_out:
-        _emit_governance(args, "codex", model, result, start_time, end_time, "timeout")
-        print("spawn_codex timed out", file=sys.stderr)
-        return 1
-    if result.returncode != 0:
-        _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
-        return 1
-    if result.event_writer_failures > 0:
-        logger.error(
-            "codex dispatch completed but %d event_writer failures occurred — audit gap",
-            result.event_writer_failures,
+    try:
+        result = spawn_codex(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            event_writer=event_store.append if event_store is not None else None,
         )
+        end_time = datetime.now(timezone.utc)
+
+        if result.error:
+            _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
+            print(f"spawn_codex failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "codex", model, result, start_time, end_time, "timeout")
+            print("spawn_codex timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "codex", model, result, start_time, end_time, "failure")
+            return 1
+        if result.event_writer_failures > 0:
+            logger.error(
+                "codex dispatch completed but %d event_writer failures occurred — audit gap",
+                result.event_writer_failures,
+            )
+            _emit_governance(args, "codex", model, result, start_time, end_time, "success")
+            return 2
         _emit_governance(args, "codex", model, result, start_time, end_time, "success")
-        return 2
-    _emit_governance(args, "codex", model, result, start_time, end_time, "success")
-    return 0
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_codex: event archive+clear failed: %s", _exc)
 
 
 def _resolve_deepseek_model() -> str:
@@ -633,38 +639,44 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
 
     enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
-    result = spawn_litellm(
-        prompt=enriched_instruction,
-        model=model,
-        dispatch_id=args.dispatch_id,
-        terminal_id=args.terminal_id,
-        sub_provider=base_sub or None,
-        lane=lane_key,
-        tool_call_shape=_tool_call_shape,
-        event_writer=event_store.append if event_store is not None else None,
-    )
-    end_time = datetime.now(timezone.utc)
-
-    if result.error:
-        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
-        print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
-        return 1
-    if result.timed_out:
-        _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout")
-        print("spawn_litellm timed out", file=sys.stderr)
-        return 1
-    if result.returncode != 0:
-        _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
-        return 1
-    if result.event_writer_failures > 0:
-        logger.error(
-            "litellm dispatch completed but %d event_writer failures occurred — audit gap",
-            result.event_writer_failures,
+    try:
+        result = spawn_litellm(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            sub_provider=base_sub or None,
+            lane=lane_key,
+            tool_call_shape=_tool_call_shape,
+            event_writer=event_store.append if event_store is not None else None,
         )
+        end_time = datetime.now(timezone.utc)
+
+        if result.error:
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
+            print(f"spawn_litellm failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "timeout")
+            print("spawn_litellm timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "failure")
+            return 1
+        if result.event_writer_failures > 0:
+            logger.error(
+                "litellm dispatch completed but %d event_writer failures occurred — audit gap",
+                result.event_writer_failures,
+            )
+            _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
+            return 2
         _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
-        return 2
-    _emit_governance(args, args.provider, model, result, start_time, end_time, "success")
-    return 0
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_litellm: event archive+clear failed: %s", _exc)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -690,35 +702,41 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
     model_label = model or "default"
     start_time = datetime.now(timezone.utc)
-    result = spawn_kimi(
-        prompt=args.instruction,
-        model=model,
-        dispatch_id=args.dispatch_id,
-        terminal_id=args.terminal_id,
-        event_writer=event_store.append if event_store is not None else None,
-    )
-    end_time = datetime.now(timezone.utc)
-
-    if result.error:
-        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
-        print(f"spawn_kimi failed: {result.error}", file=sys.stderr)
-        return 1
-    if result.timed_out:
-        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "timeout")
-        print("spawn_kimi timed out", file=sys.stderr)
-        return 1
-    if result.returncode != 0:
-        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
-        return 1
-    if result.event_writer_failures > 0:
-        logger.error(
-            "kimi dispatch completed but %d event_writer failures occurred — audit gap",
-            result.event_writer_failures,
+    try:
+        result = spawn_kimi(
+            prompt=args.instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            event_writer=event_store.append if event_store is not None else None,
         )
+        end_time = datetime.now(timezone.utc)
+
+        if result.error:
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+            print(f"spawn_kimi failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "timeout")
+            print("spawn_kimi timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+            return 1
+        if result.event_writer_failures > 0:
+            logger.error(
+                "kimi dispatch completed but %d event_writer failures occurred — audit gap",
+                result.event_writer_failures,
+            )
+            _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
+            return 2
         _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
-        return 2
-    _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
-    return 0
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_kimi: event archive+clear failed: %s", _exc)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -729,39 +747,54 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
     from event_store import EventStore
     from provider_spawns.gemini_spawn import spawn_gemini
 
+    event_store = None
+    try:
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_gemini: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
+            _es_exc,
+        )
+        return 1
+
     model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
-    event_store = EventStore()
     enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
-    result = spawn_gemini(
-        prompt=enriched_instruction,
-        model=model,
-        dispatch_id=args.dispatch_id,
-        terminal_id=args.terminal_id,
-        event_writer=event_store.append,
-    )
-    end_time = datetime.now(timezone.utc)
-
-    if result.error:
-        _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
-        print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
-        return 1
-    if result.timed_out:
-        _emit_governance(args, "gemini", model, result, start_time, end_time, "timeout")
-        print("spawn_gemini timed out", file=sys.stderr)
-        return 1
-    if result.returncode != 0:
-        _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
-        return 1
-    if result.event_writer_failures > 0:
-        logger.error(
-            "gemini dispatch completed but %d event_writer failures occurred — audit gap",
-            result.event_writer_failures,
+    try:
+        result = spawn_gemini(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+            event_writer=event_store.append,
         )
+        end_time = datetime.now(timezone.utc)
+
+        if result.error:
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
+            print(f"spawn_gemini failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "timeout")
+            print("spawn_gemini timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "failure")
+            return 1
+        if result.event_writer_failures > 0:
+            logger.error(
+                "gemini dispatch completed but %d event_writer failures occurred — audit gap",
+                result.event_writer_failures,
+            )
+            _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
+            return 2
         _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
-        return 2
-    _emit_governance(args, "gemini", model, result, start_time, end_time, "success")
-    return 0
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_gemini: event archive+clear failed: %s", _exc)
 
 
 def main(argv: list[str] | None = None) -> int:
