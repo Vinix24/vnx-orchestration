@@ -6,7 +6,12 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Added
+- feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
+- feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
+
 ### Fixed
+- fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
 - fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
 
 ### Added
