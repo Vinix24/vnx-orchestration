@@ -1,23 +1,32 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "vnx"
+name = "vnx-orchestration"
 version = "1.0.0-rc2"
-description = "Governance-first multi-agent orchestration for AI CLI workers"
+description = "Governance-first runtime for AI agents (NDJSON receipts, SPC-grade quality gates)"
 readme = "README.md"
+requires-python = ">=3.11,<3.14"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+authors = [{name = "Vincent van Deth", email = "advies@vincentvandeth.nl"}]
 dependencies = [
-    "watchdog>=6.0.0",
+    "watchdog>=4.0",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
-    "opentelemetry-exporter-otlp-proto-http>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
 ]
 
 [project.scripts]
 vnx = "vnx_cli.main:main"
 
-[project.optional-dependencies]
-dev = ["pytest>=7.0"]
+[project.urls]
+Homepage = "https://github.com/Vinix24/vnx-orchestration"
+Repository = "https://github.com/Vinix24/vnx-orchestration"
+
+[tool.setuptools]
+packages = ["vnx_cli", "vnx_cli.commands"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"vnx_cli" = ["templates/**/*", "schemas/**/*"]
