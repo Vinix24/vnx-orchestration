@@ -102,6 +102,25 @@ def get_connection(
         conn.close()
 
 
+@contextmanager
+def get_connection_for_db(
+    db_path: str | Path,
+    *,
+    timeout: float = 10.0,
+) -> Generator[sqlite3.Connection, None, None]:
+    """Like get_connection but accepts a direct DB file path instead of state_dir."""
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        yield conn
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -150,7 +169,11 @@ def _append_event(
 # ---------------------------------------------------------------------------
 
 def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -> None:
-    """Initialize (or migrate) the runtime coordination database. Idempotent."""
+    """Initialize (or migrate) the runtime coordination database. Idempotent.
+
+    Uses a single connection for the entire init+migration sequence to
+    prevent TOCTOU races between version check and migration apply.
+    """
     if schema_sql_path is None:
         here = Path(__file__).resolve()
         schema_sql_path = here.parent.parent.parent / "schemas" / "runtime_coordination.sql"
@@ -164,8 +187,7 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
         conn.executescript(schema_sql)
         conn.commit()
 
-    current_version = 1
-    with get_connection(state_dir) as conn:
+        current_version = 1
         try:
             row = conn.execute(
                 "SELECT MAX(version) FROM runtime_schema_version"
@@ -175,20 +197,19 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
         except sqlite3.OperationalError:
             pass
 
-    schemas_dir = schema_sql_path.parent
-    version = 2
-    while True:
-        migration = schemas_dir / f"runtime_coordination_v{version}.sql"
-        if not migration.exists():
-            break
-        if version <= current_version:
-            version += 1
-            continue
-        migration_sql = migration.read_text(encoding="utf-8")
-        with get_connection(state_dir) as conn:
+        schemas_dir = schema_sql_path.parent
+        version = 2
+        while True:
+            migration = schemas_dir / f"runtime_coordination_v{version}.sql"
+            if not migration.exists():
+                break
+            if version <= current_version:
+                version += 1
+                continue
+            migration_sql = migration.read_text(encoding="utf-8")
             conn.executescript(migration_sql)
             conn.commit()
-        version += 1
+            version += 1
 
 
 # ---------------------------------------------------------------------------

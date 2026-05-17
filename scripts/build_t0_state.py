@@ -1608,8 +1608,8 @@ def main() -> int:
             pass  # best-effort — must not block SessionStart
         elapsed = time.monotonic() - t_start
         _build_succeeded = True
-    except Exception:
-        pass  # SessionStart hook must never block session
+    except Exception as exc:
+        log.warning("build_t0_state failed (SessionStart continues): %s", exc)
 
     if _build_succeeded:
         try:

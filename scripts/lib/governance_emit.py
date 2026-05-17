@@ -63,7 +63,7 @@ def emit_dispatch_receipt(
     _validate_provider(provider)
 
     now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    recorded_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recorded_ts = now_ts
 
     receipt: Dict[str, Any] = {
         "dispatch_id": dispatch_id,

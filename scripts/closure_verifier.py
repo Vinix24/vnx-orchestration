@@ -959,14 +959,23 @@ def _detect_gate_report_contradictions(
     return checks
 
 
+_CLOSURE_OUTPUT_RE = re.compile(r"^\s*-?\s*\[(FAIL|PASS|WARN)\]\s")
+
+
 def _count_report_blocking_indicators(content: str) -> int:
     """Count blocking-severity indicators in a normalized report.
 
     Looks for patterns that indicate blocking findings in headless review reports.
+    Excludes lines written by the closure verifier itself (``- [FAIL] ...``)
+    to prevent a self-reference loop where the verifier's own output is
+    counted as a blocking indicator on re-read.
     """
-    import re
+    filtered_lines = [
+        line for line in content.splitlines()
+        if not _CLOSURE_OUTPUT_RE.match(line)
+    ]
+    filtered = "\n".join(filtered_lines)
     count = 0
-    # Standard blocking patterns in normalized reports
     blocking_patterns = [
         r"\[BLOCKING\]",
         r"\*\*Severity\*\*:\s*blocking",
@@ -975,7 +984,7 @@ def _count_report_blocking_indicators(content: str) -> int:
         r"Status:\s*FAIL",
     ]
     for pattern in blocking_patterns:
-        count += len(re.findall(pattern, content, re.IGNORECASE))
+        count += len(re.findall(pattern, filtered, re.IGNORECASE))
     return count
 
 
