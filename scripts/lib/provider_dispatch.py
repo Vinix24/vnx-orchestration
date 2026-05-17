@@ -379,6 +379,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gate", default="")
     parser.add_argument("--dispatch-paths", default="")
     parser.add_argument("--pr-id", default=None)
+    parser.add_argument(
+        "--auto-route", action="store_true",
+        help="Use smart_router to auto-select provider+model (opt-in, default off).",
+    )
     return parser
 
 
@@ -770,6 +774,42 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     provider = args.provider
+
+    # PR-SR-4: smart_router auto-route (opt-in via --auto-route).
+    if getattr(args, "auto_route", False):
+        try:
+            from smart_router import decide as _smart_route, parse_route_model_id, write_route_decision  # noqa: PLC0415
+
+            _dp = None
+            if args.dispatch_paths.strip():
+                _dp = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
+
+            _route_decision = _smart_route(
+                instruction=args.instruction,
+                role=args.role,
+                dispatch_paths=_dp,
+            )
+            if _route_decision.primary:
+                _routed_provider, _routed_model = parse_route_model_id(
+                    _route_decision.primary.model_id,
+                )
+                provider = _routed_provider
+                args.provider = _routed_provider
+                args.model = _routed_model
+                os.environ["VNX_ROUTE_STRATEGY"] = "smart_router"
+                os.environ["VNX_TASK_CLASS"] = _route_decision.task_class
+
+            _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+            write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
+            logger.info(
+                "smart_router: auto-route provider=%s model=%s (task_class=%s)",
+                provider, args.model, _route_decision.task_class,
+            )
+        except Exception as _route_exc:
+            logger.warning(
+                "smart_router: auto-route failed (%s); falling back to --provider=%s --model=%s",
+                _route_exc, args.provider, args.model,
+            )
 
     # PR-SR-2: enforce provider constraints before any handler runs.
     try:

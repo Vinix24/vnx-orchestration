@@ -1,11 +1,12 @@
 """smart_router.py — Task classifier + recommendation lookup for cost-aware routing.
 
-Pure-function module. Classifies dispatch instructions into one of 7 task classes
-via heuristic regex + tag matching, then looks up ranked model recommendations
-from routing_recommendations.yaml.
+Classifies dispatch instructions into one of 7 task classes via heuristic regex +
+tag matching, then looks up ranked model recommendations from
+routing_recommendations.yaml.
 
-No side effects beyond reading the YAML file. No wiring into provider_dispatch —
-that is PR-SR-4 scope.
+PR-SR-4 additions: parse_route_model_id() maps model_id to (provider, model_alias)
+for dispatch CLI flags. write_route_decision() appends decisions to
+route_decisions.ndjson via state_writer (fcntl-locked).
 """
 from __future__ import annotations
 
@@ -251,3 +252,58 @@ def decide(
         reason="; ".join(parts),
         cost_estimate=cost_estimate,
     )
+
+
+# ---------------------------------------------------------------------------
+# Model ID → (provider, model_alias) mapping for dispatch CLI flags
+# ---------------------------------------------------------------------------
+
+def parse_route_model_id(model_id: str) -> tuple[str, str]:
+    """Parse a routing_recommendations model_id into (provider_flag, model_alias).
+
+    Returns values suitable for --provider and --model in provider_dispatch.py.
+    """
+    if model_id.startswith("claude-"):
+        variant = model_id.split("-")[1]
+        return "claude", variant
+    if model_id.startswith("deepseek-"):
+        return f"litellm:deepseek:{model_id}", model_id
+    if model_id.startswith("glm-"):
+        return f"litellm:openrouter:{model_id}", model_id
+    if model_id.startswith("kimi-"):
+        return "kimi", model_id
+    return "litellm", model_id
+
+
+# ---------------------------------------------------------------------------
+# Route decision NDJSON writer
+# ---------------------------------------------------------------------------
+
+def write_route_decision(
+    dispatch_id: str,
+    decision: RouteDecision,
+    state_dir: Path,
+) -> None:
+    """Append route decision to route_decisions.ndjson (fcntl-locked via state_writer)."""
+    from datetime import datetime, timezone
+
+    from state_writer import append_locked
+
+    path = state_dir / "route_decisions.ndjson"
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "dispatch_id": dispatch_id,
+        "task_class": decision.task_class,
+        "chosen_route": {
+            "model_id": decision.primary.model_id,
+            "composite_score": decision.primary.composite_score,
+        } if decision.primary else None,
+        "fallback_route": {
+            "model_id": decision.fallback.model_id,
+            "composite_score": decision.fallback.composite_score,
+        } if decision.fallback else None,
+        "constraints_applied": decision.constraints_applied,
+        "cost_estimate": decision.cost_estimate,
+        "outcome": None,
+    }
+    append_locked(path, record)
