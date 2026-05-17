@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
-from vnx_paths import _resolve_overrides_dir, get_skill_path, resolve_paths
+from vnx_paths import _resolve_overrides_dir, _validate_skill_name, get_skill_path, resolve_paths
 
 
 class TestResolveOverridesDir:
@@ -40,6 +40,93 @@ class TestResolveOverridesDir:
         result = _resolve_overrides_dir(tmp_path)
         assert result is not None
         assert (result / "schemas" / "v10.sql").exists()
+
+
+class TestValidateSkillName:
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError, match="invalid skill name"):
+            _validate_skill_name("")
+
+    def test_dot_dot_raises(self):
+        with pytest.raises(ValueError, match="invalid skill name"):
+            _validate_skill_name("..")
+
+    def test_path_traversal_raises(self):
+        with pytest.raises(ValueError, match="invalid skill name"):
+            _validate_skill_name("../etc/passwd")
+
+    def test_slash_in_name_raises(self):
+        with pytest.raises(ValueError, match="invalid skill name"):
+            _validate_skill_name("foo/../../bar")
+
+    def test_absolute_path_raises(self):
+        with pytest.raises(ValueError, match="invalid skill name"):
+            _validate_skill_name("/absolute/path")
+
+    def test_dot_in_name_raises(self):
+        with pytest.raises(ValueError, match="invalid skill name"):
+            _validate_skill_name("some.skill")
+
+    def test_valid_alphanum_passes(self):
+        assert _validate_skill_name("mySKILL123") == "mySKILL123"
+
+    def test_valid_underscore_passes(self):
+        assert _validate_skill_name("my_skill") == "my_skill"
+
+    def test_valid_dash_passes(self):
+        assert _validate_skill_name("skill-with-dash") == "skill-with-dash"
+
+
+class TestGetSkillPathTraversal:
+    def test_traversal_in_name_raises_value_error(self, tmp_path, monkeypatch):
+        """get_skill_path('../etc/passwd') → ValueError."""
+        vnx_home = tmp_path / "vnx-home"
+        (vnx_home / "skills").mkdir(parents=True)
+        monkeypatch.setenv("VNX_HOME", str(vnx_home))
+        with pytest.raises(ValueError, match="invalid skill name"):
+            get_skill_path("../etc/passwd")
+
+    def test_foo_dotdot_bar_raises(self, tmp_path, monkeypatch):
+        """get_skill_path('foo/../../bar') → ValueError."""
+        vnx_home = tmp_path / "vnx-home"
+        (vnx_home / "skills").mkdir(parents=True)
+        monkeypatch.setenv("VNX_HOME", str(vnx_home))
+        with pytest.raises(ValueError, match="invalid skill name"):
+            get_skill_path("foo/../../bar")
+
+    def test_absolute_path_raises(self, tmp_path, monkeypatch):
+        """get_skill_path('/absolute/path') → ValueError."""
+        vnx_home = tmp_path / "vnx-home"
+        (vnx_home / "skills").mkdir(parents=True)
+        monkeypatch.setenv("VNX_HOME", str(vnx_home))
+        with pytest.raises(ValueError, match="invalid skill name"):
+            get_skill_path("/absolute/path")
+
+    def test_empty_name_raises(self, tmp_path, monkeypatch):
+        """get_skill_path('') → ValueError."""
+        vnx_home = tmp_path / "vnx-home"
+        (vnx_home / "skills").mkdir(parents=True)
+        monkeypatch.setenv("VNX_HOME", str(vnx_home))
+        with pytest.raises(ValueError, match="invalid skill name"):
+            get_skill_path("")
+
+    def test_valid_name_with_central_skill(self, tmp_path, monkeypatch):
+        """get_skill_path('normal_skill_name') succeeds when skill exists."""
+        vnx_home = tmp_path / "vnx-home"
+        skill_dir = vnx_home / "skills" / "normal_skill_name"
+        skill_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_HOME", str(vnx_home))
+        result = get_skill_path("normal_skill_name")
+        assert result == skill_dir.resolve()
+
+    def test_valid_dash_name_with_central_skill(self, tmp_path, monkeypatch):
+        """get_skill_path('skill-with-dash') succeeds when skill exists."""
+        vnx_home = tmp_path / "vnx-home"
+        skill_dir = vnx_home / "skills" / "skill-with-dash"
+        skill_dir.mkdir(parents=True)
+        monkeypatch.setenv("VNX_HOME", str(vnx_home))
+        result = get_skill_path("skill-with-dash")
+        assert result == skill_dir.resolve()
 
 
 class TestGetSkillPath:

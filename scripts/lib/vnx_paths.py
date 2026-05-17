@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import warnings
 from pathlib import Path
@@ -283,6 +284,30 @@ def resolve_central_data_dir(project_id: str) -> Path:
     return Path.home() / ".vnx-data" / project_id
 
 
+_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_skill_name(skill_name: str) -> str:
+    """Validate skill_name is a safe bare name with no path traversal.
+
+    Raises:
+        ValueError: on empty string, path separators, dots, or any char
+                    outside [A-Za-z0-9_-].
+    """
+    if not skill_name:
+        raise ValueError(f"invalid skill name: {skill_name!r}")
+    if not _SKILL_NAME_RE.match(skill_name):
+        raise ValueError(f"invalid skill name: {skill_name!r}")
+    return skill_name
+
+
+def _confine_skill_path(resolved: Path, skill_root: Path) -> None:
+    """Raise ValueError if resolved path escapes skill_root."""
+    root_str = str(skill_root.resolve()) + os.sep
+    if not str(resolved).startswith(root_str):
+        raise ValueError(f"resolved path escapes skill root: {resolved}")
+
+
 def get_skill_path(skill_name: str, project_root: Optional[Path] = None) -> Path:
     """Return the resolved Path for a named skill directory.
 
@@ -291,19 +316,28 @@ def get_skill_path(skill_name: str, project_root: Optional[Path] = None) -> Path
     2. VNX_HOME/skills/<skill_name>/
 
     Raises:
+        ValueError: if skill_name fails validation or resolved path escapes skill root.
         FileNotFoundError: if the skill directory is not found in any location.
     """
+    skill_name = _validate_skill_name(skill_name)
+
     if project_root is not None:
         overrides_dir = _resolve_overrides_dir(Path(project_root))
         if overrides_dir is not None:
-            override_skill = overrides_dir / "skills" / skill_name
+            skill_root = overrides_dir / "skills"
+            override_skill = skill_root / skill_name
+            resolved = override_skill.resolve()
+            _confine_skill_path(resolved, skill_root)
             if override_skill.is_dir():
-                return override_skill.resolve()
+                return resolved
 
     vnx_home = _resolve_vnx_home()
-    central_skill = vnx_home / "skills" / skill_name
+    skill_root = vnx_home / "skills"
+    central_skill = skill_root / skill_name
+    resolved = central_skill.resolve()
+    _confine_skill_path(resolved, skill_root)
     if central_skill.is_dir():
-        return central_skill.resolve()
+        return resolved
 
     raise FileNotFoundError(
         f"Skill {skill_name!r} not found in overrides or central VNX_HOME ({vnx_home})"

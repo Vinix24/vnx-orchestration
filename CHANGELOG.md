@@ -16,6 +16,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ### Fixed
 - fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
 - fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
+- fix(vnx_paths): validate skill_name + resolved-path confinement check in get_skill_path (codex path-traversal blocker)
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
