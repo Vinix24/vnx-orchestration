@@ -717,9 +717,10 @@ class GateRequestHandlerMixin:
             }
             if dispatch_id:
                 payload["dispatch_id"] = dispatch_id
-            self._request_path("wiring_gate", pr_number).write_text(
-                json.dumps(payload, indent=2), encoding="utf-8",
-            )
+            _path = self._request_path("wiring_gate", pr_number)
+            _tmp = _path.with_suffix(".tmp")
+            _tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(_tmp, _path)
             return payload
 
         try:
@@ -746,9 +747,10 @@ class GateRequestHandlerMixin:
             }
             if dispatch_id:
                 payload["dispatch_id"] = dispatch_id
-            self._request_path("wiring_gate", pr_number).write_text(
-                json.dumps(payload, indent=2), encoding="utf-8",
-            )
+            _path = self._request_path("wiring_gate", pr_number)
+            _tmp = _path.with_suffix(".tmp")
+            _tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(_tmp, _path)
             return payload
 
         payload = {
@@ -775,7 +777,8 @@ class GateRequestHandlerMixin:
         }
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
-        self._request_path("wiring_gate", pr_number).write_text(
-            json.dumps(payload, indent=2), encoding="utf-8",
-        )
+        _path = self._request_path("wiring_gate", pr_number)
+        _tmp = _path.with_suffix(".tmp")
+        _tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(_tmp, _path)
         return payload
