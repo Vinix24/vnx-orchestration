@@ -21,6 +21,9 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 
+POOL_HEARTBEAT_STALE_SECONDS: float = 180.0
+
+
 @dataclass(frozen=True)
 class PoolConfig:
     pool_id: str
@@ -29,7 +32,7 @@ class PoolConfig:
     scaling_policy: str          # "fixed" | "queue_aware" | "queue_depth_v1" | "cost_aware_v1"
     provider_mix: List[str]      # e.g. ["claude", "claude", "litellm:deepseek"]
     cooldown_seconds: float = 60.0
-    heartbeat_stale_seconds: float = 300.0
+    heartbeat_stale_seconds: float = POOL_HEARTBEAT_STALE_SECONDS
     cost_ceiling_usd: Optional[float] = None  # used by cost_aware_v1
 
 
@@ -74,7 +77,7 @@ def decide(
     3. Policy registry lookup (fixed | queue_aware | queue_depth_v1 | cost_aware_v1)
     4. Compute delta and return scale_up / scale_down / noop
     """
-    from pool_scaling_policies import POLICIES  # lazy import avoids circular dep
+    from pool_scaling_policies import POLICIES
 
     active = [m for m in members if m.status == "active"]
     current = len(active)

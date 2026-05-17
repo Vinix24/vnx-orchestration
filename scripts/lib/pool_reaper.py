@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
+from pool_decision_engine import POOL_HEARTBEAT_STALE_SECONDS
+
 if TYPE_CHECKING:
     from pool_decision_engine import Membership
 
@@ -23,7 +25,7 @@ class ReapTarget:
 
 @dataclass(frozen=True)
 class ReapConfig:
-    heartbeat_stale_threshold_s: float = 180.0  # operator-tunable; reap after this long silent
+    heartbeat_stale_threshold_s: float = POOL_HEARTBEAT_STALE_SECONDS
     stuck_threshold_s: float = 300.0            # reserved for future processing-stuck detection
     warmup_window_s: float = 120.0              # workers younger than this are exempt
 

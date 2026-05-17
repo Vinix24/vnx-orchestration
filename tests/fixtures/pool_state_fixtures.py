@@ -127,6 +127,8 @@ CREATE TABLE IF NOT EXISTS pool_config (
     provider_mix_json   TEXT    NOT NULL DEFAULT '["claude"]',
     scale_policy        TEXT    NOT NULL DEFAULT 'queue_depth_v1',
     cooldown_seconds    INTEGER NOT NULL DEFAULT 120,
+    cost_ceiling_usd    REAL,
+    heartbeat_stale_seconds REAL NOT NULL DEFAULT 180,
     created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE(project_id, pool_id),
@@ -183,6 +185,8 @@ def create_test_db(
     scale_policy: str = "queue_depth_v1",
     cooldown_seconds: int = 60,
     provider_mix_json: str = '["claude"]',
+    cost_ceiling_usd: Optional[float] = None,
+    heartbeat_stale_seconds: float = 180.0,
 ) -> sqlite3.Connection:
     """Create an in-memory SQLite connection with schema v14 pool tables."""
     conn = sqlite3.connect(":memory:")
@@ -192,12 +196,14 @@ def create_test_db(
         """
         INSERT OR IGNORE INTO pool_config
             (project_id, pool_id, min_workers, max_workers, target_workers,
-             scale_policy, cooldown_seconds, provider_mix_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             scale_policy, cooldown_seconds, provider_mix_json,
+             cost_ceiling_usd, heartbeat_stale_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id, pool_id, min_workers, max_workers, target_workers,
             scale_policy, cooldown_seconds, provider_mix_json,
+            cost_ceiling_usd, heartbeat_stale_seconds,
         ),
     )
     conn.execute(
@@ -222,13 +228,14 @@ def create_test_db_file(
     scale_policy: str = "queue_depth_v1",
     cooldown_seconds: int = 60,
     provider_mix_json: str = '["claude"]',
+    cost_ceiling_usd: Optional[float] = None,
+    heartbeat_stale_seconds: float = 180.0,
 ) -> Path:
     """Initialize a file-backed SQLite DB at db_path with schema v14 pool tables.
 
     Returns db_path. Used by integration tests that need real file connections
     (PoolStateRepository._connect() opens/closes per-call).
     """
-    # Clamp target_workers to satisfy CHECK constraint
     target_workers = max(target_workers, min_workers)
     target_workers = min(target_workers, max_workers)
 
@@ -239,12 +246,14 @@ def create_test_db_file(
         """
         INSERT OR IGNORE INTO pool_config
             (project_id, pool_id, min_workers, max_workers, target_workers,
-             scale_policy, cooldown_seconds, provider_mix_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             scale_policy, cooldown_seconds, provider_mix_json,
+             cost_ceiling_usd, heartbeat_stale_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id, pool_id, min_workers, max_workers, target_workers,
             scale_policy, cooldown_seconds, provider_mix_json,
+            cost_ceiling_usd, heartbeat_stale_seconds,
         ),
     )
     conn.execute(
