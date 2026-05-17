@@ -199,7 +199,9 @@ def enforce_codex_gate(
       sets required=True.
 
     Operator visibility: WARN surfaces in receipt findings and PR comment but does not
-    block merge. Current implementation has WARN-only path; BLOCK threshold is future work.
+    block merge. BLOCK level requires a full Codex review (required=True).
+    Net line deletion (lines_removed - lines_added) is also checked with the same
+    graduated semantics: NET_LINE_DELETION_WARN and NET_LINE_DELETION_HOLD.
     """
     reasons: List[str] = []
     risk = (contract.risk_class or "").strip().lower()
