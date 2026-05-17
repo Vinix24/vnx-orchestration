@@ -24,7 +24,8 @@ def _norm(name: str) -> str:
 def _read_text(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning("check_skill_coverage: cannot read %s: %s", path, e)
         return None
 
 

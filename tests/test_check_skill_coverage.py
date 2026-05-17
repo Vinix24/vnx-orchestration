@@ -13,7 +13,10 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import logging
+
 from check_skill_coverage import (
+    _read_text,
     compute_missing,
     format_report,
     list_available_skills,
@@ -221,3 +224,21 @@ class TestMain:
         assert "missing" in data
         assert "covered" in data
         assert "skipped" in data
+
+
+class TestReadText:
+    def test_unreadable_file_returns_none_and_logs_warning(self, tmp_path: Path, caplog) -> None:
+        """_read_text returns None and emits a warning when the file cannot be read."""
+        missing = tmp_path / "does_not_exist.txt"
+        with caplog.at_level(logging.WARNING, logger="check_skill_coverage"):
+            result = _read_text(missing)
+        assert result is None
+        assert len(caplog.records) == 1
+        assert "cannot read" in caplog.records[0].message
+        assert "does_not_exist.txt" in caplog.records[0].message
+
+    def test_readable_file_returns_content(self, tmp_path: Path) -> None:
+        """_read_text returns file contents on success."""
+        f = tmp_path / "data.txt"
+        f.write_text("hello")
+        assert _read_text(f) == "hello"
