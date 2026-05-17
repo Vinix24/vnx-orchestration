@@ -725,6 +725,29 @@ def main(argv: list[str] | None = None) -> int:
 
     provider = args.provider
 
+    # PR-SR-2: enforce provider constraints before any handler runs.
+    try:
+        from constraint_enforcer import HardConstraintViolation, enforce as _enforce_route  # noqa: PLC0415
+
+        _sub = None
+        _via = None
+        if provider.startswith("litellm:"):
+            _parts = provider.split(":", 2)
+            _sub = _parts[1] if len(_parts) > 1 else None
+        _enforce_route(
+            provider=provider.split(":")[0] if ":" in provider else provider,
+            sub_provider=_sub,
+            model=args.model,
+            terminal_id=args.terminal_id,
+            role=args.role,
+            via=_via,
+        )
+    except HardConstraintViolation as exc:
+        print(f"provider_dispatch: constraint violation — {exc}", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        logger.debug("provider_dispatch: provider_constraints.yaml not found — skipping enforcement")
+
     if provider == "claude":
         return _dispatch_claude(args)
 
