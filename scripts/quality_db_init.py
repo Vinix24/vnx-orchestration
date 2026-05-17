@@ -419,6 +419,18 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
                 conn.commit()
                 log('INFO', f'Migrated {_tbl}: added valid_until column')
 
+        # Migration: add invalidation_reason to success_patterns and antipatterns
+        # (catalog hygiene — codex blocker: IF NOT EXISTS invalid on SQLite < 3.37)
+        for _htbl in ("success_patterns", "antipatterns"):
+            cursor.execute(f"PRAGMA table_info({_htbl})")
+            _htbl_cols = {row[1] for row in cursor.fetchall()}
+            if "invalidation_reason" not in _htbl_cols:
+                cursor.execute(
+                    f"ALTER TABLE {_htbl} ADD COLUMN invalidation_reason TEXT"
+                )
+                conn.commit()
+                log('INFO', f'Migrated {_htbl}: added invalidation_reason column')
+
         # Migration: create dispatch_pattern_offered junction table for isolated per-dispatch
         # pattern tracking.  Replaces pattern_usage.dispatch_id as the lookup key for
         # _update_pattern_confidence so concurrent dispatches cannot overwrite each other.
