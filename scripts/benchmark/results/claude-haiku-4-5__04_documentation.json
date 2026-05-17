@@ -1,0 +1,25 @@
+{
+  "model_id": "claude-haiku-4-5",
+  "task_id": "04_documentation",
+  "dispatch_id": "bench-claude-haiku-4-5-04_documentation-1778968464",
+  "duration_seconds": 15.821,
+  "exit_code": 0,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 851,
+      "output": 26,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.000981
+  },
+  "response": "## Summary\nAuto-generated stub \u2014 worker completed without writing a manual unified report.\n\n## Open Items",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "Response is an auto-generated stub with no README content; missing overview, installation, API reference, examples, and error handling sections."
+  },
+  "cost_usd_estimated": 0.000981
+}

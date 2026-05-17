@@ -254,3 +254,34 @@ class TestFromLegacy:
         assert ev.observability_tier == 2
         assert ev.dispatch_id == ""
         assert ev.terminal_id == ""
+
+
+# ---------------------------------------------------------------------------
+# usage_complete event type (OI-1489 — litellm stream_options.include_usage)
+# ---------------------------------------------------------------------------
+
+class TestUsageCompleteEventType:
+    def test_usage_complete_event_type_accepted(self):
+        ev = _make_event(event_type="usage_complete", data={"usage": {"prompt_tokens": 42, "completion_tokens": 7}})
+        assert ev.event_type == "usage_complete"
+
+    def test_usage_complete_in_valid_event_types_set(self):
+        assert "usage_complete" in VALID_EVENT_TYPES
+
+    def test_usage_complete_round_trip(self):
+        ev = _make_event(event_type="usage_complete", data={"usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+        d = ev.to_dict()
+        assert d["event_type"] == "usage_complete"
+        reconstructed = CanonicalEvent.from_dict(d)
+        assert reconstructed.event_type == "usage_complete"
+        assert reconstructed.data == {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+    def test_from_legacy_usage_complete_not_coerced_to_error(self):
+        legacy = {"type": "usage_complete", "data": {"usage": {"prompt_tokens": 8}}}
+        ev = CanonicalEvent.from_legacy("litellm", legacy)
+        assert ev.event_type == "usage_complete"
+        assert ev.provider_meta == {}
+
+    def test_usage_complete_validate_shape_passes(self):
+        ev = _make_event(event_type="usage_complete", data={"usage": {}})
+        ev.validate_shape()  # must not raise

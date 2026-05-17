@@ -1,0 +1,25 @@
+{
+  "model_id": "claude-haiku-4-5",
+  "task_id": "05_debugging",
+  "dispatch_id": "bench-claude-haiku-4-5-05_debugging-1778968480",
+  "duration_seconds": 13.443,
+  "exit_code": 0,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 417,
+      "output": 26,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.000547
+  },
+  "response": "## Summary\nAuto-generated stub \u2014 worker completed without writing a manual unified report.\n\n## Open Items",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 1,
+    "correctness": false,
+    "completeness_score": 1,
+    "notable_issues": "Response is an auto-generated stub with no root cause analysis, fix, or explanation; instead contains meta-instructions about JSON output format."
+  },
+  "cost_usd_estimated": 0.000547
+}

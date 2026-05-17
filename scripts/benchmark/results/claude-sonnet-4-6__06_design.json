@@ -1,0 +1,25 @@
+{
+  "model_id": "claude-sonnet-4-6",
+  "task_id": "06_design",
+  "dispatch_id": "bench-claude-sonnet-4-6-06_design-1778967838",
+  "duration_seconds": 288.278,
+  "exit_code": 0,
+  "receipt": {
+    "token_usage_estimated": {
+      "input": 342,
+      "output": 630,
+      "method": "char_count_4_to_1"
+    },
+    "cost_usd_estimated": 0.010476
+  },
+  "response": "## What Changed\n\nCreated:\n- `scripts/benchmark/output/bench-claude-sonnet-4-6-06_design-1778967838/design.md` \u2014 full architecture design document (\u2248 500 lines)\n\nNo existing files modified.\n\n---\n\n## Commands Run\n\n```bash\nmkdir -p scripts/benchmark/output/bench-claude-sonnet-4-6-06_design-1778967838\n# Write tools used for design.md and this report\n```\n\n---\n\n## Test Files and Totals\n\nNo test suite applicable for a design document output. Dispatch type `06_design` produces a markdown artifact, not executable code. No pytest run performed.\n\n---\n\n## Design Coverage\n\nAll five required sections delivered with concrete numbers:\n\n| Section | Delivered |\n|---|---|\n| 1. Architecture | Component map, scaling units (pods \u00d7 concurrency), communication rationale (Redis Streams vs NATS), sync/async boundary |\n| 2. Data Flow | 11-step write log, state machine (7 states), CAS semantics, restart-durability table for 5 failure points |\n| 3. Cost Routing | 6-stage algorithm (capability \u2192 health \u2192 budget \u2192 score \u2192 task-type override \u2192 approval gate), fallback chain, modeled cost mix ($4,873/day vs $32,250 all-Claude baseline) |\n| 4. Failure Modes | 7 scenarios (provider rate-limit, Postgres failure, worker crash, cost ledger drift, Redis failure, budget exhaustion, approval backlog) \u2014 each with detection mechanism, recovery, blast radius |\n| 5. SLOs | p50/p95/p99 per tier (Interactive/Standard/Batch), throughput floor (35 rps) and burst ceiling (58 rps), 5 error budgets, burn-rate alert config |\n\nArchitectural differentiator vs. the existing opus design: Redis Streams (lighter operational surface) instead of NATS JetStream; score-based single-pass routing instead of multi-step filter chain; Postgres as the sole authority for dispatch state (Redis holds only IDs in-transit, rebuildable from outbox table).\n\n---\n\n## Known Limitations\n\n- No executable code produced; design cannot be integration-tested in this dispatch.\n- Cost model uses assumed task-type distribution (25/15/15/10/10/5/10/10%) \u2014 actual distribution will shift the provider split.\n- Provider API latency figures (p95 Claude ~3.7s, DeepSeek ~5.5s, Kimi ~15s for 1,500 output tokens) are estimates from public benchmarks at time of design; production calibration required.\n- Redis async replica (not sync) means \u22641s of messages at risk on primary failure; full durability requires Postgres outbox poll recovery, which introduces up to 30s requeue latency for affected dispatches.\n\n---\n\n## Open Items\n\n_(none \u2014 design document is complete as specified)_",
+  "cost_usd": null,
+  "judge_model": "opus",
+  "judge_scores": {
+    "quality_score": 7,
+    "correctness": true,
+    "completeness_score": 6,
+    "notable_issues": "Response is a meta-summary of a design document rather than the design itself; the actual architecture content lives in a referenced file not shown here, making the deliverable hard to evaluate on its own."
+  },
+  "cost_usd_estimated": 0.010476
+}

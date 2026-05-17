@@ -97,6 +97,31 @@ class _ErrorNormalizer(StreamingDrainerMixin):
         raise RuntimeError("normalize exploded")
 
 
+class _LiteLLMEchoNormalizer(StreamingDrainerMixin):
+    """Mirrors normalize_litellm_event: usage_complete chunks pass through as-is."""
+
+    provider_name = "litellm"
+
+    def _normalize(self, raw: Dict[str, Any]) -> CanonicalEvent:
+        if raw.get("event_type") == "usage_complete":
+            return CanonicalEvent(
+                dispatch_id=raw.get("dispatch_id", "test-dispatch"),
+                terminal_id=raw.get("terminal_id", "T2"),
+                provider="litellm",
+                event_type="usage_complete",
+                data={"usage": raw.get("usage") or {}},
+                observability_tier=2,
+            )
+        return CanonicalEvent(
+            dispatch_id=raw.get("dispatch_id", "test-dispatch"),
+            terminal_id=raw.get("terminal_id", "T2"),
+            provider="litellm",
+            event_type=raw.get("type", "text"),
+            data=raw.get("data", {}),
+            observability_tier=2,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests: normal stream
 # ---------------------------------------------------------------------------
@@ -364,3 +389,59 @@ class TestMakeErrorEvent:
             reason="too long",
         )
         assert len(ev.data["raw"]) == 500
+
+
+# ---------------------------------------------------------------------------
+# Tests: usage_complete event propagation (OI-1489)
+# ---------------------------------------------------------------------------
+
+class TestUsageCompleteEventPropagation:
+    def test_usage_complete_event_propagates_through_drainer(self):
+        lines = [
+            json.dumps({"type": "text", "data": {"content": "hello"}}),
+            json.dumps({"type": "complete", "data": {"finish_reason": "stop"}}),
+            json.dumps({"event_type": "usage_complete", "usage": {"prompt_tokens": 42, "completion_tokens": 7}}),
+        ]
+        proc = _make_pipe_process(lines, returncode=0)
+        adapter = _LiteLLMEchoNormalizer()
+        events = list(adapter.drain_stream(proc, "T2", "d-oi1489", event_store=None))
+
+        types = [e.event_type for e in events]
+        assert "usage_complete" in types, f"usage_complete missing from {types}"
+        usage_ev = next(e for e in events if e.event_type == "usage_complete")
+        assert usage_ev.data["usage"]["prompt_tokens"] == 42
+
+    def test_usage_complete_is_not_an_error_event(self):
+        lines = [
+            json.dumps({"event_type": "usage_complete", "usage": {"prompt_tokens": 10, "completion_tokens": 3}}),
+        ]
+        proc = _make_pipe_process(lines, returncode=0)
+        adapter = _LiteLLMEchoNormalizer()
+        events = list(adapter.drain_stream(proc, "T2", "d-oi1489", event_store=None))
+
+        assert len(events) == 1
+        assert events[0].event_type == "usage_complete"
+
+    def test_usage_complete_does_not_suppress_synthetic_error_on_crash(self):
+        """usage_complete alone does not count as seen_complete — crash still emits synthetic error."""
+        lines = [
+            json.dumps({"event_type": "usage_complete", "usage": {"prompt_tokens": 5, "completion_tokens": 2}}),
+        ]
+        proc = _make_pipe_process(lines, returncode=1)
+        adapter = _LiteLLMEchoNormalizer()
+        events = list(adapter.drain_stream(proc, "T2", "d-oi1489", event_store=None))
+
+        error_events = [e for e in events if e.event_type == "error"]
+        assert len(error_events) >= 1, "expected synthetic error after non-zero exit without complete"
+
+    def test_usage_complete_tier_stamped_to_1(self):
+        lines = [
+            json.dumps({"event_type": "usage_complete", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}),
+        ]
+        proc = _make_pipe_process(lines, returncode=0)
+        adapter = _LiteLLMEchoNormalizer()
+        events = list(adapter.drain_stream(proc, "T2", "d-oi1489", event_store=None))
+
+        usage_ev = next((e for e in events if e.event_type == "usage_complete"), None)
+        assert usage_ev is not None
+        assert usage_ev.observability_tier == _STREAMING_TIER
