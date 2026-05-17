@@ -242,6 +242,47 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Opt
     return round(cost_in + cost_out, 8)
 
 
+def _build_frontmatter(
+    args: argparse.Namespace,
+    provider: str,
+    model_used: str,
+    result: Any,
+    duration: float,
+    token_usage: Dict[str, int],
+    cost_usd: Optional[float],
+) -> Dict[str, Any]:
+    """Build unified_report_v1 frontmatter from dispatch context + spawn result."""
+    from unified_report_schema import SCHEMA_VERSION
+
+    spawn_fm = result.frontmatter_fields() if hasattr(result, "frontmatter_fields") else {}
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "dispatch_id": args.dispatch_id,
+        "provider": spawn_fm.get("provider", provider.split(":")[0]),
+        "sub_provider": spawn_fm.get("sub_provider", "none"),
+        "model": model_used,
+        "terminal_id": args.terminal_id,
+        "pool_id": os.environ.get("VNX_POOL_ID", "headless"),
+        "role": getattr(args, "role", None) or "backend-developer",
+        "task_class": os.environ.get("VNX_TASK_CLASS", "implementation"),
+        "pr_id": getattr(args, "pr_id", None) or "none",
+        "duration_seconds": round(duration, 3),
+        "exit_code": spawn_fm.get("exit_code", getattr(result, "returncode", 1)),
+        "token_usage": spawn_fm.get("token_usage", {
+            "input": token_usage.get("input", 0),
+            "output": token_usage.get("output", 0),
+            "cache_read": token_usage.get("cache_hit", 0),
+        }),
+        "cost_usd": cost_usd if cost_usd is not None else 0.0,
+        "route_decision": {
+            "strategy": os.environ.get("VNX_ROUTE_STRATEGY", "default"),
+            "selected_provider": provider,
+            "selected_model": model_used,
+        },
+    }
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -281,6 +322,10 @@ def _emit_governance(
         logger.error("governance_emit: receipt failed dispatch=%s: %s", args.dispatch_id, exc)
         raise SystemExit(1) from exc
 
+    frontmatter = _build_frontmatter(
+        args, provider, model_used, result, duration, token_usage, cost_usd,
+    )
+
     try:
         report_path = emit_unified_report(
             dispatch_id=args.dispatch_id,
@@ -291,6 +336,7 @@ def _emit_governance(
             findings=[],
             duration_seconds=duration,
             data_dir=data_dir,
+            frontmatter=frontmatter,
         )
         print(f"Report: {report_path}", file=sys.stderr)
     except RuntimeError as exc:

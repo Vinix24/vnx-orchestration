@@ -68,6 +68,19 @@ class ClaudeSpawnResult:
     # available.  Not included in repr to avoid verbose output.
     _adapter: Any = field(default=None, repr=False)
 
+    def frontmatter_fields(self) -> Dict[str, Any]:
+        usage = self.token_usage or {}
+        return {
+            "provider": "claude",
+            "sub_provider": "anthropic",
+            "exit_code": self.returncode,
+            "token_usage": {
+                "input": int(usage.get("input_tokens", 0) or 0),
+                "output": int(usage.get("output_tokens", 0) or 0),
+                "cache_read": int(usage.get("cache_read_input_tokens", 0) or 0),
+            },
+        }
+
 
 def spawn_claude(
     prompt: str,

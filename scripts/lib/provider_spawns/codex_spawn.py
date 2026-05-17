@@ -59,6 +59,19 @@ class CodexSpawnResult:
     # > 0 indicates audit-trail gaps the caller must investigate per ADR-005.
     event_writer_failures: int = 0
 
+    def frontmatter_fields(self) -> Dict[str, Any]:
+        usage = self.token_usage or {}
+        return {
+            "provider": "codex",
+            "sub_provider": "openai",
+            "exit_code": self.returncode,
+            "token_usage": {
+                "input": int(usage.get("input_tokens", 0) or 0),
+                "output": int(usage.get("output_tokens", 0) or 0),
+                "cache_read": int(usage.get("cache_read_tokens", 0) or 0),
+            },
+        }
+
 
 # ---------------------------------------------------------------------------
 # Normalizer helpers — single implementation; codex_adapter shims delegate here
