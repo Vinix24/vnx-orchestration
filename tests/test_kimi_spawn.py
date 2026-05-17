@@ -256,6 +256,49 @@ class TestSpawnKimiIntegration(unittest.TestCase):
         self.assertEqual(result.token_usage["input_tokens"], 200)
         self.assertEqual(result.token_usage["output_tokens"], 75)
 
+    def test_error_event_propagated_to_result_error_field(self):
+        """Error events emitted by kimi CLI must surface in result.error."""
+        events = [
+            {"event_type": "assistant_text", "content": "Partial"},
+            {"event_type": "error", "message": "upstream model returned 503"},
+            {"event_type": "complete"},
+        ]
+        result = self._run_with_events(events)
+        self.assertIsNotNone(result.error)
+        self.assertIn("503", result.error)
+
+    def test_error_event_overrides_zero_exit_code(self):
+        """An error event with exit_code=0 must set result.error and returncode != 0."""
+        events = [
+            {"event_type": "error", "message": "auth token expired"},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNotNone(result.error)
+        self.assertIn("auth token expired", result.error)
+        self.assertNotEqual(result.returncode, 0)
+
+
+class TestDispatchKimiEventStoreFailure(unittest.TestCase):
+    """Tests for _dispatch_kimi EventStore audit-invariant enforcement (ADR-005)."""
+
+    def test_event_store_init_failure_returns_nonzero(self):
+        """_dispatch_kimi must return non-zero when EventStore fails to initialize."""
+        import argparse
+        _PARENT_LIB = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
+        if _PARENT_LIB not in sys.path:
+            sys.path.insert(0, _PARENT_LIB)
+        import provider_dispatch as pd
+
+        args = argparse.Namespace(
+            instruction="test prompt",
+            dispatch_id="d-es-fail",
+            terminal_id="T1",
+            pr_id=None,
+        )
+        with patch("event_store.EventStore", side_effect=RuntimeError("db locked")):
+            rc = pd._dispatch_kimi(args)
+        self.assertNotEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

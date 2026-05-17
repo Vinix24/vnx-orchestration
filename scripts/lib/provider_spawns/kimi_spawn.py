@@ -195,14 +195,15 @@ def _consume_kimi_stream(
     event_store: Optional[Any],
     chunk_timeout: float,
     total_deadline: float,
-) -> "tuple[str, int, Optional[Dict], bool, bool, int]":
-    """Drain the stream; return (completion_text, events_written, token_usage, timed_out, stopped_early, failures)."""
+) -> "tuple[str, int, Optional[Dict], bool, bool, int, list]":
+    """Drain the stream; return (completion_text, events_written, token_usage, timed_out, stopped_early, failures, errors_captured)."""
     events_written = 0
     completion_parts: list = []
     token_usage: Optional[Dict[str, Any]] = None
     stopped_early = False
     timed_out = False
     _event_writer_failures = 0
+    errors_captured: list = []
 
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
@@ -219,9 +220,12 @@ def _consume_kimi_stream(
             if tc:
                 token_usage = tc
         elif evt_type == "error":
-            reason = ((canonical_event.data or {}).get("reason") or "").lower()
+            data = canonical_event.data or {}
+            reason = (data.get("reason") or "").lower()
             if "timeout" in reason or "deadline" in reason:
                 timed_out = True
+            msg = data.get("message") or data.get("reason") or str(data)[:200]
+            errors_captured.append(str(msg))
 
         if health_monitor is not None:
             health_monitor.update(canonical_event)
@@ -245,7 +249,7 @@ def _consume_kimi_stream(
                     logger.debug("spawn_kimi: kill after on_event=False failed: %s", _ke)
                 break
 
-    return "".join(completion_parts), events_written, token_usage, timed_out, stopped_early, _event_writer_failures
+    return "".join(completion_parts), events_written, token_usage, timed_out, stopped_early, _event_writer_failures, errors_captured
 
 
 def _finalize_kimi_result(
@@ -256,6 +260,7 @@ def _finalize_kimi_result(
     timed_out: bool,
     stopped_early: bool,
     event_writer_failures: int,
+    errors_captured: Optional[list] = None,
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult."""
     try:
@@ -264,6 +269,16 @@ def _finalize_kimi_result(
         proc.kill()
         proc.wait()
     rc = proc.returncode if proc.returncode is not None else 1
+
+    if errors_captured:
+        error: Optional[str] = "\n".join(errors_captured)
+        if rc == 0:
+            rc = 1  # error event overrides false-success zero exit code
+    elif rc != 0:
+        error = f"kimi exited with code {rc}"
+    else:
+        error = None
+
     return KimiSpawnResult(
         returncode=rc,
         completion_text=completion_text,
@@ -273,6 +288,7 @@ def _finalize_kimi_result(
         stopped_early=stopped_early,
         token_usage=token_usage,
         event_writer_failures=event_writer_failures,
+        error=error,
     )
 
 
@@ -302,6 +318,11 @@ def spawn_kimi(
     per normalized event. Failures are counted in result.event_writer_failures.
 
     Auth: OAuth via ``kimi login`` (operator-managed). No API key required.
+
+    DUPLICATE-WRITE CONTRACT: pass either ``event_writer`` OR ``event_store``, not
+    both. ``event_store`` is forwarded to drain_stream (writes via drainer);
+    ``event_writer`` is called per-event in _consume_kimi_stream. Passing both
+    causes every event to be written twice.
     """
     try:
         chunk_timeout = float(os.environ.get("VNX_KIMI_STALL_THRESHOLD", chunk_timeout))
@@ -323,7 +344,7 @@ def spawn_kimi(
         return err_result
 
     host = _KimiNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
-    completion_text, events_written, token_usage, timed_out, stopped_early, _event_writer_failures = (
+    completion_text, events_written, token_usage, timed_out, stopped_early, _event_writer_failures, errors_captured = (
         _consume_kimi_stream(
             proc=proc, host=host, on_event=on_event,
             health_monitor=health_monitor, event_writer=event_writer,
@@ -337,4 +358,5 @@ def spawn_kimi(
         events_written=events_written, token_usage=token_usage,
         timed_out=timed_out, stopped_early=stopped_early,
         event_writer_failures=_event_writer_failures,
+        errors_captured=errors_captured,
     )

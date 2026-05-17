@@ -320,10 +320,11 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         from event_store import EventStore
         event_store = EventStore()
     except Exception as _es_exc:
-        logger.warning(
-            "_dispatch_codex: EventStore unavailable; NDJSON audit sink skipped: %s",
+        logger.error(
+            "_dispatch_codex: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
             _es_exc,
         )
+        return 1
 
     model = os.environ.get("VNX_CODEX_MODEL", "")
     start_time = datetime.now(timezone.utc)
@@ -437,10 +438,11 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         from event_store import EventStore
         event_store = EventStore()
     except Exception as _es_exc:
-        logger.warning(
-            "_dispatch_litellm: EventStore unavailable; NDJSON audit sink skipped: %s",
+        logger.error(
+            "_dispatch_litellm: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
             _es_exc,
         )
+        return 1
 
     parts = args.provider.split(":", 1)
     sub_provider = parts[1] if len(parts) > 1 else ""
@@ -546,10 +548,11 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         from event_store import EventStore
         event_store = EventStore()
     except Exception as _es_exc:
-        logger.warning(
-            "_dispatch_kimi: EventStore unavailable; NDJSON audit sink skipped: %s",
+        logger.error(
+            "_dispatch_kimi: EventStore init failed; cannot proceed without audit sink (ADR-005): %s",
             _es_exc,
         )
+        return 1
 
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
     model_label = model or "default"
