@@ -307,3 +307,52 @@ def write_route_decision(
         "outcome": None,
     }
     append_locked(path, record)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end routing pipeline (PR-SR-3)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RoutingResult:
+    """Full result of the route() end-to-end pipeline."""
+    decision: RouteDecision
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    routed: bool = False
+
+
+def route(
+    instruction: str,
+    dispatch_id: str,
+    state_dir: Path,
+    *,
+    role: Optional[str] = None,
+    dispatch_paths: Optional[Sequence[str]] = None,
+    recommendations_path: Optional[Path] = None,
+) -> RoutingResult:
+    """End-to-end smart routing pipeline: classify → decide → resolve → persist.
+
+    Combines classify_task, decide, parse_route_model_id, and write_route_decision
+    into a single call. Returns RoutingResult with the selected provider/model and
+    the underlying RouteDecision.
+
+    This is the function provider_dispatch should call under --auto-route.
+    """
+    decision = decide(
+        instruction=instruction,
+        role=role,
+        dispatch_paths=dispatch_paths,
+        recommendations_path=recommendations_path,
+    )
+
+    result = RoutingResult(decision=decision)
+
+    if decision.primary:
+        provider, model = parse_route_model_id(decision.primary.model_id)
+        result.provider = provider
+        result.model = model
+        result.routed = True
+
+    write_route_decision(dispatch_id, decision, state_dir=state_dir)
+    return result
