@@ -76,7 +76,7 @@ def _spawn_via_provider_dispatch(
     """Spawn a worker CC session via subprocess.Popen.
 
     Launches ``scripts.lib.subprocess_dispatch`` as a detached child process
-    and captures its PID for lifecycle management (heartbeat, reap).
+    in an isolated git worktree, and captures its PID for lifecycle management.
     """
     log.info(
         "spawn: project=%s pool=%s terminal=%s provider=%s role=%s",
@@ -86,6 +86,16 @@ def _spawn_via_provider_dispatch(
         provider,
         role,
     )
+
+    try:
+        from pool_worktree_manager import create_worker_worktree  # noqa: E402
+        worktree_path = create_worker_worktree(terminal_id)
+    except Exception as exc:
+        return SpawnResult(
+            terminal_id=terminal_id,
+            success=False,
+            error=f"worktree creation failed: {exc}",
+        )
 
     dispatch_id = f"pool-spawn-{terminal_id}-{int(time.time() * 1000) % 100000}"
     cmd = [
@@ -102,6 +112,7 @@ def _spawn_via_provider_dispatch(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            cwd=str(worktree_path),
         )
     except OSError as exc:
         return SpawnResult(
@@ -256,6 +267,16 @@ class PoolManager:
                 log.error(
                     "reap: membership release failed for %s: %s",
                     target.membership_id,
+                    exc,
+                )
+
+            try:
+                from pool_worktree_manager import reap_worker_worktree  # noqa: E402
+                reap_worker_worktree(target.terminal_id)
+            except Exception as exc:
+                log.warning(
+                    "reap: worktree cleanup failed for %s: %s",
+                    target.terminal_id,
                     exc,
                 )
 
