@@ -643,6 +643,7 @@ def check_gate_clearance(
             "cleared": True,
             "reason": "codex_gate_not_required",
             "blockers": [],
+            "warnings": list(enforcement.warnings),
         }
 
     if receipt is None:
@@ -650,6 +651,7 @@ def check_gate_clearance(
             "cleared": False,
             "reason": "codex_gate_required_no_receipt",
             "blockers": ["missing_codex_gate_receipt"],
+            "warnings": list(enforcement.warnings),
         }
 
     blockers: List[str] = []
@@ -683,12 +685,14 @@ def check_gate_clearance(
             "cleared": False,
             "reason": "codex_gate_not_cleared",
             "blockers": blockers,
+            "warnings": list(enforcement.warnings),
         }
 
     return {
         "cleared": True,
         "reason": "codex_gate_passed",
         "blockers": [],
+        "warnings": list(enforcement.warnings),
     }
 
 
