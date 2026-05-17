@@ -20,7 +20,12 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
-from gate_request_handler import _CODEX_MASS_DELETION_HOLD, _count_deleted_files_in_pr
+from gate_request_handler import (
+    _CODEX_MASS_DELETION_HOLD,
+    _CODEX_NET_LINE_DELETION_HOLD,
+    _count_deleted_files_in_pr,
+    _get_net_line_deletion_in_pr,
+)
 
 
 def _mock_git_deleted(deleted_files: list):
@@ -244,4 +249,198 @@ class TestRequestCodexMassDeletion:
         data = json.loads(request_file.read_text())
         assert data["mass_deletion_count"] == deleted_count
         assert data["mass_deletion_flagged"] is True
+        assert data["required"] is True
+
+
+def _mock_git_numstat(added: int, removed: int):
+    """Return a mock subprocess result with numstat output for one file."""
+    mock = MagicMock()
+    mock.returncode = 0
+    mock.stdout = f"{added}\t{removed}\tsome/file.py\n"
+    return mock
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _get_net_line_deletion_in_pr helper
+# ---------------------------------------------------------------------------
+
+class TestGetNetLineDeletionInPr:
+
+    def test_returns_net_deletion_on_success(self):
+        with patch("gate_request_handler.subprocess.run", return_value=_mock_git_numstat(10, 300)):
+            assert _get_net_line_deletion_in_pr() == 290
+
+    def test_returns_zero_on_git_failure(self):
+        fail = MagicMock()
+        fail.returncode = 1
+        fail.stdout = ""
+        with patch("gate_request_handler.subprocess.run", return_value=fail):
+            assert _get_net_line_deletion_in_pr() == 0
+
+    def test_returns_zero_when_no_net_deletion(self):
+        with patch("gate_request_handler.subprocess.run", return_value=_mock_git_numstat(100, 100)):
+            assert _get_net_line_deletion_in_pr() == 0
+
+    def test_negative_net_returns_negative(self):
+        # More lines added than removed — net should be negative (not flagged)
+        with patch("gate_request_handler.subprocess.run", return_value=_mock_git_numstat(500, 10)):
+            result = _get_net_line_deletion_in_pr()
+            assert result < 0
+
+    def test_fallback_to_head_minus_one(self):
+        fail = MagicMock()
+        fail.returncode = 1
+        fail.stdout = ""
+        success = _mock_git_numstat(20, 600)
+        with patch("gate_request_handler.subprocess.run", side_effect=[fail, fail, success]):
+            assert _get_net_line_deletion_in_pr() == 580
+
+    def test_timeout_returns_zero(self):
+        import subprocess as _sp
+        with patch(
+            "gate_request_handler.subprocess.run",
+            side_effect=_sp.TimeoutExpired(cmd=["git"], timeout=10),
+        ):
+            assert _get_net_line_deletion_in_pr() == 0
+
+    def test_binary_files_skipped(self):
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = "-\t-\tbinary.png\n10\t300\tsome/file.py\n"
+        with patch("gate_request_handler.subprocess.run", return_value=mock):
+            assert _get_net_line_deletion_in_pr() == 290
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: net-line-deletion in _request_codex payload
+# ---------------------------------------------------------------------------
+
+class TestRequestCodexNetLineDeletion:
+
+    def test_net_line_deletion_above_hold_sets_required_true(self, manager_env):
+        manager = _make_manager(manager_env)
+
+        with patch("gate_request_handler._count_deleted_files_in_pr", return_value=0):
+            with patch(
+                "gate_request_handler._get_net_line_deletion_in_pr",
+                return_value=_CODEX_NET_LINE_DELETION_HOLD + 50,
+            ):
+                with patch("gate_request_handler._get_head_commit_sha", return_value="abc123"):
+                    payload = manager._request_codex(
+                        pr_number=101,
+                        branch="feat/gut-content",
+                        risk_class="low",
+                        changed_files=[],
+                        mode="per_pr",
+                    )
+
+        assert payload["required"] is True
+        assert payload["net_line_deletion_flagged"] is True
+        assert payload["net_line_deletion"] == _CODEX_NET_LINE_DELETION_HOLD + 50
+        assert payload["mass_deletion_flagged"] is False
+
+    def test_net_line_deletion_below_hold_no_flag(self, manager_env):
+        manager = _make_manager(manager_env)
+
+        with patch("gate_request_handler._count_deleted_files_in_pr", return_value=0):
+            with patch(
+                "gate_request_handler._get_net_line_deletion_in_pr",
+                return_value=_CODEX_NET_LINE_DELETION_HOLD - 1,
+            ):
+                with patch("gate_request_handler._get_head_commit_sha", return_value="abc123"):
+                    payload = manager._request_codex(
+                        pr_number=102,
+                        branch="feat/small-net",
+                        risk_class="low",
+                        changed_files=[],
+                        mode="per_pr",
+                    )
+
+        assert payload["required"] is False
+        assert payload["net_line_deletion_flagged"] is False
+        assert payload["net_line_deletion"] == _CODEX_NET_LINE_DELETION_HOLD - 1
+
+    def test_exact_net_hold_sets_required_true(self, manager_env):
+        manager = _make_manager(manager_env)
+
+        with patch("gate_request_handler._count_deleted_files_in_pr", return_value=0):
+            with patch(
+                "gate_request_handler._get_net_line_deletion_in_pr",
+                return_value=_CODEX_NET_LINE_DELETION_HOLD,
+            ):
+                with patch("gate_request_handler._get_head_commit_sha", return_value="abc123"):
+                    payload = manager._request_codex(
+                        pr_number=103,
+                        branch="feat/exact-net-hold",
+                        risk_class="low",
+                        changed_files=[],
+                        mode="per_pr",
+                    )
+
+        assert payload["required"] is True
+        assert payload["net_line_deletion_flagged"] is True
+
+    def test_git_failure_does_not_set_net_flag(self, manager_env):
+        manager = _make_manager(manager_env)
+
+        with patch("gate_request_handler._count_deleted_files_in_pr", return_value=0):
+            with patch("gate_request_handler._get_net_line_deletion_in_pr", return_value=0):
+                with patch("gate_request_handler._get_head_commit_sha", return_value="abc123"):
+                    payload = manager._request_codex(
+                        pr_number=104,
+                        branch="feat/git-failure-net",
+                        risk_class="low",
+                        changed_files=[],
+                        mode="per_pr",
+                    )
+
+        assert payload["required"] is False
+        assert payload["net_line_deletion_flagged"] is False
+        assert payload["net_line_deletion"] == 0
+
+    def test_both_flags_set_when_both_exceed_hold(self, manager_env):
+        manager = _make_manager(manager_env)
+
+        with patch(
+            "gate_request_handler._count_deleted_files_in_pr",
+            return_value=_CODEX_MASS_DELETION_HOLD + 5,
+        ):
+            with patch(
+                "gate_request_handler._get_net_line_deletion_in_pr",
+                return_value=_CODEX_NET_LINE_DELETION_HOLD + 100,
+            ):
+                with patch("gate_request_handler._get_head_commit_sha", return_value="abc123"):
+                    payload = manager._request_codex(
+                        pr_number=105,
+                        branch="feat/both-flags",
+                        risk_class="low",
+                        changed_files=[],
+                        mode="per_pr",
+                    )
+
+        assert payload["required"] is True
+        assert payload["mass_deletion_flagged"] is True
+        assert payload["net_line_deletion_flagged"] is True
+
+    def test_payload_persisted_with_net_deletion_fields(self, manager_env):
+        """Disk-written request must include net_line_deletion and net_line_deletion_flagged."""
+        manager = _make_manager(manager_env)
+        net_lines = _CODEX_NET_LINE_DELETION_HOLD + 200
+
+        with patch("gate_request_handler._count_deleted_files_in_pr", return_value=0):
+            with patch("gate_request_handler._get_net_line_deletion_in_pr", return_value=net_lines):
+                with patch("gate_request_handler._get_head_commit_sha", return_value="abc123"):
+                    manager._request_codex(
+                        pr_number=106,
+                        branch="feat/persist-net",
+                        risk_class="low",
+                        changed_files=[],
+                        mode="per_pr",
+                    )
+
+        request_file = manager_env["requests_dir"] / "pr-106-codex_gate.json"
+        assert request_file.exists()
+        data = json.loads(request_file.read_text())
+        assert data["net_line_deletion"] == net_lines
+        assert data["net_line_deletion_flagged"] is True
         assert data["required"] is True

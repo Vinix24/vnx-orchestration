@@ -11,6 +11,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
 
 ### Fixed
+- fix(gate): net-line-deletion sanity check in `_request_codex`: `_get_net_line_deletion_in_pr()` + `_CODEX_NET_LINE_DELETION_HOLD=500` constant; `net_line_deletion_flagged` now contributes to `required=True` at request time, matching `enforce_codex_gate` execution-time decision. Payload carries `net_line_deletion` + `net_line_deletion_flagged`. 13 new tests.
+- fix(dispatch): add threading.Lock around mutable global _dispatch_token_usage dict (Kimi audit race-condition finding). Provides get_token_usage / set_token_usage / clear_token_usage thread-safe accessors.
 - fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
 - fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
 
