@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-VALID_PROVIDERS = frozenset({"claude", "codex", "gemini", "litellm", "ollama"})
+VALID_PROVIDERS = frozenset({"claude", "codex", "gemini", "kimi", "litellm", "ollama"})
 VALID_EVENT_TYPES = frozenset({"init", "text", "tool_use", "tool_result", "thinking", "complete", "error"})
 VALID_TIERS = frozenset({1, 2, 3})
 
@@ -204,6 +204,8 @@ class CanonicalEvent:
             return _from_codex_event(raw, dispatch_id, terminal_id)
         if provider == "gemini":
             return _from_gemini_event(raw, dispatch_id, terminal_id)
+        if provider == "kimi":
+            return _from_kimi_event(raw, dispatch_id, terminal_id)
         if provider == "litellm":
             return _from_litellm_event(raw, dispatch_id, terminal_id, sub_provider=sub_provider)
         # ollama fallback
@@ -376,6 +378,53 @@ def _from_litellm_event(
     if delta.get("role") == "assistant" and not delta.get("content"):
         return make("init", {"model": str(raw.get("model") or "")})
     return make("text", {"content": delta.get("content") or ""})
+
+
+def _from_kimi_event(
+    raw: Dict[str, Any],
+    dispatch_id: str,
+    terminal_id: str,
+) -> CanonicalEvent:
+    """Map a raw Kimi CLI stream-json event dict to a CanonicalEvent (Tier-1)."""
+    def make(et: str, d: Dict[str, Any]) -> CanonicalEvent:
+        return CanonicalEvent(
+            dispatch_id=dispatch_id, terminal_id=terminal_id,
+            provider="kimi", event_type=et, data=d, observability_tier=1,
+        )
+
+    event_type = (raw.get("event_type") or raw.get("type") or "")
+
+    if event_type in ("assistant_text", "text"):
+        return make("text", {"text": str(raw.get("content", ""))})
+    if event_type == "tool_call":
+        return make("tool_use", {
+            "name": str(raw.get("name", "")),
+            "input": raw.get("input", {}),
+            "id": str(raw.get("id", "")),
+        })
+    if event_type == "tool_result":
+        return make("tool_result", {
+            "tool_use_id": str(raw.get("tool_call_id", "")),
+            "content": str(raw.get("output", "")),
+        })
+    if event_type == "usage_complete":
+        usage = raw.get("usage") or {}
+        token_count = {
+            "input_tokens": int((usage.get("prompt_tokens") or 0)),
+            "output_tokens": int((usage.get("completion_tokens") or 0)),
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+        }
+        return make("text", {"text": "", "token_count": token_count})
+    if event_type == "complete":
+        return make("complete", {})
+    if event_type == "error":
+        msg = raw.get("message") or raw.get("error") or ""
+        return make("error", {"message": str(msg) if msg else str(raw)[:200]})
+    return make("error", {
+        "reason": f"unrecognized kimi event_type: {event_type!r}",
+        "raw": str(raw)[:300],
+    })
 
 
 def _from_ollama_event(

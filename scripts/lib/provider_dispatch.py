@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "litellm"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -91,7 +91,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         details = raw.get("prompt_tokens_details") or {}
         cache = int(details.get("cached_tokens", 0) or 0) or int(raw.get("prompt_cache_hit_tokens", 0) or 0)
         usage["cache_hit"] = cache
-    elif provider in ("codex", "gemini"):
+    elif provider in ("codex", "gemini", "kimi"):
         usage["input"] = int(raw.get("input_tokens", 0) or 0)
         usage["output"] = int(raw.get("output_tokens", 0) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
@@ -135,10 +135,34 @@ def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str,
         return None
 
 
+def _compute_kimi_cost(model: Optional[str], token_usage: Dict[str, int]) -> Optional[float]:
+    """Compute cost via wave7_models.yaml kimi_cli section for kimi provider."""
+    if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
+        return None
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+        cfg = registry.get("kimi_cli")
+        if cfg is None or not cfg.models:
+            return None
+        target_key = (model or "").strip() or "kimi-default"
+        entry = cfg.models.get(target_key) or next(iter(cfg.models.values()), None)
+        if entry is None:
+            return None
+        cost_in = (token_usage.get("input", 0) / 1_000_000) * entry.cost_input_per_mtok
+        cost_out = (token_usage.get("output", 0) / 1_000_000) * entry.cost_output_per_mtok
+        return round(cost_in + cost_out, 8)
+    except Exception as exc:
+        logger.debug("_compute_kimi_cost failed: %s", exc)
+        return None
+
+
 def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Optional[float]:
     """Compute cost_usd from wave7_models.yaml pricing. Returns None on lookup miss."""
     if not token_usage or (token_usage.get("input", 0) == 0 and token_usage.get("output", 0) == 0):
         return None
+    if provider == "kimi":
+        return _compute_kimi_cost(model, token_usage)
     pricing = _load_pricing_from_registry(provider, model)
     if not pricing:
         return None
@@ -223,8 +247,8 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "Provider to use for dispatch. "
-            "Accepted values: claude, codex, gemini, litellm:<model>. "
-            "Example: --provider claude, --provider litellm:deepseek-v4-pro"
+            "Accepted values: claude, codex, gemini, kimi, litellm:<model>. "
+            "Example: --provider claude, --provider kimi, --provider litellm:deepseek-v4-pro"
         ),
     )
     # Forward all existing subprocess_dispatch.py flags verbatim.
@@ -508,6 +532,59 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dispatch_kimi(args: argparse.Namespace) -> int:
+    """Route to spawn_kimi for kimi-provider dispatches (Wave 7.7).
+
+    Auth via ``kimi login`` (OAuth). No API key env var required.
+    Model resolved via VNX_KIMI_MODEL env var or kimi config default.
+    Wires EventStore as event_writer so kimi dispatches produce a NDJSON audit trail.
+    """
+    from provider_spawns.kimi_spawn import spawn_kimi
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.warning(
+            "_dispatch_kimi: EventStore unavailable; NDJSON audit sink skipped: %s",
+            _es_exc,
+        )
+
+    model = os.environ.get("VNX_KIMI_MODEL", "") or None
+    model_label = model or "default"
+    start_time = datetime.now(timezone.utc)
+    result = spawn_kimi(
+        prompt=args.instruction,
+        model=model,
+        dispatch_id=args.dispatch_id,
+        terminal_id=args.terminal_id,
+        event_writer=event_store.append if event_store is not None else None,
+    )
+    end_time = datetime.now(timezone.utc)
+
+    if result.error:
+        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+        print(f"spawn_kimi failed: {result.error}", file=sys.stderr)
+        return 1
+    if result.timed_out:
+        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "timeout")
+        print("spawn_kimi timed out", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+        return 1
+    if result.event_writer_failures > 0:
+        logger.error(
+            "kimi dispatch completed but %d event_writer failures occurred — audit gap",
+            result.event_writer_failures,
+        )
+        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
+        return 2
+    _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
+    return 0
+
+
 def _dispatch_gemini(args: argparse.Namespace) -> int:
     """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
 
@@ -572,13 +649,16 @@ def main(argv: list[str] | None = None) -> int:
     if provider == "gemini":
         return _dispatch_gemini(args)
 
+    if provider == "kimi":
+        return _dispatch_kimi(args)
+
     if provider.startswith("litellm:") or provider == "litellm":
         return _dispatch_litellm(args)
 
     # Unknown literal — argparse-style error (exit code 2).
     parser.error(
         f"Unknown provider '{provider}'. "
-        "Accepted values: claude, codex, gemini, litellm:<model>."
+        "Accepted values: claude, codex, gemini, kimi, litellm:<model>."
     )
     return 2  # unreachable; parser.error() exits
 
