@@ -239,10 +239,15 @@ class PoolStateRepository:
         provider: str,
         role: str,
         now: float,
+        *,
+        pid: Optional[int] = None,
     ) -> str:
         membership_id = _uuid7()
         joined_iso = _iso_now(now)
-        meta = json.dumps({"membership_id": membership_id})
+        meta_dict: Dict = {"membership_id": membership_id}
+        if pid is not None:
+            meta_dict["pid"] = pid
+        meta = json.dumps(meta_dict)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")

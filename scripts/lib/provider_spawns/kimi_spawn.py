@@ -47,20 +47,42 @@ class KimiSpawnResult:
     error: Optional[str] = None
     event_writer_failures: int = 0
 
+    def frontmatter_fields(self) -> Dict[str, Any]:
+        usage = self.token_usage or {}
+        return {
+            "provider": "kimi",
+            "sub_provider": "moonshot",
+            "exit_code": self.returncode,
+            "token_usage": {
+                "input": int(usage.get("input_tokens", 0) or 0),
+                "output": int(usage.get("output_tokens", 0) or 0),
+                "cache_read": int(usage.get("cache_read_tokens", 0) or 0),
+            },
+        }
+
 
 def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> CanonicalEvent:
     """Map a raw Kimi CLI stream-json event to a CanonicalEvent (Tier-1).
 
-    Kimi CLI emits events with an ``event_type`` key (not ``type``):
+    Supports two event formats:
+
+    Legacy (pre-v1.26):
       {"event_type": "assistant_text", "content": "..."}
       {"event_type": "tool_call", "name": "...", "input": {...}, "id": "..."}
       {"event_type": "tool_result", "tool_call_id": "...", "output": "..."}
-      {"event_type": "usage_complete", "usage": {"prompt_tokens": N, "completion_tokens": N}}
+      {"event_type": "usage_complete", "usage": {"prompt_tokens": N, ...}}
       {"event_type": "complete"}
       {"event_type": "error", "message": "..."}
 
-    ``usage_complete`` is mapped to a "text" event with ``token_count`` data so
-    the spawn loop can extract token usage from the standard event stream.
+    Wire Protocol camelCase (v1.26+):
+      {"event_type": "TurnBegin", ...}   -> text (empty)
+      {"event_type": "StepBegin", ...}   -> text (empty)
+      {"event_type": "ContentPart", "content": "..."}  -> text
+      {"event_type": "ThinkPart", "content": "..."}    -> thinking
+      {"event_type": "TextPart", "text": "..."}        -> text
+      {"event_type": "StatusUpdate", "token_count": {...}} -> text + token_count
+      {"event_type": "TurnEnd", ...}     -> complete
+
     Unknown event_type values map to error events (never returns None).
     """
     def make(event_type: str, data: dict) -> CanonicalEvent:
@@ -107,6 +129,35 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
     if event_type == "error":
         msg = raw.get("message") or raw.get("error") or ""
         return make("error", {"message": str(msg) if msg else str(raw)[:200]})
+
+    # Kimi CLI Wire Protocol v1.26+ camelCase event types
+    if event_type == "TurnBegin":
+        return make("text", {"text": ""})
+
+    if event_type == "StepBegin":
+        return make("text", {"text": ""})
+
+    if event_type == "ContentPart":
+        return make("text", {"text": str(raw.get("content") or raw.get("text") or "")})
+
+    if event_type == "ThinkPart":
+        return make("thinking", {"text": str(raw.get("content") or raw.get("text") or "")})
+
+    if event_type == "TextPart":
+        return make("text", {"text": str(raw.get("text") or raw.get("content") or "")})
+
+    if event_type == "StatusUpdate":
+        tc_raw = raw.get("token_count") or raw.get("usage") or {}
+        token_count = {
+            "input_tokens": int(tc_raw.get("input_tokens") or tc_raw.get("prompt_tokens") or 0),
+            "output_tokens": int(tc_raw.get("output_tokens") or tc_raw.get("completion_tokens") or 0),
+            "cache_creation_tokens": int(tc_raw.get("cache_creation_tokens") or 0),
+            "cache_read_tokens": int(tc_raw.get("cache_read_tokens") or 0),
+        }
+        return make("text", {"text": "", "token_count": token_count})
+
+    if event_type == "TurnEnd":
+        return make("complete", {})
 
     logger.warning("kimi_spawn: unknown event_type %r, mapping to error", event_type)
     return make("error", {

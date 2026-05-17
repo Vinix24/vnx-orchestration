@@ -30,73 +30,37 @@ from provider_spawns.litellm_spawn import LiteLLMSpawnResult
 # ---------------------------------------------------------------------------
 
 class TestProviderDispatchRoutesMoonshot:
-    """provider_dispatch.main routes --provider litellm:moonshot to spawn_litellm."""
+    """litellm:moonshot is blocked by kimi-via-cli-only constraint (PR-SR-2 round-3).
 
-    def test_provider_dispatch_routes_moonshot(self):
-        mock_result = LiteLLMSpawnResult(
-            returncode=0,
-            completion_text="ok",
-            events_written=2,
-            session_id=None,
-            timed_out=False,
-            stopped_early=False,
-            token_usage=None,
-            error=None,
-            event_writer_failures=0,
-        )
+    Kimi routing goes through the kimi CLI OAuth lane exclusively.
+    litellm:moonshot maps _via=moonshot which triggers the constraint.
+    """
 
-        with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result) as mock_spawn:
-            with patch.dict(os.environ, {"MOONSHOT_API_KEY": "sk-test-moonshot"}):
-                from provider_dispatch import main
-                rc = main([
-                    "--provider", "litellm:moonshot",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "test-dispatch-moonshot",
-                    "--instruction", "Reply with one word.",
-                ])
+    def test_provider_dispatch_blocks_litellm_moonshot(self):
+        """litellm:moonshot blocked by kimi-via-cli-only (via=moonshot in forbidden list)."""
+        with patch.dict(os.environ, {"MOONSHOT_API_KEY": "sk-test-moonshot"}):
+            from provider_dispatch import main
+            rc = main([
+                "--provider", "litellm:moonshot",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-dispatch-moonshot",
+                "--instruction", "Reply with one word.",
+            ])
 
-        assert rc == 0, f"expected exit 0, got {rc}"
-        assert mock_spawn.called, "spawn_litellm was not called"
-        call_kwargs = mock_spawn.call_args
-        model = (call_kwargs[1] if call_kwargs[1] else {}).get("model") or (
-            call_kwargs[0][1] if len(call_kwargs[0]) > 1 else ""
-        )
-        assert "moonshot" in model, (
-            f"expected model containing 'moonshot', got {model!r}"
-        )
+        assert rc == 1, f"expected exit 1 (constraint violation), got {rc}"
 
-    def test_provider_dispatch_routes_moonshot_premium_alias(self):
-        mock_result = LiteLLMSpawnResult(
-            returncode=0,
-            completion_text="ok",
-            events_written=1,
-            session_id=None,
-            timed_out=False,
-            stopped_early=False,
-            token_usage=None,
-            error=None,
-            event_writer_failures=0,
-        )
+    def test_provider_dispatch_blocks_litellm_moonshot_premium_alias(self):
+        """litellm:moonshot:kimi-k2-6 also blocked — sub_provider is still moonshot."""
+        with patch.dict(os.environ, {"MOONSHOT_API_KEY": "sk-test-moonshot"}):
+            from provider_dispatch import main
+            rc = main([
+                "--provider", "litellm:moonshot:kimi-k2-6",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-dispatch-moonshot-k26",
+                "--instruction", "Reply with one word.",
+            ])
 
-        with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result) as mock_spawn:
-            with patch.dict(os.environ, {"MOONSHOT_API_KEY": "sk-test-moonshot"}):
-                from provider_dispatch import main
-                rc = main([
-                    "--provider", "litellm:moonshot:kimi-k2-6",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "test-dispatch-moonshot-k26",
-                    "--instruction", "Reply with one word.",
-                ])
-
-        assert rc == 0, f"expected exit 0, got {rc}"
-        assert mock_spawn.called, "spawn_litellm was not called"
-        call_kwargs = mock_spawn.call_args
-        model = (call_kwargs[1] if call_kwargs[1] else {}).get("model") or (
-            call_kwargs[0][1] if len(call_kwargs[0]) > 1 else ""
-        )
-        assert "kimi-k2.6" in model, (
-            f"expected model containing 'kimi-k2.6', got {model!r}"
-        )
+        assert rc == 1, f"expected exit 1 (constraint violation), got {rc}"
 
 
 # ---------------------------------------------------------------------------

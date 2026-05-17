@@ -110,31 +110,31 @@ class TestZaiRequiresOpenRouterKey:
 # ---------------------------------------------------------------------------
 
 class TestGlmLegacyRejected:
-    """Passing deprecated GLM model names raises ValueError."""
+    """Passing deprecated GLM model names is blocked by constraint enforcer."""
 
     def test_glm45_legacy_rejected(self):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}):
             from provider_dispatch import main
-            with pytest.raises(ValueError, match="GLM-4.5/4.6 are LEGACY"):
-                main([
-                    "--provider", "litellm:zai",
-                    "--model", "glm-4.5",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "test-legacy",
-                    "--instruction", "test",
-                ])
+            rc = main([
+                "--provider", "litellm:zai",
+                "--model", "glm-4.5",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-legacy",
+                "--instruction", "test",
+            ])
+        assert rc == 1, f"expected exit 1 (constraint blocks deprecated model), got {rc}"
 
     def test_glm46_legacy_rejected(self):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}):
             from provider_dispatch import main
-            with pytest.raises(ValueError, match="GLM-4.5/4.6 are LEGACY"):
-                main([
-                    "--provider", "litellm:zai",
-                    "--model", "glm-4.6",
-                    "--terminal-id", "T1",
-                    "--dispatch-id", "test-legacy-46",
-                    "--instruction", "test",
-                ])
+            rc = main([
+                "--provider", "litellm:zai",
+                "--model", "glm-4.6",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-legacy-46",
+                "--instruction", "test",
+            ])
+        assert rc == 1, f"expected exit 1 (constraint blocks deprecated model), got {rc}"
 
     def test_validate_zai_model_not_legacy_raises_for_deprecated(self):
         from provider_dispatch import _validate_zai_model_not_legacy

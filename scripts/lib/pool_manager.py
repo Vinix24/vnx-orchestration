@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -49,6 +50,7 @@ class SpawnResult:
     terminal_id: str
     success: bool
     error: str = ""
+    pid: Optional[int] = None
 
 
 SpawnFn = Callable[[str, str, str, str, str], SpawnResult]
@@ -71,11 +73,10 @@ def _spawn_via_provider_dispatch(
     provider: str,
     role: str,
 ) -> SpawnResult:
-    """Delegate to Wave 4.6 provider spawn handlers.
+    """Spawn a worker CC session via subprocess.Popen.
 
-    Provider-mix integration is completed in PR-6.5. For PR-6.3 this
-    records the spawn intent and returns success so that PoolManager can
-    insert the membership row. Actual subprocess spawning is wired in PR-6.5.
+    Launches ``scripts.lib.subprocess_dispatch`` as a detached child process
+    and captures its PID for lifecycle management (heartbeat, reap).
     """
     log.info(
         "spawn: project=%s pool=%s terminal=%s provider=%s role=%s",
@@ -85,7 +86,41 @@ def _spawn_via_provider_dispatch(
         provider,
         role,
     )
-    return SpawnResult(terminal_id=terminal_id, success=True)
+
+    dispatch_id = f"pool-spawn-{terminal_id}-{int(time.time() * 1000) % 100000}"
+    cmd = [
+        sys.executable, "-m", "scripts.lib.subprocess_dispatch",
+        "--terminal-id", terminal_id,
+        "--dispatch-id", dispatch_id,
+        "--instruction", f"Pool worker {terminal_id} for pool {pool_id}",
+        "--role", role,
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return SpawnResult(
+            terminal_id=terminal_id,
+            success=False,
+            error=f"Popen failed: {exc}",
+        )
+
+    try:
+        os.kill(proc.pid, 0)
+    except ProcessLookupError:
+        return SpawnResult(
+            terminal_id=terminal_id,
+            success=False,
+            error=f"process {proc.pid} died immediately after spawn",
+            pid=proc.pid,
+        )
+
+    return SpawnResult(terminal_id=terminal_id, success=True, pid=proc.pid)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +364,8 @@ class PoolManager:
                 )
                 if spawn_result.success:
                     self.repo.add_member(
-                        self.pool_id, terminal_id, provider, role, now
+                        self.pool_id, terminal_id, provider, role, now,
+                        pid=spawn_result.pid,
                     )
                     result.spawned.append(terminal_id)
                     log.info(

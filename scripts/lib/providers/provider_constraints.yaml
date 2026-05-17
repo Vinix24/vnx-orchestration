@@ -30,12 +30,12 @@ constraints:
     rule: forbid_route
     forbidden_route:
       provider: moonshot
-      via: api
+      via: [api, moonshot]
     reason: >-
       Kimi K2/K2.6 routing in Wave 7 PR-7.7 uses the kimi CLI OAuth lane
       (`kimi login`) to avoid API-key management and rate-limit volatility.
-      Direct Moonshot API routing competes with the CLI lane and breaks
-      cost tracking attribution.
+      Direct Moonshot API routing (including litellm:moonshot sub-provider)
+      competes with the CLI lane and breaks cost tracking attribution.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false

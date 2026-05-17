@@ -106,6 +106,28 @@ def emit_dispatch_receipt(
     return receipt_path
 
 
+def _validate_report_frontmatter(content: str, dispatch_id: str) -> None:
+    """Validate unified-report frontmatter. Shadow-mode by default.
+
+    Logs SchemaViolation as a warning. Raises only when VNX_SCHEMA_STRICT=1.
+    """
+    try:
+        from unified_report_schema import validate_frontmatter, SchemaViolation
+    except ImportError:
+        logger.debug("governance_emit: unified_report_schema not available, skipping validation")
+        return
+
+    try:
+        validate_frontmatter(content)
+    except SchemaViolation as exc:
+        if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+            raise
+        logger.warning(
+            "governance_emit: schema violation (shadow-mode) dispatch=%s: %s",
+            dispatch_id, exc,
+        )
+
+
 def emit_unified_report(
     dispatch_id: str,
     terminal_id: str,
@@ -115,11 +137,17 @@ def emit_unified_report(
     findings: List[Dict[str, Any]],
     duration_seconds: float,
     data_dir: Path,
+    *,
+    frontmatter: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
+
+    When *frontmatter* is provided, prepends a YAML frontmatter block and
+    validates against unified_report_v1 schema.  Default is shadow-mode (log
+    violations, do not raise).  Set VNX_SCHEMA_STRICT=1 to raise on violation.
 
     Raises:
         RuntimeError: write failed
@@ -139,7 +167,7 @@ def emit_unified_report(
     else:
         findings_lines = "None"
 
-    content = (
+    body = (
         f"# Dispatch {dispatch_id}\n\n"
         f"- Provider: {provider}\n"
         f"- Terminal: {terminal_id}\n"
@@ -148,6 +176,17 @@ def emit_unified_report(
         f"## Response\n\n{response_text or '(no response captured)'}\n\n"
         f"## Findings\n\n{findings_lines}\n"
     )
+
+    if frontmatter:
+        import yaml
+        frontmatter_yaml = yaml.dump(
+            frontmatter, default_flow_style=False, sort_keys=False,
+            allow_unicode=True,
+        )
+        content = f"---\n{frontmatter_yaml}---\n\n{body}"
+        _validate_report_frontmatter(content, dispatch_id)
+    else:
+        content = body
 
     tmp_path = report_path.with_suffix(".md.tmp")
     try:
