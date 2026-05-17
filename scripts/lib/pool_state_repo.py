@@ -20,7 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pool_decision_engine import Membership, PoolConfig, PoolDecision, PoolState
+from pool_decision_engine import (
+    POOL_HEARTBEAT_STALE_SECONDS,
+    Membership,
+    PoolConfig,
+    PoolDecision,
+    PoolState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,18 +106,35 @@ class PoolStateRepository:
     def get_config(self, pool_id: str) -> Optional[PoolConfig]:
         conn = self._connect()
         try:
-            row = conn.execute(
-                """
-                SELECT pool_id, min_workers, max_workers, scale_policy,
-                       provider_mix_json, cooldown_seconds
-                FROM pool_config
-                WHERE project_id = ? AND pool_id = ?
-                """,
-                (self.project_id, pool_id),
-            ).fetchone()
+            params = (self.project_id, pool_id)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT pool_id, min_workers, max_workers, scale_policy,
+                           provider_mix_json, cooldown_seconds,
+                           cost_ceiling_usd, heartbeat_stale_seconds
+                    FROM pool_config
+                    WHERE project_id = ? AND pool_id = ?
+                    """,
+                    params,
+                ).fetchone()
+            except sqlite3.OperationalError:
+                row = conn.execute(
+                    """
+                    SELECT pool_id, min_workers, max_workers, scale_policy,
+                           provider_mix_json, cooldown_seconds
+                    FROM pool_config
+                    WHERE project_id = ? AND pool_id = ?
+                    """,
+                    params,
+                ).fetchone()
             if row is None:
                 return None
             provider_mix = json.loads(row["provider_mix_json"] or '["claude"]')
+            keys = row.keys()
+            cost_ceiling = row["cost_ceiling_usd"] if "cost_ceiling_usd" in keys else None
+            raw_hb = row["heartbeat_stale_seconds"] if "heartbeat_stale_seconds" in keys else None
+            heartbeat_stale = float(raw_hb) if raw_hb is not None else float(POOL_HEARTBEAT_STALE_SECONDS)
             return PoolConfig(
                 pool_id=row["pool_id"],
                 min_workers=row["min_workers"],
@@ -119,6 +142,8 @@ class PoolStateRepository:
                 scaling_policy=row["scale_policy"],
                 provider_mix=provider_mix,
                 cooldown_seconds=float(row["cooldown_seconds"]),
+                cost_ceiling_usd=cost_ceiling,
+                heartbeat_stale_seconds=heartbeat_stale,
             )
         finally:
             conn.close()
@@ -515,6 +540,8 @@ class PoolStateRepository:
             "max_workers": "max_workers",
             "scaling_policy": "scale_policy",
             "cooldown_seconds": "cooldown_seconds",
+            "cost_ceiling_usd": "cost_ceiling_usd",
+            "heartbeat_stale_seconds": "heartbeat_stale_seconds",
         }
         cols: List[str] = []
         vals: List = []
