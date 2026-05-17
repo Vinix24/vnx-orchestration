@@ -139,6 +139,139 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 7: invalid --version (path-traversal) exits EX_CONFIG (78)
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 7: invalid --version exits 78 (EX_CONFIG)"
+
+bad_version_code=0
+bad_version_output="$(bash "$SCRIPT" --dry-run --target "$TMP_TARGET" --version "../etc/passwd" 2>&1)" || bad_version_code=$?
+
+if [ "$bad_version_code" -eq 78 ]; then
+  pass "invalid --version exits 78"
+else
+  fail "invalid --version exit code was ${bad_version_code}, expected 78"
+fi
+
+if echo "$bad_version_output" | grep -qi "invalid"; then
+  pass "invalid --version error message contains 'invalid'"
+else
+  fail "invalid --version error message missing 'invalid'"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 8: shim pin validation — bad pin in installed shim exits 78
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 8: shim rejects invalid pin (exits 78)"
+
+TMP_SHIM="$(mktemp -d)"
+mkdir -p "${TMP_SHIM}/versions/v1.0.0-rc2"
+
+# Install shim without clone/verify by overriding those functions
+test_shim_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_shim_script"
+chmod +x "$test_shim_script"
+bash "$test_shim_script" --target "$TMP_SHIM" --version v1.0.0-rc2 >/dev/null 2>&1
+
+if [ -x "${TMP_SHIM}/bin/vnx" ]; then
+  pass "shim written to ${TMP_SHIM}/bin/vnx"
+
+  # Create .vnx-version with bad pin and test from that dir
+  TMP_BAD_PIN_DIR="$(mktemp -d)"
+  printf '../etc/passwd\n' > "${TMP_BAD_PIN_DIR}/.vnx-version"
+
+  shim_exit_code=0
+  (cd "$TMP_BAD_PIN_DIR" && bash "${TMP_SHIM}/bin/vnx" 2>/dev/null) || shim_exit_code=$?
+
+  if [ "$shim_exit_code" -eq 78 ]; then
+    pass "shim rejects '../etc/passwd' pin with exit 78"
+  else
+    fail "shim exit code was ${shim_exit_code}, expected 78 for bad pin"
+  fi
+
+  rm -rf "$TMP_BAD_PIN_DIR"
+else
+  fail "shim not installed at ${TMP_SHIM}/bin/vnx"
+fi
+
+rm -rf "$TMP_SHIM" "$test_shim_script"
+
+# ---------------------------------------------------------------------------
+# Test 9: rollback restores previous 'current' symlink on install failure
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 9: rollback restores previous symlink on failure"
+
+TMP_ROLLBACK="$(mktemp -d)"
+OLD_VER="v0.9.0"
+mkdir -p "${TMP_ROLLBACK}/versions/${OLD_VER}"
+ln -sfn "${TMP_ROLLBACK}/versions/${OLD_VER}" "${TMP_ROLLBACK}/current"
+
+test_rollback_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { return 1; }\n'  # force failure after symlink swap
+  printf 'main "$@"\n'
+} > "$test_rollback_script"
+chmod +x "$test_rollback_script"
+
+bash "$test_rollback_script" --target "$TMP_ROLLBACK" --version v1.0.0-rc2 >/dev/null 2>&1 || true
+
+current_target="$(readlink "${TMP_ROLLBACK}/current" 2>/dev/null || echo "MISSING")"
+if echo "$current_target" | grep -qF "$OLD_VER"; then
+  pass "rollback restored previous symlink (${OLD_VER})"
+else
+  fail "rollback did not restore previous symlink (got: ${current_target})"
+fi
+
+rm -rf "$TMP_ROLLBACK" "$test_rollback_script"
+
+# ---------------------------------------------------------------------------
+# Test 10: shim install uses atomic tempfile (no leftover .tmp. files)
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 10: shim install leaves no temp files"
+
+TMP_ATOMIC="$(mktemp -d)"
+mkdir -p "${TMP_ATOMIC}/versions/v1.0.0-rc2"
+
+test_atomic_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_atomic_script"
+chmod +x "$test_atomic_script"
+
+bash "$test_atomic_script" --target "$TMP_ATOMIC" --version v1.0.0-rc2 >/dev/null 2>&1
+
+if [ -x "${TMP_ATOMIC}/bin/vnx" ]; then
+  pass "shim exists and is executable"
+else
+  fail "shim missing or not executable"
+fi
+
+leftover_tmp="$(ls "${TMP_ATOMIC}/bin/"vnx.tmp.* 2>/dev/null || true)"
+if [ -z "$leftover_tmp" ]; then
+  pass "no leftover .tmp. files in shim dir"
+else
+  fail "leftover temp files found: ${leftover_tmp}"
+fi
+
+rm -rf "$TMP_ATOMIC" "$test_atomic_script"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

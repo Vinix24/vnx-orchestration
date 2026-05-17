@@ -28,6 +28,10 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(intelligence): catalogus-hygiene — filter governance-event success_patterns (81.6% noise) + memory_consolidation antipatterns (26% noise) at source; recency-decay (0.95^weeks) op confidence; migration invalidates existing noise. Addresses Sonnet audit BLOCKER #2 (intelligence +30pp claim artefact). PR-IH-1 per intelligence-injection-quality-research.
 - fix(intelligence-hygiene): replace ALTER TABLE IF NOT EXISTS (invalid SQLite < 3.37) with Python idempotent column-add via PRAGMA table_info check in quality_db_init.py (codex_gate blocker audit-ih-1-fixforward)
 - fix(intelligence-hygiene): parse ISO timestamps with timezone via fromisoformat + astimezone(UTC) — raw[:26] truncation was dropping tz offsets, skipping recency decay for those rows
+- fix(install-central): pin validation + resolved-path confinement in shim (path-traversal blocker)
+- fix(install-central): atomic rollback restore of previous symlink target (data-integrity blocker)
+- fix(install-central): atomic shim install via mktemp + mv (data-integrity blocker)
+- fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin

@@ -15,6 +15,18 @@ TARGET_DIR="${HOME}/.vnx-system"
 SOURCE_URL="https://github.com/Vinix24/vnx-orchestration"
 DRY_RUN=false
 
+# Defined early so arg parsing can call it before helpers are defined.
+validate_version() {
+  local v="$1"
+  if [ -z "$v" ]; then
+    echo "[install-central] [x] version must not be empty" >&2; exit 78
+  fi
+  if ! [[ "$v" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "[install-central] [x] invalid version '${v}' (must match [A-Za-z0-9._-]+)" >&2
+    exit 78  # EX_CONFIG
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Arg parsing
 # ---------------------------------------------------------------------------
@@ -55,6 +67,8 @@ HELP
       echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+
+validate_version "$VERSION"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -155,16 +169,10 @@ swap_symlink() {
   run mkdir -p "${TARGET_DIR}/versions"
 
   if [ "$DRY_RUN" = "false" ]; then
-    local tmp_link="${TARGET_DIR}/current.tmp.$$"
-    ln -s "$version_dir" "$tmp_link"
-    # mv -T is Linux-specific; use portable approach for macOS compatibility
-    if mv -T "$tmp_link" "$current_link" 2>/dev/null; then
-      : # Linux mv -T succeeded
-    else
-      # macOS: ln -sfn is atomic enough for our needs
-      rm -f "$tmp_link"
-      ln -sfn "$version_dir" "$current_link"
-    fi
+    local new_link_tmp="${TARGET_DIR}/current.tmp.$$"
+    ln -sn "$version_dir" "$new_link_tmp"
+    mv -fT "$new_link_tmp" "$current_link" 2>/dev/null || \
+      mv -f "$new_link_tmp" "$current_link"  # macOS fallback (no -T flag)
   else
     echo "  [dry-run] ln -sfn ${version_dir} ${current_link}"
   fi
@@ -203,14 +211,25 @@ find_version_pin() {
   echo ""
 }
 
-pin="$(find_version_pin)"
+pin="$(find_version_pin | head -1 | tr -d '\n[:space:]')"
 
 if [ -n "$pin" ]; then
+  if ! [[ "$pin" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "[vnx-shim] ERROR: invalid pin '${pin}' in .vnx-version (must match [A-Za-z0-9._-]+)" >&2
+    exit 78  # EX_CONFIG
+  fi
   version_dir="${VNX_SYSTEM_DIR}/versions/${pin}"
   if [ ! -d "$version_dir" ]; then
     echo "[vnx-shim] [x] Pinned version ${pin} not installed at ${version_dir}" >&2
     echo "[vnx-shim] Run: bash ${VNX_SYSTEM_DIR}/../install-central.sh --version ${pin}" >&2
     exit 1
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    resolved=$(realpath "$version_dir" 2>/dev/null) || { echo "[vnx-shim] ERROR: cannot resolve version_dir: ${version_dir}" >&2; exit 78; }
+    versions_root=$(realpath "${VNX_SYSTEM_DIR}/versions")
+    if [[ "$resolved" != "$versions_root"/* ]]; then
+      echo "[vnx-shim] ERROR: pin '${pin}' escapes versions root" >&2; exit 78
+    fi
   fi
   export VNX_HOME="$version_dir"
 else
@@ -226,8 +245,11 @@ SHIM
 )
 
   if [ "$DRY_RUN" = "false" ]; then
-    printf '%s\n' "$shim_content" > "$shim_path"
-    chmod +x "$shim_path"
+    local shim_tmp
+    shim_tmp=$(mktemp "${shim_path}.tmp.XXXXXX")
+    printf '%s\n' "$shim_content" > "$shim_tmp"
+    chmod +x "$shim_tmp"
+    mv -f "$shim_tmp" "$shim_path"
   else
     echo "  [dry-run] write shim to ${shim_path} (chmod +x)"
   fi
@@ -270,13 +292,21 @@ verify_install() {
 # Rollback helper — called on ERR when mid-flow symlink was swapped
 # ---------------------------------------------------------------------------
 _SYMLINK_SWAPPED=false
-rollback_on_error() {
+_previous_target=""
+
+cleanup_on_failure() {
   if [ "$_SYMLINK_SWAPPED" = "true" ] && [ "$DRY_RUN" = "false" ]; then
     warn "Rolling back symlink due to installation error..."
-    rm -f "${TARGET_DIR}/current"
+    if [ -n "${_previous_target:-}" ] && [ -e "$_previous_target" ]; then
+      ln -sfn "$_previous_target" "${TARGET_DIR}/current" 2>/dev/null || true
+      echo "ROLLBACK: restored previous symlink target ${_previous_target}"
+    else
+      rm -f "${TARGET_DIR}/current"
+      echo "ROLLBACK: removed current symlink (no previous target to restore)"
+    fi
   fi
 }
-trap rollback_on_error ERR
+trap cleanup_on_failure ERR
 
 # ---------------------------------------------------------------------------
 # Main
@@ -294,6 +324,9 @@ main() {
 
   check_prereqs
   clone_version
+  if [ -L "${TARGET_DIR}/current" ]; then
+    _previous_target=$(readlink "${TARGET_DIR}/current")
+  fi
   swap_symlink
   _SYMLINK_SWAPPED=true
   install_shim
