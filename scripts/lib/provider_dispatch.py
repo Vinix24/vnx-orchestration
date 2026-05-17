@@ -778,19 +778,37 @@ def main(argv: list[str] | None = None) -> int:
     provider = args.provider
 
     # PR-SR-3/4: smart_router end-to-end pipeline (opt-in via --auto-route).
-    # Uses explicit decide() + parse + write_route_decision() to ensure NDJSON
-    # persistence is never silently swallowed by a bundled route() failure.
+    # Split into import → decide → write stages so that:
+    #   - ImportError (missing yaml dep): graceful fallback
+    #   - FileNotFoundError/ValueError (missing/malformed recommendations): graceful fallback
+    #   - write_route_decision failure: logged at ERROR, visible in audit, not swallowed
     if getattr(args, "auto_route", False):
+        _route_decision = None
+        _sr_imported = False
         try:
             from smart_router import decide as _smart_decide, parse_route_model_id, write_route_decision  # noqa: PLC0415
-
-            _dp = _resolve_dispatch_paths(args.dispatch_paths)
-            _route_decision = _smart_decide(
-                instruction=args.instruction,
-                role=args.role,
-                dispatch_paths=_dp,
+            _sr_imported = True
+        except ImportError as _imp_exc:
+            logger.warning(
+                "smart_router: import failed (%s); falling back to --provider=%s --model=%s",
+                _imp_exc, args.provider, args.model,
             )
 
+        if _sr_imported:
+            try:
+                _dp = _resolve_dispatch_paths(args.dispatch_paths)
+                _route_decision = _smart_decide(
+                    instruction=args.instruction,
+                    role=args.role,
+                    dispatch_paths=_dp,
+                )
+            except (FileNotFoundError, ValueError) as _decide_exc:
+                logger.warning(
+                    "smart_router: decide failed (%s); falling back to --provider=%s --model=%s",
+                    _decide_exc, args.provider, args.model,
+                )
+
+        if _route_decision is not None:
             if _route_decision.primary:
                 _r_provider, _r_model = parse_route_model_id(
                     _route_decision.primary.model_id,
@@ -802,16 +820,16 @@ def main(argv: list[str] | None = None) -> int:
                 os.environ["VNX_TASK_CLASS"] = _route_decision.task_class
 
             _state_dir = _resolve_state_dir()
-            write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
+            try:
+                write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
+            except OSError as _write_exc:
+                logger.error(
+                    "smart_router: route_decisions.ndjson write failed: %s", _write_exc,
+                )
 
             logger.info(
                 "smart_router: auto-route provider=%s model=%s (task_class=%s)",
                 provider, args.model, _route_decision.task_class,
-            )
-        except Exception as _route_exc:
-            logger.warning(
-                "smart_router: auto-route failed (%s); falling back to --provider=%s --model=%s",
-                _route_exc, args.provider, args.model,
             )
 
     # PR-SR-2: enforce provider constraints before any handler runs.

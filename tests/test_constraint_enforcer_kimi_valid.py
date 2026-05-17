@@ -50,6 +50,14 @@ class TestKimiCliAlwaysValid:
         """provider='kimi' is native CLI — 'moonshot' via is irrelevant."""
         enforcer.enforce(provider="kimi", sub_provider=None, via="moonshot")
 
+    def test_kimi_provider_double_match_not_blocked(self, enforcer: ConstraintEnforcer):
+        """Even with sub_provider=moonshot AND via=moonshot, native kimi CLI wins."""
+        enforcer.enforce(provider="kimi", sub_provider="moonshot", via="moonshot")
+
+    def test_kimi_provider_sub_moonshot_via_api_not_blocked(self, enforcer: ConstraintEnforcer):
+        """Bench dispatches: provider=kimi with erroneous sub+via still native CLI."""
+        enforcer.enforce(provider="kimi", sub_provider="moonshot", via="api")
+
 
 class TestLitellmMoonshotStillBlocked:
     """litellm:moonshot API route must remain blocked (not a regression)."""
