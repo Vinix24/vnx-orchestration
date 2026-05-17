@@ -54,6 +54,10 @@ PR_SIZE_HOLD = 600
 DELETION_FILE_WARN = 5
 DELETION_FILE_HOLD = 10
 
+# Net line deletion thresholds (lines_removed - lines_added across all changed files).
+NET_LINE_DELETION_WARN = 200
+NET_LINE_DELETION_HOLD = 500
+
 # Pytest timeout in seconds
 PYTEST_TIMEOUT = 120
 
@@ -551,7 +555,15 @@ def check_shell_syntax(project_root: Path) -> Dict[str, Any]:
 
 
 def check_net_deletion(project_root: Path) -> Dict[str, Any]:
-    """Check for mass file deletion in the PR diff vs origin/main (full branch scope)."""
+    """Check for mass file deletion and large net line deletion in the PR diff.
+
+    Two independent sub-checks run in parallel:
+    - File deletion count (lines_removed > lines_added across deleted files)
+    - Net line deletion (total_removed - total_added across all changed files)
+
+    Either sub-check reaching its HOLD threshold produces a HOLD verdict.
+    WARN-level findings are advisory and do not block merge.
+    """
     deleted = _get_deleted_files(project_root)
     if deleted is None:
         return {
@@ -559,26 +571,53 @@ def check_net_deletion(project_root: Path) -> Dict[str, Any]:
             "status": "GO",
             "detail": "could not compute deleted files",
             "deleted_count": None,
+            "net_line_deletion": None,
         }
 
     deleted_count = len(deleted)
+    net_line = _get_net_line_deletion(project_root)
 
+    # Determine file-deletion verdict
     if deleted_count >= DELETION_FILE_HOLD:
-        status = "HOLD"
-        detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
+        file_status = "HOLD"
+        file_detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_HOLD} — mass deletion requires review)"
     elif deleted_count >= DELETION_FILE_WARN:
-        status = "GO"
-        detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_WARN} — review deletions before merge)"
+        file_status = "WARN"
+        file_detail = f"{deleted_count} file(s) deleted (>={DELETION_FILE_WARN} — review deletions before merge)"
+    else:
+        file_status = "GO"
+        file_detail = f"{deleted_count} file(s) deleted"
+
+    # Determine net-line-deletion verdict
+    if net_line is None:
+        line_status = "GO"
+        line_detail = "net line deletion: unavailable"
+    elif net_line >= NET_LINE_DELETION_HOLD:
+        line_status = "HOLD"
+        line_detail = f"net line deletion: {net_line} lines removed (>={NET_LINE_DELETION_HOLD} — requires review)"
+    elif net_line >= NET_LINE_DELETION_WARN:
+        line_status = "WARN"
+        line_detail = f"net line deletion: {net_line} lines removed (>={NET_LINE_DELETION_WARN} — review scope reduction)"
+    else:
+        line_status = "GO"
+        line_detail = f"net line deletion: {net_line if net_line is not None else 'n/a'} lines removed"
+
+    # Merge: HOLD wins over WARN wins over GO
+    if file_status == "HOLD" or line_status == "HOLD":
+        status = "HOLD"
     else:
         status = "GO"
-        detail = f"{deleted_count} file(s) deleted"
 
+    details = [file_detail, line_detail]
     return {
         "check": "net_deletion",
         "status": status,
-        "detail": detail,
+        "detail": "; ".join(details),
         "deleted_count": deleted_count,
         "deleted_files": deleted,
+        "net_line_deletion": net_line,
+        "net_line_deletion_warn": line_status == "WARN",
+        "file_deletion_warn": file_status == "WARN",
     }
 
 
@@ -638,6 +677,59 @@ def _get_deleted_files(project_root: Path) -> Optional[List[str]]:
         )
         if result.returncode == 0:
             return [f for f in result.stdout.strip().splitlines() if f.strip()]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return None
+
+
+def _parse_numstat_net(numstat_output: str) -> int:
+    """Parse git diff --numstat output, return net line deletion (removed - added).
+
+    Binary files report '-' for both columns and are skipped.
+    """
+    total_added = 0
+    total_removed = 0
+    for line in numstat_output.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0] != "-" and parts[1] != "-":
+            try:
+                total_added += int(parts[0])
+                total_removed += int(parts[1])
+            except ValueError:
+                pass
+    return total_removed - total_added
+
+
+def _get_net_line_deletion(project_root: Path) -> Optional[int]:
+    """Return net lines deleted (removed - added) for current PR vs origin/main.
+
+    Returns None on git failure.
+    """
+    for base_ref in ("origin/main", "origin/master"):
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--numstat", f"{base_ref}...HEAD"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return _parse_numstat_net(result.stdout)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--numstat", "HEAD~1", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return _parse_numstat_net(result.stdout)
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 

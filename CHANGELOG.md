@@ -6,6 +6,9 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Refactored
+- refactor(dispatch): extract `_apply_runtime_overrides` from delivery.py + recovery.py to shared `runtime_overrides.py` module (Kimi audit duplication finding). Eliminates copy-paste drift.
+
 ### Added
 - feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
 - feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
