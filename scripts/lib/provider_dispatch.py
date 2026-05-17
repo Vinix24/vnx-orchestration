@@ -734,8 +734,14 @@ def main(argv: list[str] | None = None) -> int:
             _parts = provider.split(":", 2)
             _sub = _parts[1] if len(_parts) > 1 else None
 
+        _VIA_PER_SUB: dict = {
+            "deepseek": "litellm",
+            "moonshot": "moonshot",
+            "openrouter": "openrouter",
+            "zai": "openrouter",
+        }
         if provider.startswith("litellm:"):
-            _via = "openrouter" if _sub == "zai" else "litellm"
+            _via = _VIA_PER_SUB.get(_sub or "", "litellm")
         elif provider in ("claude", "codex", "gemini", "kimi"):
             _via = "cli"
         else:
@@ -753,6 +759,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provider_dispatch: constraint violation — {exc}", file=sys.stderr)
         return 1
     except FileNotFoundError:
+        if os.environ.get("VNX_CONSTRAINTS_STRICT") == "1":
+            print("provider_dispatch: provider_constraints.yaml not found and VNX_CONSTRAINTS_STRICT=1", file=sys.stderr)
+            return 1
         logger.debug("provider_dispatch: provider_constraints.yaml not found — skipping enforcement")
 
     if provider == "claude":

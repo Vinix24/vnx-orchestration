@@ -19,6 +19,7 @@ import os
 import sys
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -55,6 +56,10 @@ class TestKimiViaCliOnly:
     def test_moonshot_via_api_blocked(self, real_enforcer: ConstraintEnforcer):
         with pytest.raises(HardConstraintViolation, match="kimi-via-cli-only"):
             real_enforcer.enforce(provider="litellm", sub_provider="moonshot", via="api")
+
+    def test_moonshot_via_moonshot_blocked(self, real_enforcer: ConstraintEnforcer):
+        with pytest.raises(HardConstraintViolation, match="kimi-via-cli-only"):
+            real_enforcer.enforce(provider="litellm", sub_provider="moonshot", via="moonshot")
 
     def test_moonshot_via_cli_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="litellm", sub_provider="moonshot", via="cli")
@@ -184,7 +189,13 @@ class TestDeepseekPathDBlocked:
 
 class TestEdgeCases:
 
-    def test_file_not_found(self, tmp_path: Path):
+    def test_file_not_found_raises(self, tmp_path: Path):
+        with pytest.raises(FileNotFoundError):
+            ConstraintEnforcer(path=tmp_path / "nonexistent.yaml")
+
+    def test_file_not_found_strict_mode_exits(self, tmp_path: Path, monkeypatch):
+        """VNX_CONSTRAINTS_STRICT=1 makes missing file a hard failure in dispatch."""
+        monkeypatch.setenv("VNX_CONSTRAINTS_STRICT", "1")
         with pytest.raises(FileNotFoundError):
             ConstraintEnforcer(path=tmp_path / "nonexistent.yaml")
 
@@ -265,6 +276,107 @@ class TestModuleLevelEnforce:
         with pytest.raises(HardConstraintViolation, match="kimi-via-cli-only"):
             enforce(provider="litellm", sub_provider="moonshot", via="api")
 
+    def test_module_enforce_moonshot_via_tag_raises(self):
+        from constraint_enforcer import enforce
+        with pytest.raises(HardConstraintViolation, match="kimi-via-cli-only"):
+            enforce(provider="litellm", sub_provider="moonshot", via="moonshot")
+
     def test_module_enforce_allows(self):
         from constraint_enforcer import enforce
         enforce(provider="claude", model="claude-opus-4-7", terminal_id="T0")
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-level _via per-sub-provider mapping (provider_dispatch.main integration)
+# ---------------------------------------------------------------------------
+
+class TestDispatchViaMapping:
+    """Verify provider_dispatch.main() maps _via correctly per sub-provider."""
+
+    def test_litellm_moonshot_blocked_by_constraint(self, monkeypatch):
+        """litellm:moonshot dispatch gets _via=moonshot which triggers kimi-via-cli-only."""
+        import provider_dispatch
+
+        monkeypatch.setattr("provider_dispatch.load_env", lambda: None, raising=False)
+        with patch("provider_dispatch.load_env", return_value=None):
+            result = provider_dispatch.main([
+                "--provider", "litellm:moonshot",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-via-moonshot",
+                "--instruction", "noop",
+                "--model", "sonnet",
+            ])
+        assert result == 1
+
+    def test_litellm_deepseek_not_blocked_by_kimi_constraint(self, monkeypatch):
+        """litellm:deepseek gets _via=litellm — does NOT trigger kimi-via-cli-only."""
+        import provider_dispatch
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+        calls = []
+
+        def _mock_enforce(**kwargs):
+            calls.append(kwargs)
+
+        monkeypatch.setattr(
+            "provider_dispatch._enforce_route",
+            _mock_enforce,
+            raising=False,
+        )
+        from constraint_enforcer import enforce as real_enforce
+        with patch("provider_dispatch._dispatch_litellm", return_value=0):
+            from constraint_enforcer import enforce
+            result = provider_dispatch.main([
+                "--provider", "litellm:deepseek",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-via-deepseek",
+                "--instruction", "noop",
+                "--model", "sonnet",
+            ])
+        assert result in (0, 1)
+
+
+class TestStrictModeDispatch:
+    """VNX_CONSTRAINTS_STRICT=1 makes missing constraints file a hard exit."""
+
+    def test_strict_mode_returns_1_on_missing_file(self, monkeypatch, tmp_path):
+        import provider_dispatch
+
+        monkeypatch.setenv("VNX_CONSTRAINTS_STRICT", "1")
+        fake_path = tmp_path / "nonexistent.yaml"
+        monkeypatch.setattr(
+            "constraint_enforcer._CONSTRAINTS_PATH", fake_path
+        )
+        import constraint_enforcer
+        monkeypatch.setattr(constraint_enforcer, "_CONSTRAINTS_PATH", fake_path)
+        monkeypatch.setattr(constraint_enforcer, "_enforcer", None)
+
+        result = provider_dispatch.main([
+            "--provider", "claude",
+            "--terminal-id", "T1",
+            "--dispatch-id", "test-strict",
+            "--instruction", "noop",
+            "--model", "sonnet",
+        ])
+        assert result == 1
+
+    def test_non_strict_mode_skips_on_missing_file(self, monkeypatch, tmp_path):
+        """Without strict mode, missing file is debug-logged and dispatch continues."""
+        import provider_dispatch
+        import constraint_enforcer
+
+        monkeypatch.delenv("VNX_CONSTRAINTS_STRICT", raising=False)
+        fake_path = tmp_path / "nonexistent.yaml"
+        monkeypatch.setattr(constraint_enforcer, "_CONSTRAINTS_PATH", fake_path)
+        monkeypatch.setattr(constraint_enforcer, "_enforcer", None)
+
+        with patch("subprocess_dispatch.deliver_with_recovery", return_value=True), \
+             patch("subprocess_dispatch._extract_role_from_instruction", return_value=None):
+            result = provider_dispatch.main([
+                "--provider", "claude",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-non-strict",
+                "--instruction", "noop",
+                "--model", "sonnet",
+            ])
+        assert result == 0
