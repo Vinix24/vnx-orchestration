@@ -7,7 +7,8 @@ Each provider requires an API key set as an env var before dispatch.
 |---|---|---|---|---|
 | Anthropic Claude | ANTHROPIC_API_KEY (or OAuth via subscription) | console.anthropic.com | Sonnet 4.6 $3/$15 | default |
 | DeepSeek | DEEPSEEK_API_KEY | platform.deepseek.com | V4-Pro $0.435/$0.87, V4-Flash $0.14/$0.28 | Wave 7 PR-7.1 |
-| Moonshot (Kimi) | MOONSHOT_API_KEY | platform.moonshot.cn | K2-0905 $0.60/$2.50 | Wave 7 PR-7.2 |
+| Kimi CLI | *(OAuth via `kimi login`)* | — | K2.6 / K2-0905 (free tier via CLI) | Wave 7 PR-7.7 |
+| Moonshot (Kimi) via LiteLLM | MOONSHOT_API_KEY | platform.moonshot.cn | K2-0905 $0.60/$2.50 | Wave 7 PR-7.2 |
 | Z.AI (GLM) via OpenRouter | OPENROUTER_API_KEY | openrouter.ai | GLM-5.1 $0.50/$2.50 (pass-through) | Wave 7 PR-7.3 |
 
 **Note on GLM legacy versions:** GLM-4.5 and GLM-4.6 are deprecated. Only GLM-5.1 is
@@ -98,6 +99,24 @@ GLM-5.1 routes through OpenRouter as `openrouter/z-ai/glm-5`:
 - Deprecated models GLM-4.5 and GLM-4.6 → ValueError on dispatch (explicit legacy guard)
 - Context: 8,192 tokens; streaming + tool calls supported
 - Direct Zhipu integration deferred to Wave 7.3.1 (see `z_ai_custom_provider.py`)
+
+## Kimi CLI — direct provider (PR-7.7, #550)
+
+Kimi CLI (`kimi`) is a standalone provider lane (not via LiteLLM). Authentication is OAuth-based:
+
+```bash
+kimi login    # One-time browser OAuth flow
+```
+
+No `MOONSHOT_API_KEY` needed for this lane. The CLI outputs Anthropic-compatible stream-json events, which `kimi_spawn.py` normalizes to `CanonicalEvent` directly.
+
+- Dispatch: `--provider kimi`
+- Models: K2.6, K2-0905 (selected via `--model` flag)
+- Wire protocol: camelCase events (`TurnBegin`, `ContentPart`, `TextPart`) mapped to VNX canonical shape
+- Token tracking: extracted from `usage_complete` event in stream
+- Feature flag: `VNX_ROUTING_KIMI_CLI=1` (for policy engine routing; manual dispatch always works)
+
+The Kimi CLI lane and the LiteLLM Moonshot lane are independent. Use Kimi CLI for OAuth-based free-tier access; use LiteLLM Moonshot for API-key-based metered access.
 
 ## Related
 

@@ -1,181 +1,208 @@
 # Changelog
 
-## Unreleased — post-v1.0.0-rc1 (2026-05-09 → present)
+All notable changes to VNX Orchestration are documented here.
 
-Wave 1 (shadow-mode read cutover) + Wave 5 P0/P1 (smart-context smart injection) shipped on top of the v1.0.0-rc1 architectural baseline.
+Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
-### Added — Wave 4.6 provider dispatch generalization
+## [Unreleased]
 
-- **PR-4.6.1** `scripts/lib/provider_dispatch.py` — provider-agnostic dispatch entry-point (`--provider {claude,codex,gemini,litellm:<model>}`). Claude path delegates byte-identically to `subprocess_dispatch.deliver_with_recovery`; codex/gemini/litellm stubs exit 64 (EX_USAGE) with PR reference until spawn handlers land in PR-4.6.3/4.6.4/4.6.5. All existing `subprocess_dispatch.py` flags forwarded verbatim. No Anthropic SDK imported. See `claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md §PR-4.6.1`.
-- **PR-4.6.2** `scripts/lib/provider_spawns/claude_spawn.py` — extract Claude-specific spawn+stream slice from `subprocess_dispatch_internals/delivery.py` into a dedicated `provider_spawns/` package. `spawn_claude()` owns: `subprocess.Popen(["claude", ...])` invocation via `SubprocessAdapter.deliver()`, NDJSON event stream reading, tool-use/agent_message capture, health-monitor ticking, and optional `on_event` callback for rotation detection. All governance concerns (lease, manifest, receipt, event archive, retry, pattern confidence) remain in `delivery.py` — byte-identical routing. 11 unit tests in `tests/test_claude_spawn_byte_identity.py` verify structural event-shape parity, completion capture, premature-exit handling, health-monitor wiring, and `on_event` early-stop. See `claudedocs/wave4.6-provider-dispatch-generalization-design-2026-05-13.md §PR-4.6.2`.
+### Planned (Wave 8)
+- Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)
+- Unified report schema enforced via YAML frontmatter + shell-script guardrails (model-agnostic)
+- Hard constraint enforcement at code level (`HardConstraintViolation` raise; T0=Opus, Kimi=CLI-only, no Anthropic SDK)
+- Self-learning loop: `route_decisions_watcher.py` auto-adjusts `routing_recommendations.yaml` on production failure patterns
+- Multi-project centralization via pipx wheel (D2 burn-in path: mission-control → sales-copilot → SEOcrawler)
+- Module-size CI gate (prevents new 2500-LOC monoliths from landing)
+- Hard-task benchmark suite (T08-T11) to discriminate Pro vs Flash on complex coding tasks
 
-### Added — Wave 1 shadow-mode read cutover (#450–#454)
-- **PR-W1.1 (#450)** `scripts/lib/shadow_verifier.py` — independent comparator (no shared code with the migration) computing 6 zero-tolerance divergence metrics: wrong-project rows, scoping/blocking-finding mismatch, IntelligenceSelector top-3 divergence, count drift (0%) + checksum drift (<0.01%), lease-key collision count, p95-latency ratio (central ≤ 1.5× per-project).
-- **PR-W1.2 (#451)** `scripts/lib/shadow_logger.py` NDJSON writer + `scripts/shadow_report.py` CLI + `scripts/rotate_shadow_ledger.sh` timestamp-suffix rotation under flock; routes via `vnx_paths.resolve_paths()` (no `.vnx-data/state/` literals).
-- **PR-W1.3 (#452)** T0 state-builder shadow wiring — 4 read sites in `scripts/build_t0_state.py` instrumented with `VNX_USE_CENTRAL_DB=unset|shadow|1` flag.
-- **PR-W1.4 (#453)** `IntelligenceSelector` (5 read methods) + `DispatchRegister` shadow wiring (~600 LOC additions).
-- **PR-W1.5 (#454)** Dashboard read paths shadow-wired (`api_intelligence.py`, `api_operator.py`); canary divergence test pack with 14+ deliberate-divergence fixtures (`tests/canary/test_shadow_canary_divergence.py`); operator-readable `docs/operations/wave1-rollback.md`.
+### Open horizons (post-1.0)
+- Business-task benchmark suite (`scripts/benchmark_business/`) for non-coding orchestration
+- Multi-operator federation with isolated state
+- 100+ concurrent dispatch scale tuning
 
-### Added — Wave 5 smart-context injection (#455–#456)
-- **PR-W5.0 (#455)** `scripts/lib/prior_round_injector.py` — when a dispatch has `pr_id` mapping to existing review-gate results, fetch blocking + advisory findings from prior rounds and inject as a bounded markdown section (≤2000 chars). Scope-filtered by `dispatch_paths` overlap; recency-sorted; LRU-cached 60s TTL; anti-anchoring instruction included per Codex Q4 epistemic-failure-mode mitigation. Validated against PR #432's 9-round cascade as canonical proof-of-concept.
-- **PR-W5.1 (#456)** `scripts/lib/adr_indexer.py` — scans `docs/governance/decisions/ADR-*.md` for file-path references, builds an inverted index `file_path → [ADR_ids]`. When dispatch `dispatch_paths` overlap with ADR-referenced files, the relevant ADR sections are auto-injected as governance context. Bounded by 1500-char budget; mtime-based 60s TTL cache.
+## [1.0.0-rc1+wave7] - 2026-05-17
 
-### Added — Governance amendment
-- **ADR-011 v2 (#449)** — split subagent pilot into 2 sequential gates: Gate 1 provenance/redaction (10 dispatches), Gate 2 performance baseline (15 dispatches, median ≥30% wall-clock saved + p25 ≥0%).
+Multi-provider milestone. 5 providers in production with provider-agnostic governance, intelligence injection, and end-to-end token + cost tracking. Reproducible 49-dispatch benchmark suite ships with routing recommendations.
 
-### Documentation produced (claudedocs/, gitignored)
-- `claudedocs/2026-05-09-wave1-design.md` — Wave 1 spec with 6 hard metrics
-- `claudedocs/2026-05-09-wave5-p0-design.md` — prior-round-findings injection design
-- `claudedocs/2026-05-09-vnx-smart-context-design.md` — three-state context bundle pipeline
-- `claudedocs/2026-05-10-deepseek-v4-pro-harness-feasibility.md` — three integration paths analysis
-- `claudedocs/2026-05-09-vnx-codex-strategic-review.md` + `2026-05-09-vnx-gemini-strategic-review.md` + `2026-05-09-vnx-reviews-synthesis.md` — dual-LLM external review insights driving v1.2 strategic plan
+### Added — Wave 7: Multi-Provider via LiteLLM (PR #515-#520, #531, #536, #545, #550-#552)
 
-### Burn-in pending (not yet merged into v1.0.0 final)
-- Wave 1 cutover requires 7 consecutive days clean on all 6 hard metrics (per project, per table) before flipping `VNX_USE_CENTRAL_DB=shadow → 1`.
-- Wave 5 P2/P3/P4 (file:line code anchors / operator memory / schema introspection) extend the +30pp smart-context lift; in flight.
-- v1.0.0 final tag is operator-decision after Wave 1 cutover validates on pilot projects.
+- **PR-7.0 (#515)** ADR-015 LiteLLM Path B for DeepSeek/Kimi/GLM integration freeze
+- **PR-7.1 (#516)** DeepSeek V4 lane via LiteLLM subprocess bridge (V4-Pro + V4-Flash)
+- **PR-7.2 (#517)** Kimi K2.6 + K2-0905 lane via LiteLLM Moonshot endpoint
+- **PR-7.3 (#518)** GLM-5.1 lane via OpenRouter (z.AI direct deferred)
+- **PR-7.4 (#519)** Cost-routing policy engine (feature-flag gated)
+- **PR-7.5 (#520)** Provider behavior contracts (capabilities + tool-shape + cache-control)
+- **PR-7.6 (#536)** Provider governance unification — uniform receipt + unified report shape for all 5 providers (claude/codex/gemini/litellm/kimi)
+- **PR-7.7 (#550)** Kimi CLI as 5th provider — OAuth via `kimi login`, no API key required (Anthropic-compatible stream-json output)
+- **PR #531** `vnx.env` loader + DeepSeek V4-Pro/V4-Flash model registry
+- **PR #545** OI cleanup group 2 — LiteLLM usage stream + unified report `.md` suffix
+- **PR #551 (P0-A)** Intelligence injection unification — codex/gemini/litellm equal first-class with claude
+- **PR #552 (P0-B)** Token usage + cost tracking end-to-end for all 5 providers; OI-1489 streaming drainer accepts `usage_complete` event
 
-## v1.0.0-rc1 — 2026-05-09 (Architectural stabilization milestone)
+### Added — Wave 6: Workers=N Elastic Pool (PR #534-#544, #546)
 
-Chain summary: Wave 0 + Wave 0.5 of the strategic replan — architectural decisions LOCKED via 14 ADRs, central VNX state proven on real production data (855k snippets across 4 projects, 0 verifier discrepancies), CI gate enforcing OAuth-only Claude routing, smart context injection validated at +30 percentage-point dispatch quality lift on 658 outcome-tagged dispatches.
+- **PR-6.0 (#534)** ADR-018 elastic worker pool design freeze
+- **PR-6.1 (#535)** `vnx_workers.yaml` + `WORKER_REGISTRY` (ADR-013 implementation)
+- **PR-6.2 (#538)** Schema v14 elastic worker pool tables + migration scripts
+- **PR-6.3 (#539)** `PoolManager` core (decision engine + state repo + manager)
+- **PR-6.4 (#540)** Pluggable scaling policies (`queue_depth_v1` + `cost_aware_v1`)
+- **PR-6.5 (#541)** Provider-mix per pool with lowest-share-first allocation
+- **PR-6.6 (#542)** Health monitoring + dead-worker reap (tick cycle: reap → decide → execute)
+- **PR-6.7 (#543)** `vnx pool` CLI (`status`/`scale`/`config`/`reap` subcommands)
+- **PR-6.8 (#544)** Control Centre pool integration (cross-project pool view + supervisor)
+- **PR #546** OI cleanup group 1 — idempotency + regex + ledger + audit fixes
+- **PR #537** OI-1479 — token_usage extraction + cost_usd computation per provider
 
-This is the architectural stabilization moment: dispatch envelope, receipt schema, NDJSON ledger format, and ADR-locked invariants are now backwards-compatibility-honoring. Future v1.x is feature additions on a stable foundation; future v2.0 reserved for breaking changes.
+### Added — Wave 5: Control Centre + Multi-Project (PR #521-#532)
+
+- **PR-5.0 (#521)** ADR-017 Control Centre product-shape architecture
+- **PR-5.1 (#522)** Multi-project state aggregator write-pad
+- **PR-5.2 (#525)** Per-project T0 lifecycle management (spawn/heartbeat/kill/reap)
+- **PR-5.3 (#523)** Multi-tenant lease isolation (schema v12)
+- **PR-5.4 (#524)** Cross-project intelligence aggregator (global + per-project facets)
+- **PR-5.5 (#528)** Control Centre CLI shell skill + operator commands
+- **PR-5.6 (#530)** Hybrid dispatch routing with receipt-tail lifecycle tracker
+- **PR-5.7 (#532)** Operator demo runbook + Control Centre docs + completion report
+- **PR #533** OI-1476 — align `project_id` regex + YAML placeholder substitution
+
+### Added — Benchmark Infrastructure (PR #547, #548)
+
+- **PR #547** Benchmark suite infrastructure — 9 models × 7 task-classes orchestrator + judge + analyzer (`scripts/benchmark/`)
+- **PR #548** 56-dispatch model comparison results + routing recommendations (`scripts/lib/providers/routing_recommendations.yaml`)
+
+Result summary (49 valid dispatches):
+- DeepSeek V4-Flash: $0.0006/dispatch, 7.3/10 — cost+speed winner (198× cheaper than Opus 4.6)
+- Kimi K2.6: 8.1/10 — top-tier quality, 21× cheaper than Opus
+- GLM-5.1: 8.0/10 — top-tier quality, 24× cheaper, fastest top-tier (100s vs Kimi's 215s)
+- Opus 4.6: 8.2/10 — highest cost, marginal quality lead
+
+### Added — Wave 4.6: Provider Dispatch Generalization (PR #488, #490, #510-#513)
+
+- **PR-4.6.1 (#488)** `scripts/lib/provider_dispatch.py` — provider-agnostic dispatch entry-point (`--provider {claude,codex,gemini,litellm:<model>}`)
+- **PR-4.6.2 (#490)** `claude_spawn` extracted from `subprocess_dispatch` (byte-identical)
+- **PR-4.6.3 (#511)** `codex_spawn` handler extracted from `codex_adapter`
+- **PR-4.6.4 (#510)** `gemini_spawn` handler extracted from `gemini_adapter`
+- **PR-4.6.5 (#512)** `litellm_spawn` handler extracted from `litellm_adapter`
+- **PR-4.6.6 (#513)** Unified event shape via `CanonicalEvent` + `EventStore` enforcement
+
+### Refactored
+
+- **intelligence_selector.py** (2026-05-17, in flight) — 2511 LOC monolith split into `intelligence_sources/` package (9 modules, target ~321 LOC main + sources)
+- **conversation_analyzer (#504)** — modularized into package; closes OI-1438/1439/1440/1441/1442
+- **replay_harness (#506)** — modularized into package; closes OI-1443/1444/1445/1446/1447
+- **cleanup_worker_exit (#507)** — decompose 104-line function; closes OI-1448
+
+### Hardened — Silent-except narrowing (OI-1437, PR #491-#500, #508, #509)
+
+- 14 PRs converting bare `except:` and overly broad `except Exception:` patterns to specific exception types with `logger.warning` across hot files (build_t0_state, intelligence_selector, gather_intelligence, learning_loop, api_intelligence, dispatch_register, append_receipt payload, api_operator, session_resolver, conversation_analyzer, replay_harness, cleanup_worker_exit, plus 13 singleton files, plus 7 hot files). Total ~120 silent-except sites converted to instrumented warnings.
+
+### Fixed
+
+- **OI-1489** (in flight) — Streaming drainer drops `usage_complete` event; 1-line fix re-enables provider-agnostic token telemetry end-to-end
+- **OI-1450/1451/1452 (#503)** — Receipt processor bootstrap audit ordering + test infra hardening
+- **dispatcher (#502)** — log stderr, fix `script_dir` leak, receipt processor bootstrap-mode
+- **ADR-003 (#505)** — clarify API-key + CLI permitted; SDK still banned
+
+### Added — CONTRIBUTING (#489)
+
+- `CONTRIBUTING.md` + CI lint gate enforcing atomic-write and silent-except policies
+
+## [1.0.0-rc1] - 2026-05-09
+
+Architectural stabilization milestone. 14 ADRs locked. Central VNX state proven on real production data (855k snippets across 4 projects, 0 verifier discrepancies). CI gate enforces OAuth-only Claude routing. Smart context injection validated at +30 percentage-point dispatch quality lift on 658 outcome-tagged dispatches.
+
+From this release forward, dispatch envelope, receipt schema, NDJSON ledger format, and ADR-locked invariants are backwards-compatibility-honoring.
 
 ### Added — ADR backfill (10 new ADRs, 003-014)
-- ADR-003 — OAuth-only Claude routing via `claude -p` subprocess (no SDK, no API key) (#439)
-- ADR-004 — VNX positioning: self-hosted alternative to Anthropic Managed Agents (#439)
-- ADR-005 — Append-only NDJSON audit ledger as primary orchestration substrate (#439)
-- ADR-006 — Mandatory staging→promote with human approval gate (#439)
-- ADR-007 — Multi-tenant `project_id` stamping with composite UNIQUE rebuilds (#439)
-- ADR-008 — Dual-LLM adversarial review (codex_gate + gemini_review) with `contract_hash` evidence binding (#439)
-- ADR-009 — Schema-first migrations via PRAGMA introspection (no hardcoded column projections) (#439)
-- ADR-010 — Subprocess adapter (`claude -p`) as canonical Claude routing (#439)
-- ADR-011 — Manager+worker hierarchy with explicit depth>1; subagents Conditional/Pilot for read-only parallel-fanout (#439, #447)
-- ADR-012 — Hybrid interactive+headless (no retire-interactive) (#439)
-- ADR-013 — Worker pool size as configuration, not constant (workers = N) (#445)
-- ADR-014 — Autonomous mode = pre-approved chain dispatch with SHA-256 chain-spec hash as consent token (#445)
+
+- ADR-003 OAuth-only Claude routing via `claude -p` subprocess (no SDK, no API key)
+- ADR-004 VNX positioning: self-hosted alternative to Anthropic Managed Agents
+- ADR-005 Append-only NDJSON audit ledger as primary orchestration substrate
+- ADR-006 Mandatory staging→promote with human approval gate
+- ADR-007 Multi-tenant `project_id` stamping with composite UNIQUE rebuilds
+- ADR-008 Dual-LLM adversarial review (codex_gate + gemini_review) with `contract_hash` evidence binding
+- ADR-009 Schema-first migrations via PRAGMA introspection
+- ADR-010 Subprocess adapter (`claude -p`) as canonical Claude routing
+- ADR-011 Manager+worker hierarchy with explicit depth>1
+- ADR-012 Hybrid interactive+headless (no retire-interactive)
+- ADR-013 Worker pool size as configuration (workers = N)
+- ADR-014 Autonomous mode = pre-approved chain dispatch with SHA-256 chain-spec hash as consent token
 
 ### Added — Structural enforcement
-- CI gate `ADR-003: No Anthropic SDK Imports` — blocks any `import anthropic` / `from anthropic` / `import claude_agent_sdk` in `scripts/`, `dashboard/`, `tests/`. Magic-comment opt-in for explicit exceptions only. (#439)
-- `scripts/check_adr_003_no_sdk_imports.py` + `tests/test_adr_003_no_sdk_imports.py` (23 unit tests).
 
-### Improved — Migration architecture (Phase 6 P4)
-- One-shot data import script `scripts/migrate_to_central_vnx.py` (#432): real-data success on 4 production source DBs (855k code_snippets, 505 dispatches, 0 verifier discrepancies)
-- Migration 0016 schema-first rewrite per ADR-009 (#446): replaces hardcoded 12-column projection with PRAGMA introspection; orphan project_id stamping uses migrating-project_id (not vnx-dev fallback); `_import_table` streams via `cursor.fetchmany(500)` instead of materializing full table — resolves OI-1375, OI-1376, OI-1377.
-- Composite UNIQUE rebuilds for 5 round-6 tables (`session_analytics`, `vnx_code_quality`, `dispatch_quality_context`, `dispatch_metadata`, `dispatch_experiments`)
-- Schema audit step `_audit_unique_constraints()` catches T3 single-column UNIQUE patterns at startup
-- Structural test parsing `0015_complete_project_id.sql` enforces ALTER↔IMPORT_TABLES symmetry (would have caught all round-7/8/9 gaps)
-- Dispatch-register identity fallback per-field (was all-or-nothing); dual-writer locking on data file (was sentinel only); ghost-gate receipt rerouting fixed (#446 sibling)
+- CI gate `ADR-003: No Anthropic SDK Imports` blocks any `import anthropic` / `from anthropic` / `import claude_agent_sdk` in `scripts/`, `dashboard/`, `tests/`
 
-### Added — Repo hygiene (OI-1373 cleanup)
-- Tier 1: 8 business agent drafts moved from public `roadmap/features/phase-16-business-domain-bootstrap/agent_drafts/` to private `claudedocs/business-domain/` (#440)
-- Tier 2: 7 strategy files (`KICKOFF.md`, `ROADMAP.md`, `backlog.yaml`, `roadmap.yaml`, 3 dispatch_plans) from `.vnx-data/strategy/` to `claudedocs/strategy/`; `!.vnx-data/strategy/` carve-out removed from `.gitignore` (#441)
-- Tier 3: `.vnx-data/state/PROJECT_STATE_DESIGN.md` to private; 2 `.vnx-data/state/` carve-outs removed (in #443)
-- Tier 4: 18 phase FEATURE_PLAN.md files from public `roadmap/features/<phase>/` to `claudedocs/roadmap/features/` (#442)
-- Tier 5: 9 stale docs from `docs/internal/plans/` and `docs/research/` archived to `claudedocs/archive/{headless-t0-research,research-2026-spring}/` (#443)
-- Pattern: filesystem `mv` + `git add -u` (NOT `git mv`) — preserves files locally on disk while removing from git tracking. History scrub intentionally NOT performed.
+### Added — Wave 1 shadow-mode read cutover (PR #450-#454)
 
-### Added — Strategic documentation
-- `claudedocs/2026-05-09-vnx-strategic-replan-proposal.md` v1.1 — 6-wave plan (Wave 0-6) replacing the overtaken-by-reality PRD-UH-001 v1.3 framing
-- `claudedocs/PRD-VNX-UH-002-v1.0-DRAFT.md` — "VNX 2.0: self-hosted alternative to Anthropic Managed Agents" with 8 structural moats, ICP refinement, and §11.b open horizons
-- `claudedocs/2026-05-09-vnx-replan-inventory.md` — full repo inventory: shipped/in-flight/planned/dead with provenance
-- `claudedocs/2026-05-09-vnx-industry-research.md` — 15-topic competitive landscape (May 2026): no competitor stacks 4+ of VNX's 5 axes
-- `claudedocs/2026-05-09-vnx-platform-features-verification.md` — Perplexity-verified 8 platform claims; 2 outdated (subagent session-resume + Anthropic Code Review GA), 1 partial (Agent SDK orchestration), 5 confirmed
-- `claudedocs/2026-05-09-vnx-market-validation.md` — verdict CONDITIONAL GO; OpenClaw ban (April 2026) retroactively validated M6/ADR-003 OAuth-only as structural ToS-policy moat
-- `claudedocs/2026-05-09-vnx-smart-context-design.md` — three-state intelligence pipeline design + +30pp lift PoC
-- `claudedocs/2026-05-09-vnx-subagent-tactical-research.md` — verdict Conditional/Pilot; T1-only `VNX_T1_TACTICAL_SUBAGENTS=1`, read-only parallel-fanout, 4-week pilot
-- `claudedocs/2026-05-09-vnx-f46-f58-reconciliation.md` — F46-F58 phantom-features claim refuted: 6 real-clean-PR + 6 cluster-titled + 1 verify + 0 phantom
-- `claudedocs/2026-05-09-p4-migration-architecture-lessons.md` — bug taxonomy + 14 action items from the 9-round PR #432 chain
-- `claudedocs/blog-drafts/2026-05-09-intelligence-30pp-lift-DRAFT.md` — 2300-word public-facing deep-dive draft on the +30pp result
-- PRD-UH-001 v1.3 archived to `claudedocs/archive/`
+- `shadow_verifier.py` — independent comparator with 6 zero-tolerance divergence metrics
+- `shadow_logger.py` NDJSON writer + CLI + flock-rotation
+- T0 state-builder + IntelligenceSelector + DispatchRegister + Dashboard shadow wiring across 13 read sites
+- Canary divergence test pack (14+ fixtures) + operator-readable rollback procedure
 
-### Reports
-- `claudedocs/2026-05-09-vnx-replan-inventory.md`
-- `claudedocs/2026-05-09-vnx-industry-research.md`
-- `claudedocs/2026-05-09-vnx-platform-features-verification.md`
-- `claudedocs/2026-05-09-vnx-market-validation.md`
-- `claudedocs/2026-05-09-vnx-smart-context-design.md`
-- `claudedocs/2026-05-09-vnx-subagent-tactical-research.md`
-- `claudedocs/2026-05-09-vnx-f46-f58-reconciliation.md`
-- `claudedocs/2026-05-09-p4-migration-architecture-lessons.md`
+### Added — Wave 5 smart-context injection (PR #455-#461)
 
-### Validated — Smart context injection (gevalideerd op real production data)
-- `IntelligenceSelector.select()` pipeline measured: **88.9% dispatch success WITH intelligence vs 58.3% WITHOUT** across 658 outcome-tagged dispatches (+30.6 pp lift)
-- 922 rows in `intelligence_injections` ledger growing hourly
-- Pipeline plumbing 9/10; content quality 2/10 — "the lift we got despite injecting governance noise; imagine signal" (Wave 5 design target)
+- Prior-round-findings injection (W5.0)
+- ADR injection by file-touch (W5.1)
+- Code anchor injection (W5.2)
+- Operator memory injection (W5.3)
+- Schema introspection injection (W5.4)
+- Production plumbing for P0-P4 context-bundle classes (W5.5)
 
-### Open items resolved
-- OI-1373 (49+ strategic/business docs in public repo) — fully closed via Tiers 1-5
-- OI-1375 (migration 0016 hardcoded 12-column projection) — closed by #446
-- OI-1376 (migration 0016 orphan COALESCE project_id fallback) — closed by #446
-- OI-1377 (`_import_table` materializes full source table) — closed by #446
+### Added — Wave 4 OTel observability foundation (PR #468)
 
-### Known open items deferred to v1.0.0 final
-- OI-1374 (dashboard `/agent-stream` SSE lifecycle regression — separate-PR cleanup)
+- Opt-in OpenTelemetry export wired into `subprocess_dispatch` completion. Emits `dispatch_completion_count` metric + spans. Env-gated via `OTEL_EXPORTER_OTLP_ENDPOINT`; no-op when unset.
 
-### Added — Wave 4 OTel observability foundation (#468)
-- **PR-W4.1 (#468)** — opt-in OpenTelemetry export wired into subprocess_dispatch completion. Emits `dispatch_completion_count` metric + spans. Env-gated via `OTEL_EXPORTER_OTLP_ENDPOINT`; no-op when unset.
+### Added — Wave 4.5 provider parity (PR #471, #472, #477, #479)
 
-### Added — Wave 2 package extraction foundation (#469, #478)
-- **PR-W2.0a (#469)** package skeleton with `pyproject.toml` + `vnx_core` + `vnx_cli` + smoke tests + `docs/operations/PACKAGE_BUILD.md`
-- **PR-W2.1a-redo (#478)** First module migration: `function_size_gate.py` → `vnx_core`, with `sys.path`-fallback shim in `scripts/lib/`. Demonstrates migration pattern for non-`__file__`-dependent modules.
+- `PromptAssembler` provider-agnostic methods (claude/codex/gemini/litellm)
+- Codex + Gemini adapters use `PromptAssembler`; `AGENTS.md` + `GEMINI.md` tri-file activated by `vnx init` bootstrap
+- Gate reviewer prompts use `gh pr diff` authoritative source
+- Intelligence injection per-provider with empty-`dispatch_id` guard (audit-safe)
 
-### Added — Wave 4.5 provider parity (#471, #472, #477, #479)
-- **PR-W4.5.1 (#471)** `PromptAssembler` provider-agnostic methods (`for_claude_subprocess`, `for_codex_subprocess`, `for_gemini_subprocess`, `for_litellm_provider`). Existing claude path byte-identical.
-- **PR-W4.5.2 (#472)** Codex + Gemini adapters use `PromptAssembler`. `AGENTS.md` + `GEMINI.md` tri-file activated by `vnx init` bootstrap.
-- **PR-W4.5.2b (#479)** Gate reviewer prompts use `gh pr diff` authoritative source. New `scripts/lib/prompts/roles/reviewer.md`. `PromptAssembler` skips L1 `base_worker` for reviewer role.
-- **PR-W4.5.3 (#477)** Intelligence injection per-provider with empty-`dispatch_id` guard (audit-safe).
+### Added — Wave 2 package extraction foundation (PR #469, #478)
+
+- `pyproject.toml` + `vnx_core` + `vnx_cli` package skeleton with smoke tests
+- First module migration: `function_size_gate.py` → `vnx_core` with `sys.path`-fallback shim
+
+### Fixed — OI-1370 systemic locking refactor (PR #482-#486)
+
+- Original `migrate_phase3_envelope` race (writer pre-rename appends to unlinked inode) required system-wide locking refactor across all writer paths
+- `scripts/lib/state_writer.append_locked()` helper with sentinel registry; 100-thread × 100-write concurrency test passes
+- 4-PR migration of all envelope/state writers to helper
+- All four implementation PRs (#483-#486) implemented by **Codex CLI workers** — first production codex-worker dispatches in this codebase
 
 ### Fixed — Security + governance
+
 - **OI-1369 (#465)** Path traversal in `vnx_paths.resolve_central_data_dir` — strict regex `^[a-z][a-z0-9-]{1,31}$`
-- **OI-1294 (#467)** `compact_open_items_digest` function-size 76→34 via mechanical `_coid_` helper extraction
-- **OI-1415 (#462)** `review_contract.content_hash` backward-compat (omit empty `deleted_files`)
+- **OI-1294 (#467)** `compact_open_items_digest` function-size 76→34 via mechanical helper extraction
+- **OI-1415 (#462)** `review_contract.content_hash` backward-compat for empty `deleted_files`
 
-### Added — Infrastructure
-- **PR (#464)** T0 canonical `subprocess_dispatch.py` routing rule in templates + skill
-- **PR (#463)** Default `VNX_QUEUE_POPUP_ENABLED=0` in init-time preset templates
-- **PR (#480)** Vertex routing alternative for gemini quota workaround (`docs/operations/GEMINI_VERTEX_ROUTING.md`)
+### Added — Repo hygiene (OI-1373 cleanup)
 
-### Plumbing
-- **PR (#462)** CFX-W5-2 — `pr_id` propagation + headless daemon entry points + `IndexCache` + net-deletion gate + `deleted_files` plumbing for Wave 5 smart-context
+- 5-tier OI-1373 cleanup: 49 strategic/business docs moved from public `roadmap/`+`docs/internal/` to gitignored `claudedocs/`
+- Pattern: filesystem `mv` + `git add -u` (NOT `git mv`) — preserves files locally on disk while removing from git tracking
 
-### Deferred (with OIs for follow-up)
-- PR #466 OI-1370 race fix — needs systemic locking refactor across all writer paths
-- PR #470 Wave 2 Phase 1a `vnx_paths` — uses `__file__`, blocked until decoupled
-- PR #473 Wave 4.5 PR-2b superseded by #479
-- PR #474 Wave 4.5 PR-3 superseded by #477
-- PR #475 OI-1370 redo attempt — defer to systemic refactor
-
-### Fixed — OI-1370 systemic locking refactor (#482, #483, #484, #485, #486)
-
-The original `migrate_phase3_envelope` race (writer pre-rename appends to unlinked inode) required a system-wide locking refactor across all writer paths to envelope/state files. Three earlier scoped-fix attempts (PR #466, #475 round-2) were blocked by codex because each ad-hoc lock left other writers uncoordinated.
-
-- **PR #482** — OPUS architect plan in `claudedocs/oi1370-systemic-locking-refactor-plan-2026-05-13.md`. 4-PR phasing + Option-A sentinel-per-file recommendation.
-- **PR N1 (#483)** — `scripts/lib/state_writer.append_locked()` helper with sentinel registry. 100-thread × 100-write concurrency test passes.
-- **PR N2 (#484)** — migrate `scripts/lib/gate_register_emit.py` + `scripts/lib/cleanup_worker_exit.py` to helper.
-- **PR N3 (#485)** — migrate `scripts/compact_state.compact_receipts` + `scripts/backfill_headless_receipts._update_ndjson`.
-- **PR N4 (#486)** — final: migrate `scripts/migrate_phase3_envelope.py` + `scripts/lib/dispatch_register._write_event_locked`. Race eliminated by construction.
-
-All four implementation PRs (#483-486) implemented by **Codex CLI workers** (first production codex-worker dispatches in this codebase). Each PR codex_gate clean (0 blocking, max 1 advisory). OI-1370 closed.
-
-## v0.10.0 — 2026-04-30
+## [0.10.0] - 2026-04-30
 
 Chain summary: 27 PRs landed across governance hardening, headless audit parity, supervisor pack, CFX thematic refactors, P0 intelligence loop fixes.
 
 ### Added — State self-maintenance
-- `compact_state.py` + `install_nightly_crons.sh` (#299, #313): auto-rotate intelligence_archive (7d), receipts cap (10k), open_items_digest (>30d evict)
-- (cleanup) Removed legacy postmerge audit scripts (#314)
 
-### Added — Headless audit parity (was 40% → 90%)
+- `compact_state.py` + `install_nightly_crons.sh` (#299, #313): auto-rotate intelligence_archive (7d), receipts cap (10k), open_items_digest (>30d evict)
+
+### Added — Headless audit parity (40% → 90%)
+
 - `instruction_sha256` in manifest + receipt (#309): cryptographic reproducibility
-- WorkerHealthMonitor STUCK → EventStore + receipt `stuck_event_count` (#310)
+- `WorkerHealthMonitor` STUCK → EventStore + receipt `stuck_event_count` (#310)
 - Codex+Gemini token tracking via `adapter.get_token_usage()` (#307)
 - Canonical gate result schema with `gate_status.is_pass()` (#322)
 
 ### Added — Real-time observability
-- `/api/register-stream` SSE endpoint (#304)
+
+- `/api/register-stream` SSE endpoint (#304): dispatch lifecycle stream
 
 ### Added — Supervisor pack (auto-respawn)
+
 - `cleanup_worker_exit` single-owner exit cleanup (#315)
 - `receipt_processor_supervisor.sh` wrapper-respawn (#319)
 - `lease_sweep` + dispatcher prelude tick (#316)
@@ -183,248 +210,42 @@ Chain summary: 27 PRs landed across governance hardening, headless audit parity,
 - Operator guide `docs/operations/UNIFIED_SUPERVISOR.md` (#318)
 
 ### Added — Frontend regression protection
+
 - Playwright visual regression suite (#312)
-- tsc strict + npm typecheck (#306)
+- `tsc` strict + `npm typecheck` (#306)
 - Playwright network failure scenarios (#308)
 - Console error detection per route (#305)
 
-### Added — CFX thematic refactors
-- Subprocess dispatch git-scope manifest (#320)
-- `closure_verifier` CLI flag forwarding + E2E coverage (#321)
-
 ### Improved — Codex review intelligence
+
 - Severity prompt tightening (#323, #324): `error` reserved for data loss / false closure / security; ~75% reduction in blocking findings noise
-- `closure_verifier` hard-blocks on codex-failed gate (#300)
-- Round-3 fixes for ci_gate (#301), dispatch_register (#302), F43 context-rotation (#303), confidence dedup (#311)
 
-### Added — P0 intelligence loop fixes
-- Reconcile pattern confidence stores (#327): closes selector-vs-learner open-circuit
-- Stamp `dispatch_id` at injection time (#326): unblocks failure decay
-- Activate T0 decision log + outcome reconciliation (#328): T0 introspection finally wired
+## [0.9.0] - 2026-04-11
 
-### Reports
-- `claudedocs/2026-04-29-unified-supervisor-research.md`
-- `claudedocs/2026-04-29-codex-findings-synthesis.md`
-- `claudedocs/2026-04-30-state-memory-audit.md`
-- `claudedocs/2026-04-30-intelligence-system-audit.md`
-- `claudedocs/2026-04-30-self-learning-loop-audit.md`
-- `claudedocs/VNX_feature_breakdown.md` (blog team feature catalogue)
+Streaming + autonomous loop + A/B test milestone.
 
-## Unreleased
+### Added
 
-### Features
-- **F59-PR1 event-archive-analyzer**: `scripts/lib/event_analyzer.py` — deterministic behavioral analysis of dispatch NDJSON event archives; extracts tool counts (Read/Write/Edit/Bash/Grep/Glob), exploration depth (`reads_before_first_write`), rework indicators (`edit_cycles_same_file`, `test_fail_edit_cycles`), phase sequences (explore→implement→test→commit), bash error extraction, pytest result parsing, and commit/push/report detection; CLI supports `--dispatch`, `--all`, `--summary`, and `--output` modes; 22 tests in `tests/test_event_analyzer.py` covering real archive fixtures and synthetic NDJSON scenarios
+- **F42 PR-1** Restore EventStore from git history + dashboard archive endpoints for historical dispatch event retrieval
+- **F42 PR-2** Headless T0 decision loop — decision parser extracted from replay harness, decision executor with 5 decision types and loop guards, trigger wiring for closed autonomous loop
+- **A/B Test** First systematic comparison of interactive vs headless execution across F40 (moderate) and F42 (complex). Finding: headless produces functionally equivalent output with ~4% less LOC and ~18% fewer tests. Conclusion: execution mode does not determine quality — instruction quality does.
 
-### Dashboard
-- **dispatch-viewer**: Add `/operator/dispatches` list view with stage tabs (staging/pending/active/review/done), track/terminal/search filters, and per-row receipt status indicator. Add `/operator/dispatches/[id]` detail page with Overview/Event Replay/Instruction/Result tabs; replay tab renders phase-colored tool-use timeline from archived NDJSON with scrubbable cursor, play/pause/step controls, and phase filter chips. Data flows through existing `/api/dispatches*` endpoints (F59-PR4).
+## [0.8.0] - 2026-04-11
 
-### Docs
-- **docs-audit-cleanup-round-2**: Fix 12 incorrect/stale findings from audit slices B+C: correct `VNX_CANONICAL_LEASE_ACTIVE` default in `RUNTIME_CORE_ROLLBACK.md`; fix function name and default-adapter description in `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`; fix self-referential broken stub in `MULTI_MODEL_GUIDE.md`; add deprecation notice to `RECEIPT_PROCESSING_FLOW.md`; update stale paths in `RECEIPT_PIPELINE.md`; mark unimplemented scripts in `AUTONOMOUS_PRODUCTION_GUIDE.md`; fix `MONITORING_GUIDE.md` reference in `docs/operations/README.md`; correct Opus 4.6/4.5 pricing in `COST_TRACKING_GUIDE.md`; rewrite `EXIT_CODES.md` around named failure classes; fix env-override list in `MIGRATION_GUIDE.md`; update `dashboard/README.md` for token-dashboard subdir + port 3100 + correct API/frontend status; fix `scripts/_archive/` non-existence in `SCRIPTS_INDEX.md`.
-- **docs-audit-cleanup**: Fix broken link to archived `MONITORING_GUIDE.md` in `docs/README.md`; correct inaccurate "Internal (not in repo)" claim in `docs/DOCS_INDEX.md` to list the 4 tracked headless-T0 research docs; remove 5 dead markdown hyperlinks in `docs/operations/AUTONOMOUS_PRODUCTION_GUIDE.md` pointing to private planning docs not in repo.
-- **event-streams**: Add `docs/operations/EVENT_STREAMS.md` documenting the per-dispatch ring-buffer lifecycle of `.vnx-data/events/T{n}.ndjson` and the `events/archive/{terminal}/{dispatch_id}.ndjson` layout; linked from `docs/operations/README.md` and `docs/DOCS_INDEX.md`. Clarifies a misinterpretation flagged as W-2 in the 2026-04-23 audit-trail investigation (OI-AT-6a).
+Headless intelligence + governance profiles milestone.
 
-### Fixes
-- **W5A-cleanups**: Remove stale `(missing source)` claim from `event-streams` CHANGELOG entry; `ghost-receipt-filter` entry annotated with source-confirmed note (OI-1133). Rename `GovernanceProfile` enum in `governance_profile_selector.py` to `GovernanceProfileEnum` to eliminate naming conflict with `GovernanceProfile` dataclass in `governance_profiles.py`; all importers updated (OI-1160). Upgrade `HeadlessOrchestrator._check_all_gates_passed()` to use `gate_status.is_pass()` — now enforces `blocking_findings` and `blocking_count` checks in addition to status (OI-1139).
-- **dashboard-duplicate-key**: Fix duplicate-key React error on `/operator/dispatches` — `_scan_dispatches` was mapping both `completed/` and `rejected/` directories to stage `done`, causing the same dispatch ID to appear twice when a dispatch existed in both directories (regression from F59-PR4 #266). Backend fix: `rejected/` now maps to a distinct `rejected` stage; priority-based dedup (`staging > pending > active > review > done > rejected`) ensures exactly one canonical entry per dispatch_id. Frontend fix: `DispatchList` now uses composite key `${id}-${stage}` as belt-and-suspenders defense. `DispatchStage` type and stage badge updated to include `rejected`; dispatches page includes `rejected` in stage tabs.
-- **learning-loop-phases**: Fix nightly pipeline Phase 3 (`3-session-dispatch-link`) and Phase 4 (`4-learning-cycle`) to unblock the learning loop; add `report_findings` table migration to `quality_db_init.py` (OI-1154); fix `TypeError: can't compare offset-naive and offset-aware datetimes` in `learning_loop.py::archive_unused_patterns` by introducing `_to_aware_utc()` helper and normalizing all datetime comparisons to UTC-aware throughout `LearningLoop`; 20 new tests in `tests/test_learning_loop_tz.py` and `tests/test_report_findings_schema.py` (OI-1155)
-- **restore-daemon-deps**: Restore 44 daemon dependency files deleted in cleanup PR #205; includes direct `intelligence_daemon.py` imports (`pr_discovery`, `intelligence_dashboard`, `intelligence_hygiene`, `retrospective_digest`, `retrospective_model_hook`), daemon infrastructure (`runtime_supervisor`, `supervisor_shadow`, `worker_state_manager`, `workflow_incident_handler`, `workflow_supervisor`, `headless_transport_adapter`), daemon scripts (`heartbeat_ack_monitor_daemon`, `intelligence_daemon_monitor`, `session_gc`, `subprocess_health_monitor`), and supporting lib modules; fix `terminal_state_check.py` regression restoring `check_terminal()` function; install `watchdog` package dependency; 576 passing tests
-- **restore-python-singleton**: Restore `scripts/lib/python_singleton.py` — deleted by cleanup commit cb17479; re-adds `enforce_python_singleton()` with original signature `(name, locks_dir, pids_dir, log=None)`; unblocks `intelligence_daemon`, `unified_state_manager_v2`, and `heartbeat_ack_monitor` which all hard-exit on import failure
-- **event-streams-doc**: Remove broken `.vnx-data/unified_reports/...` link from `docs/operations/EVENT_STREAMS.md` historical-context paragraph; `.vnx-data/` is gitignored runtime state and never resolves from committed docs (OI-1141).
-- **gate-status-check**: `_check_all_gates_passed()` now loads each required gate result JSON and verifies `status` is in `{"completed", "pass"}` before emitting `feature_gates_complete`; a `"failed"` result file no longer unblocks features (OI-1139). `cleanup_orphan_gates.main()` tracks resolved orphans individually instead of using a count-based slice, so non-prefix write failures log the correct set to `governance_audit.ndjson` (OI-1140). 7 new tests in `tests/test_gate_status_check.py`.
-- **governance-audit-stamping**: All `governance_audit.ndjson` writers now stamp `dispatch_id` and `pr_number` on every row; `log_gate_result()` gains `dispatch_id` param; `log_dispatch_decision()` gains `pr_number` param; `cleanup_orphan_gates` extracts pr_number from stem and dispatch_id from request_data; `auto_gate_trigger` forwards dispatch_id to gate log; headless daemon returns pr_number from pre-check for dispatch_decision rows; 10 new tests in `tests/test_governance_audit_stamping.py` (OI-AT-5)
-- **headless-receipts-backfill**: Backfill script `scripts/backfill_headless_receipts.py` retroactively patches all 363 processed receipts and 275 ndjson entries that carried `dispatch_id="unknown"` prior to OI-AT-4 phase 1; idempotent; 34 tests in `tests/test_backfill_headless_receipts.py`
-- **headless-reports-layout**: Gate reports now written to `unified_reports/headless/` subdir; `VNX_HEADLESS_REPORTS_DIR` added to `vnx_paths.py` and `vnx_paths.sh`; receipt processor scans both dirs; 11 new tests (OI-AT-7)
-- **ci-slug-match-gate**: `scripts/check_ci_slug_match.py` — CI gate validates Dispatch-ID present in commit bodies and slug portion matches branch name; shadow mode by default (`VNX_SLUG_ENFORCEMENT=1` to block); new `slug-match-check` job added to `vnx-ci.yml`; 57 tests in `tests/test_ci_slug_match_gate.py`
-- **headless-gate-dispatch-id**: Gate request handlers now accept and persist `dispatch_id` in request payloads; `materialize_artifacts` emits real dispatch_id in result JSON and sidecar instead of synthetic `gate-<gate>-pr-<n>` strings; `review_gate_manager` CLI gains `--dispatch-id` arg; 12 new tests (OI-AT-4)
-- **audit-hook-active-drain**: Install `prepare-commit-msg` hook via `core.hooksPath=hooks/git`; add `scripts/check_active_drain.py` janitor that moves receipted dispatches from `active/` to `completed/` and orphans older than threshold to `dead_letter/`; 23 passing tests
-- **ghost-receipt-filter**: Route headless gate receipts with `dispatch_id="unknown"` to a separate `gate_events.ndjson` stream instead of polluting `t0_receipts.ndjson`; adds `headless_review_receipt` schema module (`scripts/lib/headless_review_receipt.py`) with 30 passing tests; source confirmed in-tree (OI-1133)
-- **dispatcher**: Skip tmux MODE_CONTROL pre-flight (pane probe, configure_terminal_mode, C-u clear, sleep) for subprocess-routed terminals; call only mode_pre_check to set _CTM_* globals needed by deliver_dispatch_to_terminal
-- **Latency PR-1+PR2 CI fix**: Update `tests/test_subprocess_dispatch.py` stale assertions from old defaults (chunk_timeout=120, total_deadline=600) to new defaults (chunk_timeout=300, total_deadline=900) introduced by latency PR-1
-- **Latency PR-2**: Add `SessionStore` (`scripts/lib/session_store.py`) — atomic JSON file-backed store that persists Claude session IDs per terminal; wire into `deliver_via_subprocess()` to pass `--resume <session_id>` on subsequent dispatches (opt-in via `VNX_SESSION_RESUME=1`)
-- **Latency PR-1**: Add 60s cooldown for invalid-skill dispatches in `dispatcher_v8_minimal.sh` (env-tunable via `VNX_INVALID_SKILL_COOLDOWN`) to prevent log floods and queue stalls on every 2s poll
-- **Latency PR-1**: Raise `chunk_timeout` default from 120s → 300s and `total_deadline` from 600s → 900s in `subprocess_adapter.py` and `subprocess_dispatch.py`; both tuneable via `VNX_CHUNK_TIMEOUT` / `VNX_TOTAL_DEADLINE` env vars
-- **W0 cleanup**: `scripts/review_gate_manager.py` — auto-compute `changed_files` from git diff when `--changed-files` is empty and `--branch` is provided (eliminates context contamination); `scripts/lib/dispatch_instruction_validator.py` — D-8 rule bumped from `warn` to `blocker` for gate-bearing dispatches; 4 new tests
+### Added
 
-### Bug Fixes
+- **F39** Headless T0 benchmark — decision framework with deterministic pre-filter (Level-1: 100%, Level-2: 73-87%, Level-3: 67-78%), context assembler, replay harness, file-based gate locks (#204)
+- **F41** Intelligence pipeline activation — governance aggregator backfill (722 metrics, 58 SPC control limits), nightly pipeline scheduling via launchd, quality digest with real SPC data (#206)
+- **F41** 3-layer headless trigger system — file watcher on unified_reports, silence watchdog (10-min stale lease/dispatch detection), optional haiku LLM triage (#206)
+- Headless dispatch writer — programmatic dispatch creation for autonomous T0 orchestration (#207)
+- Governance profiles — config-driven review profiles (default/light/minimal) replacing hardcoded business/coding split, configurable via `.vnx/governance_profiles.yaml` (#207)
 
-- **W0 PR-2 fix**: `receipt_processor_v4.sh` — fix shell quoting in `_auto_release_lease_on_receipt` (array-based args replace unquoted `${:+}` expansion) and fix conflicting state on `task_timeout+no_confirmation` (skip auto-release when shadow intentionally keeps terminal blocked); 8 new tests (22 total)
+## [0.5.0] - 2026-03-30
 
-### Features
+Governance Runtime Upgrade. Largest upgrade since initial public preview. One-command worktree lifecycle with deterministic gates, governance-aware finish flow, hardened dispatcher/tmux delivery, intelligence export/import + self-learning loop, token/model tracking in receipts, dashboard attention model + event timeline, Codex CLI + multi-model orchestration improvements, configurable per-terminal models, Opus 4.6 1M default.
 
-- **W0 PR-2**: Auto-lease-release on task receipt — `receipt_processor_v4.sh` now calls `release-on-receipt` automatically on `task_complete`/`task_failed`/`task_timeout` events, eliminating the need for manual `release-on-failure` after every worker receipt; `RuntimeCore.release_on_receipt()` resolves generation internally with dispatch-id ownership guard and idempotent idle-terminal handling
-
-### Security
-- **W0 PR-4 security fix**: `vnx_snapshot.py` — path traversal (Zip Slip) + symlink hardening: `do_restore` now uses `tarfile.extractall(filter="data")` (Python 3.12 safe extraction, raises on path-traversal/absolute-symlink members) instead of the previous unsafe `extractall` with suppressed warnings; `do_snapshot` now filters out absolute symlinks and relative symlinks that escape `.vnx-data/` before they enter the archive; 5 new security tests (17 total)
-
-### Fixes
-- **W0 PR-5 fix2**: `scripts/lib/log_artifact.py` — path traversal hardening: `_safe_filename()` strips path separators and collapses `..` sequences from `run_id` before using it in artifact filenames; `scripts/lib/headless_inspect.py` — `list_runs()` `show_all` parameter was dead code (never branched on); added explicit `elif show_all:` branch; 3 new tests (53 total)
-- **W0 PR-5 fix**: `.github/workflows/burn-in-headless.yml` — remove `skip_billing_gate` input and its conditional job guard (billing safety now unconditional); fix unexpanded `$VNX_HOME` in single-quoted heredoc by using `os.environ.get("VNX_HOME")` in Python instead of shell expansion
-- **F32-R3**: `deliver_via_subprocess` now fail-closes on non-zero subprocess exit code — `adapter.observe()` is checked after events are drained; non-zero returncode returns `success=False` regardless of parsed event count; fixes broken test assertions in `test_subprocess_dispatch.py` and `test_subprocess_dispatch_integration.py` (`result is True/False` → `result.success is True/False`)
-- **F36-R8 PR-234**: Fix cross-platform `stat` portability in `check_flood_protection()` (GNU/Linux compatibility); defer SHA fallback warning until after `log()` is defined; manual mode now honors last-processed watermark in `should_process_report()`
-
-### Features
-- **W0 PR-6**: `scripts/lib/dispatch_instruction_validator.py` — dispatch instruction template validator (D-1..D-8): Dispatch-ID format, description presence, scope item count thresholds (warn ≥9/block ≥16), unbounded-task language detection, gate/quality-gate alignment, file directory breadth, instruction size, and success-criteria presence; 35 tests in `tests/test_dispatch_instruction_validator.py`
-- **W0 PR-5**: `.github/workflows/burn-in-headless.yml` — scheduled weekly burn-in CI (Sunday 02:00 UTC) running billing-safety gate (BS-1..BS-6) followed by burn-in certification (B-1..B-10), snapshot tooling regression, and fixture smoke checks; `workflow_dispatch` for manual runs; zero API cost (CLI stub via `VNX_HEADLESS_CLI=echo`)
-- **W0 PR-5**: `scripts/lib/exit_classifier.py` — maps subprocess exit conditions to named failure classes (`SUCCESS/TIMEOUT/TOOL_FAIL/INFRA_FAIL/NO_OUTPUT/INTERRUPTED/PROMPT_ERR/UNKNOWN`) with retryability, signal extraction, and operator hints
-- **W0 PR-5**: `scripts/lib/log_artifact.py` — structured human-readable run-log writer (`<run_id>.log`) and raw output capture (`<run_id>.out`) for operator inspection without file spelunking
-- **W0 PR-5**: `scripts/lib/headless_inspect.py` — operator inspection tools: `format_run_line`, `format_run_detail`, `list_runs`, `build_health_summary`, `format_health_summary`
-- **W0 PR-5**: `tests/conftest.py` — shared pytest fixtures (`vnx_state_dir`, `vnx_registry`, `vnx_artifact_dir`, `vnx_dispatch_dir`, `vnx_fake_project`, `vnx_snapshot_dir`) for burn-in and snapshot test suites; `make_vnx_dispatch_bundle` factory fixture
-- **W0 PR-5**: `tests/fixtures/dispatch_bundle_research.json` + `dispatch_bundle_analysis.json` — CI fixture bundles for headless adapter integration tests
-- **W0 PR-5**: `tests/test_billing_safety.py` — 12 billing-safety assertions across BS-1..BS-6: no SDK imports, no direct API URLs, no hardcoded keys, no key assignments, CLI-only subprocess, clean fixture files
-- **W0 PR-4**: `vnx snapshot/restore/quiesce-check` — CLI tools for project-state backup and migration readiness: tarball + SQL dump of `.vnx-data/`, fail-safe restore with overwrite guard, and read-only quiesce verification across 4 conditions (active dispatches, held leases, in-flight gates, uncommitted changes)
-- **W0 PR-1**: `scripts/dispatcher_supervisor.sh` — dedicated auto-restart supervisor for `dispatcher_v8_minimal.sh` with exponential backoff (2s→60s), stale singleton lock cleanup before each restart, SIGTERM-safe child shutdown, and `status` subcommand
-- **F32 Wave D PR-1**: T2/T3 default subprocess delivery — `deliver_dispatch_to_terminal` now defaults T1/T2/T3 to subprocess adapter; T0 remains tmux by default; `VNX_ADAPTER_Tx=tmux` opts any terminal back to tmux
-- **F36 PR-1**: T0 decision summarizer (`t0_decision_summarizer.py`) — haiku-powered structured decision log writer with file-locking JSONL append, log rotation, and assembler query interface
-- **F36 PR-1b**: T0 decision log passive writer (`t0_decision_log.py`) — zero-LLM path converting decision_executor events to JSONL records with cursor tracking for idempotent incremental replay
-- **F36 PR-233 fix**: `_rotate_if_needed` holds exclusive lock across full copy+truncate to prevent concurrent-writer data loss; `process_events_file` resets stale cursor when it exceeds file length after source reset
-- **F36 PR-233 re-gate fix**: inode-based cursor invalidation in `process_events_file` detects source-file replacement (same or greater line count) and resets cursor to 0; `.claude/scheduled_tasks.lock` untracked and added to `.gitignore`
-- **F36 PR-233 final fix**: parse-before-advance in `process_events_file` — partial trailing JSON line does not advance cursor (retried next invocation); malformed non-last lines log warning and advance as before
-- **F36 PR-233 round-4 fix**: legacy cursor upgrade in `process_events_file` — cursor written without inode (legacy `save_cursor` format) is upgraded with current inode even when no new events exist, enabling same-length file replacement detection on all subsequent runs
-- **F36 Wave B PR-2**: T0 escalations log (`t0_escalations_log.py`) — passive JSONL writer for escalation records with dual adapter hooks: `decision_executor._handle_escalate()` emits executor-source records; `governance_escalation.transition_escalation()` emits governance-source records with full entity/trigger data; batch-replay CLI with inode-based cursor tracking
-- **F36 Wave B PR-1**: `VNX_ADAPTER_T0=subprocess` cutover flag — `is_headless_t0()` added to receipt processor; T0 snapshot annotated with `adapter/headless` fields when headless; `dispatch_deliver.sh` documents explicit T0 subprocess support; `heartbeat_ack_monitor` docstring updated for T0 coverage
-- **F36 Wave C PR-1**: Shadow mode decision parity harness (`shadow_mode_runner.py`) — runs the headless T0 decision engine in dry-run mode against recent trigger events, compares shadow decisions to the actual decision log, and generates JSONL + markdown parity reports under `{VNX_DATA_DIR}/shadow_parity/`; 64 tests covering all public functions
-- **F36 Wave C PR-239 fix**: Shadow runner pairing correctness — replaced positional event↔decision alignment with `dispatch_id`-keyed lookup (FIFO fallback for non-dispatch events); prevents stale pairings when cursor lag or independent "last N" slices cause index drift; 12 new tests, 76 total
-
-## W0 PR 3 — terminal_state_check.py regression fix (2026-04-22)
-
-- **fix(w0-pr3)**: Restore comprehensive `scripts/lib/terminal_state_check.py` deleted in c90615e; add `tests/test_terminal_state_check_regression.py` to prevent re-deletion (12 tests, 12 passed)
-
-## v0.9.0 — Streaming + Autonomous Loop + A/B Test (2026-04-11)
-
-### Features
-- **F42 PR-1**: Restore EventStore from git history + dashboard archive endpoints for historical dispatch event retrieval
-- **F42 PR-2**: Headless T0 decision loop — decision parser extracted from replay harness, decision executor with 5 decision types and loop guards, trigger wiring for closed autonomous loop
-- **A/B Test**: First systematic comparison of interactive vs headless execution across F40 (moderate) and F42 (complex) — published results in docs/research/
-
-### Research
-- Published headless A/B test results: docs/research/HEADLESS_AB_TEST_RESULTS.md
-- Finding: headless produces functionally equivalent output with ~4% less LOC and ~18% fewer tests
-- Conclusion: execution mode does not determine quality — instruction quality does
-
-## v0.8.0 — Headless Intelligence & Governance Profiles (2026-04-11)
-
-### Features
-- **F39**: Headless T0 benchmark — decision framework with deterministic pre-filter (Level-1: 100%, Level-2: 73-87%, Level-3: 67-78%), context assembler, replay harness, file-based gate locks (#204)
-- **F41**: Intelligence pipeline activation — governance aggregator backfill (722 metrics, 58 SPC control limits), nightly pipeline scheduling via launchd, quality digest with real SPC data (#206)
-- **F41**: 3-layer headless trigger system — file watcher on unified_reports, silence watchdog (10-min stale lease/dispatch detection), optional haiku LLM triage, 366 LOC (#206)
-- **Headless dispatch writer** — programmatic dispatch creation for autonomous T0 orchestration (#207)
-- **Governance profiles** — config-driven review profiles (default/light/minimal) replacing hardcoded business/coding split, configurable via `.vnx/governance_profiles.yaml` (#207)
-
-### Fixes
-- **Subprocess adapter**: Add `--dangerously-skip-permissions` for headless `claude -p` write/edit capability (#207)
-- **Receipt processor**: Replace 10-minute time cutoff with watermark-based processing; update watermark after sweep, not per-file (#206)
-- **CI**: Replace hardcoded absolute paths in launchd plists with install-time placeholders (#206)
-- **Receipt processor**: Handle `on_moved` events for atomic file delivery (#206)
-
-### Docs
-- README: Add headless workers, multi-provider review gates, and mission control dashboard sections (#208)
-
-### Housekeeping
-- System cleanup: blocker fixes, ~25K LOC dead code removed, doc updates (#205)
-- Unified T0 state builder replacing 8+ startup scripts (#200)
-
-## v0.7.x — F38 Dashboard Unified (2026-04-10)
-
-### Features
-- **F38 PR-2**: Dashboard frontend — session history browser (`/operator/reports`), agent selector component, domain filter tabs (Coding/Analytics), Reports sidebar nav link, SWR hooks and types for reports and agents
-
-## v0.6.x — F37 Auto-Report Pipeline (2026-04-08)
-
-### Fixes
-- **fix-2**: Stop hook uses `git rev-parse --show-toplevel` for PROJECT_ROOT — eliminates symlink confusion causing assembler not to be invoked; activate F37 with `VNX_AUTO_REPORT=1` default in `vnx_paths.sh`
-- **fix-3**: Heartbeat monitor skips subprocess-adapter terminals (`VNX_ADAPTER_T*=subprocess`) to prevent ghost `task_started` events and phantom leases; activate haiku classifier with `VNX_HAIKU_CLASSIFY=1` in `vnx_paths.sh`
-
-### Features
-- **F37 PR-5**: Receipt processor integration and end-to-end tests — 39 tests covering auto-generated report validation, tag flow integrity, manual report backward compatibility, subprocess trigger path, and end-to-end fixture through `ReportParser`
-- **F37 PR-5**: Fix `render_markdown()` to include `**Terminal**` field required for receipt processor terminal detection
-
-## v0.6.0 — Headless Pipeline + Post-Chain Refactoring (2026-04-07)
-
-### Features
-- **F31**: Headless worker resilience — timeout protection via `select.select()`, lease heartbeat renewal, health monitoring daemon, LLM failure diagnosis
-- **F32**: T1 as headless backend-developer — pure `claude -p` subprocess execution, no tmux dependency
-- **F33**: Dashboard domain filter — agent selector by name, domain filter tabs (Coding/Content/All)
-- **F34**: Skill context inlining — 3-tier CLAUDE.md resolution for headless workers (`agents/{role}` → `.claude/skills/{role}` → `.claude/terminals/{terminal}`)
-- **F35**: End-to-end headless pipeline certification — 10/10 evidence checks PASS, 268 subprocess/headless tests, production-ready verdict
-
-### Refactoring
-- **F36**: Post-chain code housekeeping — 10 oversized modules split across 3 parallel tracks, all under 800-line/70-function thresholds
-- Decision summarizer (`t0_decision_summarizer.py`) — haiku-powered T0 session summary
-- Orchestrator agent directory (`agents/orchestrator/`) — condensed CLAUDE.md for headless T0
-
-### Architecture (planning, not yet implemented)
-- Headless T0 feasibility study — CONDITIONAL GO verdict
-- State architecture for stateless T0 sessions (6.5% token budget)
-- Framework comparison (7 frameworks: LangGraph, CrewAI, OpenAI SDK, AG2, Mastra, Claude SDK, n8n)
-- Governance & intelligence layer architecture (stream-based reporting, tag pipeline, quality checks)
-- Repository housekeeping — internal docs moved to private folder, contracts reorganized
-
----
-
-All notable changes to VNX are documented here.
-
-## v0.5.2 — Dashboard Agent Stream (Feature 29)
-
-Released: 2026-04-06
-
-Highlights:
-- EventStore NDJSON persistence for agent stream events with atomic append and file locking (PR-1)
-- Open-item auto-close on dispatch completion and SubprocessAdapter integration (PR-1)
-- SSE endpoint `GET /api/agent-stream/{terminal}` for real-time event streaming with `since` reconnection (PR-2)
-- Stream status endpoint `GET /api/agent-stream/status` listing terminals with active event data (PR-2)
-- Dashboard Agent Stream page with terminal selector, color-coded event rendering, auto-scroll, and auto-reconnect (PR-3)
-- Sidebar "Agent Stream" link under Operator section (PR-3)
-
-## v0.5.1 — Terminal Startup And Session Control (Feature 26)
-
-Released: 2026-04-04
-
-Highlights:
-- profile-aware session startup: coding_strict projects get 2x2 tmux layout (4 panes), business_light projects get single terminal
-- session stop with clean tmux teardown via vnx stop
-- dry-run mode returns planned actions without executing side effects
-- dashboard session control buttons (Start, Stop, Attach) on project cards with pending states and outcome display
-- serve_dashboard.py module split: extracted api_operator.py (762 lines) and api_token_stats.py (380 lines), reducing serve_dashboard.py from ~1570 to 438 lines
-- 208 tests across backend (183 Python) and frontend (25 TypeScript) covering session lifecycle, profile detection, layout creation, dry-run safety, and UI interactions
-
-Resolves:
-- OI-373: dashboard_actions.py:start_session refactored with profile-aware direct tmux path
-- OI-374: serve_dashboard.py decomposed into focused modules (438 + 762 + 380 lines)
-
-## v0.5.0 — Governance Runtime Upgrade
-
-Released: 2026-03-30
-
-This release consolidates the largest upgrade to VNX since the initial public preview. Compared to `v0.1.0`, VNX now has a much stronger orchestration core, better recovery and worktree handling, richer intelligence and receipt pipelines, a dashboard attention model, and a significantly more mature governance surface.
-
-Highlights:
-- one-command worktree lifecycle with deterministic gates
-- governance-aware finish flow and stronger pre-merge enforcement
-- hardened dispatcher/tmux delivery and `vnx recover`
-- intelligence export/import and self-learning feedback loop
-- token/model tracking in receipts and analytics
-- dashboard attention model, event timeline, and terminal health views
-- Codex CLI and multi-model orchestration improvements
-- configurable per-terminal models and Opus 4.6 1M default
-- improved public README and documentation surface
-
-Representative merged work since `v0.1.0`:
-- dispatch lifecycle, queue, and receipt delivery hardening
-- context rotation stabilization and lifecycle hooks
-- lease reliability and terminal unlock behavior
-- git worktree support with provenance tracking
-- outbox delivery pattern and stale-pending catchup
-- role-aware intelligence filtering and session analytics
-- intelligence feedback loop and recommendation tracking
-- dashboard attention model and operator visibility improvements
-- metrics/token tracking and model detection fixes
-
-Upgrade note:
-- This is still a pre-1.0 release.
-- The system is substantially beyond early preview quality, but long-running operational proving and broader adoption hardening are still ongoing.
-
-## v0.1.0 — Public Preview
-
-Released: 2026-02-22
+## [0.1.0] - 2026-02-22
 
 Initial public preview release of VNX.

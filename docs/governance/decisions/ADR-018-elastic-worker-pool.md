@@ -225,6 +225,8 @@ Full failure mode register (FM-1 through FM-12) in `claudedocs/wave6-workers-n-a
   sequencing, operator interaction model, failure modes, timeline)
 - ADR-011 — worker isolation (process-per-worker, depth>1 hierarchy)
 - ADR-013 — workers=N as configuration (design-only predecessor; implemented by Wave 6)
+- ADR-015 — Wave 7 LiteLLM Path B (provider-mix per pool uses LiteLLM-routed providers)
+- ADR-016 — Unified event shape (pool receipts use CanonicalEvent across all providers)
 - ADR-017 — Control Centre as agent role (Wave 5 supervisor; extended by PR-6.8)
 - `scripts/lib/runtime_facade.py:49` — `CANONICAL_TERMINALS` constant (replaced by
   `WORKER_REGISTRY` in PR-6.1)
