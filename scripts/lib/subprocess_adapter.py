@@ -354,13 +354,17 @@ class SubprocessAdapter:
                     }})
             return normalized
 
-        # result → result (extract useful fields)
+        # result → result (extract useful fields including token usage when present)
         if event_type == "result":
-            return [{"type": "result", "data": {
+            result_data: dict = {
                 "text": payload.get("result", ""),
                 "subtype": event_subtype,
                 "session_id": payload.get("session_id"),
-            }}]
+            }
+            _usage = payload.get("usage")
+            if isinstance(_usage, dict) and _usage:
+                result_data["usage"] = _usage
+            return [{"type": "result", "data": result_data}]
 
         # rate_limit_event → skip (not dashboard-relevant)
         if event_type == "rate_limit_event":

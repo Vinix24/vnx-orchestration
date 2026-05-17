@@ -25,6 +25,11 @@ from .path_utils import _extract_touched_paths_from_event, _normalize_repo_path
 
 logger = logging.getLogger(__name__)
 
+# Side-channel for token_usage from spawn_claude — keyed by dispatch_id.
+# Written by deliver_via_subprocess after each spawn; read+popped by
+# _dispatch_claude in provider_dispatch.py immediately after deliver_with_recovery.
+_dispatch_token_usage: dict = {}
+
 
 def _build_worker_identity_env(terminal_id: str) -> dict[str, str]:
     """Resolve the orchestrator's identity and project it onto the worker env.
@@ -314,6 +319,9 @@ def deliver_via_subprocess(
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
         )
+
+        if spawn_result.token_usage:
+            _dispatch_token_usage[dispatch_id] = spawn_result.token_usage
 
         # --- completion classification (mirrors _classify_completion) ---
         session_id = spawn_result.session_id

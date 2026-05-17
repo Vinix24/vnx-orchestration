@@ -118,7 +118,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
     - codex      — input_tokens / output_tokens / cache_read_tokens
     - gemini     — input_tokens / output_tokens / cache_read_tokens
     - claude     — input_tokens / output_tokens / cache_read_input_tokens (from result event)
-    - kimi       — same as codex/gemini (input_tokens / output_tokens)
+    - kimi       — input_tokens / output_tokens (same as codex/gemini)
     """
     usage = {"input": 0, "output": 0, "cache_hit": 0}
     raw = getattr(result, "token_usage", None)
