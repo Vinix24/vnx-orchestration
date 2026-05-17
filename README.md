@@ -10,7 +10,7 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-Current release: `v1.0.0-rc1` — architectural stabilization milestone (2026-05-09).
+Current release: `v1.0.0-rc1+wave7` — multi-provider milestone (2026-05-17). Five providers in production with provider-agnostic governance: Claude (Opus/Sonnet/Haiku), Codex (GPT-5.2-codex), Gemini (2.5 Pro/Flash), Kimi CLI (K2.6), LiteLLM bridge (DeepSeek V4 Pro/Flash, GLM-5.1 via OpenRouter).
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
 **API contract is stable from this release forward.** Dispatch envelope, receipt schema, NDJSON ledger format, and 14 ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`) are now backwards-compatibility-honoring. v1.0.0 final ships after Phase 5 reader cutover validation.
@@ -140,7 +140,7 @@ T0 breaks work into scoped tasks (150-300 lines) and routes them to worker termi
 
 ### 2. Execute — Each agent works in isolation
 
-Workers execute tasks using their assigned CLI. VNX supports mixing providers freely — Claude Code, Codex CLI, Gemini CLI, or Kimi CLI. The orchestration layer doesn't care which model runs where.
+Workers execute tasks using their assigned CLI. VNX supports mixing 5 providers freely — Claude Code, Codex CLI, Gemini CLI, Kimi CLI, and LiteLLM bridge (DeepSeek, GLM-5.1, Moonshot). The orchestration layer doesn't care which model runs where. Provider-agnostic receipts capture token usage and cost for all 5.
 
 ### 3. Track — Every decision is recorded
 
@@ -188,6 +188,70 @@ Zero human intervention. Zero lost work. The receipt ledger maintains a complete
 ## What's new since v1.0.0-rc1 (May 2026)
 
 > Strategic replan v1.2 organizes work into 6 waves. v1.0.0-rc1 itself shipped Wave 0 + 0.5 (architectural stabilization + Phase 6 P4 migration). Wave 1 (shadow read cutover) and Wave 5 P0/P1 (smart-context injection) shipped on top of the rc1 baseline and are still pending burn-in before the v1.0.0 final tag. 12 additional PRs (#462–#480) shipped post-rc1 — see [CHANGELOG.md](CHANGELOG.md) "Unreleased" for the full PR list.
+
+### Wave 7 — Multi-Provider via LiteLLM (#515-#520, #531, #536, #545, #550-#552)
+
+Five providers in production with provider-agnostic governance — uniform receipt + unified report schema, intelligence injection equal first-class, end-to-end token + cost tracking.
+
+- **LiteLLM bridge** (#515-#519): DeepSeek V4-Pro/V4-Flash, Moonshot endpoints (Kimi K2.6/K2-0905), OpenRouter (GLM-5.1)
+- **Provider governance unification** (#536): same receipt + unified report shape for claude/codex/gemini/litellm/kimi
+- **Provider behavior contracts** (#520): capabilities + tool-shape + cache-control per provider
+- **Kimi CLI as 5th provider** (#550): OAuth via `kimi login`, no API key required (Anthropic-compatible stream-json output)
+- **Cost-routing policy engine** (#519): feature-flag gated routing-by-cost foundation
+- **Intelligence injection unification** (#551, P0-A): codex/gemini/litellm now receive smart-context bundles identical to claude
+- **Token + cost tracking end-to-end** (#552, P0-B): all 5 providers populate `token_usage` + `cost_usd` in receipts; OI-1489 streaming drainer accepts `usage_complete` event
+- **vnx.env loader** (#531): centralized provider key + model registry
+
+Benchmark results (49 valid dispatches, 7 task-classes, `scripts/benchmark/`):
+
+| Model | Quality | Cost/dispatch | Speed |
+|-------|---------|---------------|-------|
+| Opus 4.6 | 8.2/10 | $0.119 | baseline |
+| Kimi K2.6 | 8.1/10 | $0.0056 (21×) | 215s |
+| GLM-5.1 | 8.0/10 | $0.0049 (24×) | 100s |
+| Sonnet 4.6 | 7.5/10 | $0.024 (5×) | baseline |
+| DeepSeek V4-Flash | 7.3/10 | $0.0006 (198×) | fastest |
+
+Full routing recommendations: `scripts/lib/providers/routing_recommendations.yaml`.
+
+### Wave 6 — Workers=N Elastic Pool (#534-#544, #546)
+
+Configurable worker-pool with queue-aware + cost-aware scaling policies, dead-worker reap, and `vnx pool` CLI.
+
+- **PoolManager core** (#539): decision engine + state repo + manager (schema v14)
+- **Pluggable scaling policies** (#540): `queue_depth_v1` + `cost_aware_v1`
+- **Provider-mix per pool** (#541): lowest-share-first allocation
+- **Health monitoring + dead-worker reap** (#542): tick cycle = reap → decide → execute
+- **`vnx pool` CLI** (#543): `status` / `scale` / `config` / `reap` subcommands
+- **Control Centre pool integration** (#544): cross-project pool view + supervisor
+- **ADR-018** (#534): elastic worker pool design freeze
+- **`vnx_workers.yaml`** (#535): worker registry per ADR-013
+
+### Wave 5 — Control Centre + Multi-Project (#521-#532)
+
+Single supervisor session managing N per-project T0 orchestrators with cross-project receipt + dispatch visibility, per-project state isolation, and hybrid dispatch routing.
+
+- **Multi-project state aggregator** (#522): write-pad foundation
+- **Per-project T0 lifecycle** (#525): spawn / heartbeat / kill / reap
+- **Multi-tenant lease isolation** (#523): schema v12 with composite UNIQUE rebuilds
+- **Cross-project intelligence aggregator** (#524): global + per-project facets
+- **Control Centre CLI shell skill** (#528): operator commands
+- **Hybrid dispatch routing** (#530): receipt-tail lifecycle tracker
+- **Operator demo runbook + docs** (#532): `docs/operations/CONTROL_CENTRE.md`
+- **ADR-017** (#521): Control Centre product-shape architecture
+
+### Wave 4.6 — Provider Dispatch Generalization (#488, #490, #510-#513)
+
+Provider-agnostic dispatch entry-point with byte-identical Claude path. Extracted per-provider spawn handlers.
+
+- **`provider_dispatch.py`** (#488): `--provider {claude,codex,gemini,litellm:<model>}` entry-point
+- **`claude_spawn`** (#490): byte-identical extract from `subprocess_dispatch`
+- **`codex_spawn`** (#511) / **`gemini_spawn`** (#510) / **`litellm_spawn`** (#512): per-provider handlers
+- **CanonicalEvent** (#513): unified event shape via `EventStore` enforcement
+
+### Refactoring — silent-except hardening (OI-1437, ~120 sites)
+
+14 PRs (#491-#500, #508, #509) converted bare `except:` and overly broad `except Exception:` patterns to specific exception types with `logger.warning` instrumentation across hot files. Net effect: previously-silent failures now surface in logs without breaking the catch contract.
 
 ### Wave 4.5 — Provider parity (#471, #472, #477, #479)
 `PromptAssembler` now has provider-agnostic methods for Claude, Codex, Gemini, and LiteLLM. Codex + Gemini adapters use it. Gate reviewer prompts use `gh pr diff` as the authoritative source (new `reviewer.md` role prompt). Intelligence injection is now per-provider with an audit-safe empty-`dispatch_id` guard.
@@ -350,7 +414,7 @@ VNX continuously mines its own NDJSON ledger + dispatch metadata to learn what w
 2. **Three-state-aware context bundle** — `IntelligenceSelector.select()` now combines intelligence_items, prior-round review findings (Wave 5 P0), ADR governance text by file-touch (Wave 5 P1), and on-roadmap code anchors / schemas / operator memory (Wave 5 P2-P4 in flight) into a bounded per-dispatch context pack.
 3. **Tuning suggestions** — `vnx suggest review` surfaces auto-generated proposals (MEMORY edits, rule/skill changes); nothing auto-applies. `vnx suggest accept <ids>` then `vnx suggest apply`.
 
-Measured impact: **88.9% dispatch success WITH intelligence vs 58.3% WITHOUT** over 658 outcome-tagged dispatches (+30 percentage-point lift). PR-cascade prevention validated against PR #432's 9-round chain as canonical proof-of-concept.
+Measured impact: **88.9% dispatch success WITH intelligence vs 58.3% WITHOUT** over 658 outcome-tagged dispatches (+30 percentage-point lift). PR-cascade prevention validated against PR #432's 9-round chain as canonical proof-of-concept. Wave 7 (#551) extends this to all 5 providers (codex/gemini/litellm/kimi/claude equal first-class).
 
 ```bash
 vnx suggest review         # See what's proposed
@@ -428,7 +492,7 @@ See [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.md) and [VNX vs Mul
 | **Quality gates** | Deterministic, non-LLM | None built-in | Framework-dependent |
 | **Human approval** | Mandatory on every dispatch | Per-tool approval | Configurable but not default |
 | **Context rotation** | Automatic handover | Manual /clear | Not typically handled |
-| **LLM-agnostic** | Yes (Claude, Codex, Gemini, Kimi) | Claude only | Varies by framework |
+| **LLM-agnostic** | Yes — 5 providers (Claude, Codex, Gemini, Kimi CLI, LiteLLM bridge for DeepSeek/GLM/Moonshot) | Claude only | Varies by framework |
 | **Setup complexity** | `git clone` + `vnx init` | `npm install` | pip install + code integration |
 | **Automated multi-provider review** | Built-in (Codex + Gemini triple gate) | None built-in | Not typically included |
 
@@ -436,41 +500,41 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 ## Roadmap
 
-Active development. Priorities shift based on real usage patterns.
+Active development. Priorities shift based on real usage patterns. Full detail in [ROADMAP.md](./ROADMAP.md); recent shipping history in [CHANGELOG.md](./CHANGELOG.md).
 
-### Recently landed (Wave 0 + 0.5 + Wave 1 + Wave 5 P0/P1, May 2026)
+### Recently landed (Wave 5, 6, 7 — May 2026)
 
-Strategic replan v1.2 reframed development around 6 waves. Shipped between v1.0.0-rc1 cut and now:
+- **Wave 5** — Control Centre + multi-project supervision (single supervisor session managing N per-project T0 orchestrators, schema v12 multi-tenant lease isolation, cross-project intelligence aggregator)
+- **Wave 6** — Workers=N elastic pool with `vnx pool` CLI, queue-aware + cost-aware scaling policies, dead-worker reap, schema v14
+- **Wave 7** — Multi-provider via LiteLLM (DeepSeek/Kimi/GLM), provider governance unification (uniform receipt + report shape), Kimi CLI as 5th provider with OAuth, intelligence injection + token/cost tracking equal first-class across all 5 providers
+- **Benchmark infrastructure** — reproducible 9-model × 7-task suite + routing recommendations published
 
-- **Wave 0** — 14 ADRs locked (003-014), CI gate `ADR-003: No Anthropic SDK Imports`, 49 strategic docs moved to private `claudedocs/` (5-tier OI-1373 cleanup), v1.0.0-rc1 release notes (#439–#449)
-- **Wave 0.5** — Phase 6 P4 data migration to central VNX state proven on real production data (855k code_snippets, 505 dispatches, 0 verifier discrepancies); migration 0016 schema-first per ADR-009 (#432, #446)
-- **Wave 1 — shadow-mode read cutover (#450–#454)** —
-  - W1.1 `shadow_verifier.py` independent comparator with 6 hard divergence-detection metrics (zero-tolerance for scoping/blocking findings)
-  - W1.2 `shadow_logger.py` NDJSON writer + report CLI + flock-rotation
-  - W1.3 T0 state-builder shadow wiring (4 read sites)
-  - W1.4 `IntelligenceSelector` + `DispatchRegister` shadow wiring (5 read sites)
-  - W1.5 Dashboard shadow wiring + canary divergence test pack (14+ fixtures) + operator-readable rollback docs
-- **Wave 5 P0 — prior-round-findings injection (#455)** — when a dispatch is round N+1 of a multi-round PR, the worker auto-receives blocking + advisory findings from prior rounds. Validated against PR #432's 9-round cascade as the canonical proof-of-concept.
-- **Wave 5 P1 — ADR injection by file-touch (#456)** — dispatches whose `dispatch_paths` overlap with files referenced in ADRs auto-receive the relevant ADR sections as governance context.
+### Wave 8 — Smart Routing + Schema Enforcement + Self-Learning (next, in design)
 
-### Next
+Five layers operator-approved 2026-05-17:
 
-Strategic replan v1.2 sequence:
+1. **Routing decision** — `smart_router.py` with task-class-aware model selection
+2. **Uniform reports** — YAML frontmatter enforced via shell-script guardrails (model-agnostic)
+3. **Guardrails** — hard provider constraints in code + CI (`HardConstraintViolation` on policy breach)
+4. **Analysis cadence** — weekly drift sample + monthly full benchmark + triggered re-bench
+5. **Self-learning loop** — `route_decisions_watcher.py` auto-adjusts `routing_recommendations.yaml` on production failure patterns
 
-- **Wave 1 cutover validation (in progress)** — pilot burn-in on mc + sales projects with `VNX_USE_CENTRAL_DB=shadow`. Required: 7 consecutive days clean on all 6 hard metrics before flipping `shadow → 1` per project per table.
-- **Wave 5 P2/P3/P4 (in progress)** — file:line code-anchor injection, operator-memory injection, schema-introspection injection (extends the +30pp smart-context lift across the remaining context bundle classes).
-- **Wave 2 — Phase 6 cleanup** — retire shadow-mode flag once all consumers cut over, remove dual-write code paths, rotate-and-archive per-project DBs.
-- **Wave 5.5 (conditional)** — cryptographic audit-integrity layer (signed checkpoints, hash-chained NDJSON) — gating decision pending operator review.
-- **Wave 6** — workers=N tactical: subagent-pilot 2-gate split per ADR-011 v2 (Gate 1 provenance/redaction, Gate 2 performance baseline median ≥30% wall-clock saved).
-- **Wave 7+** — option space: multi-operator/federation, performance/scale, integration breadth (LiteLLM bridge to non-Claude providers), domain expansion. Non-binding; refresh post-Wave 6.
+Estimated 3 weeks, 16 PRs, ~3490 LOC.
 
 ### Known gaps / deferred
 
-- **Headless context rotation** (OI-1073) — subprocess workers currently use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
+- **Headless context rotation** (OI-1073) — subprocess workers use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
 - **MCP server** — expose VNX state to external Claude sessions; not yet built.
-- **v1.0.0 final tag** — operator decision after Wave 1 cutover validates on pilot projects. Currently `v1.0.0-rc1` is the public release candidate.
+- **v1.0.0 final tag** — operator decision after Wave 8 ships and centralization burn-in validates on mission-control + sales-copilot + SEOcrawler.
+- **Path D (Claude-harness for non-Claude models)** — blocked pending telemetry-leak resolution (`claude` v2.1.136 hits `api.anthropic.com` 8× even with `BASE_URL` redirect, verified 2026-05-10).
 
-See [CHANGELOG.md](CHANGELOG.md) for what shipped recently.
+### Future horizons (post-1.0, non-binding)
+
+- Business-task benchmark suite (B01-B08)
+- Multi-operator federation with isolated state
+- 100+ concurrent dispatch scale tuning
+- Direct integrations with more Anthropic-compatible endpoints
+- Domain expansion (business agent skills beyond coding)
 
 ## Architecture & Docs
 
