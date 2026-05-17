@@ -281,7 +281,9 @@ class TestResolveTokenUsageAndCost:
 
         assert token_usage == {"input": 2000, "output": 900, "cache_hit": 150}
         assert cost_usd == 0.05
-        assert "test-side-001" not in _dispatch_token_usage
+        # .get() leaves entry for _dispatch_claude governance receipt; clean up
+        assert "test-side-001" in _dispatch_token_usage
+        _dispatch_token_usage.pop("test-side-001", None)
 
     def test_falls_back_to_sub_result_token_usage(self):
         from subprocess_dispatch_internals.recovery import _resolve_token_usage_and_cost

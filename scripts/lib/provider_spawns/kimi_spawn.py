@@ -391,7 +391,11 @@ def spawn_kimi(
     cwd_str = str(cwd) if cwd is not None else None
 
     cmd = _build_kimi_cmd(prompt, model, cwd)
-    logger.info("kimi_spawn: launching %s", " ".join(cmd[:6]))
+    logger.info(
+        "kimi_spawn: launching kimi -p <%d chars> -m %s",
+        len(prompt),
+        cmd[cmd.index("-m") + 1] if "-m" in cmd else "default",
+    )
 
     proc, err_result = _start_kimi_subprocess(cmd, env, cwd_str)
     if err_result is not None:
