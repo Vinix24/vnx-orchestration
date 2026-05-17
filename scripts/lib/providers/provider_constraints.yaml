@@ -1,0 +1,127 @@
+# VNX Smart Routing — Provider Constraints SSOT
+#
+# Single source of truth for the hard guard-rails around which provider may
+# serve which role/lane. Loaded by:
+#   - dispatcher pre-flight check (forbid_route / require_route)
+#   - routing engine lane validation (routing_policy.yaml selection)
+#   - CI grep (forbid_import patterns)
+#   - audit pipeline (severity tagging on receipts)
+#
+# Schema (per entry under `constraints`):
+#   id               kebab-case identifier, stable across versions
+#   rule             forbid_route | require_route | forbid_import
+#   forbidden_route  optional, used with rule=forbid_route
+#                    keys: provider, model (str|list), role (str|list),
+#                          task_class (str|list), via (str)
+#   required_route   optional, used with rule=require_route
+#                    keys: provider, model, role (str|list)
+#   forbidden_import optional, used with rule=forbid_import
+#                    keys: patterns (list of substrings or simple regex)
+#   reason           human-readable justification (cite memory ref or ADR)
+#   enforcement      code_raise | code_warn | ci_grep
+#   audit_severity   blocking | warn | info
+#   override_allowed bool; when true operator may bypass via env flag
+#                    VNX_OVERRIDE_<UPPERCASED_ID_WITH_UNDERSCORES>=1
+
+version: 1
+
+constraints:
+  - id: kimi-via-cli-only
+    rule: forbid_route
+    forbidden_route:
+      provider: moonshot
+      via: api
+    reason: >-
+      Kimi K2/K2.6 routing in Wave 7 PR-7.7 uses the kimi CLI OAuth lane
+      (`kimi login`) to avoid API-key management and rate-limit volatility.
+      Direct Moonshot API routing competes with the CLI lane and breaks
+      cost tracking attribution.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: false
+
+  - id: t0-opus-only
+    rule: require_route
+    required_route:
+      role: T0
+      model: claude-opus-4-7
+    reason: >-
+      T0 orchestrator performs gate evaluation across the full NDJSON ledger
+      under multi-PR concurrency. Sonnet-grade reasoning regresses on missed
+      gates; downgrade is only acceptable with explicit operator approval.
+    enforcement: code_warn
+    audit_severity: warn
+    override_allowed: true
+
+  - id: workers-sonnet-pinned
+    rule: require_route
+    required_route:
+      role: [T1, T2, T3]
+      model: claude-sonnet-4-6
+    reason: >-
+      Worker terminals standardize on Sonnet 4.6 for cost-quality balance.
+      Haiku regresses on multi-file edits; Opus is reserved for T0 so the
+      monthly budget stays predictable.
+    enforcement: code_warn
+    audit_severity: warn
+    override_allowed: true
+
+  - id: no-anthropic-sdk
+    rule: forbid_import
+    forbidden_import:
+      patterns:
+        - "import anthropic"
+        - "from anthropic import"
+        - "anthropic.Anthropic("
+        - "@anthropic-ai/sdk"
+    reason: >-
+      VNX is a CLI-driven runtime. Importing the Anthropic SDK with OAuth
+      credentials risks an Anthropic account ban (opencode/openclaw
+      precedent — see feedback_avoid_claude_sdk_use_cli_oauth.md). All
+      Claude work flows through the `claude` CLI via subprocess.
+    enforcement: ci_grep
+    audit_severity: blocking
+    override_allowed: false
+
+  - id: zai-via-openrouter-only
+    rule: forbid_route
+    forbidden_route:
+      provider: zai
+      via: direct
+    reason: >-
+      Native Zhipu integration is deferred. Wave 7 PR-7.3 routes GLM-5.1
+      through OpenRouter; direct Zhipu API calls bypass the cost-tracking
+      pipeline and the fallback chain configured in routing_policy.yaml.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: false
+
+  - id: deprecated-glm-models
+    rule: forbid_route
+    forbidden_route:
+      provider: zai
+      model: [glm-4.5, glm-4.6]
+    reason: >-
+      GLM-4.5 and GLM-4.6 are legacy and superseded by GLM-5.1 (verified
+      2026-05-10, project_kimi_glm_integration_paths.md). The provider
+      will retire the legacy snapshots; new dispatches must use the
+      glm-5.1-default model key.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: false
+
+  - id: deepseek-path-d-blocked
+    rule: forbid_route
+    forbidden_route:
+      provider: deepseek
+      via: claude_harness
+    reason: >-
+      Path D (Claude binary with ANTHROPIC_BASE_URL redirect) blocked on
+      2026-05-10 — telemetry-leak verified, `claude` v2.1.136 still hits
+      api.anthropic.com 8x per session despite redirect
+      (project_deepseek_v4_pro_paths.md). Tier C network-namespace sandbox
+      is mandatory before Path D can be unblocked. Use Path B (LiteLLM
+      bridge) until that work lands.
+    enforcement: code_raise
+    audit_severity: blocking
+    override_allowed: false
