@@ -119,8 +119,12 @@ def _resolve_active_dispatch_file(dispatch_id: str):
 def _resolve_token_usage_and_cost(
     dispatch_id: str, sub_result, model: "str | None",
 ) -> tuple[dict | None, float | None]:
-    """Pop token_usage from the delivery side-channel, normalize, and compute cost."""
-    raw_usage = _dispatch_token_usage.pop(dispatch_id, None)
+    """Read token_usage from the delivery side-channel, normalize, and compute cost.
+
+    Uses .get() (not .pop()) so the entry remains available for the governance
+    receipt emitted by _dispatch_claude in provider_dispatch.py.
+    """
+    raw_usage = _dispatch_token_usage.get(dispatch_id, None)
     if raw_usage is None:
         raw_usage = getattr(sub_result, "token_usage", None) if sub_result else None
     if not isinstance(raw_usage, dict) or not raw_usage:
