@@ -276,6 +276,11 @@ def deliver_via_subprocess(
     resume_session = _load_resume_session(terminal_id)
     extra_env = _build_worker_identity_env(terminal_id)
 
+    # PR-6.5e: per-worker state directory for N-worker isolation.
+    from vnx_paths import resolve_worker_state_dir
+    worker_state_dir = resolve_worker_state_dir(terminal_id)
+    extra_env["VNX_WORKER_STATE_DIR"] = str(worker_state_dir)
+
     heartbeat_stop, heartbeat_thread = _start_heartbeat(
         terminal_id, dispatch_id, lease_generation, heartbeat_interval,
     )
