@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .delivery_runtime import _SubprocessResult, _heartbeat_loop
 from .path_utils import _extract_touched_paths_from_event, _normalize_repo_path
+from .runtime_overrides import apply_runtime_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -59,18 +60,6 @@ def _build_worker_identity_env(terminal_id: str) -> dict[str, str]:
             env[ENV_AGENT] = agent_label
     return env
 
-
-def _apply_runtime_overrides(chunk_timeout: float, total_deadline: float) -> tuple[float, float]:
-    """Honor VNX_CHUNK_TIMEOUT / VNX_TOTAL_DEADLINE env overrides."""
-    try:
-        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
-    except (KeyError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
-    except (KeyError, ValueError):
-        pass
-    return chunk_timeout, total_deadline
 
 
 def _apply_handover_continuation(
@@ -266,7 +255,7 @@ def deliver_via_subprocess(
     import subprocess_dispatch as _sd
     from provider_spawns.claude_spawn import spawn_claude
 
-    chunk_timeout, total_deadline = _apply_runtime_overrides(chunk_timeout, total_deadline)
+    chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
 
     instruction, pending_handover, agent_cwd, manifest_path = _prepare_dispatch(
         terminal_id, instruction, model, dispatch_id, role, repo_map, commit_hash_before,
