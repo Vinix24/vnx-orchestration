@@ -63,6 +63,48 @@ _SUB_PROVIDER_DEFAULT_ALIAS: dict = {
 }
 
 
+def _resolve_state_dir() -> Path:
+    """Resolve VNX state directory from environment."""
+    env = os.environ.get("VNX_STATE_DIR", "")
+    if env:
+        return Path(env)
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    if data_dir:
+        return Path(data_dir) / "state"
+    return Path(".vnx-data") / "state"
+
+
+def _resolve_dispatch_paths(raw: str) -> "list[str] | None":
+    """Parse comma-separated dispatch-paths arg into a list, or None when empty."""
+    if not (raw or "").strip():
+        return None
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _enrich_instruction(args: argparse.Namespace) -> str:
+    """Prepend intelligence context to instruction for non-Claude provider paths.
+
+    Claude dispatches are enriched inside subprocess_dispatch.deliver_with_recovery
+    via skill_injection._build_intelligence_section; this function handles the
+    remaining providers (codex, gemini, litellm, kimi).
+
+    Returns the original instruction unchanged on any failure (best-effort).
+    """
+    try:
+        from intelligence_injection import build_intelligence_section  # noqa: PLC0415
+    except ImportError as exc:
+        logger.warning("_enrich_instruction: intelligence_injection unavailable (%s)", exc)
+        return args.instruction
+    return build_intelligence_section(
+        instruction=args.instruction,
+        dispatch_id=args.dispatch_id,
+        role=getattr(args, "role", None),
+        state_dir=_resolve_state_dir(),
+        pr_id=getattr(args, "pr_id", None),
+        dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+    )
+
+
 def _extract_response_text(result: Any) -> str:
     """Return completion_text from any spawn result, or empty string."""
     return (getattr(result, "completion_text", None) or "")
@@ -75,7 +117,8 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
     - litellm:*  — prompt_tokens / completion_tokens (OpenAI format from _litellm_runner.py)
     - codex      — input_tokens / output_tokens / cache_read_tokens
     - gemini     — input_tokens / output_tokens / cache_read_tokens
-    - claude     — token_usage is None (subprocess_dispatch does not yet return usage)
+    - claude     — input_tokens / output_tokens / cache_read_input_tokens (from result event)
+    - kimi       — same as codex/gemini (input_tokens / output_tokens)
     """
     usage = {"input": 0, "output": 0, "cache_hit": 0}
     raw = getattr(result, "token_usage", None)
@@ -91,7 +134,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         details = raw.get("prompt_tokens_details") or {}
         cache = int(details.get("cached_tokens", 0) or 0) or int(raw.get("prompt_cache_hit_tokens", 0) or 0)
         usage["cache_hit"] = cache
-    elif provider in ("codex", "gemini"):
+    elif provider in ("codex", "gemini", "kimi"):
         usage["input"] = int(raw.get("input_tokens", 0) or 0)
         usage["output"] = int(raw.get("output_tokens", 0) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
@@ -111,19 +154,47 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
     return usage
 
 
+# Maps VNX provider literals to their wave7_models.yaml registry keys.
+_PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
+    "claude": "anthropic",
+    "codex": "openai",
+    "gemini": "google",
+    "kimi": "kimi",
+}
+
+
 def _load_pricing_from_registry(provider: str, model: str) -> Optional[Dict[str, float]]:
-    """Load {input, output} pricing per MTok from wave7_models.yaml. Returns None on miss."""
-    sub = provider.split(":", 1)[1] if provider.startswith("litellm:") and ":" in provider else ""
-    if not sub:
+    """Load {input, output} pricing per MTok from wave7_models.yaml. Returns None on miss.
+
+    Handles direct providers (claude, codex, gemini, kimi) via _PROVIDER_TO_REGISTRY_KEY,
+    and litellm sub-providers (litellm:deepseek, litellm:moonshot, litellm:zai) by
+    extracting the sub-provider from the colon-delimited string.
+    """
+    registry_key = _PROVIDER_TO_REGISTRY_KEY.get(provider)
+    if registry_key is None and provider.startswith("litellm:") and ":" in provider:
+        registry_key = provider.split(":", 1)[1].split(":", 1)[0]
+    if not registry_key:
+        logger.warning(
+            "_load_pricing_from_registry: unknown provider=%s — no pricing available",
+            provider,
+        )
         return None
     try:
         from providers import provider_registry as _reg
         registry = _reg.load()
-        cfg = registry.get(sub)
+        cfg = registry.get(registry_key)
         if cfg is None or not cfg.models:
+            logger.warning(
+                "_load_pricing_from_registry: no models for provider=%s registry_key=%s",
+                provider, registry_key,
+            )
             return None
         model_key = model.split("/")[-1] if "/" in model else model
-        entry = cfg.models.get(model_key) or next(iter(cfg.models.values()), None)
+        entry = (
+            cfg.models.get(model_key)
+            or next((v for k, v in cfg.models.items() if k in model_key or model_key in k), None)
+            or next(iter(cfg.models.values()), None)
+        )
         if entry is None:
             return None
         return {
@@ -273,9 +344,17 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     )
     end_time = datetime.now(timezone.utc)
 
+    # Read token_usage side-channel written by deliver_via_subprocess → spawn_claude.
+    _claude_token_usage = None
+    try:
+        from subprocess_dispatch_internals.delivery import _dispatch_token_usage as _tu_cache
+        _claude_token_usage = _tu_cache.pop(args.dispatch_id, None)
+    except Exception as _tu_exc:
+        logger.debug("_dispatch_claude: token_usage side-channel read failed: %s", _tu_exc)
+
     class _ClaudeResult:
         completion_text = ""
-        token_usage = None
+        token_usage = _claude_token_usage
 
     status = "success" if ok else "failure"
     _emit_governance(args, "claude", args.model, _ClaudeResult(), start_time, end_time, status)
@@ -302,9 +381,10 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         )
 
     model = os.environ.get("VNX_CODEX_MODEL", "")
+    enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
     result = spawn_codex(
-        prompt=args.instruction,
+        prompt=enriched_instruction,
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
@@ -473,9 +553,10 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             lane_key,
         )
 
+    enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
     result = spawn_litellm(
-        prompt=args.instruction,
+        prompt=enriched_instruction,
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,
@@ -518,9 +599,10 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     event_store = EventStore()
+    enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
     result = spawn_gemini(
-        prompt=args.instruction,
+        prompt=enriched_instruction,
         model=model,
         dispatch_id=args.dispatch_id,
         terminal_id=args.terminal_id,

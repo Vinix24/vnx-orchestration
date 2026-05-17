@@ -74,92 +74,41 @@ def _build_intelligence_section(
 ) -> str:
     """Return formatted intelligence items as markdown, or empty string (best-effort).
 
-    Calls IntelligenceSelector to gather antipatterns, success patterns, and
-    recent comparable dispatches from quality_intelligence.db.  After selecting,
-    emits the coordination event and records the injection (intelligence_injections
-    + pattern_usage + dispatch_pattern_offered) so the post-dispatch confidence
-    feedback loop has dispatch-scoped rows to update.  Any import or DB failure
-    is caught and logged — dispatch proceeds without intelligence.
+    Delegates to intelligence_injection.fetch_intelligence_section so the same
+    logic serves all provider paths (codex/gemini/litellm/kimi) via
+    provider_dispatch.py.
+
+    _default_state_dir is fetched via subprocess_dispatch namespace so test
+    monkeypatches at the facade honour this call site unchanged.
 
     dispatch_paths, instruction_text, pr_id are forwarded to selector.select() so
     W5 item classes (adr_relevant, code_anchor, operator_memory, schema_section,
     prior_round_finding) can fire in production dispatches.
     """
     try:
-        from intelligence_selector import IntelligenceSelector  # noqa: PLC0415
-        # Look up _default_state_dir via subprocess_dispatch namespace so test
-        # monkeypatches at the facade ("subprocess_dispatch._default_state_dir")
-        # are honoured when this helper is called directly by tests.
-        import subprocess_dispatch as _sd
-        state_dir = _sd._default_state_dir()
-        quality_db_path = state_dir / "quality_intelligence.db"
-        selector = IntelligenceSelector(
-            quality_db_path=quality_db_path,
-            coord_db_state_dir=state_dir,
-        )
-        try:
-            result = selector.select(
-                dispatch_id=dispatch_id,
-                injection_point="dispatch_create",
-                skill_name=role or "",
-                dispatch_paths=dispatch_paths or [],
-                instruction_text=instruction_text or "",
-                pr_id=pr_id,
-            )
-            try:
-                selector.emit_event(result, coord_state_dir=state_dir)
-            except Exception as exc:
-                logger.debug("emit_event failed for %s: %s", dispatch_id, exc)
-            try:
-                selector.record_injection(result, coord_state_dir=state_dir)
-            except Exception as exc:
-                logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
-            # Phase 1.5 PR-2 / OI-1315 / OI-1321: stamp source_dispatch_ids
-            # at the record_injection call site even when _record_pattern_usage
-            # is partially or fully skipped.  Without this, FRESHLY injected
-            # patterns can't be matched back to their source dispatch on
-            # receipt arrival (intelligence_persist.update_confidence_from_outcome
-            # filters by ``source_dispatch_ids LIKE '%dispatch_id%'``).  The
-            # call is idempotent and resilient — each item is wrapped
-            # individually so partial failure cannot lose subsequent stamps.
-            try:
-                selector.stamp_source_dispatch_ids(result)
-            except Exception as exc:
-                logger.debug(
-                    "stamp_source_dispatch_ids failed for %s: %s", dispatch_id, exc
-                )
-        finally:
-            selector.close()
-        if not result.items:
-            return ""
-        return _format_intelligence_items(result.items)
-    except Exception as exc:
+        from intelligence_injection import fetch_intelligence_section  # noqa: PLC0415
+    except ImportError as exc:
         logger.warning("intelligence injection failed (%s); proceeding without", exc)
         return ""
+    # Look up _default_state_dir via subprocess_dispatch namespace so test
+    # monkeypatches at the facade ("subprocess_dispatch._default_state_dir")
+    # are honoured when this helper is called directly by tests.
+    import subprocess_dispatch as _sd
+    state_dir = _sd._default_state_dir()
+    return fetch_intelligence_section(
+        dispatch_id=dispatch_id,
+        role=role,
+        state_dir=state_dir,
+        pr_id=pr_id,
+        dispatch_paths=dispatch_paths,
+        instruction_text=instruction_text,
+    )
 
 
 def _format_intelligence_items(items: list) -> str:
     """Group items by class and render as markdown sections."""
-    by_class: dict[str, list] = {}
-    for item in items:
-        by_class.setdefault(item.item_class, []).append(item)
-    parts: list[str] = []
-    if "failure_prevention" in by_class:
-        parts.append("### Antipatterns to avoid")
-        for item in by_class["failure_prevention"]:
-            parts.append(f"- **{item.title}**: {item.content}")
-        parts.append("")
-    if "proven_pattern" in by_class:
-        parts.append("### Proven success patterns")
-        for item in by_class["proven_pattern"]:
-            parts.append(f"- **{item.title}**: {item.content}")
-        parts.append("")
-    if "recent_comparable" in by_class:
-        parts.append("### Tag warnings")
-        for item in by_class["recent_comparable"]:
-            parts.append(f"- **{item.title}**: {item.content}")
-        parts.append("")
-    return "\n".join(parts)
+    from intelligence_injection import format_intelligence_items  # noqa: PLC0415
+    return format_intelligence_items(items)
 
 
 def _inject_skill_context(
