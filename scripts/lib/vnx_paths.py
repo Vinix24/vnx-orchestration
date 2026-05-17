@@ -226,6 +226,29 @@ def resolve_state_dir(project_root: "Path | None" = None) -> Path:
     return Path(paths["VNX_STATE_DIR"])
 
 
+def resolve_worker_state_dir(terminal_id: str, vnx_data_dir: "Path | None" = None) -> Path:
+    """Return ``.vnx-data/workers/<terminal_id>/`` — per-worker isolated state directory.
+
+    Creates the directory on demand (exist_ok=True). When vnx_data_dir is None,
+    derives it from resolve_paths()["VNX_DATA_DIR"].
+
+    Raises:
+        ValueError: if terminal_id is empty or contains path-traversal characters.
+    """
+    if not terminal_id or not terminal_id.strip():
+        raise ValueError("terminal_id must be non-empty")
+    clean = terminal_id.strip()
+    if "/" in clean or "\\" in clean or ".." in clean:
+        raise ValueError(
+            f"terminal_id must not contain path separators or '..': {terminal_id!r}"
+        )
+    if vnx_data_dir is None:
+        vnx_data_dir = Path(resolve_paths()["VNX_DATA_DIR"])
+    worker_dir = vnx_data_dir / "workers" / clean
+    os.makedirs(worker_dir, exist_ok=True)
+    return worker_dir.resolve()
+
+
 def resolve_central_data_dir(project_id: str) -> Path:
     """Return ``~/.vnx-data/<project_id>/`` — the central per-project data directory.
 
