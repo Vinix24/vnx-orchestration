@@ -10,6 +10,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - refactor(dispatch): extract `_apply_runtime_overrides` from delivery.py + recovery.py to shared `runtime_overrides.py` module (Kimi audit duplication finding). Eliminates copy-paste drift.
 
 ### Added
+- feat(intelligence): A/B random-skip framework (V5 per intelligence-injection-quality-research). Adds `ab_arm` column to intelligence_injections + 10% control-arm skip via `VNX_INTEL_AB_TEST=1` env flag + weekly lift report (`scripts/intelligence_ab_report.py`). Enables verifiable +30pp lift measurement. Audit BLOCKER #2 closes-the-loop PR-IH-3.
 - feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
 - feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
 - feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
