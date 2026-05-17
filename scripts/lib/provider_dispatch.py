@@ -423,8 +423,8 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     # available for this governance-receipt path; we .pop() here to clean up.
     _claude_token_usage = None
     try:
-        from subprocess_dispatch_internals.delivery import _dispatch_token_usage as _tu_cache
-        _claude_token_usage = _tu_cache.pop(args.dispatch_id, None)
+        from subprocess_dispatch_internals.delivery import clear_token_usage as _clear_tu
+        _claude_token_usage = _clear_tu(args.dispatch_id)
     except Exception as _tu_exc:
         logger.debug("_dispatch_claude: token_usage side-channel read failed: %s", _tu_exc)
 

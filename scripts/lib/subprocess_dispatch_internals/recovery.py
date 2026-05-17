@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from otel_exporter import emit_dispatch_completion
-from subprocess_dispatch_internals.delivery import _dispatch_token_usage
+from subprocess_dispatch_internals.delivery import get_token_usage as _get_token_usage
 from subprocess_dispatch_internals.runtime_overrides import apply_runtime_overrides
 from provider_dispatch import _extract_token_usage, _compute_cost
 
@@ -112,7 +112,7 @@ def _resolve_token_usage_and_cost(
     Uses .get() (not .pop()) so the entry remains available for the governance
     receipt emitted by _dispatch_claude in provider_dispatch.py.
     """
-    raw_usage = _dispatch_token_usage.get(dispatch_id, None)
+    raw_usage = _get_token_usage(dispatch_id)
     if raw_usage is None:
         raw_usage = getattr(sub_result, "token_usage", None) if sub_result else None
     if not isinstance(raw_usage, dict) or not raw_usage:
