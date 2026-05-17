@@ -58,3 +58,23 @@ providers:
         deprecated_models:  # explicit guard against legacy
           - "glm-4.5"
           - "glm-4.6"
+  kimi_cli:
+    enabled: true
+    api_key_env: ""  # no API key; OAuth via `kimi login`
+    models:
+      kimi-default:
+        litellm_name: ""  # kimi CLI direct; not via LiteLLM
+        cost_input_per_mtok: 0.60   # estimate based on moonshot K2 pricing
+        cost_output_per_mtok: 2.50
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+      kimi-k2-6:
+        litellm_name: ""  # kimi CLI direct; not via LiteLLM
+        cost_input_per_mtok: 0.95
+        cost_output_per_mtok: 4.00
+        max_tokens: 8192
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium"]
