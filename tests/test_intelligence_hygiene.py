@@ -236,6 +236,53 @@ class TestInsertFilteredAntipattern:
 
 
 # ---------------------------------------------------------------------------
+# _parse_last_used tests (timezone regression)
+# ---------------------------------------------------------------------------
+
+class TestParseLastUsed:
+    def test_naive_datetime_string(self):
+        dt = _parse_last_used("2026-03-15T10:00:00")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0)
+        assert dt.tzinfo is None
+
+    def test_naive_datetime_with_microseconds(self):
+        dt = _parse_last_used("2026-03-15T10:00:00.123456")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0, 123456)
+
+    def test_sqlite_space_separator(self):
+        dt = _parse_last_used("2026-03-15 10:00:00")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0)
+
+    def test_utc_z_suffix(self):
+        dt = _parse_last_used("2026-03-15T10:00:00Z")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0)
+        assert dt.tzinfo is None
+
+    def test_positive_offset_converted_to_utc(self):
+        dt = _parse_last_used("2026-03-15T12:00:00+02:00")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0)
+        assert dt.tzinfo is None
+
+    def test_negative_offset_converted_to_utc(self):
+        dt = _parse_last_used("2026-03-15T07:00:00-03:00")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0)
+        assert dt.tzinfo is None
+
+    def test_offset_with_microseconds(self):
+        dt = _parse_last_used("2026-03-15T12:00:00.000000+02:00")
+        assert dt == datetime(2026, 3, 15, 10, 0, 0)
+
+    def test_none_returns_none(self):
+        assert _parse_last_used(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert _parse_last_used("") is None
+
+    def test_invalid_string_returns_none(self):
+        assert _parse_last_used("not-a-date") is None
+
+
+# ---------------------------------------------------------------------------
 # Recency decay tests
 # ---------------------------------------------------------------------------
 

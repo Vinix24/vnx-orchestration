@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -49,19 +49,20 @@ def _recency_decay(confidence: float, last_used: datetime) -> float:
 
 
 def _parse_last_used(raw: Optional[str]) -> Optional[datetime]:
-    """Parse ISO-8601 or SQLite datetime string into a naive UTC datetime."""
+    """Parse ISO-8601 or SQLite datetime string into a naive UTC datetime.
+
+    Uses fromisoformat (Python 3.11+) which correctly handles timezone offsets
+    and Z suffix — raw[:26] truncation silently dropped offsets like +05:30.
+    """
     if not raw:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
-                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            dt = datetime.strptime(raw[:26], fmt[:len(fmt)])
-            if dt.tzinfo is not None:
-                return dt.replace(tzinfo=None) + (dt.utcoffset() or __import__('datetime').timedelta(0))
-            return dt
-        except ValueError:
-            continue
-    return None
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except ValueError:
+        return None
 
 
 def beta_score(success_count: int, failure_count: int) -> float:

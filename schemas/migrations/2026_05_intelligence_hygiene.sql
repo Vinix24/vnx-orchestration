@@ -27,9 +27,10 @@ BEGIN TRANSACTION;
 -- ============================================================================
 -- 1. Add invalidation_reason column (idempotent)
 -- ============================================================================
-
-ALTER TABLE success_patterns ADD COLUMN IF NOT EXISTS invalidation_reason TEXT;
-ALTER TABLE antipatterns     ADD COLUMN IF NOT EXISTS invalidation_reason TEXT;
+-- Column addition is handled by the Python bootstrap (quality_db_init.py)
+-- via PRAGMA table_info check — SQLite < 3.37 does not support
+-- ADD COLUMN IF NOT EXISTS.  This section intentionally left empty.
+-- See: codex blocker audit-ih-1-fixforward-20260517-232614
 
 -- ============================================================================
 -- 2. Invalidate governance-event noise in success_patterns
