@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""vnx version — print VNX version, build info, and resolved paths."""
+
+import os
+import platform
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _read_version_file() -> str:
+    here = Path(__file__).resolve()
+    # vnx_cli/commands/version.py -> vnx_cli/commands -> vnx_cli -> project root
+    for ancestor in [here.parent, here.parent.parent, here.parent.parent.parent]:
+        version_file = ancestor / "VERSION"
+        if version_file.is_file():
+            content = version_file.read_text(encoding="utf-8").strip()
+            if content:
+                return content
+    return "unknown"
+
+
+def _git_commit(repo_dir: Path) -> str:
+    try:
+        output = subprocess.check_output(
+            ["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return output or "unknown"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _resolve_vnx_home() -> str:
+    env_val = os.environ.get("VNX_HOME")
+    if env_val:
+        return env_val
+
+    try:
+        scripts_lib = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "lib")
+        if scripts_lib not in sys.path:
+            sys.path.insert(0, scripts_lib)
+        from vnx_paths import resolve_paths  # type: ignore[import]
+        return resolve_paths().get("VNX_HOME", "unresolved")
+    except Exception:
+        return "unresolved"
+
+
+def _read_pin(project_dir: Path) -> str:
+    pin_file = project_dir / ".vnx-version"
+    if pin_file.is_file():
+        pin = pin_file.read_text(encoding="utf-8").strip()
+        if pin:
+            return f"{pin} (project)"
+    return "current"
+
+
+def vnx_version(args) -> int:
+    version = _read_version_file()
+
+    # Resolve project root from module location for git
+    repo_dir = Path(__file__).resolve().parent.parent.parent
+    commit = _git_commit(repo_dir)
+
+    vnx_home = _resolve_vnx_home()
+
+    project_dir = Path(getattr(args, "project_dir", ".")).resolve()
+    pin = _read_pin(project_dir)
+
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    plat = platform.system().lower()
+
+    print(f"VNX {version}")
+    print(f"Commit: {commit}")
+    print(f"VNX_HOME: {vnx_home}")
+    print(f"Pin: {pin}")
+    print(f"Python: {py_ver} {plat}")
+
+    return 0
