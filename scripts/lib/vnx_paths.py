@@ -11,7 +11,7 @@ import os
 import subprocess
 import warnings
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 # Self-bootstrap: ensure scripts/lib is on sys.path so sibling imports work
 # regardless of whether the caller set up the repo root or lib dir.
@@ -24,6 +24,14 @@ if _lib not in _sys.path:
 from vnx_ids import PROJECT_ID_RE as _PROJECT_ID_RE
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_overrides_dir(project_root: Path) -> Optional[Path]:
+    """Return project_root/.vnx-overrides if it exists as a directory, else None."""
+    candidate = project_root / ".vnx-overrides"
+    if candidate.is_dir():
+        return candidate
+    return None
 
 
 def _resolve_vnx_home() -> Path:
@@ -156,11 +164,17 @@ def resolve_paths() -> Dict[str, str]:
     if "VNX_SKILLS_DIR" in os.environ:
         paths["VNX_SKILLS_DIR"] = os.environ["VNX_SKILLS_DIR"]
     else:
-        claude_skills = project_root / ".claude" / "skills"
-        if claude_skills.is_dir():
-            paths["VNX_SKILLS_DIR"] = str(claude_skills)
+        # Resolver order: .vnx-overrides/skills > .claude/skills > VNX_HOME/skills
+        overrides_dir = _resolve_overrides_dir(project_root)
+        overrides_skills = overrides_dir / "skills" if overrides_dir is not None else None
+        if overrides_skills is not None and overrides_skills.is_dir():
+            paths["VNX_SKILLS_DIR"] = str(overrides_skills)
         else:
-            paths["VNX_SKILLS_DIR"] = str(vnx_home / "skills")
+            claude_skills = project_root / ".claude" / "skills"
+            if claude_skills.is_dir():
+                paths["VNX_SKILLS_DIR"] = str(claude_skills)
+            else:
+                paths["VNX_SKILLS_DIR"] = str(vnx_home / "skills")
 
     return paths
 
@@ -267,6 +281,33 @@ def resolve_central_data_dir(project_id: str) -> Path:
             f"(no dots, slashes, leading dashes, or special chars): {project_id!r}"
         )
     return Path.home() / ".vnx-data" / project_id
+
+
+def get_skill_path(skill_name: str, project_root: Optional[Path] = None) -> Path:
+    """Return the resolved Path for a named skill directory.
+
+    Resolution order:
+    1. project_root/.vnx-overrides/skills/<skill_name>/  (if project_root supplied)
+    2. VNX_HOME/skills/<skill_name>/
+
+    Raises:
+        FileNotFoundError: if the skill directory is not found in any location.
+    """
+    if project_root is not None:
+        overrides_dir = _resolve_overrides_dir(Path(project_root))
+        if overrides_dir is not None:
+            override_skill = overrides_dir / "skills" / skill_name
+            if override_skill.is_dir():
+                return override_skill.resolve()
+
+    vnx_home = _resolve_vnx_home()
+    central_skill = vnx_home / "skills" / skill_name
+    if central_skill.is_dir():
+        return central_skill.resolve()
+
+    raise FileNotFoundError(
+        f"Skill {skill_name!r} not found in overrides or central VNX_HOME ({vnx_home})"
+    )
 
 
 if __name__ == "__main__":
