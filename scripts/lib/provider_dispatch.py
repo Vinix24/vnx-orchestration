@@ -730,10 +730,17 @@ def main(argv: list[str] | None = None) -> int:
         from constraint_enforcer import HardConstraintViolation, enforce as _enforce_route  # noqa: PLC0415
 
         _sub = None
-        _via = None
         if provider.startswith("litellm:"):
             _parts = provider.split(":", 2)
             _sub = _parts[1] if len(_parts) > 1 else None
+
+        if provider.startswith("litellm:"):
+            _via = "openrouter" if _sub == "zai" else "litellm"
+        elif provider in ("claude", "codex", "gemini", "kimi"):
+            _via = "cli"
+        else:
+            _via = None
+
         _enforce_route(
             provider=provider.split(":")[0] if ":" in provider else provider,
             sub_provider=_sub,

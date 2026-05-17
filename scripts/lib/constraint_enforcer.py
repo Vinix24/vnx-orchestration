@@ -162,8 +162,8 @@ class ConstraintEnforcer:
                 return False
 
         spec_model = rr.get("model")
-        if spec_model and model:
-            if not self._match_value(model, spec_model):
+        if spec_model:
+            if model is None or not self._match_value(model, spec_model):
                 return True
 
         return False

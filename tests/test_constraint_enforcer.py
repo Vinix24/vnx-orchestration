@@ -234,6 +234,30 @@ class TestEdgeCases:
 # Module-level convenience function
 # ---------------------------------------------------------------------------
 
+class TestRequireRouteModelNoneStrict:
+    """require_route with model=None must trigger violation, not silently skip."""
+
+    def test_t0_model_none_warns(self, real_enforcer: ConstraintEnforcer, caplog):
+        with caplog.at_level("WARNING"):
+            real_enforcer.enforce(terminal_id="T0", model=None)
+        assert "t0-opus-only" in caplog.text
+
+    def test_worker_model_none_warns(self, real_enforcer: ConstraintEnforcer, caplog):
+        with caplog.at_level("WARNING"):
+            real_enforcer.enforce(terminal_id="T1", model=None)
+        assert "workers-sonnet-pinned" in caplog.text
+
+    def test_non_matching_role_model_none_ok(self, real_enforcer: ConstraintEnforcer, caplog):
+        with caplog.at_level("WARNING"):
+            real_enforcer.enforce(terminal_id="T9", model=None)
+        assert "t0-opus-only" not in caplog.text
+        assert "workers-sonnet-pinned" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience function
+# ---------------------------------------------------------------------------
+
 class TestModuleLevelEnforce:
 
     def test_module_enforce_raises(self):

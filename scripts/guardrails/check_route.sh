@@ -45,25 +45,34 @@ if [ -z "$PROVIDER" ]; then
 fi
 
 PYTHONPATH="$REPO_ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
-  "$PYTHON_BIN" -c "
-import sys
+  "$PYTHON_BIN" -c '
+import sys, json
 try:
     from constraint_enforcer import enforce, HardConstraintViolation
 except ImportError as exc:
-    sys.stderr.write(f'check_route: cannot import constraint_enforcer ({exc}).\n')
+    sys.stderr.write(f"check_route: cannot import constraint_enforcer ({exc}).\n")
     sys.exit(1)
 
+args = json.loads(sys.stdin.read())
 try:
     enforce(
-        provider='$PROVIDER' or None,
-        sub_provider='$SUB_PROVIDER' or None,
-        model='$MODEL' or None,
-        terminal_id='$TERMINAL_ID' or None,
-        role='$ROLE' or None,
-        via='$VIA' or None,
+        provider=args.get("provider") or None,
+        sub_provider=args.get("sub_provider") or None,
+        model=args.get("model") or None,
+        terminal_id=args.get("terminal_id") or None,
+        role=args.get("role") or None,
+        via=args.get("via") or None,
     )
 except HardConstraintViolation as exc:
-    sys.stderr.write(f'check_route: BLOCKED — {exc}\n')
+    sys.stderr.write(f"check_route: BLOCKED — {exc}\n")
     sys.exit(1)
-print('check_route: route allowed')
-"
+print("check_route: route allowed")
+' <<EOF
+$(printf '{"provider":"%s","sub_provider":"%s","model":"%s","terminal_id":"%s","role":"%s","via":"%s"}' \
+  "$(printf '%s' "$PROVIDER" | sed 's/["\]/\\&/g')" \
+  "$(printf '%s' "$SUB_PROVIDER" | sed 's/["\]/\\&/g')" \
+  "$(printf '%s' "$MODEL" | sed 's/["\]/\\&/g')" \
+  "$(printf '%s' "$TERMINAL_ID" | sed 's/["\]/\\&/g')" \
+  "$(printf '%s' "$ROLE" | sed 's/["\]/\\&/g')" \
+  "$(printf '%s' "$VIA" | sed 's/["\]/\\&/g')")
+EOF
