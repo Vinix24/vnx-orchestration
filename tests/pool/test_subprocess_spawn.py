@@ -106,9 +106,11 @@ class TestSpawnResult:
 # ---------------------------------------------------------------------------
 
 class TestSpawnViaProviderDispatch:
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_successful_spawn_captures_pid(self, mock_kill, mock_popen):
+    def test_successful_spawn_captures_pid(self, mock_kill, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 54321
         mock_popen.return_value = mock_proc
@@ -120,6 +122,7 @@ class TestSpawnViaProviderDispatch:
         assert result.success is True
         assert result.pid == 54321
         assert result.terminal_id == "T1"
+        mock_wt.assert_called_once_with("T1")
         mock_popen.assert_called_once()
         call_args = mock_popen.call_args
         cmd = call_args[0][0]
@@ -127,10 +130,13 @@ class TestSpawnViaProviderDispatch:
         assert "T1" in cmd
         assert "--role" in cmd
         assert "backend-developer" in cmd
+        assert call_args[1]["cwd"] == "/tmp/fake-worktree"
 
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_uses_start_new_session(self, mock_kill, mock_popen):
+    def test_spawn_uses_start_new_session(self, mock_kill, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 100
         mock_popen.return_value = mock_proc
@@ -142,8 +148,10 @@ class TestSpawnViaProviderDispatch:
         call_kwargs = mock_popen.call_args[1]
         assert call_kwargs.get("start_new_session") is True
 
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
-    def test_spawn_failure_on_oserror(self, mock_popen):
+    def test_spawn_failure_on_oserror(self, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_popen.side_effect = OSError("No such file or directory")
 
         result = _spawn_via_provider_dispatch(
@@ -154,9 +162,11 @@ class TestSpawnViaProviderDispatch:
         assert "Popen failed" in result.error
         assert result.pid is None
 
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_failure_when_process_dies_immediately(self, mock_kill, mock_popen):
+    def test_spawn_failure_when_process_dies_immediately(self, mock_kill, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 99999
         mock_popen.return_value = mock_proc
@@ -170,9 +180,11 @@ class TestSpawnViaProviderDispatch:
         assert "died immediately" in result.error
         assert result.pid == 99999
 
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_command_includes_dispatch_id(self, mock_kill, mock_popen):
+    def test_spawn_command_includes_dispatch_id(self, mock_kill, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 200
         mock_popen.return_value = mock_proc
@@ -186,9 +198,11 @@ class TestSpawnViaProviderDispatch:
         dispatch_id_idx = cmd.index("--dispatch-id") + 1
         assert cmd[dispatch_id_idx].startswith("pool-spawn-T1-")
 
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_command_includes_instruction(self, mock_kill, mock_popen):
+    def test_spawn_command_includes_instruction(self, mock_kill, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 300
         mock_popen.return_value = mock_proc
@@ -202,6 +216,18 @@ class TestSpawnViaProviderDispatch:
         instr_idx = cmd.index("--instruction") + 1
         assert "T2" in cmd[instr_idx]
         assert "my-pool" in cmd[instr_idx]
+
+    @patch("pool_worktree_manager.create_worker_worktree")
+    def test_spawn_failure_on_worktree_error(self, mock_wt):
+        mock_wt.side_effect = RuntimeError("git worktree add failed")
+
+        result = _spawn_via_provider_dispatch(
+            "vnx-dev", "default", "T1", "claude", "backend-developer"
+        )
+
+        assert result.success is False
+        assert "worktree creation failed" in result.error
+        assert result.pid is None
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +394,10 @@ class TestReaperPidValidation:
 # ---------------------------------------------------------------------------
 
 class TestSpawnNegativePaths:
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
-    def test_spawn_popen_file_not_found(self, mock_popen):
+    def test_spawn_popen_file_not_found(self, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_popen.side_effect = FileNotFoundError("python3 not found")
 
         result = _spawn_via_provider_dispatch(
@@ -379,9 +407,11 @@ class TestSpawnNegativePaths:
         assert result.success is False
         assert "Popen failed" in result.error
 
+    @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_with_empty_role(self, mock_kill, mock_popen):
+    def test_spawn_with_empty_role(self, mock_kill, mock_popen, mock_wt):
+        mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 400
         mock_popen.return_value = mock_proc
