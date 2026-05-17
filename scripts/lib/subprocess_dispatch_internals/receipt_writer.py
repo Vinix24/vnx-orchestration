@@ -97,6 +97,9 @@ def _write_receipt(
     commit_hash_after: str = "",
     manifest_path: str | None = None,
     stuck_event_count: int = 0,
+    token_usage: dict | None = None,
+    cost_usd: float | None = None,
+    pr_id: str | None = None,
 ) -> Path:
     """Append a subprocess completion receipt to t0_receipts.ndjson.
 
@@ -116,6 +119,9 @@ def _write_receipt(
         commit_hash_after=commit_hash_after,
         manifest_path=manifest_path,
         stuck_event_count=stuck_event_count,
+        token_usage=token_usage,
+        cost_usd=cost_usd,
+        pr_id=pr_id,
     )
     return _persist_receipt(receipt, dispatch_id, terminal_id, status)
 
@@ -135,6 +141,9 @@ def _build_receipt_payload(
     commit_hash_after: str,
     manifest_path: str | None,
     stuck_event_count: int,
+    token_usage: dict | None = None,
+    cost_usd: float | None = None,
+    pr_id: str | None = None,
 ) -> dict:
     """Assemble the receipt dict from the named fields."""
     receipt = {
@@ -165,6 +174,12 @@ def _build_receipt_payload(
         receipt["commit_missing"] = True
     if stuck_event_count:
         receipt["stuck_event_count"] = stuck_event_count
+    if token_usage is not None:
+        receipt["token_usage"] = token_usage
+    if cost_usd is not None:
+        receipt["cost_usd"] = cost_usd
+    if pr_id is not None:
+        receipt["pr_id"] = pr_id
     return receipt
 
 

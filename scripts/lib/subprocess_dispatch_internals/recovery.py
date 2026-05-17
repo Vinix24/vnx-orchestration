@@ -15,6 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from otel_exporter import emit_dispatch_completion
+from subprocess_dispatch_internals.delivery import _dispatch_token_usage
+from provider_dispatch import _extract_token_usage, _compute_cost
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +116,24 @@ def _resolve_active_dispatch_file(dispatch_id: str):
     return _sd._resolve_active_dispatch_file(dispatch_id)
 
 
+def _resolve_token_usage_and_cost(
+    dispatch_id: str, sub_result, model: "str | None",
+) -> tuple[dict | None, float | None]:
+    """Pop token_usage from the delivery side-channel, normalize, and compute cost."""
+    raw_usage = _dispatch_token_usage.pop(dispatch_id, None)
+    if raw_usage is None:
+        raw_usage = getattr(sub_result, "token_usage", None) if sub_result else None
+    if not isinstance(raw_usage, dict) or not raw_usage:
+        return None, None
+
+    class _UsageHolder:
+        token_usage = raw_usage
+
+    token_usage = _extract_token_usage(_UsageHolder(), "claude")
+    cost_usd = _compute_cost("claude", model or "claude-sonnet-4-6", token_usage)
+    return token_usage, cost_usd
+
+
 def _handle_success(
     *,
     dispatch_id: str,
@@ -130,6 +150,7 @@ def _handle_success(
     pre_sha: str,
     lease_generation: "int | None",
     model: "str | None" = None,
+    pr_id: "str | None" = None,
 ) -> None:
     """Run the success branch: write receipt, feedback, outcome capture, cleanup."""
     import subprocess_dispatch as _sd
@@ -146,6 +167,7 @@ def _handle_success(
         commit_hash_after=commit_hash_after,
         model=model,
     )
+    token_usage, cost_usd = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
     _sd._ensure_unified_report(dispatch_id, terminal_id, "done")
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
@@ -158,6 +180,9 @@ def _handle_success(
         commit_hash_after=commit_hash_after,
         manifest_path=sub_result.manifest_path,
         stuck_event_count=monitor.stuck_count,
+        token_usage=token_usage,
+        cost_usd=cost_usd,
+        pr_id=pr_id,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "success", quality_db)
@@ -201,6 +226,8 @@ def _handle_final_failure(
     pre_sha: str,
     max_retries: int,
     lease_generation: "int | None",
+    model: "str | None" = None,
+    pr_id: "str | None" = None,
 ) -> None:
     """Run the budget-exhausted failure branch: stash, receipt, decay, cleanup."""
     import subprocess_dispatch as _sd
@@ -212,6 +239,7 @@ def _handle_final_failure(
             dispatch_touched_files=sub_result.touched_files,
             manifest_paths=manifest_paths,
         )
+    token_usage, cost_usd = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
     _sd._write_receipt(
         dispatch_id, terminal_id, "failed",
         event_count=sub_result.event_count,
@@ -221,6 +249,9 @@ def _handle_final_failure(
         commit_hash_before=commit_hash_before,
         manifest_path=sub_result.manifest_path,
         stuck_event_count=monitor.stuck_count,
+        token_usage=token_usage,
+        cost_usd=cost_usd,
+        pr_id=pr_id,
     )
     quality_db = _sd._default_state_dir() / "quality_intelligence.db"
     patt_updated = _sd._update_pattern_confidence(dispatch_id, "failure", quality_db)
@@ -349,6 +380,8 @@ def _backoff_or_fail(
     dispatch_start_ts: str,
     pre_sha: str,
     lease_generation: "int | None",
+    model: "str | None" = None,
+    pr_id: "str | None" = None,
 ) -> None:
     """Sleep with exponential backoff, or run the final-failure branch when exhausted."""
     if attempt < max_retries:
@@ -370,6 +403,8 @@ def _backoff_or_fail(
             pre_sha=pre_sha,
             max_retries=max_retries,
             lease_generation=lease_generation,
+            model=model,
+            pr_id=pr_id,
         )
 
 
@@ -437,6 +472,7 @@ def deliver_with_recovery(
                 pre_sha=pre_sha,
                 lease_generation=lease_generation,
                 model=model,
+                pr_id=pr_id,
             )
             return True
         _backoff_or_fail(
@@ -448,6 +484,8 @@ def deliver_with_recovery(
             commit_hash_before=commit_hash_before,
             dispatch_start_ts=dispatch_start_ts, pre_sha=pre_sha,
             lease_generation=lease_generation,
+            model=model,
+            pr_id=pr_id,
         )
 
     return False
