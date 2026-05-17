@@ -155,6 +155,25 @@ class LiteLLMSpawnResult:
     # > 0 indicates audit-trail gaps the caller must investigate per ADR-005.
     event_writer_failures: int = 0
 
+    def frontmatter_fields(self) -> Dict[str, Any]:
+        usage = self.token_usage or {}
+        cache_read = 0
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cache_read = int(details.get("cached_tokens", 0) or 0)
+        if not cache_read:
+            cache_read = int(usage.get("prompt_cache_hit_tokens", 0) or 0)
+        return {
+            "provider": "litellm",
+            "sub_provider": "none",
+            "exit_code": self.returncode,
+            "token_usage": {
+                "input": int(usage.get("prompt_tokens", 0) or 0),
+                "output": int(usage.get("completion_tokens", 0) or 0),
+                "cache_read": cache_read,
+            },
+        }
+
 
 # ---------------------------------------------------------------------------
 # Contract enforcement helpers

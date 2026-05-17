@@ -428,6 +428,7 @@ def write_report(
 
     try:
         markdown = render_markdown(report)
+        _validate_assembler_output(markdown, dispatch_id)
         md_path.write_text(markdown, encoding="utf-8")
         result.md_path = md_path
     except OSError as exc:
@@ -435,6 +436,25 @@ def write_report(
         md_path = None
 
     return json_path, md_path
+
+
+def _validate_assembler_output(content: str, dispatch_id: str) -> None:
+    """Validate report frontmatter if present. Shadow-mode by default."""
+    if not content or not content.lstrip().startswith("---"):
+        return
+    try:
+        from unified_report_schema import validate_frontmatter, SchemaViolation
+    except ImportError:
+        return
+    try:
+        validate_frontmatter(content)
+    except SchemaViolation as exc:
+        if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+            raise
+        logger.warning(
+            "report_assembler: schema violation (shadow-mode) dispatch=%s: %s",
+            dispatch_id, exc,
+        )
 
 
 def _short_title_from_dispatch_id(dispatch_id: str) -> str:

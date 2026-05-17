@@ -47,6 +47,19 @@ class KimiSpawnResult:
     error: Optional[str] = None
     event_writer_failures: int = 0
 
+    def frontmatter_fields(self) -> Dict[str, Any]:
+        usage = self.token_usage or {}
+        return {
+            "provider": "kimi",
+            "sub_provider": "moonshot",
+            "exit_code": self.returncode,
+            "token_usage": {
+                "input": int(usage.get("input_tokens", 0) or 0),
+                "output": int(usage.get("output_tokens", 0) or 0),
+                "cache_read": int(usage.get("cache_read_tokens", 0) or 0),
+            },
+        }
+
 
 def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> CanonicalEvent:
     """Map a raw Kimi CLI stream-json event to a CanonicalEvent (Tier-1).
