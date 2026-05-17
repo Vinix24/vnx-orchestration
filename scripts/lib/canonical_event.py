@@ -421,6 +421,36 @@ def _from_kimi_event(
     if event_type == "error":
         msg = raw.get("message") or raw.get("error") or ""
         return make("error", {"message": str(msg) if msg else str(raw)[:200]})
+
+    # Kimi CLI Wire Protocol v1.26+ camelCase event types
+    if event_type == "TurnBegin":
+        return make("text", {"text": ""})
+
+    if event_type == "StepBegin":
+        return make("text", {"text": ""})
+
+    if event_type == "ContentPart":
+        return make("text", {"text": str(raw.get("content") or raw.get("text") or "")})
+
+    if event_type == "ThinkPart":
+        return make("thinking", {"text": str(raw.get("content") or raw.get("text") or "")})
+
+    if event_type == "TextPart":
+        return make("text", {"text": str(raw.get("text") or raw.get("content") or "")})
+
+    if event_type == "StatusUpdate":
+        tc_raw = raw.get("token_count") or raw.get("usage") or {}
+        token_count = {
+            "input_tokens": int(tc_raw.get("input_tokens") or tc_raw.get("prompt_tokens") or 0),
+            "output_tokens": int(tc_raw.get("output_tokens") or tc_raw.get("completion_tokens") or 0),
+            "cache_creation_tokens": int(tc_raw.get("cache_creation_tokens") or 0),
+            "cache_read_tokens": int(tc_raw.get("cache_read_tokens") or 0),
+        }
+        return make("text", {"text": "", "token_count": token_count})
+
+    if event_type == "TurnEnd":
+        return make("complete", {})
+
     return make("error", {
         "reason": f"unrecognized kimi event_type: {event_type!r}",
         "raw": str(raw)[:300],
