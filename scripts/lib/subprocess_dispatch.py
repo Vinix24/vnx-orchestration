@@ -187,6 +187,10 @@ if __name__ == "__main__":
         "--complexity", default="medium", choices=["low", "medium", "high"],
         help="Dispatch complexity for cost-routing. Defaults to medium.",
     )
+    parser.add_argument(
+        "--auto-route", action="store_true",
+        help="Use smart_router to auto-select model (opt-in, default off).",
+    )
     args = parser.parse_args()
 
     # OI-1107: fall back to Role: header in instruction, then to a documented default.
@@ -200,7 +204,41 @@ if __name__ == "__main__":
     # Wave 7 PR-7.4: consult routing policy when VNX_ROUTING_POLICY_ENABLED=1.
     # Default behavior (flag unset): unchanged — Sonnet as before.
     _effective_model = args.model
-    if os.environ.get("VNX_ROUTING_POLICY_ENABLED") == "1" and args.task_class:
+
+    # PR-SR-4: smart_router auto-route (opt-in, takes precedence over routing_policy).
+    _auto_route_applied = False
+    if getattr(args, "auto_route", False):
+        try:
+            from smart_router import decide as _smart_route, parse_route_model_id, write_route_decision  # noqa: PLC0415
+
+            _route_decision = _smart_route(
+                instruction=args.instruction,
+                role=args.role,
+                dispatch_paths=_dispatch_paths,
+            )
+            if _route_decision.primary:
+                _r_provider, _r_model = parse_route_model_id(
+                    _route_decision.primary.model_id,
+                )
+                if _r_provider == "claude":
+                    _effective_model = _r_model
+                    _auto_route_applied = True
+
+            _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+            write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
+            import logging as _log_mod  # noqa: PLC0415
+            _log_mod.getLogger(__name__).info(
+                "smart_router: auto-route task_class=%s model=%s",
+                _route_decision.task_class, _effective_model,
+            )
+        except Exception as _route_exc:
+            import logging as _log_mod  # noqa: PLC0415
+            _log_mod.getLogger(__name__).warning(
+                "smart_router: auto-route failed (%s); falling back to --model=%s",
+                _route_exc, args.model,
+            )
+
+    if not _auto_route_applied and os.environ.get("VNX_ROUTING_POLICY_ENABLED") == "1" and args.task_class:
         try:
             from routing_policy import decide_lane, lane_to_claude_model
             _decision = decide_lane(
