@@ -160,7 +160,9 @@ def _pool_heartbeat_loop(
             from pool_state_repo import PoolStateRepository
             repo = PoolStateRepository(db_path, project_id)
             repo.update_heartbeat_by_terminal(terminal_id, time.time())
-        except Exception:
+        except Exception as exc:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).warning("heartbeat update failed: %s", exc)
             pass
 
 
@@ -262,7 +264,9 @@ if __name__ == "__main__":
         from pool_state_repo import PoolStateRepository
         _pid_repo = PoolStateRepository(_db_path, _project_id)
         _pid_repo.store_worker_pid(args.terminal_id, os.getpid())
-    except Exception:
+    except Exception as exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning("PID persistence failed: %s", exc)
         pass
 
     _hb_stop = threading.Event()

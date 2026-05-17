@@ -366,3 +366,32 @@ def test_pool_manager_reap_dead_catches_dead_pid(tmp_path):
     assert len(reaped) == 1
     assert reaped[0].membership_id == "m-dead-pid"
     assert "pid_dead" in reaped[0].reason
+
+
+# ---------------------------------------------------------------------------
+# 8. Silent-except regression: heartbeat loop logs on failure
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_loop_logs_warning_on_exception(tmp_path, caplog):
+    import logging
+
+    from subprocess_dispatch import _pool_heartbeat_loop
+
+    bad_db = tmp_path / "nonexistent" / "db.sqlite3"
+    stop = threading.Event()
+
+    with caplog.at_level(logging.WARNING):
+        t = threading.Thread(
+            target=_pool_heartbeat_loop,
+            args=("T1", "vnx-dev", bad_db, stop),
+            kwargs={"interval": 0.05},
+            daemon=True,
+        )
+        t.start()
+        time.sleep(0.15)
+        stop.set()
+        t.join(timeout=2)
+
+    assert any("heartbeat update failed" in r.message for r in caplog.records)
+
+
