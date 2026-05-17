@@ -192,6 +192,7 @@ class PoolStateRepository:
                 membership_id = meta.get("membership_id", str(row["id"]))
                 last_heartbeat = _from_iso(row["last_heartbeat_at"])
                 joined_ts = _from_iso(row["joined_at"]) or 0.0
+                pid_val = meta.get("pid")
                 members.append(
                     Membership(
                         membership_id=membership_id,
@@ -201,6 +202,7 @@ class PoolStateRepository:
                         status="active",
                         joined_at=joined_ts,
                         last_heartbeat=last_heartbeat,
+                        pid=int(pid_val) if pid_val is not None else None,
                     )
                 )
             return members
@@ -235,10 +237,15 @@ class PoolStateRepository:
         provider: str,
         role: str,
         now: float,
+        *,
+        pid: Optional[int] = None,
     ) -> str:
         membership_id = _uuid7()
         joined_iso = _iso_now(now)
-        meta = json.dumps({"membership_id": membership_id})
+        meta_dict: Dict = {"membership_id": membership_id}
+        if pid is not None:
+            meta_dict["pid"] = pid
+        meta = json.dumps(meta_dict)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
