@@ -49,10 +49,23 @@ def record_injection_audit(
     injection_id = _new_id()
     items_json = json.dumps([item.to_dict() for item in result.items])
     suppressed_json = json.dumps([s.to_dict() for s in result.suppressed])
+    ab_arm = getattr(result, "ab_arm", "treatment") or "treatment"
     try:
         with get_connection(state_dir) as conn:
             has_project = _table_has_column(conn, "intelligence_injections", "project_id")
-            if has_project:
+            has_ab_arm = _table_has_column(conn, "intelligence_injections", "ab_arm")
+            if has_project and has_ab_arm:
+                conn.execute(
+                    """INSERT INTO intelligence_injections
+                        (injection_id, dispatch_id, injection_point, task_class,
+                         items_injected, items_suppressed, payload_chars,
+                         items_json, suppressed_json, project_id, ab_arm)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (injection_id, result.dispatch_id, result.injection_point,
+                     result.task_class, result.items_injected, result.items_suppressed,
+                     result.payload_chars, items_json, suppressed_json, project_id, ab_arm),
+                )
+            elif has_project:
                 conn.execute(
                     """INSERT INTO intelligence_injections
                         (injection_id, dispatch_id, injection_point, task_class,
@@ -62,6 +75,17 @@ def record_injection_audit(
                     (injection_id, result.dispatch_id, result.injection_point,
                      result.task_class, result.items_injected, result.items_suppressed,
                      result.payload_chars, items_json, suppressed_json, project_id),
+                )
+            elif has_ab_arm:
+                conn.execute(
+                    """INSERT INTO intelligence_injections
+                        (injection_id, dispatch_id, injection_point, task_class,
+                         items_injected, items_suppressed, payload_chars,
+                         items_json, suppressed_json, ab_arm)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (injection_id, result.dispatch_id, result.injection_point,
+                     result.task_class, result.items_injected, result.items_suppressed,
+                     result.payload_chars, items_json, suppressed_json, ab_arm),
                 )
             else:
                 conn.execute(
