@@ -60,14 +60,14 @@ def _atomic_write_json(path: Path, obj: object) -> None:
     os.replace(tmp, path)
 
 
-def run_single(model: Dict, task: Dict, dispatch_id: str) -> Dict:
+def run_single(model: Dict, task: Dict, dispatch_id: str, terminal_id: str = "BENCH") -> Dict:
     """Dispatch single (model, task) pair. Return result dict."""
     start = time.time()
     cmd = [
         "python3",
         str(REPO_ROOT / "scripts" / "lib" / "provider_dispatch.py"),
         "--provider", model["provider"],
-        "--terminal-id", "T2",
+        "--terminal-id", terminal_id,
         "--dispatch-id", dispatch_id,
         "--role", "backend-developer",
         "--instruction", task["prompt"],
@@ -177,6 +177,7 @@ def main() -> int:
     parser.add_argument("--models", default="all", help="Comma-separated model IDs or 'all'")
     parser.add_argument("--tasks", default="all", help="Comma-separated task IDs or 'all'")
     parser.add_argument("--output", default=None, help="Override output directory")
+    parser.add_argument("--terminal-id", default="BENCH", help="Terminal ID for governance state (default: BENCH)")
     parser.add_argument("--dry-run", action="store_true", help="List dispatches without executing")
     parser.add_argument("--run", action="store_true", help="Actually execute benchmarks")
     args = parser.parse_args()
@@ -209,7 +210,7 @@ def main() -> int:
             dispatch_id = f"bench-{model['id']}-{task['id']}-{ts}"
             print(f"[{completed + 1}/{total}] {model['id']} x {task['id']}...")
             try:
-                result = run_single(model, task, dispatch_id)
+                result = run_single(model, task, dispatch_id, terminal_id=args.terminal_id)
                 result_path = output_dir / f"{model['id']}__{task['id']}.json"
                 _atomic_write_json(result_path, result)
                 cost = result.get("cost_usd")
