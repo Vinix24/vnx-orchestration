@@ -124,8 +124,8 @@ def reap_worker_worktree(
                 capture_output=True,
                 text=True,
             )
-        except subprocess.CalledProcessError:
-            pass
+        except subprocess.CalledProcessError as exc:
+            log.warning("worktree prune failed: %s", exc)
 
     _delete_worktree_branch(terminal_id, root)
 
@@ -142,5 +142,5 @@ def _delete_worktree_branch(terminal_id: str, project_root: Path) -> None:
             text=True,
         )
         log.info("branch deleted: %s", branch_name)
-    except subprocess.CalledProcessError:
-        pass
+    except subprocess.CalledProcessError as exc:
+        log.warning("branch deletion failed for %s: %s", branch_name, exc)
