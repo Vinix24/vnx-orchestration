@@ -36,7 +36,7 @@ from pool_provider_allocator import (  # noqa: E402
     allocate_for_scale_up,
     select_for_scale_down,
 )
-from pool_reaper import ReapConfig, ReapTarget, identify_reap_targets  # noqa: E402
+from pool_reaper import ReapConfig, ReapTarget, identify_dead_pid_targets, identify_reap_targets  # noqa: E402
 from pool_state_repo import PoolStateRepository  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -213,13 +213,26 @@ class PoolManager:
     def reap_dead(self) -> List[ReapTarget]:
         """Identify + kill + release stuck/stale workers.
 
+        Two detection paths run in sequence:
+        1. PID validation — os.kill(pid, 0) probe; dead process = immediate reap
+        2. Heartbeat staleness — existing threshold-based detection
+
         Returns list of successfully reaped targets for audit/observability.
         Kill failures do not block membership release — process may already be gone.
         """
         _config, _state, members = self.load_state()
         now = time.time()
 
-        targets = identify_reap_targets(members, now, self.reap_config)
+        pid_targets = identify_dead_pid_targets(members)
+        heartbeat_targets = identify_reap_targets(members, now, self.reap_config)
+
+        seen_ids: set[str] = set()
+        targets: List[ReapTarget] = []
+        for t in pid_targets + heartbeat_targets:
+            if t.membership_id not in seen_ids:
+                seen_ids.add(t.membership_id)
+                targets.append(t)
+
         reaped: List[ReapTarget] = []
 
         for target in targets:

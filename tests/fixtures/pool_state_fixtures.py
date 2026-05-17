@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS terminal_leases (
     state             TEXT    NOT NULL DEFAULT 'idle',
     lease_token       TEXT    NOT NULL DEFAULT '',
     last_heartbeat_at TEXT,
+    worker_pid        INTEGER,
     UNIQUE(terminal_id, project_id)
 );
 
