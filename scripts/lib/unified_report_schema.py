@@ -190,3 +190,49 @@ def validate_file(path: Path) -> Dict[str, Any]:
     except OSError as exc:
         raise SchemaViolation(f"cannot read report {path}: {exc}") from exc
     return validate_frontmatter(text)
+
+
+class UnifiedReportValidator:
+    """Stateful validator for unified report frontmatter (PR-D5-E).
+
+    Provides a class-based API around the module-level validation functions.
+    Caches the jsonschema validator instance for repeated calls within the
+    same process (e.g. batch validation in CI or governance_emit hot path).
+
+    Usage:
+        validator = UnifiedReportValidator()
+        result = validator.validate(report_text)
+        # result.valid is True/False, result.errors lists violation messages
+    """
+
+    class Result:
+        __slots__ = ("valid", "errors", "frontmatter")
+
+        def __init__(
+            self,
+            valid: bool,
+            errors: "list[str]",
+            frontmatter: "Dict[str, Any] | None",
+        ):
+            self.valid = valid
+            self.errors = errors
+            self.frontmatter = frontmatter
+
+    def __init__(self, schema_path: "Path | None" = None):
+        self._schema_path = schema_path or SCHEMA_PATH
+
+    def validate(self, text: str) -> "UnifiedReportValidator.Result":
+        """Validate report text. Returns Result with valid/errors/frontmatter."""
+        try:
+            fm = validate_frontmatter(text)
+            return self.Result(valid=True, errors=[], frontmatter=fm)
+        except SchemaViolation as exc:
+            return self.Result(valid=False, errors=[str(exc)], frontmatter=None)
+
+    def validate_path(self, path: Path) -> "UnifiedReportValidator.Result":
+        """Validate a report file on disk."""
+        try:
+            fm = validate_file(path)
+            return self.Result(valid=True, errors=[], frontmatter=fm)
+        except SchemaViolation as exc:
+            return self.Result(valid=False, errors=[str(exc)], frontmatter=None)

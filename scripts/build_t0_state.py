@@ -191,14 +191,22 @@ def _init_and_check_db(state_dir: Path) -> bool:
     if not db_path.exists():
         return False
     try:
-        import sqlite3
         with sqlite3.connect(str(db_path)) as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()}
-            return "terminal_leases" in tables
+            if "terminal_leases" not in tables:
+                return False
     except Exception:
         return False
+    # PR-6.5d fallback: DB exists but coordination_db init failed (e.g. locked).
+    # Still attempt auto_apply with the known path so pending migrations run.
+    try:
+        from migrations.auto_apply import auto_apply
+        auto_apply(db_path)
+    except Exception as e:
+        log.warning("migration auto_apply (fallback path) failed: %s", e)
+    return True
 
 
 # ---------------------------------------------------------------------------

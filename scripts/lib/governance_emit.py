@@ -106,25 +106,56 @@ def emit_dispatch_receipt(
     return receipt_path
 
 
-def _validate_report_frontmatter(content: str, dispatch_id: str) -> None:
-    """Validate unified-report frontmatter. Shadow-mode by default.
+def _validate_report_via_shell(report_path: Path, dispatch_id: str) -> None:
+    """Shell fallback: invoke verify_report_schema.sh when Python jsonschema unavailable."""
+    import subprocess
 
-    Logs SchemaViolation as a warning. Raises only when VNX_SCHEMA_STRICT=1.
+    script = Path(__file__).resolve().parent.parent / "guardrails" / "verify_report_schema.sh"
+    if not script.exists():
+        logger.debug("governance_emit: shell validator %s not found, skipping", script)
+        return
+    try:
+        result = subprocess.run(
+            ["bash", str(script), str(report_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            msg = (result.stdout or result.stderr or "unknown error").strip()
+            if os.environ.get("VNX_SCHEMA_STRICT") == "1":
+                raise ValueError(f"schema validation failed (shell): {msg}")
+            logger.warning(
+                "governance_emit: schema violation via shell (shadow-mode) dispatch=%s: %s",
+                dispatch_id, msg,
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("governance_emit: shell validator error dispatch=%s: %s", dispatch_id, exc)
+
+
+def _validate_report_frontmatter(content: str, dispatch_id: str, report_path: Optional[Path] = None) -> None:
+    """Validate unified-report frontmatter via UnifiedReportValidator (PR-D5-E/F).
+
+    Uses Python jsonschema when available (UnifiedReportValidator class), falls
+    back to shell wrapper (verify_report_schema.sh) when jsonschema is missing.
+    Shadow-mode by default (log violations). Raises only when VNX_SCHEMA_STRICT=1.
     """
     try:
-        from unified_report_schema import validate_frontmatter, SchemaViolation
+        from unified_report_schema import UnifiedReportValidator, SchemaViolation
     except ImportError:
-        logger.debug("governance_emit: unified_report_schema not available, skipping validation")
+        if report_path is not None:
+            _validate_report_via_shell(report_path, dispatch_id)
+        else:
+            logger.debug("governance_emit: unified_report_schema not available, skipping validation")
         return
 
-    try:
-        validate_frontmatter(content)
-    except SchemaViolation as exc:
+    validator = UnifiedReportValidator()
+    result = validator.validate(content)
+    if not result.valid:
+        violation_msg = result.errors[0] if result.errors else "unknown schema violation"
         if os.environ.get("VNX_SCHEMA_STRICT") == "1":
-            raise
+            raise SchemaViolation(violation_msg)
         logger.warning(
             "governance_emit: schema violation (shadow-mode) dispatch=%s: %s",
-            dispatch_id, exc,
+            dispatch_id, violation_msg,
         )
 
 
@@ -184,7 +215,7 @@ def emit_unified_report(
             allow_unicode=True,
         )
         content = f"---\n{frontmatter_yaml}---\n\n{body}"
-        _validate_report_frontmatter(content, dispatch_id)
+        _validate_report_frontmatter(content, dispatch_id, report_path=report_path)
     else:
         content = body
 

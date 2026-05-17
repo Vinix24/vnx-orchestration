@@ -775,35 +775,33 @@ def main(argv: list[str] | None = None) -> int:
 
     provider = args.provider
 
-    # PR-SR-4: smart_router auto-route (opt-in via --auto-route).
+    # PR-SR-3/4: smart_router.route() end-to-end pipeline (opt-in via --auto-route).
     if getattr(args, "auto_route", False):
         try:
-            from smart_router import decide as _smart_route, parse_route_model_id, write_route_decision  # noqa: PLC0415
+            from smart_router import route as _smart_route  # noqa: PLC0415
 
             _dp = None
             if args.dispatch_paths.strip():
                 _dp = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]
 
-            _route_decision = _smart_route(
+            _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+            _routing_result = _smart_route(
                 instruction=args.instruction,
+                dispatch_id=args.dispatch_id,
+                state_dir=_state_dir,
                 role=args.role,
                 dispatch_paths=_dp,
             )
-            if _route_decision.primary:
-                _routed_provider, _routed_model = parse_route_model_id(
-                    _route_decision.primary.model_id,
-                )
-                provider = _routed_provider
-                args.provider = _routed_provider
-                args.model = _routed_model
+            if _routing_result.routed:
+                provider = _routing_result.provider
+                args.provider = _routing_result.provider
+                args.model = _routing_result.model
                 os.environ["VNX_ROUTE_STRATEGY"] = "smart_router"
-                os.environ["VNX_TASK_CLASS"] = _route_decision.task_class
+                os.environ["VNX_TASK_CLASS"] = _routing_result.decision.task_class
 
-            _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
-            write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
             logger.info(
                 "smart_router: auto-route provider=%s model=%s (task_class=%s)",
-                provider, args.model, _route_decision.task_class,
+                provider, args.model, _routing_result.decision.task_class,
             )
         except Exception as _route_exc:
             logger.warning(
