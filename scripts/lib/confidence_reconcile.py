@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -34,6 +35,33 @@ RECONCILE_CACHE_TTL_SECONDS = 300
 
 # pattern_usage.pattern_id prefix that maps onto success_patterns rows.
 SUCCESS_PATTERN_PREFIX = "intel_sp_"
+
+
+def _recency_decay(confidence: float, last_used: datetime) -> float:
+    """Decay confidence by 0.95^weeks since last_used. Floor 0.1.
+
+    A pattern unused for 8 weeks decays to ~0.66× its beta score.
+    After ~29 weeks the floor of 0.1 kicks in, preventing full suppression.
+    """
+    weeks = (datetime.utcnow() - last_used).days / 7.0
+    decayed = confidence * (0.95 ** weeks)
+    return max(decayed, 0.1)
+
+
+def _parse_last_used(raw: Optional[str]) -> Optional[datetime]:
+    """Parse ISO-8601 or SQLite datetime string into a naive UTC datetime."""
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(raw[:26], fmt[:len(fmt)])
+            if dt.tzinfo is not None:
+                return dt.replace(tzinfo=None) + (dt.utcoffset() or __import__('datetime').timedelta(0))
+            return dt
+        except ValueError:
+            continue
+    return None
 
 
 def beta_score(success_count: int, failure_count: int) -> float:
@@ -102,15 +130,19 @@ def reconcile_pattern_confidence(db_path: Path) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
         rows = conn.execute(
-            "SELECT id, confidence_score FROM success_patterns"
+            "SELECT id, confidence_score, last_used FROM success_patterns"
         ).fetchall()
 
         updated = 0
-        for sp_id, current_score in rows:
+        for sp_id, current_score, last_used_raw in rows:
             agg = _aggregate_for_pattern(conn, int(sp_id))
             if agg is None:
                 continue
-            new_score = round(float(agg[0]), 6)
+            beta = float(agg[0])
+            last_used_dt = _parse_last_used(last_used_raw)
+            if last_used_dt is not None:
+                beta = _recency_decay(beta, last_used_dt)
+            new_score = round(beta, 6)
             current = float(current_score or 0.0)
             if abs(new_score - current) < 1e-6:
                 continue
