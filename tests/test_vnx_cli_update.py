@@ -2,6 +2,7 @@
 """Tests for vnx update subcommand."""
 
 import io
+import json
 import sys
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -20,6 +21,8 @@ from vnx_cli.commands.update import (
     _list_version_dirs,
     _current_target,
     _prune_old_versions,
+    _atomic_symlink_flip,
+    _validate_version_name,
     DEFAULT_KEEP_LAST,
 )
 
@@ -33,7 +36,7 @@ def _update_args(*, to_version=None, keep_last=DEFAULT_KEEP_LAST, dry_run=False,
     )
 
 
-def _capture_update(args) -> tuple[str, str, int]:
+def _capture_update(args) -> tuple:
     out_buf = io.StringIO()
     err_buf = io.StringIO()
     with redirect_stdout(out_buf):
@@ -191,3 +194,200 @@ def test_rollback_no_previous_version(tmp_path, monkeypatch, capsys):
     assert rc == 1
     captured = capsys.readouterr()
     assert "previous" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# _validate_version_name — path traversal + injection
+# ---------------------------------------------------------------------------
+
+def test_validate_rejects_path_traversal_dotdot(capsys):
+    with pytest.raises(ValueError, match="invalid version name"):
+        _validate_version_name("../../outside")
+
+
+def test_validate_rejects_absolute_path(capsys):
+    with pytest.raises(ValueError, match="invalid version name"):
+        _validate_version_name("/etc/passwd")
+
+
+def test_validate_rejects_shell_injection():
+    with pytest.raises(ValueError, match="invalid version name"):
+        _validate_version_name("foo;rm -rf /")
+
+
+def test_validate_accepts_semver_with_rc():
+    assert _validate_version_name("v1.0.0-rc2") == "v1.0.0-rc2"
+
+
+def test_validate_accepts_edge():
+    assert _validate_version_name("edge") == "edge"
+
+
+def test_validate_accepts_latest():
+    assert _validate_version_name("latest") == "latest"
+
+
+def test_validate_accepts_bare_semver():
+    assert _validate_version_name("1.2.3") == "1.2.3"
+
+
+# ---------------------------------------------------------------------------
+# vnx_update path-traversal: no filesystem mutation on invalid target
+# ---------------------------------------------------------------------------
+
+def test_update_path_traversal_no_mutation(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    args = _update_args(to_version="../../outside")
+
+    rc = vnx_update(args)
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid version name" in captured.err
+    # No filesystem mutation
+    assert not (tmp_path / "versions").exists()
+    assert not (tmp_path / "current").exists()
+
+
+def test_update_absolute_path_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    args = _update_args(to_version="/etc/passwd")
+
+    rc = vnx_update(args)
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid version name" in captured.err
+    assert not (tmp_path / "versions").exists()
+
+
+def test_update_shell_injection_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    args = _update_args(to_version="foo;rm -rf /")
+
+    rc = vnx_update(args)
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid version name" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# ADR-005: symlink flip emits NDJSON audit events
+# ---------------------------------------------------------------------------
+
+def test_symlink_flip_emits_audit_events(tmp_path):
+    root = tmp_path / "install"
+    root.mkdir()
+    target_dir = root / "versions" / "v1.0.0"
+    target_dir.mkdir(parents=True)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _atomic_symlink_flip(root, target_dir, dry_run=False, audit_log=audit_log)
+
+    assert audit_log.exists()
+    lines = audit_log.read_text().strip().splitlines()
+    assert len(lines) == 2
+
+    before = json.loads(lines[0])
+    after = json.loads(lines[1])
+
+    assert before["event_type"] == "central_install_update"
+    assert before["to_version"] == "v1.0.0"
+    assert before["success"] is False
+    assert before["phase"] == "before_flip"
+
+    assert after["event_type"] == "central_install_update"
+    assert after["to_version"] == "v1.0.0"
+    assert after["success"] is True
+    assert after["phase"] == "after_flip"
+
+
+def test_symlink_flip_audit_event_has_timestamp(tmp_path):
+    root = tmp_path / "install"
+    root.mkdir()
+    target_dir = root / "versions" / "v2.0.0"
+    target_dir.mkdir(parents=True)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _atomic_symlink_flip(root, target_dir, dry_run=False, audit_log=audit_log)
+
+    lines = audit_log.read_text().strip().splitlines()
+    for line in lines:
+        record = json.loads(line)
+        assert "timestamp" in record
+        assert record["timestamp"]  # non-empty
+
+
+def test_symlink_flip_dry_run_no_audit_event(tmp_path):
+    root = tmp_path / "install"
+    root.mkdir()
+    target_dir = root / "versions" / "v1.0.0"
+    target_dir.mkdir(parents=True)
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+
+    _atomic_symlink_flip(root, target_dir, dry_run=True, audit_log=audit_log)
+
+    assert not audit_log.exists()
+
+
+# ---------------------------------------------------------------------------
+# ADR-005: prune emits NDJSON audit events
+# ---------------------------------------------------------------------------
+
+def test_prune_emits_audit_event(tmp_path):
+    for v in ("v1", "v2", "v3", "v4", "v5"):
+        (tmp_path / "versions" / v).mkdir(parents=True)
+
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+    _prune_old_versions(tmp_path, keep_last=3, dry_run=False, audit_log=audit_log)
+
+    assert audit_log.exists()
+    lines = audit_log.read_text().strip().splitlines()
+    assert len(lines) == 2  # 5 - 3 = 2 pruned
+
+    for line in lines:
+        record = json.loads(line)
+        assert record["event_type"] == "central_install_prune"
+        assert "pruned_version" in record
+        assert record["keep_last_N"] == 3
+        assert "timestamp" in record
+
+
+def test_prune_dry_run_no_audit_event(tmp_path):
+    for v in ("v1", "v2", "v3", "v4", "v5"):
+        (tmp_path / "versions" / v).mkdir(parents=True)
+
+    audit_log = tmp_path / "events" / "central_install.ndjson"
+    _prune_old_versions(tmp_path, keep_last=3, dry_run=True, audit_log=audit_log)
+
+    assert not audit_log.exists()
+
+
+# ---------------------------------------------------------------------------
+# Subprocess FileNotFoundError — controlled error, no crash
+# ---------------------------------------------------------------------------
+
+def test_git_not_found_returns_controlled_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    args = _update_args(to_version="v1.0.0")
+
+    with patch("subprocess.run", side_effect=FileNotFoundError("git not found")):
+        rc = vnx_update(args)
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "git executable not found in PATH" in captured.err
+
+
+def test_git_not_found_no_exception_raised(tmp_path, monkeypatch):
+    monkeypatch.setenv("VNX_HOME_ROOT", str(tmp_path))
+    args = _update_args(to_version="v1.0.0")
+
+    with patch("subprocess.run", side_effect=FileNotFoundError("no git")):
+        try:
+            rc = vnx_update(args)
+        except FileNotFoundError:
+            pytest.fail("FileNotFoundError leaked out of vnx_update — must be caught internally")
+
+    assert rc == 1
