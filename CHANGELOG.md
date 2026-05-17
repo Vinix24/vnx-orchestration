@@ -7,6 +7,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ## [Unreleased]
 
 ### Added
+- feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
 - feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
 - feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
 - feat(vnx_paths): override-resolver `_resolve_overrides_dir()` + `get_skill_path()` — per-project `.vnx-overrides/skills,schemas,configs/` directory takes precedence over central VNX_HOME. Enables mission-control-style custom assets without central pollution. (Pre-centralization must-have #5)
