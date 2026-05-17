@@ -117,7 +117,7 @@ class IntelligenceSelector:
         result: Dict[str, List[IntelligenceItem]] = {"proven_pattern": [], "failure_prevention": [], "recent_comparable": []}
         if db is None:
             return result
-        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn)
+        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn, project_id_fn=current_project_id)
         result["proven_pattern"] = query_proven_patterns(db, task_class, scope_tags, reconcile_fn=self._maybe_reconcile_confidence, **kw)
         result["failure_prevention"] = query_failure_prevention(db, task_class, scope_tags, **kw)
         result["recent_comparable"] = query_recent_comparable(db, task_class, scope_tags, **kw)
