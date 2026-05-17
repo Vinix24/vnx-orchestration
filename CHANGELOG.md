@@ -18,6 +18,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - feat(schema): migration 0021 `central_install_pins` + `central_install_events` tables met `scripts/lib/central_install_db.py` helper. Bookkeeping voor project pin tracking + install/update/rollback event history. Pre-centralization must-have #10.
 
 ### Fixed
+- fix(governance): `_emit_governance` no longer raises `SystemExit(1)` on transient receipt write failure (Kimi audit). 3 retries with exponential backoff (0.5/1.0/1.5 s), then raises to caller. Transient FS races (rename collision, brief lock) no longer kill workers.
 - fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
 - fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
 - fix(vnx_paths): validate skill_name + resolved-path confinement check in get_skill_path (codex path-traversal blocker)

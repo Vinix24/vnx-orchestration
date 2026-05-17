@@ -19,6 +19,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -283,6 +284,10 @@ def _build_frontmatter(
     }
 
 
+_EMIT_MAX_RETRIES = 3
+_EMIT_RETRY_DELAY = 0.5  # seconds; multiplied by attempt number for backoff
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -292,7 +297,14 @@ def _emit_governance(
     end_time: datetime,
     status: str,
 ) -> None:
-    """Emit dispatch receipt + unified report after every spawn handler call."""
+    """Emit dispatch receipt + unified report after every spawn handler call.
+
+    Transient OSError/RuntimeError (rename collision, brief lock) retries up to
+    _EMIT_MAX_RETRIES times with exponential backoff.  After exhausting retries,
+    raises to the caller — it is the caller's responsibility to decide whether to
+    kill the worker.  ValueError (invalid provider) is not transient and re-raises
+    immediately without retry.
+    """
     from governance_emit import emit_dispatch_receipt, emit_unified_report
 
     state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
@@ -301,47 +313,77 @@ def _emit_governance(
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
-    try:
-        receipt_path = emit_dispatch_receipt(
-            dispatch_id=args.dispatch_id,
-            terminal_id=args.terminal_id,
-            provider=provider,
-            model=model_used,
-            pr_id=getattr(args, "pr_id", None),
-            status=status,
-            completion_pct=100 if status == "success" else 0,
-            risk=0.0,
-            findings=[],
-            duration_seconds=duration,
-            token_usage=token_usage,
-            cost_usd=cost_usd,
-            state_dir=state_dir,
-        )
-        print(f"Receipt: {receipt_path}", file=sys.stderr)
-    except (ValueError, RuntimeError) as exc:
-        logger.error("governance_emit: receipt failed dispatch=%s: %s", args.dispatch_id, exc)
-        raise SystemExit(1) from exc
+    for attempt in range(_EMIT_MAX_RETRIES):
+        try:
+            receipt_path = emit_dispatch_receipt(
+                dispatch_id=args.dispatch_id,
+                terminal_id=args.terminal_id,
+                provider=provider,
+                model=model_used,
+                pr_id=getattr(args, "pr_id", None),
+                status=status,
+                completion_pct=100 if status == "success" else 0,
+                risk=0.0,
+                findings=[],
+                duration_seconds=duration,
+                token_usage=token_usage,
+                cost_usd=cost_usd,
+                state_dir=state_dir,
+            )
+            print(f"Receipt: {receipt_path}", file=sys.stderr)
+            break
+        except ValueError as exc:
+            logger.error(
+                "_emit_governance: receipt failed dispatch=%s (invalid provider): %s",
+                args.dispatch_id, exc,
+            )
+            raise
+        except RuntimeError as exc:
+            if attempt < _EMIT_MAX_RETRIES - 1:
+                logger.warning(
+                    "_emit_governance: transient receipt write failure (attempt %d/%d): %s — retrying",
+                    attempt + 1, _EMIT_MAX_RETRIES, exc,
+                )
+                time.sleep(_EMIT_RETRY_DELAY * (attempt + 1))
+                continue
+            logger.error(
+                "_emit_governance: persistent receipt write failure after %d retries: %s — receipt may be lost",
+                _EMIT_MAX_RETRIES, exc,
+            )
+            raise
 
     frontmatter = _build_frontmatter(
         args, provider, model_used, result, duration, token_usage, cost_usd,
     )
 
-    try:
-        report_path = emit_unified_report(
-            dispatch_id=args.dispatch_id,
-            terminal_id=args.terminal_id,
-            provider=provider,
-            instruction=args.instruction,
-            response_text=_extract_response_text(result),
-            findings=[],
-            duration_seconds=duration,
-            data_dir=data_dir,
-            frontmatter=frontmatter,
-        )
-        print(f"Report: {report_path}", file=sys.stderr)
-    except RuntimeError as exc:
-        logger.error("governance_emit: unified report failed dispatch=%s: %s", args.dispatch_id, exc)
-        raise SystemExit(1) from exc
+    for attempt in range(_EMIT_MAX_RETRIES):
+        try:
+            report_path = emit_unified_report(
+                dispatch_id=args.dispatch_id,
+                terminal_id=args.terminal_id,
+                provider=provider,
+                instruction=args.instruction,
+                response_text=_extract_response_text(result),
+                findings=[],
+                duration_seconds=duration,
+                data_dir=data_dir,
+                frontmatter=frontmatter,
+            )
+            print(f"Report: {report_path}", file=sys.stderr)
+            break
+        except RuntimeError as exc:
+            if attempt < _EMIT_MAX_RETRIES - 1:
+                logger.warning(
+                    "_emit_governance: transient report write failure (attempt %d/%d): %s — retrying",
+                    attempt + 1, _EMIT_MAX_RETRIES, exc,
+                )
+                time.sleep(_EMIT_RETRY_DELAY * (attempt + 1))
+                continue
+            logger.error(
+                "_emit_governance: persistent report write failure after %d retries: %s — report may be lost",
+                _EMIT_MAX_RETRIES, exc,
+            )
+            raise
 
 
 def _build_lane_key(base_sub: str, model_alias: "str | None") -> str:
