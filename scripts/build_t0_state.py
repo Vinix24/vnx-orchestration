@@ -173,8 +173,16 @@ def _count_md(directory: Path) -> int:
 def _init_and_check_db(state_dir: Path) -> bool:
     """Idempotent schema init. Returns True if DB is operational."""
     try:
-        from coordination_db import init_schema
+        from coordination_db import db_path_from_state_dir, init_schema
         init_schema(state_dir)
+        # PR-6.5d: auto-apply any pending numbered migrations (e.g. 0020 pool tables)
+        # before downstream readers touch the DB. Best-effort: a migration error
+        # must not block SessionStart, but surface at WARNING for operator visibility.
+        try:
+            from migrations.auto_apply import auto_apply
+            auto_apply(db_path_from_state_dir(state_dir))
+        except Exception as e:
+            log.warning("migration auto_apply failed: %s", e)
         return True
     except (ImportError, OSError, sqlite3.OperationalError) as e:
         log.debug("coordination_db init failed, falling back: %s", e)
