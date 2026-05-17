@@ -415,6 +415,97 @@ class TestNetLineDeletion:
         assert result.net_line_deletion_warn is False
 
 
+class TestNoProjectRootSkipsDeletionCheck:
+    """enforce_codex_gate without project_root must skip deletion checks entirely."""
+
+    def test_no_project_root_skips_deletion(self):
+        """project_root=None → deletion count stays 0, no deletion reasons added."""
+        from review_contract import Deliverable, ReviewContract
+        contract = ReviewContract(
+            pr_id="PR-noroot",
+            pr_title="No root test",
+            feature_title="test",
+            branch="feat/test",
+            track="A",
+            risk_class="low",
+            merge_policy="squash_merge",
+            closure_stage="open",
+            deliverables=[Deliverable(description="thing", category="feature")],
+            review_stack=[],
+            changed_files=[],
+            content_hash="noroot01",
+        )
+        result = enforce_codex_gate(contract, project_root=None)
+        assert result.mass_deletion_count == 0
+        assert result.mass_deletion_warn is False
+        assert result.net_line_deletion == 0
+        assert result.net_line_deletion_warn is False
+        assert "mass_file_deletion" not in result.reasons
+        assert "net_line_deletion" not in result.reasons
+
+
+class TestBothDeletionTriggersSimultaneously:
+    """Both file-count and net-line HOLD triggers must both appear in receipt."""
+
+    def _make_contract(self, **overrides):
+        from review_contract import Deliverable, ReviewContract
+        defaults = dict(
+            pr_id="PR-both",
+            pr_title="Both triggers",
+            feature_title="test",
+            branch="feat/test",
+            track="A",
+            risk_class="low",
+            merge_policy="squash_merge",
+            closure_stage="open",
+            deliverables=[Deliverable(description="cleanup", category="infrastructure")],
+            review_stack=[],
+            changed_files=[],
+            content_hash="both1234",
+        )
+        defaults.update(overrides)
+        return ReviewContract(**defaults)
+
+    def test_both_hold_triggers_both_reasons(self, tmp_path):
+        """File HOLD + net-line HOLD both add their reason to enforcement."""
+        contract = self._make_contract()
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_HOLD)]
+        mock_deleted = MagicMock(returncode=0, stdout="\n".join(deleted) + "\n")
+        mock_numstat = MagicMock(returncode=0, stdout=f"0\t{NET_LINE_DELETION_HOLD + 100}\tsome/file.py\n")
+        with patch("codex_final_gate.subprocess.run", side_effect=[mock_deleted, mock_numstat]):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert "mass_file_deletion" in result.reasons
+        assert "net_line_deletion" in result.reasons
+        assert result.required is True
+
+    def test_both_warn_findings_in_receipt(self, tmp_path):
+        """evaluate_and_record injects two warning findings when both WARN levels are hit."""
+        from review_contract import Deliverable
+        contract = self._make_contract(
+            pr_id="PR-both-warn",
+            pr_title="Both WARN level",
+            deliverables=[Deliverable(description="reduce module", category="refactor")],
+            review_stack=["codex_gate"],
+            content_hash="bothwarn1",
+        )
+        deleted = [f"old/file_{i}.py" for i in range(DELETION_FILE_WARN + 1)]
+        mock_deleted = MagicMock(returncode=0, stdout="\n".join(deleted) + "\n")
+        mock_numstat = MagicMock(returncode=0, stdout=f"0\t{NET_LINE_DELETION_WARN + 50}\tsome/file.py\n")
+        with patch("codex_final_gate.subprocess.run", side_effect=[mock_deleted, mock_numstat]):
+            with patch("codex_final_gate.emit_governance_receipt"):
+                receipt = evaluate_and_record(contract, project_root=tmp_path)
+        file_warn = [
+            f for f in receipt.findings
+            if f.get("severity") == "warning" and "Net deletion warning" in f.get("message", "")
+        ]
+        line_warn = [
+            f for f in receipt.findings
+            if f.get("severity") == "warning" and "Net line deletion warning" in f.get("message", "")
+        ]
+        assert len(file_warn) == 1, "expected exactly one file-deletion warning finding"
+        assert len(line_warn) == 1, "expected exactly one net-line-deletion warning finding"
+
+
 class TestRenderPromptIncludesDeletionAlert:
     """_cmd_render_prompt must inject Net-Deletion Alert when deleted files exist."""
 
