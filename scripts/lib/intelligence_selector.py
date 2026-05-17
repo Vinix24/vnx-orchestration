@@ -137,7 +137,7 @@ class IntelligenceSelector:
         """Run the bounded selection algorithm and return an InjectionResult."""
         if injection_point not in VALID_INJECTION_POINTS:
             raise ValueError(f"Invalid injection_point: {injection_point!r}. Must be one of {sorted(VALID_INJECTION_POINTS)}")
-        resolved_class = resolve_task_class(task_class, skill_name)
+        resolved_class = resolve_task_class(task_class, skill_name, dispatch_paths, instruction_text)
         effective_scope: List[str] = list(scope_tags or [])
         for tag in [skill_name, (f"Track-{track}" if track and not track.startswith("Track-") else track), gate, resolved_class]:
             if tag and tag not in effective_scope:
@@ -264,11 +264,34 @@ class IntelligenceSelector:
 
 
 
-def select_intelligence(dispatch_id, injection_point, *, quality_db_path=None, coord_state_dir=None, task_class=None, skill_name=None, scope_tags=None, track=None, gate=None) -> InjectionResult:
+def select_intelligence(
+    dispatch_id,
+    injection_point,
+    *,
+    quality_db_path=None,
+    coord_state_dir=None,
+    task_class=None,
+    skill_name=None,
+    scope_tags=None,
+    track=None,
+    gate=None,
+    dispatch_paths=None,
+    instruction_text=None,
+) -> InjectionResult:
     """Convenience function: select, emit event, record injection, return result."""
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
-        result = selector.select(dispatch_id=dispatch_id, injection_point=injection_point, task_class=task_class, skill_name=skill_name, scope_tags=scope_tags, track=track, gate=gate)
+        result = selector.select(
+            dispatch_id=dispatch_id,
+            injection_point=injection_point,
+            task_class=task_class,
+            skill_name=skill_name,
+            scope_tags=scope_tags,
+            track=track,
+            gate=gate,
+            dispatch_paths=dispatch_paths,
+            instruction_text=instruction_text,
+        )
         selector.emit_event(result)
         selector.record_injection(result)
         return result
