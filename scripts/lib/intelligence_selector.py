@@ -73,7 +73,8 @@ class IntelligenceSelector:
         try:
             self._quality_db = sqlite3.connect(str(self._quality_db_path))
             self._quality_db.row_factory = sqlite3.Row
-        except Exception:
+        except Exception as exc:
+            logger.warning("_get_quality_db: failed to open quality_intelligence DB at %s: %s", self._quality_db_path, exc)
             self._quality_db = None
         return self._quality_db
 
@@ -108,7 +109,8 @@ class IntelligenceSelector:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             return conn
-        except Exception:
+        except Exception as exc:
+            logger.debug("_get_central_qi_conn: failed to connect to central DB: %s", exc)
             return None
 
     def _query_candidates(self, task_class: str, scope_tags: List[str]) -> Dict[str, List[IntelligenceItem]]:
@@ -117,7 +119,7 @@ class IntelligenceSelector:
         result: Dict[str, List[IntelligenceItem]] = {"proven_pattern": [], "failure_prevention": [], "recent_comparable": []}
         if db is None:
             return result
-        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn)
+        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn, project_id_fn=current_project_id)
         result["proven_pattern"] = query_proven_patterns(db, task_class, scope_tags, reconcile_fn=self._maybe_reconcile_confidence, **kw)
         result["failure_prevention"] = query_failure_prevention(db, task_class, scope_tags, **kw)
         result["recent_comparable"] = query_recent_comparable(db, task_class, scope_tags, **kw)
@@ -199,30 +201,6 @@ class IntelligenceSelector:
                 governance_used += 1
         return selected, suppressed
 
-    def _query_proven_patterns(self, db, task_class: str, scope_tags: List[str]) -> List[IntelligenceItem]:
-        return query_proven_patterns(
-            db, task_class, scope_tags,
-            has_column_fn=self._has_column,
-            central_conn_fn=self._get_central_qi_conn,
-            reconcile_fn=self._maybe_reconcile_confidence,
-            project_id_fn=current_project_id,
-        )
-
-    def _query_failure_prevention(self, db, task_class: str, scope_tags: List[str]) -> List[IntelligenceItem]:
-        return query_failure_prevention(
-            db, task_class, scope_tags,
-            has_column_fn=self._has_column,
-            central_conn_fn=self._get_central_qi_conn,
-            project_id_fn=current_project_id,
-        )
-
-    def _query_recent_comparable(self, db, task_class: str, scope_tags: List[str]) -> List[IntelligenceItem]:
-        return query_recent_comparable(
-            db, task_class, scope_tags,
-            has_column_fn=self._has_column,
-            central_conn_fn=self._get_central_qi_conn,
-            project_id_fn=current_project_id,
-        )
 
     def _enforce_payload_limit(self, selected, suppressed, drop_order=None) -> List[IntelligenceItem]:
         """Drop lowest-priority classes until payload fits within MAX_PAYLOAD_CHARS."""
