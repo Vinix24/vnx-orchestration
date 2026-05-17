@@ -24,6 +24,7 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from pool_worktree_manager import (
+    _validate_terminal_id,
     _worktree_dir,
     create_worker_worktree,
     reap_worker_worktree,
@@ -310,3 +311,95 @@ def test_reaper_calls_worktree_cleanup(tmp_path):
         assert "REAP-T1" in terminal_ids_reaped
         reap_calls = [c[0][0] for c in mock_reap.call_args_list]
         assert "REAP-T1" in reap_calls
+
+
+# ---------------------------------------------------------------------------
+# 13. Security: terminal_id validation rejects path traversal
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_id", [
+    "../etc/passwd",
+    "../../root",
+    "foo/bar",
+    "a" * 33,
+    "",
+    "hello world",
+    "T1; rm -rf /",
+    "pool\x00null",
+])
+def test_validate_terminal_id_rejects_malicious(bad_id):
+    with pytest.raises(ValueError, match="invalid terminal_id"):
+        _validate_terminal_id(bad_id)
+
+
+@pytest.mark.parametrize("good_id", [
+    "T1",
+    "ABC-1",
+    "worker_3",
+    "a" * 32,
+    "T0",
+    "my-worker-99",
+])
+def test_validate_terminal_id_accepts_valid(good_id):
+    _validate_terminal_id(good_id)
+
+
+def test_create_rejects_traversal_id(tmp_path):
+    with pytest.raises(ValueError, match="invalid terminal_id"):
+        create_worker_worktree("../../../etc", project_root=tmp_path)
+
+
+def test_reap_rejects_traversal_id(tmp_path):
+    with pytest.raises(ValueError, match="invalid terminal_id"):
+        reap_worker_worktree("../../../etc", project_root=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 14. Security: cleanup fallback refuses symlink targets
+# ---------------------------------------------------------------------------
+
+def test_reap_fallback_refuses_symlink_inside_root(tmp_path):
+    local = _init_git_repo_with_origin(tmp_path)
+    wt_dir = local / ".vnx-data" / "worktrees" / "pool-SYM1"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    target = local / "real_target"
+    target.mkdir()
+    wt_dir.symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="refusing cleanup.*symlink"):
+        reap_worker_worktree("SYM1", project_root=local)
+
+    assert target.is_dir()
+
+
+def test_reap_fallback_refuses_symlink_outside_root(tmp_path):
+    local = _init_git_repo_with_origin(tmp_path)
+    wt_dir = local / ".vnx-data" / "worktrees" / "pool-SYM2"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    target = tmp_path / "outside_target"
+    target.mkdir()
+    wt_dir.symlink_to(target)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        reap_worker_worktree("SYM2", project_root=local)
+
+    assert target.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# 15. Security: cleanup fallback refuses paths outside project root
+# ---------------------------------------------------------------------------
+
+def test_reap_fallback_refuses_outside_root(tmp_path):
+    local = _init_git_repo_with_origin(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    wt_dir = local / ".vnx-data" / "worktrees" / "pool-ESC1"
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    wt_dir.symlink_to(outside)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        reap_worker_worktree("ESC1", project_root=local)

@@ -7,10 +7,13 @@ concurrent subprocess workers operate on independent file trees.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+_TERMINAL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +26,16 @@ def _resolve_project_root() -> Path:
         return Path.cwd()
 
 
+def _validate_terminal_id(terminal_id: str) -> None:
+    if not _TERMINAL_ID_RE.fullmatch(terminal_id):
+        raise ValueError(
+            f"invalid terminal_id {terminal_id!r}: "
+            "must match ^[A-Za-z0-9_-]{1,32}$"
+        )
+
+
 def _worktree_dir(project_root: Path, terminal_id: str) -> Path:
+    _validate_terminal_id(terminal_id)
     return project_root / ".vnx-data" / "worktrees" / f"pool-{terminal_id}"
 
 
@@ -115,7 +127,13 @@ def reap_worker_worktree(
             "git worktree remove failed: %s; cleaning up directory",
             (exc.stderr or "").strip(),
         )
-        shutil.rmtree(str(wt_path), ignore_errors=True)
+        if wt_path.is_symlink() or not wt_path.is_dir():
+            raise RuntimeError(
+                f"refusing cleanup: {wt_path} is a symlink or not a directory"
+            )
+        resolved = wt_path.resolve()
+        resolved.relative_to(root)
+        shutil.rmtree(str(resolved), ignore_errors=True)
         try:
             subprocess.run(
                 ["git", "worktree", "prune"],
