@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnx-orchestration/schemas/unified_report_v1.json",
+  "title": "Unified Report Frontmatter v1",
+  "description": "JSONSchema for the YAML frontmatter that every unified report (PR-D5-F onward) must declare. PR-D5-E ships this schema + validator; PR-D5-F wires it into governance_emit.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "dispatch_id",
+    "provider",
+    "sub_provider",
+    "model",
+    "terminal_id",
+    "pool_id",
+    "role",
+    "task_class",
+    "pr_id",
+    "duration_seconds",
+    "exit_code",
+    "token_usage",
+    "cost_usd",
+    "route_decision"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Frontmatter schema version. Currently fixed at 1.",
+      "const": 1
+    },
+    "dispatch_id": {
+      "description": "Stable dispatch identifier, matches dispatch metadata footer.",
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "description": "Top-level provider family (claude|codex|gemini|kimi|litellm).",
+      "type": "string",
+      "minLength": 1
+    },
+    "sub_provider": {
+      "description": "Sub-provider routing label (e.g. anthropic, openai, google, moonshot, deepseek, glm). Use 'none' when not applicable.",
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "description": "Concrete model identifier reported by the adapter.",
+      "type": "string",
+      "minLength": 1
+    },
+    "terminal_id": {
+      "description": "Terminal slot identifier (e.g. T0, T1, W4).",
+      "type": "string",
+      "minLength": 1
+    },
+    "pool_id": {
+      "description": "Worker pool identifier (interactive|headless|hybrid|<custom>).",
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "description": "Role profile that executed the dispatch (e.g. backend-developer, architect).",
+      "type": "string",
+      "minLength": 1
+    },
+    "task_class": {
+      "description": "Coarse task classification used by routing (implementation|review|gate|test|docs|...).",
+      "type": "string",
+      "minLength": 1
+    },
+    "pr_id": {
+      "description": "PR identifier (PR-D5-E) or 'none' if not PR-scoped work.",
+      "type": "string",
+      "minLength": 1
+    },
+    "duration_seconds": {
+      "description": "Wall-clock execution duration in seconds.",
+      "type": "number",
+      "minimum": 0
+    },
+    "exit_code": {
+      "description": "Adapter exit code (0 = success).",
+      "type": "integer"
+    },
+    "token_usage": {
+      "description": "Token accounting reported by the adapter.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "cache_read"],
+      "properties": {
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cost_usd": {
+      "description": "Estimated USD cost for the dispatch.",
+      "type": "number",
+      "minimum": 0
+    },
+    "route_decision": {
+      "description": "Routing metadata captured at dispatch time (provider/model selection rationale).",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["strategy", "selected_provider", "selected_model"],
+      "properties": {
+        "strategy": {
+          "description": "Routing strategy label (e.g. default, override, fallback).",
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
