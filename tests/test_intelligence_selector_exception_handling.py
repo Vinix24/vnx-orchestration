@@ -2,10 +2,8 @@
 """
 Regression tests for exception-handling hardening in intelligence_selector.py (OI-1437).
 
-Covers the 10 silent-except sites narrowed in the cleanup PR: every broad
-``except Exception: pass`` is now narrowed and logged. These tests verify
-that (a) the selector runs cleanly in a default env, and (b) DB errors surface
-as log messages instead of being swallowed silently.
+Updated for the per-source module split: internal query methods moved to
+intelligence_sources submodules, so tests now reach them directly.
 """
 
 from __future__ import annotations
@@ -62,6 +60,13 @@ def _make_result(dispatch_id: str = "test-dispatch-001") -> InjectionResult:
     )
 
 
+def _broken_central_conn() -> MagicMock:
+    conn = MagicMock(spec=sqlite3.Connection)
+    conn.execute.side_effect = sqlite3.OperationalError("no such table: success_patterns")
+    conn.close = MagicMock()
+    return conn
+
+
 class TestRunsCleanInDefaultEnv(unittest.TestCase):
     """Selector constructs and select() runs without unhandled exceptions."""
 
@@ -84,7 +89,7 @@ class TestRunsCleanInDefaultEnv(unittest.TestCase):
 
 
 class TestCorruptStateLogsWarning(unittest.TestCase):
-    """record_injection with a broken DB logs a warning instead of crashing."""
+    """record_injection with a broken DB logs instead of crashing."""
 
     def test_corrupt_db_logs_warning(self) -> None:
         """sqlite3.Error during injection audit write surfaces as log.warning."""
@@ -92,11 +97,10 @@ class TestCorruptStateLogsWarning(unittest.TestCase):
             sel = _make_selector(tmp)
             result = _make_result()
 
-            # Patch runtime_coordination.get_connection to raise sqlite3.Error
             import runtime_coordination as _rc
             with (
                 patch.object(_rc, "get_connection", side_effect=sqlite3.OperationalError("db locked")),
-                self.assertLogs("intelligence_selector", level="WARNING") as cm,
+                self.assertLogs("intelligence_sources._recording", level="WARNING") as cm,
             ):
                 sel.record_injection(result)
 
@@ -104,7 +108,7 @@ class TestCorruptStateLogsWarning(unittest.TestCase):
             self.assertIn("Failed to record injection audit", logged)
 
     def test_stamp_source_ids_db_error_logs_debug(self) -> None:
-        """sqlite3.Error in stamp_source_dispatch_ids is caught and logged at DEBUG."""
+        """sqlite3.Error in _stamp is caught and logged at DEBUG by intelligence_selector."""
         from contextlib import contextmanager
 
         @contextmanager
@@ -119,9 +123,10 @@ class TestCorruptStateLogsWarning(unittest.TestCase):
             result = _make_result()
 
             import runtime_coordination as _rc
+            import intelligence_selector as _is_mod
             with (
                 patch.object(_rc, "get_connection", side_effect=_noop_conn),
-                patch.object(sel, "stamp_source_dispatch_ids", side_effect=sqlite3.OperationalError("locked")),
+                patch.object(_is_mod, "_stamp", side_effect=sqlite3.OperationalError("locked")),
                 self.assertLogs("intelligence_selector", level="DEBUG") as cm,
             ):
                 sel.record_injection(result)
@@ -131,98 +136,131 @@ class TestCorruptStateLogsWarning(unittest.TestCase):
 
 
 class TestCentralDbQueryExceptionSilenced(unittest.TestCase):
-    """Central DB query methods catch sqlite3.Error and return empty list."""
-
-    def _broken_conn(self) -> MagicMock:
-        conn = MagicMock(spec=sqlite3.Connection)
-        conn.execute.side_effect = sqlite3.OperationalError("no such table: success_patterns")
-        conn.close = MagicMock()
-        return conn
+    """Central DB query functions catch sqlite3.Error and return empty list."""
 
     def test_proven_patterns_central_db_error_returns_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sel = _make_selector(tmp)
-            with patch.object(sel, "_get_central_qi_conn", return_value=self._broken_conn()):
-                with self.assertLogs("intelligence_selector", level="DEBUG") as cm:
-                    items = sel._query_proven_patterns_central("backend-developer", [])
-            self.assertEqual(items, [])
-            self.assertTrue(any("proven-patterns" in line for line in cm.output))
+        from intelligence_sources.proven_pattern import _query_central
+        with self.assertLogs("intelligence_sources.proven_pattern", level="DEBUG") as cm:
+            items = _query_central(
+                "backend-developer", [],
+                lambda: _broken_central_conn(),
+                project_id_fn=lambda: None,
+            )
+        self.assertEqual(items, [])
+        self.assertTrue(any("proven-patterns" in line for line in cm.output))
 
     def test_failure_prevention_central_db_error_returns_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sel = _make_selector(tmp)
-            with patch.object(sel, "_get_central_qi_conn", return_value=self._broken_conn()):
-                with self.assertLogs("intelligence_selector", level="DEBUG") as cm:
-                    items = sel._query_failure_prevention_central("backend-developer", [])
-            self.assertEqual(items, [])
-            self.assertTrue(any("failure-prevention" in line for line in cm.output))
+        from intelligence_sources.failure_prevention import _query_central
+        with self.assertLogs("intelligence_sources.failure_prevention", level="DEBUG") as cm:
+            items = _query_central(
+                "backend-developer", [],
+                lambda: _broken_central_conn(),
+                project_id_fn=lambda: None,
+            )
+        self.assertEqual(items, [])
+        self.assertTrue(any("failure-prevention" in line for line in cm.output))
 
     def test_recent_comparable_central_db_error_returns_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            sel = _make_selector(tmp)
-            with patch.object(sel, "_get_central_qi_conn", return_value=self._broken_conn()):
-                with self.assertLogs("intelligence_selector", level="DEBUG") as cm:
-                    items = sel._query_recent_comparable_central("backend-developer", [])
-            self.assertEqual(items, [])
-            self.assertTrue(any("recent-comparable" in line for line in cm.output))
+        from intelligence_sources.recent_comparable import _query_central
+        with self.assertLogs("intelligence_sources.recent_comparable", level="DEBUG") as cm:
+            items = _query_central(
+                "backend-developer", [],
+                lambda: _broken_central_conn(),
+                project_id_fn=lambda: None,
+            )
+        self.assertEqual(items, [])
+        self.assertTrue(any("recent-comparable" in line for line in cm.output))
 
 
 class TestShadowVerifierExceptionSilenced(unittest.TestCase):
     """Shadow compare exceptions are caught and logged at DEBUG, not raised."""
 
+    def _make_per_project_db(self) -> sqlite3.Connection:
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.executescript("""
+            CREATE TABLE success_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT, description TEXT, category TEXT,
+                confidence_score REAL DEFAULT 0.0, usage_count INTEGER DEFAULT 0,
+                source_dispatch_ids TEXT, first_seen DATETIME, last_used DATETIME,
+                valid_until DATETIME DEFAULT NULL
+            );
+            CREATE TABLE dispatch_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT UNIQUE, terminal TEXT, track TEXT,
+                role TEXT, skill_name TEXT, gate TEXT,
+                outcome_status TEXT, dispatched_at DATETIME,
+                pattern_count INTEGER DEFAULT 0, prevention_rule_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE antipatterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT, description TEXT, category TEXT,
+                severity TEXT DEFAULT 'medium', occurrence_count INTEGER DEFAULT 0,
+                why_problematic TEXT, better_alternative TEXT,
+                first_seen DATETIME, last_seen DATETIME,
+                valid_until DATETIME DEFAULT NULL
+            );
+        """)
+        return db
+
     def test_shadow_proven_patterns_exception_logged(self) -> None:
-        import intelligence_selector as _mod
-        with tempfile.TemporaryDirectory() as tmp:
-            sel = _make_selector(tmp)
-            broken_verifier = MagicMock()
-            broken_verifier.compare.side_effect = RuntimeError("shadow verifier exploded")
-            quality_db = sqlite3.connect(":memory:")
-            with (
-                patch.object(_mod, "_shadow_verifier", broken_verifier),
-                patch.object(sel, "_query_proven_patterns_per_project", return_value=[]),
-                patch.object(sel, "_query_proven_patterns_central", return_value=[]),
-                patch.dict("os.environ", {"VNX_USE_CENTRAL_DB": "shadow"}),
-                self.assertLogs("intelligence_selector", level="DEBUG") as cm,
-            ):
-                result = sel._query_proven_patterns(quality_db, "backend-developer", [])
-            self.assertEqual(result, [])
-            self.assertTrue(any("Shadow compare" in line for line in cm.output))
+        import intelligence_sources.proven_pattern as _mod
+        db = self._make_per_project_db()
+        broken_verifier = MagicMock()
+        broken_verifier.compare.side_effect = RuntimeError("shadow verifier exploded")
+        with (
+            patch.object(_mod, "_shadow_verifier", broken_verifier),
+            patch.dict("os.environ", {"VNX_USE_CENTRAL_DB": "shadow"}),
+            self.assertLogs("intelligence_sources.proven_pattern", level="DEBUG") as cm,
+        ):
+            result = _mod.query_proven_patterns(
+                db, "backend-developer", [],
+                has_column_fn=lambda t, c: False,
+                central_conn_fn=lambda: None,
+                reconcile_fn=lambda: None,
+            )
+        db.close()
+        self.assertEqual(result, [])
+        self.assertTrue(any("Shadow compare" in line for line in cm.output))
 
     def test_shadow_failure_prevention_exception_logged(self) -> None:
-        import intelligence_selector as _mod
-        with tempfile.TemporaryDirectory() as tmp:
-            sel = _make_selector(tmp)
-            broken_verifier = MagicMock()
-            broken_verifier.compare.side_effect = RuntimeError("shadow verifier exploded")
-            quality_db = sqlite3.connect(":memory:")
-            with (
-                patch.object(_mod, "_shadow_verifier", broken_verifier),
-                patch.object(sel, "_query_failure_prevention_per_project", return_value=[]),
-                patch.object(sel, "_query_failure_prevention_central", return_value=[]),
-                patch.dict("os.environ", {"VNX_USE_CENTRAL_DB": "shadow"}),
-                self.assertLogs("intelligence_selector", level="DEBUG") as cm,
-            ):
-                result = sel._query_failure_prevention(quality_db, "backend-developer", [])
-            self.assertEqual(result, [])
-            self.assertTrue(any("Shadow compare" in line for line in cm.output))
+        import intelligence_sources.failure_prevention as _mod
+        db = self._make_per_project_db()
+        broken_verifier = MagicMock()
+        broken_verifier.compare.side_effect = RuntimeError("shadow verifier exploded")
+        with (
+            patch.object(_mod, "_shadow_verifier", broken_verifier),
+            patch.dict("os.environ", {"VNX_USE_CENTRAL_DB": "shadow"}),
+            self.assertLogs("intelligence_sources.failure_prevention", level="DEBUG") as cm,
+        ):
+            result = _mod.query_failure_prevention(
+                db, "backend-developer", [],
+                has_column_fn=lambda t, c: False,
+                central_conn_fn=lambda: None,
+            )
+        db.close()
+        self.assertEqual(result, [])
+        self.assertTrue(any("Shadow compare" in line for line in cm.output))
 
     def test_shadow_recent_comparable_exception_logged(self) -> None:
-        import intelligence_selector as _mod
-        with tempfile.TemporaryDirectory() as tmp:
-            sel = _make_selector(tmp)
-            broken_verifier = MagicMock()
-            broken_verifier.compare.side_effect = RuntimeError("shadow verifier exploded")
-            quality_db = sqlite3.connect(":memory:")
-            with (
-                patch.object(_mod, "_shadow_verifier", broken_verifier),
-                patch.object(sel, "_query_recent_comparable_per_project", return_value=[]),
-                patch.object(sel, "_query_recent_comparable_central", return_value=[]),
-                patch.dict("os.environ", {"VNX_USE_CENTRAL_DB": "shadow"}),
-                self.assertLogs("intelligence_selector", level="DEBUG") as cm,
-            ):
-                result = sel._query_recent_comparable(quality_db, "backend-developer", [])
-            self.assertEqual(result, [])
-            self.assertTrue(any("Shadow compare" in line for line in cm.output))
+        import intelligence_sources.recent_comparable as _mod
+        db = self._make_per_project_db()
+        broken_verifier = MagicMock()
+        broken_verifier.compare.side_effect = RuntimeError("shadow verifier exploded")
+        with (
+            patch.object(_mod, "_shadow_verifier", broken_verifier),
+            patch.dict("os.environ", {"VNX_USE_CENTRAL_DB": "shadow"}),
+            self.assertLogs("intelligence_sources.recent_comparable", level="DEBUG") as cm,
+        ):
+            result = _mod.query_recent_comparable(
+                db, "backend-developer", [],
+                has_column_fn=lambda t, c: False,
+                central_conn_fn=lambda: None,
+            )
+        db.close()
+        self.assertEqual(result, [])
+        self.assertTrue(any("Shadow compare" in line for line in cm.output))
 
 
 if __name__ == "__main__":
