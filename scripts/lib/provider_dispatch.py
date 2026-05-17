@@ -582,8 +582,8 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             "kimi dispatch completed but %d event_writer failures occurred — audit gap",
             result.event_writer_failures,
         )
-        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
-        return 2
+        _emit_governance(args, "kimi", model_label, result, start_time, end_time, "failure")
+        return 1
     _emit_governance(args, "kimi", model_label, result, start_time, end_time, "success")
     return 0
 

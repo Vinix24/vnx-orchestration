@@ -324,6 +324,9 @@ def spawn_kimi(
     ``event_writer`` is called per-event in _consume_kimi_stream. Passing both
     causes every event to be written twice.
     """
+    if event_store is not None and event_writer is not None:
+        raise ValueError("Pass either event_store OR event_writer, not both")
+
     try:
         chunk_timeout = float(os.environ.get("VNX_KIMI_STALL_THRESHOLD", chunk_timeout))
     except (TypeError, ValueError):

@@ -77,7 +77,7 @@ class TestDispatchKimiSuccess(unittest.TestCase):
         result = self._make_success_result()
 
         with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
-             patch("event_store.EventStore", side_effect=Exception("no store")), \
+             patch("event_store.EventStore", return_value=MagicMock()), \
              patch("governance_emit.emit_dispatch_receipt") as mock_receipt, \
              patch("governance_emit.emit_unified_report") as mock_report:
             mock_receipt.return_value = Path("/tmp/receipts.ndjson")
@@ -97,7 +97,7 @@ class TestDispatchKimiSuccess(unittest.TestCase):
         result = self._make_success_result()
 
         with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
-             patch("event_store.EventStore", side_effect=Exception("no store")), \
+             patch("event_store.EventStore", return_value=MagicMock()), \
              patch("governance_emit.emit_dispatch_receipt") as mock_receipt, \
              patch("governance_emit.emit_unified_report") as mock_report:
             mock_receipt.return_value = Path("/tmp/receipts.ndjson")
@@ -121,7 +121,7 @@ class TestDispatchKimiSuccess(unittest.TestCase):
         )
 
         with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=fail_result), \
-             patch("event_store.EventStore", side_effect=Exception("no store")), \
+             patch("event_store.EventStore", return_value=MagicMock()), \
              patch("governance_emit.emit_dispatch_receipt") as mock_receipt, \
              patch("governance_emit.emit_unified_report") as mock_report:
             mock_receipt.return_value = Path("/tmp/receipts.ndjson")
@@ -129,6 +129,51 @@ class TestDispatchKimiSuccess(unittest.TestCase):
             exit_code = pd._dispatch_kimi(args)
 
         self.assertEqual(exit_code, 1)
+        mock_receipt.assert_called_once()
+        call_kwargs = mock_receipt.call_args.kwargs
+        self.assertEqual(call_kwargs.get("status"), "failure")
+
+    def test_event_store_init_failure_returns_nonzero(self):
+        import provider_dispatch as pd
+
+        args = _build_args()
+
+        with patch("event_store.EventStore", side_effect=Exception("db unavailable")), \
+             patch("governance_emit.emit_dispatch_receipt") as mock_receipt, \
+             patch("governance_emit.emit_unified_report") as mock_report:
+            exit_code = pd._dispatch_kimi(args)
+
+        self.assertNotEqual(exit_code, 0)
+        # No success receipt may be emitted when audit sink is unavailable
+        for call in mock_receipt.call_args_list:
+            self.assertNotEqual(call.kwargs.get("status"), "success")
+
+    def test_event_writer_failures_emits_failure_receipt(self):
+        import provider_dispatch as pd
+        from provider_spawns.kimi_spawn import KimiSpawnResult
+
+        args = _build_args()
+        audit_gap_result = KimiSpawnResult(
+            returncode=0,
+            completion_text="done",
+            events_written=5,
+            session_id=None,
+            timed_out=False,
+            stopped_early=False,
+            token_usage={"input_tokens": 100, "output_tokens": 40, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+            error=None,
+            event_writer_failures=3,
+        )
+
+        with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=audit_gap_result), \
+             patch("event_store.EventStore", return_value=MagicMock()), \
+             patch("governance_emit.emit_dispatch_receipt") as mock_receipt, \
+             patch("governance_emit.emit_unified_report") as mock_report:
+            mock_receipt.return_value = Path("/tmp/receipts.ndjson")
+            mock_report.return_value = Path("/tmp/report.md")
+            exit_code = pd._dispatch_kimi(args)
+
+        self.assertNotEqual(exit_code, 0)
         mock_receipt.assert_called_once()
         call_kwargs = mock_receipt.call_args.kwargs
         self.assertEqual(call_kwargs.get("status"), "failure")
