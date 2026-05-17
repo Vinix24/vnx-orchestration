@@ -120,12 +120,13 @@ def stamp_source_dispatch_ids(
         try:
             if _stamp_source_dispatch_id(db, item, result.dispatch_id):
                 stamped += 1
-        except Exception:
+        except Exception as exc:
+            logger.warning("stamp_source_dispatch_ids: failed to stamp item %s: %s", getattr(item, "item_id", "?"), exc)
             continue
     try:
         db.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        logger.warning("stamp_source_dispatch_ids: commit failed: %s", exc)
     return stamped
 
 

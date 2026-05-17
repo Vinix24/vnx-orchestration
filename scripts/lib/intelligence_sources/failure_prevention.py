@@ -132,7 +132,8 @@ def _query_antipatterns(
             """,
             ap_scope_params,
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        logger.warning("failure_prevention antipatterns query failed: %s", exc)
         return items
     for row in rows:
         row_d = dict(row)
@@ -189,7 +190,8 @@ def _query_prevention_rules(
             """,
             pr_scope_params,
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        logger.warning("failure_prevention prevention_rules query failed: %s", exc)
         return items
     for row in rule_rows:
         row_d = dict(row)

@@ -262,7 +262,8 @@ class IntelligenceSelector:
                 event_id = _append_event(conn, event_type=event_type, entity_type="dispatch", entity_id=result.dispatch_id, actor="intelligence_selector", reason=reason, metadata=result.to_event_metadata())
                 conn.commit()
             return event_id
-        except Exception:
+        except Exception as exc:
+            logger.warning("emit_event: failed to append coordination event for dispatch %s: %s", result.dispatch_id, exc)
             return None
 
     def record_injection(self, result: InjectionResult, coord_state_dir=None) -> None:

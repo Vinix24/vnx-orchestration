@@ -115,7 +115,8 @@ def _query_per_project(
             """,
             (cutoff, *dm_scope_params),
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        logger.warning("recent_comparable per-project query failed: %s", exc)
         return items
     for row in rows:
         item = _row_to_intelligence_item(row, scope_tags)

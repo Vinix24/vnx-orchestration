@@ -158,7 +158,8 @@ def _query_per_project(
             ORDER BY confidence_score DESC LIMIT 20""",
             scope_params,
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        logger.warning("proven_pattern per-project query failed: %s", exc)
         return items
     canonical_cache: Dict[Any, Any] = {}
     for row in rows:
