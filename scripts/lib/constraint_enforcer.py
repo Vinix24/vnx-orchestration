@@ -112,6 +112,8 @@ class ConstraintEnforcer:
                         raise HardConstraintViolation(cid, msg)
                     logger.warning("[%s] %s", cid, msg)
 
+    _NATIVE_CLI_PROVIDERS = frozenset({"claude", "codex", "gemini", "kimi"})
+
     def _check_forbid_route(
         self,
         constraint: Dict[str, Any],
@@ -127,9 +129,13 @@ class ConstraintEnforcer:
 
         spec_provider = fr.get("provider")
         if spec_provider:
-            effective_provider = sub_provider or provider
-            if not self._match_value(effective_provider, spec_provider):
-                return False
+            if provider and provider.lower() in self._NATIVE_CLI_PROVIDERS:
+                if not self._match_value(provider, spec_provider):
+                    return False
+            else:
+                effective_provider = sub_provider or provider
+                if not self._match_value(effective_provider, spec_provider):
+                    return False
 
         spec_model = fr.get("model")
         if spec_model:
