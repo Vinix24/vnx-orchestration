@@ -74,4 +74,4 @@ def cleanup_temp(directory):
     os.system(f"rm -rf {directory}")
 ```
 
-List all blocking issues with line number, issue type, severity, and fix. Do not miss any of the 5 deliberately planted critical issues.
+List all blocking issues with line number, issue type, severity, and fix.
