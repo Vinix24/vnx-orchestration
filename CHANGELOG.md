@@ -6,6 +6,12 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Fixed
+- fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
+
+### Added
+- feat(pyproject): `vnx` console_script entry-point + requires-python `>=3.11,<3.14`. Pipx-installable. (Pre-centralization must-have #6)
+
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
 
