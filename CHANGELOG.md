@@ -7,6 +7,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ## [Unreleased]
 
 ### Added
+- feat(gate): net-deletion annotation injected into codex + gemini reviewer prompts when PR deletes >= 5 files (WARN) or >= 20 files (HOLD); `_NET_DELETION_WARN_THRESHOLD` / `_NET_DELETION_HOLD_THRESHOLD` module-level constants replace inline magic numbers.
 - feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
 - feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
 
