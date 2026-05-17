@@ -88,6 +88,8 @@ class GateRequestHandlerMixin:
             return payload
         if gate == "ci_gate":
             return self._request_ci_gate(pr_number, branch, risk_class, changed_files, mode, dispatch_id)
+        if gate == "wiring_gate":
+            return self._request_wiring_gate(pr_number, branch, dispatch_id)
         return {"gate": gate, "status": "blocked", "reason": "unknown_review_gate"}
 
     def request_reviews(
@@ -688,4 +690,64 @@ class GateRequestHandlerMixin:
         request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
         self._emit_ci_gate_contract_receipt(contract, mode, dispatch_id, payload["status"])
+        return payload
+
+    def _wiring_gate_available(self) -> bool:
+        return shutil.which("gh") is not None
+
+    def _request_wiring_gate(
+        self, pr_number: int, branch: str, dispatch_id: str = "",
+    ) -> Dict[str, Any]:
+        from review_gate_manager import _utc_now
+        from wiring_gate import check_pr_wiring
+
+        available = self._wiring_gate_available()
+        requested_at = _utc_now()
+
+        if not available:
+            payload: Dict[str, Any] = {
+                "gate": "wiring_gate",
+                "status": "not_executable",
+                "provider": "gh_cli",
+                "branch": branch,
+                "pr_number": pr_number,
+                "requested_at": requested_at,
+                "reason": "provider_not_installed",
+                "reason_detail": "gh binary not found in PATH",
+            }
+            if dispatch_id:
+                payload["dispatch_id"] = dispatch_id
+            self._request_path("wiring_gate", pr_number).write_text(
+                json.dumps(payload, indent=2), encoding="utf-8",
+            )
+            return payload
+
+        result = check_pr_wiring(pr_number)
+        payload = {
+            "gate": "wiring_gate",
+            "status": result.status,
+            "provider": "ast_grep",
+            "branch": branch,
+            "pr_number": pr_number,
+            "requested_at": requested_at,
+            "completed_at": _utc_now(),
+            "summary": result.summary,
+            "blocking_findings": [
+                {
+                    "severity": "blocking" if result.status == "fail" else "advisory",
+                    "title": f"Unwired {s.kind}: {s.name}",
+                    "description": f"{s.file}:{s.line} — zero callers outside definition file",
+                }
+                for s in result.unwired
+            ],
+            "blocking_count": len(result.unwired) if result.status == "fail" else 0,
+            "advisory_count": len(result.unwired) if result.status == "advisory" else 0,
+            "total_checked": result.total_checked,
+            "skipped_symbols": result.skipped,
+        }
+        if dispatch_id:
+            payload["dispatch_id"] = dispatch_id
+        self._request_path("wiring_gate", pr_number).write_text(
+            json.dumps(payload, indent=2), encoding="utf-8",
+        )
         return payload

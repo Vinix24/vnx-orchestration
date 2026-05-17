@@ -22,6 +22,7 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "codex_gate": "VNX_CODEX_HEADLESS_ENABLED",
     "claude_github_optional": "VNX_CLAUDE_GITHUB_REVIEW_ENABLED",
     "ci_gate": "VNX_CI_GATE_REQUIRED",
+    "wiring_gate": "VNX_WIRING_GATE_REQUIRED",
 }
 
 _GATE_BINARIES: Dict[str, str] = {
@@ -29,6 +30,7 @@ _GATE_BINARIES: Dict[str, str] = {
     "codex_gate": "codex",
     "claude_github_optional": "gh",
     "ci_gate": "gh",
+    "wiring_gate": "gh",
 }
 
 # Infrastructure/execution failures — NOT semantic gate verdicts.
