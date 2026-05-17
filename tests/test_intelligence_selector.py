@@ -38,6 +38,9 @@ from intelligence_selector import (
     SuppressionRecord,
     resolve_task_class,
     select_intelligence,
+    query_proven_patterns,
+    query_failure_prevention,
+    query_recent_comparable,
 )
 from runtime_coordination import get_connection, init_schema
 
@@ -1051,7 +1054,13 @@ class TestShadowModeQueryProvenPatterns(unittest.TestCase):
         os.environ.pop("VNX_USE_CENTRAL_DB", None)
         selector = self._make_selector()
         db = self._open_per_project_db()
-        items = selector._query_proven_patterns(db, "research_structured", ["architect"])
+        items = query_proven_patterns(
+            db, "research_structured", ["architect"],
+            has_column_fn=selector._has_column,
+            central_conn_fn=selector._get_central_qi_conn,
+            reconcile_fn=selector._maybe_reconcile_confidence,
+            project_id_fn=lambda: self._project_id,
+        )
         db.close()
         selector.close()
         self.assertTrue(len(items) >= 1)
@@ -1093,7 +1102,13 @@ class TestShadowModeQueryProvenPatterns(unittest.TestCase):
                    VALUES ('Extra per-project', 'Only in per-project', 'reviewer', 0.9, 3, datetime('now'))"""
             )
             db.commit()
-            items = selector._query_proven_patterns(db, "research_structured", [])
+            items = query_proven_patterns(
+                db, "research_structured", [],
+                has_column_fn=selector._has_column,
+                central_conn_fn=selector._get_central_qi_conn,
+                reconcile_fn=selector._maybe_reconcile_confidence,
+                project_id_fn=lambda: self._project_id,
+            )
             db.close()
             selector.close()
             # Legacy result is authoritative (returned)
@@ -1116,7 +1131,13 @@ class TestShadowModeQueryProvenPatterns(unittest.TestCase):
         try:
             selector = self._make_selector()
             db = self._open_per_project_db()
-            items = selector._query_proven_patterns(db, "research_structured", ["architect"])
+            items = query_proven_patterns(
+                db, "research_structured", ["architect"],
+                has_column_fn=selector._has_column,
+                central_conn_fn=selector._get_central_qi_conn,
+                reconcile_fn=selector._maybe_reconcile_confidence,
+                project_id_fn=lambda: self._project_id,
+            )
             db.close()
             selector.close()
             titles = [i.title for i in items]
@@ -1165,7 +1186,12 @@ class TestShadowModeQueryFailurePrevention(unittest.TestCase):
         os.environ.pop("VNX_USE_CENTRAL_DB", None)
         selector = self._make_selector()
         db = self._open_per_project_db()
-        items = selector._query_failure_prevention(db, "research_structured", [])
+        items = query_failure_prevention(
+            db, "research_structured", [],
+            has_column_fn=selector._has_column,
+            central_conn_fn=selector._get_central_qi_conn,
+            project_id_fn=lambda: self._project_id,
+        )
         db.close()
         selector.close()
         self.assertTrue(len(items) >= 1)
@@ -1183,7 +1209,12 @@ class TestShadowModeQueryFailurePrevention(unittest.TestCase):
         try:
             selector = self._make_selector()
             db = self._open_per_project_db()
-            items = selector._query_failure_prevention(db, "research_structured", [])
+            items = query_failure_prevention(
+                db, "research_structured", [],
+                has_column_fn=selector._has_column,
+                central_conn_fn=selector._get_central_qi_conn,
+                project_id_fn=lambda: self._project_id,
+            )
             db.close()
             selector.close()
             # Per-project authoritative: result is returned regardless of divergence
@@ -1204,7 +1235,12 @@ class TestShadowModeQueryFailurePrevention(unittest.TestCase):
         try:
             selector = self._make_selector()
             db = self._open_per_project_db()
-            items = selector._query_failure_prevention(db, "research_structured", [])
+            items = query_failure_prevention(
+                db, "research_structured", [],
+                has_column_fn=selector._has_column,
+                central_conn_fn=selector._get_central_qi_conn,
+                project_id_fn=lambda: self._project_id,
+            )
             db.close()
             selector.close()
             titles = [i.title for i in items]
@@ -1250,7 +1286,12 @@ class TestShadowModeQueryRecentComparable(unittest.TestCase):
         os.environ.pop("VNX_USE_CENTRAL_DB", None)
         selector = self._make_selector()
         db = self._open_per_project_db()
-        items = selector._query_recent_comparable(db, "research_structured", ["architect"])
+        items = query_recent_comparable(
+            db, "research_structured", ["architect"],
+            has_column_fn=selector._has_column,
+            central_conn_fn=selector._get_central_qi_conn,
+            project_id_fn=lambda: self._project_id,
+        )
         db.close()
         selector.close()
         self.assertIsInstance(items, list)
@@ -1269,7 +1310,12 @@ class TestShadowModeQueryRecentComparable(unittest.TestCase):
         try:
             selector = self._make_selector()
             db = self._open_per_project_db()
-            items = selector._query_recent_comparable(db, "research_structured", [])
+            items = query_recent_comparable(
+                db, "research_structured", [],
+                has_column_fn=selector._has_column,
+                central_conn_fn=selector._get_central_qi_conn,
+                project_id_fn=lambda: self._project_id,
+            )
             db.close()
             selector.close()
             # Per-project authoritative
@@ -1290,7 +1336,12 @@ class TestShadowModeQueryRecentComparable(unittest.TestCase):
         try:
             selector = self._make_selector()
             db = self._open_per_project_db()
-            items = selector._query_recent_comparable(db, "research_structured", [])
+            items = query_recent_comparable(
+                db, "research_structured", [],
+                has_column_fn=selector._has_column,
+                central_conn_fn=selector._get_central_qi_conn,
+                project_id_fn=lambda: self._project_id,
+            )
             db.close()
             selector.close()
             ids = [i.item_id for i in items]
