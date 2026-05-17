@@ -2,6 +2,7 @@
 """Tests for wiring_gate.py — dead-code detection gate."""
 
 import os
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -14,8 +15,10 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 from wiring_gate import (
+    WiringGateError,
     WiringGateResult,
     _extract_new_public_defs,
+    _grep_callers,
     _load_skip_list,
     check_pr_wiring,
 )
@@ -39,6 +42,24 @@ SAMPLE_DIFF = textwrap.dedent("""\
     +    pass
     +
     +class _InternalWidget:
+    +    pass
+""")
+
+SAMPLE_DIFF_ASYNC = textwrap.dedent("""\
+    diff --git a/scripts/lib/async_module.py b/scripts/lib/async_module.py
+    new file mode 100644
+    --- /dev/null
+    +++ b/scripts/lib/async_module.py
+    @@ -0,0 +1,9 @@
+    +\"\"\"Async module.\"\"\"
+    +
+    +async def fetch_data():
+    +    pass
+    +
+    +async def _internal_fetch():
+    +    pass
+    +
+    +def sync_helper():
     +    pass
 """)
 
@@ -166,3 +187,70 @@ class TestCheckPrWiring:
         assert d["status"] == "advisory"
         assert d["unwired"][0]["name"] == "foo"
         assert d["skipped"] == ["baz"]
+
+    @patch("wiring_gate._get_pr_diff", side_effect=WiringGateError("gh pr diff failed"))
+    def test_diff_failure_raises_wiring_gate_error(self, mock_diff):
+        with pytest.raises(WiringGateError, match="gh pr diff failed"):
+            check_pr_wiring(999)
+
+    @patch("wiring_gate._grep_callers", return_value=None)
+    @patch("wiring_gate._get_pr_diff", return_value=SAMPLE_DIFF)
+    def test_grep_failure_blocks_as_fail(self, mock_diff, mock_grep):
+        result = check_pr_wiring(123)
+        assert result.status == "fail"
+        assert len(result.unwired) == 2
+        assert "grep failed" in result.summary
+
+
+class TestAsyncDefExtraction:
+    def test_extracts_async_def(self):
+        defs = _extract_new_public_defs(SAMPLE_DIFF_ASYNC)
+        names = [d["name"] for d in defs]
+        assert "fetch_data" in names
+        assert "sync_helper" in names
+        assert "_internal_fetch" not in names
+
+    def test_async_def_kind_is_function(self):
+        defs = _extract_new_public_defs(SAMPLE_DIFF_ASYNC)
+        by_name = {d["name"]: d for d in defs}
+        assert by_name["fetch_data"]["kind"] == "function"
+
+
+class TestGetPrDiffRaisesOnError:
+    @patch("wiring_gate.subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 30))
+    def test_timeout_raises(self, mock_run):
+        from wiring_gate import _get_pr_diff
+        with pytest.raises(WiringGateError, match="timed out"):
+            _get_pr_diff(123)
+
+    @patch("wiring_gate.subprocess.run", side_effect=subprocess.CalledProcessError(1, "gh"))
+    def test_called_process_error_raises(self, mock_run):
+        from wiring_gate import _get_pr_diff
+        with pytest.raises(WiringGateError, match="failed"):
+            _get_pr_diff(123)
+
+    @patch("wiring_gate.subprocess.run", side_effect=OSError("no gh binary"))
+    def test_os_error_raises(self, mock_run):
+        from wiring_gate import _get_pr_diff
+        with pytest.raises(WiringGateError, match="failed"):
+            _get_pr_diff(123)
+
+
+class TestGrepCallersReturnsNone:
+    @patch("wiring_gate.subprocess.run", side_effect=subprocess.TimeoutExpired("grep", 10))
+    def test_timeout_returns_none(self, mock_run):
+        result = _grep_callers("some_func", "some_file.py")
+        assert result is None
+
+    @patch("wiring_gate.subprocess.run", side_effect=OSError("no grep"))
+    def test_os_error_returns_none(self, mock_run):
+        result = _grep_callers("some_func", "some_file.py")
+        assert result is None
+
+    @patch("wiring_gate.subprocess.run")
+    def test_bad_returncode_returns_none(self, mock_run):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["grep"], returncode=2, stdout="", stderr="error"
+        )
+        result = _grep_callers("some_func", "some_file.py")
+        assert result is None

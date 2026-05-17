@@ -699,7 +699,7 @@ class GateRequestHandlerMixin:
         self, pr_number: int, branch: str, dispatch_id: str = "",
     ) -> Dict[str, Any]:
         from review_gate_manager import _utc_now
-        from wiring_gate import check_pr_wiring
+        from wiring_gate import WiringGateError, check_pr_wiring
 
         available = self._wiring_gate_available()
         requested_at = _utc_now()
@@ -722,7 +722,35 @@ class GateRequestHandlerMixin:
             )
             return payload
 
-        result = check_pr_wiring(pr_number)
+        try:
+            result = check_pr_wiring(pr_number)
+        except WiringGateError as exc:
+            payload = {
+                "gate": "wiring_gate",
+                "status": "fail",
+                "provider": "ast_grep",
+                "branch": branch,
+                "pr_number": pr_number,
+                "requested_at": requested_at,
+                "completed_at": _utc_now(),
+                "summary": f"Wiring gate error: {exc}",
+                "blocking_findings": [{
+                    "severity": "blocking",
+                    "title": "Wiring gate subprocess failure",
+                    "description": str(exc),
+                }],
+                "blocking_count": 1,
+                "advisory_count": 0,
+                "total_checked": 0,
+                "skipped_symbols": [],
+            }
+            if dispatch_id:
+                payload["dispatch_id"] = dispatch_id
+            self._request_path("wiring_gate", pr_number).write_text(
+                json.dumps(payload, indent=2), encoding="utf-8",
+            )
+            return payload
+
         payload = {
             "gate": "wiring_gate",
             "status": result.status,
