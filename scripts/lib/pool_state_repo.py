@@ -194,6 +194,8 @@ class PoolStateRepository:
                 last_heartbeat = _from_iso(row["last_heartbeat_at"])
                 joined_ts = _from_iso(row["joined_at"]) or 0.0
                 raw_pid = row["worker_pid"]
+                if raw_pid is None:
+                    raw_pid = meta.get("pid")
                 pid = int(raw_pid) if raw_pid is not None else None
                 members.append(
                     Membership(
