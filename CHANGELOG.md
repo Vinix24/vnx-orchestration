@@ -32,6 +32,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(install-central): atomic rollback restore of previous symlink target (data-integrity blocker)
 - fix(install-central): atomic shim install via mktemp + mv (data-integrity blocker)
 - fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
+- fix(install-central): unlink+ln fallback voor macOS atomic symlink swap (codex edge-case blocker: mv -f kan dest-symlink-naar-dir verkeerd interpreteren)
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin

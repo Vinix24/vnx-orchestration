@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eEuo pipefail
 
 # install-central.sh — Centralized VNX install to ~/.vnx-system/versions/<version>/
 # Separate from install.sh (embedded/open-source per-project installer).
@@ -171,8 +171,21 @@ swap_symlink() {
   if [ "$DRY_RUN" = "false" ]; then
     local new_link_tmp="${TARGET_DIR}/current.tmp.$$"
     ln -sn "$version_dir" "$new_link_tmp"
-    mv -fT "$new_link_tmp" "$current_link" 2>/dev/null || \
-      mv -f "$new_link_tmp" "$current_link"  # macOS fallback (no -T flag)
+    if mv -fT "$new_link_tmp" "$current_link" 2>/dev/null; then
+      : # GNU mv -T succeeded
+    else
+      # macOS/BSD fallback: unlink + atomic ln.
+      # Critical: NEVER `mv $tmp $current_link` here — if $current_link is a symlink
+      # to a directory, mv without -T moves the temp link INTO that directory instead
+      # of replacing the symlink itself.
+      rm -f "$current_link" || true
+      if ! ln -sn "$(readlink "$new_link_tmp")" "$current_link"; then
+        rm -f "$new_link_tmp"
+        echo "ERROR: failed to install symlink atomically" >&2
+        exit 75  # EX_TEMPFAIL
+      fi
+      rm -f "$new_link_tmp"
+    fi
   else
     echo "  [dry-run] ln -sfn ${version_dir} ${current_link}"
   fi

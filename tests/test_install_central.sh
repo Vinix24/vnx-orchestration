@@ -272,6 +272,68 @@ fi
 rm -rf "$TMP_ATOMIC" "$test_atomic_script"
 
 # ---------------------------------------------------------------------------
+# Test 11: macOS-like fallback (mv without -T) uses unlink+ln correctly
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 11: macOS-like fallback: mock mv without -T support"
+
+TMP_MACOS="$(mktemp -d)"
+OLD_VER_MAC="v0.9.0"
+NEW_VER_MAC="v1.0.0-rc2"
+mkdir -p "${TMP_MACOS}/versions/${OLD_VER_MAC}"
+mkdir -p "${TMP_MACOS}/versions/${NEW_VER_MAC}"
+ln -sfn "${TMP_MACOS}/versions/${OLD_VER_MAC}" "${TMP_MACOS}/current"
+
+# Fake mv that rejects -T to simulate macOS/BSD behaviour
+FAKE_MV_DIR="$(mktemp -d)"
+cat > "${FAKE_MV_DIR}/mv" <<'FAKEMV'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    -fT|-T) exit 1 ;;
+  esac
+done
+exec /bin/mv "$@"
+FAKEMV
+chmod +x "${FAKE_MV_DIR}/mv"
+
+test_macos_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_macos_script"
+chmod +x "$test_macos_script"
+
+macos_exit=0
+PATH="${FAKE_MV_DIR}:${PATH}" bash "$test_macos_script" \
+  --target "$TMP_MACOS" --version "$NEW_VER_MAC" >/dev/null 2>&1 || macos_exit=$?
+
+if [ "$macos_exit" -eq 0 ]; then
+  pass "macOS fallback exits 0"
+else
+  fail "macOS fallback exit code was ${macos_exit}, expected 0"
+fi
+
+current_target="$(readlink "${TMP_MACOS}/current" 2>/dev/null || echo "MISSING")"
+if echo "$current_target" | grep -qF "$NEW_VER_MAC"; then
+  pass "symlink correctly points to new version after macOS fallback"
+else
+  fail "symlink target after macOS fallback: ${current_target} (expected: ${NEW_VER_MAC})"
+fi
+
+leftover="$(ls "${TMP_MACOS}/"current.tmp.* 2>/dev/null || true)"
+if [ -z "$leftover" ]; then
+  pass "no leftover temp symlinks after macOS fallback"
+else
+  fail "leftover temp symlinks found: ${leftover}"
+fi
+
+rm -rf "$TMP_MACOS" "$FAKE_MV_DIR" "$test_macos_script"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
