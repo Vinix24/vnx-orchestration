@@ -87,6 +87,8 @@ Concrete contract:
 - ADR-010 — Subprocess adapter (the spawn mechanism per registered worker)
 - ADR-011 — Manager+worker hierarchy with depth>1 (consumes registry for sub-orchestrator pools)
 - ADR-012 — Hybrid interactive + headless (each registered worker can be tmux- or subprocess-routed)
+- ADR-015 — Wave 7 LiteLLM Path B (pool workers can be LiteLLM-routed providers: DeepSeek/Kimi/GLM)
+- ADR-016 — Unified event shape (workers emit CanonicalEvent regardless of provider)
 - ADR-018 — Elastic worker pool (Wave 6 implementation of this ADR; adds PoolManager, schema v13,
   provider-mix per pool, queue-aware scaling)
 - `claudedocs/PRD-VNX-UH-002-v1.0-DRAFT.md` §6 FR-12 — the functional requirement this ADR redeems
