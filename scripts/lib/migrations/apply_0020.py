@@ -28,6 +28,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+_LIB_DIR = Path(__file__).resolve().parent.parent
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+from coordination_db import get_connection_for_db
+
 log = logging.getLogger(__name__)
 
 _TARGET_VERSION = 14
@@ -69,56 +74,54 @@ def apply_migration(
         vnx_data_dir = Path(db_path).parent.parent
 
     current_version = 0
-    conn = sqlite3.connect(str(db_path))
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT MAX(version) FROM runtime_schema_version")
-        row = cur.fetchone()
-        current_version = int(row[0]) if (row and row[0] is not None) else 0
 
-        if current_version == _TARGET_VERSION:
-            log.info("apply_0020: already at v%s; idempotent skip", _TARGET_VERSION)
-            return False
-        if current_version != _TARGET_VERSION - 1:
-            msg = (
-                f"ERROR: up-migration requires schema v{_TARGET_VERSION - 1}; "
-                f"got v{current_version}. Refusing to apply."
+    with get_connection_for_db(db_path) as conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(version) FROM runtime_schema_version")
+            row = cur.fetchone()
+            current_version = int(row[0]) if (row and row[0] is not None) else 0
+
+            if current_version == _TARGET_VERSION:
+                log.info("apply_0020: already at v%s; idempotent skip", _TARGET_VERSION)
+                return False
+            if current_version != _TARGET_VERSION - 1:
+                msg = (
+                    f"ERROR: up-migration requires schema v{_TARGET_VERSION - 1}; "
+                    f"got v{current_version}. Refusing to apply."
+                )
+                print(msg, file=sys.stderr)
+                log.error("apply_0020: %s", msg)
+                raise SystemExit(1)
+
+            _emit_migration_event(
+                vnx_data_dir,
+                "migration_started",
+                {"from_version": current_version, "to_version": _TARGET_VERSION},
             )
-            print(msg, file=sys.stderr)
-            log.error("apply_0020: %s", msg)
-            raise SystemExit(1)
 
-        _emit_migration_event(
-            vnx_data_dir,
-            "migration_started",
-            {"from_version": current_version, "to_version": _TARGET_VERSION},
-        )
+            sql = migration_sql_path.read_text()
+            conn.executescript(sql)
+            log.info(
+                "apply_0020: migrated from v%s to v%s", current_version, _TARGET_VERSION
+            )
 
-        sql = migration_sql_path.read_text()
-        conn.executescript(sql)
-        log.info(
-            "apply_0020: migrated from v%s to v%s", current_version, _TARGET_VERSION
-        )
+            _emit_migration_event(
+                vnx_data_dir,
+                "migration_completed",
+                {"from_version": current_version, "to_version": _TARGET_VERSION},
+            )
+            return True
 
-        _emit_migration_event(
-            vnx_data_dir,
-            "migration_completed",
-            {"from_version": current_version, "to_version": _TARGET_VERSION},
-        )
-        return True
-
-    except sqlite3.Error as e:
-        conn.rollback()
-        log.error("apply_0020: error during migration; transaction rolled back")
-        _emit_migration_event(
-            vnx_data_dir,
-            "migration_failed",
-            {"from_version": current_version, "error": str(e)},
-        )
-        raise
-
-    finally:
-        conn.close()
+        except sqlite3.Error as e:
+            conn.rollback()
+            log.error("apply_0020: error during migration; transaction rolled back")
+            _emit_migration_event(
+                vnx_data_dir,
+                "migration_failed",
+                {"from_version": current_version, "error": str(e)},
+            )
+            raise
 
 
 def apply_down_migration(
@@ -137,58 +140,56 @@ def apply_down_migration(
         vnx_data_dir = Path(db_path).parent.parent
 
     current_version = 0
-    conn = sqlite3.connect(str(db_path))
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT MAX(version) FROM runtime_schema_version")
-        row = cur.fetchone()
-        current_version = int(row[0]) if (row and row[0] is not None) else 0
 
-        if current_version == _TARGET_VERSION - 1:
-            log.info("apply_0020 down: already at v%s; idempotent skip", _TARGET_VERSION - 1)
-            return False
-        if current_version != _TARGET_VERSION:
-            msg = (
-                f"ERROR: down-migration requires schema v{_TARGET_VERSION}; "
-                f"got v{current_version}. Refusing to apply."
+    with get_connection_for_db(db_path) as conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(version) FROM runtime_schema_version")
+            row = cur.fetchone()
+            current_version = int(row[0]) if (row and row[0] is not None) else 0
+
+            if current_version == _TARGET_VERSION - 1:
+                log.info("apply_0020 down: already at v%s; idempotent skip", _TARGET_VERSION - 1)
+                return False
+            if current_version != _TARGET_VERSION:
+                msg = (
+                    f"ERROR: down-migration requires schema v{_TARGET_VERSION}; "
+                    f"got v{current_version}. Refusing to apply."
+                )
+                print(msg, file=sys.stderr)
+                log.error("apply_0020 down: %s", msg)
+                raise SystemExit(1)
+
+            _emit_migration_event(
+                vnx_data_dir,
+                "migration_started",
+                {"direction": "down", "from_version": current_version, "to_version": _TARGET_VERSION - 1},
             )
-            print(msg, file=sys.stderr)
-            log.error("apply_0020 down: %s", msg)
-            raise SystemExit(1)
 
-        _emit_migration_event(
-            vnx_data_dir,
-            "migration_started",
-            {"direction": "down", "from_version": current_version, "to_version": _TARGET_VERSION - 1},
-        )
+            sql = down_sql_path.read_text()
+            conn.executescript(sql)
+            log.info(
+                "apply_0020 down: rolled back from v%s to v%s",
+                current_version,
+                _TARGET_VERSION - 1,
+            )
 
-        sql = down_sql_path.read_text()
-        conn.executescript(sql)
-        log.info(
-            "apply_0020 down: rolled back from v%s to v%s",
-            current_version,
-            _TARGET_VERSION - 1,
-        )
+            _emit_migration_event(
+                vnx_data_dir,
+                "migration_completed",
+                {"direction": "down", "from_version": current_version, "to_version": _TARGET_VERSION - 1},
+            )
+            return True
 
-        _emit_migration_event(
-            vnx_data_dir,
-            "migration_completed",
-            {"direction": "down", "from_version": current_version, "to_version": _TARGET_VERSION - 1},
-        )
-        return True
-
-    except sqlite3.Error as e:
-        conn.rollback()
-        log.error("apply_0020 down: error during rollback; transaction rolled back")
-        _emit_migration_event(
-            vnx_data_dir,
-            "migration_failed",
-            {"direction": "down", "from_version": current_version, "error": str(e)},
-        )
-        raise
-
-    finally:
-        conn.close()
+        except sqlite3.Error as e:
+            conn.rollback()
+            log.error("apply_0020 down: error during rollback; transaction rolled back")
+            _emit_migration_event(
+                vnx_data_dir,
+                "migration_failed",
+                {"direction": "down", "from_version": current_version, "error": str(e)},
+            )
+            raise
 
 
 if __name__ == "__main__":

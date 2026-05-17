@@ -11,6 +11,7 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime
+from contextlib import contextmanager
 from typing import List, Optional, Literal, Tuple
 import sys
 
@@ -52,6 +53,19 @@ def _rollback_mode_enabled() -> bool:
     return bool(rollback)
 
 
+@contextmanager
+def _with_items_lock():
+    """Acquire exclusive lock on open_items.lock for read-modify-write safety."""
+    lock_path = STATE_DIR / "open_items.lock"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def load_items() -> dict:
     """Load open items database"""
     source = OPEN_ITEMS_FILE
@@ -64,25 +78,33 @@ def load_items() -> dict:
         return json.load(f)
 
 def save_items(data: dict):
-    """Save open items database"""
+    """Save open items database with atomic write (tmp + os.replace)."""
     data["last_updated"] = datetime.now().isoformat()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OPEN_ITEMS_FILE, 'w') as f:
+    tmp_path = OPEN_ITEMS_FILE.with_suffix(".json.tmp")
+    with open(tmp_path, 'w') as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp_path, OPEN_ITEMS_FILE)
 
 def audit_log_entry(action: str, **kwargs):
-    """Write audit log entry"""
+    """Write audit log entry with flock for concurrent safety."""
     entry = {
         "timestamp": datetime.now().isoformat(),
-        "actor": "T0",  # In practice, could be from env var
+        "actor": "T0",
         "action": action,
         **kwargs
     }
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry) + '\n'
     with open(AUDIT_LOG, 'a') as f:
-        f.write(json.dumps(entry) + '\n')
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def generate_item_id(data: dict) -> str:
     """Generate next item ID"""
@@ -127,91 +149,82 @@ def add_item_programmatic(
     Returns:
         (item_id, created): item_id is existing or new, created is False if deduplicated.
     """
-    lock_path = STATE_DIR / "open_items.lock"
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with _with_items_lock():
+        data = load_items()
 
-    with lock_path.open("a+", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        try:
-            data = load_items()
+        if dedup_key:
+            existing = _find_by_dedup_key(data, dedup_key)
+            if existing is not None:
+                return (existing["id"], False)
 
-            # Dedup check: if key matches an existing item (any status), skip.
-            # Closed items are included so duplicate/replayed receipts cannot
-            # recreate findings that were already closed.
-            if dedup_key:
-                existing = _find_by_dedup_key(data, dedup_key)
-                if existing is not None:
-                    return (existing["id"], False)
+        item_id = generate_item_id(data)
 
-            item_id = generate_item_id(data)
+        new_item = {
+            "id": item_id,
+            "status": "open",
+            "severity": severity,
+            "title": title,
+            "details": details,
+            "origin_dispatch_id": dispatch_id,
+            "origin_report_path": report_path,
+            "pr_id": pr_id,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "closed_reason": None,
+            "source": source,
+        }
+        if dedup_key:
+            new_item["dedup_key"] = dedup_key
 
-            new_item = {
-                "id": item_id,
-                "status": "open",
-                "severity": severity,
-                "title": title,
-                "details": details,
-                "origin_dispatch_id": dispatch_id,
-                "origin_report_path": report_path,
-                "pr_id": pr_id,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-                "closed_reason": None,
-                "source": source,
-            }
-            if dedup_key:
-                new_item["dedup_key"] = dedup_key
+        data["items"].append(new_item)
+        save_items(data)
 
-            data["items"].append(new_item)
-            save_items(data)
+        audit_log_entry(
+            "add",
+            item_id=item_id,
+            severity=severity,
+            dispatch_id=dispatch_id,
+            pr_id=pr_id,
+            source=source,
+            dedup_key=dedup_key,
+        )
 
-            audit_log_entry(
-                "add",
-                item_id=item_id,
-                severity=severity,
-                dispatch_id=dispatch_id,
-                pr_id=pr_id,
-                source=source,
-                dedup_key=dedup_key,
-            )
+        generate_digest()
 
-            generate_digest()
-
-            return (item_id, True)
-        finally:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        return (item_id, True)
 
 
 def add_item(args):
     """Add new open item"""
-    data = load_items()
+    with _with_items_lock():
+        data = load_items()
 
-    item_id = generate_item_id(data)
+        item_id = generate_item_id(data)
 
-    new_item = {
-        "id": item_id,
-        "status": "open",
-        "severity": args.severity,
-        "title": args.title,
-        "details": args.details or "",
-        "origin_dispatch_id": args.dispatch,
-        "origin_report_path": args.report,
-        "pr_id": args.pr,
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
-        "closed_reason": None
-    }
+        new_item = {
+            "id": item_id,
+            "status": "open",
+            "severity": args.severity,
+            "title": args.title,
+            "details": args.details or "",
+            "origin_dispatch_id": args.dispatch,
+            "origin_report_path": args.report,
+            "pr_id": args.pr,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "closed_reason": None
+        }
 
-    data["items"].append(new_item)
-    save_items(data)
+        data["items"].append(new_item)
+        save_items(data)
 
-    audit_log_entry(
-        "add",
-        item_id=item_id,
-        severity=args.severity,
-        dispatch_id=args.dispatch,
-        pr_id=args.pr
-    )
+        audit_log_entry(
+            "add",
+            item_id=item_id,
+            severity=args.severity,
+            dispatch_id=args.dispatch,
+            pr_id=args.pr
+        )
 
     print(f"✅ Added {item_id}: {args.title}")
     print(f"   Severity: {args.severity}, PR: {args.pr or 'none'}")
@@ -220,41 +233,41 @@ def add_item(args):
 
 def close_item(args):
     """Close an open item with specified status"""
-    data = load_items()
+    with _with_items_lock():
+        data = load_items()
 
-    item = None
-    for i in data["items"]:
-        if i["id"] == args.item_id:
-            item = i
-            break
+        item = None
+        for i in data["items"]:
+            if i["id"] == args.item_id:
+                item = i
+                break
 
-    if not item:
-        print(f"❌ Item {args.item_id} not found")
-        return 1
+        if not item:
+            print(f"❌ Item {args.item_id} not found")
+            return 1
 
-    if item["status"] != "open":
-        print(f"⚠️  Item {args.item_id} already {item['status']}")
-        return 1
+        if item["status"] != "open":
+            print(f"⚠️  Item {args.item_id} already {item['status']}")
+            return 1
 
-    # Update item
-    old_status = item["status"]
-    item["status"] = args.status
-    item["closed_reason"] = args.reason
-    item["closed_by_dispatch_id"] = getattr(args, 'dispatch_id', None)
-    item["closed_at"] = datetime.now().isoformat()
-    item["updated_at"] = datetime.now().isoformat()
+        old_status = item["status"]
+        item["status"] = args.status
+        item["closed_reason"] = args.reason
+        item["closed_by_dispatch_id"] = getattr(args, 'dispatch_id', None)
+        item["closed_at"] = datetime.now().isoformat()
+        item["updated_at"] = datetime.now().isoformat()
 
-    save_items(data)
+        save_items(data)
 
-    audit_log_entry(
-        "close",
-        item_id=args.item_id,
-        from_status=old_status,
-        to_status=args.status,
-        reason=args.reason,
-        dispatch_id=item.get("origin_dispatch_id"),
-        pr_id=item.get("pr_id")
-    )
+        audit_log_entry(
+            "close",
+            item_id=args.item_id,
+            from_status=old_status,
+            to_status=args.status,
+            reason=args.reason,
+            dispatch_id=item.get("origin_dispatch_id"),
+            pr_id=item.get("pr_id")
+        )
 
     _log_oi_close_decision(
         oi_id=args.item_id,
@@ -338,43 +351,43 @@ def list_items(args):
 
 def attach_evidence(args):
     """Attach evidence from a report to all open items for a PR (does NOT close them)."""
-    data = load_items()
+    with _with_items_lock():
+        data = load_items()
 
-    pr_id = args.pr
-    report_path = args.report or ""
-    dispatch_id = args.dispatch or ""
+        pr_id = args.pr
+        report_path = args.report or ""
+        dispatch_id = args.dispatch or ""
 
-    matched = 0
-    for item in data["items"]:
-        if item["status"] != "open":
-            continue
-        if item.get("pr_id") != pr_id:
-            continue
+        matched = 0
+        for item in data["items"]:
+            if item["status"] != "open":
+                continue
+            if item.get("pr_id") != pr_id:
+                continue
 
-        # Append evidence entry
-        if "evidence" not in item:
-            item["evidence"] = []
-        item["evidence"].append({
-            "report_path": report_path,
-            "dispatch_id": dispatch_id,
-            "attached_at": datetime.now().isoformat()
-        })
-        item["updated_at"] = datetime.now().isoformat()
-        matched += 1
+            if "evidence" not in item:
+                item["evidence"] = []
+            item["evidence"].append({
+                "report_path": report_path,
+                "dispatch_id": dispatch_id,
+                "attached_at": datetime.now().isoformat()
+            })
+            item["updated_at"] = datetime.now().isoformat()
+            matched += 1
 
-    if matched == 0:
-        print(f"ℹ️  No open items found for {pr_id}")
-        return 0
+        if matched == 0:
+            print(f"ℹ️  No open items found for {pr_id}")
+            return 0
 
-    save_items(data)
+        save_items(data)
 
-    audit_log_entry(
-        "attach_evidence",
-        pr_id=pr_id,
-        report_path=report_path,
-        dispatch_id=dispatch_id,
-        items_matched=matched
-    )
+        audit_log_entry(
+            "attach_evidence",
+            pr_id=pr_id,
+            report_path=report_path,
+            dispatch_id=dispatch_id,
+            items_matched=matched
+        )
 
     print(f"📎 Attached evidence to {matched} open items for {pr_id}")
     print(f"   Report: {report_path}")
@@ -465,8 +478,10 @@ def generate_digest():
         "digest_generated": datetime.now().isoformat()
     }
 
-    with open(DIGEST_FILE, 'w') as f:
+    tmp_digest = DIGEST_FILE.with_suffix(".json.tmp")
+    with open(tmp_digest, 'w') as f:
         json.dump(digest, f, indent=2)
+    os.replace(tmp_digest, DIGEST_FILE)
 
     # Generate markdown
     generate_markdown(data, digest)
@@ -528,8 +543,10 @@ def generate_markdown(data: dict, digest: dict):
     lines.append("---")
     lines.append("Generated automatically by `open_items_manager.py`")
 
-    with open(MARKDOWN_FILE, 'w') as f:
+    tmp_md = MARKDOWN_FILE.with_suffix(".md.tmp")
+    with open(tmp_md, 'w') as f:
         f.write('\n'.join(lines))
+    os.replace(tmp_md, MARKDOWN_FILE)
 
 # ---------------------------------------------------------------------------
 # OI Auto-Close: rescan patterns
@@ -633,39 +650,41 @@ def _check_function_size(func_name: str, file_path: str, threshold: int) -> dict
 
 def rescan_items(args):
     """Rescan open items and auto-close resolved violations."""
-    data = load_items()
     dry_run = getattr(args, 'dry_run', False)
     closed = []
 
-    for item in data["items"]:
-        if item["status"] != "open":
-            continue
+    with _with_items_lock():
+        data = load_items()
 
-        result = check_violation(item)
-        if result is None:
-            continue
-        if result["resolved"]:
-            if not dry_run:
-                item["status"] = "done"
-                item["closed_reason"] = result["reason"]
-                item["closed_at"] = datetime.now().isoformat()
-                item["updated_at"] = datetime.now().isoformat()
-                item["closed_by"] = "auto-rescan"
-            closed.append({
-                "id": item["id"],
-                "title": item["title"],
-                "reason": result["reason"],
-            })
+        for item in data["items"]:
+            if item["status"] != "open":
+                continue
 
-    if not dry_run and closed:
-        save_items(data)
-        for c in closed:
-            audit_log_entry(
-                "auto_close",
-                item_id=c["id"],
-                reason=c["reason"],
-                source="rescan",
-            )
+            result = check_violation(item)
+            if result is None:
+                continue
+            if result["resolved"]:
+                if not dry_run:
+                    item["status"] = "done"
+                    item["closed_reason"] = result["reason"]
+                    item["closed_at"] = datetime.now().isoformat()
+                    item["updated_at"] = datetime.now().isoformat()
+                    item["closed_by"] = "auto-rescan"
+                closed.append({
+                    "id": item["id"],
+                    "title": item["title"],
+                    "reason": result["reason"],
+                })
+
+        if not dry_run and closed:
+            save_items(data)
+            for c in closed:
+                audit_log_entry(
+                    "auto_close",
+                    item_id=c["id"],
+                    reason=c["reason"],
+                    source="rescan",
+                )
 
     prefix = "[DRY RUN] " if dry_run else ""
     verb = "would be " if dry_run else ""
