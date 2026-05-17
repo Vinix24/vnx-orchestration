@@ -9,6 +9,9 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
 
+### Added
+- feat(skill-coverage): `scripts/check_skill_coverage.py` pre-flight scanner — finds project skill-refs vs central+overrides availability. Prevents mission-control style product-skill loss on central rollout. Pre-centralization must-have #9.
+
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)
 - Unified report schema enforced via YAML frontmatter + shell-script guardrails (model-agnostic)
