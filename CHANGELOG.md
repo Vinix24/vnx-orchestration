@@ -9,6 +9,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
 - feat(schema): idempotent bootstrap — quality_db_init + coordination_db check PRAGMA user_version before each migration block, skip already-applied. Mid-run failures rollback cleanly via SAVEPOINT transactions. New `scripts/lib/schema_migration.py` helper centralises `apply_if_below` + `apply_script_if_below` patterns. (Pre-centralization must-have #4)
+- fix(schema-migration): replace silent `except: pass` in rollback with logger.warning (codex blocker, error-handling gate)
 
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)

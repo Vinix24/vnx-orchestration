@@ -54,8 +54,13 @@ def apply_if_below(
         try:
             conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
             conn.execute(f"RELEASE SAVEPOINT {sp}")
-        except Exception:
-            pass
+        except Exception as rollback_err:
+            logger.warning(
+                "rollback/release failed (continuing): %s: %s",
+                type(rollback_err).__name__, rollback_err,
+            )
+            # not re-raising: already in error-recovery path; logging ensures
+            # observability without masking the primary failure
         raise
     return True
 
