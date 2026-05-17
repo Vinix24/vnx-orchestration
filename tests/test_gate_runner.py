@@ -799,8 +799,8 @@ class TestGateTimeoutConfig:
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
-        assert gate_stall_threshold("gemini_review") == 60
-        assert gate_stall_threshold("codex_gate") == 120
+        assert gate_stall_threshold("gemini_review") == 180
+        assert gate_stall_threshold("codex_gate") == 300
 
     def test_env_override_stall_threshold(self, monkeypatch):
         from headless_adapter import gate_stall_threshold
