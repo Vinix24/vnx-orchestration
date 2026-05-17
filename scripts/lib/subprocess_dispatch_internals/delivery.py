@@ -29,6 +29,25 @@ logger = logging.getLogger(__name__)
 # Written by deliver_via_subprocess after each spawn; read+popped by
 # _dispatch_claude in provider_dispatch.py immediately after deliver_with_recovery.
 _dispatch_token_usage: dict = {}
+_dispatch_token_usage_lock = threading.Lock()
+
+
+def get_token_usage(dispatch_id: str) -> "dict | None":
+    """Thread-safe read of token usage per dispatch_id."""
+    with _dispatch_token_usage_lock:
+        return _dispatch_token_usage.get(dispatch_id)
+
+
+def set_token_usage(dispatch_id: str, usage: dict) -> None:
+    """Thread-safe write of token usage per dispatch_id."""
+    with _dispatch_token_usage_lock:
+        _dispatch_token_usage[dispatch_id] = usage
+
+
+def clear_token_usage(dispatch_id: str) -> None:
+    """Thread-safe cleanup of token usage entry."""
+    with _dispatch_token_usage_lock:
+        _dispatch_token_usage.pop(dispatch_id, None)
 
 
 def _build_worker_identity_env(terminal_id: str) -> dict[str, str]:
@@ -326,7 +345,7 @@ def deliver_via_subprocess(
         )
 
         if spawn_result.token_usage:
-            _dispatch_token_usage[dispatch_id] = spawn_result.token_usage
+            set_token_usage(dispatch_id, spawn_result.token_usage)
 
         # --- completion classification (mirrors _classify_completion) ---
         session_id = spawn_result.session_id
