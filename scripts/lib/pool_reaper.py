@@ -5,6 +5,7 @@ Pure detection module. Actual SIGTERM/SIGKILL via cleanup_worker_exit.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -54,7 +55,7 @@ def identify_reap_targets(
                 targets.append(ReapTarget(
                     membership_id=m.membership_id,
                     terminal_id=m.terminal_id,
-                    pid=getattr(m, "pid", None),
+                    pid=m.pid,
                     reason=(
                         f"never_heartbeat_age={worker_age:.0f}s"
                         f">{config.heartbeat_stale_threshold_s:.0f}s"
@@ -66,10 +67,46 @@ def identify_reap_targets(
                 targets.append(ReapTarget(
                     membership_id=m.membership_id,
                     terminal_id=m.terminal_id,
-                    pid=getattr(m, "pid", None),
+                    pid=m.pid,
                     reason=(
                         f"heartbeat_stale={stale_age:.0f}s"
                         f">{config.heartbeat_stale_threshold_s:.0f}s"
                     ),
                 ))
+    return targets
+
+
+def is_pid_alive(pid: Optional[int]) -> bool:
+    """Check if a process with the given PID is still running.
+
+    Returns False for None, pid <= 0, or dead processes.
+    """
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def identify_dead_pid_targets(
+    members: "List[Membership]",
+) -> List[ReapTarget]:
+    """Identify active members whose worker PID is no longer alive."""
+    targets: List[ReapTarget] = []
+    for m in members:
+        if m.status != "active":
+            continue
+        if m.pid is None or m.pid <= 0:
+            continue
+        if not is_pid_alive(m.pid):
+            targets.append(ReapTarget(
+                membership_id=m.membership_id,
+                terminal_id=m.terminal_id,
+                pid=m.pid,
+                reason=f"pid_dead={m.pid}",
+            ))
     return targets

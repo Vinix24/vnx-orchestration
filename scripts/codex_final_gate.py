@@ -47,6 +47,11 @@ RUNTIME_PATH_MARKERS = (
 DELETION_FILE_WARN = 5
 DELETION_FILE_HOLD = 20
 
+# Net line deletion thresholds (lines_removed - lines_added across all changed files).
+# Catches PRs that gut file content without fully deleting files.
+NET_LINE_DELETION_WARN = 200
+NET_LINE_DELETION_HOLD = 500
+
 
 def _touches_governance_paths(changed_files: List[str]) -> bool:
     return is_governance_path(changed_files)
@@ -98,6 +103,60 @@ def _count_deleted_files(project_root: Path) -> int:
     return len(files) if files is not None else -1
 
 
+def _parse_numstat_net(numstat_output: str) -> int:
+    """Parse git diff --numstat output, return net line deletion (removed - added).
+
+    Binary files report '-' for both columns and are skipped.
+    """
+    total_added = 0
+    total_removed = 0
+    for line in numstat_output.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0] != "-" and parts[1] != "-":
+            try:
+                total_added += int(parts[0])
+                total_removed += int(parts[1])
+            except ValueError:
+                pass
+    return total_removed - total_added
+
+
+def _get_net_line_deletion(project_root: Path) -> Optional[int]:
+    """Return net lines deleted (removed - added) for current PR vs origin/main.
+
+    Returns None on git failure. Complements _get_deleted_files: catches PRs that gut
+    file content without fully deleting files.
+    """
+    for base_ref in ("origin/main", "origin/master"):
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--numstat", f"{base_ref}...HEAD"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return _parse_numstat_net(result.stdout)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--numstat", "HEAD~1", "HEAD"],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return _parse_numstat_net(result.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return None
+
+
 @dataclass(frozen=True)
 class CodexGateEnforcementResult:
     """Result of evaluating whether a Codex final gate is required."""
@@ -111,6 +170,8 @@ class CodexGateEnforcementResult:
     high_risk_by_path: bool
     mass_deletion_count: int = 0
     mass_deletion_warn: bool = False
+    net_line_deletion: int = 0
+    net_line_deletion_warn: bool = False
     warnings: List[str] = field(default_factory=list)
     deleted_files: List[str] = field(default_factory=list)
 
@@ -160,6 +221,8 @@ def enforce_codex_gate(
     deleted_files: List[str] = []
     deleted_count = 0
     mass_deletion_warn = False
+    net_line_deletion = 0
+    net_line_deletion_warn = False
     warnings_list: List[str] = []
     if project_root is not None:
         raw = _get_deleted_files(project_root)
@@ -172,6 +235,15 @@ def enforce_codex_gate(
             mass_deletion_warn = True
             warnings_list.append("mass_deletion_warning")
 
+        raw_net = _get_net_line_deletion(project_root)
+        if raw_net is not None:
+            net_line_deletion = raw_net
+        if net_line_deletion >= NET_LINE_DELETION_HOLD:
+            reasons.append("net_line_deletion")
+        elif net_line_deletion >= NET_LINE_DELETION_WARN:
+            net_line_deletion_warn = True
+            warnings_list.append("net_line_deletion_warning")
+
     return CodexGateEnforcementResult(
         required=len(reasons) > 0,
         reasons=reasons,
@@ -182,6 +254,8 @@ def enforce_codex_gate(
         high_risk_by_path=high_risk_path,
         mass_deletion_count=deleted_count,
         mass_deletion_warn=mass_deletion_warn,
+        net_line_deletion=net_line_deletion,
+        net_line_deletion_warn=net_line_deletion_warn,
         warnings=warnings_list,
         deleted_files=deleted_files,
     )
@@ -424,20 +498,28 @@ def _apply_mass_deletion_warning(
     enforcement: CodexGateEnforcementResult,
     findings: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Prepend a WARN-level finding when mass-deletion threshold is reached.
+    """Prepend WARN-level findings for file-count and net-line-count deletion thresholds.
 
-    WARN does not make the gate required; it surfaces as an advisory finding.
+    WARN does not make the gate required; findings surface as advisory in the receipt.
     """
-    if not enforcement.mass_deletion_warn:
-        return findings
-    warning = {
-        "severity": "warning",
-        "message": (
-            f"Net deletion warning: {enforcement.mass_deletion_count} file(s) deleted "
-            f"(>= {DELETION_FILE_WARN} threshold) — verify intentional scope reduction"
-        ),
-    }
-    return [warning] + findings
+    prefixed: List[Dict[str, Any]] = list(findings)
+    if enforcement.net_line_deletion_warn:
+        prefixed.insert(0, {
+            "severity": "warning",
+            "message": (
+                f"Net line deletion warning: {enforcement.net_line_deletion} net lines deleted "
+                f"(>= {NET_LINE_DELETION_WARN} threshold) — verify intentional scope reduction"
+            ),
+        })
+    if enforcement.mass_deletion_warn:
+        prefixed.insert(0, {
+            "severity": "warning",
+            "message": (
+                f"Net deletion warning: {enforcement.mass_deletion_count} file(s) deleted "
+                f"(>= {DELETION_FILE_WARN} threshold) — verify intentional scope reduction"
+            ),
+        })
+    return prefixed
 
 
 def _atomic_write_text(target: Path, content: str) -> None:
@@ -626,8 +708,10 @@ def _cmd_render_prompt(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return EXIT_IO
 
+    deleted_files = _get_deleted_files(SCRIPT_DIR.parent)
+
     try:
-        prompt = render_codex_prompt(contract)
+        prompt = render_codex_prompt(contract, deleted_files=deleted_files)
     except ValueError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return EXIT_VALIDATION

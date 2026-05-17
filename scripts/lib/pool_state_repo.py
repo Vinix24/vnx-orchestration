@@ -174,7 +174,8 @@ class PoolStateRepository:
                     wpm.role,
                     wpm.joined_at,
                     wpm.metadata_json,
-                    tl.last_heartbeat_at
+                    tl.last_heartbeat_at,
+                    tl.worker_pid
                 FROM worker_pool_membership wpm
                 LEFT JOIN terminal_leases tl
                     ON tl.terminal_id = wpm.terminal_id
@@ -192,7 +193,8 @@ class PoolStateRepository:
                 membership_id = meta.get("membership_id", str(row["id"]))
                 last_heartbeat = _from_iso(row["last_heartbeat_at"])
                 joined_ts = _from_iso(row["joined_at"]) or 0.0
-                pid_val = meta.get("pid")
+                raw_pid = row["worker_pid"]
+                pid = int(raw_pid) if raw_pid is not None else None
                 members.append(
                     Membership(
                         membership_id=membership_id,
@@ -202,7 +204,7 @@ class PoolStateRepository:
                         status="active",
                         joined_at=joined_ts,
                         last_heartbeat=last_heartbeat,
-                        pid=int(pid_val) if pid_val is not None else None,
+                        pid=pid,
                     )
                 )
             return members
@@ -324,6 +326,46 @@ class PoolStateRepository:
             log.error(
                 "mark_member_reaped: ledger emit failed for membership_id=%s", membership_id
             )
+
+    def store_worker_pid(self, terminal_id: str, pid: int) -> None:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE terminal_leases
+                SET worker_pid = ?
+                WHERE terminal_id = ? AND project_id = ?
+                """,
+                (pid, terminal_id, self.project_id),
+            )
+            conn.commit()
+            log.debug("store_worker_pid: terminal=%s pid=%d", terminal_id, pid)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_heartbeat_by_terminal(self, terminal_id: str, now: float) -> None:
+        hb_iso = _iso_now(now)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE terminal_leases
+                SET last_heartbeat_at = ?
+                WHERE terminal_id = ? AND project_id = ?
+                """,
+                (hb_iso, terminal_id, self.project_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def update_heartbeat(self, membership_id: str, now: float) -> None:
         hb_iso = _iso_now(now)
