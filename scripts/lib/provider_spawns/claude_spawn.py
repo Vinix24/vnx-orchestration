@@ -58,6 +58,10 @@ class ClaudeSpawnResult:
     stopped_early: bool = False
     # Set when an exception terminated the stream read; forwarded to receipt.
     error: Optional[str] = None
+    # Token usage extracted from the result event (input_tokens, output_tokens,
+    # cache_read_input_tokens). None when the stream never emitted a result event
+    # with usage data or when the SubprocessAdapter version does not forward it.
+    token_usage: Optional[Dict[str, Any]] = None
     # Internal: the SubprocessAdapter instance used for this spawn.
     # Callers may use this for post-spawn cleanup (event_store.clear,
     # trigger_report_pipeline) to ensure the same session_id and state are
@@ -185,6 +189,7 @@ def spawn_claude(
     events_written = 0
     stopped_early = False
     last_stuck_log = 0.0
+    token_usage: Optional[Dict[str, Any]] = None
 
     try:
         for event in adapter.read_events_with_timeout(
@@ -194,9 +199,12 @@ def spawn_claude(
         ):
             events_written += 1
 
-            # Capture final result event (agent_message + metadata).
+            # Capture final result event (agent_message + metadata + usage).
             if event.type == "result":
                 completion = dict(event.data) if isinstance(event.data, dict) else {}
+                _raw_usage = completion.get("usage") if completion else None
+                if isinstance(_raw_usage, dict) and _raw_usage:
+                    token_usage = _raw_usage
 
             # Tick health monitor; run stuck-event logging at threshold.
             if health_monitor is not None:
@@ -274,5 +282,6 @@ def spawn_claude(
         session_id=adapter.get_session_id(terminal_id),
         timed_out=timed_out,
         stopped_early=stopped_early,
+        token_usage=token_usage,
         _adapter=adapter,
     )

@@ -1,5 +1,63 @@
 # Wave 7 model registry — LiteLLM-compatible model names + cost/MTok
+# Anthropic, OpenAI, Google entries added for cost tracking (P0-B).
 providers:
+  anthropic:
+    enabled: true
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      opus:
+        litellm_name: "anthropic/claude-opus-4-7"
+        cost_input_per_mtok: 15.00
+        cost_output_per_mtok: 75.00
+        max_tokens: 32000
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding-premium", "review", "analysis"]
+      sonnet:
+        litellm_name: "anthropic/claude-sonnet-4-6"
+        cost_input_per_mtok: 3.00
+        cost_output_per_mtok: 15.00
+        max_tokens: 64000
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
+      haiku:
+        litellm_name: "anthropic/claude-haiku-4-5-20251001"
+        cost_input_per_mtok: 1.00
+        cost_output_per_mtok: 5.00
+        max_tokens: 8096
+        context_window: 200000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "fast"]
+  openai:
+    enabled: true
+    api_key_env: OPENAI_API_KEY
+    models:
+      gpt-5.2-codex:
+        litellm_name: "openai/gpt-5.2-codex"
+        cost_input_per_mtok: 1.25
+        cost_output_per_mtok: 10.00
+        max_tokens: 32000
+        context_window: 128000
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review"]
+  google:
+    enabled: true
+    api_key_env: GEMINI_API_KEY
+    models:
+      gemini-2.5-pro:
+        litellm_name: "google/gemini-2.5-pro"
+        cost_input_per_mtok: 1.25
+        cost_output_per_mtok: 5.00
+        max_tokens: 65536
+        context_window: 1048576
+        supports_streaming: true
+        supports_tool_calls: true
+        task_classes: ["coding", "review", "analysis"]
   deepseek:
     enabled: true
     api_key_env: DEEPSEEK_API_KEY

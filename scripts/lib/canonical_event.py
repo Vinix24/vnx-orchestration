@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 VALID_PROVIDERS = frozenset({"claude", "codex", "gemini", "kimi", "litellm", "ollama"})
-VALID_EVENT_TYPES = frozenset({"init", "text", "tool_use", "tool_result", "thinking", "complete", "error"})
+VALID_EVENT_TYPES = frozenset({"init", "text", "tool_use", "tool_result", "thinking", "complete", "error", "usage_complete"})
 VALID_TIERS = frozenset({1, 2, 3})
 
 # Legacy "result" emitted by subprocess_adapter maps to canonical "complete"
