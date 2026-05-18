@@ -3,15 +3,22 @@
 
 Usage
 -----
-    from schema_migration import apply_if_below
+    from schema_migration import apply_if_below, apply_script_if_below
 
     # conn.isolation_level = None is recommended for explicit control
-    apply_if_below(conn, 2, _mig_v2_add_column)
-    apply_if_below(conn, 3, _mig_v3_add_table)
+    apply_if_below(conn, 2, _mig_v2_add_column)        # Python migration fn
+    apply_script_if_below(conn, 3, sql_text)            # SQL-file string
 
-Migration functions passed to apply_if_below MUST use conn.execute() for
-individual statements. Never call conn.executescript() inside migration_fn —
+Both helpers run under a SAVEPOINT — mid-migration failure rolls back ALL
+statements + the version stamp atomically.
+
+For ``apply_if_below``: migration_fn MUST use ``conn.execute()`` for individual
+statements. Never call ``conn.executescript()`` inside migration_fn —
 executescript() commits any active transaction and breaks SAVEPOINT atomicity.
+
+For ``apply_script_if_below``: pass the raw SQL text; the helper splits it
+into individual statements (quote- and comment-aware) and executes them
+inside the SAVEPOINT.
 """
 from __future__ import annotations
 
@@ -65,29 +72,113 @@ def apply_if_below(
     return True
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+    """Split a SQL script into individual statements by `;` boundaries.
+
+    Handles single/double-quoted strings (no semicolon-split inside literals).
+    Ignores SQL line comments (`-- …`) and block comments (`/* … */`).
+    Returns non-empty, stripped statements ready for ``conn.execute()``.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    i = 0
+    n = len(sql)
+    in_string = False
+    quote_char: str | None = None
+    in_block_comment = False
+    in_line_comment = False
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        if in_line_comment:
+            current.append(ch)
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            current.append(ch)
+            if ch == "*" and nxt == "/":
+                current.append(nxt)
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_string:
+            current.append(ch)
+            if ch == quote_char:
+                in_string = False
+                quote_char = None
+            i += 1
+            continue
+        # not in string/comment
+        if ch == "-" and nxt == "-":
+            in_line_comment = True
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            current.append(ch)
+            current.append(nxt)
+            i += 2
+            continue
+        if ch in ('"', "'"):
+            in_string = True
+            quote_char = ch
+            current.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    tail = "".join(current).strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
 def apply_script_if_below(
     conn: sqlite3.Connection,
     target_version: int,
     sql: str,
 ) -> bool:
-    """Apply a SQL script via executescript() if user_version < target_version.
+    """Apply a SQL script atomically if user_version < target_version.
 
-    Because executescript() commits automatically, the schema changes and the
-    user_version stamp occur in separate transactions. This is safe when all
-    SQL uses CREATE TABLE IF NOT EXISTS and ALTER TABLE is preceded by
-    column-existence checks — a crash between the two commits causes a harmless
-    re-run of idempotent SQL on next start.
+    Splits the script into individual statements and executes them inside a
+    SAVEPOINT together with the ``PRAGMA user_version`` stamp. Mid-script
+    failure rolls back ALL statements + the version stamp atomically — no
+    partial schema state is left behind (codex round-2 atomicity fix).
 
     Returns True if the script was applied, False if skipped.
     """
     if get_user_version(conn) >= target_version:
         return False
 
-    conn.executescript(sql)
-    # executescript() committed above; stamp the version in a new transaction
+    statements = _split_sql_statements(sql)
     sp = f'"vnx_ver_{target_version}"'
     conn.execute(f"SAVEPOINT {sp}")
-    conn.execute(f"PRAGMA user_version = {target_version}")
-    conn.execute(f"RELEASE SAVEPOINT {sp}")
-    logger.debug("schema script applied: user_version → %d", target_version)
+    try:
+        for stmt in statements:
+            conn.execute(stmt)
+        conn.execute(f"PRAGMA user_version = {target_version}")
+        conn.execute(f"RELEASE SAVEPOINT {sp}")
+        logger.debug("schema script applied atomically: user_version → %d", target_version)
+    except Exception:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception as rollback_err:
+            logger.warning(
+                "rollback/release failed (continuing): %s: %s",
+                type(rollback_err).__name__, rollback_err,
+            )
+        raise
     return True

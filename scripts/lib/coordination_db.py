@@ -217,13 +217,9 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
     schema_sql = schema_sql_path.read_text(encoding="utf-8")
 
     with get_connection(state_dir) as conn:
-        # V1: base schema (executescript commits automatically)
+        # V1: base schema applied atomically (codex round-2 fix — script + version stamp in one SAVEPOINT)
         if _needs_initial_migration(conn):
-            conn.executescript(schema_sql)
-            # Stamp the version in a new transaction after executescript committed
-            conn.execute('SAVEPOINT "vnx_coord_v1"')
-            conn.execute("PRAGMA user_version = 1")
-            conn.execute('RELEASE SAVEPOINT "vnx_coord_v1"')
+            schema_migration.apply_script_if_below(conn, 1, schema_sql)
 
         # Versioned migration files: runtime_coordination_v2.sql, v3.sql, ...
         schemas_dir = schema_sql_path.parent
@@ -232,14 +228,8 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
             migration_path = schemas_dir / f"runtime_coordination_v{v}.sql"
             if not migration_path.exists():
                 break
-            if schema_migration.get_user_version(conn) < v:
-                migration_sql = migration_path.read_text(encoding="utf-8")
-                conn.executescript(migration_sql)
-                # Stamp version after executescript committed
-                sp = f'"vnx_coord_v{v}"'
-                conn.execute(f"SAVEPOINT {sp}")
-                conn.execute(f"PRAGMA user_version = {v}")
-                conn.execute(f"RELEASE SAVEPOINT {sp}")
+            migration_sql = migration_path.read_text(encoding="utf-8")
+            schema_migration.apply_script_if_below(conn, v, migration_sql)
             v += 1
 
 

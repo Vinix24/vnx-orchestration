@@ -212,3 +212,98 @@ def test_needs_initial_migration_legacy_table_syncs_pragma():
     assert coordination_db._needs_initial_migration(conn) is False
     assert get_user_version(conn) == 9
     conn.close()
+
+
+# ----------------------------------------------------------------------
+# Codex round-2 atomicity fix: apply_script_if_below splits SQL and runs
+# the entire script + version stamp inside a single SAVEPOINT.
+# ----------------------------------------------------------------------
+
+def test_apply_script_if_below_atomic_failure_rolls_back(tmp_path):
+    """Mid-script failure must roll back ALL statements + version stamp."""
+    import sqlite3
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+    import schema_migration
+
+    db_path = tmp_path / "test_atomic.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        # Script with a syntax error on the 3rd statement
+        bad_sql = """
+        CREATE TABLE good_a (id INTEGER PRIMARY KEY);
+        CREATE TABLE good_b (id INTEGER PRIMARY KEY);
+        CREATE NONSENSE_STATEMENT_INVALID_SQL;
+        CREATE TABLE never_created (id INTEGER PRIMARY KEY);
+        """
+        try:
+            schema_migration.apply_script_if_below(conn, 5, bad_sql)
+            assert False, "expected exception on bad SQL"
+        except sqlite3.OperationalError:
+            pass
+
+        # Atomicity: good_a + good_b should NOT exist (rolled back)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('good_a', 'good_b', 'never_created')"
+        ).fetchall()
+        assert rows == [], f"expected no tables created, got {rows}"
+
+        # Version stamp also rolled back
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_apply_script_if_below_success(tmp_path):
+    """Successful script: all statements + version stamp applied."""
+    import sqlite3
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+    import schema_migration
+
+    db_path = tmp_path / "test_atomic_ok.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        good_sql = """
+        -- comment with ; in it
+        CREATE TABLE t1 (id INTEGER PRIMARY KEY, label TEXT DEFAULT 'a;b;c');
+        CREATE TABLE t2 (id INTEGER PRIMARY KEY);
+        """
+        applied = schema_migration.apply_script_if_below(conn, 7, good_sql)
+        assert applied is True
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        assert [r[0] for r in rows] == ["t1", "t2"]
+
+        # Second call: skip
+        applied2 = schema_migration.apply_script_if_below(conn, 7, good_sql)
+        assert applied2 is False
+    finally:
+        conn.close()
+
+
+def test_split_sql_statements_quote_and_comment_safe():
+    """Splitter must not break on semicolons inside strings or comments."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+    from schema_migration import _split_sql_statements
+
+    sql = """
+    -- leading comment; ignored
+    CREATE TABLE x (
+        id INTEGER PRIMARY KEY,
+        note TEXT DEFAULT 'has;semicolon'
+    );
+    /* block; comment; with; semicolons */
+    INSERT INTO x (note) VALUES ('a;b;c');
+    """
+    stmts = _split_sql_statements(sql)
+    assert len(stmts) == 2, f"expected 2 statements, got {len(stmts)}: {stmts}"
+    assert "CREATE TABLE" in stmts[0]
+    assert "INSERT INTO" in stmts[1]

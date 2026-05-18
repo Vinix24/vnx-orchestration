@@ -11,6 +11,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - feat(schema): idempotent bootstrap — quality_db_init + coordination_db check PRAGMA user_version before each migration block, skip already-applied. Mid-run failures rollback cleanly via SAVEPOINT transactions. New `scripts/lib/schema_migration.py` helper centralises `apply_if_below` + `apply_script_if_below` patterns. (Pre-centralization must-have #4)
 - fix(schema-migration): replace silent `except: pass` in rollback with logger.warning (codex blocker, error-handling gate)
 - fix(coordination_db): migration gate falls back to runtime_schema_version table when PRAGMA user_version=0 (codex round-2 blocker — legacy install compatibility)
+- fix(schema-migration): replace `executescript` with quote/comment-aware SQL splitter inside SAVEPOINT in `apply_script_if_below` — schema script + `PRAGMA user_version` stamp now atomic, mid-script failure rolls back ALL statements (codex round-3 atomicity blocker)
+- fix(coordination_db): use `schema_migration.apply_script_if_below` for both V1 base schema + versioned migrations — eliminates direct `executescript` calls that broke SAVEPOINT atomicity
 
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)
