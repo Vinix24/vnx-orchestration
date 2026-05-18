@@ -342,6 +342,31 @@ vnx doctor              # Validate everything
 
 Starter mode needs only bash, python3, git, and jq. Operator mode additionally requires tmux and fswatch.
 
+### Pipx (recommended for central deploy)
+
+```bash
+pipx install vnx-orchestration   # no clone required
+cd /path/to/your/project
+vnx init
+vnx doctor --strict              # full pre-flight validation
+```
+
+### Central install (multi-project)
+
+```bash
+git clone https://github.com/Vinix24/vnx-orchestration.git
+cd vnx-orchestration
+bash install-central.sh --version v1.0.0-rc2
+```
+
+Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc2/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
+
+```bash
+vnx version                      # Print version, commit, VNX_HOME, pin, Python + platform
+vnx update --to v1.0.0-rc2       # Flip to a specific version (central install)
+vnx doctor --strict              # Full pre-flight: schema check, skill coverage, worktree orphans, active dispatch drain
+```
+
 ## Commands
 
 Commands are tiered by mode. Running an operator-only command in starter mode returns a clear error with upgrade instructions.
@@ -351,11 +376,12 @@ Commands are tiered by mode. Running an operator-only command in starter mode re
 | Command | What it does |
 |---------|-------------|
 | `vnx init` | Initialize VNX project (with mode selection) |
-| `vnx doctor` | Validate setup and dependencies |
+| `vnx doctor` | Validate setup and dependencies (`--strict` for full central-install pre-flight) |
+| `vnx version` | Print version, commit, VNX_HOME, pin, Python + platform |
 | `vnx status` | Show current state and mode |
 | `vnx recover` | Recover from failures |
 | `vnx help` | Show available commands for current mode |
-| `vnx update` | Pull latest VNX version |
+| `vnx update [--to <ver>]` | Pull latest VNX version or flip to a specific version (central install) |
 
 ### Starter + Operator
 
@@ -465,6 +491,10 @@ your-project/
 ├── dashboard/         # Operator dashboard (git-tracked)
 │   ├── index.html     # Vanilla HTML/JS UI (no build step)
 │   └── serve_dashboard.py # Python HTTP server (port 4173)
+├── .vnx-overrides/    # Per-project customizations (takes precedence over central install)
+│   ├── skills/        # Override or extend central skill templates
+│   ├── schemas/       # Override central schema definitions
+│   └── configs/       # Override central configuration defaults
 └── .claude/           # Claude Code config + skills
 ```
 
@@ -502,30 +532,19 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 Active development. Priorities shift based on real usage patterns. Full detail in [ROADMAP.md](./ROADMAP.md); recent shipping history in [CHANGELOG.md](./CHANGELOG.md).
 
-### Recently landed (Wave 5, 6, 7 — May 2026)
+### Recently landed (Wave 5, 6, 7, 8 — May 2026)
 
-- **Wave 5** — Control Centre + multi-project supervision (single supervisor session managing N per-project T0 orchestrators, schema v12 multi-tenant lease isolation, cross-project intelligence aggregator)
-- **Wave 6** — Workers=N elastic pool with `vnx pool` CLI, queue-aware + cost-aware scaling policies, dead-worker reap, schema v14
-- **Wave 7** — Multi-provider via LiteLLM (DeepSeek/Kimi/GLM), provider governance unification (uniform receipt + report shape), Kimi CLI as 5th provider with OAuth, intelligence injection + token/cost tracking equal first-class across all 5 providers
+- **Wave 5** (SHIPPED 2026-05-16) — Control Centre + multi-project supervision (single supervisor session managing N per-project T0 orchestrators, schema v12 multi-tenant lease isolation, cross-project intelligence aggregator)
+- **Wave 6** (SHIPPED 2026-05-16) — Workers=N elastic pool with `vnx pool` CLI, queue-aware + cost-aware scaling policies, dead-worker reap, schema v14
+- **Wave 7** (SHIPPED 2026-05-17) — Multi-provider via LiteLLM (DeepSeek/Kimi/GLM), provider governance unification (uniform receipt + report shape), Kimi CLI as 5th provider with OAuth, intelligence injection + token/cost tracking equal first-class across all 5 providers
+- **Wave 8** (SHIPPED 2026-05-17) — Smart router with task-class-aware model selection, hard provider constraint enforcement (`HardConstraintViolation` on policy breach), YAML frontmatter guardrails for uniform report schema, weekly drift + monthly benchmark cadence, self-learning `route_decisions_watcher.py`
 - **Benchmark infrastructure** — reproducible 9-model × 7-task suite + routing recommendations published
-
-### Wave 8 — Smart Routing + Schema Enforcement + Self-Learning (next, in design)
-
-Five layers operator-approved 2026-05-17:
-
-1. **Routing decision** — `smart_router.py` with task-class-aware model selection
-2. **Uniform reports** — YAML frontmatter enforced via shell-script guardrails (model-agnostic)
-3. **Guardrails** — hard provider constraints in code + CI (`HardConstraintViolation` on policy breach)
-4. **Analysis cadence** — weekly drift sample + monthly full benchmark + triggered re-bench
-5. **Self-learning loop** — `route_decisions_watcher.py` auto-adjusts `routing_recommendations.yaml` on production failure patterns
-
-Estimated 3 weeks, 16 PRs, ~3490 LOC.
 
 ### Known gaps / deferred
 
 - **Headless context rotation** (OI-1073) — subprocess workers use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
 - **MCP server** — expose VNX state to external Claude sessions; not yet built.
-- **v1.0.0 final tag** — operator decision after Wave 8 ships and centralization burn-in validates on mission-control + sales-copilot + SEOcrawler.
+- **v1.0.0 final tag** — operator decision after Wave 5-8 centralization burn-in validates on mission-control + sales-copilot + SEOcrawler.
 - **Path D (Claude-harness for non-Claude models)** — blocked pending telemetry-leak resolution (`claude` v2.1.136 hits `api.anthropic.com` 8× even with `BASE_URL` redirect, verified 2026-05-10).
 
 ### Future horizons (post-1.0, non-binding)
