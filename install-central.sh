@@ -159,38 +159,49 @@ clone_version() {
 }
 
 # ---------------------------------------------------------------------------
-# swap_symlink — atomic current -> versions/<version> switch
+# swap_symlink current_link target — atomic symlink replacement
+#   Never removes $current_link before successful replacement.
+#   Both Linux (GNU mv -T) and macOS (BSD mv -f via rename(2)) paths are safe
+#   because $current_link is always a symlink or nonexistent, never a real dir.
+#   Returns 75 (EX_TEMPFAIL) on failure; caller handles rollback.
 # ---------------------------------------------------------------------------
 swap_symlink() {
-  local version_dir="${TARGET_DIR}/versions/${VERSION}"
-  local current_link="${TARGET_DIR}/current"
+  local current_link="$1"
+  local target="$2"
+  local tmp_link="${current_link}.swap.$$"
 
-  info "Swapping symlink: ${current_link} -> ${version_dir}..."
-  run mkdir -p "${TARGET_DIR}/versions"
+  info "Swapping symlink: ${current_link} -> ${target}..."
 
-  if [ "$DRY_RUN" = "false" ]; then
-    local new_link_tmp="${TARGET_DIR}/current.tmp.$$"
-    ln -sn "$version_dir" "$new_link_tmp"
-    if mv -fT "$new_link_tmp" "$current_link" 2>/dev/null; then
-      : # GNU mv -T succeeded
-    else
-      # macOS/BSD fallback: unlink + atomic ln.
-      # Critical: NEVER `mv $tmp $current_link` here — if $current_link is a symlink
-      # to a directory, mv without -T moves the temp link INTO that directory instead
-      # of replacing the symlink itself.
-      rm -f "$current_link" || true
-      if ! ln -sn "$(readlink "$new_link_tmp")" "$current_link"; then
-        rm -f "$new_link_tmp"
-        echo "ERROR: failed to install symlink atomically" >&2
-        exit 75  # EX_TEMPFAIL
-      fi
-      rm -f "$new_link_tmp"
-    fi
-  else
-    echo "  [dry-run] ln -sfn ${version_dir} ${current_link}"
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "  [dry-run] ln -sfn ${target} ${current_link}"
+    success "Symlink updated: ${current_link} -> ${target}"
+    return 0
   fi
 
-  success "Symlink updated: ${current_link} -> ${version_dir}"
+  mkdir -p "$(dirname "$current_link")"
+
+  ln -sn "$target" "$tmp_link" || {
+    rm -f "$tmp_link"
+    echo "ERROR: failed to create temp symlink" >&2
+    return 75
+  }
+
+  # Try GNU mv -T first (Linux). macOS BSD mv without -T follows symlinks to
+  # directories, so mv -f is not safe there. Python os.replace() maps directly
+  # to rename(2) on all POSIX platforms — atomic, no directory-following.
+  if mv -fT "$tmp_link" "$current_link" 2>/dev/null; then
+    : # GNU mv -T succeeded (Linux)
+  elif python3 -c "import os,sys; os.replace(sys.argv[1],sys.argv[2])" \
+         "$tmp_link" "$current_link" 2>/dev/null; then
+    : # python os.replace() => rename(2), atomic on macOS
+  else
+    rm -f "$tmp_link"
+    echo "ERROR: failed to rename temp symlink" >&2
+    return 75
+  fi
+
+  success "Symlink updated: ${current_link} -> ${target}"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -302,21 +313,17 @@ verify_install() {
 }
 
 # ---------------------------------------------------------------------------
-# Rollback helper — called on ERR when mid-flow symlink was swapped
+# Rollback helper — called on ERR; restores previous symlink or exits 70
 # ---------------------------------------------------------------------------
-_SYMLINK_SWAPPED=false
-_previous_target=""
+_PREVIOUS_TARGET=""
 
 cleanup_on_failure() {
-  if [ "$_SYMLINK_SWAPPED" = "true" ] && [ "$DRY_RUN" = "false" ]; then
-    warn "Rolling back symlink due to installation error..."
-    if [ -n "${_previous_target:-}" ] && [ -e "$_previous_target" ]; then
-      ln -sfn "$_previous_target" "${TARGET_DIR}/current" 2>/dev/null || true
-      echo "ROLLBACK: restored previous symlink target ${_previous_target}"
-    else
-      rm -f "${TARGET_DIR}/current"
-      echo "ROLLBACK: removed current symlink (no previous target to restore)"
+  if [ -n "${_PREVIOUS_TARGET:-}" ]; then
+    if ! swap_symlink "${TARGET_DIR}/current" "$_PREVIOUS_TARGET"; then
+      echo "FATAL: rollback failed — manual recovery required: previous=$_PREVIOUS_TARGET" >&2
+      exit 70  # EX_SOFTWARE
     fi
+    echo "ROLLBACK: restored previous symlink target $_PREVIOUS_TARGET"
   fi
 }
 trap cleanup_on_failure ERR
@@ -338,10 +345,9 @@ main() {
   check_prereqs
   clone_version
   if [ -L "${TARGET_DIR}/current" ]; then
-    _previous_target=$(readlink "${TARGET_DIR}/current")
+    _PREVIOUS_TARGET=$(readlink "${TARGET_DIR}/current")
   fi
-  swap_symlink
-  _SYMLINK_SWAPPED=true
+  swap_symlink "${TARGET_DIR}/current" "${TARGET_DIR}/versions/${VERSION}"
   install_shim
   verify_install
 

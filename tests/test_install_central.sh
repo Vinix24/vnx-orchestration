@@ -334,6 +334,134 @@ fi
 rm -rf "$TMP_MACOS" "$FAKE_MV_DIR" "$test_macos_script"
 
 # ---------------------------------------------------------------------------
+# Test 12: swap_symlink happy path — succeeds, symlink updated, no temp files
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 12: swap_symlink atomic swap — existing target replaced, no temp files"
+
+TMP_12="$(mktemp -d)"
+OLD_VER_12="v0.9.0"
+NEW_VER_12="v1.0.0-rc2"
+mkdir -p "${TMP_12}/versions/${OLD_VER_12}" "${TMP_12}/versions/${NEW_VER_12}"
+ln -sn "${TMP_12}/versions/${OLD_VER_12}" "${TMP_12}/current"
+
+test_12_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"
+  printf 'DRY_RUN=false\n'
+  printf 'swap_symlink "%s/current" "%s/versions/%s"\n' "$TMP_12" "$TMP_12" "$NEW_VER_12"
+} > "$test_12_script"
+
+test_12_exit=0
+bash "$test_12_script" >/dev/null 2>&1 || test_12_exit=$?
+
+if [ "$test_12_exit" -eq 0 ]; then
+  pass "swap_symlink exits 0 on happy path"
+else
+  fail "swap_symlink exited ${test_12_exit}, expected 0"
+fi
+
+current_12="$(readlink "${TMP_12}/current" 2>/dev/null || echo "MISSING")"
+if echo "$current_12" | grep -qF "$NEW_VER_12"; then
+  pass "current symlink points to new version after swap"
+else
+  fail "current symlink not updated: ${current_12}"
+fi
+
+leftover_12="$(ls "${TMP_12}/"current.swap.* 2>/dev/null || true)"
+if [ -z "$leftover_12" ]; then
+  pass "no leftover .swap. temp files after successful swap"
+else
+  fail "leftover temp files found: ${leftover_12}"
+fi
+
+rm -rf "$TMP_12" "$test_12_script"
+
+# ---------------------------------------------------------------------------
+# Test 13: swap_symlink — ln fails (read-only parent dir) → temp cleaned, current unchanged
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 13: swap_symlink ln failure — tempfile cleaned up, current symlink unchanged"
+
+TMP_13="$(mktemp -d)"
+OLD_VER_13="v0.9.0"
+NEW_VER_13="v1.0.0-rc2"
+mkdir -p "${TMP_13}/versions/${OLD_VER_13}" "${TMP_13}/versions/${NEW_VER_13}"
+ln -sn "${TMP_13}/versions/${OLD_VER_13}" "${TMP_13}/current"
+chmod 555 "$TMP_13"  # make parent dir read-only so ln -sn fails
+
+test_13_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"
+  printf 'DRY_RUN=false\n'
+  printf 'swap_symlink "%s/current" "%s/versions/%s"\n' "$TMP_13" "$TMP_13" "$NEW_VER_13"
+} > "$test_13_script"
+
+test_13_exit=0
+bash "$test_13_script" >/dev/null 2>&1 || test_13_exit=$?
+
+chmod 755 "$TMP_13"  # restore for cleanup
+
+if [ "$test_13_exit" -eq 75 ]; then
+  pass "swap_symlink returns 75 (EX_TEMPFAIL) when ln fails"
+else
+  fail "expected exit 75, got ${test_13_exit}"
+fi
+
+current_13="$(readlink "${TMP_13}/current" 2>/dev/null || echo "MISSING")"
+if echo "$current_13" | grep -qF "$OLD_VER_13"; then
+  pass "current symlink unchanged after swap_symlink failure"
+else
+  fail "current symlink was modified during failure: ${current_13}"
+fi
+
+leftover_13="$(ls "${TMP_13}/"current.swap.* 2>/dev/null || true)"
+if [ -z "$leftover_13" ]; then
+  pass "no leftover .swap. temp files after ln failure"
+else
+  fail "leftover temp files found after failure: ${leftover_13}"
+fi
+
+rm -rf "$TMP_13" "$test_13_script"
+
+# ---------------------------------------------------------------------------
+# Test 14: cleanup_on_failure — rollback fails → exits 70, FATAL logged
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 14: cleanup_on_failure broken rollback — exits 70, FATAL message logged"
+
+TMP_14="$(mktemp -d)"
+chmod 555 "$TMP_14"  # read-only so swap_symlink's ln fails inside cleanup_on_failure
+
+test_14_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"
+  printf 'DRY_RUN=false\n'
+  printf 'TARGET_DIR="%s"\n' "$TMP_14"
+  printf '_PREVIOUS_TARGET="%s/some-version"\n' "$TMP_14"
+  printf 'cleanup_on_failure\n'
+} > "$test_14_script"
+
+test_14_exit=0
+test_14_output="$(bash "$test_14_script" 2>&1)" || test_14_exit=$?
+
+chmod 755 "$TMP_14"  # restore for cleanup
+
+if [ "$test_14_exit" -eq 70 ]; then
+  pass "cleanup_on_failure exits 70 (EX_SOFTWARE) when rollback fails"
+else
+  fail "expected exit 70, got ${test_14_exit}"
+fi
+
+if echo "$test_14_output" | grep -qi "FATAL"; then
+  pass "cleanup_on_failure logs FATAL message on rollback failure"
+else
+  fail "FATAL message not found in output: ${test_14_output}"
+fi
+
+rm -rf "$TMP_14" "$test_14_script"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
