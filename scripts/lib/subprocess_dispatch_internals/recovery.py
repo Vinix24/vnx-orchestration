@@ -7,7 +7,6 @@ that ``unittest.mock.patch("subprocess_dispatch.X")`` intercepts the call.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -16,22 +15,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from otel_exporter import emit_dispatch_completion
 from subprocess_dispatch_internals.delivery import _dispatch_token_usage
+from subprocess_dispatch_internals.runtime_overrides import apply_runtime_overrides
 from provider_dispatch import _extract_token_usage, _compute_cost
 
 logger = logging.getLogger(__name__)
 
-
-def _apply_runtime_overrides(chunk_timeout: float, total_deadline: float) -> tuple[float, float]:
-    """Honor VNX_CHUNK_TIMEOUT / VNX_TOTAL_DEADLINE env overrides."""
-    try:
-        chunk_timeout = float(os.environ["VNX_CHUNK_TIMEOUT"])
-    except (KeyError, ValueError):
-        pass
-    try:
-        total_deadline = float(os.environ["VNX_TOTAL_DEADLINE"])
-    except (KeyError, ValueError):
-        pass
-    return chunk_timeout, total_deadline
 
 
 def _read_dispatch_path_manifest(dispatch_id: str) -> "list[str] | None":
@@ -442,7 +430,7 @@ def deliver_with_recovery(
     prior_round_finding items (codex/gemini gate results) fire in production.
     """
     import subprocess_dispatch as _sd
-    chunk_timeout, total_deadline = _apply_runtime_overrides(chunk_timeout, total_deadline)
+    chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
 
     dispatch_start_ts, commit_hash_before, pre_dispatch_dirty, manifest_paths = (
         _init_recovery_state(

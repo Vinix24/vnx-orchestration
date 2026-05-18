@@ -42,6 +42,55 @@ Key deliverables: `t0_decision_framework.py`, `t0_gate_locks.py`, `t0_context_as
 
 ---
 
+## Wave History
+
+Wave-based planning tracks major capability milestones across the 2026 roadmap. All waves below are shipped and merged.
+
+### Wave 1 — Shadow Read Cutover
+**Status**: `Completed` — April 2026
+
+Central VNX state shadow-mode validation. `shadow_verifier.py` computes 6 zero-tolerance metrics (wrong-project rows, scoping/blocking-finding mismatch, top-3 divergence, count drift, lease-key collisions, p95-latency ratio). NDJSON divergence records under flock with timestamp-suffix rotation. All production T0 + IntelligenceSelector read sites wired through `VNX_USE_CENTRAL_DB` flag.
+
+### Wave 2 — Package Extraction Foundation
+**Status**: `Completed` — April 2026
+
+`pyproject.toml` + `vnx_core` + `vnx_cli` package skeleton with smoke tests. First module migration: `function_size_gate.py` → `vnx_core`. Pipx-installable wheel foundation (`vnx` console_script entry-point).
+
+### Wave 4 / 4.5 / 4.6 — Provider Generalization
+**Status**: `Completed` — April/May 2026
+
+OTel observability foundation (opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`). `PromptAssembler` provider-agnostic methods for Claude/Codex/Gemini/LiteLLM. `provider_dispatch.py` entry-point with per-provider spawn handlers (`claude_spawn`, `codex_spawn`, `gemini_spawn`, `litellm_spawn`). `CanonicalEvent` unified event shape via `EventStore` enforcement.
+
+### Wave 5 — Control Centre + Multi-Project
+**Status**: `Completed` — SHIPPED 2026-05-16
+
+Single supervisor session managing N per-project T0 orchestrators. Multi-project state aggregator, per-project T0 lifecycle (spawn/heartbeat/kill/reap), multi-tenant lease isolation (schema v12), cross-project intelligence aggregator, hybrid dispatch routing, operator demo runbook.
+
+Key deliverables: `multi_project_aggregator.py`, `control_centre_skill.md`, `CONTROL_CENTRE.md`, ADR-017.
+
+### Wave 6 — Workers=N Elastic Pool
+**Status**: `Completed` — SHIPPED 2026-05-16
+
+Configurable worker pool with queue-aware + cost-aware scaling policies, dead-worker reap, and `vnx pool` CLI. PoolManager core (schema v14), pluggable scaling policies (`queue_depth_v1` + `cost_aware_v1`), provider-mix per pool, health monitoring + dead-worker reap tick cycle.
+
+Key deliverables: `pool_manager.py`, `vnx_workers.yaml`, ADR-018.
+
+### Wave 7 — Multi-Provider via LiteLLM
+**Status**: `Completed` — SHIPPED 2026-05-17
+
+Five providers in production: Claude, Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.1 via OpenRouter). Uniform receipt + report shape across all 5 providers. Intelligence injection, token + cost tracking, and quality gates equal first-class for every provider. Reproducible benchmark suite: 9 models × 7 tasks with routing recommendations.
+
+Key deliverables: `litellm_spawn.py`, `provider_governance.py`, `vnx.env`, `routing_recommendations.yaml`, ADR-015.
+
+### Wave 8 — Smart Router + Schema Enforcement
+**Status**: `Completed` — SHIPPED 2026-05-17
+
+Task-class-aware model routing (`smart_router.py`), hard provider constraint enforcement (`HardConstraintViolation` on policy breach), YAML frontmatter guardrails for uniform report schema, weekly drift + monthly benchmark cadence, self-learning `route_decisions_watcher.py` auto-adjusting `routing_recommendations.yaml` on production failure patterns.
+
+Key deliverables: `smart_router.py`, `hard_constraints.py`, `route_decisions_watcher.py`.
+
+---
+
 ## Milestones
 
 ### Headless T0 Production
@@ -56,7 +105,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ## Committed (Near Term)
 
 ## 1) Multi-Feature PR Queue
-**Status**: `Committed`  
+**Status**: `Completed` — Shipped via Wave 5 (multi-project state aggregator + per-project T0 lifecycle)
 **Why**: Current flow is strong for one feature at a time, but throughput is limited.
 
 **Goals**
@@ -72,7 +121,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ---
 
 ## 2) Smart Context Injection (Indexed Docs + Line Targets)
-**Status**: `Committed`  
+**Status**: `Completed` — Shipped via Wave 5/7 (three-state-aware context bundles + intelligence injection unification)
 **Why**: Better context precision reduces hallucinations and prompt bloat.
 
 **Goals**
@@ -88,7 +137,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ---
 
 ## 3) Codex Model Switching Hardening
-**Status**: `Committed`  
+**Status**: `Completed` — Shipped via Wave 4.6/7 (per-provider spawn handlers + provider behavior contracts)
 **Why**: Model switching works functionally, but needs battle-tested reliability.
 
 **Goals**
@@ -104,7 +153,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ---
 
 ## 4) Worktree-Aware Orchestration
-**Status**: `Committed`  
+**Status**: `Completed` — Shipped in v1.0.0-rc1 (worktree metadata in dispatch + receipt, cross-branch write prevention)
 **Why**: Parallel PR execution needs branch/worktree isolation.
 
 **Goals**
@@ -120,6 +169,57 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ---
 
 ## Next (After Committed Scope)
+
+## Centralization Rollout
+**Status**: `Next`
+**Why**: Wave 8 shipped; central install path validated on vnx-orchestration-system. Rolling out to all 4 projects via pipx wheel + `install-central.sh`.
+
+**Rollout order**
+1. vnx-orchestration-system (reference) — done
+2. SEOcrawler_v2 — next
+3. mission-control — following
+4. sales-copilot — final
+
+**Success Criteria**
+- All 4 projects pin via `.vnx-version` to `v1.0.0-rc2`
+- `vnx doctor --strict` passes on all 4 with no override warnings
+- `.vnx-overrides/` pattern adopted where projects need custom skills or schemas
+
+---
+
+## 4-Gate Enforcement Framework
+**Status**: `Next`
+**Why**: Research complete in `claudedocs/4-gate-research-deep-dive-2026-05-18.md` + shift-left QA addendum. Triple gate (codex + gemini + CI) is validated; extending to a 4th deterministic gate with shift-left enforcement.
+
+**Goals**
+- Specify and implement the 4th gate (shift-left pre-dispatch quality signal)
+- Deterministic enforcement — no LLM bypass path
+- Integrate 4th gate verdict into structured result records with evidence binding
+- Document rollback path for failed 4th gate
+
+**Success Criteria**
+- 4-gate policy enforced in CI for all new PRs
+- Gate verdicts stored in `.vnx-data/state/review_gates/results/` with full evidence chain
+- Shift-left addendum patterns adopted in dispatch pre-check
+
+---
+
+## Wave 9 — VNX-Dispatcher MVP
+**Status**: `Next`
+**Why**: Research complete in `claudedocs/vnx-dispatcher-strategic-research.md`. Next architectural milestone after centralization — standalone dispatcher replacing the shell-script dispatch loop.
+
+**Goals**
+- VNX-Dispatcher as a deployable standalone service
+- Event-driven architecture for dispatch lifecycle (created → promoted → started → completed)
+- First-class support for cross-project dispatch from a single dispatcher instance
+- Backwards-compatible with existing `.vnx-data/dispatches/` directory structure
+
+**Success Criteria**
+- VNX-Dispatcher MVP deployable independently of the VNX CLI
+- Dispatch + receipt events flow without loss through the dispatcher
+- Drop-in replacement — existing `.vnx-data/` structure unchanged
+
+---
 
 ## Recommended Next Hardening Chain
 **Status**: `Next`
@@ -142,7 +242,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ---
 
 ## 5) Terminal Pool Expansion (4 -> N)
-**Status**: `Next`  
+**Status**: `Completed` — Shipped via Wave 6 (Workers=N elastic pool with `vnx pool` CLI, schema v14)
 **Why**: Higher throughput and specialization require dynamic terminal scaling.
 
 **Goals**

@@ -26,10 +26,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
+import re
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Compiled patterns for governance-event detection
+_GATE_PASSED_RE = re.compile(r"^gate .+ passed$", re.IGNORECASE)
+_RECENT_DISPATCH_RE = re.compile(r"^recent: .+ dispatch \(.+\)$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +55,23 @@ def content_hash(*parts: Optional[str]) -> str:
     """SHA-256 over normalized concatenation of the supplied content parts."""
     joined = "\n".join(normalize_content(p) for p in parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _is_governance_event(title: Optional[str]) -> bool:
+    """Return True if title matches known governance-event noise patterns.
+
+    Matches:
+      - "gate <name> passed"          → gate-pass events (81.6% of catalogue)
+      - "Recent: <role> dispatch (...)" → recency noise injections
+    """
+    t = normalize_content(title)
+    if _GATE_PASSED_RE.match(t):
+        logger.info("pattern_dedup: skipped governance-event title=%s", title)
+        return True
+    if _RECENT_DISPATCH_RE.match(t):
+        logger.info("pattern_dedup: skipped governance-event title=%s", title)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

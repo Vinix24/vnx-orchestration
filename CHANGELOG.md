@@ -6,6 +6,38 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ## [Unreleased]
 
+### Refactored
+- refactor(dispatch): extract `_apply_runtime_overrides` from delivery.py + recovery.py to shared `runtime_overrides.py` module (Kimi audit duplication finding). Eliminates copy-paste drift.
+
+### Added
+- feat(install): `install-central.sh` for centralized VNX install (apart van embedded `install.sh`) — clones to `~/.vnx-system/versions/<v>/`, atomic symlink-swap, project-pin via `.vnx-version`. Pre-centralization must-have #7.
+- feat(intelligence): A/B random-skip framework (V5 per intelligence-injection-quality-research). Adds `ab_arm` column to intelligence_injections + 10% control-arm skip via `VNX_INTEL_AB_TEST=1` env flag + weekly lift report (`scripts/intelligence_ab_report.py`). Enables verifiable +30pp lift measurement. Audit BLOCKER #2 closes-the-loop PR-IH-3.
+- feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
+- feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
+- feat(cli): `vnx update --to <ver> --keep-last N --dry-run --rollback` subcommand for future central install version-flip (pre-central-install scaffolding)
+- feat(vnx_paths): override-resolver `_resolve_overrides_dir()` + `get_skill_path()` — per-project `.vnx-overrides/skills,schemas,configs/` directory takes precedence over central VNX_HOME. Enables mission-control-style custom assets without central pollution. (Pre-centralization must-have #5)
+- feat(pyproject): `vnx` console_script entry-point + requires-python `>=3.11,<3.14`. Pipx-installable. (Pre-centralization must-have #6)
+- feat(schema): migration 0021 `central_install_pins` + `central_install_events` tables met `scripts/lib/central_install_db.py` helper. Bookkeeping voor project pin tracking + install/update/rollback event history. Pre-centralization must-have #10.
+- feat(doctor): `vnx doctor --strict` flag with central-mode detection (install mode, dual-install warning, schema PRAGMA user_version check, skill coverage audit, overrides listing, worktree orphan detection, active dispatch drain check). Pre-centralization must-have #8.
+
+### Fixed
+- fix(governance): `_emit_governance` no longer raises `SystemExit(1)` on transient receipt write failure (Kimi audit). 3 retries with exponential backoff (0.5/1.0/1.5 s), then raises to caller. Transient FS races (rename collision, brief lock) no longer kill workers.
+- fix(cli-update): path-traversal validation + ADR-005 audit events for symlink-flip + prune + git FileNotFoundError handling (codex blocker + 3 advisories)
+- fix(pyproject): build-backend `setuptools.backends._legacy` → `setuptools.build_meta`. Wheel build now succeeds via `python -m build`.
+- fix(vnx_paths): validate skill_name + resolved-path confinement check in get_skill_path (codex path-traversal blocker)
+- fix(pool): add real-subprocess integration tests for pool spawn; confirms `_spawn_via_provider_dispatch` uses real `subprocess.Popen` with live PID verification — guards against regression to pre-PR-6.5a stub (Sonnet audit BLOCKER #1)
+- fix(intelligence): catalogus-hygiene — filter governance-event success_patterns (81.6% noise) + memory_consolidation antipatterns (26% noise) at source; recency-decay (0.95^weeks) op confidence; migration invalidates existing noise. Addresses Sonnet audit BLOCKER #2 (intelligence +30pp claim artefact). PR-IH-1 per intelligence-injection-quality-research.
+- fix(intelligence-hygiene): replace ALTER TABLE IF NOT EXISTS (invalid SQLite < 3.37) with Python idempotent column-add via PRAGMA table_info check in quality_db_init.py (codex_gate blocker audit-ih-1-fixforward)
+- fix(intelligence-hygiene): parse ISO timestamps with timezone via fromisoformat + astimezone(UTC) — raw[:26] truncation was dropping tz offsets, skipping recency decay for those rows
+- fix(install-central): pin validation + resolved-path confinement in shim (path-traversal blocker)
+- fix(install-central): atomic rollback restore of previous symlink target (data-integrity blocker)
+- fix(install-central): atomic shim install via mktemp + mv (data-integrity blocker)
+- fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
+- fix(install-central): unlink+ln fallback voor macOS atomic symlink swap (codex edge-case blocker: mv -f kan dest-symlink-naar-dir verkeerd interpreteren)
+- fix(install-central): atomic symlink swap via tempfile + mv (no rm-before-replace); cleanup_on_failure raises EX_SOFTWARE on rollback failure (codex round-2 atomicity blocker)
+- fix(doctor): replace silent `except OSError: continue` in skill-coverage gate with `logger.warning` + unreadable list surfaced in strict mode (codex blocker)
+- fix(doctor): narrow OSError + sqlite3.OperationalError in _resolve_central_pin + _check_schema_versions; surface in strict-mode results instead of silent fallback (codex round-2 blockers)
+
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
 - feat(schema): idempotent bootstrap — quality_db_init + coordination_db check PRAGMA user_version before each migration block, skip already-applied. Mid-run failures rollback cleanly via SAVEPOINT transactions. New `scripts/lib/schema_migration.py` helper centralises `apply_if_below` + `apply_script_if_below` patterns. (Pre-centralization must-have #4)
@@ -14,6 +46,13 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(schema-migration): replace `executescript` with quote/comment-aware SQL splitter inside SAVEPOINT in `apply_script_if_below` — schema script + `PRAGMA user_version` stamp now atomic, mid-script failure rolls back ALL statements (codex round-3 atomicity blocker)
 - fix(coordination_db): use `schema_migration.apply_script_if_below` for both V1 base schema + versioned migrations — eliminates direct `executescript` calls that broke SAVEPOINT atomicity
 - fix(quality_db_init): use `schema_migration.apply_script_if_below` for V1 base schema (codex round-3 follow-up — same atomicity pattern in third file)
+
+### Added
+- feat(skill-coverage): `scripts/check_skill_coverage.py` pre-flight scanner — finds project skill-refs vs central+overrides availability. Prevents mission-control style product-skill loss on central rollout. Pre-centralization must-have #9.
+- fix(skill-coverage): replace silent `except Exception: pass` in `_scan_local_skills_dir` + `_list_skills_in_dir` with narrow `(yaml.YAMLError, OSError)` + `logger.warning` + skipped report surfaced in `--json` output (codex 2 blockers)
+- fix(skill-coverage): narrow `_read_text` exception (OSError, UnicodeDecodeError) + logger.warning + surface to skipped list (codex round-2 blocker)
+
+- docs: refresh README + ROADMAP voor 1.0.0-rc2 (Wave 5/6/7/8 shipped, central install instructions, pipx wheel, .vnx-overrides documentation)
 
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)

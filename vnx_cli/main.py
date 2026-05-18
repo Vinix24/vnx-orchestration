@@ -41,6 +41,11 @@ def main() -> None:
         help="emit results as JSON",
     )
     doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail (exit 1) on any warning or failure, not just failures",
+    )
+    doctor_parser.add_argument(
         "--project-dir",
         default=".",
         metavar="DIR",
@@ -105,6 +110,47 @@ def main() -> None:
         help="pool subcommand and arguments",
     )
 
+    # version subcommand
+    version_parser = subparsers.add_parser(
+        "version",
+        help="print VNX version, commit, VNX_HOME, pin, and Python info",
+    )
+    version_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to check for .vnx-version pin (default: current directory)",
+    )
+
+    # update subcommand
+    update_parser = subparsers.add_parser(
+        "update",
+        help="flip active VNX version in central install (pre-central-install scaffolding)",
+    )
+    update_parser.add_argument(
+        "--to",
+        dest="to_version",
+        metavar="VERSION",
+        help="target version (e.g. '1.0.0-rc3' or 'edge')",
+    )
+    update_parser.add_argument(
+        "--keep-last",
+        type=int,
+        default=3,
+        metavar="N",
+        help="number of old versions to retain (default: 3)",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print planned actions without making filesystem changes",
+    )
+    update_parser.add_argument(
+        "--rollback",
+        action="store_true",
+        help="revert current symlink to the previous version",
+    )
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -126,6 +172,14 @@ def main() -> None:
     elif args.command == "pool":
         from vnx_cli.commands.pool import main as pool_main
         sys.exit(pool_main(argv=getattr(args, "pool_args", None) or None))
+
+    elif args.command == "version":
+        from vnx_cli.commands.version import vnx_version
+        sys.exit(vnx_version(args))
+
+    elif args.command == "update":
+        from vnx_cli.commands.update import vnx_update
+        sys.exit(vnx_update(args))
 
     else:
         parser.print_help()

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import random
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -34,6 +36,19 @@ from intelligence_sources import (  # noqa: F401  (re-exported for backward comp
 from intelligence_sources import stamp_source_dispatch_ids as _stamp
 
 logger = logging.getLogger(__name__)
+
+AB_CONTROL_FRACTION = 0.10  # 10% control arm when A/B testing is active
+
+
+def _ab_arm() -> str:
+    """Return 'control' (10%) or 'treatment' (90%) based on VNX_INTEL_AB_TEST env flag.
+
+    When VNX_INTEL_AB_TEST is not set or '0', always returns 'treatment' (no-op).
+    """
+    if os.environ.get("VNX_INTEL_AB_TEST", "0") != "1":
+        return "treatment"
+    return "control" if random.random() < AB_CONTROL_FRACTION else "treatment"
+
 
 try:
     from vnx_paths import resolve_central_data_dir as _resolve_central_data_dir
@@ -137,7 +152,7 @@ class IntelligenceSelector:
         """Run the bounded selection algorithm and return an InjectionResult."""
         if injection_point not in VALID_INJECTION_POINTS:
             raise ValueError(f"Invalid injection_point: {injection_point!r}. Must be one of {sorted(VALID_INJECTION_POINTS)}")
-        resolved_class = resolve_task_class(task_class, skill_name)
+        resolved_class = resolve_task_class(task_class, skill_name, dispatch_paths, instruction_text)
         effective_scope: List[str] = list(scope_tags or [])
         for tag in [skill_name, (f"Track-{track}" if track and not track.startswith("Track-") else track), gate, resolved_class]:
             if tag and tag not in effective_scope:
@@ -264,11 +279,54 @@ class IntelligenceSelector:
 
 
 
-def select_intelligence(dispatch_id, injection_point, *, quality_db_path=None, coord_state_dir=None, task_class=None, skill_name=None, scope_tags=None, track=None, gate=None) -> InjectionResult:
+def select_intelligence(
+    dispatch_id,
+    injection_point,
+    *,
+    quality_db_path=None,
+    coord_state_dir=None,
+    task_class=None,
+    skill_name=None,
+    scope_tags=None,
+    track=None,
+    gate=None,
+    dispatch_paths=None,
+    instruction_text=None,
+) -> InjectionResult:
     """Convenience function: select, emit event, record injection, return result."""
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
-        result = selector.select(dispatch_id=dispatch_id, injection_point=injection_point, task_class=task_class, skill_name=skill_name, scope_tags=scope_tags, track=track, gate=gate)
+        ab_arm = _ab_arm()
+        if ab_arm == "control":
+            logger.info(
+                "intelligence_selector: A/B control arm — skipping injection for dispatch %s",
+                dispatch_id,
+            )
+            resolved_class = resolve_task_class(task_class, skill_name, dispatch_paths, instruction_text)
+            result = InjectionResult(
+                injection_point=injection_point,
+                injected_at=_now_utc(),
+                items=[],
+                suppressed=[],
+                task_class=resolved_class,
+                dispatch_id=dispatch_id,
+                ab_arm="control",
+            )
+            selector.emit_event(result)
+            selector.record_injection(result)
+            return result
+        result = selector.select(
+            dispatch_id=dispatch_id,
+            injection_point=injection_point,
+            task_class=task_class,
+            skill_name=skill_name,
+            scope_tags=scope_tags,
+            track=track,
+            gate=gate,
+            dispatch_paths=dispatch_paths,
+            instruction_text=instruction_text,
+        )
+        result.ab_arm = "treatment"
         selector.emit_event(result)
         selector.record_injection(result)
         return result
@@ -286,7 +344,32 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
         return None
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
+        ab_arm = _ab_arm()
+        if ab_arm == "control":
+            logger.info(
+                "intelligence_selector: A/B control arm — skipping context build for dispatch %s",
+                dispatch_id,
+            )
+            result = InjectionResult(
+                injection_point="dispatch_create",
+                injected_at=_now_utc(),
+                items=[],
+                suppressed=[],
+                task_class=resolve_task_class(None, role or None, dispatch_paths, None),
+                dispatch_id=dispatch_id,
+                ab_arm="control",
+            )
+            try:
+                selector.emit_event(result, coord_state_dir=coord_state_dir)
+            except Exception as exc:
+                logger.debug("build_intelligence_context: emit_event (control) failed for %s: %s", dispatch_id, exc)
+            try:
+                selector.record_injection(result, coord_state_dir=coord_state_dir)
+            except Exception as exc:
+                logger.debug("build_intelligence_context: record_injection (control) failed for %s: %s", dispatch_id, exc)
+            return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         result = selector.select(dispatch_id=dispatch_id, injection_point="dispatch_create", skill_name=role or "", dispatch_paths=dispatch_paths or [], pr_id=pr_id)
+        result.ab_arm = "treatment"
         try:
             selector.emit_event(result, coord_state_dir=coord_state_dir)
         except Exception as exc:

@@ -486,7 +486,11 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
                     log('INFO', f'Migrated {tbl}: added valid_until column')
         schema_migration.apply_if_below(conn, 16, _v16)
 
-        # ---- V17: dispatch_pattern_offered junction table ----
+        # ---- V17: dispatch_pattern_offered junction + invalidation_reason columns ----
+        # Merges two v17 migrations that landed independently:
+        # - dispatch_pattern_offered (this branch — atomic via apply_if_below)
+        # - invalidation_reason on success_patterns + antipatterns (from #593 AUDIT-IH-1 main)
+        # Both wrapped in single _v17 → atomic via apply_if_below SAVEPOINT
         def _v17(c):
             if not c.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
@@ -506,6 +510,13 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
                     "ON dispatch_pattern_offered (dispatch_id)"
                 )
                 log('INFO', 'Migrated: created dispatch_pattern_offered table + index')
+            # Catalog hygiene: invalidation_reason on success_patterns + antipatterns
+            # (from #593 AUDIT-IH-1 fix — codex blocker about IF NOT EXISTS invalid on SQLite < 3.37)
+            for _htbl in ("success_patterns", "antipatterns"):
+                cols = {r[1] for r in c.execute(f"PRAGMA table_info({_htbl})").fetchall()}
+                if "invalidation_reason" not in cols:
+                    c.execute(f"ALTER TABLE {_htbl} ADD COLUMN invalidation_reason TEXT")
+                    log('INFO', f'Migrated {_htbl}: added invalidation_reason column')
         schema_migration.apply_if_below(conn, 17, _v17)
 
         log('SUCCESS', 'Database schema initialized successfully')

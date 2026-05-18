@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
@@ -67,11 +69,26 @@ VALID_INJECTION_POINTS = frozenset({"dispatch_create", "dispatch_resume"})
 
 VALID_TASK_CLASSES = frozenset({
     "coding_interactive",
+    "coding_sql",
+    "coding_runtime",
+    "coding_intelligence",
+    "coding_test",
+    "coding_ui",
     "research_structured",
     "docs_synthesis",
     "ops_watchdog",
     "channel_response",
 })
+
+# Maps subclass names to their component keywords for scope expansion in _scope_matches.
+# When a query contains "coding_sql", items tagged "sql", "schema", or "migration" also match.
+_SUBCLASS_TO_KEYWORDS: Dict[str, frozenset] = {
+    "coding_sql": frozenset(["sql", "schema", "migration"]),
+    "coding_runtime": frozenset(["runtime", "dispatch", "receipt"]),
+    "coding_intelligence": frozenset(["intelligence", "pattern"]),
+    "coding_test": frozenset(["test"]),
+    "coding_ui": frozenset(["ui", "html", "css", "dashboard"]),
+}
 
 SKILL_TO_TASK_CLASS = {
     "backend-developer": "coding_interactive",
@@ -203,23 +220,80 @@ def classify_pattern_category(title: str, description: str) -> str:
     return PATTERN_CATEGORY_CODE
 
 
-def resolve_task_class(
-    task_class: Optional[str] = None,
-    skill_name: Optional[str] = None,
+def infer_task_subclass(
+    skill_name: Optional[str],
+    dispatch_paths: Optional[List[str]],
+    instruction_text: Optional[str],
 ) -> str:
-    """Resolve task class from explicit value or skill name. Defaults to coding_interactive."""
-    if task_class and task_class in VALID_TASK_CLASSES:
-        return task_class
-    if skill_name:
-        return SKILL_TO_TASK_CLASS.get(skill_name, "coding_interactive")
+    """Infer a fine-grained task subclass from dispatch paths and instruction text.
+
+    Priority order: sql > runtime > intelligence > test > ui > coding_interactive.
+    Returns one of the VALID_TASK_CLASSES subclass names.
+    """
+    paths_lower = [p.lower() for p in (dispatch_paths or [])]
+    instruction = (instruction_text or "").lower()
+
+    if (
+        any(p.endswith(".sql") or "migrat" in p or "/schemas/" in p or p.startswith("schemas/") for p in paths_lower)
+        or re.search(r"\b(migration|schema|table)\b", instruction)
+    ):
+        return "coding_sql"
+
+    if any(re.search(r"(?:^|/)(?:runtime_|dispatch_|receipt_)", p) for p in paths_lower):
+        return "coding_runtime"
+
+    if any(re.search(r"(?:^|/)intelligence_", p) for p in paths_lower):
+        return "coding_intelligence"
+
+    if any("/tests/" in p or p.startswith("tests/") for p in paths_lower):
+        return "coding_test"
+
+    if any(
+        "/dashboard/" in p or p.startswith("dashboard/") or p.endswith(".html") or p.endswith(".tsx")
+        for p in paths_lower
+    ):
+        return "coding_ui"
+
     return "coding_interactive"
 
 
+def resolve_task_class(
+    task_class: Optional[str] = None,
+    skill_name: Optional[str] = None,
+    dispatch_paths: Optional[List[str]] = None,
+    instruction_text: Optional[str] = None,
+) -> str:
+    """Resolve task class from explicit value, skill name, or inferred from paths/instruction."""
+    if task_class and task_class in VALID_TASK_CLASSES:
+        return task_class
+    base_class = SKILL_TO_TASK_CLASS.get(skill_name or "", "coding_interactive") if skill_name else "coding_interactive"
+    if base_class == "coding_interactive" and (dispatch_paths or instruction_text):
+        return infer_task_subclass(skill_name, dispatch_paths, instruction_text)
+    return base_class
+
+
+def _expand_scope_tags(tags: List[str]) -> frozenset:
+    """Expand subclass scope names to include component keywords for matching."""
+    expanded: set = set(tags)
+    for tag in tags:
+        expanded.update(_SUBCLASS_TO_KEYWORDS.get(tag, frozenset()))
+    return frozenset(expanded)
+
+
 def _scope_matches(item_scope_tags: List[str], query_scope_tags: List[str]) -> bool:
-    """Empty item scope = matches everything. Empty query scope = matches everything."""
-    if not item_scope_tags or not query_scope_tags:
+    """Match item scope against query scope.
+
+    Empty query scope always matches. In strict mode (VNX_INTEL_STRICT_SCOPE=1),
+    an item with no scope tags does NOT match a non-empty query scope.
+    Subclass names in the query are expanded to include component keywords.
+    """
+    if not query_scope_tags:
         return True
-    return bool(set(item_scope_tags) & set(query_scope_tags))
+    strict = os.environ.get("VNX_INTEL_STRICT_SCOPE", "0") == "1"
+    if not item_scope_tags:
+        return not strict
+    expanded_query = _expand_scope_tags(query_scope_tags)
+    return bool(set(item_scope_tags) & expanded_query)
 
 
 def _task_class_matches(item_filter: List[str], task_class: str) -> bool:

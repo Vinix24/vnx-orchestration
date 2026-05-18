@@ -55,6 +55,7 @@ class InjectionResult:
     suppressed: List[SuppressionRecord]
     task_class: str
     dispatch_id: str
+    ab_arm: str = "treatment"
 
     @property
     def items_injected(self) -> int:
