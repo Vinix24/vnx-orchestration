@@ -46,6 +46,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(skill-coverage): replace silent `except Exception: pass` in `_scan_local_skills_dir` + `_list_skills_in_dir` with narrow `(yaml.YAMLError, OSError)` + `logger.warning` + skipped report surfaced in `--json` output (codex 2 blockers)
 - fix(skill-coverage): narrow `_read_text` exception (OSError, UnicodeDecodeError) + logger.warning + surface to skipped list (codex round-2 blocker)
 
+- docs: refresh README + ROADMAP voor 1.0.0-rc2 (Wave 5/6/7/8 shipped, central install instructions, pipx wheel, .vnx-overrides documentation)
+
 ### Planned (Wave 8)
 - Smart provider router with task-class-aware routing (`scripts/lib/smart_router.py`)
 - Unified report schema enforced via YAML frontmatter + shell-script guardrails (model-agnostic)
