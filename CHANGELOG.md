@@ -18,6 +18,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - feat(vnx_paths): override-resolver `_resolve_overrides_dir()` + `get_skill_path()` — per-project `.vnx-overrides/skills,schemas,configs/` directory takes precedence over central VNX_HOME. Enables mission-control-style custom assets without central pollution. (Pre-centralization must-have #5)
 - feat(pyproject): `vnx` console_script entry-point + requires-python `>=3.11,<3.14`. Pipx-installable. (Pre-centralization must-have #6)
 - feat(schema): migration 0021 `central_install_pins` + `central_install_events` tables met `scripts/lib/central_install_db.py` helper. Bookkeeping voor project pin tracking + install/update/rollback event history. Pre-centralization must-have #10.
+- feat(doctor): `vnx doctor --strict` flag with central-mode detection (install mode, dual-install warning, schema PRAGMA user_version check, skill coverage audit, overrides listing, worktree orphan detection, active dispatch drain check). Pre-centralization must-have #8.
 
 ### Fixed
 - fix(governance): `_emit_governance` no longer raises `SystemExit(1)` on transient receipt write failure (Kimi audit). 3 retries with exponential backoff (0.5/1.0/1.5 s), then raises to caller. Transient FS races (rename collision, brief lock) no longer kill workers.
@@ -34,6 +35,8 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
 - fix(install-central): unlink+ln fallback voor macOS atomic symlink swap (codex edge-case blocker: mv -f kan dest-symlink-naar-dir verkeerd interpreteren)
 - fix(install-central): atomic symlink swap via tempfile + mv (no rm-before-replace); cleanup_on_failure raises EX_SOFTWARE on rollback failure (codex round-2 atomicity blocker)
+- fix(doctor): replace silent `except OSError: continue` in skill-coverage gate with `logger.warning` + unreadable list surfaced in strict mode (codex blocker)
+- fix(doctor): narrow OSError + sqlite3.OperationalError in _resolve_central_pin + _check_schema_versions; surface in strict-mode results instead of silent fallback (codex round-2 blockers)
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin

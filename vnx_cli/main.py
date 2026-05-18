@@ -41,6 +41,11 @@ def main() -> None:
         help="emit results as JSON",
     )
     doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail (exit 1) on any warning or failure, not just failures",
+    )
+    doctor_parser.add_argument(
         "--project-dir",
         default=".",
         metavar="DIR",
