@@ -43,10 +43,6 @@ _REVIEWER_VERDICT_TEMPLATE = (
     "```\n"
 )
 
-# Net-deletion thresholds — mirrors codex_final_gate.DELETION_FILE_WARN / DELETION_FILE_HOLD
-_NET_DELETION_WARN_THRESHOLD = 5
-_NET_DELETION_HOLD_THRESHOLD = 20
-
 # Gate type → CLI binary mapping
 GATE_BINARIES: Dict[str, str] = {
     "gemini_review": "gemini",
@@ -231,22 +227,6 @@ class GateRunner:
         )
 
     @staticmethod
-    def _count_diff_file_deletions(diff_content: str) -> int:
-        """Count fully-deleted files in a unified diff (lines with 'deleted file mode' header)."""
-        return sum(1 for line in diff_content.splitlines() if line.startswith("deleted file mode"))
-
-    @staticmethod
-    def _net_deletion_annotation(deleted_count: int) -> str:
-        """Return a Net-Deletion Alert block to inject into the reviewer prompt."""
-        level = "HOLD" if deleted_count >= _NET_DELETION_HOLD_THRESHOLD else "WARN"
-        return (
-            f"## Net-Deletion Alert [{level}] ({deleted_count} file(s) deleted)\n\n"
-            f"> **{deleted_count} file(s)** are fully deleted in this PR. "
-            "Include a warning finding with the count and confirm the deletions are intentional "
-            "(not accidental scope reduction).\n\n"
-        )
-
-    @staticmethod
     def _fetch_gh_pr_diff(pr_number: Optional[int]) -> str:
         """Fetch authoritative PR diff via gh pr diff.
 
@@ -282,21 +262,11 @@ class GateRunner:
         risk = (request_payload.get("risk_class") or "medium")
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
-        deleted_count = GateRunner._count_diff_file_deletions(diff_content)
-        deletion_block = (
-            GateRunner._net_deletion_annotation(deleted_count)
-            if deleted_count >= _NET_DELETION_WARN_THRESHOLD
-            else ""
-        )
         l3 = (
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
-            "do not flag pre-existing code. "
-            f"Net deletion sanity: if ≥{_NET_DELETION_WARN_THRESHOLD} files are entirely deleted, "
-            "include a warning finding with the count.\n\n"
-            f"{diff_content}\n\n"
-            f"{deletion_block}"
-            f"{_REVIEWER_VERDICT_TEMPLATE}"
+            "do not flag pre-existing code.\n\n"
+            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
             dispatch_metadata={"role": "reviewer"},
@@ -315,21 +285,11 @@ class GateRunner:
         risk = (request_payload.get("risk_class") or "medium")
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
-        deleted_count = GateRunner._count_diff_file_deletions(diff_content)
-        deletion_block = (
-            GateRunner._net_deletion_annotation(deleted_count)
-            if deleted_count >= _NET_DELETION_WARN_THRESHOLD
-            else ""
-        )
         l3 = (
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
-            "do not flag pre-existing code. "
-            f"Net deletion sanity: if ≥{_NET_DELETION_WARN_THRESHOLD} files are entirely deleted, "
-            "include a warning finding with the count.\n\n"
-            f"{diff_content}\n\n"
-            f"{deletion_block}"
-            f"{_REVIEWER_VERDICT_TEMPLATE}"
+            "do not flag pre-existing code.\n\n"
+            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
             dispatch_metadata={"role": "reviewer"},

@@ -25,95 +25,6 @@ from claude_github_receipt import (
 )
 
 
-# Files deleted threshold that requires Codex gate — mirrors codex_final_gate.DELETION_FILE_HOLD.
-_CODEX_MASS_DELETION_HOLD = 20
-
-# Net line deletion threshold (removed - added) — mirrors codex_final_gate.NET_LINE_DELETION_HOLD.
-_CODEX_NET_LINE_DELETION_HOLD = 500
-
-
-def _count_deleted_files_in_pr() -> int:
-    """Count files deleted in current PR vs origin/main. Returns 0 on git failure.
-
-    Mirrors codex_final_gate._count_deleted_files but runs from CWD (project root)
-    without requiring an explicit project_root argument, matching the pattern used
-    by _compute_changed_files in review_gate_manager.
-    """
-    for base_ref in ("origin/main", "origin/master"):
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--diff-filter=D", "--name-only", f"{base_ref}...HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return len([f for f in result.stdout.strip().splitlines() if f.strip()])
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--diff-filter=D", "--name-only", "HEAD~1", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return len([f for f in result.stdout.strip().splitlines() if f.strip()])
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    return 0
-
-
-def _get_net_line_deletion_in_pr() -> int:
-    """Return net lines deleted (removed - added) for current PR vs origin/main.
-
-    Mirrors codex_final_gate._get_net_line_deletion but runs from CWD without
-    requiring an explicit project_root argument. Returns 0 on git failure.
-    Catches PRs that gut file content without fully deleting files.
-    """
-    def _parse(numstat_output: str) -> int:
-        total_added = total_removed = 0
-        for line in numstat_output.strip().splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and parts[0] != "-" and parts[1] != "-":
-                try:
-                    total_added += int(parts[0])
-                    total_removed += int(parts[1])
-                except ValueError:
-                    pass
-        return total_removed - total_added
-
-    for base_ref in ("origin/main", "origin/master"):
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--numstat", f"{base_ref}...HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return _parse(result.stdout)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--numstat", "HEAD~1", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return _parse(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    return 0
-
-
 def _get_head_commit_sha() -> str:
     """Return the HEAD commit SHA via git rev-parse. Returns empty string on failure."""
     try:
@@ -561,16 +472,7 @@ class GateRequestHandlerMixin:
     ) -> Dict[str, Any]:
         from review_gate_manager import _utc_now
 
-        mass_deletion_count = _count_deleted_files_in_pr()
-        mass_deletion_flagged = mass_deletion_count >= _CODEX_MASS_DELETION_HOLD
-        net_line_deletion = _get_net_line_deletion_in_pr()
-        net_line_deletion_flagged = net_line_deletion >= _CODEX_NET_LINE_DELETION_HOLD
-        required = (
-            mode == "final"
-            or codex_final_gate_required(changed_files)
-            or mass_deletion_flagged
-            or net_line_deletion_flagged
-        )
+        required = mode == "final" or codex_final_gate_required(changed_files)
         available = self._codex_headless_available()
         # Model from env only; empty string means "use codex config.toml default".
         # See gate_runner._build_gate_cmd and ~/.codex/config.toml for defaults.
@@ -589,10 +491,6 @@ class GateRequestHandlerMixin:
             "changed_files": changed_files,
             "requested_at": requested_at,
             "commit_sha": _get_head_commit_sha(),
-            "mass_deletion_count": mass_deletion_count,
-            "mass_deletion_flagged": mass_deletion_flagged,
-            "net_line_deletion": net_line_deletion,
-            "net_line_deletion_flagged": net_line_deletion_flagged,
             "report_path": self._build_report_path(
                 gate="codex_gate",
                 requested_at=requested_at,
