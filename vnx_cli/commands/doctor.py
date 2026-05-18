@@ -85,8 +85,9 @@ def _resolve_central_pin(central_path: Path) -> str:
     try:
         if central_path.is_symlink():
             return central_path.resolve().name
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("doctor: cannot resolve central_path symlink: %s", e)
+        return "error"
     for fname in ("VERSION", "version.txt", ".vnx-version"):
         vf = central_path / fname
         if vf.is_file():
@@ -94,9 +95,10 @@ def _resolve_central_pin(central_path: Path) -> str:
                 first = vf.read_text(encoding="utf-8").strip().splitlines()[0]
                 if first:
                     return first
-            except OSError:
-                pass
-    return "unknown"
+            except OSError as e:
+                logger.warning("doctor: cannot read version file %s: %s", vf, e)
+                return "error"
+    return "unset"
 
 
 def _check_install_mode(project_dir: Path) -> Check:
@@ -109,6 +111,12 @@ def _check_install_mode(project_dir: Path) -> Check:
 
     if central_active:
         pin = _resolve_central_pin(central_path)
+        if pin == "error":
+            return Check(
+                name="install:mode",
+                status=WARN,
+                detail="mode: central, pin: error (cannot read version file — check permissions)",
+            )
         return Check(
             name="install:mode",
             status=PASS,
@@ -174,18 +182,19 @@ def _check_schema_versions(project_dir: Path) -> list[Check]:
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             try:
-                user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-                schema_version: int | None = None
                 try:
                     row = conn.execute(
-                        "SELECT MAX(version) FROM runtime_schema_version"
+                        "SELECT version FROM runtime_schema_version ORDER BY applied_at DESC LIMIT 1"
                     ).fetchone()
-                    if row and row[0] is not None:
-                        schema_version = int(row[0])
-                except sqlite3.OperationalError:
-                    pass
+                    legacy_version: int | None = int(row[0]) if row else None
+                except sqlite3.OperationalError as e:
+                    logger.warning(
+                        "doctor: runtime_schema_version query failed: %s — falling back to PRAGMA", e
+                    )
+                    legacy_version = None
 
-                effective = schema_version if schema_version is not None else user_version
+                pragma_version = conn.execute("PRAGMA user_version").fetchone()[0]
+                effective = max(pragma_version, legacy_version or 0)
 
                 if min_version > 0 and effective < min_version:
                     results.append(Check(
@@ -193,14 +202,14 @@ def _check_schema_versions(project_dir: Path) -> list[Check]:
                         status=WARN,
                         detail=(
                             f"schema version {effective} < minimum {min_version} "
-                            f"(PRAGMA user_version={user_version})"
+                            f"(PRAGMA user_version={pragma_version})"
                         ),
                     ))
                 else:
                     results.append(Check(
                         name=f"schema:{db_name}",
                         status=PASS,
-                        detail=f"schema version {effective} (PRAGMA user_version={user_version})",
+                        detail=f"schema version {effective} (PRAGMA user_version={pragma_version})",
                     ))
             finally:
                 conn.close()

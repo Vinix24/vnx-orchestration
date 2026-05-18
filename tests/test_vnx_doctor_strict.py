@@ -111,7 +111,7 @@ class TestCentralMode:
         assert "pin:" in result.detail
         assert "1.0.0-rc2" in result.detail
 
-    def test_central_mode_pin_unknown_when_no_version_file(self, tmp_path, monkeypatch):
+    def test_central_mode_pin_unset_when_no_version_file(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)
         central = tmp_path / "home" / ".vnx-system" / "current"
         (central / "scripts").mkdir(parents=True)
@@ -121,7 +121,42 @@ class TestCentralMode:
         result = _check_install_mode(project)
 
         assert result.status == PASS
-        assert "pin: unknown" in result.detail
+        assert "pin: unset" in result.detail
+
+    def test_central_mode_pin_error_on_read_failure(self, tmp_path, monkeypatch):
+        project = _make_project(tmp_path)
+        central = tmp_path / "home" / ".vnx-system" / "current"
+        (central / "scripts").mkdir(parents=True)
+        version_file = central / "VERSION"
+        version_file.write_text("1.0.0-rc2\n")
+        version_file.chmod(0o000)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        try:
+            result = _check_install_mode(project)
+        finally:
+            version_file.chmod(0o644)
+
+        assert result.status == WARN
+        assert "pin: error" in result.detail
+
+    def test_central_mode_error_pin_causes_strict_exit_1(self, tmp_path, monkeypatch):
+        project = _make_project(tmp_path)
+        central = tmp_path / "home" / ".vnx-system" / "current"
+        (central / "scripts").mkdir(parents=True)
+        version_file = central / "VERSION"
+        version_file.write_text("1.0.0-rc2\n")
+        version_file.chmod(0o000)
+
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+        try:
+            exit_code = vnx_doctor(_make_args(str(project), strict=True))
+        finally:
+            version_file.chmod(0o644)
+
+        assert exit_code == 1
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +245,52 @@ class TestSchemaVersions:
 
         for r in results:
             assert r.status != FAIL
+
+    def test_schema_no_runtime_table_falls_back_to_pragma(self, tmp_path):
+        """When runtime_schema_version table is absent, PRAGMA user_version is the fallback."""
+        project = _make_project(tmp_path)
+        state_dir = project / ".vnx-data" / "state"
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA user_version = 15")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL DEFAULT 'queued'
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        results = _check_schema_versions(project)
+
+        coord_check = next(r for r in results if "runtime_coordination" in r.name)
+        assert coord_check.status == PASS
+        assert "15" in coord_check.detail
+
+    def test_schema_effective_is_max_of_pragma_and_table(self, tmp_path):
+        """effective version = max(PRAGMA user_version, legacy_version)."""
+        project = _make_project(tmp_path)
+        state_dir = project / ".vnx-data" / "state"
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS runtime_schema_version (
+                version INTEGER NOT NULL,
+                applied_at TEXT
+            )
+        """)
+        conn.execute("INSERT INTO runtime_schema_version (version) VALUES (12)")
+        conn.commit()
+        conn.close()
+
+        results = _check_schema_versions(project)
+
+        coord_check = next(r for r in results if "runtime_coordination" in r.name)
+        assert coord_check.status == PASS
+        assert "12" in coord_check.detail
 
 
 # ---------------------------------------------------------------------------
