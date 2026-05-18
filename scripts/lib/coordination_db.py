@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
+
+import schema_migration
+
+logger = logging.getLogger(__name__)
 
 DB_FILENAME = "runtime_coordination.db"
 
@@ -164,12 +169,40 @@ def _append_event(
     return event_id
 
 
+def _needs_initial_migration(conn: sqlite3.Connection) -> bool:
+    """Check if initial migration is needed.
+
+    Modern path: PRAGMA user_version.
+    Legacy fallback: runtime_schema_version table (pre-CENTRAL-4 schema).
+    """
+    pragma_version = schema_migration.get_user_version(conn)
+    if pragma_version >= 1:
+        return False
+    # Legacy fallback: check runtime_schema_version table
+    try:
+        row = conn.execute(
+            "SELECT version FROM runtime_schema_version ORDER BY applied_at DESC LIMIT 1"
+        ).fetchone()
+        if row and row[0] >= 1:
+            # Legacy install — sync PRAGMA user_version forward
+            conn.execute(f"PRAGMA user_version = {row[0]}")
+            return False
+    except sqlite3.OperationalError as e:
+        # Table doesn't exist → fresh install, needs migration
+        logger.info("coordination_db: no runtime_schema_version table (%s) — assuming fresh install", e)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Schema initialization
 # ---------------------------------------------------------------------------
 
 def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -> None:
     """Initialize (or migrate) the runtime coordination database. Idempotent.
+
+    Tracks applied migrations via PRAGMA user_version (primary) and
+    runtime_schema_version table (secondary, preserved for backward compat).
+    Base schema = user_version 1; each versioned SQL file increments by 1.
 
     Uses a single connection for the entire init+migration sequence to
     prevent TOCTOU races between version check and migration apply.
@@ -184,32 +217,20 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
     schema_sql = schema_sql_path.read_text(encoding="utf-8")
 
     with get_connection(state_dir) as conn:
-        conn.executescript(schema_sql)
-        conn.commit()
+        # V1: base schema applied atomically (codex round-2 fix — script + version stamp in one SAVEPOINT)
+        if _needs_initial_migration(conn):
+            schema_migration.apply_script_if_below(conn, 1, schema_sql)
 
-        current_version = 1
-        try:
-            row = conn.execute(
-                "SELECT MAX(version) FROM runtime_schema_version"
-            ).fetchone()
-            if row and row[0] is not None:
-                current_version = row[0]
-        except sqlite3.OperationalError:
-            pass
-
+        # Versioned migration files: runtime_coordination_v2.sql, v3.sql, ...
         schemas_dir = schema_sql_path.parent
-        version = 2
+        v = 2
         while True:
-            migration = schemas_dir / f"runtime_coordination_v{version}.sql"
-            if not migration.exists():
+            migration_path = schemas_dir / f"runtime_coordination_v{v}.sql"
+            if not migration_path.exists():
                 break
-            if version <= current_version:
-                version += 1
-                continue
-            migration_sql = migration.read_text(encoding="utf-8")
-            conn.executescript(migration_sql)
-            conn.commit()
-            version += 1
+            migration_sql = migration_path.read_text(encoding="utf-8")
+            schema_migration.apply_script_if_below(conn, v, migration_sql)
+            v += 1
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,12 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
+- feat(schema): idempotent bootstrap — quality_db_init + coordination_db check PRAGMA user_version before each migration block, skip already-applied. Mid-run failures rollback cleanly via SAVEPOINT transactions. New `scripts/lib/schema_migration.py` helper centralises `apply_if_below` + `apply_script_if_below` patterns. (Pre-centralization must-have #4)
+- fix(schema-migration): replace silent `except: pass` in rollback with logger.warning (codex blocker, error-handling gate)
+- fix(coordination_db): migration gate falls back to runtime_schema_version table when PRAGMA user_version=0 (codex round-2 blocker — legacy install compatibility)
+- fix(schema-migration): replace `executescript` with quote/comment-aware SQL splitter inside SAVEPOINT in `apply_script_if_below` — schema script + `PRAGMA user_version` stamp now atomic, mid-script failure rolls back ALL statements (codex round-3 atomicity blocker)
+- fix(coordination_db): use `schema_migration.apply_script_if_below` for both V1 base schema + versioned migrations — eliminates direct `executescript` calls that broke SAVEPOINT atomicity
+- fix(quality_db_init): use `schema_migration.apply_script_if_below` for V1 base schema (codex round-3 follow-up — same atomicity pattern in third file)
 
 ### Added
 - feat(skill-coverage): `scripts/check_skill_coverage.py` pre-flight scanner — finds project skill-refs vs central+overrides availability. Prevents mission-control style product-skill loss on central rollout. Pre-centralization must-have #9.
