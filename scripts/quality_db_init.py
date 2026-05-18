@@ -125,13 +125,11 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
         conn = sqlite3.connect(str(db_path))
         conn.isolation_level = None  # manual transaction management for SAVEPOINT correctness
 
-        # ---- V1: base schema (executescript commits automatically) ----
-        if schema_migration.get_user_version(conn) < 1:
-            conn.executescript(schema_sql)
-            conn.execute('SAVEPOINT "vnx_mig_1"')
-            conn.execute("PRAGMA user_version = 1")
-            conn.execute('RELEASE SAVEPOINT "vnx_mig_1"')
-            log('INFO', 'Base schema applied (v1)')
+        # ---- V1: base schema applied atomically (codex round-3 fix) ----
+        # schema_migration.apply_script_if_below splits SQL and runs all statements
+        # + user_version stamp inside ONE SAVEPOINT — mid-script failure rolls back ALL
+        if schema_migration.apply_script_if_below(conn, 1, schema_sql):
+            log('INFO', 'Base schema applied atomically (v1)')
 
         # ---- V2: pattern_hash on snippet_metadata ----
         def _v2(c):
