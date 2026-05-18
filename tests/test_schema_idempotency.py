@@ -23,6 +23,7 @@ for _p in (_SCRIPTS, _LIB):
 
 from quality_db_init import bootstrap_qi_db, HIGHEST_QI_VERSION
 from schema_migration import apply_if_below, get_user_version
+import coordination_db
 
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schemas" / "quality_intelligence.sql"
 
@@ -172,3 +173,42 @@ def test_bootstrap_idempotent_repeated_runs(tmp_path):
         assert _uv(db) == HIGHEST_QI_VERSION, (
             f"user_version drifted on run {run + 1}: expected {HIGHEST_QI_VERSION}, got {_uv(db)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests for coordination_db._needs_initial_migration legacy fallback
+# ---------------------------------------------------------------------------
+
+def test_needs_initial_migration_fresh_db():
+    """Fresh DB (PRAGMA=0, no runtime_schema_version table) → needs migration."""
+    conn = sqlite3.connect(":memory:")
+    assert coordination_db._needs_initial_migration(conn) is True
+    conn.close()
+
+
+def test_needs_initial_migration_pragma_high():
+    """PRAGMA user_version=10 → no migration needed."""
+    conn = sqlite3.connect(":memory:")
+    conn.isolation_level = None
+    conn.execute("PRAGMA user_version = 10")
+    assert coordination_db._needs_initial_migration(conn) is False
+    conn.close()
+
+
+def test_needs_initial_migration_legacy_table_syncs_pragma():
+    """PRAGMA=0 but runtime_schema_version table has v9 → no migration + PRAGMA synced to 9."""
+    conn = sqlite3.connect(":memory:")
+    conn.isolation_level = None
+    conn.execute("""
+        CREATE TABLE runtime_schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT
+        )
+    """)
+    conn.execute(
+        "INSERT INTO runtime_schema_version (version, applied_at) VALUES (9, '2026-01-01')"
+    )
+    assert get_user_version(conn) == 0
+    assert coordination_db._needs_initial_migration(conn) is False
+    assert get_user_version(conn) == 9
+    conn.close()

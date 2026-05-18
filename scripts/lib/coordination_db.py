@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import schema_migration
+
+logger = logging.getLogger(__name__)
 
 DB_FILENAME = "runtime_coordination.db"
 
@@ -166,6 +169,30 @@ def _append_event(
     return event_id
 
 
+def _needs_initial_migration(conn: sqlite3.Connection) -> bool:
+    """Check if initial migration is needed.
+
+    Modern path: PRAGMA user_version.
+    Legacy fallback: runtime_schema_version table (pre-CENTRAL-4 schema).
+    """
+    pragma_version = schema_migration.get_user_version(conn)
+    if pragma_version >= 1:
+        return False
+    # Legacy fallback: check runtime_schema_version table
+    try:
+        row = conn.execute(
+            "SELECT version FROM runtime_schema_version ORDER BY applied_at DESC LIMIT 1"
+        ).fetchone()
+        if row and row[0] >= 1:
+            # Legacy install — sync PRAGMA user_version forward
+            conn.execute(f"PRAGMA user_version = {row[0]}")
+            return False
+    except sqlite3.OperationalError as e:
+        # Table doesn't exist → fresh install, needs migration
+        logger.info("coordination_db: no runtime_schema_version table (%s) — assuming fresh install", e)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Schema initialization
 # ---------------------------------------------------------------------------
@@ -191,7 +218,7 @@ def init_schema(state_dir: str | Path, schema_sql_path: Optional[Path] = None) -
 
     with get_connection(state_dir) as conn:
         # V1: base schema (executescript commits automatically)
-        if schema_migration.get_user_version(conn) < 1:
+        if _needs_initial_migration(conn):
             conn.executescript(schema_sql)
             # Stamp the version in a new transaction after executescript committed
             conn.execute('SAVEPOINT "vnx_coord_v1"')
