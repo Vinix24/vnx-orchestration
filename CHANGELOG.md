@@ -10,6 +10,7 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - refactor(dispatch): extract `_apply_runtime_overrides` from delivery.py + recovery.py to shared `runtime_overrides.py` module (Kimi audit duplication finding). Eliminates copy-paste drift.
 
 ### Added
+- feat(install): `install-central.sh` for centralized VNX install (apart van embedded `install.sh`) — clones to `~/.vnx-system/versions/<v>/`, atomic symlink-swap, project-pin via `.vnx-version`. Pre-centralization must-have #7.
 - feat(intelligence): A/B random-skip framework (V5 per intelligence-injection-quality-research). Adds `ab_arm` column to intelligence_injections + 10% control-arm skip via `VNX_INTEL_AB_TEST=1` env flag + weekly lift report (`scripts/intelligence_ab_report.py`). Enables verifiable +30pp lift measurement. Audit BLOCKER #2 closes-the-loop PR-IH-3.
 - feat(intelligence): fine-grained task_class subclassing (coding_sql/runtime/intelligence/test/ui) + active scope_tags matching via VNX_INTEL_STRICT_SCOPE env-flag. Selector kan SQL-werk SQL-kennis geven ipv generieke pool. (Audit BLOCKER #2 follow-up PR-IH-2)
 - feat(cli): `vnx version` subcommand prints VERSION, commit, VNX_HOME, pin, Python+platform (pre-central-install support)
@@ -27,6 +28,12 @@ Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [s
 - fix(intelligence): catalogus-hygiene — filter governance-event success_patterns (81.6% noise) + memory_consolidation antipatterns (26% noise) at source; recency-decay (0.95^weeks) op confidence; migration invalidates existing noise. Addresses Sonnet audit BLOCKER #2 (intelligence +30pp claim artefact). PR-IH-1 per intelligence-injection-quality-research.
 - fix(intelligence-hygiene): replace ALTER TABLE IF NOT EXISTS (invalid SQLite < 3.37) with Python idempotent column-add via PRAGMA table_info check in quality_db_init.py (codex_gate blocker audit-ih-1-fixforward)
 - fix(intelligence-hygiene): parse ISO timestamps with timezone via fromisoformat + astimezone(UTC) — raw[:26] truncation was dropping tz offsets, skipping recency decay for those rows
+- fix(install-central): pin validation + resolved-path confinement in shim (path-traversal blocker)
+- fix(install-central): atomic rollback restore of previous symlink target (data-integrity blocker)
+- fix(install-central): atomic shim install via mktemp + mv (data-integrity blocker)
+- fix(install-central): macOS-safe atomic symlink swap via tempfile + rename (advisory)
+- fix(install-central): unlink+ln fallback voor macOS atomic symlink swap (codex edge-case blocker: mv -f kan dest-symlink-naar-dir verkeerd interpreteren)
+- fix(install-central): atomic symlink swap via tempfile + mv (no rm-before-replace); cleanup_on_failure raises EX_SOFTWARE on rollback failure (codex round-2 atomicity blocker)
 
 ### Changed
 - chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (was 1.0.0-rc1 / 0.9.0 mismatch); single-source version for pipx wheel + central install pin
