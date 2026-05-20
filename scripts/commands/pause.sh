@@ -103,6 +103,46 @@ _vnx_pause_stop_daemon() {
   fi
 }
 
+# Helper: create required directories for pause operation.
+_vnx_pause_validate_args() {
+  local state_dir="$1"
+  local events_dir="$2"
+  local pids_dir="$3"
+  mkdir -p "$state_dir" "$events_dir" "$pids_dir" \
+    "${VNX_LOGS_DIR:-${VNX_DATA_DIR}/logs}"
+}
+
+# Helper: stop all three targeted daemons; sets _pause_any_failed on error.
+_vnx_pause_stop_daemons() {
+  local pids_dir="$1"
+  _pause_any_failed=0
+  _vnx_pause_stop_daemon "dispatcher" "$pids_dir"
+  _vnx_pause_stop_daemon "receipt_processor" "$pids_dir"
+  _vnx_pause_stop_daemon "queue_watcher" "$pids_dir"
+}
+
+# Helper: atomic write of PAUSED marker (tmp → mv to prevent partial reads).
+_vnx_pause_write_marker() {
+  local paused_file="$1"
+  local ts="$2"
+  local by_dispatch_id="$3"
+  local reason="$4"
+  local tmp_paused="${paused_file}.tmp.$$"
+  python3 -c "import json,sys; print(json.dumps({'paused_at':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':sys.argv[3]}))" \
+    "$ts" "$by_dispatch_id" "$reason" > "$tmp_paused"
+  mv "$tmp_paused" "$paused_file"
+}
+
+# Helper: append service_paused NDJSON event using python3 for safe encoding.
+_vnx_pause_log_lifecycle() {
+  local lifecycle_log="$1"
+  local ts="$2"
+  local by_dispatch_id="$3"
+  local reason="$4"
+  python3 -c "import json,sys; print(json.dumps({'event_type':'service_paused','timestamp':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':sys.argv[3]}))" \
+    "$ts" "$by_dispatch_id" "$reason" >> "$lifecycle_log"
+}
+
 cmd_pause() {
   local state_dir="${VNX_STATE_DIR:-${VNX_DATA_DIR}/state}"
   local pids_dir="${VNX_PIDS_DIR:-${VNX_DATA_DIR}/pids}"
@@ -112,19 +152,14 @@ cmd_pause() {
   local by_dispatch_id="${VNX_DISPATCH_ID:-manual}"
   local reason="${1:-migration_cutover}"
 
-  mkdir -p "$state_dir" "$events_dir" "$pids_dir" \
-    "${VNX_LOGS_DIR:-${VNX_DATA_DIR}/logs}"
+  _vnx_pause_validate_args "$state_dir" "$events_dir" "$pids_dir"
 
   if [ -f "$paused_file" ]; then
     log "[pause] Already paused — PAUSED marker exists: $paused_file"
     return 0
   fi
 
-  _pause_any_failed=0
-
-  _vnx_pause_stop_daemon "dispatcher" "$pids_dir"
-  _vnx_pause_stop_daemon "receipt_processor" "$pids_dir"
-  _vnx_pause_stop_daemon "queue_watcher" "$pids_dir"
+  _vnx_pause_stop_daemons "$pids_dir"
 
   if [ "${_pause_any_failed:-0}" -eq 1 ]; then
     err "[pause] Some daemons could not be stopped. PAUSED marker NOT written."
@@ -133,18 +168,10 @@ cmd_pause() {
   fi
   unset _pause_any_failed
 
-  # Atomic write: tmp file → mv (prevents partial reads)
-  # Use python3 for safe JSON encoding — prevents injection via $reason/$by_dispatch_id
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  local tmp_paused="${paused_file}.tmp.$$"
-  python3 -c "import json,sys; print(json.dumps({'paused_at':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':sys.argv[3]}))" \
-    "$ts" "$by_dispatch_id" "$reason" > "$tmp_paused"
-  mv "$tmp_paused" "$paused_file"
-
-  # NDJSON lifecycle event (python3 for safe JSON encoding)
-  python3 -c "import json,sys; print(json.dumps({'event_type':'service_paused','timestamp':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':sys.argv[3]}))" \
-    "$ts" "$by_dispatch_id" "$reason" >> "$lifecycle_log"
+  _vnx_pause_write_marker "$paused_file" "$ts" "$by_dispatch_id" "$reason"
+  _vnx_pause_log_lifecycle "$lifecycle_log" "$ts" "$by_dispatch_id" "$reason"
 
   log "[pause] VNX daemons paused. Marker: $paused_file"
   return 0

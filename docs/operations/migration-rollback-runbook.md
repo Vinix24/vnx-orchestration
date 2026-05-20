@@ -391,7 +391,10 @@ CENTRAL_DB_TMP=~/.vnx-data/state/quality_intelligence.db.restore-tmp
 cp "$ARCHIVE_DIR/quality_intelligence.db" "$CENTRAL_DB_TMP"
 sqlite3 "$CENTRAL_DB_TMP" "PRAGMA integrity_check;" | head -3
 # Expected: ok
-mv "$CENTRAL_DB_TMP" "$CENTRAL_DB"
+# Use python3 os.replace for guaranteed atomic swap on the same filesystem.
+# Plain `mv` is non-atomic across filesystem boundaries and can cause partial reads
+# if the tmp and target are on different mounts.
+python3 -c "import os, sys; os.replace(sys.argv[1], sys.argv[2])" "$CENTRAL_DB_TMP" "$CENTRAL_DB"
 echo "Central DB restored from snapshot."
 ```
 
