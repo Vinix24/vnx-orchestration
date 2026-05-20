@@ -372,7 +372,6 @@ bash install-central.sh --version v1.0.0-rc2
 Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc2/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
 
 ```bash
-vnx version                      # Print version, commit, VNX_HOME, pin, Python + platform
 vnx update --to v1.0.0-rc2       # Flip to a specific version (central install)
 vnx doctor --strict              # Full pre-flight: schema check, skill coverage, worktree orphans, active dispatch drain
 ```
@@ -387,7 +386,6 @@ Commands are tiered by mode. Running an operator-only command in starter mode re
 |---------|-------------|
 | `vnx init` | Initialize VNX project (with mode selection) |
 | `vnx doctor` | Validate setup and dependencies (`--strict` for full central-install pre-flight) |
-| `vnx version` | Print version, commit, VNX_HOME, pin, Python + platform |
 | `vnx status` | Show current state and mode |
 | `vnx recover` | Recover from failures |
 | `vnx help` | Show available commands for current mode |
