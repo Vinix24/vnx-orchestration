@@ -1,10 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Circle, Pause, Play } from 'lucide-react';
+import { Activity, Archive, Circle, Pause, Play, Radio } from 'lucide-react';
+import { fetchAgentStreamArchiveList, fetchAgentStreamArchive, type ArchiveEntry } from '@/lib/api';
 
 const TERMINALS = ['T1', 'T2', 'T3'] as const;
 type Terminal = (typeof TERMINALS)[number];
+type StreamMode = 'live' | 'archive';
 
 interface StreamEvent {
   type: string;
@@ -72,6 +74,16 @@ function formatTime(iso: string): string {
   }
 }
 
+function formatRelTime(epochSeconds: number): string {
+  const diffMs = Date.now() - epochSeconds * 1000;
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24) return `${diffH}h ago`;
+  return `${Math.floor(diffH / 24)}d ago`;
+}
+
 function renderEventContent(event: StreamEvent): string {
   const d = event.data;
   if (event.type === 'text' || event.type === 'result') {
@@ -133,11 +145,17 @@ function EventRow({ event }: { event: StreamEvent }) {
 
 export default function AgentStreamPage() {
   const [terminal, setTerminal] = useState<Terminal>('T1');
+  const [mode, setMode] = useState<StreamMode>('live');
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [status, setStatus] = useState<Record<string, TerminalStatus>>({});
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
+
+  // Archive state
+  const [archives, setArchives] = useState<ArchiveEntry[]>([]);
+  const [selectedArchive, setSelectedArchive] = useState<string>('');
+  const [archiveLoading, setArchiveLoading] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -148,14 +166,8 @@ export default function AgentStreamPage() {
   const activeTerminalRef = useRef<Terminal | null>(null);
   const isNavigatingAwayRef = useRef(false);
 
-  // Keep ref in sync with state for use in EventSource callbacks
-  useEffect(() => {
-    pausedRef.current = paused;
-  }, [paused]);
-
-  useEffect(() => {
-    terminalRef.current = terminal;
-  }, [terminal]);
+  useEffect(() => { pausedRef.current = paused; }, [paused]);
+  useEffect(() => { terminalRef.current = terminal; }, [terminal]);
 
   const clearStatusPolling = useCallback(() => {
     if (statusIntervalRef.current) {
@@ -193,12 +205,9 @@ export default function AgentStreamPage() {
 
   const startStatusPolling = useCallback(() => {
     if (statusIntervalRef.current || isNavigatingAwayRef.current) return;
-    statusIntervalRef.current = setInterval(() => {
-      void pollStatus();
-    }, 5000);
+    statusIntervalRef.current = setInterval(() => { void pollStatus(); }, 5000);
   }, [pollStatus]);
 
-  // Connect to SSE
   const connect = useCallback((term: Terminal, since: string | null) => {
     disconnectStream();
     if (isNavigatingAwayRef.current) return;
@@ -220,12 +229,8 @@ export default function AgentStreamPage() {
       if (eventSourceRef.current !== es || isNavigatingAwayRef.current) return;
       try {
         const event: StreamEvent = JSON.parse(msg.data);
-        if (event.timestamp) {
-          lastTimestampRef.current = event.timestamp;
-        }
-        if (!pausedRef.current) {
-          setEvents((prev) => [...prev, event]);
-        }
+        if (event.timestamp) lastTimestampRef.current = event.timestamp;
+        if (!pausedRef.current) setEvents((prev) => [...prev, event]);
       } catch {
         // skip malformed
       }
@@ -238,28 +243,63 @@ export default function AgentStreamPage() {
     };
   }, [disconnectStream]);
 
+  // Load archive list when switching to archive mode or changing terminal
+  useEffect(() => {
+    if (mode !== 'archive') return;
+    let cancelled = false;
+    fetchAgentStreamArchiveList(terminal)
+      .then((list) => {
+        if (!cancelled) {
+          const sorted = [...list].sort((a, b) => b.modified_at - a.modified_at).slice(0, 20);
+          setArchives(sorted);
+          setSelectedArchive(sorted[0]?.dispatch_id ?? '');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setArchives([]);
+          setSelectedArchive('');
+        }
+      });
+    return () => { cancelled = true; };
+  }, [mode, terminal]);
+
+  // Load archive events when selection changes
+  useEffect(() => {
+    if (mode !== 'archive' || !selectedArchive) {
+      if (mode === 'archive') setEvents([]);
+      return;
+    }
+    setArchiveLoading(true);
+    setError(null);
+    fetchAgentStreamArchive(terminal, selectedArchive)
+      .then((raw) => {
+        setEvents(raw as unknown as StreamEvent[]);
+        setArchiveLoading(false);
+      })
+      .catch((err: unknown) => {
+        setError(String(err));
+        setArchiveLoading(false);
+      });
+  }, [mode, terminal, selectedArchive]);
+
   useEffect(() => {
     function handleDocumentClick(event: MouseEvent) {
       if (event.defaultPrevented || event.button !== 0) return;
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       if (!(event.target instanceof Element)) return;
-
       const anchor = event.target.closest('a[href]');
       const href = anchor?.getAttribute('href');
       if (!href || href.startsWith('#')) return;
-
       const nextUrl = new URL(href, window.location.href);
       if (nextUrl.origin !== window.location.origin) return;
-
       if (nextUrl.pathname !== '/agent-stream') {
         isNavigatingAwayRef.current = true;
         clearStatusPolling();
         disconnectStream();
         return;
       }
-
       if (!isNavigatingAwayRef.current) return;
-
       isNavigatingAwayRef.current = false;
       setEvents([]);
       setError(null);
@@ -267,11 +307,8 @@ export default function AgentStreamPage() {
       startStatusPolling();
       connect(terminalRef.current, null);
     }
-
     document.addEventListener('click', handleDocumentClick, true);
-    return () => {
-      document.removeEventListener('click', handleDocumentClick, true);
-    };
+    return () => { document.removeEventListener('click', handleDocumentClick, true); };
   }, [clearStatusPolling, connect, disconnectStream, startStatusPolling]);
 
   useEffect(() => {
@@ -280,23 +317,26 @@ export default function AgentStreamPage() {
     return clearStatusPolling;
   }, [clearStatusPolling, startStatusPolling]);
 
-  // Connect when terminal changes
+  // Connect live stream when terminal changes (live mode only)
   useEffect(() => {
+    if (mode !== 'live') return;
     isNavigatingAwayRef.current = false;
     setEvents([]);
     setError(null);
     lastTimestampRef.current = null;
-
-    if (eventSourceRef.current && activeTerminalRef.current === terminal) {
-      return;
-    }
-
+    if (eventSourceRef.current && activeTerminalRef.current === terminal) return;
     connect(terminal, null);
+    return () => { disconnectStream(); };
+  }, [terminal, mode, connect, disconnectStream]);
 
-    return () => {
+  // Disconnect SSE when switching to archive mode
+  useEffect(() => {
+    if (mode === 'archive') {
       disconnectStream();
-    };
-  }, [terminal, connect, disconnectStream]);
+      setEvents([]);
+      setError(null);
+    }
+  }, [mode, disconnectStream]);
 
   // Auto-scroll
   useEffect(() => {
@@ -325,44 +365,77 @@ export default function AgentStreamPage() {
               Agent Stream
             </h2>
             <p style={{ fontSize: 12, color: 'var(--color-muted)', marginTop: 2 }}>
-              Real-time event stream from worker terminals
+              {mode === 'live' ? 'Real-time event stream from worker terminals' : 'Archived dispatch replay'}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Connection status */}
-          <div className="flex items-center gap-2" style={{ fontSize: 12, color: connected ? '#50fa7b' : 'var(--color-muted)' }}>
-            <Circle size={8} fill={connected ? '#50fa7b' : 'var(--color-muted)'} />
-            {connected ? 'Connected' : 'Disconnected'}
+          {/* Mode toggle */}
+          <div style={{ display: 'flex', gap: 4, background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: 3 }}>
+            {(['live', 'archive'] as StreamMode[]).map((m) => {
+              const active = m === mode;
+              return (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    padding: '6px 14px',
+                    borderRadius: 8,
+                    background: active ? 'rgba(249, 115, 22, 0.15)' : 'transparent',
+                    border: `1px solid ${active ? 'rgba(249, 115, 22, 0.3)' : 'transparent'}`,
+                    cursor: 'pointer',
+                    fontSize: 12,
+                    fontWeight: active ? 600 : 400,
+                    color: active ? 'var(--color-accent)' : 'var(--color-muted)',
+                  }}
+                >
+                  {m === 'live' ? <Radio size={12} /> : <Archive size={12} />}
+                  {m === 'live' ? 'Live' : 'Archive'}
+                </button>
+              );
+            })}
           </div>
 
-          {/* Pause/Resume */}
-          <button
-            onClick={() => setPaused(!paused)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '7px 14px',
-              borderRadius: 8,
-              background: paused ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.05)',
-              border: `1px solid ${paused ? 'rgba(249, 115, 22, 0.3)' : 'rgba(255,255,255,0.1)'}`,
-              cursor: 'pointer',
-              fontSize: 12,
-              color: paused ? 'var(--color-accent)' : 'var(--color-muted)',
-            }}
-          >
-            {paused ? <Play size={13} /> : <Pause size={13} />}
-            {paused ? 'Resume' : 'Pause'}
-          </button>
+          {/* Connection status (live mode only) */}
+          {mode === 'live' && (
+            <div className="flex items-center gap-2" style={{ fontSize: 12, color: connected ? '#50fa7b' : 'var(--color-muted)' }}>
+              <Circle size={8} fill={connected ? '#50fa7b' : 'var(--color-muted)'} />
+              {connected ? 'Connected' : 'Disconnected'}
+            </div>
+          )}
 
-          {/* Agent / Terminal selector */}
+          {/* Pause/Resume (live mode only) */}
+          {mode === 'live' && (
+            <button
+              onClick={() => setPaused(!paused)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '7px 14px',
+                borderRadius: 8,
+                background: paused ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.05)',
+                border: `1px solid ${paused ? 'rgba(249, 115, 22, 0.3)' : 'rgba(255,255,255,0.1)'}`,
+                cursor: 'pointer',
+                fontSize: 12,
+                color: paused ? 'var(--color-accent)' : 'var(--color-muted)',
+              }}
+            >
+              {paused ? <Play size={13} /> : <Pause size={13} />}
+              {paused ? 'Resume' : 'Pause'}
+            </button>
+          )}
+
+          {/* Terminal selector */}
           <div data-testid="agent-selector" style={{ display: 'flex', gap: 4 }}>
             {TERMINALS.map((t) => {
               const active = t === terminal;
-              const hasEvents = !!status[t];
               const ts = status[t];
+              const hasEvents = !!ts;
               const label = ts?.agent_name || t;
               return (
                 <button
@@ -411,8 +484,56 @@ export default function AgentStreamPage() {
         </div>
       </div>
 
-      {/* Status bar */}
-      {terminalStatus && (
+      {/* Archive selector (archive mode) */}
+      {mode === 'archive' && (
+        <div
+          style={{
+            marginBottom: 16,
+            padding: '12px 16px',
+            background: 'rgba(255,255,255,0.02)',
+            borderRadius: 8,
+            border: '1px solid rgba(255,255,255,0.07)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
+          }}
+        >
+          <Archive size={14} style={{ color: 'var(--color-muted)', flexShrink: 0 }} />
+          <span style={{ fontSize: 12, color: 'var(--color-muted)', flexShrink: 0 }}>Dispatch:</span>
+          {archives.length === 0 ? (
+            <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>No archives for {terminal}</span>
+          ) : (
+            <select
+              value={selectedArchive}
+              onChange={(e) => setSelectedArchive(e.target.value)}
+              style={{
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 6,
+                color: 'var(--color-foreground)',
+                fontSize: 12,
+                padding: '4px 8px',
+                cursor: 'pointer',
+                maxWidth: 480,
+                flex: 1,
+              }}
+            >
+              {archives.map((a) => (
+                <option key={a.dispatch_id} value={a.dispatch_id}>
+                  {a.dispatch_id} — {formatRelTime(a.modified_at)}, {a.file_size} bytes
+                </option>
+              ))}
+            </select>
+          )}
+          {archiveLoading && (
+            <span style={{ fontSize: 12, color: 'var(--color-muted)' }}>Loading…</span>
+          )}
+        </div>
+      )}
+
+      {/* Status bar (live mode) */}
+      {mode === 'live' && terminalStatus && (
         <div
           style={{
             display: 'flex',
@@ -430,6 +551,31 @@ export default function AgentStreamPage() {
           <span>Displayed: <strong style={{ color: 'var(--color-foreground)' }}>{events.length}</strong></span>
           {terminalStatus.last_timestamp && (
             <span>Last: <strong style={{ color: 'var(--color-foreground)' }}>{formatTime(terminalStatus.last_timestamp)}</strong></span>
+          )}
+        </div>
+      )}
+
+      {/* Archive status bar */}
+      {mode === 'archive' && events.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            gap: 24,
+            padding: '10px 16px',
+            marginBottom: 16,
+            background: 'rgba(255,255,255,0.02)',
+            borderRadius: 8,
+            border: '1px solid rgba(255,255,255,0.06)',
+            fontSize: 12,
+            color: 'var(--color-muted)',
+          }}
+        >
+          <span>Events: <strong style={{ color: 'var(--color-foreground)' }}>{events.length}</strong></span>
+          {events[0]?.timestamp && (
+            <span>From: <strong style={{ color: 'var(--color-foreground)' }}>{formatTime(events[0].timestamp)}</strong></span>
+          )}
+          {events[events.length - 1]?.timestamp && (
+            <span>To: <strong style={{ color: 'var(--color-foreground)' }}>{formatTime(events[events.length - 1].timestamp)}</strong></span>
           )}
         </div>
       )}
@@ -479,11 +625,13 @@ export default function AgentStreamPage() {
           >
             <Activity size={32} strokeWidth={1.5} />
             <span style={{ fontSize: 13 }}>
-              {connected ? 'Waiting for events...' : `No events for ${terminal}`}
+              {mode === 'live'
+                ? (connected ? 'Waiting for events...' : `No events for ${terminal}`)
+                : (archiveLoading ? 'Loading archive...' : (selectedArchive ? 'No events in this archive' : `No archives for ${terminal}`))}
             </span>
           </div>
         ) : (
-          events.map((ev, i) => <EventRow key={`${ev.terminal}-${ev.sequence}-${i}`} event={ev} />)
+          events.map((ev, i) => <EventRow key={`${ev.terminal}-${ev.sequence ?? i}-${i}`} event={ev} />)
         )}
       </div>
     </div>

@@ -162,3 +162,61 @@ else:
     print(f'Not found in registry: {project_path}')
 " || return 1
 }
+
+# ── refresh ──────────────────────────────────────────────────────────────
+cmd_refresh() {
+  # Touch updated_at for all registered projects without changing other data.
+  # Dashboard reads this timestamp to determine if the registry is fresh.
+  if [ ! -f "$VNX_REGISTRY_FILE" ]; then
+    log "No projects registered. Use 'vnx register' first."
+    return 0
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    err "[refresh] python3 is required"
+    return 1
+  fi
+
+  python3 -c "
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+
+registry_file = '$VNX_REGISTRY_FILE'
+with open(registry_file) as f:
+    data = json.load(f)
+
+now = datetime.now(timezone.utc).isoformat()
+count = 0
+for p in data.get('projects', []):
+    p['updated_at'] = now
+    count += 1
+
+reg_dir = os.path.dirname(registry_file)
+fd, tmp_path = tempfile.mkstemp(dir=reg_dir, prefix='.projects-', suffix='.tmp')
+try:
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, registry_file)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+
+event = {
+    'event_type': 'registry_refresh',
+    'timestamp': now,
+    'operator': 'vnx',
+    'project_count': count,
+}
+events_path = os.path.join(os.path.expanduser('~'), '.vnx-data', 'events', 'registry_refresh.ndjson')
+os.makedirs(os.path.dirname(events_path), exist_ok=True)
+with open(events_path, 'a') as f:
+    f.write(json.dumps(event) + '\n')
+
+print(f'Refreshed updated_at for {count} project(s) in {registry_file}')
+" || return 1
+
+  log "[refresh] Registry timestamps updated in $VNX_REGISTRY_FILE"
+}

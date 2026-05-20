@@ -805,6 +805,25 @@ def _operator_post_gate_toggle(body: dict, config_path: Path | None = None) -> t
 import sqlite3
 from typing import Any
 
+
+def _effective_db_mtime(db_path: "Path | str") -> float:
+    """Return the effective mtime of a SQLite db, accounting for WAL mode.
+
+    In WAL mode, .db-wal accumulates writes until checkpoint; the base .db
+    file mtime alone can make a live db appear stale. Returns
+    max(mtime(.db), mtime(.db-wal), mtime(.db-shm)) so freshness checks
+    remain correct regardless of checkpoint timing.
+    """
+    p = Path(db_path)
+    mtimes = []
+    for candidate in (p, p.parent / (p.name + "-wal"), p.parent / (p.name + "-shm")):
+        try:
+            mtimes.append(candidate.stat().st_mtime)
+        except OSError:
+            pass
+    return max(mtimes) if mtimes else 0.0
+
+
 _SYSTEM_HEALTH_DB_TABLES = ("success_patterns", "antipatterns", "prevention_rules", "dispatch_metadata")
 
 
@@ -852,6 +871,8 @@ def _operator_get_system_health() -> dict:
                 status = "dead"
                 intel_details["error"] = "central quality_intelligence.db not available"
         elif DB_PATH.exists():
+            # WAL-aware mtime: .db-wal may be more recent than .db
+            intel_details["db_mtime"] = _effective_db_mtime(DB_PATH)
             conn = sqlite3.connect(str(DB_PATH))
             conn.row_factory = sqlite3.Row
             total_rows = 0

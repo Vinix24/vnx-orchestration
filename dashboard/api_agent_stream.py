@@ -44,10 +44,6 @@ def handle_agent_stream(handler: BaseHTTPRequestHandler, terminal: str, since: s
         _send_json(handler, HTTPStatus.BAD_REQUEST, {"error": f"Invalid terminal: {terminal}"})
         return
 
-    if _store.event_count(terminal) == 0:
-        _send_json(handler, HTTPStatus.NOT_FOUND, {"error": f"No events for terminal {terminal}"})
-        return
-
     # Send SSE headers
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", "text/event-stream")
