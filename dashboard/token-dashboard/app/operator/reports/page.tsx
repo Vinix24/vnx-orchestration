@@ -21,7 +21,7 @@ const STATUS_COLORS: Record<string, { color: string; bg: string; border: string 
 };
 
 function TrackBadge({ track }: { track: string | null | undefined }) {
-  const safeTrack = (track ?? 'UNKNOWN').toUpperCase();
+  const safeTrack = (track || 'UNKNOWN').toUpperCase();
   const cfg = TRACK_COLORS[safeTrack] ?? { color: '#6B6B6B', bg: 'rgba(107,107,107,0.1)', border: 'rgba(107,107,107,0.3)' };
   return (
     <span

@@ -178,7 +178,7 @@ cmd_refresh() {
   fi
 
   python3 -c "
-import json, os, sys
+import json, os, sys, tempfile
 from datetime import datetime, timezone
 
 registry_file = '$VNX_REGISTRY_FILE'
@@ -191,8 +191,29 @@ for p in data.get('projects', []):
     p['updated_at'] = now
     count += 1
 
-with open(registry_file, 'w') as f:
-    json.dump(data, f, indent=2)
+reg_dir = os.path.dirname(registry_file)
+fd, tmp_path = tempfile.mkstemp(dir=reg_dir, prefix='.projects-', suffix='.tmp')
+try:
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, registry_file)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+
+event = {
+    'event_type': 'registry_refresh',
+    'timestamp': now,
+    'operator': 'vnx',
+    'project_count': count,
+}
+events_path = os.path.join(os.path.expanduser('~'), '.vnx-data', 'events', 'registry_refresh.ndjson')
+os.makedirs(os.path.dirname(events_path), exist_ok=True)
+with open(events_path, 'a') as f:
+    f.write(json.dumps(event) + '\n')
 
 print(f'Refreshed updated_at for {count} project(s) in {registry_file}')
 " || return 1
