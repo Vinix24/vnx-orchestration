@@ -10,6 +10,16 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
+## Status (2026-05-20)
+
+Wave 5/6/7 zijn gemerged. Wave 8 (Smart Router) in flight via PR-split.
+Komende stappen: pre-cutover hardening -> Wave 2a centralisatie (Hybrid C,
+MC -> sales-copilot -> SEOcrawler over 5 dagen) -> Wave 3 DB retirement.
+
+Volledige roadmap: [claudedocs/roadmap-2026-05-20-master.md][roadmap].
+
+[roadmap]: claudedocs/roadmap-2026-05-20-master.md
+
 Current release: `v1.0.0-rc2` — multi-provider milestone (2026-05-17). Five providers in production with provider-agnostic governance: Claude (Opus/Sonnet/Haiku), Codex (GPT-5.2-codex), Gemini (2.5 Pro/Flash), Kimi CLI (K2.6), LiteLLM bridge (DeepSeek V4 Pro/Flash, GLM-5.1 via OpenRouter).
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
