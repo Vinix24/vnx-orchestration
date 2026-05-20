@@ -513,12 +513,12 @@ def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
     if rc_db.exists():
         with sqlite3.connect(str(rc_db)) as _conn:
             ensure_schema_meta(_conn)
-            _v = get_schema_version(_conn)
-            if _v > 0:
-                # Raises RuntimeError if version < 10 (0010 not applied yet).
-                if not check_schema_version(_conn, 10, "0015_complete_project_id"):
-                    LOG.info("0015 already applied (schema_version=%d); skipping", _v)
-                    return
+            # Always check prerequisite: v10 required before v15 can run.
+            # No bypass for fresh DB (schema_version=0) — 0010 must be applied first.
+            if not check_schema_version(_conn, 10, "0015_complete_project_id"):
+                _v = get_schema_version(_conn)
+                LOG.info("0015 already applied (schema_version=%d); skipping", _v)
+                return
 
     sql = MIGRATION_0015_PATH.read_text()
     qi_block, _, rc_block = sql.partition(
@@ -529,6 +529,12 @@ def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
 
     if rc_db.exists():
         with sqlite3.connect(str(rc_db)) as _conn:
+            set_schema_version(_conn, 15)
+    # QI must also reach v15 so apply_migration_0016 can verify the prerequisite
+    # on its own connection (QI schema_meta is independent of RC schema_meta).
+    if qi_db.exists():
+        with sqlite3.connect(str(qi_db)) as _conn:
+            ensure_schema_meta(_conn)
             set_schema_version(_conn, 15)
 
 
@@ -1415,12 +1421,12 @@ def apply_migration_0016(qi_db: Path) -> None:
     con = sqlite3.connect(str(qi_db), isolation_level=None)
     try:
         ensure_schema_meta(con)
-        _qi_v = get_schema_version(con)
-        if _qi_v > 0:
-            # Raises RuntimeError if version < 15 (0015 not applied yet).
-            if not check_schema_version(con, 15, "0016_rebuild_fts5"):
-                LOG.info("0016 already applied (schema_version=%d); skipping", _qi_v)
-                return
+        # Always check prerequisite: v15 required before v16 can run.
+        # No bypass for fresh DB (schema_version=0) — 0015 must be applied first.
+        if not check_schema_version(con, 15, "0016_rebuild_fts5"):
+            _qi_v = get_schema_version(con)
+            LOG.info("0016 already applied (schema_version=%d); skipping", _qi_v)
+            return
 
         if not _table_exists(con, "code_snippets"):
             LOG.info("code_snippets vtab not present; skipping FTS5 rebuild")

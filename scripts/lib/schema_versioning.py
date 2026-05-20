@@ -7,7 +7,10 @@ and schema_version (text PK table in quality_intelligence.db).
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 
 _SCHEMA_META_DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -49,6 +52,25 @@ def set_schema_version(conn: sqlite3.Connection, version: int) -> None:
                updated_at = excluded.updated_at""",
         (str(version),),
     )
+    # ADR-005: append audit event for schema mutation traceability
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        db_file = row[2] if row and row[2] else "unknown"
+    except Exception:
+        db_file = "unknown"
+    event = {
+        "event_type": "schema_version_set",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": version,
+        "db_path": db_file,
+    }
+    events_path = Path.home() / ".vnx-data" / "events" / "schema_versioning.ndjson"
+    try:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(events_path, "a") as f:
+            f.write(json.dumps(event) + "\n")
+    except OSError:
+        pass
 
 
 def check_schema_version(

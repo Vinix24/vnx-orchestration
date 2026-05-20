@@ -22,7 +22,12 @@ BEGIN TRANSACTION;
 DROP INDEX IF EXISTS idx_success_patterns_content_hash;
 ALTER TABLE success_patterns DROP COLUMN content_hash;
 
-DELETE FROM runtime_schema_version WHERE version = 12
+-- Migration 0012 targets quality_intelligence.db (@db: quality_intelligence).
+-- QI uses the schema_version table (TEXT PRIMARY KEY), not runtime_schema_version
+-- (which lives in runtime_coordination.db). The _up.sql INSERT into
+-- runtime_schema_version was a no-op because that table does not exist in QI;
+-- this rollback targets the correct QI versioning table.
+DELETE FROM schema_version WHERE version = '12'
     AND description LIKE '%content_hash%';
 
 COMMIT;
