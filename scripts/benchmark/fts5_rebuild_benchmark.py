@@ -46,11 +46,8 @@ def _is_fts5_table(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _row_count(conn: sqlite3.Connection, table: str) -> int:
-    try:
-        cur = conn.execute(f"SELECT count(*) FROM [{table}]")
-        return cur.fetchone()[0]
-    except Exception:
-        return -1
+    """Return row count for *table*. Raises sqlite3.Error on failure — let the caller handle it."""
+    return conn.execute(f"SELECT count(*) FROM [{table}]").fetchone()[0]
 
 
 def _baseline_memory_rss() -> int:

@@ -103,6 +103,21 @@ class TestCopyDb:
         assert work_dir.exists()
 
 
+class TestRowCount:
+    def test_row_count_returns_correct_count(self, synthetic_db: Path):
+        conn = sqlite3.connect(str(synthetic_db))
+        count = bm._row_count(conn, "code_snippets")
+        conn.close()
+        assert count == 100
+
+    def test_row_count_raises_on_nonexistent_table(self, synthetic_db: Path):
+        """_row_count must raise sqlite3.OperationalError on missing table, not return -1."""
+        conn = sqlite3.connect(str(synthetic_db))
+        with pytest.raises(sqlite3.OperationalError):
+            bm._row_count(conn, "does_not_exist")
+        conn.close()
+
+
 class TestIsFts5Table:
     def test_fts5_table_detected(self, synthetic_db: Path):
         conn = sqlite3.connect(str(synthetic_db))
