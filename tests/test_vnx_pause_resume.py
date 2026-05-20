@@ -35,7 +35,13 @@ RESUME_SH = VNX_ROOT / "scripts" / "commands" / "resume.sh"
 # ---------------------------------------------------------------------------
 
 def _make_dirs(tmp_path: Path) -> dict:
-    """Create minimal .vnx-data layout and return env var mapping."""
+    """Create minimal .vnx-data layout and return env var mapping.
+
+    Sets VNX_SKIP_DAEMON_SPAWN=1 so cmd_resume does not spawn real nohup
+    daemons. Without this, sourced resume.sh would launch operator-grade
+    dispatcher_supervisor.sh + receipt_processor_supervisor.sh that survive
+    the test and proliferate against real .vnx-data state.
+    """
     data = tmp_path / ".vnx-data"
     dirs = {
         "VNX_DATA_DIR": data,
@@ -47,7 +53,9 @@ def _make_dirs(tmp_path: Path) -> dict:
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
     (data / "events").mkdir(parents=True, exist_ok=True)
-    return {k: str(v) for k, v in dirs.items()}
+    env = {k: str(v) for k, v in dirs.items()}
+    env["VNX_SKIP_DAEMON_SPAWN"] = "1"
+    return env
 
 
 def _run_cmd(cmd_name: str, env_vars: dict, args: list[str] | None = None) -> subprocess.CompletedProcess:

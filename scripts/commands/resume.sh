@@ -100,21 +100,27 @@ _vnx_resume_verify_readiness() {
   return $resume_failed
 }
 
-# Helper: remove PAUSED marker and append service_resumed NDJSON event.
+# Helper: append service_resumed NDJSON event, then remove PAUSED marker.
+# Order matters: if the audit append fails, the PAUSED marker is retained so
+# VNX cannot be silently resumed without an audit trail.
 # Uses python3 json.dumps for safe encoding — prevents injection via $by_dispatch_id.
 _vnx_resume_log_lifecycle() {
   local paused_file="$1"
   local lifecycle_log="$2"
   local ts="$3"
   local by_dispatch_id="$4"
+  if ! python3 -c "import json,sys; print(json.dumps({'event_type':'service_resumed','timestamp':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':'resume'}))" \
+    "$ts" "$by_dispatch_id" >> "$lifecycle_log"; then
+    err "[resume] Failed to append service_resumed audit event to ${lifecycle_log}. PAUSED marker retained."
+    return 1
+  fi
   rm -f "$paused_file"
-  python3 -c "import json,sys; print(json.dumps({'event_type':'service_resumed','timestamp':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':'resume'}))" \
-    "$ts" "$by_dispatch_id" >> "$lifecycle_log"
+  return 0
 }
 
 cmd_resume() {
   local state_dir="${VNX_STATE_DIR:-${VNX_DATA_DIR}/state}"
-  local scripts_dir="${VNX_HOME}/scripts"
+  local scripts_dir="${VNX_HOME:-}/scripts"
   local logs_dir="${VNX_LOGS_DIR:-${VNX_DATA_DIR}/logs}"
   local events_dir="${VNX_DATA_DIR}/events"
   local paused_file="$state_dir/PAUSED"
@@ -123,16 +129,23 @@ cmd_resume() {
 
   _vnx_resume_validate_marker "$paused_file" || return 1
   mkdir -p "$events_dir" "$logs_dir"
-  _vnx_resume_start_daemons "$scripts_dir" "$logs_dir" || return 1
 
-  if ! _vnx_resume_verify_readiness; then
-    err "[resume] One or more mandatory daemons failed to start. PAUSED marker retained."
-    return 1
+  # Test-mode guard: tests source resume.sh and call cmd_resume directly.
+  # Without this guard the helper would spawn real nohup daemons that survive
+  # the test, write to operator-grade state, and proliferate via tmux send-keys.
+  if [ "${VNX_SKIP_DAEMON_SPAWN:-0}" = "1" ]; then
+    log "[resume] VNX_SKIP_DAEMON_SPAWN=1 — skipping daemon spawn + readiness check."
+  else
+    _vnx_resume_start_daemons "$scripts_dir" "$logs_dir" || return 1
+    if ! _vnx_resume_verify_readiness; then
+      err "[resume] One or more mandatory daemons failed to start. PAUSED marker retained."
+      return 1
+    fi
   fi
 
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  _vnx_resume_log_lifecycle "$paused_file" "$lifecycle_log" "$ts" "$by_dispatch_id"
+  _vnx_resume_log_lifecycle "$paused_file" "$lifecycle_log" "$ts" "$by_dispatch_id" || return 1
 
   log "[resume] VNX daemons resumed. Dispatcher and receipt_processor restarted."
   return 0
