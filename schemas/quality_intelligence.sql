@@ -653,3 +653,15 @@ VALUES ('8.1.0-governance', 'Add governance_metrics, spc_control_limits, spc_ale
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.2.0-cqs-advisory-oi', 'Add target_open_items, open_items_created, open_items_resolved columns to dispatch_metadata for T0 advisory and OI delta CQS components');
+
+-- ============================================================================
+-- SCHEMA META (Wave 2a: schema version tracking for migration safety)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '0');

@@ -72,6 +72,12 @@ from scripts.aggregator.build_central_view import (  # noqa: E402
     load_registry,
     _default_registry_path,
 )
+from schema_versioning import (  # noqa: E402
+    ensure_schema_meta,
+    get_schema_version,
+    set_schema_version,
+    check_schema_version,
+)
 
 LOG = logging.getLogger("vnx.migrate.apply")
 
@@ -482,6 +488,14 @@ def apply_migration_0010(qi_db: Path, rc_db: Path) -> None:
     The companion 0015 then extends to cold tables; the order
     ``0010 → 0015`` matches FEATURE_PLAN §w6-p4.
     """
+    if rc_db.exists():
+        with sqlite3.connect(str(rc_db)) as _conn:
+            ensure_schema_meta(_conn)
+            _v = get_schema_version(_conn)
+            if _v > 0 and not check_schema_version(_conn, 0, "0010_add_project_id"):
+                LOG.info("0010 already applied (schema_version=%d); skipping", _v)
+                return
+
     sql = MIGRATION_0010_PATH.read_text()
     # 0010 uses a slightly different delimiter than 0015. Match the
     # exact partition heading from the file so we don't accidentally
@@ -490,14 +504,38 @@ def apply_migration_0010(qi_db: Path, rc_db: Path) -> None:
     _apply_alters_idempotently(qi_db, qi_block)
     _apply_alters_idempotently(rc_db, rc_block)
 
+    if rc_db.exists():
+        with sqlite3.connect(str(rc_db)) as _conn:
+            set_schema_version(_conn, 10)
+
 
 def apply_migration_0015(qi_db: Path, rc_db: Path) -> None:
+    if rc_db.exists():
+        with sqlite3.connect(str(rc_db)) as _conn:
+            ensure_schema_meta(_conn)
+            # Always check prerequisite: v10 required before v15 can run.
+            # No bypass for fresh DB (schema_version=0) — 0010 must be applied first.
+            if not check_schema_version(_conn, 10, "0015_complete_project_id"):
+                _v = get_schema_version(_conn)
+                LOG.info("0015 already applied (schema_version=%d); skipping", _v)
+                return
+
     sql = MIGRATION_0015_PATH.read_text()
     qi_block, _, rc_block = sql.partition(
         "-- @db: runtime_coordination (Phase 4 cold tables — 7 tables)"
     )
     _apply_alters_idempotently(qi_db, qi_block)
     _apply_alters_idempotently(rc_db, rc_block)
+
+    if rc_db.exists():
+        with sqlite3.connect(str(rc_db)) as _conn:
+            set_schema_version(_conn, 15)
+    # QI must also reach v15 so apply_migration_0016 can verify the prerequisite
+    # on its own connection (QI schema_meta is independent of RC schema_meta).
+    if qi_db.exists():
+        with sqlite3.connect(str(qi_db)) as _conn:
+            ensure_schema_meta(_conn)
+            set_schema_version(_conn, 15)
 
 
 # ---------------------------------------------------------------------------
@@ -1382,6 +1420,14 @@ def apply_migration_0016(qi_db: Path) -> None:
         return
     con = sqlite3.connect(str(qi_db), isolation_level=None)
     try:
+        ensure_schema_meta(con)
+        # Always check prerequisite: v15 required before v16 can run.
+        # No bypass for fresh DB (schema_version=0) — 0015 must be applied first.
+        if not check_schema_version(con, 15, "0016_rebuild_fts5"):
+            _qi_v = get_schema_version(con)
+            LOG.info("0016 already applied (schema_version=%d); skipping", _qi_v)
+            return
+
         if not _table_exists(con, "code_snippets"):
             LOG.info("code_snippets vtab not present; skipping FTS5 rebuild")
             return
@@ -1403,6 +1449,7 @@ def apply_migration_0016(qi_db: Path) -> None:
                 "VALUES ('8.4.0-fts5-project-id', "
                 "'Phase 6 P4: rebuild FTS5 virtual tables with project_id column')"
             )
+            set_schema_version(con, 16)
             con.execute("COMMIT")
         except Exception:
             with contextlib.suppress(sqlite3.OperationalError):

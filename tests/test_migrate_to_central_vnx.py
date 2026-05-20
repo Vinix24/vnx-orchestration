@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from scripts import migrate_to_central_vnx as M  # noqa: E402
 from scripts.aggregator.build_central_view import load_registry  # noqa: E402
+from schema_versioning import ensure_schema_meta, set_schema_version  # noqa: E402
 
 
 def _make_qi_db(path: Path) -> None:
@@ -1292,6 +1293,9 @@ def test_apply_migration_0016_rolls_back_on_failure(tmp_path: Path, monkeypatch)
         )
         con.execute("INSERT INTO snippet_metadata VALUES (1, 'vnx-dev')")
         con.execute("INSERT INTO snippet_metadata VALUES (2, 'mc')")
+        # Prerequisite: apply_migration_0016 requires schema_version=15 in QI
+        ensure_schema_meta(con)
+        set_schema_version(con, 15)
         con.commit()
     finally:
         con.close()
@@ -1614,6 +1618,9 @@ def test_round4_fts_rebuild_uses_index(tmp_path: Path):
             "line_start, line_end, pattern_hash) VALUES (?, ?, ?, ?, ?, ?)",
             meta_rows,
         )
+        # Prerequisite: apply_migration_0016 requires schema_version=15 in QI
+        ensure_schema_meta(con)
+        set_schema_version(con, 15)
         con.commit()
     finally:
         con.close()
@@ -2916,6 +2923,9 @@ def _make_fts5_db_with_extra_cols(path: Path, extra_cols: list) -> None:
             "INSERT INTO snippet_metadata (snippet_rowid, project_id) VALUES (?, ?)",
             (1, "test-proj"),
         )
+        # Prerequisite: apply_migration_0016 requires schema_version=15 in QI
+        ensure_schema_meta(con)
+        set_schema_version(con, 15)
         con.commit()
     finally:
         con.close()
@@ -2990,6 +3000,9 @@ def test_migration_0016_orphan_uses_rowid_map_project_id(tmp_path: Path):
             "(project_id, source_table, source_rowid, central_rowid) VALUES (?, ?, ?, ?)",
             ("seocrawler-v2", "code_snippets", 10, 42),
         )
+        # Prerequisite: apply_migration_0016 requires schema_version=15 in QI
+        ensure_schema_meta(con)
+        set_schema_version(con, 15)
         con.commit()
     finally:
         con.close()
@@ -3036,6 +3049,9 @@ def test_migration_0016_orphan_raises_without_any_project_id(tmp_path: Path):
         con.execute(
             "INSERT INTO code_snippets (rowid, title) VALUES (?, ?)", (7, "true-orphan")
         )
+        # Prerequisite: apply_migration_0016 requires schema_version=15 in QI
+        ensure_schema_meta(con)
+        set_schema_version(con, 15)
         con.commit()
     finally:
         con.close()
