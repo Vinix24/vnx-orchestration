@@ -207,6 +207,9 @@ Snapshot commands (W0):
   quiesce-check [<path>]    Verify project is safe to migrate (read-only)
 
 Runtime commands:
+  pause [reason]     Gracefully stop dispatcher + receipt_processor + queue_watcher
+                     Writes ${VNX_STATE_DIR}/PAUSED marker for migration cutover
+  resume             Restart daemons after 'vnx pause'; fails if not paused
   recover            Recover from unclean shutdown or stale state
                      Options: --aggressive, --dry-run
 
@@ -1855,6 +1858,12 @@ main() {
       ;;
     quiesce-check)
       cmd_quiesce_check "$@"
+      ;;
+    pause)
+      cmd_pause "$@"
+      ;;
+    resume)
+      cmd_resume "$@"
       ;;
     recover)
       cmd_recover "$@"

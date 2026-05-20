@@ -260,6 +260,166 @@ and `schema_version` (text PK audit log in QI).
 
 ---
 
+---
+
+## Pre-apply snapshot (mandatory before every --apply)
+
+Before running `migrate_to_central_vnx.py --apply` for any project, snapshot the
+central DB to an archive directory. This snapshot is the fast-restore point for
+Scenario X below.
+
+```bash
+# Set once per apply session
+CENTRAL_DB=~/.vnx-data/state/quality_intelligence.db
+FAILED_PROJECT_ID="mission-control"   # fill in target project
+ARCHIVE_DIR=~/Archive/pre-apply-${FAILED_PROJECT_ID}-$(date +%Y%m%dT%H%M%S)
+
+mkdir -p "$ARCHIVE_DIR"
+cp "$CENTRAL_DB" "$ARCHIVE_DIR/quality_intelligence.db"
+sqlite3 "$CENTRAL_DB" ".dump" > "$ARCHIVE_DIR/quality_intelligence.sql"
+echo "Snapshot written to: $ARCHIVE_DIR"
+```
+
+Verify the snapshot is readable before proceeding:
+
+```bash
+sqlite3 "$ARCHIVE_DIR/quality_intelligence.db" "PRAGMA integrity_check;" | head -3
+```
+
+Expected: `ok`
+
+---
+
+## Scenario X — Partial migration failure (central store cleanup)
+
+Use when project X (e.g. mission-control) fails halfway through `--apply` to the
+central store, leaving partial rows that must be removed before retrying or
+rolling back the source project.
+
+### Step 1 — Identify the partially migrated project
+
+Check which project has an inconsistent row count in the central DB:
+
+```bash
+CENTRAL_DB=~/.vnx-data/state/quality_intelligence.db
+
+sqlite3 "$CENTRAL_DB" "
+SELECT project_id, COUNT(*) as rows
+FROM success_patterns
+GROUP BY project_id
+ORDER BY rows DESC;"
+
+sqlite3 "$CENTRAL_DB" "
+SELECT project_id, COUNT(*) as rows
+FROM antipatterns
+GROUP BY project_id
+ORDER BY rows DESC;"
+```
+
+Compare against the source project DB to confirm the mismatch.
+
+### Step 2 — Pause VNX to prevent concurrent writes
+
+```bash
+vnx pause partial_migration_cleanup
+```
+
+Verify the PAUSED marker exists:
+
+```bash
+cat ~/.vnx-data/state/PAUSED
+```
+
+Do NOT skip this step. Concurrent dispatcher writes during cleanup corrupt the
+central store.
+
+### Step 3 — Central store cleanup
+
+Replace `$FAILED_PROJECT_ID` with the actual project_id from Step 1.
+
+```bash
+CENTRAL_DB=~/.vnx-data/state/quality_intelligence.db
+FAILED_PROJECT_ID="mission-control"
+
+sqlite3 "$CENTRAL_DB" "
+BEGIN IMMEDIATE;
+DELETE FROM success_patterns    WHERE project_id = '${FAILED_PROJECT_ID}';
+DELETE FROM antipatterns        WHERE project_id = '${FAILED_PROJECT_ID}';
+DELETE FROM code_snippets       WHERE project_id = '${FAILED_PROJECT_ID}';
+DELETE FROM snippet_metadata    WHERE project_id = '${FAILED_PROJECT_ID}';
+DELETE FROM intelligence_injections WHERE project_id = '${FAILED_PROJECT_ID}';
+DELETE FROM session_analytics   WHERE project_id = '${FAILED_PROJECT_ID}';
+COMMIT;"
+echo "Exit code: $?"
+```
+
+If any DELETE fails, restore from the pre-apply snapshot (Step 4b) and
+investigate before retrying.
+
+### Step 4a — Validate post-cleanup
+
+Confirm no rows remain for the failed project:
+
+```bash
+sqlite3 "$CENTRAL_DB" "
+SELECT
+  (SELECT COUNT(*) FROM success_patterns    WHERE project_id='${FAILED_PROJECT_ID}') as patterns,
+  (SELECT COUNT(*) FROM antipatterns        WHERE project_id='${FAILED_PROJECT_ID}') as antipatterns,
+  (SELECT COUNT(*) FROM code_snippets       WHERE project_id='${FAILED_PROJECT_ID}') as snippets,
+  (SELECT COUNT(*) FROM snippet_metadata    WHERE project_id='${FAILED_PROJECT_ID}') as snippet_meta,
+  (SELECT COUNT(*) FROM intelligence_injections WHERE project_id='${FAILED_PROJECT_ID}') as injections;"
+```
+
+Expected: all zeros.
+
+Run integrity check to confirm the DB is consistent:
+
+```bash
+sqlite3 "$CENTRAL_DB" "PRAGMA integrity_check;" | head -3
+```
+
+Expected: `ok`
+
+### Step 4b — Restore from pre-apply snapshot (if cleanup fails)
+
+If Step 3 produced errors or the integrity check fails:
+
+```bash
+ARCHIVE_DIR=~/Archive/pre-apply-${FAILED_PROJECT_ID}-<timestamp>
+CENTRAL_DB_TMP=~/.vnx-data/state/quality_intelligence.db.restore-tmp
+
+cp "$ARCHIVE_DIR/quality_intelligence.db" "$CENTRAL_DB_TMP"
+sqlite3 "$CENTRAL_DB_TMP" "PRAGMA integrity_check;" | head -3
+# Expected: ok
+mv "$CENTRAL_DB_TMP" "$CENTRAL_DB"
+echo "Central DB restored from snapshot."
+```
+
+### Step 5 — Re-run dry-run to confirm no traces
+
+```bash
+python3 scripts/migrate_to_central_vnx.py --project "$FAILED_PROJECT_ID" --dry-run
+```
+
+The dry-run should show no conflicts and report the correct row counts for the
+project as if it were unmigrated.
+
+### Step 6 — Resume VNX
+
+```bash
+vnx resume
+```
+
+Confirm lifecycle events were written:
+
+```bash
+tail -2 ~/.vnx-data/events/lifecycle.ndjson | python3 -m json.tool
+```
+
+Expected: one `service_paused` event and one `service_resumed` event.
+
+---
+
 ## Open Items
 
 - OI-ROLLBACK-1: Wire `--rollback-fts5` flag into `migrate_to_central_vnx.py` for
