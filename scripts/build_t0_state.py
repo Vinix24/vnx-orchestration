@@ -266,6 +266,12 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
     # Phase 6 P3: prefer central receipts when available (derived from state_dir)
     _central = _central_state_dir_for(state_dir)
     receipts_path = (_central if _central is not None else state_dir) / "t0_receipts.ndjson"
+    # Wave 2a: filter central receipts by project_id to prevent cross-project contamination.
+    _receipts_project_id = (
+        (project_id_from_state_dir(state_dir) or os.environ.get("VNX_PROJECT_ID", "").strip())
+        if _central is not None
+        else None
+    )
     if receipts_path.exists():
         cutoff = _now_utc() - timedelta(hours=1)
         try:
@@ -277,6 +283,11 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
                     e = json.loads(line)
                 except Exception:
                     continue
+                # Skip receipts from other projects; receipts without project_id pass (backward compat).
+                if _receipts_project_id:
+                    receipt_pid = (e.get("project_id") or "").strip()
+                    if receipt_pid and receipt_pid != _receipts_project_id:
+                        continue
                 event = e.get("event_type") or e.get("event", "")
                 if event not in ("task_complete", "quality_gate_verification"):
                     continue

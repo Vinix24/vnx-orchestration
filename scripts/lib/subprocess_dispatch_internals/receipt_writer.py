@@ -210,6 +210,11 @@ def _persist_receipt(
         logger.warning(
             "append_receipt_payload failed (%s); falling back to bare write", exc
         )
+        # Stamp project_id from env when _stamp_identity is unavailable (circular-import fallback).
+        if not receipt.get("project_id"):
+            _fallback_pid = os.environ.get("VNX_PROJECT_ID", "").strip()
+            if _fallback_pid:
+                receipt["project_id"] = _fallback_pid
         import subprocess_dispatch as _sd
         receipt_path = _sd._default_state_dir() / "t0_receipts.ndjson"
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
