@@ -181,7 +181,7 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 4. sales-copilot — final
 
 **Success Criteria**
-- All 4 projects pin via `.vnx-version` to `v1.0.0-rc2`
+- All 4 projects pin via `.vnx-version` to `v1.0.0-rc3`
 - `vnx doctor --strict` passes on all 4 with no override warnings
 - `.vnx-overrides/` pattern adopted where projects need custom skills or schemas
 

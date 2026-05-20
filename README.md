@@ -20,7 +20,7 @@ Volledige roadmap: [claudedocs/roadmap-2026-05-20-master.md][roadmap].
 
 [roadmap]: claudedocs/roadmap-2026-05-20-master.md
 
-Current release: `v1.0.0-rc2` — multi-provider milestone (2026-05-17). Five providers in production with provider-agnostic governance: Claude (Opus/Sonnet/Haiku), Codex (GPT-5.2-codex), Gemini (2.5 Pro/Flash), Kimi CLI (K2.6), LiteLLM bridge (DeepSeek V4 Pro/Flash, GLM-5.1 via OpenRouter).
+Current release: `v1.0.0-rc3` — multi-provider milestone (2026-05-17). Five providers in production with provider-agnostic governance: Claude (Opus/Sonnet/Haiku), Codex (GPT-5.2-codex), Gemini (2.5 Pro/Flash), Kimi CLI (K2.6), LiteLLM bridge (DeepSeek V4 Pro/Flash, GLM-5.1 via OpenRouter).
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
 **API contract is stable from this release forward.** Dispatch envelope, receipt schema, NDJSON ledger format, and 14 ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`) are now backwards-compatibility-honoring. v1.0.0 final ships after Phase 5 reader cutover validation.
@@ -366,13 +366,13 @@ vnx doctor --strict              # full pre-flight validation
 ```bash
 git clone https://github.com/Vinix24/vnx-orchestration.git
 cd vnx-orchestration
-bash install-central.sh --version v1.0.0-rc2
+bash install-central.sh --version v1.0.0-rc3
 ```
 
-Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc2/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
+Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc3/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
 
 ```bash
-vnx update --to v1.0.0-rc2       # Flip to a specific version (central install)
+vnx update --to v1.0.0-rc3       # Flip to a specific version (central install)
 vnx doctor --strict              # Full pre-flight: schema check, skill coverage, worktree orphans, active dispatch drain
 ```
 
