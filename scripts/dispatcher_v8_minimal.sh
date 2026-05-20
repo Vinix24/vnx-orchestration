@@ -10,6 +10,13 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
+
+# Respect PAUSED marker: refuse to start while VNX is paused.
+if [ -f "${VNX_STATE_DIR}/PAUSED" ]; then
+  echo "[dispatcher_v8_minimal] PAUSED marker present at ${VNX_STATE_DIR}/PAUSED — refusing to start. Run 'vnx resume' to clear." >&2
+  exit 0
+fi
+
 source "$SCRIPT_DIR/lib/dispatch_metadata.sh"
 source "$SCRIPT_DIR/lib/dispatch_project_guard.sh"
 source "$SCRIPT_DIR/lib/provider_routing.sh"

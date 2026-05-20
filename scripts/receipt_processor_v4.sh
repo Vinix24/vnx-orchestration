@@ -4,6 +4,13 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
+
+# Respect PAUSED marker: refuse to start while VNX is paused.
+if [ "${_RP_LIB_MODE:-0}" != "1" ] && [ -f "${VNX_STATE_DIR}/PAUSED" ]; then
+  echo "[receipt_processor_v4] PAUSED marker present at ${VNX_STATE_DIR}/PAUSED — refusing to start. Run 'vnx resume' to clear." >&2
+  exit 0
+fi
+
 source "$SCRIPT_DIR/lib/receipt_terminal_detection.sh"
 
 # Base directories

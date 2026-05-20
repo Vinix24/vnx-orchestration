@@ -20,6 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/process_lifecycle.sh"
 
+# Respect PAUSED marker: refuse to start while VNX is paused.
+if [ -f "${VNX_STATE_DIR}/PAUSED" ]; then
+  echo "[dispatcher_supervisor] PAUSED marker present at ${VNX_STATE_DIR}/PAUSED — refusing to start. Run 'vnx resume' to clear." >&2
+  exit 0
+fi
+
 VNX_DIR="$VNX_HOME"
 DISPATCHER_SCRIPT="${VNX_DISPATCHER_SCRIPT:-$SCRIPT_DIR/dispatcher_v8_minimal.sh}"
 SUPERVISOR_NAME="dispatcher_supervisor"
