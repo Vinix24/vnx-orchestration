@@ -107,3 +107,15 @@ CREATE INDEX IF NOT EXISTS idx_worker_states_project ON worker_states(project_id
 
 INSERT OR IGNORE INTO runtime_schema_version (version, description)
 VALUES (12, 'Wave 5 PR-5.3: composite UNIQUE on terminal_leases + dispatches; project_id on worker_states');
+
+-- ============================================================================
+-- SCHEMA META (Wave 2a: schema version tracking for migration safety)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '0');
