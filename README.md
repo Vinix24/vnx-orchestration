@@ -10,6 +10,16 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
+## Status (2026-05-20)
+
+Wave 5/6/7 zijn gemerged. Wave 8 (Smart Router) in flight via PR-split.
+Komende stappen: pre-cutover hardening -> Wave 2a centralisatie (Hybrid C,
+MC -> sales-copilot -> SEOcrawler over 5 dagen) -> Wave 3 DB retirement.
+
+Volledige roadmap: [claudedocs/roadmap-2026-05-20-master.md][roadmap].
+
+[roadmap]: claudedocs/roadmap-2026-05-20-master.md
+
 Current release: `v1.0.0-rc2` — multi-provider milestone (2026-05-17). Five providers in production with provider-agnostic governance: Claude (Opus/Sonnet/Haiku), Codex (GPT-5.2-codex), Gemini (2.5 Pro/Flash), Kimi CLI (K2.6), LiteLLM bridge (DeepSeek V4 Pro/Flash, GLM-5.1 via OpenRouter).
 See [CHANGELOG.md](CHANGELOG.md) for the release summary.
 
@@ -362,7 +372,6 @@ bash install-central.sh --version v1.0.0-rc2
 Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc2/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
 
 ```bash
-vnx version                      # Print version, commit, VNX_HOME, pin, Python + platform
 vnx update --to v1.0.0-rc2       # Flip to a specific version (central install)
 vnx doctor --strict              # Full pre-flight: schema check, skill coverage, worktree orphans, active dispatch drain
 ```
@@ -377,7 +386,6 @@ Commands are tiered by mode. Running an operator-only command in starter mode re
 |---------|-------------|
 | `vnx init` | Initialize VNX project (with mode selection) |
 | `vnx doctor` | Validate setup and dependencies (`--strict` for full central-install pre-flight) |
-| `vnx version` | Print version, commit, VNX_HOME, pin, Python + platform |
 | `vnx status` | Show current state and mode |
 | `vnx recover` | Recover from failures |
 | `vnx help` | Show available commands for current mode |
