@@ -59,7 +59,8 @@ Migrations must be rolled back in reverse numeric order. Do not skip.
 | Rollback order | Migration | Target DB |
 |---|---|---|
 | 1st | 2026_05_task_subclass_down.sql | quality_intelligence.db |
-| 2nd | 2026_05_intelligence_hygiene_down.sql | quality_intelligence.db + runtime_coordination.db |
+| 2nd (QI) | 2026_05_intelligence_hygiene_down.sql | quality_intelligence.db |
+| 2nd (RC) | 2026_05_intelligence_hygiene_runtime_down.sql | runtime_coordination.db |
 | 3rd | 2026_05_intelligence_ab_arm_down.sql | runtime_coordination.db |
 | 4th | 0021_central_install_metadata_down.sql | (central install DB or runtime_coordination.db) |
 | 5th | 0020_elastic_worker_pool_down.sql | runtime_coordination.db |
@@ -133,7 +134,7 @@ sqlite3 "$QI" < "$MIGS/0015_complete_project_id_down.sql"
 sqlite3 "$RC" < "$MIGS/0015_complete_project_id_down.sql"
 sqlite3 "$QI" < "$MIGS/0014_add_report_findings_down.sql"
 sqlite3 "$QI" < "$MIGS/0013_normalize_tag_combination_down.sql"
-sqlite3 "$RC" < "$MIGS/0017_multi_tenant_lease_isolation_down.sql"
+sqlite3 "$QI" < "$MIGS/0012_add_pattern_content_hash_down.sql"
 
 # Update schema_meta to target version
 sqlite3 "$RC" "UPDATE schema_meta SET value='11' WHERE key='schema_version';"

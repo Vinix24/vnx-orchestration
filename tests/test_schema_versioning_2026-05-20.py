@@ -373,8 +373,28 @@ class TestDownSqlReversibility:
         assert row3[0] is None
         assert row3[1] is None
 
-        # Version stamp should be gone
+        # Version stamp is handled by the separate _runtime_down.sql — row must still exist here
         stamp = conn.execute(
             "SELECT version FROM runtime_schema_version WHERE version=15"
         ).fetchone()
-        assert stamp is None
+        assert stamp is not None, "QI down must not touch runtime_schema_version; use _runtime_down.sql for that"
+
+    def test_intelligence_hygiene_runtime_down_removes_stamp(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+            CREATE TABLE runtime_schema_version (
+                version INTEGER PRIMARY KEY,
+                description TEXT,
+                applied_at TEXT
+            );
+            INSERT INTO runtime_schema_version(version, description)
+            VALUES (15, 'hygiene');
+        """)
+
+        runtime_down_path = _MIGRATIONS_DIR / "2026_05_intelligence_hygiene_runtime_down.sql"
+        conn.executescript(runtime_down_path.read_text())
+
+        stamp = conn.execute(
+            "SELECT version FROM runtime_schema_version WHERE version=15"
+        ).fetchone()
+        assert stamp is None, "runtime_down.sql must remove the version=15 stamp from runtime_schema_version"
