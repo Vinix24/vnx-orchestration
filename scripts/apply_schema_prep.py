@@ -2,7 +2,7 @@
 """Idempotent schema-prep runner for VNX pre-central-migration.
 
 Applies the project-specific prep-migration SQL files from
-schemas/prep_migrations/ to a project's .vnx-data/state/ databases,
+schemas/prep_migrations/ to a project's ${VNX_STATE_DIR} databases,
 closing schema-drift gaps BEFORE migrate_to_central_vnx.py --apply runs.
 
 Each ALTER TABLE is guarded: PRAGMA table_info check first, skip if the
@@ -13,7 +13,7 @@ one transaction; any error rolls back that DB fully.
 CLI:
     python3 scripts/apply_schema_prep.py \\
       --project-id sales-copilot|seocrawler-v2 \\
-      --source-db-dir <path>/.vnx-data/state/ \\
+      --source-db-dir ${VNX_STATE_DIR} \\
       --dry-run | --apply
 
 Post-apply verification: re-runs migrate_dry_run.py in dry-run mode
@@ -309,8 +309,8 @@ def _apply_statements_to_db(
         if not dry_run:
             try:
                 conn.execute("ROLLBACK")
-            except Exception:
-                pass
+            except Exception as rb_err:
+                LOG.warning("ROLLBACK failed (connection may already be closed): %s", rb_err)
         errors.append(f"Error applying to {db_path}: {exc}")
     finally:
         conn.close()
@@ -406,7 +406,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--source-db-dir", type=Path, required=True,
-        help="Path to the project's .vnx-data/state/ directory (contains the SQLite DBs)",
+        help="Path to the VNX state directory (typically $VNX_STATE_DIR or <project>/.vnx-data/state)",
     )
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true",
