@@ -162,3 +162,40 @@ else:
     print(f'Not found in registry: {project_path}')
 " || return 1
 }
+
+# ── refresh ──────────────────────────────────────────────────────────────
+cmd_refresh() {
+  # Touch updated_at for all registered projects without changing other data.
+  # Dashboard reads this timestamp to determine if the registry is fresh.
+  if [ ! -f "$VNX_REGISTRY_FILE" ]; then
+    log "No projects registered. Use 'vnx register' first."
+    return 0
+  fi
+
+  if ! command -v python3 &>/dev/null; then
+    err "[refresh] python3 is required"
+    return 1
+  fi
+
+  python3 -c "
+import json, os, sys
+from datetime import datetime, timezone
+
+registry_file = '$VNX_REGISTRY_FILE'
+with open(registry_file) as f:
+    data = json.load(f)
+
+now = datetime.now(timezone.utc).isoformat()
+count = 0
+for p in data.get('projects', []):
+    p['updated_at'] = now
+    count += 1
+
+with open(registry_file, 'w') as f:
+    json.dump(data, f, indent=2)
+
+print(f'Refreshed updated_at for {count} project(s) in {registry_file}')
+" || return 1
+
+  log "[refresh] Registry timestamps updated in $VNX_REGISTRY_FILE"
+}

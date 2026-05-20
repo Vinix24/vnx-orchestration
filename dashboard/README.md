@@ -39,7 +39,9 @@ npm run build
 # -> .next/ (Next.js output)
 ```
 
-**Backend API server** (separate process): `python dashboard/serve_dashboard.py` — runs on port 4173.
+**Backend API server** (separate process): `python dashboard/serve_dashboard.py` — runs on port 4174.
+
+**Registry freshness**: if the project-overview panel shows degraded state, run `vnx registry refresh` to update `~/.vnx/projects.json` timestamps without changing registration data.
 
 **Prerequisites**: Node.js 18+, running VNX dashboard server (`launch-dashboard.sh`), populated `quality_intelligence.db`.
 

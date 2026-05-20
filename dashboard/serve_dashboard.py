@@ -122,6 +122,7 @@ from api_health import (  # noqa: E402
 
 from api_operator import (  # noqa: E402
     _api_health,
+    _effective_db_mtime,
     _jump_terminal,
     _operator_get_agents,
     _operator_get_gate_config,

@@ -20,8 +20,9 @@ const STATUS_COLORS: Record<string, { color: string; bg: string; border: string 
   failed:  { color: '#ff6b6b', bg: 'rgba(255, 107, 107, 0.08)', border: 'rgba(255, 107, 107, 0.25)' },
 };
 
-function TrackBadge({ track }: { track: string }) {
-  const cfg = TRACK_COLORS[track.toUpperCase()] ?? { color: '#6B6B6B', bg: 'rgba(107,107,107,0.1)', border: 'rgba(107,107,107,0.3)' };
+function TrackBadge({ track }: { track: string | null | undefined }) {
+  const safeTrack = (track ?? 'UNKNOWN').toUpperCase();
+  const cfg = TRACK_COLORS[safeTrack] ?? { color: '#6B6B6B', bg: 'rgba(107,107,107,0.1)', border: 'rgba(107,107,107,0.3)' };
   return (
     <span
       style={{
@@ -35,7 +36,7 @@ function TrackBadge({ track }: { track: string }) {
         letterSpacing: '0.04em',
       }}
     >
-      {track.toUpperCase()}
+      {safeTrack}
     </span>
   );
 }

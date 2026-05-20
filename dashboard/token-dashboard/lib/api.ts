@@ -62,3 +62,32 @@ export async function fetchTranscript(sessionId: string): Promise<TranscriptResp
   }
   return res.json();
 }
+
+export interface ArchiveEntry {
+  dispatch_id: string;
+  file_size: number;
+  modified_at: number;
+}
+
+export async function fetchAgentStreamArchiveList(terminal: string): Promise<ArchiveEntry[]> {
+  const res = await fetch(`/api/agent-stream/${encodeURIComponent(terminal)}/archives`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch archive list for ${terminal}: ${res.status} ${res.statusText}`);
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+export async function fetchAgentStreamArchive(
+  terminal: string,
+  dispatchId: string,
+): Promise<Record<string, unknown>[]> {
+  const res = await fetch(
+    `/api/agent-stream/${encodeURIComponent(terminal)}/archive/${encodeURIComponent(dispatchId)}`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to fetch archive ${dispatchId}: ${res.status} ${res.statusText}`);
+  }
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
