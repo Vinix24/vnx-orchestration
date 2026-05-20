@@ -8,9 +8,12 @@ and schema_version (text PK table in quality_intelligence.db).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA_META_DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -69,8 +72,13 @@ def set_schema_version(conn: sqlite3.Connection, version: int) -> None:
         events_path.parent.mkdir(parents=True, exist_ok=True)
         with open(events_path, "a") as f:
             f.write(json.dumps(event) + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning(
+            "Audit ledger write failed: %s",
+            e,
+            extra={"event": "schema_versioning_audit_failure"},
+        )
+        raise  # fail loud — schema change without audit trail is a governance violation
 
 
 def check_schema_version(

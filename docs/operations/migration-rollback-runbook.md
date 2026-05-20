@@ -97,6 +97,23 @@ sqlite3 "$RC" "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '
 # Update schema_meta
 sqlite3 "$RC" "UPDATE schema_meta SET value='20' WHERE key='schema_version';"
 sqlite3 "$QI" "UPDATE schema_meta SET value='20' WHERE key='schema_version';"
+
+# Record NDJSON audit event for manual schema_meta mutation (ADR-005)
+python3 -c "
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+event = {
+    'event_type': 'manual_schema_meta_mutation',
+    'timestamp': datetime.now(timezone.utc).isoformat(),
+    'operator': 'manual_rollback',
+    'reason': '<vul reden in>',
+}
+p = Path.home() / '.vnx-data' / 'events' / 'schema_versioning.ndjson'
+p.parent.mkdir(parents=True, exist_ok=True)
+with open(p, 'a') as f:
+    f.write(json.dumps(event) + '\n')
+"
 ```
 
 ---
@@ -112,7 +129,8 @@ QI=~/.vnx-data/state/quality_intelligence.db
 
 # Example: rollback from v16 to v11 (reverse order)
 sqlite3 "$QI" < "$MIGS/0016_rebuild_fts5_down.sql"
-sqlite3 "$QI" "$RC" < "$MIGS/0015_complete_project_id_down.sql"  # QI section first, then RC
+sqlite3 "$QI" < "$MIGS/0015_complete_project_id_down.sql"
+sqlite3 "$RC" < "$MIGS/0015_complete_project_id_down.sql"
 sqlite3 "$QI" < "$MIGS/0014_add_report_findings_down.sql"
 sqlite3 "$QI" < "$MIGS/0013_normalize_tag_combination_down.sql"
 sqlite3 "$RC" < "$MIGS/0017_multi_tenant_lease_isolation_down.sql"
@@ -120,6 +138,23 @@ sqlite3 "$RC" < "$MIGS/0017_multi_tenant_lease_isolation_down.sql"
 # Update schema_meta to target version
 sqlite3 "$RC" "UPDATE schema_meta SET value='11' WHERE key='schema_version';"
 sqlite3 "$QI" "UPDATE schema_meta SET value='11' WHERE key='schema_version';"
+
+# Record NDJSON audit event for manual schema_meta mutation (ADR-005)
+python3 -c "
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+event = {
+    'event_type': 'manual_schema_meta_mutation',
+    'timestamp': datetime.now(timezone.utc).isoformat(),
+    'operator': 'manual_rollback',
+    'reason': '<vul reden in>',
+}
+p = Path.home() / '.vnx-data' / 'events' / 'schema_versioning.ndjson'
+p.parent.mkdir(parents=True, exist_ok=True)
+with open(p, 'a') as f:
+    f.write(json.dumps(event) + '\n')
+"
 ```
 
 For migrations that target both QI and RC (0010, 0015), the SQL file contains
