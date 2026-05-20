@@ -16,11 +16,14 @@ Test matrix:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 PAUSE_SH = VNX_ROOT / "scripts" / "commands" / "pause.sh"
@@ -174,8 +177,8 @@ def test_pause_stops_running_daemons(tmp_path: Path):
             try:
                 proc.kill()
                 proc.wait(timeout=3)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning('cleanup failed: %s', e)
 
 
 def test_pause_cleans_stale_pid_files(tmp_path: Path):
@@ -332,8 +335,8 @@ def test_pause_then_resume_round_trip(tmp_path: Path):
         try:
             proc.kill()
             proc.wait(timeout=3)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning('cleanup failed: %s', e)
 
 
 def test_lifecycle_events_are_valid_ndjson(tmp_path: Path):

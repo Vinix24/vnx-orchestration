@@ -42,11 +42,18 @@ _vnx_pause_stop_daemon() {
     return 0
   fi
 
-  local pid
-  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  local pid_line pid fingerprint
+  pid_line="$(cat "$pid_file" 2>/dev/null || true)"
   # PID file may have a fingerprint on the same line separated by |
-  pid="${pid%%|*}"
+  pid="${pid_line%%|*}"
   pid="$(printf '%s' "$pid" | tr -d '[:space:]')"
+  # Extract fingerprint (process comm= stored at write time)
+  if printf '%s' "$pid_line" | grep -q '|'; then
+    fingerprint="${pid_line#*|}"
+    fingerprint="$(printf '%s' "$fingerprint" | tr -d '[:space:]')"
+  else
+    fingerprint=""
+  fi
 
   if [ -z "$pid" ] || ! echo "$pid" | grep -qE '^[0-9]+$'; then
     log "[pause] $name: invalid/empty PID in $pid_file — cleaning up."
@@ -58,6 +65,18 @@ _vnx_pause_stop_daemon() {
     log "[pause] $name (PID: $pid): already stopped — cleaning stale PID file."
     rm -f "$pid_file" "${pid_file}.fingerprint"
     return 0
+  fi
+
+  # Validate fingerprint before signaling — prevents killing an unrelated process
+  # that reused the same PID after a stale restart.
+  if [ -n "$fingerprint" ]; then
+    local current_comm
+    current_comm="$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')" || true
+    if [ -z "$current_comm" ] || [ "$current_comm" != "$fingerprint" ]; then
+      log "[pause] WARNING: $name (PID: $pid) fingerprint mismatch — expected '$fingerprint', got '$current_comm'. Skipping kill to avoid harming unrelated process."
+      rm -f "$pid_file" "${pid_file}.fingerprint"
+      return 0
+    fi
   fi
 
   log "[pause] Stopping $name (PID: $pid) with SIGTERM..."
@@ -115,15 +134,16 @@ cmd_pause() {
   unset _pause_any_failed
 
   # Atomic write: tmp file → mv (prevents partial reads)
+  # Use python3 for safe JSON encoding — prevents injection via $reason/$by_dispatch_id
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local tmp_paused="${paused_file}.tmp.$$"
-  printf '{"paused_at":"%s","by_dispatch_id":"%s","reason":"%s"}\n' \
+  python3 -c "import json,sys; print(json.dumps({'paused_at':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':sys.argv[3]}))" \
     "$ts" "$by_dispatch_id" "$reason" > "$tmp_paused"
   mv "$tmp_paused" "$paused_file"
 
-  # NDJSON lifecycle event
-  printf '{"event_type":"service_paused","timestamp":"%s","by_dispatch_id":"%s","reason":"%s"}\n' \
+  # NDJSON lifecycle event (python3 for safe JSON encoding)
+  python3 -c "import json,sys; print(json.dumps({'event_type':'service_paused','timestamp':sys.argv[1],'by_dispatch_id':sys.argv[2],'reason':sys.argv[3]}))" \
     "$ts" "$by_dispatch_id" "$reason" >> "$lifecycle_log"
 
   log "[pause] VNX daemons paused. Marker: $paused_file"
