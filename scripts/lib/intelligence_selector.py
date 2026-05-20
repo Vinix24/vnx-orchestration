@@ -117,7 +117,7 @@ class IntelligenceSelector:
         result: Dict[str, List[IntelligenceItem]] = {"proven_pattern": [], "failure_prevention": [], "recent_comparable": []}
         if db is None:
             return result
-        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn)
+        kw = dict(has_column_fn=self._has_column, central_conn_fn=self._get_central_qi_conn, project_id_fn=current_project_id)
         result["proven_pattern"] = query_proven_patterns(db, task_class, scope_tags, reconcile_fn=self._maybe_reconcile_confidence, **kw)
         result["failure_prevention"] = query_failure_prevention(db, task_class, scope_tags, **kw)
         result["recent_comparable"] = query_recent_comparable(db, task_class, scope_tags, **kw)
@@ -198,31 +198,6 @@ class IntelligenceSelector:
             if best.pattern_category == PATTERN_CATEGORY_GOVERNANCE:
                 governance_used += 1
         return selected, suppressed
-
-    def _query_proven_patterns(self, db, task_class: str, scope_tags: List[str]) -> List[IntelligenceItem]:
-        return query_proven_patterns(
-            db, task_class, scope_tags,
-            has_column_fn=self._has_column,
-            central_conn_fn=self._get_central_qi_conn,
-            reconcile_fn=self._maybe_reconcile_confidence,
-            project_id_fn=current_project_id,
-        )
-
-    def _query_failure_prevention(self, db, task_class: str, scope_tags: List[str]) -> List[IntelligenceItem]:
-        return query_failure_prevention(
-            db, task_class, scope_tags,
-            has_column_fn=self._has_column,
-            central_conn_fn=self._get_central_qi_conn,
-            project_id_fn=current_project_id,
-        )
-
-    def _query_recent_comparable(self, db, task_class: str, scope_tags: List[str]) -> List[IntelligenceItem]:
-        return query_recent_comparable(
-            db, task_class, scope_tags,
-            has_column_fn=self._has_column,
-            central_conn_fn=self._get_central_qi_conn,
-            project_id_fn=current_project_id,
-        )
 
     def _enforce_payload_limit(self, selected, suppressed, drop_order=None) -> List[IntelligenceItem]:
         """Drop lowest-priority classes until payload fits within MAX_PAYLOAD_CHARS."""

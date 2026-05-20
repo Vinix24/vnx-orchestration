@@ -229,8 +229,21 @@ def _task_class_matches(item_filter: List[str], task_class: str) -> bool:
     return task_class in item_filter
 
 
+VALID_TABLES = frozenset({
+    "success_patterns",
+    "antipatterns",
+    "prevention_rules",
+    "dispatch_metadata",
+    "intelligence_injections",
+    "pattern_usage",
+    "dispatch_pattern_offered",
+})
+
+
 def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    """PRAGMA-based column probe."""
+    """PRAGMA-based column probe. table must be in VALID_TABLES."""
+    if table not in VALID_TABLES:
+        raise ValueError(f"Unknown table: {table!r}; allowed: {sorted(VALID_TABLES)}")
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     except sqlite3.Error:
