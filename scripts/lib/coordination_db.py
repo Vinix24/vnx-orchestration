@@ -14,6 +14,16 @@ from typing import Any, Dict, Generator, List, Optional
 
 import schema_migration
 
+try:
+    from project_scope import current_project_id as _current_project_id
+    from project_scope import project_filter_enabled as _project_filter_enabled
+except ImportError:
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from project_scope import current_project_id as _current_project_id  # type: ignore[no-redef]
+    from project_scope import project_filter_enabled as _project_filter_enabled  # type: ignore[no-redef]
+
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "runtime_coordination.db"
@@ -142,6 +152,18 @@ def _dump(obj: Any) -> str:
     return json.dumps(obj) if obj is not None else "{}"
 
 
+def _has_project_id_col(conn: sqlite3.Connection, table: str) -> bool:
+    """True if `table` has a project_id column (post-migration-0010)."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return False
+    return any(
+        (row[1] if not isinstance(row, sqlite3.Row) else row["name"]) == "project_id"
+        for row in rows
+    )
+
+
 def _append_event(
     conn: sqlite3.Connection,
     *,
@@ -153,19 +175,34 @@ def _append_event(
     actor: str = "runtime",
     reason: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
 ) -> str:
     """Append a coordination event row. Returns the event_id."""
     event_id = _new_event_id()
-    conn.execute(
-        """
-        INSERT INTO coordination_events
-            (event_id, event_type, entity_type, entity_id,
-             from_state, to_state, actor, reason, metadata_json, occurred_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (event_id, event_type, entity_type, entity_id, from_state, to_state,
-         actor, reason, _dump(metadata), _now_utc()),
-    )
+    if _has_project_id_col(conn, "coordination_events"):
+        effective_pid = project_id or _current_project_id()
+        conn.execute(
+            """
+            INSERT INTO coordination_events
+                (event_id, event_type, entity_type, entity_id,
+                 from_state, to_state, actor, reason, metadata_json, occurred_at,
+                 project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (event_id, event_type, entity_type, entity_id, from_state, to_state,
+             actor, reason, _dump(metadata), _now_utc(), effective_pid),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO coordination_events
+                (event_id, event_type, entity_type, entity_id,
+                 from_state, to_state, actor, reason, metadata_json, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (event_id, event_type, entity_type, entity_id, from_state, to_state,
+             actor, reason, _dump(metadata), _now_utc()),
+        )
     return event_id
 
 
@@ -247,8 +284,10 @@ def get_dispatch(conn: sqlite3.Connection, dispatch_id: str) -> Optional[Dict[st
 
 def get_lease(conn: sqlite3.Connection, terminal_id: str) -> Optional[Dict[str, Any]]:
     """Return terminal lease row or None."""
+    pid_clause = " AND project_id = ?" if (_has_project_id_col(conn, "terminal_leases") and _project_filter_enabled()) else ""
+    params = (terminal_id, _current_project_id()) if pid_clause else (terminal_id,)
     row = conn.execute(
-        "SELECT * FROM terminal_leases WHERE terminal_id = ?", (terminal_id,)
+        f"SELECT * FROM terminal_leases WHERE terminal_id = ?{pid_clause}", params
     ).fetchone()
     return dict(row) if row else None
 
@@ -273,6 +312,9 @@ def get_events(
     if event_type:
         clauses.append("event_type = ?")
         params.append(event_type)
+    if _has_project_id_col(conn, "coordination_events") and _project_filter_enabled():
+        clauses.append("project_id = ?")
+        params.append(_current_project_id())
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(
@@ -284,7 +326,12 @@ def get_events(
 
 def project_terminal_state(conn: sqlite3.Connection) -> Dict[str, Any]:
     """Project current terminal_leases state into terminal_state.json format."""
-    rows = conn.execute("SELECT * FROM terminal_leases").fetchall()
+    if _has_project_id_col(conn, "terminal_leases") and _project_filter_enabled():
+        rows = conn.execute(
+            "SELECT * FROM terminal_leases WHERE project_id = ?", (_current_project_id(),)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM terminal_leases").fetchall()
 
     terminals: Dict[str, Any] = {}
     for row in rows:

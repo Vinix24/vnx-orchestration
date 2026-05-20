@@ -26,12 +26,12 @@ if TYPE_CHECKING:
     from ._models import InjectionResult
 
 try:
-    from project_scope import current_project_id
+    from project_scope import current_project_id, project_filter_enabled
 except ImportError:
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    from project_scope import current_project_id  # type: ignore[no-redef]
+    from project_scope import current_project_id, project_filter_enabled  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -225,9 +225,13 @@ def _stamp_source_dispatch_id(db, item, dispatch_id: str) -> bool:
         row_id = int(row_key)
     except (ValueError, TypeError):
         return False
+    has_pid = _table_has_column(db, table, "project_id")
+    pid_clause = " AND project_id = ?" if (has_pid and project_filter_enabled()) else ""
+    pid_params: tuple = (current_project_id(),) if pid_clause else ()
     try:
         row = db.execute(
-            f"SELECT source_dispatch_ids FROM {table} WHERE id = ?", (row_id,)
+            f"SELECT source_dispatch_ids FROM {table} WHERE id = ?{pid_clause}",
+            (row_id, *pid_params),
         ).fetchone()
     except sqlite3.Error:
         return False
@@ -248,8 +252,8 @@ def _stamp_source_dispatch_id(db, item, dispatch_id: str) -> bool:
     ids = ids[-20:]
     try:
         db.execute(
-            f"UPDATE {table} SET source_dispatch_ids = ? WHERE id = ?",
-            (json.dumps(ids), row_id),
+            f"UPDATE {table} SET source_dispatch_ids = ? WHERE id = ?{pid_clause}",
+            (json.dumps(ids), row_id, *pid_params),
         )
     except sqlite3.Error:
         return False
