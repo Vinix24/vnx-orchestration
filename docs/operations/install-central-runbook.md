@@ -37,13 +37,13 @@ bash install-central.sh --dry-run
 bash install-central.sh
 
 # Pin a specific version
-bash install-central.sh --version v1.0.0-rc2
+bash install-central.sh --version v1.0.0-rc3
 
 # Custom install root
-bash install-central.sh --target /opt/vnx-system --version v1.0.0-rc2
+bash install-central.sh --target /opt/vnx-system --version v1.0.0-rc3
 
 # Internal mirror
-bash install-central.sh --source https://internal.git/vnx-orchestration --version v1.0.0-rc2
+bash install-central.sh --source https://internal.git/vnx-orchestration --version v1.0.0-rc3
 ```
 
 After install, add the shim to PATH:
@@ -59,7 +59,7 @@ Add to `~/.zshrc` or `~/.bashrc` to persist.
 Each project can pin a specific installed version:
 
 ```bash
-echo 'v1.0.0-rc2' > /path/to/project/.vnx-version
+echo 'v1.0.0-rc3' > /path/to/project/.vnx-version
 ```
 
 The shim reads `.vnx-version` by traversing up from `cwd`. When no pin is found, it falls back to `~/.vnx-system/current` (the last installed version).
