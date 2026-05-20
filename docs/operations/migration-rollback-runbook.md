@@ -2,6 +2,8 @@
 
 Wave 2a safety companion. Use when a schema migration must be reversed during the rc2/rc3 rollout window or after an accidental apply.
 
+All DB restores use atomic pattern (temp file + verify + mv) to prevent corruption on interrupted restore.
+
 ---
 
 ## When to roll back
@@ -190,9 +192,17 @@ sha256sum --check "$BACKUP/manifest.sha256" && echo "Backup OK"
 # Stop all VNX processes first
 vnx stop --all 2>/dev/null || true
 
-# Restore
-cp "$BACKUP/vnx-dev/quality_intelligence.db" ~/.vnx-data/state/quality_intelligence.db
-cp "$BACKUP/vnx-dev/runtime_coordination.db" ~/.vnx-data/state/runtime_coordination.db
+# Restore — atomic pattern (temp + verify + mv) prevents corruption on interrupted restore
+QI_TMP=~/.vnx-data/state/quality_intelligence.db.restore-tmp
+cp "$BACKUP/vnx-dev/quality_intelligence.db" "$QI_TMP"
+sqlite3 "$QI_TMP" "PRAGMA integrity_check" | head -5
+mv "$QI_TMP" ~/.vnx-data/state/quality_intelligence.db
+
+RC_TMP=~/.vnx-data/state/runtime_coordination.db.restore-tmp
+cp "$BACKUP/vnx-dev/runtime_coordination.db" "$RC_TMP"
+sqlite3 "$RC_TMP" "PRAGMA integrity_check" | head -5
+mv "$RC_TMP" ~/.vnx-data/state/runtime_coordination.db
+
 echo "Restore complete"
 ```
 
