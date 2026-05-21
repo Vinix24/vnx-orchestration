@@ -56,10 +56,10 @@ export default function TokenVolumeChart({ data }: TokenVolumeChartProps) {
   );
 
   const categories = [
-    { key: 'input', label: 'Input Tokens', color: '#ff6b6b' },
-    { key: 'cacheCreation', label: 'Cache Creation', color: '#f97316' },
-    { key: 'cacheRead', label: 'Cache Read', color: '#6B8AE6' },
-    { key: 'output', label: 'Output Tokens', color: '#50fa7b' },
+    { key: 'input', label: 'Input Tokens', color: '#c0392b' },
+    { key: 'cacheCreation', label: 'Cache Creation', color: '#f39c12' },
+    { key: 'cacheRead', label: 'Cache Read', color: '#2e86c1' },
+    { key: 'output', label: 'Output Tokens', color: '#27ae60' },
   ];
 
   return (
@@ -79,44 +79,44 @@ export default function TokenVolumeChart({ data }: TokenVolumeChartProps) {
             <defs>
               {categories.map((cat) => (
                 <linearGradient key={cat.key} id={`vol-grad-${cat.key}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={cat.color} stopOpacity={0.35} />
+                  <stop offset="0%" stopColor={cat.color} stopOpacity={0.25} />
                   <stop offset="95%" stopColor={cat.color} stopOpacity={0.02} />
                 </linearGradient>
               ))}
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false} />
+            <CartesianGrid strokeDasharray="3 3" stroke="#e1e8f0" vertical={false} />
             <XAxis
               dataKey="period"
-              tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
+              tick={{ fill: '#4a5a7a', fontSize: 11 }}
               tickFormatter={(v: string) => {
                 try { return format(parseISO(v), 'MMM d'); } catch { return v; }
               }}
-              stroke="rgba(255,255,255,0.06)"
-              axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
+              stroke="#e1e8f0"
+              axisLine={{ stroke: '#e1e8f0' }}
               tickLine={false}
             />
             <YAxis
-              tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
-              stroke="rgba(255,255,255,0.06)"
+              tick={{ fill: '#4a5a7a', fontSize: 11 }}
+              stroke="#e1e8f0"
               axisLine={false}
               tickLine={false}
               tickFormatter={formatMillions}
             />
             <Tooltip
               contentStyle={{
-                background: 'linear-gradient(135deg, rgba(10, 20, 48, 0.95), rgba(10, 20, 48, 0.85))',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 12,
+                background: '#ffffff',
+                border: '1px solid #e1e8f0',
+                borderRadius: 8,
                 fontSize: 12,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                boxShadow: '0 2px 8px rgba(10, 36, 99, 0.08)',
+                color: '#0a2463',
               }}
               labelFormatter={(v: string) => {
                 try { return format(parseISO(v), 'MMM d, yyyy'); } catch { return v; }
               }}
               formatter={(value: number, name: string) => [formatMillions(value), name]}
             />
-            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8, color: '#4a5a7a' }} />
             {categories.map((cat) => (
               <Area
                 key={cat.key}

@@ -20,40 +20,40 @@ export default function KPICards({ data }: KPICardsProps) {
       label: 'Total Sessions',
       value: totalSessions.toLocaleString(),
       icon: Activity,
-      color: '#f97316',
-      glowColor: 'rgba(249, 115, 22, 0.15)',
+      color: '#f39c12',
+      glowColor: 'rgba(243, 156, 18, 0.10)',
     },
     {
       label: 'Total API Calls',
       value: totalApiCalls.toLocaleString(),
       icon: Zap,
-      color: '#facc15',
-      glowColor: 'rgba(250, 204, 21, 0.12)',
+      color: '#2e86c1',
+      glowColor: 'rgba(46, 134, 193, 0.10)',
     },
     {
       label: 'Avg Context/Call',
       value: `${avgContext.toFixed(1)}K`,
       icon: Database,
-      color: '#6B8AE6',
-      glowColor: 'rgba(107, 138, 230, 0.12)',
+      color: '#0a2463',
+      glowColor: 'rgba(10, 36, 99, 0.08)',
     },
     {
       label: 'Cache Hit %',
       value: `${avgCache.toFixed(1)}%`,
       icon: TrendingUp,
-      color: avgCache >= 95 ? '#50fa7b' : avgCache >= 90 ? '#facc15' : '#ff6b6b',
+      color: avgCache >= 95 ? '#27ae60' : avgCache >= 90 ? '#f39c12' : '#c0392b',
       glowColor: avgCache >= 95
-        ? 'rgba(80, 250, 123, 0.12)'
+        ? 'rgba(39, 174, 96, 0.10)'
         : avgCache >= 90
-        ? 'rgba(250, 204, 21, 0.12)'
-        : 'rgba(255, 107, 107, 0.12)',
+        ? 'rgba(243, 156, 18, 0.10)'
+        : 'rgba(192, 57, 43, 0.10)',
     },
     {
       label: 'Context Rotations',
       value: totalRotations.toLocaleString(),
       icon: RefreshCw,
-      color: '#9B6BE6',
-      glowColor: 'rgba(155, 107, 230, 0.12)',
+      color: '#6B8AE6',
+      glowColor: 'rgba(107, 138, 230, 0.10)',
     },
   ];
 
@@ -65,7 +65,7 @@ export default function KPICards({ data }: KPICardsProps) {
           className="glass-card"
           style={{
             padding: '24px',
-            boxShadow: `0 4px 24px ${card.glowColor}, 0 1px 2px rgba(0,0,0,0.2)`,
+            boxShadow: `0 2px 12px ${card.glowColor}, var(--shadow-sm)`,
           }}
         >
           <div className="flex items-center justify-between mb-4">
@@ -83,7 +83,7 @@ export default function KPICards({ data }: KPICardsProps) {
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                backgroundColor: `${card.color}15`,
+                backgroundColor: `${card.color}12`,
               }}
             >
               <card.icon size={16} style={{ color: card.color }} />

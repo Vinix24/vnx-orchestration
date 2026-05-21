@@ -62,7 +62,7 @@ export default function ModelDonut({ data }: ModelDonutProps) {
                 return (
                   <linearGradient key={entry.name} id={`model-grad-${entry.name}`} x1="0" y1="0" x2="1" y2="1">
                     <stop offset="0%" stopColor={color} stopOpacity={1} />
-                    <stop offset="100%" stopColor={color} stopOpacity={0.7} />
+                    <stop offset="100%" stopColor={color} stopOpacity={0.75} />
                   </linearGradient>
                 );
               })}
@@ -87,12 +87,12 @@ export default function ModelDonut({ data }: ModelDonutProps) {
             </Pie>
             <Tooltip
               contentStyle={{
-                background: 'linear-gradient(135deg, rgba(10, 20, 48, 0.95), rgba(10, 20, 48, 0.85))',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 12,
+                background: '#ffffff',
+                border: '1px solid #e1e8f0',
+                borderRadius: 8,
                 fontSize: 12,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                boxShadow: '0 2px 8px rgba(10, 36, 99, 0.08)',
+                color: '#0a2463',
               }}
               formatter={(value: number, name: string) => [`${value} sessions`, name]}
             />
@@ -111,7 +111,6 @@ export default function ModelDonut({ data }: ModelDonutProps) {
                   height: 10,
                   borderRadius: 3,
                   backgroundColor: color,
-                  boxShadow: `0 0 6px ${color}40`,
                 }}
               />
               <span style={{ color: 'var(--color-muted)' }}>

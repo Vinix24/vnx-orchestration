@@ -41,44 +41,44 @@ export default function TerminalComparison({ data }: TerminalComparisonProps) {
           <BarChart data={terminalData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
             <defs>
               <linearGradient id="grad-sessions" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#f97316" stopOpacity={1} />
-                <stop offset="100%" stopColor="#f97316" stopOpacity={0.6} />
+                <stop offset="0%" stopColor="#f39c12" stopOpacity={1} />
+                <stop offset="100%" stopColor="#f39c12" stopOpacity={0.6} />
               </linearGradient>
               <linearGradient id="grad-api-calls" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#6B8AE6" stopOpacity={1} />
-                <stop offset="100%" stopColor="#6B8AE6" stopOpacity={0.6} />
+                <stop offset="0%" stopColor="#0a2463" stopOpacity={1} />
+                <stop offset="100%" stopColor="#0a2463" stopOpacity={0.6} />
               </linearGradient>
               <linearGradient id="grad-output" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#50fa7b" stopOpacity={1} />
-                <stop offset="100%" stopColor="#50fa7b" stopOpacity={0.6} />
+                <stop offset="0%" stopColor="#2e86c1" stopOpacity={1} />
+                <stop offset="100%" stopColor="#2e86c1" stopOpacity={0.6} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false} />
+            <CartesianGrid strokeDasharray="3 3" stroke="#e1e8f0" vertical={false} />
             <XAxis
               dataKey="terminal"
-              tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
-              stroke="rgba(255,255,255,0.06)"
-              axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
+              tick={{ fill: '#4a5a7a', fontSize: 11 }}
+              stroke="#e1e8f0"
+              axisLine={{ stroke: '#e1e8f0' }}
               tickLine={false}
             />
             <YAxis
-              tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
-              stroke="rgba(255,255,255,0.06)"
+              tick={{ fill: '#4a5a7a', fontSize: 11 }}
+              stroke="#e1e8f0"
               axisLine={false}
               tickLine={false}
             />
             <Tooltip
               contentStyle={{
-                background: 'linear-gradient(135deg, rgba(10, 20, 48, 0.95), rgba(10, 20, 48, 0.85))',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 12,
+                background: '#ffffff',
+                border: '1px solid #e1e8f0',
+                borderRadius: 8,
                 fontSize: 12,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                boxShadow: '0 2px 8px rgba(10, 36, 99, 0.08)',
+                color: '#0a2463',
               }}
-              cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+              cursor={{ fill: 'rgba(10, 36, 99, 0.03)' }}
             />
-            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8, color: '#4a5a7a' }} />
             <Bar dataKey="sessions" fill="url(#grad-sessions)" radius={[6, 6, 0, 0]} />
             <Bar dataKey="api_calls" fill="url(#grad-api-calls)" radius={[6, 6, 0, 0]} />
             <Bar
