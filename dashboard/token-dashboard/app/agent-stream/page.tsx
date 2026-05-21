@@ -25,21 +25,21 @@ interface TerminalStatus {
 }
 
 const EVENT_COLORS: Record<string, string> = {
-  thinking: 'rgba(160, 170, 190, 0.85)',
-  tool_use: '#6B8AE6',
-  tool_result: '#50fa7b',
+  thinking: '#4a5a7a',
+  tool_use: '#2e86c1',
+  tool_result: '#27ae60',
   text: 'var(--color-foreground)',
   result: 'var(--color-foreground)',
-  error: '#ff6b6b',
+  error: '#c0392b',
   init: 'var(--color-accent)',
 };
 
 const EVENT_BG: Record<string, string> = {
-  thinking: 'rgba(160, 170, 190, 0.05)',
-  tool_use: 'rgba(107, 138, 230, 0.08)',
-  tool_result: 'rgba(80, 250, 123, 0.06)',
-  error: 'rgba(255, 107, 107, 0.08)',
-  init: 'rgba(249, 115, 22, 0.08)',
+  thinking: 'rgba(74, 90, 122, 0.05)',
+  tool_use: 'rgba(46, 134, 193, 0.07)',
+  tool_result: 'rgba(39, 174, 96, 0.06)',
+  error: 'rgba(192, 57, 43, 0.06)',
+  init: 'rgba(46, 134, 193, 0.08)',
 };
 
 function EventBadge({ type }: { type: string }) {
@@ -53,7 +53,7 @@ function EventBadge({ type }: { type: string }) {
         letterSpacing: '0.04em',
         textTransform: 'uppercase',
         color,
-        background: EVENT_BG[type] ?? 'rgba(255,255,255,0.04)',
+        background: EVENT_BG[type] ?? 'rgba(10, 36, 99, 0.04)',
         padding: '2px 8px',
         borderRadius: 4,
         border: `1px solid ${color}33`,
@@ -118,7 +118,7 @@ function EventRow({ event }: { event: StreamEvent }) {
         gap: 12,
         alignItems: 'flex-start',
         padding: '8px 12px',
-        borderBottom: '1px solid rgba(255,255,255,0.04)',
+        borderBottom: '1px solid var(--color-border)',
         fontSize: 13,
         lineHeight: '1.5',
       }}
@@ -372,7 +372,7 @@ export default function AgentStreamPage() {
 
         <div className="flex items-center gap-3">
           {/* Mode toggle */}
-          <div style={{ display: 'flex', gap: 4, background: 'rgba(255,255,255,0.04)', borderRadius: 10, padding: 3 }}>
+          <div style={{ display: 'flex', gap: 4, background: 'var(--color-card-hover)', borderRadius: 8, padding: 3, border: '1px solid var(--color-border)' }}>
             {(['live', 'archive'] as StreamMode[]).map((m) => {
               const active = m === mode;
               return (
@@ -384,9 +384,9 @@ export default function AgentStreamPage() {
                     alignItems: 'center',
                     gap: 5,
                     padding: '6px 14px',
-                    borderRadius: 8,
-                    background: active ? 'rgba(249, 115, 22, 0.15)' : 'transparent',
-                    border: `1px solid ${active ? 'rgba(249, 115, 22, 0.3)' : 'transparent'}`,
+                    borderRadius: 6,
+                    background: active ? 'var(--color-accent-soft)' : 'transparent',
+                    border: `1px solid ${active ? 'rgba(46, 134, 193, 0.3)' : 'transparent'}`,
                     cursor: 'pointer',
                     fontSize: 12,
                     fontWeight: active ? 600 : 400,
@@ -402,8 +402,8 @@ export default function AgentStreamPage() {
 
           {/* Connection status (live mode only) */}
           {mode === 'live' && (
-            <div className="flex items-center gap-2" style={{ fontSize: 12, color: connected ? '#50fa7b' : 'var(--color-muted)' }}>
-              <Circle size={8} fill={connected ? '#50fa7b' : 'var(--color-muted)'} />
+            <div className="flex items-center gap-2" style={{ fontSize: 12, color: connected ? '#27ae60' : 'var(--color-muted)' }}>
+              <Circle size={8} fill={connected ? '#27ae60' : 'var(--color-muted)'} />
               {connected ? 'Connected' : 'Disconnected'}
             </div>
           )}
@@ -418,8 +418,8 @@ export default function AgentStreamPage() {
                 gap: 6,
                 padding: '7px 14px',
                 borderRadius: 8,
-                background: paused ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.05)',
-                border: `1px solid ${paused ? 'rgba(249, 115, 22, 0.3)' : 'rgba(255,255,255,0.1)'}`,
+                background: paused ? 'var(--color-accent-soft)' : 'var(--color-card-hover)',
+                border: `1px solid ${paused ? 'rgba(46, 134, 193, 0.3)' : 'var(--color-border)'}`,
                 cursor: 'pointer',
                 fontSize: 12,
                 color: paused ? 'var(--color-accent)' : 'var(--color-muted)',
@@ -445,8 +445,8 @@ export default function AgentStreamPage() {
                   style={{
                     padding: '7px 16px',
                     borderRadius: 8,
-                    background: active ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.05)',
-                    border: `1px solid ${active ? 'rgba(249, 115, 22, 0.3)' : 'rgba(255,255,255,0.1)'}`,
+                    background: active ? 'var(--color-accent-soft)' : 'var(--color-card-hover)',
+                    border: `1px solid ${active ? 'rgba(46, 134, 193, 0.3)' : 'var(--color-border)'}`,
                     cursor: 'pointer',
                     fontSize: 12,
                     fontWeight: active ? 600 : 400,
@@ -473,7 +473,7 @@ export default function AgentStreamPage() {
                         width: 6,
                         height: 6,
                         borderRadius: '50%',
-                        background: '#50fa7b',
+                        background: '#27ae60',
                       }}
                     />
                   )}
@@ -490,9 +490,9 @@ export default function AgentStreamPage() {
           style={{
             marginBottom: 16,
             padding: '12px 16px',
-            background: 'rgba(255,255,255,0.02)',
+            background: 'var(--color-card-hover)',
             borderRadius: 8,
-            border: '1px solid rgba(255,255,255,0.07)',
+            border: '1px solid var(--color-border)',
             display: 'flex',
             alignItems: 'center',
             gap: 12,
@@ -508,8 +508,8 @@ export default function AgentStreamPage() {
               value={selectedArchive}
               onChange={(e) => setSelectedArchive(e.target.value)}
               style={{
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.12)',
+                background: '#ffffff',
+                border: '1px solid var(--color-border)',
                 borderRadius: 6,
                 color: 'var(--color-foreground)',
                 fontSize: 12,
@@ -540,9 +540,9 @@ export default function AgentStreamPage() {
             gap: 24,
             padding: '10px 16px',
             marginBottom: 16,
-            background: 'rgba(255,255,255,0.02)',
+            background: 'var(--color-card-hover)',
             borderRadius: 8,
-            border: '1px solid rgba(255,255,255,0.06)',
+            border: '1px solid var(--color-border)',
             fontSize: 12,
             color: 'var(--color-muted)',
           }}
@@ -563,9 +563,9 @@ export default function AgentStreamPage() {
             gap: 24,
             padding: '10px 16px',
             marginBottom: 16,
-            background: 'rgba(255,255,255,0.02)',
+            background: 'var(--color-card-hover)',
             borderRadius: 8,
-            border: '1px solid rgba(255,255,255,0.06)',
+            border: '1px solid var(--color-border)',
             fontSize: 12,
             color: 'var(--color-muted)',
           }}
@@ -588,10 +588,10 @@ export default function AgentStreamPage() {
           style={{
             padding: '12px 16px',
             marginBottom: 16,
-            background: 'rgba(255, 107, 107, 0.08)',
+            background: 'rgba(192, 57, 43, 0.06)',
             borderRadius: 8,
-            border: '1px solid rgba(255, 107, 107, 0.2)',
-            color: '#ff6b6b',
+            border: '1px solid rgba(192, 57, 43, 0.2)',
+            color: '#c0392b',
             fontSize: 13,
           }}
         >

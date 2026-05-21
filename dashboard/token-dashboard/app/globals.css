@@ -1,35 +1,45 @@
 @import "tailwindcss";
 
 @theme inline {
-  --color-background: #070b16;
-  --color-card: #0a1430;
-  --color-card-hover: #0d1a3d;
-  --color-card-border: rgba(255, 255, 255, 0.12);
-  --color-primary: #0a2463;
-  --color-accent: #f97316;
-  --color-accent-gold: #facc15;
-  --color-foreground: #f4f4f9;
-  --color-muted: rgba(244, 244, 249, 0.65);
-  --color-success: #50fa7b;
-  --color-warning: #facc15;
-  --color-error: #ff6b6b;
+  --color-background:   #ffffff;
+  --color-card:         #ffffff;
+  --color-card-hover:   #f4f7fb;
+  --color-card-border:  #e1e8f0;
+  --color-sidebar:      #f4f7fb;
+  --color-sidebar-hover:#e5edf7;
+  --color-primary:      #0a2463;
+  --color-accent:       #2e86c1;
+  --color-accent-soft:  #e5f6ff;
+  --color-accent-gold:  #f39c12;
+  --color-foreground:   #0a2463;
+  --color-muted:        #4a5a7a;
+  --color-text-faint:   #8a96ad;
+  --color-border:       #e1e8f0;
+  --color-border-strong:#c8d4e5;
+  --color-success:      #27ae60;
+  --color-warning:      #f39c12;
+  --color-error:        #c0392b;
 
-  --color-chart-t-manager: #f97316;
-  --color-chart-t0: #6B8AE6;
-  --color-chart-t1: #50fa7b;
-  --color-chart-t2: #facc15;
-  --color-chart-t3: #9B6BE6;
-  --color-chart-unknown: #6B6B6B;
+  --color-chart-t-manager: #f39c12;
+  --color-chart-t0:        #0a2463;
+  --color-chart-t1:        #2e86c1;
+  --color-chart-t2:        #27ae60;
+  --color-chart-t3:        #6B8AE6;
+  --color-chart-unknown:   #8a96ad;
 
-  --color-model-opus: #f97316;
-  --color-model-sonnet: #6B8AE6;
+  --color-model-opus:   #0a2463;
+  --color-model-sonnet: #2e86c1;
+
+  --shadow-sm: 0 1px 2px rgba(10, 36, 99, 0.06);
+  --shadow-md: 0 2px 8px rgba(10, 36, 99, 0.08);
 }
 
 html,
 body {
   background-color: var(--color-background);
   color: var(--color-foreground);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -77,41 +87,21 @@ body {
   }
 }
 
-/* ===== Glassmorphism Card ===== */
+/* ===== Card ===== */
 
 .glass-card {
-  background: linear-gradient(
-    135deg,
-    rgba(10, 20, 48, 0.85) 0%,
-    rgba(10, 20, 48, 0.65) 100%
-  );
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
   position: relative;
   overflow: hidden;
-  transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.2s ease;
-}
-
-.glass-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.15) 50%,
-    transparent 100%
-  );
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: var(--shadow-md);
 }
 
 .glass-card:hover {
-  border-color: rgba(255, 255, 255, 0.16);
-  transform: translateY(-1px);
+  border-color: var(--color-border-strong);
+  box-shadow: 0 4px 16px rgba(10, 36, 99, 0.12);
 }
 
 /* ===== Animate In ===== */
@@ -141,16 +131,16 @@ body {
   animation: fadeIn 0.35s ease-out both;
 }
 
-/* ===== Recharts tooltip override for dark mode ===== */
+/* ===== Recharts tooltip override for light mode ===== */
 
 .recharts-default-tooltip {
-  background: linear-gradient(135deg, rgba(10, 20, 48, 0.95) 0%, rgba(10, 20, 48, 0.85) 100%) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.12) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+  background: #ffffff !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+  box-shadow: var(--shadow-md) !important;
   padding: 12px 16px !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 .recharts-tooltip-item {
@@ -175,18 +165,18 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(10, 36, 99, 0.12);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(10, 36, 99, 0.2);
 }
 
 /* Firefox scrollbar */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  scrollbar-color: rgba(10, 36, 99, 0.12) transparent;
 }
 
 /* ===== Table Row Hover ===== */
@@ -196,7 +186,7 @@ body {
 }
 
 .table-row-hover:hover {
-  background-color: rgba(255, 255, 255, 0.03);
+  background-color: var(--color-card-hover);
 }
 
 /* ===== Section Header ===== */

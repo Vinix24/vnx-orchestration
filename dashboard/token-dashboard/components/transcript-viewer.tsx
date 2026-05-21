@@ -8,10 +8,10 @@ import type { ConversationSession, TranscriptMessage } from '@/lib/types';
 const PAGE_SIZE = 50;
 
 const TERMINAL_COLORS: Record<string, string> = {
-  T0: '#6B8AE6',
-  T1: '#50fa7b',
-  T2: '#facc15',
-  T3: '#9B6BE6',
+  T0: '#0a2463',
+  T1: '#2e86c1',
+  T2: '#27ae60',
+  T3: '#6B8AE6',
 };
 
 // ── Content parsing ────────────────────────────────────────────────────────────
@@ -83,12 +83,12 @@ function TextBlock({ text }: { text: string }) {
                 margin: '8px 0',
                 padding: '10px 12px',
                 borderRadius: 6,
-                background: 'rgba(0,0,0,0.35)',
-                border: '1px solid rgba(255,255,255,0.08)',
+                background: '#f4f7fb',
+                border: '1px solid var(--color-border)',
                 fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                 fontSize: 11,
                 lineHeight: 1.5,
-                color: 'rgba(244,244,249,0.85)',
+                color: 'var(--color-foreground)',
                 overflowX: 'auto',
                 whiteSpace: 'pre',
               }}
@@ -110,8 +110,8 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
       style={{
         margin: '4px 0',
         borderRadius: 6,
-        border: '1px solid rgba(107,138,230,0.3)',
-        background: 'rgba(107,138,230,0.06)',
+        border: '1px solid rgba(46, 134, 193, 0.3)',
+        background: 'rgba(46, 134, 193, 0.06)',
         overflow: 'hidden',
       }}
     >
@@ -130,10 +130,10 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
         }}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <span style={{ fontSize: 10, fontWeight: 700, color: '#6B8AE6', letterSpacing: '0.04em' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: '#2e86c1', letterSpacing: '0.04em' }}>
           TOOL
         </span>
-        <span style={{ fontSize: 11, color: 'rgba(244,244,249,0.7)', fontFamily: 'ui-monospace, monospace' }}>
+        <span style={{ fontSize: 11, color: 'var(--color-muted)', fontFamily: 'ui-monospace, monospace' }}>
           {name}
         </span>
       </button>
@@ -145,10 +145,10 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
             fontSize: 10,
             lineHeight: 1.5,
-            color: 'rgba(244,244,249,0.7)',
+            color: 'var(--color-muted)',
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
-            borderTop: '1px solid rgba(107,138,230,0.15)',
+            borderTop: '1px solid rgba(46, 134, 193, 0.15)',
           }}
         >
           {JSON.stringify(input, null, 2)}
@@ -166,8 +166,8 @@ function ToolResultBlock({ content }: { content: string }) {
       style={{
         margin: '4px 0',
         borderRadius: 6,
-        border: '1px solid rgba(80,250,123,0.2)',
-        background: 'rgba(80,250,123,0.04)',
+        border: '1px solid rgba(39, 174, 96, 0.25)',
+        background: 'rgba(39, 174, 96, 0.05)',
         overflow: 'hidden',
       }}
     >
@@ -186,11 +186,11 @@ function ToolResultBlock({ content }: { content: string }) {
         }}
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <span style={{ fontSize: 10, fontWeight: 700, color: '#50fa7b', letterSpacing: '0.04em' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: '#27ae60', letterSpacing: '0.04em' }}>
           RESULT
         </span>
         {!open && (
-          <span style={{ fontSize: 10, color: 'rgba(244,244,249,0.45)', fontFamily: 'ui-monospace, monospace' }}>
+          <span style={{ fontSize: 10, color: 'var(--color-text-faint)', fontFamily: 'ui-monospace, monospace' }}>
             {preview}{content.length > 80 ? '…' : ''}
           </span>
         )}
@@ -203,10 +203,10 @@ function ToolResultBlock({ content }: { content: string }) {
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
             fontSize: 10,
             lineHeight: 1.5,
-            color: 'rgba(244,244,249,0.65)',
+            color: 'var(--color-muted)',
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
-            borderTop: '1px solid rgba(80,250,123,0.1)',
+            borderTop: '1px solid rgba(39, 174, 96, 0.12)',
           }}
         >
           {content}
@@ -247,8 +247,8 @@ function MessageBubble({ msg }: { msg: TranscriptMessage }) {
           maxWidth: '85%',
           padding: '10px 14px',
           borderRadius: isUser ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-          background: isUser ? 'rgba(107,138,230,0.15)' : 'rgba(255,255,255,0.04)',
-          border: `1px solid ${isUser ? 'rgba(107,138,230,0.3)' : 'rgba(255,255,255,0.08)'}`,
+          background: isUser ? 'rgba(46, 134, 193, 0.10)' : 'var(--color-card-hover)',
+          border: `1px solid ${isUser ? 'rgba(46, 134, 193, 0.25)' : 'var(--color-border)'}`,
           fontSize: 13,
           color: 'var(--color-foreground)',
         }}
@@ -268,7 +268,7 @@ function MessageBubble({ msg }: { msg: TranscriptMessage }) {
         style={{
           marginTop: 3,
           fontSize: 10,
-          color: 'var(--color-muted)',
+          color: 'var(--color-text-faint)',
           display: 'flex',
           gap: 6,
         }}
@@ -301,7 +301,7 @@ export default function TranscriptViewer({ session, onClose }: TranscriptViewerP
   const visible = messages.slice(0, visibleCount);
   const hasMore = visibleCount < messages.length;
 
-  const termColor = session.terminal ? (TERMINAL_COLORS[session.terminal] ?? '#6B6B6B') : '#6B6B6B';
+  const termColor = session.terminal ? (TERMINAL_COLORS[session.terminal] ?? '#8a96ad') : '#8a96ad';
 
   return (
     <div
@@ -316,7 +316,7 @@ export default function TranscriptViewer({ session, onClose }: TranscriptViewerP
       <div
         style={{
           padding: '16px 20px 12px',
-          borderBottom: '1px solid rgba(255,255,255,0.07)',
+          borderBottom: '1px solid var(--color-border)',
           flexShrink: 0,
         }}
       >
@@ -328,7 +328,7 @@ export default function TranscriptViewer({ session, onClose }: TranscriptViewerP
                 borderRadius: 6,
                 fontSize: 10,
                 fontWeight: 700,
-                background: `${termColor}18`,
+                background: `${termColor}14`,
                 border: `1px solid ${termColor}35`,
                 color: termColor,
                 letterSpacing: '0.04em',
@@ -410,8 +410,8 @@ export default function TranscriptViewer({ session, onClose }: TranscriptViewerP
             style={{
               padding: '16px',
               borderRadius: 8,
-              background: 'rgba(255,107,107,0.08)',
-              border: '1px solid rgba(255,107,107,0.25)',
+              background: 'rgba(192, 57, 43, 0.06)',
+              border: '1px solid rgba(192, 57, 43, 0.2)',
               color: 'var(--color-error)',
               fontSize: 13,
             }}
@@ -445,8 +445,8 @@ export default function TranscriptViewer({ session, onClose }: TranscriptViewerP
                 padding: '7px 18px',
                 borderRadius: 8,
                 fontSize: 12,
-                background: 'rgba(255,255,255,0.05)',
-                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'var(--color-card-hover)',
+                border: '1px solid var(--color-border)',
                 color: 'var(--color-muted)',
                 cursor: 'pointer',
               }}
@@ -467,12 +467,12 @@ function MetaPill({ label, value }: { label: string; value: string }) {
         fontSize: 10,
         padding: '2px 8px',
         borderRadius: 10,
-        background: 'rgba(255,255,255,0.05)',
-        border: '1px solid rgba(255,255,255,0.1)',
+        background: 'var(--color-card-hover)',
+        border: '1px solid var(--color-border)',
         color: 'var(--color-muted)',
       }}
     >
-      <span style={{ color: 'rgba(244,244,249,0.4)', marginRight: 4 }}>{label}</span>
+      <span style={{ color: 'var(--color-text-faint)', marginRight: 4 }}>{label}</span>
       {value}
     </span>
   );

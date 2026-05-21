@@ -17,8 +17,8 @@ function SortToggle({ sortOrder, onToggle }: SortToggleProps) {
       style={{
         padding: '6px 14px',
         borderRadius: 20,
-        border: '1.5px solid rgba(255, 255, 255, 0.12)',
-        backgroundColor: 'rgba(255, 255, 255, 0.04)',
+        border: '1.5px solid var(--color-border)',
+        backgroundColor: 'var(--color-card-hover)',
         color: 'var(--color-foreground)',
         cursor: 'pointer',
       }}
@@ -84,7 +84,7 @@ interface SessionCardProps {
 function SessionCard({ session, isSelected, onSelect, rotationChain }: SessionCardProps) {
   const terminalColor = session.terminal
     ? TERMINAL_COLORS[session.terminal] ?? TERMINAL_COLORS.unknown
-    : 'rgba(255, 255, 255, 0.3)';
+    : 'var(--color-border-strong)';
 
   return (
     <button
@@ -93,9 +93,9 @@ function SessionCard({ session, isSelected, onSelect, rotationChain }: SessionCa
       style={{
         display: 'block',
         padding: '14px 18px',
-        borderRadius: 12,
-        border: `1.5px solid ${isSelected ? `${terminalColor}50` : 'rgba(255, 255, 255, 0.06)'}`,
-        backgroundColor: isSelected ? `${terminalColor}0C` : 'rgba(255, 255, 255, 0.02)',
+        borderRadius: 10,
+        border: `1.5px solid ${isSelected ? `${terminalColor}50` : 'var(--color-border)'}`,
+        backgroundColor: isSelected ? `${terminalColor}0A` : 'transparent',
         cursor: 'pointer',
         position: 'relative',
         overflow: 'hidden',
@@ -125,7 +125,7 @@ function SessionCard({ session, isSelected, onSelect, rotationChain }: SessionCa
               style={{
                 padding: '2px 7px',
                 borderRadius: 6,
-                backgroundColor: `${terminalColor}18`,
+                backgroundColor: `${terminalColor}14`,
                 color: terminalColor,
                 border: `1px solid ${terminalColor}30`,
               }}
@@ -142,7 +142,7 @@ function SessionCard({ session, isSelected, onSelect, rotationChain }: SessionCa
         </div>
         <span
           className="text-xs shrink-0"
-          style={{ color: 'var(--color-muted)', whiteSpace: 'nowrap' }}
+          style={{ color: 'var(--color-text-faint)', whiteSpace: 'nowrap' }}
         >
           {formatTimestamp(session.last_message)}
         </span>
@@ -203,7 +203,7 @@ function WorktreeGroupHeader({ root, exists, count }: WorktreeGroupHeaderProps) 
       style={{
         padding: '8px 4px',
         color: exists ? 'var(--color-muted)' : 'var(--color-error)',
-        borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+        borderBottom: '1px solid var(--color-border)',
         marginBottom: 8,
       }}
     >
@@ -301,10 +301,10 @@ export default function ConversationTimeline({
                 style={{
                   padding: '4px 12px',
                   borderRadius: 20,
-                  backgroundColor: active ? `${color}18` : 'rgba(255, 255, 255, 0.03)',
-                  border: `1.5px solid ${active ? `${color}60` : 'rgba(255, 255, 255, 0.06)'}`,
+                  backgroundColor: active ? `${color}14` : 'transparent',
+                  border: `1.5px solid ${active ? `${color}60` : 'var(--color-border)'}`,
                   color: active ? color : 'var(--color-muted)',
-                  opacity: active ? 1 : 0.55,
+                  opacity: active ? 1 : 0.7,
                   cursor: 'pointer',
                 }}
               >
@@ -313,7 +313,7 @@ export default function ConversationTimeline({
                     width: 6,
                     height: 6,
                     borderRadius: '50%',
-                    backgroundColor: active ? color : 'rgba(255, 255, 255, 0.15)',
+                    backgroundColor: active ? color : 'var(--color-border-strong)',
                     transition: 'all 0.2s ease',
                   }}
                 />

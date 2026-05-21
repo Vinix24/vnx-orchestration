@@ -41,11 +41,11 @@ export default function PeriodSelector({
           className="text-sm outline-none transition-all"
           style={{
             padding: '7px 12px',
-            borderRadius: 10,
-            backgroundColor: 'rgba(10, 20, 48, 0.8)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
+            borderRadius: 8,
+            backgroundColor: '#ffffff',
+            border: '1px solid var(--color-border)',
             color: 'var(--color-foreground)',
-            colorScheme: 'dark',
+            colorScheme: 'light',
           }}
         />
       </div>
@@ -64,11 +64,11 @@ export default function PeriodSelector({
           className="text-sm outline-none transition-all"
           style={{
             padding: '7px 12px',
-            borderRadius: 10,
-            backgroundColor: 'rgba(10, 20, 48, 0.8)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
+            borderRadius: 8,
+            backgroundColor: '#ffffff',
+            border: '1px solid var(--color-border)',
             color: 'var(--color-foreground)',
-            colorScheme: 'dark',
+            colorScheme: 'light',
           }}
         />
       </div>
@@ -76,9 +76,9 @@ export default function PeriodSelector({
       <div
         className="flex overflow-hidden"
         style={{
-          borderRadius: 10,
-          border: '1px solid rgba(255, 255, 255, 0.08)',
-          backgroundColor: 'rgba(10, 20, 48, 0.6)',
+          borderRadius: 8,
+          border: '1px solid var(--color-border)',
+          backgroundColor: 'var(--color-card-hover)',
         }}
         role="radiogroup"
         aria-label="Group by period"
@@ -95,11 +95,10 @@ export default function PeriodSelector({
               style={{
                 padding: '7px 18px',
                 backgroundColor: isActive ? 'var(--color-accent)' : 'transparent',
-                color: isActive ? '#070b16' : 'var(--color-muted)',
+                color: isActive ? '#ffffff' : 'var(--color-muted)',
                 border: 'none',
                 cursor: 'pointer',
                 position: 'relative',
-                boxShadow: isActive ? '0 2px 8px rgba(249, 115, 22, 0.3)' : 'none',
               }}
             >
               {opt.label}

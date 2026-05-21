@@ -1,7 +1,10 @@
 import { Suspense } from 'react';
 import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
 import Sidebar from '@/components/sidebar';
 import './globals.css';
+
+const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: 'VNX Token Dashboard',
@@ -14,7 +17,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="nl" className={inter.className}>
       <body>
         <Suspense>
           <Sidebar />
@@ -22,10 +25,9 @@ export default function RootLayout({
         <main
           className="min-h-screen page-enter"
           style={{
-            marginLeft: 260,
+            marginLeft: 240,
             padding: '32px 40px',
             backgroundColor: 'var(--color-background)',
-            backgroundImage: 'radial-gradient(ellipse at 20% 0%, rgba(249, 115, 22, 0.03) 0%, transparent 60%)',
           }}
         >
           {children}

@@ -45,12 +45,11 @@ export default function TerminalFilter({ selected, onChange }: TerminalFilterPro
             style={{
               padding: '5px 14px',
               borderRadius: 20,
-              backgroundColor: active ? `${color}18` : 'rgba(255, 255, 255, 0.03)',
-              border: `1.5px solid ${active ? `${color}60` : 'rgba(255, 255, 255, 0.06)'}`,
+              backgroundColor: active ? `${color}14` : 'transparent',
+              border: `1.5px solid ${active ? `${color}60` : 'var(--color-border)'}`,
               color: active ? color : 'var(--color-muted)',
-              opacity: active ? 1 : 0.55,
+              opacity: active ? 1 : 0.7,
               cursor: 'pointer',
-              boxShadow: active ? `0 0 12px ${color}15` : 'none',
             }}
           >
             <span
@@ -58,8 +57,7 @@ export default function TerminalFilter({ selected, onChange }: TerminalFilterPro
                 width: 7,
                 height: 7,
                 borderRadius: '50%',
-                backgroundColor: active ? color : 'rgba(255, 255, 255, 0.15)',
-                boxShadow: active ? `0 0 6px ${color}50` : 'none',
+                backgroundColor: active ? color : 'var(--color-border-strong)',
                 transition: 'all 0.2s ease',
               }}
             />

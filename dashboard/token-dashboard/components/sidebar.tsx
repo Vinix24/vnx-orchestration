@@ -1,6 +1,5 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { LayoutDashboard, Coins, Monitor, Cpu, DollarSign, MessageSquare, Radio, AlertTriangle, Kanban, ShieldAlert, Activity, FileText, Brain, Lightbulb, ClipboardList } from 'lucide-react';
@@ -57,29 +56,33 @@ export default function Sidebar() {
     <aside
       className="fixed left-0 top-0 h-screen flex flex-col"
       style={{
-        width: 260,
-        background: 'linear-gradient(180deg, #0c1638 0%, #080e24 50%, #070b16 100%)',
-        borderRight: '1px solid rgba(255, 255, 255, 0.06)',
+        width: 240,
+        background: 'var(--color-sidebar)',
+        borderRight: '1px solid var(--color-border)',
       }}
     >
       {/* Logo area */}
       <div
-        className="px-6 py-7"
+        className="px-5 py-6"
         style={{
-          borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+          borderBottom: '1px solid var(--color-border)',
         }}
       >
         <div className="flex items-center gap-3">
-          <Image
-            src="/logo.png"
-            alt="VNX"
-            width={36}
-            height={36}
+          <div
             style={{
-              borderRadius: 10,
-              boxShadow: '0 4px 16px rgba(249, 115, 22, 0.3)',
+              width: 28,
+              height: 28,
+              borderRadius: 7,
+              background: 'linear-gradient(135deg, var(--color-primary), var(--color-accent))',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
             }}
-          />
+          >
+            <span style={{ color: 'white', fontWeight: 700, fontSize: 11 }}>VNX</span>
+          </div>
           <div>
             <h1
               className="text-sm font-semibold"
@@ -87,7 +90,7 @@ export default function Sidebar() {
             >
               Token Dashboard
             </h1>
-            <p className="text-xs" style={{ color: 'var(--color-muted)', marginTop: 2 }}>
+            <p className="text-xs" style={{ color: 'var(--color-text-faint)', marginTop: 2 }}>
               Session Analytics
             </p>
           </div>
@@ -103,8 +106,8 @@ export default function Sidebar() {
           style={{
             display: 'flex',
             flexWrap: 'wrap',
-            gap: 6,
-            padding: '4px 14px 12px',
+            gap: 5,
+            padding: '4px 10px 12px',
           }}
         >
           {DOMAINS.map((d) => {
@@ -120,8 +123,8 @@ export default function Sidebar() {
                   borderRadius: 20,
                   fontSize: 11,
                   fontWeight: isActive ? 600 : 400,
-                  background: isActive ? 'rgba(249, 115, 22, 0.15)' : 'rgba(255,255,255,0.04)',
-                  border: `1px solid ${isActive ? 'rgba(249, 115, 22, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                  background: isActive ? 'var(--color-accent-soft)' : 'transparent',
+                  border: `1px solid ${isActive ? 'rgba(46, 134, 193, 0.4)' : 'var(--color-border)'}`,
                   color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
                   cursor: 'pointer',
                 }}
@@ -133,7 +136,7 @@ export default function Sidebar() {
         </div>
 
         {/* Divider */}
-        <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', margin: '0 14px 8px' }} />
+        <div style={{ height: 1, background: 'var(--color-border)', margin: '0 10px 8px' }} />
 
         {/* Operator section */}
         {showOperator(activeDomain) && (
@@ -143,9 +146,9 @@ export default function Sidebar() {
                 fontSize: 10,
                 fontWeight: 700,
                 letterSpacing: '0.08em',
-                color: 'rgba(249, 115, 22, 0.7)',
+                color: 'var(--color-text-faint)',
                 textTransform: 'uppercase',
-                padding: '4px 14px 6px',
+                padding: '4px 10px 6px',
               }}
             >
               Operator
@@ -158,9 +161,9 @@ export default function Sidebar() {
                   href={href}
                   className="flex items-center gap-3 text-sm transition-all"
                   style={{
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    backgroundColor: isActive ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
+                    padding: '9px 10px',
+                    borderRadius: 8,
+                    backgroundColor: isActive ? 'var(--color-accent-soft)' : 'transparent',
                     color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
                     fontWeight: isActive ? 600 : 400,
                     position: 'relative',
@@ -177,12 +180,11 @@ export default function Sidebar() {
                         width: 3,
                         height: 20,
                         borderRadius: '0 3px 3px 0',
-                        background: 'linear-gradient(180deg, #f97316, #fb923c)',
-                        boxShadow: '0 0 8px rgba(249, 115, 22, 0.4)',
+                        background: 'linear-gradient(180deg, var(--color-accent), var(--color-primary))',
                       }}
                     />
                   )}
-                  <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
+                  <Icon size={17} strokeWidth={isActive ? 2.2 : 1.8} />
                   <span>{label}</span>
                 </Link>
               );
@@ -192,7 +194,7 @@ export default function Sidebar() {
 
         {/* Divider — only when both sections visible */}
         {showOperator(activeDomain) && showAnalytics(activeDomain) && (
-          <div style={{ height: 1, background: 'rgba(255,255,255,0.05)', margin: '4px 14px 8px' }} />
+          <div style={{ height: 1, background: 'var(--color-border)', margin: '4px 10px 8px' }} />
         )}
 
         {/* Analytics section */}
@@ -203,9 +205,9 @@ export default function Sidebar() {
                 fontSize: 10,
                 fontWeight: 700,
                 letterSpacing: '0.08em',
-                color: 'rgba(244, 244, 249, 0.35)',
+                color: 'var(--color-text-faint)',
                 textTransform: 'uppercase',
-                padding: '4px 14px 6px',
+                padding: '4px 10px 6px',
               }}
             >
               Analytics
@@ -218,9 +220,9 @@ export default function Sidebar() {
                   href={href}
                   className="flex items-center gap-3 text-sm transition-all"
                   style={{
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    backgroundColor: isActive ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
+                    padding: '9px 10px',
+                    borderRadius: 8,
+                    backgroundColor: isActive ? 'var(--color-accent-soft)' : 'transparent',
                     color: isActive ? 'var(--color-accent)' : 'var(--color-muted)',
                     fontWeight: isActive ? 600 : 400,
                     position: 'relative',
@@ -237,12 +239,11 @@ export default function Sidebar() {
                         width: 3,
                         height: 20,
                         borderRadius: '0 3px 3px 0',
-                        background: 'linear-gradient(180deg, #f97316, #fb923c)',
-                        boxShadow: '0 0 8px rgba(249, 115, 22, 0.4)',
+                        background: 'linear-gradient(180deg, var(--color-accent), var(--color-primary))',
                       }}
                     />
                   )}
-                  <Icon size={18} strokeWidth={isActive ? 2.2 : 1.8} />
+                  <Icon size={17} strokeWidth={isActive ? 2.2 : 1.8} />
                   <span>{label}</span>
                 </Link>
               );
@@ -253,11 +254,10 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div
-        className="px-6 py-4 text-xs"
+        className="px-5 py-4 text-xs"
         style={{
-          borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-          color: 'var(--color-muted)',
-          opacity: 0.7,
+          borderTop: '1px solid var(--color-border)',
+          color: 'var(--color-text-faint)',
         }}
       >
         Claude Code Analytics

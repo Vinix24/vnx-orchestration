@@ -38,51 +38,51 @@ export default function CacheEfficiency({ data }: CacheEfficiencyProps) {
       <div style={{ width: '100%', height: 300 }}>
         <ResponsiveContainer>
           <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false} />
+            <CartesianGrid strokeDasharray="3 3" stroke="#e1e8f0" vertical={false} />
             <XAxis
               dataKey="period"
-              tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
+              tick={{ fill: '#4a5a7a', fontSize: 11 }}
               tickFormatter={(v: string) => {
                 try { return format(parseISO(v), 'MMM d'); } catch { return v; }
               }}
-              stroke="rgba(255,255,255,0.06)"
-              axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
+              stroke="#e1e8f0"
+              axisLine={{ stroke: '#e1e8f0' }}
               tickLine={false}
             />
             <YAxis
               domain={[80, 100]}
-              tick={{ fill: 'rgba(244,244,249,0.45)', fontSize: 11 }}
-              stroke="rgba(255,255,255,0.06)"
+              tick={{ fill: '#4a5a7a', fontSize: 11 }}
+              stroke="#e1e8f0"
               axisLine={false}
               tickLine={false}
               tickFormatter={(v: number) => `${v}%`}
             />
             <Tooltip
               contentStyle={{
-                background: 'linear-gradient(135deg, rgba(10, 20, 48, 0.95), rgba(10, 20, 48, 0.85))',
-                backdropFilter: 'blur(16px)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 12,
+                background: '#ffffff',
+                border: '1px solid #e1e8f0',
+                borderRadius: 8,
                 fontSize: 12,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                boxShadow: '0 2px 8px rgba(10, 36, 99, 0.08)',
+                color: '#0a2463',
               }}
               labelFormatter={(v: string) => {
                 try { return format(parseISO(v), 'MMM d, yyyy'); } catch { return v; }
               }}
               formatter={(value: number) => [`${value}%`]}
             />
-            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+            <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8, color: '#4a5a7a' }} />
             <ReferenceLine
               y={95}
               stroke="var(--color-success)"
               strokeDasharray="6 3"
-              strokeOpacity={0.4}
+              strokeOpacity={0.6}
               label={{
                 value: '95% target',
                 position: 'right',
                 fill: 'var(--color-success)',
                 fontSize: 10,
-                opacity: 0.7,
+                opacity: 0.8,
               }}
             />
             {terminals.map((terminal) => (
@@ -92,11 +92,11 @@ export default function CacheEfficiency({ data }: CacheEfficiencyProps) {
                 dataKey={terminal}
                 stroke={TERMINAL_COLORS[terminal] ?? TERMINAL_COLORS.unknown}
                 strokeWidth={2.5}
-                dot={{ r: 3, fill: '#070b16', strokeWidth: 2 }}
+                dot={{ r: 3, fill: '#ffffff', strokeWidth: 2 }}
                 activeDot={{
                   r: 6,
                   fill: TERMINAL_COLORS[terminal] ?? TERMINAL_COLORS.unknown,
-                  stroke: '#070b16',
+                  stroke: '#ffffff',
                   strokeWidth: 2,
                 }}
                 connectNulls
