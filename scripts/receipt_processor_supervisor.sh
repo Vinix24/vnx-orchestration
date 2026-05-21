@@ -20,6 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 source "$SCRIPT_DIR/lib/process_lifecycle.sh"
 
+# Respect PAUSED marker: refuse to start while VNX is paused.
+if [ -f "${VNX_STATE_DIR}/PAUSED" ]; then
+  echo "[receipt_processor_supervisor] PAUSED marker present at ${VNX_STATE_DIR}/PAUSED — refusing to start. Run 'vnx resume' to clear." >&2
+  exit 0
+fi
+
 VNX_DIR="$VNX_HOME"
 RECEIPT_PROCESSOR_SCRIPT="$SCRIPT_DIR/receipt_processor_v4.sh"
 SUPERVISOR_NAME="receipt_processor_supervisor"
