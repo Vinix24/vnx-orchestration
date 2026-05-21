@@ -21,9 +21,19 @@ _vnx_resume_validate_marker() {
 
 # Helper: start all three daemons. Sets _resume_dispatcher_pid and
 # _resume_receipt_pid for use by _vnx_resume_verify_readiness.
+#
+# Exports VNX_RESUME_IN_PROGRESS=1 so the spawned daemon scripts bypass their
+# PAUSED-marker startup guards (added in PR #612). Without this bypass the
+# guards reject the daemons before flock acquisition, _vnx_resume_verify_readiness
+# sees the PIDs dead, and cmd_resume fails closed with PAUSED retained — a
+# chicken-and-egg deadlock between the audit-integrity ordering (PR #611:
+# verify daemons before clearing marker) and the defense layer (PR #612:
+# refuse start while marker present).
 _vnx_resume_start_daemons() {
   local scripts_dir="$1"
   local logs_dir="$2"
+
+  export VNX_RESUME_IN_PROGRESS=1
 
   # Restart dispatcher via supervisor (preferred) or directly
   if [ -f "$scripts_dir/dispatcher_supervisor.sh" ]; then
