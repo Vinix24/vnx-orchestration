@@ -54,23 +54,57 @@ enforce_singleton() {
 
     # Open the lock file on a fixed FD. The FD inherits the bash process'
     # lifetime; closing it (or bash exiting) releases the kernel flock.
-    eval "exec ${_VNX_SINGLETON_LOCK_FD}>\"\$lock_file\""
-
-    if ! flock -n -x "$_VNX_SINGLETON_LOCK_FD"; then
-        local existing_pid
-        existing_pid="$(cat "$pid_file" 2>/dev/null || echo unknown)"
-        echo "[SINGLETON] Another instance of $script_name is already running (PID: $existing_pid)"
-        eval "exec ${_VNX_SINGLETON_LOCK_FD}>&-"
-        exit 0
+    # Failure to open (permission, ENOSPC, etc.) is a real error, not a clean
+    # singleton refusal — surface it loudly so the operator notices.
+    if ! eval "exec ${_VNX_SINGLETON_LOCK_FD}>\"\$lock_file\"" 2>/dev/null; then
+        echo "[SINGLETON] Failed to open lock file $lock_file (permission, ENOSPC, or FS issue)" >&2
+        exit 1
     fi
+
+    # flock -E sets a distinct exit code for "lock held" (contention) so we can
+    # distinguish it from other failure modes (bad FD, syscall error, etc.).
+    # Without -E, every non-zero exit looks the same and a real bug would be
+    # silently masked as "another instance running".
+    flock -n -x -E 75 "$_VNX_SINGLETON_LOCK_FD"
+    local flock_rc=$?
+    case $flock_rc in
+        0)
+            ;;
+        75)
+            local existing_pid
+            existing_pid="$(cat "$pid_file" 2>/dev/null || echo unknown)"
+            echo "[SINGLETON] Another instance of $script_name is already running (PID: $existing_pid)"
+            eval "exec ${_VNX_SINGLETON_LOCK_FD}>&-"
+            exit 0
+            ;;
+        *)
+            echo "[SINGLETON] flock failed with unexpected exit code $flock_rc (not contention)" >&2
+            eval "exec ${_VNX_SINGLETON_LOCK_FD}>&-"
+            exit 1
+            ;;
+    esac
 
     local fingerprint
     fingerprint="$(vnx_proc_realpath "$script_path")"
     if [ -z "$fingerprint" ]; then
         fingerprint="$(vnx_proc_cmdline "$$")"
     fi
-    echo "$$" > "$pid_file"
-    echo "$fingerprint" > "${pid_file}.fingerprint"
+
+    # Atomic write: writer-process-tagged tmp + rename(2). Prevents a
+    # partial or empty PID/fingerprint file being visible if this script
+    # is interrupted between the write and the close.
+    local pid_tmp="${pid_file}.tmp.$$"
+    local fp_tmp="${pid_file}.fingerprint.tmp.$$"
+    if ! printf '%s\n' "$$" > "$pid_tmp" || ! mv "$pid_tmp" "$pid_file"; then
+        echo "[SINGLETON] Failed to write PID file $pid_file" >&2
+        rm -f "$pid_tmp"
+        exit 1
+    fi
+    if ! printf '%s\n' "$fingerprint" > "$fp_tmp" || ! mv "$fp_tmp" "${pid_file}.fingerprint"; then
+        echo "[SINGLETON] Failed to write fingerprint file" >&2
+        rm -f "$fp_tmp" "$pid_file"
+        exit 1
+    fi
 
     # PID files are observability/telemetry only — the lock itself is released
     # by the kernel when fd 200 closes. EXIT/INT/TERM trap cleans the PID
