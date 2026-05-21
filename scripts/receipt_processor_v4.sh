@@ -6,7 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/vnx_paths.sh"
 
 # Respect PAUSED marker: refuse to start while VNX is paused.
-if [ "${_RP_LIB_MODE:-0}" != "1" ] && [ -f "${VNX_STATE_DIR}/PAUSED" ]; then
+# _RP_LIB_MODE=1 bypasses for library-sourcing helpers (rp_time.sh, etc.).
+# VNX_RESUME_IN_PROGRESS=1 bypass is set by cmd_resume in scripts/commands/resume.sh
+# so that the resume flow can verify daemon readiness BEFORE removing the PAUSED
+# marker (audit-integrity ordering; see PR #611).
+if [ "${_RP_LIB_MODE:-0}" != "1" ] && [ "${VNX_RESUME_IN_PROGRESS:-0}" != "1" ] && [ -f "${VNX_STATE_DIR}/PAUSED" ]; then
   echo "[receipt_processor_v4] PAUSED marker present at ${VNX_STATE_DIR}/PAUSED — refusing to start. Run 'vnx resume' to clear." >&2
   exit 0
 fi
