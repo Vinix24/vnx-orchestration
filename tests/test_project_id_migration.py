@@ -337,7 +337,24 @@ def test_runtime_schema_version_bumped(tmp_path: Path) -> None:
         latest = conn.execute(
             "SELECT MAX(version) FROM runtime_schema_version"
         ).fetchone()[0]
-        assert latest == RUNTIME_SCHEMA_VERSION == 10
+        # Migration 0010 stamps RUNTIME_SCHEMA_VERSION (10) into
+        # runtime_schema_version. The schema bootstrap (init_schema via
+        # runtime_coordination_v10.sql) also inserts version 12 for the
+        # Wave 5 PR-5.3 multi-tenant composite UNIQUE changes.
+        # Assert that the migration-0010 target version is present AND
+        # that the latest version is at least that — accommodating the
+        # bootstrap's higher version stamp.
+        row = conn.execute(
+            "SELECT 1 FROM runtime_schema_version WHERE version = ?",
+            (RUNTIME_SCHEMA_VERSION,),
+        ).fetchone()
+        assert row is not None, (
+            f"runtime_schema_version row for migration-0010 target "
+            f"(version={RUNTIME_SCHEMA_VERSION}) missing after migration"
+        )
+        assert latest >= RUNTIME_SCHEMA_VERSION, (
+            f"MAX(version) {latest} < RUNTIME_SCHEMA_VERSION {RUNTIME_SCHEMA_VERSION}"
+        )
     finally:
         conn.close()
 
