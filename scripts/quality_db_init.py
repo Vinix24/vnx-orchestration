@@ -22,7 +22,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 17
+HIGHEST_QI_VERSION = 18
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -518,6 +518,60 @@ def bootstrap_qi_db(db_path: Path, schema_file: Path | None = None) -> bool:
                     c.execute(f"ALTER TABLE {_htbl} ADD COLUMN invalidation_reason TEXT")
                     log('INFO', f'Migrated {_htbl}: added invalidation_reason column')
         schema_migration.apply_if_below(conn, 17, _v17)
+
+        # ---- V18: dispatch_experiments (unified from dispatch_tracker.db) ----
+        # dispatch_experiments was historically written to dispatch_tracker.db by
+        # dispatch_parameter_tracker.py. retroactive_backfill.py unified it into
+        # quality_intelligence.db. The canonical bootstrap did not include a
+        # CREATE TABLE for it, causing BootstrapFailure when _assert_central_tables_exist
+        # checked for its presence in source DBs and found it missing in central.
+        # Schema mirrors scripts/lib/dispatch_parameter_tracker.py::init_schema() plus the
+        # project_id column that migration 0015 would later ADD COLUMN on existing DBs
+        # (here we create it upfront so fresh installs get the full schema immediately).
+        def _v18(c):
+            if not c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='dispatch_experiments'"
+            ).fetchone():
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS dispatch_experiments (
+                        id                  INTEGER PRIMARY KEY,
+                        dispatch_id         TEXT UNIQUE,
+                        timestamp           DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        instruction_chars   INTEGER,
+                        context_items       INTEGER,
+                        repo_map_symbols    INTEGER,
+                        role                TEXT,
+                        cognition           TEXT,
+                        model               TEXT,
+                        terminal            TEXT,
+                        file_count          INTEGER,
+                        success             BOOLEAN,
+                        cqs                 REAL,
+                        completion_minutes  REAL,
+                        test_count          INTEGER,
+                        committed           BOOLEAN,
+                        lines_changed       INTEGER,
+                        project_id          TEXT
+                    )
+                """)
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_de_dispatch_id "
+                    "ON dispatch_experiments (dispatch_id)"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_de_role "
+                    "ON dispatch_experiments (role)"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_de_timestamp "
+                    "ON dispatch_experiments (timestamp DESC)"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_de_project_id "
+                    "ON dispatch_experiments (project_id)"
+                )
+                log('INFO', 'Migrated: created dispatch_experiments table + indexes')
+        schema_migration.apply_if_below(conn, 18, _v18)
 
         log('SUCCESS', 'Database schema initialized successfully')
         conn.close()
