@@ -2520,15 +2520,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         _assert_central_tables_exist(central_qi, central_rc, projects)
     except BootstrapFailure as exc:
         LOG.error("bootstrap assertion failed: %s", exc)
-        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         return 3
     except sqlite3.Error as exc:
         LOG.error("schema migration failed: %s", exc)
-        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         return 3
     except (FileNotFoundError, ImportError) as exc:
         LOG.error("canonical bootstrap failed: %s", exc)
-        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         return 3
 
     if args.reset_idempotency:
@@ -2557,7 +2557,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         apply_migration_0016(central_qi)
     except sqlite3.Error as exc:
         LOG.error("FTS5 rebuild (migration 0016) failed: %s", exc)
-        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         return 3
 
     try:
@@ -2569,11 +2569,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
     except VerificationFailure as exc:
         LOG.error("verification failed: %s", exc)
-        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         return 4
     except Exception as exc:
         LOG.error("verification raised: %s", exc)
-        _restore_snapshot(pre_snapshot, central_qi, central_rc)
+        _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
         return 4
 
     out_payload = {
@@ -2637,6 +2637,31 @@ def _snapshot_central(qi: Path, rc: Path) -> dict[str, Path]:
                 src.close()
             snapshots[label] = tmp
     return snapshots
+
+
+def _restore_snapshot_safe(snapshots: dict[str, Path], qi: Path, rc: Path) -> None:
+    """Call :func:`_restore_snapshot`, absorbing any exception into a logged warning.
+
+    Callers already hold the primary exception on the call stack (inside an
+    ``except`` handler). If the snapshot restore itself fails, that secondary
+    exception would replace the primary one in the traceback the operator sees,
+    hiding the real root cause. This wrapper ensures:
+
+    1. The rollback is always *attempted*.
+    2. A rollback failure is logged at ERROR level with full details.
+    3. The primary exception remains the one that ultimately propagates (the
+       caller's ``except`` block returns a non-zero exit code, so the primary
+       exception's message is what reaches the operator's terminal).
+    """
+    try:
+        _restore_snapshot(snapshots, qi, rc)
+    except Exception as rollback_exc:
+        LOG.error(
+            "snapshot restore (rollback) failed: %r — "
+            "central DB may be in a partially-modified state; "
+            "restore manually from backup if needed.",
+            rollback_exc,
+        )
 
 
 def _restore_snapshot(snapshots: dict[str, Path], qi: Path, rc: Path) -> None:
