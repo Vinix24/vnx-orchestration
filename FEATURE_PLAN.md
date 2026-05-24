@@ -1,12 +1,40 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-17T18:40:18.751052+00:00
+**Last updated**: 2026-05-21T07:04:56.577840+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #614 — fix(resume): VNX_RESUME_IN_PROGRESS bypass for PAUSED-guards (#614) (2026-05-21)
+- #612 — feat(safety): PAUSED marker guards in daemon scripts (#612) (2026-05-21)
+- #613 — fix(singleton): atomic flock(2) replaces mkdir-race (closes OI-1518) (#613) (2026-05-21)
+- #611 — feat(centralisatie): vnx pause/resume + partial-failure cleanup runbook (Dag 2 PR C) (#611) (2026-05-20)
+- #610 — feat(benchmark): FTS5 rebuild benchmark for SEOcrawler maintenance window (Dag 2 PR B) (#610) (2026-05-20)
+- #609 — feat(centralisatie): dispatch_id collision resolver + schema-prep migrations (Dag 2 PR A) (#609) (2026-05-20)
+- #608 — feat(wave2a): bump 1.0.0-rc3 + dry-run tests against 3 projects (#608) (2026-05-20)
+- #607 — feat(migration): schema versioning + rollback playbook (Wave 2a prep) (#607) (2026-05-20)
+- #606 — fix(dashboard): bundle OI-1494 fixes (5 items) + agent-stream archive replay (#606) (2026-05-20)
+- #605 — fix(receipts): project_id scoping audit + fixes (Wave 2a prep) (#605) (2026-05-20)
+- #604 — fix(centralisatie): project_id scoping audit + critical write-leak fixes (#604) (2026-05-20)
+- #603 — docs: refresh HANDOFF + README status banner (master roadmap link) (#603) (2026-05-20)
+- #588 — feat(schema): idempotent bootstrap with PRAGMA user_version + transaction wrapping (#588) (2026-05-18)
+- #591 — feat(doctor): vnx doctor --strict for central-install pre-flight validation (#591) (2026-05-18)
+- #587 — feat(install): install-central.sh for centralized VNX install with project-pin (#587) (2026-05-18)
+- #600 — feat(intelligence): A/B random-skip framework with weekly lift report (#600) (2026-05-18)
+- #596 — fix(governance): _emit_governance retry-with-backoff instead of SystemExit (Kimi audit) (#596) (2026-05-18)
+- #589 — feat(skill-coverage): pre-flight skill-coverage scanner for central install (#589) (2026-05-18)
+- #593 — fix(intelligence): catalogus-hygiene + recency-decay (audit BLOCKER #2) (#593) (2026-05-18)
+- #595 — refactor(dispatch): shared runtime_overrides module (eliminate delivery/recovery duplicate) (#595) (2026-05-18)
+- #594 — feat(intelligence): fine-grained task_class subclass + scope_tags activation (#594) (2026-05-18)
+- #592 — fix(pool): real-subprocess integration tests for pool spawn (Sonnet audit BLOCKER #1) (#592) (2026-05-18)
+- #586 — feat(vnx_paths): .vnx-overrides resolver for per-project central-install customization (#586) (2026-05-17)
+- #590 — feat(schema): migration 0021 central install metadata + pin tracking (#590) (2026-05-17)
+- #584 — feat(cli): vnx version + vnx update subcommands for central install rollback (#584) (2026-05-17)
+- #585 — feat(pyproject): pipx-installable wheel with vnx console_script (#585) (2026-05-17)
+- #583 — chore: sync VERSION + pyproject.toml to 1.0.0-rc2 (#583) (2026-05-17)
+- #582 — fix(provider_dispatch): rotate per-terminal NDJSON ring buffer post-dispatch (#582) (2026-05-17)
 - #580 — fix(smart-router): end-to-end auto-route wiring + enforcer false-positive on Kimi CLI provider (2 blockers) (#580) (2026-05-17)
 - #578 — fix(governance): atomic OI saves + WAL migrations + closure_verifier self-reference loop (3 blockers + 4 high) (#578) (2026-05-17)
 - #576 — fix(security): PRAGMA allowlist + project_id_fn multi-tenant + missing contracts + dup ImportError (2 blockers + 4 medium) (#576) (2026-05-17)
@@ -83,41 +111,6 @@ _Last 14 days — sourced from git merge commits._
 - #434 — fix(dashboard): clean up agent stream lifecycle (#434) (2026-05-07)
 - #433 — chore(gemini): switch default reviewer model to gemini-2.5-pro for deeper reviews (#433) (2026-05-07)
 - #431 — feat(envelopes): per-project paths + four-tuple envelope (Phase 6 P3 v2) (#431) (2026-05-07)
-- #430 — fix(intelligence): wire stamp_source_dispatch_ids into all injection callers (closes OI-1341) (#430) (2026-05-07)
-- #429 — docs(skill): add Codex Defense Checklist to backend-developer skill (#429) (2026-05-07)
-- #428 — fix(intelligence): re-evaluate scope match after canonical remap (closes OI-1340) (#428) (2026-05-07)
-- #427 — fix(closure_verifier): require pr_id on claude_github_optional payloads (closes OI-1339) (#427) (2026-05-07)
-- #426 — fix(project-id): unify _get_project_id fallback via project_scope.current_project_id (closes OI-1342) (#426) (2026-05-07)
-- #425 — fix(closure_verifier): extend report_path enforcement to codex_gate handler (closes OI-1338) (#425) (2026-05-07)
-- #422 — feat(t0-state): strategic_state surface from strategy/ (Phase 2 W-state-5) (#422) (2026-05-06)
-- #417 — feat(strategy): typed current_state.md projector v2 (Phase 2 W-state-3) (#417) (2026-05-06)
-- #416 — feat(identity): four-tuple identity layer + per-project registry (Phase 6 P2) (#416) (2026-05-06)
-- #415 — feat(strategy): prd_index + adr_index builders (Phase 2 W-state-4) (#415) (2026-05-06)
-- #413 — feat(strategy): decisions.ndjson append-only log + writer (Phase 2 W-state-2) (#413) (2026-05-06)
-- #412 — feat(aggregator): read-only federation aggregator (Phase 6 P1) (#412) (2026-05-06)
-- #410 — feat(strategy): roadmap.yaml schema + reader/writer Python module (Phase 2 W-state-1) (#410) (2026-05-06)
-- #408 — fix(dispatcher): drain + dead_letter receipt classification (Phase 1.5 PR-4) (#408) (2026-05-06)
-- #409 — fix(dispatcher): propagate role-alias mapping to gather_intelligence (Phase 1.5 PR-5) (#409) (2026-05-06)
-- #407 — fix(dashboard): guard null in /operator/reports toLowerCase call (#407) (2026-05-06)
-- #406 — fix(dispatch_project_guard): canonicalize non-existent paths + Project-ID stamping (Phase 1.5 PR-3) (#406) (2026-05-06)
-- #405 — fix(intelligence): success_patterns multi-tenant correctness (Phase 1.5 PR-2) (#405) (2026-05-06)
-- #404 — fix(closure_verifier): evidence-contract restoration (Phase 1.5 PR-1) (#404) (2026-05-06)
-- #396 — fix(append_receipt): remove dead duplicate _maybe_reroute_ghost_receipt (UR-001) (#396) (2026-05-06)
-- #403 — feat(cli): vnx status dashboard subcommand (W-UX-3) (#403) (2026-05-06)
-- #402 — chore: ADRs (No-Redis + F43 packaging) + threshold-OI cleanup script (cherry-pick of #395) (#402) (2026-05-06)
-- #400 — fix(t0-state): GC retention sweep for t0_detail JSON snapshots (W-UX-4) (#400) (2026-05-06)
-- #401 — feat(strategy): current_state.md auto-projector + retire vestigial state (W-UX-2) (#401) (2026-05-06)
-- #399 — docs(kickoff): reflect PR #398 MERGED + add Phase 1 PR #395+#396 retry guidance (#399) (2026-05-06)
-- #398 — docs(strategy): persist strategic state + 17 phase FEATURE_PLAN.md files (#398) (2026-05-06)
-
-**W7**
-- #424 — feat(observability): tier labeling + governance gating (Phase 3 W7-G feature-end) (#424) (2026-05-06)
-- #421 — feat(gemini): adapter streaming refactor gated by VNX_GEMINI_STREAM (Phase 3 W7-D) (#421) (2026-05-06)
-- #420 — feat(litellm): adapter proof-of-concept via W7-B mixin (Phase 3 W7-E) (#420) (2026-05-06)
-- #419 — feat(codex): adapter migration to streaming via W7-B mixin (Phase 3 W7-C) (#419) (2026-05-06)
-- #418 — feat(ollama): adapter streaming refactor via W7-B mixin (Phase 3 W7-F) (#418) (2026-05-06)
-- #414 — feat(streaming): _streaming_drainer mixin + event_store dispatch_id fix (Phase 3 W7-B) (#414) (2026-05-06)
-- #411 — feat(events): CanonicalEvent schema + EventStore observability_tier (Phase 3 W7-A) (#411) (2026-05-06)
 
 **WAVE 0**
 - #443 — chore(repo-hygiene): Wave 0 — OI-1373 Tier 3 + 9 stale docs archive (combined) (#443) (2026-05-09)
@@ -126,6 +119,7 @@ _Last 14 days — sourced from git merge commits._
 - #457 — docs: refresh README + CHANGELOG for post-rc1 work (Wave 1 + Wave 5 P0/P1) (#457) (2026-05-10)
 
 **WAVE 5**
+- #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
 - #569 — docs: Wave 5/6/7/8 documentation overhaul (#569) (2026-05-17)
 
 **WAVE 8**
