@@ -13,6 +13,20 @@
 --
 -- This file documents the target schema structure. For fresh DB creation,
 -- apply runtime_coordination.sql then all migrations 0010 through 0017.
+--
+-- SCHEMA-ORDER NOTE (fix: PR-MIGRATOR-FIX 2026-05-24):
+-- The CREATE TABLE IF NOT EXISTS statements below are no-ops on a fresh install
+-- because the base tables (dispatches, terminal_leases, worker_states) are
+-- created by runtime_coordination.sql (v1) and runtime_coordination_v9.sql
+-- WITHOUT a project_id column. The project_id column is added by migration
+-- 0010 (dispatches, terminal_leases, etc.) and migration 0017 (worker_states).
+-- Those migrations always run AFTER coordination_db.init_schema completes.
+--
+-- Therefore: CREATE INDEX statements that reference project_id are intentionally
+-- ABSENT from this file. They are created by migrations 0010 and 0017 which
+-- run after init_schema via the migrator or apply_0017.py. Adding them here
+-- caused "no such column: project_id" on fresh --fresh-central installs because
+-- project_id does not exist yet when init_schema runs v10 on a fresh DB.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -40,10 +54,11 @@ CREATE TABLE IF NOT EXISTS terminal_leases (
     UNIQUE(terminal_id, project_id)
 );
 
+-- Non-project_id indexes are safe here because these columns exist in v1.
+-- project_id indexes (idx_lease_project, idx_lease_terminal_project) are
+-- created by migrations 0010 and 0017 after project_id is added.
 CREATE INDEX IF NOT EXISTS idx_lease_state            ON terminal_leases(state);
 CREATE INDEX IF NOT EXISTS idx_lease_dispatch         ON terminal_leases(dispatch_id);
-CREATE INDEX IF NOT EXISTS idx_lease_project          ON terminal_leases(project_id);
-CREATE INDEX IF NOT EXISTS idx_lease_terminal_project ON terminal_leases(terminal_id, project_id);
 
 -- ============================================================================
 -- DISPATCHES (v10 — composite UNIQUE)
@@ -70,10 +85,11 @@ CREATE TABLE IF NOT EXISTS dispatches (
     UNIQUE(dispatch_id, project_id)
 );
 
+-- Non-project_id indexes are safe here (columns exist from v1 schema).
+-- idx_dispatches_project is created by migration 0010 after project_id is added.
 CREATE INDEX IF NOT EXISTS idx_dispatch_state    ON dispatches(state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dispatch_terminal ON dispatches(terminal_id, state);
 CREATE INDEX IF NOT EXISTS idx_dispatch_created  ON dispatches(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_dispatches_project ON dispatches(project_id);
 
 -- ============================================================================
 -- WORKER STATES (v10 — project_id added)
@@ -97,9 +113,10 @@ CREATE TABLE IF NOT EXISTS worker_states (
     PRIMARY KEY (terminal_id)
 );
 
+-- Non-project_id indexes are safe here (columns exist from v9 schema).
+-- idx_worker_states_project is created by migration 0017 after project_id is added.
 CREATE INDEX IF NOT EXISTS idx_worker_state   ON worker_states(state);
 CREATE INDEX IF NOT EXISTS idx_worker_dispatch ON worker_states(dispatch_id);
-CREATE INDEX IF NOT EXISTS idx_worker_states_project ON worker_states(project_id);
 
 -- ============================================================================
 -- SCHEMA VERSION
