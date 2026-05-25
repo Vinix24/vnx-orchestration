@@ -167,6 +167,43 @@ log() {
   printf '%s\n' "$*"
 }
 
+# ── Template substitution ────────────────────────────────────────────────
+# Replace install-time placeholders in all installed text files.
+# Only substitutes the three install-time variables:
+#   {{USER_HOME}}        → $HOME (current user's home directory)
+#   {{VNX_PROJECT_ROOT}} → $TARGET_PROJECT_DIR (project being installed into)
+#   {{VNX_HOME}}         → $TARGET_VNX_DIR (.vnx/ directory in target project)
+#
+# Other {{...}} patterns (receipt templates, skill templates, etc.) are
+# left untouched. Uses atomic writes (tmp → rename) for safety.
+_substitute_install_templates() {
+  local target_dir="$1"
+  local user_home="$HOME"
+  local vnx_project_root="$TARGET_PROJECT_DIR"
+  local vnx_home="$TARGET_VNX_DIR"
+
+  while IFS= read -r -d '' file; do
+    # Skip files without any of our install-time placeholders.
+    # Use separate grep calls for portability (BSD grep on macOS lacks \| ERE alternation).
+    if ! grep -qF '{{USER_HOME}}' "$file" 2>/dev/null && \
+       ! grep -qF '{{VNX_PROJECT_ROOT}}' "$file" 2>/dev/null && \
+       ! grep -qF '{{VNX_HOME}}' "$file" 2>/dev/null; then
+      continue
+    fi
+    local tmp_file="${file}.vnx_install_tmp"
+    # Use | as sed delimiter to avoid conflicts with path separators in values
+    sed \
+      -e "s|{{USER_HOME}}|${user_home}|g" \
+      -e "s|{{VNX_PROJECT_ROOT}}|${vnx_project_root}|g" \
+      -e "s|{{VNX_HOME}}|${vnx_home}|g" \
+      "$file" > "$tmp_file" && mv "$tmp_file" "$file"
+  done < <(find "$target_dir" -type f \
+    \( -name '*.yml'     -o -name '*.yaml' -o -name '*.json' \
+       -o -name '*.sh'   -o -name '*.py'   -o -name '*.md'  \
+       -o -name '*.conf' -o -name '*.toml' -o -name '*.example' \) \
+    -print0 2>/dev/null)
+}
+
 copy_item() {
   local src="$1"
   local dst="$2"
@@ -325,6 +362,10 @@ install_docs
 
 chmod +x "$TARGET_VNX_DIR/bin/vnx"
 bootstrap_provider_skills
+
+# Substitute install-time template placeholders in all installed files.
+_substitute_install_templates "$TARGET_VNX_DIR"
+log "[install] Substituted install-time placeholders ({{USER_HOME}}, {{VNX_PROJECT_ROOT}}, {{VNX_HOME}})"
 
 # Persist origin URL for vnx update
 if git -C "$SRC_ROOT" remote get-url origin >/dev/null 2>&1; then
