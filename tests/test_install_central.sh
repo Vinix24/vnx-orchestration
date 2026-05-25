@@ -462,6 +462,74 @@ fi
 rm -rf "$TMP_14" "$test_14_script"
 
 # ---------------------------------------------------------------------------
+# Test 15: shim_no_vnx_cli_reference — installed shim must not contain 'vnx-cli'
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 15: shim_no_vnx_cli_reference — installed shim must not reference 'vnx-cli'"
+
+TMP_15="$(mktemp -d)"
+mkdir -p "${TMP_15}/versions/v1.0.0-rc3"
+
+test_15_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_15_script"
+chmod +x "$test_15_script"
+
+bash "$test_15_script" --target "$TMP_15" --version v1.0.0-rc3 >/dev/null 2>&1
+
+if [ -f "${TMP_15}/bin/vnx" ]; then
+  if grep -q 'vnx-cli' "${TMP_15}/bin/vnx" 2>/dev/null; then
+    fail "shim still contains references to 'vnx-cli'"
+  else
+    pass "shim contains no 'vnx-cli' references"
+  fi
+else
+  fail "shim not found at ${TMP_15}/bin/vnx"
+fi
+
+rm -rf "$TMP_15" "$test_15_script"
+
+# ---------------------------------------------------------------------------
+# Test 16: shim_execs_correct_binary — installed shim exec target is bin/vnx
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 16: shim_execs_correct_binary — shim exec line points to bin/vnx not bin/vnx-cli"
+
+TMP_16="$(mktemp -d)"
+mkdir -p "${TMP_16}/versions/v1.0.0-rc3"
+
+test_16_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_16_script"
+chmod +x "$test_16_script"
+
+bash "$test_16_script" --target "$TMP_16" --version v1.0.0-rc3 >/dev/null 2>&1
+
+if [ -f "${TMP_16}/bin/vnx" ]; then
+  # Shim must contain 'exec "${VNX_HOME}/bin/vnx"' (correct) and not 'bin/vnx-cli'
+  if grep -q 'exec.*bin/vnx"' "${TMP_16}/bin/vnx" && ! grep -q 'bin/vnx-cli' "${TMP_16}/bin/vnx"; then
+    pass "shim exec line correctly references bin/vnx"
+  else
+    exec_line="$(grep 'exec.*bin/vnx' "${TMP_16}/bin/vnx" || echo '(not found)')"
+    fail "shim exec line incorrect: ${exec_line}"
+  fi
+else
+  fail "shim not found at ${TMP_16}/bin/vnx"
+fi
+
+rm -rf "$TMP_16" "$test_16_script"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
