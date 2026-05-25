@@ -76,6 +76,19 @@ HELP
     return 1
   fi
 
+  # Wave 4 PR-4: never write settings.json into an immutable central install.
+  # The merge/full target is "$PROJECT_ROOT/.claude/settings.json". If PROJECT_ROOT
+  # mis-resolved onto VNX_HOME (the install-central bug), writing there would
+  # contaminate the shared, versioned code tree. The guard is marker-gated
+  # (only fires when .vnx-install-mode=central), so embedded and standalone-dev
+  # layouts — where PROJECT_ROOT == VNX_HOME is legitimate — are unaffected.
+  # --validate is read-only and intentionally exempt.
+  if [ "$mode" = "--merge" ] || [ "$mode" = "--full" ]; then
+    if type _guard_not_vnx_home >/dev/null 2>&1; then
+      _guard_not_vnx_home "$PROJECT_ROOT" || return 1
+    fi
+  fi
+
   # Require python3
   if ! command -v python3 &>/dev/null; then
     err "[regen-settings] python3 is required"

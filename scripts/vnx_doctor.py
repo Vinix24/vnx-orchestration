@@ -483,6 +483,49 @@ def check_path_hygiene(paths: Dict[str, str]) -> List[CheckResult]:
         return [CheckResult("hygiene", FAIL, "Path hygiene check failed")]
 
 
+def check_contamination(paths: Dict[str, str]) -> List[CheckResult]:
+    """Warn (non-fatal) on pre-fix runtime state inside a central install.
+
+    Wave 4 PR-4. Only meaningful for central installs (VNX_HOME =
+    ~/.vnx-system/versions/<v>, marked by .vnx-install-mode=central); embedded
+    and standalone-dev layouts carry no marker and are skipped. Delegates to
+    scripts/vnx_contamination_check.sh so the bash doctor path and this
+    Python path share one detector. Always WARN, never FAIL — removing
+    contamination is an explicit operator decision.
+    """
+    vnx_home = Path(paths["VNX_HOME"])
+    marker = vnx_home / ".vnx-install-mode"
+    try:
+        is_central = marker.is_file() and marker.read_text(encoding="utf-8").strip() == "central"
+    except OSError:
+        is_central = False
+    if not is_central:
+        return []
+
+    script = vnx_home / "scripts" / "vnx_contamination_check.sh"
+    if not script.exists():
+        return []
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script), "--version-dir", str(vnx_home), "--quiet"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return [CheckResult("contamination", WARN, "Contamination check timed out")]
+
+    if result.returncode == 0:
+        return [CheckResult("contamination", PASS, "No runtime state in central install")]
+
+    details = [ln for ln in result.stderr.strip().split("\n") if ln][:10]
+    return [CheckResult(
+        "contamination", WARN,
+        "Pre-fix runtime state found inside central install",
+        remediation="Copy any needed receipts into the owning project, then remove the paths listed below",
+        details=details,
+    )]
+
+
 # ---------------------------------------------------------------------------
 # Runtime checks (delegates to vnx_doctor_runtime.py)
 # ---------------------------------------------------------------------------
@@ -542,6 +585,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_worktree(paths))
     results.extend(check_version(paths))
     results.extend(check_path_hygiene(paths))
+    results.extend(check_contamination(paths))
 
     if package_check:
         vnx_home = Path(paths["VNX_HOME"])

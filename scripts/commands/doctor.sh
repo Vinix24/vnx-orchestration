@@ -53,6 +53,25 @@ run_package_check() {
   return 0
 }
 
+run_contamination_check() {
+  # Wave 4 PR-4: warn (non-fatal) on pre-fix runtime state inside a central
+  # install. Mirrors check_contamination() in vnx_doctor.py so both doctor
+  # paths share one detector. Only fires for central installs; never fails.
+  if ! type _vnx_is_central_install >/dev/null 2>&1 || ! _vnx_is_central_install; then
+    return 0
+  fi
+  local check_script="$VNX_HOME/scripts/vnx_contamination_check.sh"
+  if [ ! -f "$check_script" ]; then
+    return 0
+  fi
+  if bash "$check_script" --version-dir "$VNX_HOME" --quiet; then
+    log "[doctor] OK: No runtime state inside central install."
+  else
+    log "[doctor] WARN: Pre-fix contamination inside central install — see cleanup instructions above."
+  fi
+  return 0
+}
+
 ensure_write_access() {
   local test_file="$VNX_STATE_DIR/.vnx_doctor_write_test"
   if touch "$test_file" 2>/dev/null; then
@@ -315,6 +334,7 @@ except:
 
   ensure_write_access || failed=1
   run_path_hygiene_check || failed=1
+  run_contamination_check
   if [ "$do_package_check" -eq 1 ]; then
     run_package_check || failed=1
   fi
