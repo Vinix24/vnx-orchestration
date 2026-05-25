@@ -246,6 +246,33 @@ def confirm_apply(confirmation: Optional[str], no_prompt: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _check_backup_access(
+    projects: list[ProjectEntry],
+) -> list[tuple[str, str, str]]:
+    """Probe read access to each project's .vnx-data directory before backup.
+
+    Iterates every project and calls os.listdir() on its .vnx-data dir.
+    Returns a list of (project_id, path, error_msg) tuples for directories
+    that are inaccessible due to permission or OS errors.  An empty list
+    means all accessible directories can be read.
+
+    Missing .vnx-data dirs are skipped — BackupFailure in backup_projects()
+    handles the absent-dir case.  This probe targets the macOS TCC
+    PermissionError that occurs when the Python binary lacks Full Disk Access,
+    so operators get an actionable message before any tarfile work begins.
+    """
+    failures: list[tuple[str, str, str]] = []
+    for project in projects:
+        src_dir = project.path / ".vnx-data"
+        if not src_dir.is_dir():
+            continue  # missing dir caught later by BackupFailure
+        try:
+            os.listdir(str(src_dir))
+        except (PermissionError, OSError) as exc:
+            failures.append((project.project_id, str(src_dir), str(exc)))
+    return failures
+
+
 def backup_projects(projects: list[ProjectEntry], backup_base: Path) -> Path:
     """Tar-gz each project's ``.vnx-data/`` to ``backup_base/<ts>/<project_id>.tar.gz``.
 
@@ -2456,6 +2483,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     except AbortRequested as exc:
         LOG.error("aborting: %s", exc)
         return 1
+
+    inaccessible = _check_backup_access(projects)
+    if inaccessible:
+        for pid, path, err in inaccessible:
+            LOG.error(
+                "Cannot access source directory for project_id=%s: %s. "
+                "macOS TCC blocking: enable Full Disk Access for %s in "
+                "System Settings → Privacy & Security → Full Disk Access, "
+                "then re-run.",
+                pid,
+                err,
+                sys.executable,
+            )
+        return 3
 
     try:
         backup_dir = backup_projects(projects, args.backup_base)
