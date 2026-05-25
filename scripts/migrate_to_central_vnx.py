@@ -2546,6 +2546,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             "Default (omitted): all registry projects."
         ),
     )
+    parser.add_argument(
+        "--test-apply",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the full bootstrap + migration chain against a TEMP central "
+            "directory (in /tmp), using real source DBs read-only. Verifies "
+            "the apply sequence succeeds without touching the live central DB. "
+            "Mutually exclusive with --verify-only. Combine with --project to "
+            "test one project at a time. The temp dir is auto-cleaned after "
+            "completion (success or failure)."
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(
@@ -2583,6 +2596,53 @@ def main(argv: Iterable[str] | None = None) -> int:
             "--project filter active: migrating subset %s",
             [p.project_id for p in projects],
         )
+
+    # --test-apply and --verify-only are mutually exclusive.
+    if args.test_apply and args.verify_only:
+        LOG.error("--test-apply and --verify-only are mutually exclusive")
+        return 2
+
+    # --test-apply: redirect central_state to a temp dir and run the full
+    # bootstrap + migration chain without touching the live central DB.
+    # Source DBs remain read-only (unchanged from normal apply flow).
+    # The temp dir is auto-cleaned after completion regardless of exit code.
+    if args.test_apply:
+        import shutil
+        import tempfile
+
+        real_central = args.central_state.expanduser()
+        tmp_dir = tempfile.mkdtemp(prefix="vnx-test-apply-")
+        try:
+            print(
+                f"TEST MODE -- no writes to live central DB at {real_central}",
+                flush=True,
+            )
+            LOG.info(
+                "test-apply: redirecting central_state from %s to temp dir %s",
+                real_central,
+                tmp_dir,
+            )
+            # Override central_state and implicit flags for the test run.
+            args.central_state = Path(tmp_dir)
+            args.fresh_central = True
+            args.no_prompt = True
+            # --test-apply implies --apply so the real apply path runs.
+            args.apply = True
+            # Confirmation phrase is set implicitly for test-apply.
+            args.confirm = CONFIRMATION_PHRASE
+            # Run the apply through the normal code path.  We CANNOT call
+            # main() recursively here because that re-parses argv and would
+            # infinite-loop on args.test_apply.  Instead, fall through to the
+            # existing apply logic below with the modified args namespace.
+        except Exception as exc:
+            LOG.error("test-apply setup failed: %s", exc)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return 2
+
+        # Register cleanup to run after the apply block regardless of outcome.
+        _test_apply_tmp_dir: str | None = tmp_dir
+    else:
+        _test_apply_tmp_dir = None
 
     central_state: Path = args.central_state.expanduser()
     central_qi = central_state / "quality_intelligence.db"
@@ -2629,25 +2689,43 @@ def main(argv: Iterable[str] | None = None) -> int:
         LOG.error("aborting: %s", exc)
         return 1
 
-    inaccessible = _check_backup_access(projects)
-    if inaccessible:
-        for pid, path, err in inaccessible:
-            LOG.error(
-                "Cannot access source directory for project_id=%s: %s. "
-                "macOS TCC blocking: enable Full Disk Access for %s in "
-                "System Settings → Privacy & Security → Full Disk Access, "
-                "then re-run.",
-                pid,
-                err,
-                sys.executable,
-            )
-        return 3
+    # In test-apply mode, source DBs are opened read-only (unchanged from
+    # normal flow) but no backup of source data is taken — there is nothing
+    # to roll back because the central write target is a temp dir that is
+    # auto-cleaned at the end of the run.
+    if _test_apply_tmp_dir is not None:
+        LOG.info("test-apply: skipping backup phase (writes target temp dir only)")
+        backup_dir: Path | None = None
+    else:
+        inaccessible = _check_backup_access(projects)
+        if inaccessible:
+            for pid, path, err in inaccessible:
+                LOG.error(
+                    "Cannot access source directory for project_id=%s: %s. "
+                    "macOS TCC blocking: enable Full Disk Access for %s in "
+                    "System Settings → Privacy & Security → Full Disk Access, "
+                    "then re-run.",
+                    pid,
+                    err,
+                    sys.executable,
+                )
+            return 3
 
-    try:
-        backup_dir = backup_projects(projects, args.backup_base)
-    except (BackupFailure, AbortRequested) as exc:
-        LOG.error("backup phase failed: %s", exc)
-        return 3
+        try:
+            backup_dir = backup_projects(projects, args.backup_base)
+        except (BackupFailure, AbortRequested) as exc:
+            LOG.error("backup phase failed: %s", exc)
+            return 3
+
+    # All paths below may return early (exit codes 1/3/4).  When in
+    # test-apply mode the temp dir must be cleaned up on every exit path.
+    # _test_apply_cleanup() is defined here as a closure so it can access
+    # _test_apply_tmp_dir without threading it through every helper.
+    def _test_apply_cleanup() -> None:
+        if _test_apply_tmp_dir is not None:
+            import shutil as _shutil
+            LOG.info("test-apply: cleaning up temp central dir %s", _test_apply_tmp_dir)
+            _shutil.rmtree(_test_apply_tmp_dir, ignore_errors=True)
 
     central_state.mkdir(parents=True, exist_ok=True)
 
@@ -2661,6 +2739,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "pass --fresh-central to acknowledge first-deploy bootstrap",
             central_state,
         )
+        _test_apply_cleanup()
         return 1
 
     if not central_qi.exists():
@@ -2707,14 +2786,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     except BootstrapFailure as exc:
         LOG.error("bootstrap assertion failed: %s", exc)
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
+        _test_apply_cleanup()
         return 3
     except sqlite3.Error as exc:
         LOG.error("schema migration failed: %s", exc)
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
+        _test_apply_cleanup()
         return 3
     except (FileNotFoundError, ImportError) as exc:
         LOG.error("canonical bootstrap failed: %s", exc)
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
+        _test_apply_cleanup()
         return 3
 
     if args.reset_idempotency:
@@ -2734,6 +2816,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             summaries.extend(import_project(central_qi, central_rc, project, run_id=run_id))
         except AbortRequested as exc:
             LOG.error("aborting: %s", exc)
+            _test_apply_cleanup()
             return 1
         except Exception as exc:
             LOG.error("project=%s import failed; rolled back THAT project: %s", project.project_id, exc)
@@ -2744,6 +2827,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     except sqlite3.Error as exc:
         LOG.error("FTS5 rebuild (migration 0016) failed: %s", exc)
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
+        _test_apply_cleanup()
         return 3
 
     try:
@@ -2756,15 +2840,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     except VerificationFailure as exc:
         LOG.error("verification failed: %s", exc)
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
+        _test_apply_cleanup()
         return 4
     except Exception as exc:
         LOG.error("verification raised: %s", exc)
         _restore_snapshot_safe(pre_snapshot, central_qi, central_rc)
+        _test_apply_cleanup()
         return 4
 
     out_payload = {
         "applied_at": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
-        "backup_dir": str(backup_dir),
+        "backup_dir": str(backup_dir) if backup_dir is not None else None,
         "central_qi": str(central_qi),
         "central_rc": str(central_rc),
         "imported_summary": [
@@ -2780,10 +2866,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         "failed_projects": failed_projects,
         "verification": verify_report,
     }
+    if _test_apply_tmp_dir is not None:
+        out_payload["test_apply"] = True
+        out_payload["test_apply_temp_dir"] = _test_apply_tmp_dir
+
     if args.json:
         print(json.dumps(out_payload, indent=2, default=str))
     else:
-        print(f"P4 import complete. Backup: {backup_dir}")
+        if _test_apply_tmp_dir is not None:
+            print("TEST MODE complete. Temp central dir will be cleaned up.")
+        else:
+            print(f"P4 import complete. Backup: {backup_dir}")
         print(f"  Central QI: {central_qi}")
         print(f"  Central RC: {central_rc}")
         for s in summaries:
@@ -2791,7 +2884,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         if failed_projects:
             print(f"  FAILED projects (rolled back): {', '.join(failed_projects)}")
 
-    if args.cleanup_backups:
+    if args.cleanup_backups and _test_apply_tmp_dir is None:
         removed = cleanup_old_backups(args.backup_base, keep_n=args.keep_backups)
         if removed:
             msg = f"  Backup cleanup: removed {len(removed)} old backup dir(s) (keep_n={args.keep_backups})"
@@ -2801,6 +2894,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             out_payload["backup_cleanup_removed"] = [str(p) for p in removed]
         else:
             print(msg)
+
+    # Cleanup must run last on the success path.
+    _test_apply_cleanup()
+    if _test_apply_tmp_dir is not None:
+        print(f"TEST MODE -- temp central dir cleaned up: {_test_apply_tmp_dir}")
 
     return 0
 
