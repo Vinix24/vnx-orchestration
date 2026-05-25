@@ -104,22 +104,25 @@ def _is_central_install(vnx_home: Path) -> bool:
     """True when VNX_HOME is a standalone git repo serving as a central install.
 
     Central install = the VNX code tree is shared (e.g. ~/.vnx-system/versions/<v>)
-    and the operator runs from their own project. Detected via the
-    ``.vnx-install-mode`` marker (primary, written by install-central.sh) or a
-    CWD-git-root mismatch (secondary heuristic). Returns False for a standalone
-    dev checkout of vnx-orchestration itself.
+    and the operator runs from their own project. Detected *only* via the
+    ``.vnx-install-mode`` marker file (content ``central``) written by
+    install-central.sh.
+
+    The earlier CWD-git-root-mismatch heuristic was removed: a git worktree of
+    vnx-orchestration itself produces a CWD git root that differs from VNX_HOME,
+    which mis-fired the heuristic and collapsed PROJECT_ROOT onto the parent repo
+    (issue #225 / PR-WAVE4-1 CI regression). The marker is unambiguous, so a
+    standalone dev checkout or worktree is correctly treated as non-central.
     """
     if _git_toplevel(vnx_home) != vnx_home:
         return False
     marker = vnx_home / ".vnx-install-mode"
     if marker.is_file():
         try:
-            if marker.read_text(encoding="utf-8").strip() == "central":
-                return True
+            return marker.read_text(encoding="utf-8").strip() == "central"
         except OSError:
-            pass
-    cwd_git_root = _git_toplevel(Path.cwd())
-    return bool(cwd_git_root and cwd_git_root != vnx_home)
+            return False
+    return False
 
 
 def _default_project_root(vnx_home: Path) -> Path:

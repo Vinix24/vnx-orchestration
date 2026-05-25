@@ -84,9 +84,11 @@ VNX_HOME_DEFAULT="$(_vnx_canon_dir "$VNX_HOME_DEFAULT")"
 #   3. Standalone   — VNX_HOME = a vnx-orchestration checkout   → PROJECT_ROOT = VNX_HOME
 #
 # Layouts 2 and 3 both have "VNX_HOME is its own git repo root"; the central
-# install is distinguished by a .vnx-install-mode marker (written by the
-# installer) or, as a fallback, by the CWD git root differing from VNX_HOME.
-# See issue #225 and the Wave 4 install-central synthesis.
+# install is distinguished *only* by a .vnx-install-mode marker written by the
+# installer. The earlier CWD-git-root-mismatch fallback was removed: a worktree
+# of vnx-orchestration itself yields a differing CWD git root and mis-fired the
+# heuristic, collapsing PROJECT_ROOT onto the parent repo (issue #225 /
+# PR-WAVE4-1 CI regression). See the Wave 4 install-central synthesis.
 _VNX_HOME_GIT_ROOT="$(_vnx_git_toplevel "$VNX_HOME_DEFAULT")"
 
 # Canonical repo root owns git-tracked intelligence/provenance. Default to
@@ -96,8 +98,12 @@ VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
 
 if _vnx_is_embedded_layout "$VNX_HOME_DEFAULT"; then
   PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/../.." && pwd -P)"
-elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ]; then
+elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ] \
+  && [ "$(_vnx_canon_dir "$VNX_PROJECT_ROOT")" != "$VNX_HOME_DEFAULT" ]; then
   # Explicit override exported by the central-install shim (belt-and-suspenders).
+  # Ignored when it points at VNX_HOME itself (shim mis-detection) — parity with
+  # the Python resolver's _vnx_project_root_override guard; falls through to the
+  # git-root branch below.
   PROJECT_ROOT_DEFAULT="$(_vnx_canon_dir "$VNX_PROJECT_ROOT")"
   _VNX_CANONICAL_FROM_PROJECT="$(_vnx_git_toplevel "$PROJECT_ROOT_DEFAULT")"
   if [ -n "$_VNX_CANONICAL_FROM_PROJECT" ]; then
@@ -109,25 +115,15 @@ elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ]; then
 elif [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
   # VNX_HOME is its own git repo root: central install OR standalone dev checkout.
   _vnx_is_central=false
-  # Primary signal: install-mode marker written by install-central.sh.
+  # Only signal: install-mode marker written by install-central.sh.
   if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] \
     && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
     _vnx_is_central=true
   fi
-  # Secondary heuristic: CWD git root differs from VNX_HOME → the operator is
-  # running from their own project, not from inside the VNX source tree.
-  _CWD_GIT_ROOT=""
-  if [ "$_vnx_is_central" = "false" ]; then
-    _CWD_GIT_ROOT="$(_vnx_git_toplevel "$(pwd)")"
-    if [ -n "$_CWD_GIT_ROOT" ] && [ "$_CWD_GIT_ROOT" != "$VNX_HOME_DEFAULT" ]; then
-      _vnx_is_central=true
-    fi
-  fi
 
+  _CWD_GIT_ROOT=""
   if [ "$_vnx_is_central" = "true" ]; then
-    if [ -z "$_CWD_GIT_ROOT" ]; then
-      _CWD_GIT_ROOT="$(_vnx_git_toplevel "$(pwd)")"
-    fi
+    _CWD_GIT_ROOT="$(_vnx_git_toplevel "$(pwd)")"
     if [ -z "$_CWD_GIT_ROOT" ]; then
       _CWD_GIT_ROOT="$(pwd)"
     fi

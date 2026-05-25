@@ -11,9 +11,14 @@ These tests pin the corrected detection hierarchy:
 
   1. embedded layout            -> PROJECT_ROOT = vnx_home.parent.parent
   2. VNX_PROJECT_ROOT override  -> PROJECT_ROOT = that dir (shim, belt+braces)
+     (ignored when it equals VNX_HOME — shim mis-detection)
   3. central install (marker)   -> PROJECT_ROOT = CWD git root
-  4. central install (heuristic)-> PROJECT_ROOT = CWD git root
-  5. standalone dev checkout    -> PROJECT_ROOT = VNX_HOME (unchanged)
+  4. standalone dev checkout    -> PROJECT_ROOT = VNX_HOME (unchanged)
+
+The ``.vnx-install-mode`` marker is the *only* central-install signal. The
+earlier CWD-git-root-mismatch heuristic was removed (PR-WAVE4-1 round 2): it
+mis-fired for a git worktree of vnx-orchestration itself, collapsing
+PROJECT_ROOT onto the parent repo. See issue #225.
 
 Both resolver implementations (Python module + the shell scripts run via
 subprocess) are exercised so the three sources cannot drift apart.
@@ -109,15 +114,20 @@ def test_central_install_with_marker_uses_cwd_git_root(tmp_path, monkeypatch):
     assert _default_project_root(install) != install
 
 
-# ── Case 3: central install, no marker, CWD git mismatch ─────────────────────
-def test_central_install_detected_by_git_mismatch(tmp_path, monkeypatch):
+# ── Case 3: marker file is REQUIRED — no heuristic fallback ──────────────────
+def test_marker_file_required_for_central(tmp_path, monkeypatch):
+    # No .vnx-install-mode marker: even though CWD git root differs from VNX_HOME
+    # (the removed heuristic's trigger), this must NOT be treated as central.
     install = _make_central_install(tmp_path, marker=False)
     project = _git_init(tmp_path / "real-project")
 
     monkeypatch.chdir(project)
     assert not (install / ".vnx-install-mode").exists()
-    assert _is_central_install(install) is True
-    assert _default_project_root(install) == project
+    # Heuristic removed: CWD-git-mismatch no longer marks central.
+    assert _is_central_install(install) is False
+    # Standalone dev checkout: PROJECT_ROOT stays at VNX_HOME, never the CWD repo.
+    assert _default_project_root(install) == install
+    assert _default_project_root(install) != project
 
 
 # ── Case 4: standalone dev checkout (unchanged) ──────────────────────────────
@@ -146,13 +156,16 @@ def test_vnx_project_root_env_override_wins(tmp_path, monkeypatch):
 
 def test_vnx_project_root_ignored_when_equal_to_vnx_home(tmp_path, monkeypatch):
     # A mis-detected override pointing at VNX_HOME must be ignored, not honored.
-    install = _make_central_install(tmp_path, marker=False)
+    # Marker present so central detection still fires; the bad override must not
+    # collapse PROJECT_ROOT onto VNX_HOME but resolve to the CWD project instead.
+    install = _make_central_install(tmp_path, marker=True)
     project = _git_init(tmp_path / "real-project")
 
     monkeypatch.chdir(project)
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(install))
 
     assert _default_project_root(install) == project
+    assert _resolve_project_root(install) == project
 
 
 # ── Case 6: central install + CWD outside any git repo ───────────────────────
@@ -188,9 +201,11 @@ def test_central_install_refuses_filesystem_root(tmp_path, monkeypatch):
 
 
 # ── Case 7: bin/vnx inline fallback parity with vnx_paths.sh ──────────────────
-def _run_shell_resolver(script_path: Path, project_cwd: Path) -> dict:
+def _run_shell_resolver(script_path: Path, project_cwd: Path, extra_env: dict | None = None) -> dict:
     """Source vnx_paths.sh and capture the resolved exports."""
     env = {k: v for k, v in os.environ.items() if k not in _VNX_ENV_KEYS}
+    if extra_env:
+        env.update(extra_env)
     out = subprocess.run(
         [
             "bash",
@@ -265,6 +280,71 @@ def test_bin_vnx_inline_fallback_central_mode(tmp_path):
     assert resolved["VNX_HOME"] == str(install)
     assert resolved["PROJECT_ROOT"] == str(project)
     assert resolved["VNX_CANONICAL_ROOT"] == str(project)
+
+
+# ── Case 7b: VNX_PROJECT_ROOT == VNX_HOME is ignored (shell + bin/vnx parity) ─
+def test_vnx_project_root_eq_vnx_home_ignored_shell(tmp_path):
+    """Shell resolver: a VNX_PROJECT_ROOT pointing at VNX_HOME must be ignored.
+
+    Parity with the Python ``_vnx_project_root_override`` guard. Without the
+    guard, PROJECT_ROOT would collapse onto VNX_HOME (the immutable code tree).
+    """
+    install = _make_central_install(tmp_path, marker=True)
+    (install / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy(
+        _REPO_ROOT / "scripts" / "lib" / "vnx_paths.sh",
+        install / "scripts" / "lib" / "vnx_paths.sh",
+    )
+    project = _git_init(tmp_path / "real-project")
+
+    resolved = _run_shell_resolver(
+        install / "scripts" / "lib" / "vnx_paths.sh",
+        project,
+        extra_env={"VNX_PROJECT_ROOT": str(install)},
+    )
+    assert resolved["VNX_HOME"] == str(install)
+    # Bad override ignored -> central marker resolves PROJECT_ROOT to CWD project.
+    assert resolved["PROJECT_ROOT"] == str(project)
+    assert resolved["PROJECT_ROOT"] != str(install)
+
+
+def test_vnx_project_root_eq_vnx_home_ignored_bin_vnx(tmp_path):
+    """bin/vnx inline fallback: VNX_PROJECT_ROOT == VNX_HOME must be ignored too."""
+    install = _make_central_install(tmp_path, marker=True)
+    (install / "bin").mkdir()
+    shutil.copy(_REPO_ROOT / "bin" / "vnx", install / "bin" / "vnx")
+    os.chmod(install / "bin" / "vnx", 0o755)
+
+    cmds = install / "scripts" / "commands"
+    cmds.mkdir(parents=True)
+    (cmds / "doctor.sh").write_text(
+        "cmd_doctor() {\n"
+        '  printf "PROJECT_ROOT=%s\\n" "$PROJECT_ROOT"\n'
+        '  printf "VNX_HOME=%s\\n" "$VNX_HOME"\n'
+        '  printf "VNX_CANONICAL_ROOT=%s\\n" "$VNX_CANONICAL_ROOT"\n'
+        "  exit 0\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    assert not (install / "scripts" / "lib" / "vnx_paths.sh").exists()
+
+    project = _git_init(tmp_path / "real-project")
+    env = {k: v for k, v in os.environ.items() if k not in _VNX_ENV_KEYS}
+    env["VNX_PROJECT_ROOT"] = str(install)
+    out = subprocess.run(
+        ["bash", str(install / "bin" / "vnx"), "doctor"],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    resolved = dict(
+        line.split("=", 1) for line in out.stdout.splitlines() if "=" in line
+    )
+    assert resolved["VNX_HOME"] == str(install)
+    assert resolved["PROJECT_ROOT"] == str(project)
+    assert resolved["PROJECT_ROOT"] != str(install)
 
 
 # ── Case 8: VNX_CANONICAL_ROOT follows the project in central mode ───────────
