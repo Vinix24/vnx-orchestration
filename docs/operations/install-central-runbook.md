@@ -97,7 +97,10 @@ Installing a new version does NOT break pinned projects. Old versions remain at 
 
 ## Per-project cutover procedure
 
-After installing a new version, each project needs a switchover. This is a three-step process: symlink update, version pin, and doctor verification.
+After installing a new version, each project needs a switchover. Two scenarios:
+
+- **Version upgrade** (already on central install): update `.vnx-version` pin → verify doctor.
+- **Embedded-to-central migration**: stop daemons → backup embedded install → set pin → init → verify doctor.
 
 ### Step 1: Pre-switchover checks
 
@@ -110,6 +113,9 @@ cat ~/.vnx-system/versions/v1.0.0-rc5/.vnx-install-mode  # must print "central"
 
 # Confirm no .vnx-data contamination in the new version dir
 ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data 2>/dev/null && echo "FAIL: contaminated" || echo "clean"
+
+# Confirm shim is on PATH
+which vnx  # must show ~/.vnx-system/bin/vnx
 ```
 
 ### Step 2: Update project pin
@@ -133,7 +139,7 @@ cd /path/to/your-project
 vnx doctor
 ```
 
-Expected output after successful cutover:
+Expected output after successful cutover (rc5 with Wave 4 fixes applied):
 
 ```
   [PASS] tool: Required: bash
@@ -148,6 +154,8 @@ Expected output after successful cutover:
 ─────────────────────────────────────────────
 PASSED — N checks OK
 ```
+
+**Wave 4 context**: Prior to rc5, four doctor checks consistently failed in central-install mode — `path: Runtime root`, `path: Canonical root`, `file: Config`, and `settings: Valid JSON` — because PROJECT_ROOT resolved to VNX_HOME instead of the project directory. PR-WAVE4-1 through PR-WAVE4-4 fix the root cause. If you still see these failures after cutover to rc5, the shim may not have been reinstalled — re-run `install-central.sh --version v1.0.0-rc5` and try again.
 
 If you see any FAIL mentioning `~/.vnx-system/` paths, the PROJECT_ROOT resolver is pointing at VNX_HOME instead of your project. See [Troubleshooting](#troubleshooting).
 
@@ -172,6 +180,150 @@ Verify that runtime data goes to the project, not to VNX_HOME:
 ls /path/to/your-project/.vnx-data/   # should exist
 ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data/ 2>/dev/null && echo "FAIL: leaked" || echo "ok"
 ```
+
+## Embedded-to-central migration
+
+Projects that started with an embedded VNX install (`.vnx/` directory inside the project, or `.claude/vnx-system/` for some layouts) require additional steps before the version-pin cutover.
+
+### Layout A: `.vnx/` embedded (SEOcrawler pattern)
+
+The embedded `.vnx/` directory contains the full VNX code tree (scripts, skills, templates). After migration, it will be replaced by a minimal `config.yml` only — the code lives in `~/.vnx-system/versions/<ver>/`.
+
+```bash
+cd /path/to/your-project
+
+# 1. Stop daemons gracefully (kill PID files)
+for pid_file in .vnx-data/pids/*.pid; do
+  pid=$(cat "$pid_file" 2>/dev/null) && [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+done
+sleep 2
+
+# 2. Backup the embedded install
+cp -r .vnx .vnx.backup-$(date +%Y%m%d)-pre-central
+echo "backup: .vnx.backup-$(date +%Y%m%d)-pre-central"
+
+# 3. Remove embedded code tree (keep the project's .vnx-data)
+rm -rf .vnx
+
+# 4. Ensure shim is on PATH
+export PATH="${HOME}/.vnx-system/bin:${PATH}"
+which vnx  # must show ~/.vnx-system/bin/vnx
+
+# 5. Pin to rc5
+echo 'v1.0.0-rc5' > .vnx-version
+
+# 6. Init — creates minimal .vnx/config.yml in project dir
+vnx init
+
+# 7. Generate settings and hooks in project
+vnx regen-settings --full
+vnx bootstrap-hooks
+
+# 8. Verify
+vnx doctor  # all checks must PASS
+ls .vnx/config.yml         # minimal config in project
+ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data 2>/dev/null && echo "FAIL: leaked" || echo "isolated"
+```
+
+**Rollback — Layout A:**
+
+```bash
+cd /path/to/your-project
+
+# Stop any daemons started under central install
+for pid_file in .vnx-data/pids/*.pid; do
+  pid=$(cat "$pid_file" 2>/dev/null) && [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+done
+
+# Restore embedded install
+rm -rf .vnx
+cp -r .vnx.backup-YYYYMMDD-pre-central .vnx
+
+# Remove version pin (shim falls back to current or won't be invoked)
+rm -f .vnx-version
+
+# Verify embedded doctor still passes
+bash .vnx/bin/vnx doctor
+```
+
+### Layout B: `.claude/vnx-system/` embedded (MC pattern)
+
+Some projects store VNX at `.claude/vnx-system/` and reference it via env vars like `VNX_CANONICAL_ROOT`. The cleanest cutover is a symlink replacement, which preserves all existing script path references.
+
+```bash
+cd /path/to/your-project
+
+# 1. Stop daemons
+for pid_file in .vnx-data/pids/*.pid; do
+  pid=$(cat "$pid_file" 2>/dev/null) && [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+done
+sleep 2
+
+# 2. Backup the embedded vnx-system directory
+mv .claude/vnx-system .claude/vnx-system.backup-$(date +%Y%m%d)-pre-central
+echo "backup: .claude/vnx-system.backup-$(date +%Y%m%d)-pre-central"
+
+# 3. Create symlink pointing at central install
+ln -sfn ~/.vnx-system/current .claude/vnx-system
+ls -la .claude/vnx-system  # must show symlink to ~/.vnx-system/current
+
+# 4. Ensure shim is on PATH
+export PATH="${HOME}/.vnx-system/bin:${PATH}"
+
+# 5. Pin to rc5
+echo 'v1.0.0-rc5' > .vnx-version
+
+# 6. Init — creates minimal .vnx/config.yml in project dir
+vnx init
+
+# 7. Generate settings and hooks
+vnx regen-settings --full
+vnx bootstrap-hooks
+
+# 8. Verify
+vnx doctor  # all checks must PASS
+ls -la .claude/vnx-system  # symlink intact
+ls ~/.vnx-system/versions/v1.0.0-rc5/.vnx-data 2>/dev/null && echo "FAIL: leaked" || echo "isolated"
+```
+
+**Rollback — Layout B:**
+
+```bash
+cd /path/to/your-project
+
+# Remove symlink
+rm .claude/vnx-system
+
+# Restore backup
+mv .claude/vnx-system.backup-YYYYMMDD-pre-central .claude/vnx-system
+
+# Remove version pin
+rm -f .vnx-version
+
+# Verify embedded scripts still run
+ls .claude/vnx-system/scripts/dispatcher_v8_minimal.sh
+```
+
+### After migration: start daemons
+
+Start daemons after doctor PASS is confirmed — use the central install's script path:
+
+```bash
+cd /path/to/your-project
+
+# Start dispatcher
+nohup bash "$(vnx --print-vnx-home)/scripts/dispatcher_v8_minimal.sh" \
+  > .vnx-data/logs/dispatcher.log 2>&1 &
+
+# Start receipt processor
+nohup bash "$(vnx --print-vnx-home)/scripts/receipt_processor_v4.sh" \
+  > .vnx-data/logs/receipt_processor.log 2>&1 &
+
+# Verify daemons running
+ps aux | grep -E "dispatcher|receipt_processor" | grep -v grep
+```
+
+> If your project has a `vnx start` command or `bin/vnx start`, use that instead of direct script calls.
 
 ## Upgrading
 
@@ -241,30 +393,45 @@ This works on rc4 installs that predate the automatic marker write in `clone_ver
 
 If you ran `vnx init` before rc5 (before the path resolver fix), runtime data may have been written to `~/.vnx-system/versions/rc4/.vnx-data/` instead of your project.
 
-**Check:**
+The same applies to `settings.json`: if `regen-settings` ran before rc5, it may have written `.claude/settings.json` to `~/.vnx-system/versions/rc4/.claude/settings.json` instead of your project's `.claude/` directory.
+
+**Check all contamination targets:**
 
 ```bash
-ls ~/.vnx-system/versions/*/'.vnx-data/' 2>/dev/null
+VERSION_DIR=~/.vnx-system/versions/v1.0.0-rc4  # adjust to your version
+
+echo "=== Checking for pre-fix contamination ==="
+ls "$VERSION_DIR/.vnx-data" 2>/dev/null && echo "[!] .vnx-data contamination found" || echo "[ok] .vnx-data clean"
+ls "$VERSION_DIR/.claude"   2>/dev/null && echo "[!] .claude contamination found"   || echo "[ok] .claude clean"
+ls "$VERSION_DIR/.vnx-intelligence" 2>/dev/null && echo "[!] .vnx-intelligence contamination found" || echo "[ok] .vnx-intelligence clean"
 ```
 
 **Clean:**
 
 ```bash
-# Back up contaminated data (receipts, DB snapshots) before removing
 VERSION_DIR=~/.vnx-system/versions/v1.0.0-rc4  # adjust to your version
+BACKUP="/tmp/central-vnx-contamination-backup-$(date +%Y%m%d)"
+mkdir -p "$BACKUP"
 
-cp -r "$VERSION_DIR/.vnx-data" /tmp/central-vnx-data-backup-$(date +%Y%m%d)
+# Back up contaminated data before removing
+[ -d "$VERSION_DIR/.vnx-data" ]        && cp -r "$VERSION_DIR/.vnx-data"        "$BACKUP/.vnx-data"
+[ -d "$VERSION_DIR/.claude" ]           && cp -r "$VERSION_DIR/.claude"           "$BACKUP/.claude"
+[ -d "$VERSION_DIR/.vnx-intelligence" ] && cp -r "$VERSION_DIR/.vnx-intelligence" "$BACKUP/.vnx-intelligence"
+echo "backup: $BACKUP"
 
-# Remove the contamination
+# Remove contamination
 rm -rf "$VERSION_DIR/.vnx-data"
 rm -rf "$VERSION_DIR/.claude"
 rm -rf "$VERSION_DIR/.vnx-intelligence"
 
 # Verify clean
-ls "$VERSION_DIR/.vnx-data" 2>/dev/null && echo "FAIL: still contaminated" || echo "clean"
+ls "$VERSION_DIR/.vnx-data" 2>/dev/null && echo "FAIL: .vnx-data still contaminated" || echo "clean: .vnx-data"
+ls "$VERSION_DIR/.claude"   2>/dev/null && echo "FAIL: .claude still contaminated"   || echo "clean: .claude"
 ```
 
-After cleanup, run `vnx init` from each project directory to initialize clean runtime state in the correct location.
+After cleanup, run `vnx init` and `vnx regen-settings --full` from each project directory to initialize clean runtime state in the correct location.
+
+**If you need receipts from the contaminated `.vnx-data/`**: they are backed up at `$BACKUP/.vnx-data/receipts/`. You can copy them to your project's `.vnx-data/receipts/` directory for historical record.
 
 ## Troubleshooting
 
