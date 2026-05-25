@@ -249,6 +249,37 @@ if [ -z "${VNX_SKILLS_DIR:-}" ]; then
   fi
 fi
 
+# ── Central-install write guard ────────────────────────────────────────────
+# In a central install (.vnx-install-mode=central marker in VNX_HOME), project
+# state must never resolve under VNX_HOME — that tree is immutable shared code.
+# If detection mis-fired and collapsed PROJECT_ROOT onto VNX_HOME (the Wave 4
+# install-central bug), fail loud rather than silently writing receipts,
+# dispatches and intelligence into the code tree. Standalone-dev / embedded
+# layouts carry no marker, so this is a no-op there (state under the checkout is
+# legitimate). The check runs after the worktree override so it sees final paths.
+if [ -f "${VNX_HOME}/.vnx-install-mode" ] \
+  && [ "$(cat "${VNX_HOME}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+  _vnx_guard_home="$(_vnx_canon_dir "$VNX_HOME")"
+  for _vnx_guard_var in VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_INTELLIGENCE_DIR; do
+    _vnx_guard_val="${!_vnx_guard_var:-}"
+    [ -n "$_vnx_guard_val" ] || continue
+    case "$_vnx_guard_val" in
+      "$_vnx_guard_home"|"$_vnx_guard_home"/*)
+        printf 'ERROR: [vnx_paths] cannot write project state under immutable central install\n' >&2
+        printf 'ERROR: [vnx_paths]   %s=%s\n' "$_vnx_guard_var" "$_vnx_guard_val" >&2
+        printf 'ERROR: [vnx_paths]   VNX_HOME=%s (immutable shared code)\n' "$_vnx_guard_home" >&2
+        printf 'ERROR: [vnx_paths]   PROJECT_ROOT mis-detected; run from your project directory\n' >&2
+        # Data-integrity guard: halt unconditionally so the misconfiguration
+        # cannot proceed to write into the code tree, regardless of whether the
+        # caller enabled `set -e`. Restore the caller's shell options first.
+        eval "$__VNX_PATHS_SHELLOPTS"
+        exit 1
+        ;;
+    esac
+  done
+  unset _vnx_guard_home _vnx_guard_var _vnx_guard_val
+fi
+
 # ── Resolver functions ────────────────────────────────────────
 # These are callable from any script that sources vnx_paths.sh.
 # They resolve runtime dependencies dynamically instead of
