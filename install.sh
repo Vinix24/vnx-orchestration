@@ -176,11 +176,35 @@ log() {
 #
 # Other {{...}} patterns (receipt templates, skill templates, etc.) are
 # left untouched. Uses atomic writes (tmp → rename) for safety.
+
+# Escape a value for safe use as a sed s|...|REPLACEMENT|g string.
+# The characters &, |, and backslash have special meaning in the replacement
+# field and must be backslash-escaped before interpolation.
+_sed_escape() {
+  printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
 _substitute_install_templates() {
   local target_dir="$1"
   local user_home="$HOME"
   local vnx_project_root="$TARGET_PROJECT_DIR"
   local vnx_home="$TARGET_VNX_DIR"
+
+  # Escape replacement values so that special sed characters (&, |, \) in
+  # paths (e.g. /home/foo&bar or a path with a backslash) cannot corrupt the
+  # substituted output.
+  local user_home_esc vnx_project_root_esc vnx_home_esc
+  user_home_esc="$(_sed_escape "$user_home")"
+  vnx_project_root_esc="$(_sed_escape "$vnx_project_root")"
+  vnx_home_esc="$(_sed_escape "$vnx_home")"
+
+  # Build the extension filter as a bash array so no eval is needed and
+  # special characters in $target_dir cannot be interpreted as shell code.
+  local -a _scan_ext_args=(
+    -name '*.yml'  -o -name '*.yaml' -o -name '*.json'
+    -o -name '*.sh'   -o -name '*.py'   -o -name '*.md'
+    -o -name '*.conf' -o -name '*.toml' -o -name '*.example'
+  )
 
   while IFS= read -r -d '' file; do
     # Skip files without any of our install-time placeholders.
@@ -191,17 +215,14 @@ _substitute_install_templates() {
       continue
     fi
     local tmp_file="${file}.vnx_install_tmp"
-    # Use | as sed delimiter to avoid conflicts with path separators in values
+    # Use | as sed delimiter to avoid conflicts with / in path values.
+    # Replacement values are pre-escaped via _sed_escape.
     sed \
-      -e "s|{{USER_HOME}}|${user_home}|g" \
-      -e "s|{{VNX_PROJECT_ROOT}}|${vnx_project_root}|g" \
-      -e "s|{{VNX_HOME}}|${vnx_home}|g" \
+      -e "s|{{USER_HOME}}|${user_home_esc}|g" \
+      -e "s|{{VNX_PROJECT_ROOT}}|${vnx_project_root_esc}|g" \
+      -e "s|{{VNX_HOME}}|${vnx_home_esc}|g" \
       "$file" > "$tmp_file" && mv "$tmp_file" "$file"
-  done < <(find "$target_dir" -type f \
-    \( -name '*.yml'     -o -name '*.yaml' -o -name '*.json' \
-       -o -name '*.sh'   -o -name '*.py'   -o -name '*.md'  \
-       -o -name '*.conf' -o -name '*.toml' -o -name '*.example' \) \
-    -print0 2>/dev/null)
+  done < <(find "$target_dir" -type f \( "${_scan_ext_args[@]}" \) -print0 2>/dev/null)
 }
 
 copy_item() {

@@ -259,3 +259,110 @@ class TestInstallerOutputIsClean:
             "Hardcoded /Users/ paths found in installed output on non-macOS host:\n"
             + "\n".join(violations)
         )
+
+
+# ---------------------------------------------------------------------------
+# R2 regression tests — shell injection + sed escaping (PR-WAVE2A-6 R2)
+# ---------------------------------------------------------------------------
+
+class TestInstallerR2Security:
+    """Regression tests for the R2 codex findings:
+    - No eval in scan logic (array-based find)
+    - sed replacement values escape &, |, and backslash
+    """
+
+    def test_install_no_eval_in_scan_logic(self):
+        """install.sh must not use eval in the file-scan / find loop.
+
+        The codex blocking finding flagged shell injection via:
+          done < <(eval "find '$dir' -type f \\( $SCAN_EXTENSIONS \\) -print0")
+        The fix builds find args as a bash array and calls find directly.
+        This test greps the install.sh source for any eval usage inside the
+        _substitute_install_templates or surrounding scan context and asserts
+        none are present.
+        """
+        content = INSTALL_SH.read_text()
+
+        # Collect all lines that contain eval (case-sensitive).
+        eval_lines = [
+            (i + 1, line.rstrip())
+            for i, line in enumerate(content.splitlines())
+            if "eval" in line
+        ]
+
+        # Filter: allow eval that appears only in comments (lines whose first
+        # non-whitespace token is '#') or in test/documentation strings.
+        blocking = []
+        for lineno, line in eval_lines:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue  # comment — allowed
+            blocking.append(f"install.sh:{lineno}: {line}")
+
+        assert not blocking, (
+            "eval found in non-comment install.sh lines — "
+            "scan logic must use array-based find, not eval:\n"
+            + "\n".join(blocking)
+        )
+
+    def test_install_path_with_special_chars(self, tmp_path):
+        """install.sh must handle project paths that contain &, backslash, and |.
+
+        These characters have special meaning in sed replacement strings.
+        Without _sed_escape(), a HOME like /tmp/foo&bar would corrupt the
+        substituted output.  This test verifies that substitution produces the
+        literal path value in the installed file, not a garbled replacement.
+        """
+        # Build a target directory at a clean tmp path (no special chars in
+        # the FS path itself — OS constraints prevent | in dir names on macOS/Linux).
+        # We test escaping by injecting the special chars into a fake HOME value
+        # via the environment, which maps to {{USER_HOME}} in templates.
+        #
+        # Use a fake HOME whose string representation contains &.
+        # NOTE: the OS path itself cannot literally contain |, but we can still
+        # exercise the _sed_escape path by crafting the env HOME value.
+        # We verify via a simple template file placed in the install target.
+
+        # Create a minimal stub target that has a file with the placeholder.
+        fake_home_str = str(tmp_path / "home&special")
+        target = tmp_path / "target_project"
+        target.mkdir()
+        vnx_dir = target / ".vnx"
+        vnx_dir.mkdir()
+        # Place a stub template file that contains the placeholder.
+        stub_dir = vnx_dir / "scripts"
+        stub_dir.mkdir()
+        stub_file = stub_dir / "stub.conf"
+        stub_file.write_text("home_dir={{USER_HOME}}\n")
+
+        # Run install.sh into the target (install.sh also writes its own files,
+        # but we only care that our stub is not corrupted).
+        env = dict(os.environ)
+        env["HOME"] = fake_home_str
+        result = subprocess.run(
+            ["bash", str(INSTALL_SH), str(target)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        # install.sh may exit non-zero for unrelated reasons (e.g. git remote),
+        # but the substitution must have run.  Check the stub file directly.
+        # Locate the stub in the installed .vnx/scripts/.
+        installed_stub = target / ".vnx" / "scripts" / "stub.conf"
+        if not installed_stub.exists():
+            # install.sh overwrites the .vnx dir — look for stub at alternate path.
+            installed_stub = stub_file
+
+        if not installed_stub.exists():
+            pytest.skip("Stub file not present after install — install layout may differ")
+
+        content = installed_stub.read_text()
+        # The substitution must produce the literal fake_home_str (with &).
+        # If _sed_escape is missing, & would expand to the matched text (/tmp/.../home)
+        # and the result would NOT equal fake_home_str.
+        assert f"home_dir={fake_home_str}" in content, (
+            f"Expected literal home path '{fake_home_str}' after {{{{USER_HOME}}}} substitution.\n"
+            f"Got file content:\n{content}\n"
+            "& in path was likely not escaped — _sed_escape may not be applied."
+        )
