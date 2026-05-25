@@ -74,26 +74,83 @@ unset _VNX_HOME_FROM_SCRIPT
 VNX_HOME_DEFAULT="$(_vnx_canon_dir "$VNX_HOME_DEFAULT")"
 
 # Default runtime/bootstrap root.
-# Embedded layout keeps runtime in the parent project; standalone repo/worktree
-# layout keeps runtime local to the checkout itself.
+#
+# Three layouts must be distinguished, because VNX_HOME (immutable code) and
+# PROJECT_ROOT (per-project runtime state) only coincide for a self-dev checkout:
+#
+#   1. Embedded     — VNX_HOME nested under the project's .claude tree (see
+#                     _vnx_is_embedded_layout)                  → PROJECT_ROOT = <project>
+#   2. Central      — VNX_HOME = a shared versioned install     → PROJECT_ROOT = CWD git root
+#   3. Standalone   — VNX_HOME = a vnx-orchestration checkout   → PROJECT_ROOT = VNX_HOME
+#
+# Layouts 2 and 3 both have "VNX_HOME is its own git repo root"; the central
+# install is distinguished *only* by a .vnx-install-mode marker written by the
+# installer. The earlier CWD-git-root-mismatch fallback was removed: a worktree
+# of vnx-orchestration itself yields a differing CWD git root and mis-fired the
+# heuristic, collapsing PROJECT_ROOT onto the parent repo (issue #225 /
+# PR-WAVE4-1 CI regression). See the Wave 4 install-central synthesis.
 _VNX_HOME_GIT_ROOT="$(_vnx_git_toplevel "$VNX_HOME_DEFAULT")"
+
+# Canonical repo root owns git-tracked intelligence/provenance. Default to
+# VNX_HOME; the branches below repoint it to the project in central mode so
+# intelligence exports land in the project, not the immutable code tree.
+VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+
 if _vnx_is_embedded_layout "$VNX_HOME_DEFAULT"; then
   PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/../.." && pwd -P)"
+elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ] \
+  && [ "$(_vnx_canon_dir "$VNX_PROJECT_ROOT")" != "$VNX_HOME_DEFAULT" ]; then
+  # Explicit override exported by the central-install shim (belt-and-suspenders).
+  # Ignored when it points at VNX_HOME itself (shim mis-detection) — parity with
+  # the Python resolver's _vnx_project_root_override guard; falls through to the
+  # git-root branch below.
+  PROJECT_ROOT_DEFAULT="$(_vnx_canon_dir "$VNX_PROJECT_ROOT")"
+  _VNX_CANONICAL_FROM_PROJECT="$(_vnx_git_toplevel "$PROJECT_ROOT_DEFAULT")"
+  if [ -n "$_VNX_CANONICAL_FROM_PROJECT" ]; then
+    VNX_CANONICAL_ROOT_DEFAULT="$_VNX_CANONICAL_FROM_PROJECT"
+  else
+    VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+  fi
+  unset _VNX_CANONICAL_FROM_PROJECT
 elif [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
-  PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  # VNX_HOME is its own git repo root: central install OR standalone dev checkout.
+  _vnx_is_central=false
+  # Only signal: install-mode marker written by install-central.sh.
+  if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] \
+    && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+    _vnx_is_central=true
+  fi
+
+  _CWD_GIT_ROOT=""
+  if [ "$_vnx_is_central" = "true" ]; then
+    _CWD_GIT_ROOT="$(_vnx_git_toplevel "$(pwd)")"
+    if [ -z "$_CWD_GIT_ROOT" ]; then
+      _CWD_GIT_ROOT="$(pwd)"
+    fi
+    # Safety: never let PROJECT_ROOT collapse to filesystem root or empty.
+    if [ "$_CWD_GIT_ROOT" = "/" ] || [ -z "$_CWD_GIT_ROOT" ]; then
+      _CWD_GIT_ROOT="$VNX_HOME_DEFAULT"
+    fi
+    PROJECT_ROOT_DEFAULT="$(_vnx_canon_dir "$_CWD_GIT_ROOT")"
+    # Intelligence exports follow the project, not the immutable code tree.
+    VNX_CANONICAL_ROOT_DEFAULT="$(_vnx_git_toplevel "$PROJECT_ROOT_DEFAULT")"
+    if [ -z "${VNX_CANONICAL_ROOT_DEFAULT:-}" ]; then
+      VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+    fi
+  else
+    # Standalone dev checkout: runtime/bootstrap stay local to the checkout.
+    PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+    _VNX_HOME_COMMON_ROOT="$(_vnx_git_common_root "$VNX_HOME_DEFAULT")"
+    if [ -n "$_VNX_HOME_COMMON_ROOT" ]; then
+      VNX_CANONICAL_ROOT_DEFAULT="$_VNX_HOME_COMMON_ROOT"
+    fi
+    unset _VNX_HOME_COMMON_ROOT
+  fi
+  unset _vnx_is_central _CWD_GIT_ROOT
 else
   PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/.." && pwd -P)"
 fi
-
-# Canonical repo root owns git-tracked intelligence/provenance.
-VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
-if [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
-  _VNX_HOME_COMMON_ROOT="$(_vnx_git_common_root "$VNX_HOME_DEFAULT")"
-  if [ -n "$_VNX_HOME_COMMON_ROOT" ]; then
-    VNX_CANONICAL_ROOT_DEFAULT="$_VNX_HOME_COMMON_ROOT"
-  fi
-fi
-unset _VNX_HOME_GIT_ROOT _VNX_HOME_COMMON_ROOT
+unset _VNX_HOME_GIT_ROOT
 
 # Guard against cross-project env contamination:
 # If inherited VNX_HOME points to a different project tree than VNX_HOME_DEFAULT

@@ -20,16 +20,55 @@ if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_paths.sh" ]; then
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/../scripts/lib/vnx_paths.sh"
 else
+  # Inline fallback resolver — fires only when scripts/lib/vnx_paths.sh is
+  # absent. Mirrors the layout detection in vnx_paths.sh so a central install
+  # (VNX_HOME = ~/.vnx-system/versions/<v>) does not conflate PROJECT_ROOT with
+  # VNX_HOME. Keep this in sync with scripts/lib/vnx_paths.sh.
   VNX_HOME_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  _vnx_home_git_root="$(git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" || _vnx_home_git_root=""
   if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
+    # Embedded layout: project state lives in the parent project.
     PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/../.." && pwd)"
-  elif git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel >/dev/null 2>&1 && [ "$(git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" = "$VNX_HOME_DEFAULT" ]; then
-    PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+    VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ] && [ "$(cd "$VNX_PROJECT_ROOT" && pwd)" != "$VNX_HOME_DEFAULT" ]; then
+    # Explicit override exported by the central-install shim. Ignored when it
+    # points at VNX_HOME itself (shim mis-detection) — parity with the Python
+    # resolver guard; falls through to the git-root branch below.
+    PROJECT_ROOT_DEFAULT="$(cd "$VNX_PROJECT_ROOT" && pwd)"
+    VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$PROJECT_ROOT_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+    [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+  elif [ -n "$_vnx_home_git_root" ] && [ "$_vnx_home_git_root" = "$VNX_HOME_DEFAULT" ]; then
+    # VNX_HOME is its own git repo: central install OR standalone dev checkout.
+    # Only the .vnx-install-mode marker marks a central install; the old
+    # CWD-git-mismatch heuristic was removed (mis-fired on worktrees, #225).
+    _vnx_is_central=false
+    if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+      _vnx_is_central=true
+    fi
+    _cwd_git_root=""
+    if [ "$_vnx_is_central" = "true" ]; then
+      _cwd_git_root="$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null)" || _cwd_git_root=""
+      if [ -z "$_cwd_git_root" ]; then
+        _cwd_git_root="$(pwd)"
+      fi
+      if [ "$_cwd_git_root" = "/" ] || [ -z "$_cwd_git_root" ]; then
+        _cwd_git_root="$VNX_HOME_DEFAULT"
+      fi
+      PROJECT_ROOT_DEFAULT="$(cd "$_cwd_git_root" && pwd)"
+      VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$PROJECT_ROOT_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+      [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+    else
+      # Standalone dev checkout: keep runtime local to the checkout.
+      PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+      VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$VNX_HOME_DEFAULT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+      [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+    fi
+    unset _vnx_is_central _cwd_git_root
   else
     PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/.." && pwd)"
+    VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
   fi
-  VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$VNX_HOME_DEFAULT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
-  [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  unset _vnx_home_git_root
 
   export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
   export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
