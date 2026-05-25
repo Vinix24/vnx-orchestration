@@ -264,7 +264,7 @@ else
   export VNX_HOME="${VNX_SYSTEM_DIR}/current"
 fi
 
-exec "${VNX_HOME}/bin/vnx-cli" "$@"
+exec "${VNX_HOME}/bin/vnx" "$@"
 SHIM
 )
 
