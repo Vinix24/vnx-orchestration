@@ -327,6 +327,92 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Backup Retention Policy (PR-WAVE2A-3)
+# ---------------------------------------------------------------------------
+
+_BACKUP_DIR_PATTERN = re.compile(r"^vnx-pre-p4-auto-backup-")
+
+
+def cleanup_old_backups(backup_base: Path, keep_n: int = 3) -> list[Path]:
+    """Remove excess backup directories beyond the ``keep_n`` most-recent ones.
+
+    Only directories whose names match ``vnx-pre-p4-auto-backup-*`` are
+    considered.  All other directories under ``backup_base`` are left
+    untouched regardless of their names or ages.
+
+    Sorting is by ``mtime`` (newest first) so the ``keep_n`` survivors are
+    always the most recently written backups.  Ties in mtime are broken
+    alphabetically (descending) to produce a deterministic order.
+
+    Args:
+        backup_base: Directory that contains the ``vnx-pre-p4-auto-backup-*``
+            directories (e.g. ``~/Documents``).
+        keep_n: Number of most-recent backup directories to retain.
+            Must be >= 1.  Defaults to 3.
+
+    Returns:
+        List of :class:`~pathlib.Path` objects that were removed (empty when
+        nothing needed cleaning up — i.e. the call is idempotent).
+
+    Raises:
+        ValueError: If ``keep_n < 1``.
+    """
+    if keep_n < 1:
+        raise ValueError(f"keep_n must be >= 1, got {keep_n!r}")
+
+    backup_base = backup_base.expanduser()
+    if not backup_base.is_dir():
+        LOG.debug("cleanup_old_backups: backup_base does not exist: %s", backup_base)
+        return []
+
+    # Collect only dirs matching the strict pattern — no unrelated dirs.
+    candidates: list[Path] = [
+        p
+        for p in backup_base.iterdir()
+        if p.is_dir() and _BACKUP_DIR_PATTERN.match(p.name)
+    ]
+
+    if len(candidates) <= keep_n:
+        LOG.info(
+            "cleanup_old_backups: %d backup dir(s) found, keep_n=%d — nothing to remove",
+            len(candidates),
+            keep_n,
+        )
+        return []
+
+    # Sort newest first: primary key = mtime descending, secondary = name descending.
+    candidates.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+
+    to_keep = candidates[:keep_n]
+    to_remove = candidates[keep_n:]
+
+    LOG.info(
+        "cleanup_old_backups: %d dir(s) found, keeping %d most-recent, removing %d",
+        len(candidates),
+        len(to_keep),
+        len(to_remove),
+    )
+    for kept in to_keep:
+        LOG.debug("  keeping:  %s", kept.name)
+    for old in to_remove:
+        LOG.debug("  removing: %s", old.name)
+
+    removed: list[Path] = []
+    for old_dir in to_remove:
+        try:
+            import shutil
+            shutil.rmtree(old_dir)
+            LOG.info("cleanup_old_backups: removed %s", old_dir)
+            removed.append(old_dir)
+        except OSError as exc:
+            LOG.error(
+                "cleanup_old_backups: failed to remove %s: %s", old_dir, exc
+            )
+
+    return removed
+
+
+# ---------------------------------------------------------------------------
 # Central DB freshness + canonical bootstrap (round-3 fix-forward)
 # ---------------------------------------------------------------------------
 
@@ -2426,6 +2512,27 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON to stdout on completion")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
+        "--cleanup-backups",
+        action="store_true",
+        default=False,
+        help=(
+            "OPT-IN: after a successful --apply, remove backup directories "
+            "in --backup-base beyond the --keep-backups most-recent ones. "
+            "Only directories matching 'vnx-pre-p4-auto-backup-*' are touched. "
+            "No-op without --apply."
+        ),
+    )
+    parser.add_argument(
+        "--keep-backups",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "Number of most-recent 'vnx-pre-p4-auto-backup-*' directories to "
+            "retain when --cleanup-backups is set (default: 3)."
+        ),
+    )
+    parser.add_argument(
         "--project",
         type=str,
         default=None,
@@ -2683,6 +2790,18 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"  [{s.project_id}] {s.db_name} {s.table}: +{s.rows_inserted} ({s.rows_skipped_existing} idempotent skips)")
         if failed_projects:
             print(f"  FAILED projects (rolled back): {', '.join(failed_projects)}")
+
+    if args.cleanup_backups:
+        removed = cleanup_old_backups(args.backup_base, keep_n=args.keep_backups)
+        if removed:
+            msg = f"  Backup cleanup: removed {len(removed)} old backup dir(s) (keep_n={args.keep_backups})"
+        else:
+            msg = f"  Backup cleanup: nothing to remove (keep_n={args.keep_backups})"
+        if args.json:
+            out_payload["backup_cleanup_removed"] = [str(p) for p in removed]
+        else:
+            print(msg)
+
     return 0
 
 
