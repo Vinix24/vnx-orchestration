@@ -2566,6 +2566,23 @@ def main(argv: Iterable[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    # Env isolation pre-flight: warn if VNX_DATA_DIR is set and does not
+    # match the --central-state argument.  This detects cross-repo env
+    # contamination (e.g. VNX_DATA_DIR inherited from a different tmux pane).
+    # WARN only — not abort — because the flag value always takes precedence
+    # over env vars in the migrator's own code paths.
+    _env_vnx_data_dir = os.environ.get("VNX_DATA_DIR", "")
+    if _env_vnx_data_dir:
+        _central_arg = str(args.central_state.expanduser().resolve())
+        _env_resolved = str(Path(_env_vnx_data_dir).expanduser().resolve()) if _env_vnx_data_dir else ""
+        if _env_resolved and _env_resolved != _central_arg:
+            LOG.warning(
+                "env leak detected: VNX_DATA_DIR=%s vs --central-state=%s. "
+                "Run scripts/check_env_isolation.sh for details.",
+                _env_vnx_data_dir,
+                args.central_state,
+            )
+
     registry_path = args.registry or _default_registry_path()
     try:
         projects = load_registry(registry_path)
