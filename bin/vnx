@@ -12,9 +12,16 @@ export VNX_EXECUTABLE="$VNX_BIN"
 # (e.g. SEOcrawler PROJECT_ROOT leaking into marketing-magic-circle).
 # Preserve VNX_DATA_DIR if explicitly set (worktree isolation)
 _VNX_SAVED_DATA_DIR="${VNX_DATA_DIR:-}"
-unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR
+# Save any incoming VNX_PROJECT_ROOT (exported per-invocation by the
+# central-install shim, or set explicitly by an operator). The env reset below
+# unsets it together with PROJECT_ROOT/VNX_HOME so the resolver re-detects from
+# a clean slate, then we restore the explicit project-root override so
+# vnx_paths.sh re-applies it (detection priority 2: VNX_PROJECT_ROOT).
+_VNX_INCOMING_PROJECT_ROOT="${VNX_PROJECT_ROOT:-}"
+unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_PROJECT_ROOT
 [ -n "$_VNX_SAVED_DATA_DIR" ] && export VNX_DATA_DIR="$_VNX_SAVED_DATA_DIR"
-unset _VNX_SAVED_DATA_DIR
+[ -n "$_VNX_INCOMING_PROJECT_ROOT" ] && export VNX_PROJECT_ROOT="$_VNX_INCOMING_PROJECT_ROOT"
+unset _VNX_SAVED_DATA_DIR _VNX_INCOMING_PROJECT_ROOT
 
 if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_paths.sh" ]; then
   # shellcheck source=/dev/null
@@ -83,6 +90,30 @@ else
   export VNX_DB_DIR="${VNX_DB_DIR:-$VNX_DATA_DIR/database}"
   export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$VNX_CANONICAL_ROOT/.vnx-intelligence}"
 
+  # Central-install write guard (mirror of scripts/lib/vnx_paths.sh). In a
+  # central install (.vnx-install-mode=central) project state must never resolve
+  # under VNX_HOME — that tree is immutable shared code. Fail loud instead of
+  # corrupting it. No-op for embedded / standalone-dev layouts (no marker). Uses
+  # raw printf because err() is not defined yet at this point in the script.
+  if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] \
+    && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+    _vnx_guard_home="$(cd "$VNX_HOME_DEFAULT" && pwd -P)"
+    for _vnx_guard_var in VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_INTELLIGENCE_DIR; do
+      _vnx_guard_val="${!_vnx_guard_var:-}"
+      [ -n "$_vnx_guard_val" ] || continue
+      case "$_vnx_guard_val" in
+        "$_vnx_guard_home"|"$_vnx_guard_home"/*)
+          printf 'ERROR: [guard] cannot write project state under immutable central install\n' >&2
+          printf 'ERROR: [guard]   %s=%s\n' "$_vnx_guard_var" "$_vnx_guard_val" >&2
+          printf 'ERROR: [guard]   VNX_HOME=%s (immutable shared code)\n' "$_vnx_guard_home" >&2
+          printf 'ERROR: [guard]   PROJECT_ROOT mis-detected; run vnx from your project directory\n' >&2
+          exit 1
+          ;;
+      esac
+    done
+    unset _vnx_guard_home _vnx_guard_var _vnx_guard_val
+  fi
+
   if [ -d "$PROJECT_ROOT_DEFAULT/.claude/skills" ]; then
     export VNX_SKILLS_DIR="$PROJECT_ROOT_DEFAULT/.claude/skills"
   else
@@ -124,6 +155,38 @@ log() {
 
 err() {
   printf 'ERROR: %s\n' "$*" >&2
+}
+
+# ── Central-install write guard ───────────────────────────────────────────
+# A central install marks its (immutable, shared) versioned code tree with a
+# .vnx-install-mode=central file written by install-central.sh. In that layout
+# no project state may be written under VNX_HOME. These helpers catch
+# PROJECT_ROOT mis-detection where PROJECT_ROOT collapses onto VNX_HOME — the
+# Wave 4 install-central bug. Embedded / standalone-dev layouts carry no marker
+# (PROJECT_ROOT == VNX_HOME is legitimate there), so the guard is a no-op.
+_vnx_is_central_install() {
+  [ -f "${VNX_HOME}/.vnx-install-mode" ] \
+    && [ "$(cat "${VNX_HOME}/.vnx-install-mode" 2>/dev/null)" = "central" ]
+}
+
+# Refuse a write whose target resolves under VNX_HOME in a central install.
+# Usage: _guard_not_vnx_home "<target-path>" || return 1
+_guard_not_vnx_home() {
+  local target="$1"
+  _vnx_is_central_install || return 0
+  local canon_target canon_home
+  canon_target="$(cd "$target" 2>/dev/null && pwd -P)" || canon_target="$target"
+  canon_home="$(cd "$VNX_HOME" 2>/dev/null && pwd -P)" || canon_home="$VNX_HOME"
+  case "$canon_target" in
+    "$canon_home"|"$canon_home"/*)
+      err "[guard] cannot write project state under immutable central install"
+      err "[guard]   target:   $canon_target"
+      err "[guard]   VNX_HOME: $canon_home (immutable shared code)"
+      err "[guard]   PROJECT_ROOT mis-detected — run vnx from your project directory (where .vnx-version lives)"
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 # ── Command loader ──────────────────────────────────────────────────────
@@ -636,6 +699,9 @@ cmd_intelligence_import() {
 }
 
 cmd_init() {
+  # Refuse to bootstrap into the immutable central code tree (mis-detection).
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
+
   # Parse --starter / --operator flags before forwarding to Python init.
   local mode_flag=""
   local init_args=()
@@ -920,6 +986,7 @@ select_snippet_for_target() {
 }
 
   cmd_patch_agent_files() {
+    _guard_not_vnx_home "$PROJECT_ROOT" || return 1
     local target
   for target in "$PROJECT_ROOT/CLAUDE.md" "$PROJECT_ROOT/AGENTS.md" "$PROJECT_ROOT/GEMINI.md"; do
     local base
@@ -1109,6 +1176,7 @@ EOF
 }
 
 cmd_bootstrap_skills() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local project_claude_dir="$PROJECT_ROOT/.claude"
   local project_skills_dir="$project_claude_dir/skills"
   local shipped_skills_dir="$VNX_HOME/skills"
@@ -1181,6 +1249,7 @@ cmd_bootstrap_skills() {
 }
 
 cmd_bootstrap_terminals() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local terminals_dir="$PROJECT_ROOT/.claude/terminals"
   local force=0
   local terminal_ids="T0 T1 T2 T3"
@@ -1346,6 +1415,7 @@ PYEOF
 }
 
 cmd_bootstrap_hooks() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local project_claude_dir="$PROJECT_ROOT/.claude"
   local project_hooks_dir="$project_claude_dir/hooks"
   local project_settings="$project_claude_dir/settings.json"
@@ -1780,6 +1850,20 @@ cmd_update() {
       log "[update] Remote: unable to fetch (check network/URL)"
     fi
     return 0
+  fi
+
+  # Central install: the shared, versioned code tree is immutable. A self-update
+  # via clone+install would mutate it (or, worse, the wrong PROJECT_ROOT). Block
+  # the mutating path here — note that --check (read-only, handled above) and
+  # --pin (writes version.lock, not project state) still work. To move a central
+  # install forward, install a new version and repoint the per-project
+  # .vnx-version pin so the shim resolves it on the next invocation.
+  if _vnx_is_central_install; then
+    log "[update] Central install detected — 'vnx update' cannot mutate the shared code tree."
+    log "[update] Install a new version: bash <vnx-system>/install-central.sh --version <new-version>"
+    log "[update] Then repin this project: echo <new-version> > .vnx-version"
+    log "[update] (Use 'vnx update --check' for a read-only dry run.)"
+    return 1
   fi
 
   log "[update] Pulling latest VNX from: $origin_url (branch: $branch)"
