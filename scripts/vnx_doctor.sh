@@ -17,7 +17,7 @@ if command -v rg >/dev/null 2>&1; then
     "$SCRIPTS_DIR" "$TEMPLATES_DIR" "$BIN_DIR" \
     --glob '**/*.sh' \
     --glob '**/*.py' \
-    --glob "$TEMPLATES_DIR/**/*.md" \
+    --glob '**/*.md' \
     --glob '!**/archived*' \
     --glob '!**/archive*' \
     --glob '!**/vnx_doctor.sh' \
