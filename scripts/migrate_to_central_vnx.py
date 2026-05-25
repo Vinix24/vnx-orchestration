@@ -2425,6 +2425,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON to stdout on completion")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--project",
+        type=str,
+        default=None,
+        metavar="PROJECT_ID",
+        action="append",
+        dest="projects_filter",
+        help=(
+            "Migrate only this project_id (from registry). Enables targeted "
+            "re-run after partial failure without re-applying already-succeeded "
+            "projects. Repeat to include multiple projects: --project a --project b. "
+            "Default (omitted): all registry projects."
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     logging.basicConfig(
@@ -2438,6 +2452,30 @@ def main(argv: Iterable[str] | None = None) -> int:
     except FileNotFoundError:
         print(f"ERROR: registry not found at {registry_path}", file=sys.stderr)
         return 2
+
+    if args.projects_filter:
+        valid_ids = {p.project_id for p in projects}
+        unknown = set(args.projects_filter) - valid_ids
+        if unknown:
+            LOG.error(
+                "--project filter contains unknown project_id(s): %s; "
+                "valid project_ids from registry: %s",
+                sorted(unknown),
+                sorted(valid_ids),
+            )
+            return 2
+        filter_set = set(args.projects_filter)
+        selected: list = []
+        for p in projects:
+            if p.project_id in filter_set:
+                selected.append(p)
+            else:
+                LOG.info("skipping project %s — not in --project filter", p.project_id)
+        projects = selected
+        LOG.info(
+            "--project filter active: migrating subset %s",
+            [p.project_id for p in projects],
+        )
 
     central_state: Path = args.central_state.expanduser()
     central_qi = central_state / "quality_intelligence.db"
