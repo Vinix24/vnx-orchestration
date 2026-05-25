@@ -24,6 +24,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 INSTALL_SH = REPO_ROOT / "install.sh"
+CHECKER_SH = REPO_ROOT / "scripts" / "check_installer_no_template_leak.sh"
 
 # Paths that must never appear hardcoded in shipped template files.
 # These are developer-machine-specific strings.
@@ -302,6 +303,36 @@ class TestInstallerR2Security:
         assert not blocking, (
             "eval found in non-comment install.sh lines — "
             "scan logic must use array-based find, not eval:\n"
+            + "\n".join(blocking)
+        )
+
+    def test_checker_no_eval_in_scan_logic(self):
+        """check_installer_no_template_leak.sh must not use eval in scan logic.
+
+        R3 codex finding: the CI gate script introduced the same shell-injection
+        anti-pattern as install.sh R1:
+          done < <(eval "find '$dir' -type f \\( $SCAN_EXTENSIONS \\) -print0")
+        The fix replaces the string variable with a bash array (SCAN_EXT_ARGS)
+        and calls find directly — no eval anywhere in scan logic.
+        """
+        content = CHECKER_SH.read_text()
+
+        eval_lines = [
+            (i + 1, line.rstrip())
+            for i, line in enumerate(content.splitlines())
+            if "eval" in line
+        ]
+
+        blocking = []
+        for lineno, line in eval_lines:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue  # comment — allowed
+            blocking.append(f"check_installer_no_template_leak.sh:{lineno}: {line}")
+
+        assert not blocking, (
+            "eval found in non-comment lines of check_installer_no_template_leak.sh — "
+            "scan logic must use array-based find (SCAN_EXT_ARGS), not eval:\n"
             + "\n".join(blocking)
         )
 

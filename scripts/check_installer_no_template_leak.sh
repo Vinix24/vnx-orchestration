@@ -34,8 +34,13 @@ PLACEHOLDER_PATTERNS=(
     "{{VNX_HOME}}"
 )
 
-# File extensions to scan
-SCAN_EXTENSIONS="-name '*.yml' -o -name '*.yaml' -o -name '*.json' -o -name '*.sh' -o -name '*.py' -o -name '*.md' -o -name '*.conf' -o -name '*.toml' -o -name '*.example'"
+# File extensions to scan — stored as an array so no eval is needed and
+# special characters in directory paths cannot be interpreted as shell code.
+SCAN_EXT_ARGS=(
+    -name '*.yml'   -o -name '*.yaml' -o -name '*.json'
+    -o -name '*.sh'    -o -name '*.py'   -o -name '*.md'
+    -o -name '*.conf'  -o -name '*.toml' -o -name '*.example'
+)
 
 # ── Prepare install dir ──────────────────────────────────────────────────────
 
@@ -74,7 +79,7 @@ scan_for_pattern() {
             echo "  VIOLATION [$label]: .vnx/$rel contains '$pattern'"
             VIOLATIONS=$((VIOLATIONS + 1))
         fi
-    done < <(eval "find '$dir' -type f \( $SCAN_EXTENSIONS \) -print0 2>/dev/null")
+    done < <(find "$dir" -type f \( "${SCAN_EXT_ARGS[@]}" \) -print0 2>/dev/null)
 }
 
 echo ""
