@@ -188,8 +188,11 @@ def _resolve_venv_path(paths: Dict[str, str]) -> Optional[str]:
 def check_directories(paths: Dict[str, str]) -> List[CheckResult]:
     results = []
 
+    project_root = Path(paths["PROJECT_ROOT"])
+    vnx_home = Path(paths["VNX_HOME"])
+
     required_dirs = [
-        ("VNX config", Path(paths["PROJECT_ROOT"]) / ".vnx"),
+        ("VNX config", project_root / ".vnx"),
         ("Runtime data", Path(paths["VNX_DATA_DIR"])),
         ("State", Path(paths["VNX_STATE_DIR"])),
         ("Logs", Path(paths["VNX_LOGS_DIR"])),
@@ -202,20 +205,38 @@ def check_directories(paths: Dict[str, str]) -> List[CheckResult]:
         ("Reports", Path(paths["VNX_REPORTS_DIR"])),
     ]
 
+    # Central-install mis-detection hint: if PROJECT_ROOT == VNX_HOME, all dirs will fail
+    # because no project has been initialized there. Give a single actionable message.
+    central_misdetect = (project_root == vnx_home)
+
     for label, dir_path in required_dirs:
         if dir_path.is_dir():
             results.append(CheckResult("dir", PASS, f"{label}: {dir_path}"))
         else:
-            results.append(CheckResult("dir", FAIL, f"Missing: {label} ({dir_path})",
-                                       "Run: vnx init"))
+            if central_misdetect:
+                results.append(CheckResult("dir", FAIL,
+                    f"Missing: {label} ({dir_path})",
+                    f"PROJECT_ROOT=VNX_HOME ({vnx_home}) — run vnx from your project directory, "
+                    f"not from inside ~/.vnx-system/. "
+                    f"Central install: check ~/.vnx-system/versions/*/.vnx-install-mode"))
+            else:
+                results.append(CheckResult("dir", FAIL, f"Missing: {label} ({dir_path})",
+                                           f"Run: cd {project_root} && vnx init"))
 
     # Config file
-    config_file = Path(paths["PROJECT_ROOT"]) / ".vnx" / "config.yml"
+    config_file = project_root / ".vnx" / "config.yml"
     if config_file.exists():
         results.append(CheckResult("file", PASS, f"Config: {config_file}"))
     else:
-        results.append(CheckResult("file", FAIL, f"Missing config: {config_file}",
-                                   "Run: vnx init"))
+        if central_misdetect:
+            results.append(CheckResult("file", FAIL,
+                f"Missing config at PROJECT_ROOT={project_root}",
+                f"PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+                f"Expected: {config_file}"))
+        else:
+            results.append(CheckResult("file", FAIL,
+                f"Missing config: {config_file}",
+                f"Run: cd {project_root} && vnx init"))
 
     return results
 
@@ -253,12 +274,18 @@ def check_templates(paths: Dict[str, str]) -> List[CheckResult]:
 def check_settings(paths: Dict[str, str]) -> List[CheckResult]:
     results = []
     project_root = Path(paths["PROJECT_ROOT"])
+    vnx_home = Path(paths["VNX_HOME"])
     settings_file = project_root / ".claude" / "settings.json"
 
     if not settings_file.exists():
+        if project_root == vnx_home:
+            return [CheckResult("settings", FAIL,
+                                f"Missing .claude/settings.json at PROJECT_ROOT={project_root}",
+                                "PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+                                "Central install: check .vnx-install-mode marker and shim VNX_PROJECT_ROOT export")]
         return [CheckResult("settings", FAIL,
-                            "Missing .claude/settings.json",
-                            "Run: vnx regen-settings --full")]
+                            f"Missing .claude/settings.json at PROJECT_ROOT={project_root}",
+                            f"Run: cd {project_root} && vnx regen-settings --full")]
 
     # JSON validity
     try:
@@ -308,11 +335,20 @@ def check_settings(paths: Dict[str, str]) -> List[CheckResult]:
 # ---------------------------------------------------------------------------
 
 def check_hooks(paths: Dict[str, str]) -> List[CheckResult]:
-    hook_file = Path(paths["PROJECT_ROOT"]) / ".claude" / "hooks" / "sessionstart.sh"
+    project_root = Path(paths["PROJECT_ROOT"])
+    vnx_home = Path(paths["VNX_HOME"])
+    hook_file = project_root / ".claude" / "hooks" / "sessionstart.sh"
     if hook_file.exists():
         return [CheckResult("hooks", PASS, f"SessionStart hook: {hook_file}")]
-    return [CheckResult("hooks", FAIL, f"Missing hook: {hook_file}",
-                        "Run: vnx bootstrap-hooks")]
+    if project_root == vnx_home:
+        return [CheckResult("hooks", FAIL,
+                            f"Missing hook: {hook_file}",
+                            "PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+                            "Central install: re-run install-central.sh to refresh shim, "
+                            "then: cd <your-project> && vnx bootstrap-hooks")]
+    return [CheckResult("hooks", FAIL,
+                        f"Missing hook: {hook_file}",
+                        f"Run: cd {project_root} && vnx bootstrap-hooks")]
 
 
 # ---------------------------------------------------------------------------
