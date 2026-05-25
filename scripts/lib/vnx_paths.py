@@ -84,27 +84,98 @@ def _git_common_root(path: Path) -> Path | None:
     return common_dir.parent if common_dir.name == ".git" else common_dir
 
 
+def _vnx_project_root_override(vnx_home: Path) -> Path | None:
+    """Return the resolved VNX_PROJECT_ROOT override if it is a usable directory.
+
+    VNX_PROJECT_ROOT is the explicit override exported by the central-install
+    shim. It wins over any heuristic but is ignored when it points at VNX_HOME
+    (mis-detection) or at a non-directory.
+    """
+    raw = os.environ.get("VNX_PROJECT_ROOT")
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser().resolve()
+    if candidate.is_dir() and candidate != vnx_home:
+        return candidate
+    return None
+
+
+def _is_central_install(vnx_home: Path) -> bool:
+    """True when VNX_HOME is a standalone git repo serving as a central install.
+
+    Central install = the VNX code tree is shared (e.g. ~/.vnx-system/versions/<v>)
+    and the operator runs from their own project. Detected *only* via the
+    ``.vnx-install-mode`` marker file (content ``central``) written by
+    install-central.sh.
+
+    The earlier CWD-git-root-mismatch heuristic was removed: a git worktree of
+    vnx-orchestration itself produces a CWD git root that differs from VNX_HOME,
+    which mis-fired the heuristic and collapsed PROJECT_ROOT onto the parent repo
+    (issue #225 / PR-WAVE4-1 CI regression). The marker is unambiguous, so a
+    standalone dev checkout or worktree is correctly treated as non-central.
+    """
+    if _git_toplevel(vnx_home) != vnx_home:
+        return False
+    marker = vnx_home / ".vnx-install-mode"
+    if marker.is_file():
+        try:
+            return marker.read_text(encoding="utf-8").strip() == "central"
+        except OSError:
+            return False
+    return False
+
+
 def _default_project_root(vnx_home: Path) -> Path:
     if _is_embedded_layout(vnx_home):
         return vnx_home.parent.parent.resolve()
 
+    # Explicit override exported by the central-install shim (belt-and-suspenders).
+    override = _vnx_project_root_override(vnx_home)
+    if override is not None:
+        return override
+
     git_root = _git_toplevel(vnx_home)
     if git_root == vnx_home:
-        # Standalone repo/worktree layout: runtime/bootstrap stay local to the repo checkout.
+        if _is_central_install(vnx_home):
+            cwd_git_root = _git_toplevel(Path.cwd())
+            resolved = cwd_git_root if cwd_git_root else Path.cwd().resolve()
+            # Safety: never collapse PROJECT_ROOT to filesystem root.
+            if resolved == Path(resolved.anchor):
+                return vnx_home.resolve()
+            return resolved
+        # Standalone dev checkout: runtime/bootstrap stay local to the repo checkout.
         return vnx_home.resolve()
 
     return vnx_home.parent.resolve()
 
 
 def _default_canonical_root(vnx_home: Path) -> Path:
+    if _is_embedded_layout(vnx_home):
+        return vnx_home.resolve()
+
+    # Explicit override: intelligence follows the project's git root.
+    override = _vnx_project_root_override(vnx_home)
+    if override is not None:
+        return _git_toplevel(override) or override
+
     git_root = _git_toplevel(vnx_home)
     if git_root == vnx_home:
+        if _is_central_install(vnx_home):
+            project_root = _default_project_root(vnx_home)
+            return _git_toplevel(project_root) or project_root
         return _git_common_root(vnx_home) or vnx_home.resolve()
     return vnx_home.resolve()
 
 
 def _resolve_project_root(vnx_home: Path) -> Path:
     default_root = _default_project_root(vnx_home)
+
+    # Explicit shim override takes precedence over inherited PROJECT_ROOT, so
+    # direct Python callers honor it even when PROJECT_ROOT was not exported (EC-2).
+    override = _vnx_project_root_override(vnx_home)
+    if override is not None:
+        return override
+
     project_root_env = os.environ.get("PROJECT_ROOT")
     if project_root_env:
         candidate = Path(project_root_env).expanduser().resolve()
