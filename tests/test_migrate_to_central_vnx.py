@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from scripts import migrate_to_central_vnx as M  # noqa: E402
 from scripts.aggregator.build_central_view import load_registry  # noqa: E402
+from scripts.lib import migrate_import as _MI  # noqa: E402
 from schema_versioning import ensure_schema_meta, set_schema_version  # noqa: E402
 
 
@@ -101,7 +102,10 @@ def fixture_env(tmp_path: Path, monkeypatch) -> dict:
 
     abort_dir = tmp_path / ".vnx-aggregator"
     abort_dir.mkdir()
-    monkeypatch.setattr(M, "ABORT_FLAG", abort_dir / "ABORT")
+    abort_flag_path = abort_dir / "ABORT"
+    monkeypatch.setattr(M, "ABORT_FLAG", abort_flag_path)
+    # Also patch migrate_import since check_abort now lives there.
+    monkeypatch.setattr(_MI, "ABORT_FLAG", abort_flag_path)
 
     central_state = tmp_path / "central" / "state"
     central_qi, central_rc = _make_central_dbs(central_state)
@@ -2534,7 +2538,9 @@ def test_round6_apply_against_all_4_real_source_schemas(tmp_path: Path, monkeypa
     backup_base.mkdir()
     abort_dir = tmp_path / ".vnx-aggregator"
     abort_dir.mkdir()
-    monkeypatch.setattr(M, "ABORT_FLAG", abort_dir / "ABORT")
+    abort_flag_path = abort_dir / "ABORT"
+    monkeypatch.setattr(M, "ABORT_FLAG", abort_flag_path)
+    monkeypatch.setattr(_MI, "ABORT_FLAG", abort_flag_path)
 
     central_state = tmp_path / "central" / "state"
     central_state.mkdir(parents=True)
