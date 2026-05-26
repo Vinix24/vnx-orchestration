@@ -102,6 +102,8 @@ from subprocess_dispatch_internals.state_paths import (
 __all__ = [
     "_extract_role_from_instruction",
     "_select_dispatch_path",
+    "_build_cheap_lane_argv",
+    "_execute_cheap_lane_dispatch",
     "SubprocessAdapter",
     "HeadlessContextTracker",
     "WorkerHealthMonitor",
@@ -206,6 +208,73 @@ def _select_dispatch_path(
             exc, current_model,
         )
         return None, current_model
+
+
+def _build_cheap_lane_argv(
+    args: "argparse.Namespace",
+    cheap_lane_provider: str,
+) -> "list[str]":
+    """Build the provider_dispatch argv list for a non-Claude lane dispatch.
+
+    Constructs the full argument list forwarded to ``provider_dispatch.main()``
+    when ``routing_policy`` selects a non-Claude (cheap) provider.  Extracted
+    as a module-level function so tests can verify the delegation contract
+    without spawning real processes.
+
+    Args:
+        args:               Parsed ``argparse.Namespace`` from ``__main__``.
+        cheap_lane_provider: The lane string returned by ``_select_dispatch_path``
+                            (e.g. ``"litellm:moonshot:kimi-k2-0905-default"``).
+
+    Returns:
+        List of string arguments suitable for ``provider_dispatch.main(argv)``.
+    """
+    argv: "list[str]" = [
+        "--provider", cheap_lane_provider,
+        "--terminal-id", args.terminal_id,
+        "--dispatch-id", args.dispatch_id,
+        "--instruction", args.instruction,
+        "--model", args.model,
+        "--role", args.role or _ROLE_FALLBACK,
+        "--max-retries", str(args.max_retries),
+        "--gate", args.gate,
+    ]
+    if getattr(args, "no_auto_commit", False):
+        argv.append("--no-auto-commit")
+    if getattr(args, "dispatch_paths", ""):
+        argv.extend(["--dispatch-paths", args.dispatch_paths])
+    if getattr(args, "pr_id", None):
+        argv.extend(["--pr-id", args.pr_id])
+    return argv
+
+
+def _execute_cheap_lane_dispatch(
+    args: "argparse.Namespace",
+    cheap_lane_provider: str,
+) -> int:
+    """Delegate to provider_dispatch when routing policy selects a non-Claude lane.
+
+    This is the single delegation entry-point called from ``__main__`` when
+    ``_select_dispatch_path`` returns a non-None ``cheap_lane_provider``.
+    ``provider_dispatch`` owns receipt and unified_report emission after the
+    spawn completes; ``deliver_with_recovery`` (Claude) is never invoked on
+    this path.
+
+    Extracting it as a module-level function makes the delegation contract
+    directly testable: callers can mock ``provider_dispatch.main`` and assert
+    that ``deliver_with_recovery`` is not called (which is the primary
+    regression guard for the cheap-lane feature).
+
+    Args:
+        args:               Parsed ``argparse.Namespace`` from ``__main__``.
+        cheap_lane_provider: The non-Claude lane string (e.g.
+                            ``"litellm:moonshot:kimi-k2-0905-default"``).
+
+    Returns:
+        Exit code from ``provider_dispatch.main()``.
+    """
+    import provider_dispatch as _pd  # noqa: PLC0415
+    return _pd.main(_build_cheap_lane_argv(args, cheap_lane_provider))
 
 
 def _pool_heartbeat_loop(
@@ -357,29 +426,12 @@ if __name__ == "__main__":
 
     if _cheap_lane_provider is not None:
         # Non-Claude lane chosen by routing_policy: stop the heartbeat thread, then
-        # delegate execution to provider_dispatch.  provider_dispatch owns receipt +
-        # unified_report emission after the spawn completes; we must not also call
-        # deliver_with_recovery (which would spawn a Claude process instead).
+        # delegate execution to provider_dispatch via _execute_cheap_lane_dispatch.
+        # provider_dispatch owns receipt + unified_report emission; deliver_with_recovery
+        # (which would spawn a Claude process) is never called on this path.
         _hb_stop.set()
         _hb_thread.join(timeout=5)
-        import provider_dispatch as _pd  # noqa: PLC0415
-        _pd_argv = [
-            "--provider", _cheap_lane_provider,
-            "--terminal-id", args.terminal_id,
-            "--dispatch-id", args.dispatch_id,
-            "--instruction", args.instruction,
-            "--model", args.model,
-            "--role", args.role or _ROLE_FALLBACK,
-            "--max-retries", str(args.max_retries),
-            "--gate", args.gate,
-        ]
-        if args.no_auto_commit:
-            _pd_argv.append("--no-auto-commit")
-        if args.dispatch_paths:
-            _pd_argv.extend(["--dispatch-paths", args.dispatch_paths])
-        if args.pr_id:
-            _pd_argv.extend(["--pr-id", args.pr_id])
-        sys.exit(_pd.main(_pd_argv))
+        sys.exit(_execute_cheap_lane_dispatch(args, _cheap_lane_provider))
 
     # Scale chunk/total timeouts by --complexity so compute-heavy ("high")
     # dispatches get more headroom and aren't killed by the per-chunk timeout
