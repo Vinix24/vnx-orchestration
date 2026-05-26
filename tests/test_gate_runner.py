@@ -799,8 +799,8 @@ class TestGateTimeoutConfig:
 
     def test_default_stall_threshold(self):
         from headless_adapter import gate_stall_threshold
-        assert gate_stall_threshold("gemini_review") == 60
-        assert gate_stall_threshold("codex_gate") == 120
+        assert gate_stall_threshold("gemini_review") == 180
+        assert gate_stall_threshold("codex_gate") == 300
 
     def test_env_override_stall_threshold(self, monkeypatch):
         from headless_adapter import gate_stall_threshold
@@ -811,3 +811,417 @@ class TestGateTimeoutConfig:
         from headless_adapter import gate_timeout, gate_stall_threshold
         assert gate_timeout("unknown_gate") == 600  # DEFAULT_TIMEOUT
         assert gate_stall_threshold("unknown_gate") == 60
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity check (HOLD-level deterministic gate)
+# ---------------------------------------------------------------------------
+
+def _make_hold_diff(*paths: str) -> str:
+    """Build a minimal unified diff where every supplied path is fully deleted."""
+    parts = []
+    for path in paths:
+        parts.append(
+            f"diff --git a/{path} b/{path}\n"
+            f"deleted file mode 100644\n"
+            f"index abc1234..0000000\n"
+            f"--- a/{path}\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-# deleted\n"
+        )
+    return "\n".join(parts)
+
+
+def _mock_gh_diff(diff_text: str, returncode: int = 0):
+    return MagicMock(returncode=returncode, stdout=diff_text, stderr="")
+
+
+class TestRunCodexNetDeletionCheck:
+    """Unit tests for GateRunner._run_codex_net_deletion_check.
+
+    Validates the HOLD-level deterministic sanity check that returns a
+    pre-emptive blocking result when a PR deletes >= _GATE_DELETION_FILE_HOLD
+    files, bypassing the AI reviewer entirely.
+    """
+
+    def _make_payload(self, pr_number=50, **extra):
+        return {"gate": "codex_gate", "pr_number": pr_number, **extra}
+
+    # ------------------------------------------------------------------
+    # Threshold behaviour
+    # ------------------------------------------------------------------
+
+    def test_below_hold_returns_none(self, tmp_path):
+        """Fewer than _GATE_DELETION_FILE_HOLD deletions → None (AI gate proceeds)."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD - 1)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload()
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=50,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert result is None
+
+    def test_at_hold_threshold_returns_blocking(self, tmp_path):
+        """Exactly _GATE_DELETION_FILE_HOLD deletions → blocking result returned."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload()
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=50,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert result is not None
+        assert result["status"] == "fail"
+
+    def test_above_hold_threshold_returns_blocking(self, tmp_path):
+        """More than _GATE_DELETION_FILE_HOLD deletions → blocking result."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD + 10)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload()
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=50,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert result is not None
+        assert result["status"] == "fail"
+
+    # ------------------------------------------------------------------
+    # Graceful degradation
+    # ------------------------------------------------------------------
+
+    def test_no_pr_number_returns_none(self, tmp_path):
+        """pr_number=None → None (cannot fetch diff without a PR number)."""
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+        result = GateRunner._run_codex_net_deletion_check(
+            pr_number=None,
+            request_payload=self._make_payload(pr_number=None),
+            results_dir=results_dir,
+            requests_dir=requests_dir,
+        )
+        assert result is None
+
+    def test_gh_diff_failure_returns_none(self, tmp_path):
+        """gh pr diff non-zero exit → degrades gracefully, returns None."""
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff("", returncode=1)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=50,
+                request_payload=self._make_payload(),
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert result is None
+
+    def test_gh_not_found_returns_none(self, tmp_path):
+        """gh binary not found (FileNotFoundError) → degrades gracefully, returns None."""
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", side_effect=FileNotFoundError("gh not found")):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=50,
+                request_payload=self._make_payload(),
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert result is None
+
+    def test_timeout_returns_none(self, tmp_path):
+        """gh pr diff timeout → degrades gracefully, returns None."""
+        import subprocess as _subprocess
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run",
+                   side_effect=_subprocess.TimeoutExpired(["gh"], 60)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=50,
+                request_payload=self._make_payload(),
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert result is None
+
+    # ------------------------------------------------------------------
+    # Result structure
+    # ------------------------------------------------------------------
+
+    def test_blocking_result_has_required_keys(self, tmp_path):
+        """Blocking result must contain all keys required by gate consumers."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload(pr_number=77)
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=77,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        required_keys = (
+            "gate", "pr_number", "status", "summary", "findings",
+            "blocking_findings", "advisory_findings", "required_reruns",
+            "residual_risk", "duration_seconds", "recorded_at",
+            "net_deletion_check",
+        )
+        for key in required_keys:
+            assert key in result, f"missing key: {key}"
+
+    def test_blocking_finding_severity_is_blocking(self, tmp_path):
+        """Finding severity must be 'blocking' so the gate consumer classifies it correctly."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload(pr_number=88)
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=88,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert len(result["blocking_findings"]) == 1
+        assert result["blocking_findings"][0]["severity"] == "blocking"
+        assert result["advisory_findings"] == []
+
+    def test_net_deletion_check_metadata_in_result(self, tmp_path):
+        """net_deletion_check metadata must carry deleted_count and threshold."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD + 5)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload(pr_number=99)
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            result = GateRunner._run_codex_net_deletion_check(
+                pr_number=99,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        meta = result["net_deletion_check"]
+        assert meta["deleted_count"] == _GATE_DELETION_FILE_HOLD + 5
+        assert meta["threshold"] == _GATE_DELETION_FILE_HOLD
+        assert meta["triggered"] is True
+        assert len(meta["deleted_files"]) == _GATE_DELETION_FILE_HOLD + 5
+
+    def test_result_file_written_to_results_dir(self, tmp_path):
+        """Blocking result must be persisted to results_dir so closure_verifier sees it."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload(pr_number=55)
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            GateRunner._run_codex_net_deletion_check(
+                pr_number=55,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        result_file = results_dir / "pr-55-codex_gate.json"
+        assert result_file.exists()
+        saved = json.loads(result_file.read_text(encoding="utf-8"))
+        assert saved["status"] == "fail"
+        assert saved["gate"] == "codex_gate"
+
+    def test_request_marked_completed(self, tmp_path):
+        """After blocking result, request payload status must be 'completed'."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD)]
+        diff = _make_hold_diff(*paths)
+        payload = self._make_payload(pr_number=66)
+        results_dir = tmp_path / "results"
+        requests_dir = tmp_path / "requests"
+        results_dir.mkdir()
+        requests_dir.mkdir()
+
+        with patch("gate_runner.subprocess.run", return_value=_mock_gh_diff(diff)):
+            GateRunner._run_codex_net_deletion_check(
+                pr_number=66,
+                request_payload=payload,
+                results_dir=results_dir,
+                requests_dir=requests_dir,
+            )
+
+        assert payload["status"] == "completed"
+        assert "completed_at" in payload
+
+
+class TestCodexGateRunNetDeletionIntegration:
+    """Integration: GateRunner.run() for codex_gate short-circuits when HOLD threshold met.
+
+    Validates that the net-deletion sanity check is wired into the gate execution
+    lifecycle: when a PR deletes >= _GATE_DELETION_FILE_HOLD files, run() returns
+    a blocking result WITHOUT spawning the codex subprocess.
+    """
+
+    def test_high_deletion_skips_ai_subprocess(self, gate_env, monkeypatch):
+        """run() with HOLD-level deletions must NOT spawn codex Popen."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+
+        paths = [f"scripts/file_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD)]
+        diff = _make_hold_diff(*paths)
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=str(gate_env["reports_dir"] / "codex-del-report.md"),
+        )
+        # Remove pre-set prompt so _resolve_prompt calls _build_codex_prompt
+        # which also calls subprocess.run for gh pr diff — both calls return diff.
+        del payload["prompt"]
+
+        mock_popen = MagicMock()
+
+        with patch("gate_runner.subprocess.run", return_value=MagicMock(returncode=0, stdout=diff, stderr="")), \
+             patch("gate_runner.subprocess.Popen", mock_popen):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+
+        assert result["status"] == "fail"
+        assert len(result["blocking_findings"]) >= 1
+        mock_popen.assert_not_called()
+
+    def test_low_deletion_proceeds_to_ai_subprocess(self, gate_env, monkeypatch):
+        """run() below HOLD threshold must spawn codex Popen for AI review."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+
+        # Fewer deleted files than HOLD
+        paths = [f"scripts/file_{i}.py" for i in range(2)]
+        diff = _make_hold_diff(*paths)
+        report_path = str(gate_env["reports_dir"] / "codex-lowdel-report.md")
+        payload = _make_request_payload(
+            gate="codex_gate",
+            report_path=report_path,
+            prompt="Review this diff",  # pre-supply prompt to skip _build_codex_prompt
+        )
+
+        review_output = b'{"type":"message","message":"LGTM"}\nAll checks pass.\nNo issues.\n'
+        mock_proc = MagicMock()
+        mock_proc.stdin = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stderr = MagicMock()
+        mock_proc.stdout.fileno.return_value = 10
+        mock_proc.stderr.fileno.return_value = 11
+        mock_proc.poll.return_value = 0
+        mock_proc.returncode = 0
+        mock_proc.pid = 12121
+
+        read_calls = [0]
+        def mock_os_read(fd, size):
+            read_calls[0] += 1
+            if fd == 10 and read_calls[0] == 1:
+                return review_output
+            return b""
+
+        # subprocess.run is used by net deletion check (_fetch_gh_pr_diff)
+        # — return a small diff so check passes through
+        with patch("gate_runner.subprocess.run", return_value=MagicMock(returncode=0, stdout=diff, stderr="")), \
+             patch("gate_runner.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("gate_runner.select.select", return_value=([], [], [])), \
+             patch("gate_runner.os.read", side_effect=mock_os_read), \
+             patch("gate_runner.os.getpgid", return_value=12121):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=1)
+
+        mock_popen.assert_called_once()
+        assert result["status"] == "completed"
+
+    def test_result_is_fail_not_not_executable(self, gate_env, monkeypatch):
+        """Net-deletion blocking result must have status='fail', not 'not_executable'."""
+        from gate_runner import _GATE_DELETION_FILE_HOLD
+        monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/fake")
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+
+        paths = [f"scripts/mod_{i}.py" for i in range(_GATE_DELETION_FILE_HOLD + 3)]
+        diff = _make_hold_diff(*paths)
+        payload = _make_request_payload(gate="codex_gate")
+        del payload["prompt"]
+
+        with patch("gate_runner.subprocess.run", return_value=MagicMock(returncode=0, stdout=diff, stderr="")):
+            result = runner.run(gate="codex_gate", request_payload=payload, pr_number=2)
+
+        assert result["status"] == "fail"
+        assert result.get("reason") is None  # not an infra failure
+        assert result["net_deletion_check"]["triggered"] is True
