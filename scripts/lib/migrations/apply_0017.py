@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -36,12 +37,31 @@ log = logging.getLogger(__name__)
 
 _TARGET_VERSION = 12
 
+# Matches the bare ``ALTER TABLE worker_states ADD COLUMN project_id ...;``
+# statement in 0017. SQLite has no ``ADD COLUMN IF NOT EXISTS``, so a bare
+# ALTER raises "duplicate column name" if the column already exists. When the
+# idempotent init path (project_id_migration.run_runtime_coordination_migration)
+# has already self-healed worker_states.project_id, this statement must become
+# a no-op so 0017 can still run its terminal_leases/dispatches composite-UNIQUE
+# rebuild without erroring. The companion ``CREATE INDEX IF NOT EXISTS
+# idx_worker_states_project`` line is already idempotent and is left intact.
+_WORKER_STATES_ADD_COLUMN_RE = re.compile(
+    r"ALTER\s+TABLE\s+worker_states\s+ADD\s+COLUMN\s+project_id\b[^;]*;",
+    re.IGNORECASE,
+)
+
 _DEFAULT_MIGRATION_SQL = (
     Path(__file__).resolve().parent.parent.parent.parent
     / "schemas"
     / "migrations"
     / "0017_multi_tenant_lease_isolation.sql"
 )
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if *table* exists and has *column* (PRAGMA table_info)."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
 
 
 def _emit_migration_event(vnx_data_dir: Path, event_type: str, payload: dict) -> None:
@@ -98,6 +118,25 @@ def apply_migration(
             )
 
             sql = migration_sql_path.read_text()
+
+            # Column-guard: if worker_states.project_id was already self-healed
+            # by the init path (project_id_migration), neutralise 0017's bare
+            # ADD COLUMN so it does not raise "duplicate column name". The
+            # composite-UNIQUE rebuild for terminal_leases/dispatches is left
+            # untouched. See _WORKER_STATES_ADD_COLUMN_RE.
+            if _column_exists(conn, "worker_states", "project_id"):
+                sql, n_subs = _WORKER_STATES_ADD_COLUMN_RE.subn(
+                    "-- worker_states.project_id already present; "
+                    "ADD COLUMN skipped (column-guard, OI-095)",
+                    sql,
+                )
+                if n_subs:
+                    log.info(
+                        "apply_0017: worker_states.project_id already present; "
+                        "skipped %d ADD COLUMN statement(s)",
+                        n_subs,
+                    )
+
             conn.executescript(sql)
             log.info(
                 "apply_0017: migrated from v%s to v%s", current_version, _TARGET_VERSION
