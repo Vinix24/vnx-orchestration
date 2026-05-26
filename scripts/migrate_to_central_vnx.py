@@ -1599,7 +1599,8 @@ def raise_for_verification_failures(report: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments for migrate_to_central_vnx."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, default=None)
     parser.add_argument("--apply", action="store_true", help="ACTUALLY perform the import")
@@ -1690,13 +1691,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             "completion (success or failure)."
         ),
     )
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    return parser.parse_args(list(argv) if argv is not None else None)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
+def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
+    """Execute the apply / verify / backup flow.
+
+    Receives a fully-parsed ``args`` namespace (from :func:`_parse_args`) and
+    a filtered ``projects`` list (from :func:`main`).  Handles the
+    ``--verify-only``, dry-run, ``--test-apply``, and ``--apply`` code paths.
+    """
     # Env isolation pre-flight: warn if VNX_DATA_DIR is set and does not
     # match the --central-state argument.  This detects cross-repo env
     # contamination (e.g. VNX_DATA_DIR inherited from a different tmux pane).
@@ -1713,42 +1717,6 @@ def main(argv: Iterable[str] | None = None) -> int:
                 _env_vnx_data_dir,
                 args.central_state,
             )
-
-    registry_path = args.registry or _default_registry_path()
-    try:
-        projects = load_registry(registry_path)
-    except FileNotFoundError:
-        print(f"ERROR: registry not found at {registry_path}", file=sys.stderr)
-        return 2
-
-    if args.projects_filter:
-        valid_ids = {p.project_id for p in projects}
-        unknown = set(args.projects_filter) - valid_ids
-        if unknown:
-            LOG.error(
-                "--project filter contains unknown project_id(s): %s; "
-                "valid project_ids from registry: %s",
-                sorted(unknown),
-                sorted(valid_ids),
-            )
-            return 2
-        filter_set = set(args.projects_filter)
-        selected: list = []
-        for p in projects:
-            if p.project_id in filter_set:
-                selected.append(p)
-            else:
-                LOG.info("skipping project %s — not in --project filter", p.project_id)
-        projects = selected
-        LOG.info(
-            "--project filter active: migrating subset %s",
-            [p.project_id for p in projects],
-        )
-
-    # --test-apply and --verify-only are mutually exclusive.
-    if args.test_apply and args.verify_only:
-        LOG.error("--test-apply and --verify-only are mutually exclusive")
-        return 2
 
     # --test-apply: redirect central_state to a temp dir and run the full
     # bootstrap + migration chain without touching the live central DB.
@@ -2049,6 +2017,54 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"TEST MODE -- temp central dir cleaned up: {_test_apply_tmp_dir}")
 
     return 0
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    """CLI entry-point: parse args, load registry, filter projects, delegate to _run_apply."""
+    args = _parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    registry_path = args.registry or _default_registry_path()
+    try:
+        projects = load_registry(registry_path)
+    except FileNotFoundError:
+        print(f"ERROR: registry not found at {registry_path}", file=sys.stderr)
+        return 2
+
+    if args.projects_filter:
+        valid_ids = {p.project_id for p in projects}
+        unknown = set(args.projects_filter) - valid_ids
+        if unknown:
+            LOG.error(
+                "--project filter contains unknown project_id(s): %s; "
+                "valid project_ids from registry: %s",
+                sorted(unknown),
+                sorted(valid_ids),
+            )
+            return 2
+        filter_set = set(args.projects_filter)
+        selected: list = []
+        for p in projects:
+            if p.project_id in filter_set:
+                selected.append(p)
+            else:
+                LOG.info("skipping project %s — not in --project filter", p.project_id)
+        projects = selected
+        LOG.info(
+            "--project filter active: migrating subset %s",
+            [p.project_id for p in projects],
+        )
+
+    # --test-apply and --verify-only are mutually exclusive.
+    if args.test_apply and args.verify_only:
+        LOG.error("--test-apply and --verify-only are mutually exclusive")
+        return 2
+
+    return _run_apply(args, projects)
 
 
 def _snapshot_central(qi: Path, rc: Path) -> dict[str, Path]:
