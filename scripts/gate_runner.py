@@ -9,6 +9,7 @@ Entry point: GateRunner.run() — called from ReviewGateManager.execute_gate().
 
 from __future__ import annotations
 
+import json
 import os
 import select
 import shutil
@@ -46,6 +47,13 @@ _REVIEWER_VERDICT_TEMPLATE = (
 # Minimum deleted-file count before injecting a Net-Deletion Alert into the reviewer prompt.
 # Mirrors DELETION_FILE_WARN in codex_final_gate.py and pre_merge_gate.py (both use 5).
 _GATE_DELETION_FILE_WARN = 5
+
+# Hard blocking threshold: codex_gate returns a pre-emptive fail result when a PR
+# deletes >= this many files.  Matches DELETION_FILE_HOLD in codex_final_gate.py.
+# At this scale the deletion scope exceeds what AI-only review can reliably catch —
+# a deterministic gate check is cheaper and more trustworthy than relying on the
+# AI reviewer to notice every file in a 20+ file sweep.
+_GATE_DELETION_FILE_HOLD = 20
 
 # Gate type → CLI binary mapping
 GATE_BINARIES: Dict[str, str] = {
@@ -101,6 +109,21 @@ class GateRunner:
         prompt = self._resolve_prompt(gate, request_payload, using_vertex)
         if prompt and "prompt" not in request_payload:
             request_payload["prompt"] = prompt
+
+        # Net-deletion sanity check for codex_gate — pre-emptive blocking check that
+        # short-circuits AI review when the PR exceeds the deletion HOLD threshold.
+        # Runs after prompt resolution (so the diff is already available via gh pr diff)
+        # but before _mark_executing to avoid leaving a dangling "executing" request
+        # on disk when we return early.
+        if gate == "codex_gate":
+            net_del_result = self._run_codex_net_deletion_check(
+                pr_number=pr_number,
+                request_payload=request_payload,
+                results_dir=self._results_dir,
+                requests_dir=self._requests_dir,
+            )
+            if net_del_result is not None:
+                return net_del_result
 
         self._mark_executing(gate, request_payload, pr_number=pr_number, pr_id=pr_id)
 
@@ -297,6 +320,98 @@ class GateRunner:
                 f"{result.stderr.strip()}"
             )
         return result.stdout
+
+    @staticmethod
+    def _run_codex_net_deletion_check(
+        pr_number: Optional[int],
+        request_payload: Dict[str, Any],
+        results_dir: Path,
+        requests_dir: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """Net-deletion sanity check for codex_gate (pre-AI deterministic check).
+
+        When a PR deletes >= _GATE_DELETION_FILE_HOLD files the gate returns a
+        pre-emptive blocking result without spawning the AI reviewer.  This is:
+        - cheaper (no LLM tokens consumed),
+        - more reliable (AI reviewers can miss large-scale deletions), and
+        - consistent with codex_final_gate.DELETION_FILE_HOLD enforcement.
+
+        Returns a complete result dict when the check triggers (HOLD), else None.
+        gh pr diff failure degrades gracefully — returns None so the AI gate runs.
+        """
+        if not pr_number:
+            return None
+        try:
+            diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired):
+            # Diff unavailable (gh not found, auth failure, timeout, etc.) —
+            # degrade gracefully and let the AI gate proceed.
+            return None
+
+        deleted_files = GateRunner._extract_deleted_files_from_diff(diff_content)
+        deleted_count = len(deleted_files)
+        if deleted_count < _GATE_DELETION_FILE_HOLD:
+            return None
+
+        # HOLD threshold exceeded — assemble blocking result without running AI
+        now = utc_now_iso()
+        gate = request_payload.get("gate", "codex_gate")
+        pr_id = request_payload.get("pr_id", "")
+        file_list = "\n".join(f"- `{f}`" for f in deleted_files)
+        finding: Dict[str, Any] = {
+            "severity": "blocking",
+            "title": f"Net-deletion sanity: {deleted_count} file(s) deleted",
+            "description": (
+                f"PR deletes {deleted_count} file(s) which meets or exceeds the "
+                f"blocking threshold of {_GATE_DELETION_FILE_HOLD}. "
+                "Human review is required before merge. Confirm each deletion is "
+                "intentional and within the declared PR scope.\n\n"
+                f"Deleted files:\n{file_list}"
+            ),
+            "out_of_scope": False,
+            "introduced_by_prior_fix": False,
+        }
+        result: Dict[str, Any] = {
+            "gate": gate,
+            "pr_id": pr_id or (str(pr_number) if pr_number is not None else ""),
+            "pr_number": pr_number,
+            "status": "fail",
+            "summary": (
+                f"Net-deletion sanity: {deleted_count} file(s) deleted "
+                f"(≥ {_GATE_DELETION_FILE_HOLD} blocking threshold)"
+            ),
+            "contract_hash": "",
+            "report_path": "",
+            "findings": [finding],
+            "blocking_findings": [finding],
+            "advisory_findings": [],
+            "required_reruns": [],
+            "residual_risk": (
+                f"PR deletes {deleted_count} file(s) — human review required before merge"
+            ),
+            "duration_seconds": 0.0,
+            "recorded_at": now,
+            "net_deletion_check": {
+                "deleted_count": deleted_count,
+                "deleted_files": deleted_files,
+                "threshold": _GATE_DELETION_FILE_HOLD,
+                "triggered": True,
+            },
+        }
+
+        # Persist result and mark request completed so downstream verifiers see it
+        rf = _rec.result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
+        if rf:
+            rf.parent.mkdir(parents=True, exist_ok=True)
+            rf.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+        request_payload["status"] = "completed"
+        request_payload["completed_at"] = now
+        _rec.persist_request(
+            requests_dir, gate, request_payload,
+            pr_number=pr_number, pr_id=pr_id,
+        )
+        return result
 
     @staticmethod
     def _build_codex_prompt(request_payload: Dict[str, Any]) -> str:
