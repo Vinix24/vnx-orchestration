@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 VALID_PROVIDERS = frozenset({"claude", "codex", "gemini", "kimi", "litellm", "ollama"})
-VALID_EVENT_TYPES = frozenset({"init", "text", "tool_use", "tool_result", "thinking", "complete", "error", "usage_complete"})
+VALID_EVENT_TYPES = frozenset({"init", "text", "tool_use", "tool_result", "thinking", "complete", "error", "usage_complete", "info"})
 VALID_TIERS = frozenset({1, 2, 3})
 
 # Legacy "result" emitted by subprocess_adapter maps to canonical "complete"
@@ -302,8 +302,9 @@ def _from_codex_event(
     if etype == "error":
         msg = payload.get("message") or payload.get("error") or payload.get("text") or ""
         return make("error", {"message": str(msg) if msg else str(payload)[:200]})
-    return make("error", {
-        "reason": f"unrecognized codex event: {etype!r}",
+    # Unknown codex event type — non-fatal passthrough, same rationale as kimi.
+    return make("info", {
+        "raw_type": etype,
         "raw": str(raw)[:300],
     })
 
@@ -342,8 +343,9 @@ def _from_gemini_event(
     if etype == "error":
         msg = raw.get("message") or raw.get("error") or raw.get("text") or ""
         return make("error", {"message": str(msg) if msg else str(raw)[:200]})
-    return make("error", {
-        "reason": f"unrecognized gemini event: {etype!r}",
+    # Unknown gemini event type — non-fatal passthrough, same rationale as kimi.
+    return make("info", {
+        "raw_type": etype,
         "raw": str(raw)[:300],
     })
 
@@ -451,8 +453,12 @@ def _from_kimi_event(
     if event_type == "TurnEnd":
         return make("complete", {})
 
-    return make("error", {
-        "reason": f"unrecognized kimi event_type: {event_type!r}",
+    # Unknown event type — map to "info" (non-fatal passthrough).
+    # An unrecognized informational event must not flip the dispatch status to
+    # failure: returning "info" lets the consumer log it and move on without
+    # adding it to errors_captured or setting result.error.
+    return make("info", {
+        "raw_type": event_type,
         "raw": str(raw)[:300],
     })
 

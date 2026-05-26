@@ -254,11 +254,18 @@ class TestLegacyEventsStillWork(unittest.TestCase):
         event = normalize_kimi_event(raw, "T1", "d-legacy")
         self.assertEqual(event.event_type, "error")
 
-    def test_unknown_still_maps_to_error(self):
+    def test_unknown_maps_to_info_not_error(self):
+        """Unknown event types must map to 'info', not 'error'.
+
+        Mapping to 'error' caused false failures: errors_captured gained an entry
+        for every unrecognized informational event, forcing rc=1 and status=failure
+        even when kimi exited cleanly.  'info' breaks the chain.
+        """
         raw = {"event_type": "never_seen_this"}
         event = normalize_kimi_event(raw, "T1", "d-legacy")
-        self.assertEqual(event.event_type, "error")
-        self.assertIn("never_seen_this", event.data.get("reason", ""))
+        self.assertEqual(event.event_type, "info")
+        self.assertIn("raw_type", event.data)
+        self.assertEqual(event.data["raw_type"], "never_seen_this")
 
 
 # ---------------------------------------------------------------------------
