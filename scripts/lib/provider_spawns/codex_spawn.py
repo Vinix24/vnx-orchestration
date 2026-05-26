@@ -260,8 +260,9 @@ def normalize_codex_event(raw: dict, terminal_id: str, dispatch_id: str) -> Cano
     if result is not None:
         return result
 
-    return make("error", {
-        "reason": f"unrecognized codex event type: {etype!r}",
+    # Unknown codex event type — non-fatal passthrough, same rationale as kimi.
+    logger.debug("codex_spawn: unknown event type %r — mapping to info (non-fatal)", etype)
+    return make("info", {
         "raw_type": etype,
         "raw": str(raw)[:300],
     })

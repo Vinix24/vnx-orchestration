@@ -83,7 +83,7 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
       {"event_type": "StatusUpdate", "token_count": {...}} -> text + token_count
       {"event_type": "TurnEnd", ...}     -> complete
 
-    Unknown event_type values map to error events (never returns None).
+    Unknown event_type values map to "info" events (non-fatal passthrough, never returns None).
     """
     def make(event_type: str, data: dict) -> CanonicalEvent:
         return CanonicalEvent(
@@ -159,9 +159,13 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
     if event_type == "TurnEnd":
         return make("complete", {})
 
-    logger.warning("kimi_spawn: unknown event_type %r, mapping to error", event_type)
-    return make("error", {
-        "reason": f"unrecognized kimi event_type: {event_type!r}",
+    # Unknown event type — map to "info" (non-fatal passthrough).
+    # An unrecognized informational event must not flip the dispatch status to
+    # failure: "info" falls through the consumer's error-capture branch so it
+    # never enters errors_captured, never sets result.error, and never forces
+    # rc = 1 on an otherwise-successful completion.
+    logger.debug("kimi_spawn: unknown event_type %r — mapping to info (non-fatal)", event_type)
+    return make("info", {
         "raw_type": event_type,
         "raw": str(raw)[:300],
     })

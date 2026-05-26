@@ -148,7 +148,14 @@ class TestDispatchKimiSuccess(unittest.TestCase):
         for call in mock_receipt.call_args_list:
             self.assertNotEqual(call.kwargs.get("status"), "success")
 
-    def test_event_writer_failures_emits_failure_receipt(self):
+    def test_event_writer_failures_returns_nonzero_with_success_receipt(self):
+        """event_writer_failures signals an audit gap: exit_code=2, status='success'.
+
+        The dispatch itself completed correctly (worker produced output); the
+        event_writer_failures field flags an ADR-005 audit-trail gap, not a
+        dispatch failure.  All handlers (codex, gemini, litellm, kimi) consistently
+        emit status='success' with return code 2 for this case.
+        """
         import provider_dispatch as pd
         from provider_spawns.kimi_spawn import KimiSpawnResult
 
@@ -173,10 +180,12 @@ class TestDispatchKimiSuccess(unittest.TestCase):
             mock_report.return_value = Path("/tmp/report.md")
             exit_code = pd._dispatch_kimi(args)
 
-        self.assertNotEqual(exit_code, 0)
+        # exit_code=2 signals the audit gap to the caller — not zero, not one.
+        self.assertEqual(exit_code, 2)
         mock_receipt.assert_called_once()
         call_kwargs = mock_receipt.call_args.kwargs
-        self.assertEqual(call_kwargs.get("status"), "failure")
+        # Dispatch outcome is success; the audit gap is reported via exit_code=2.
+        self.assertEqual(call_kwargs.get("status"), "success")
 
 
 class TestComputeKimiCost(unittest.TestCase):
