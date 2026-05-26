@@ -94,6 +94,49 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r[1] == column for r in rows)
 
 
+# ---------------------------------------------------------------------------
+# worker_pid self-heal — 2nd schema-code drift (after worker_states.project_id)
+# ---------------------------------------------------------------------------
+#
+# rc6 code WRITES and READS ``terminal_leases.worker_pid``
+# (pool_state_repo.store_worker_pid / list_members), but no schema file or
+# migration ever defined the column. Every dispatch logged
+# "PID persistence failed: no such column: worker_pid" — non-fatal (the write
+# is in a rolled-back try/except) but it blinds the supervisor's worker-PID
+# tracking, degrading the lease-reaper / runtime_supervise path.
+#
+# The column is now declared in schemas/runtime_coordination{,_v10}.sql, but a
+# fresh DB builds terminal_leases from the v1 base (CREATE TABLE IF NOT EXISTS
+# in v10 is a no-op on the existing table) and pre-existing DBs predate the
+# declaration entirely — so, exactly like worker_states.project_id (OI-095), a
+# version-independent idempotent self-heal on every init is required. SQLite
+# has no ``ADD COLUMN IF NOT EXISTS``; guard with PRAGMA table_info first.
+WORKER_PID_TABLE = "terminal_leases"
+WORKER_PID_COLUMN = "worker_pid"
+
+
+def ensure_worker_pid_column(conn: sqlite3.Connection) -> str:
+    """Idempotently ensure ``terminal_leases.worker_pid`` (INTEGER, nullable).
+
+    Returns one of:
+      - ``"added"``           — column was just added
+      - ``"already_present"`` — column already existed
+      - ``"skipped_missing"`` — terminal_leases table not present in this DB
+
+    Reapplying is a clean no-op regardless of ``user_version``. Nullable
+    INTEGER: a worker PID when one is attached, NULL otherwise.
+    """
+    _validate_identifier(WORKER_PID_TABLE)
+    if not _table_exists(conn, WORKER_PID_TABLE):
+        return "skipped_missing"
+    if _column_exists(conn, WORKER_PID_TABLE, WORKER_PID_COLUMN):
+        return "already_present"
+    conn.execute(
+        f"ALTER TABLE {WORKER_PID_TABLE} ADD COLUMN {WORKER_PID_COLUMN} INTEGER"
+    )
+    return "added"
+
+
 def apply_project_id_migration(
     conn: sqlite3.Connection,
     tables: Iterable[str],
@@ -155,6 +198,9 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         results = apply_project_id_migration(conn, RUNTIME_COORDINATION_TABLES)
+        # Self-heal the 2nd schema-code drift: terminal_leases.worker_pid.
+        # Independent of the project_id columns above; nullable INTEGER.
+        worker_pid_status = ensure_worker_pid_column(conn)
         conn.execute(
             "INSERT OR IGNORE INTO runtime_schema_version (version, description) "
             "VALUES (?, ?)",
@@ -169,6 +215,7 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
         "db_path": str(path),
         "schema_version": RUNTIME_SCHEMA_VERSION,
         "results": results,
+        "worker_pid_status": worker_pid_status,
     }
 
 

@@ -220,6 +220,12 @@ def main() -> int:
             elif status == "skipped_missing":
                 log("WARNING", f"  runtime_coordination.{table}: not present, skipped")
 
+        worker_pid_status = runtime_result.get("worker_pid_status")
+        if worker_pid_status == "added":
+            log("SUCCESS", "  runtime_coordination.terminal_leases: worker_pid added")
+        elif worker_pid_status == "skipped_missing":
+            log("WARNING", "  runtime_coordination.terminal_leases: not present, worker_pid skipped")
+
         qi_db = Path(state_dir) / "quality_intelligence.db"
         qi_result = run_quality_intelligence_migration(qi_db)
         if qi_result.get("status") == "skipped_no_db":

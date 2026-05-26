@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS terminal_leases (
     expires_at          TEXT,
     last_heartbeat_at   TEXT,
     released_at         TEXT,
+    worker_pid          INTEGER,
     metadata_json       TEXT    DEFAULT '{}'
 );
 
