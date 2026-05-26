@@ -134,12 +134,21 @@ class TestNormalizeKimiEvent(unittest.TestCase):
         self.assertEqual(event.event_type, "error")
         self.assertEqual(event.data["message"], "something went wrong")
 
-    def test_normalize_unknown_event_type_maps_to_error(self):
+    def test_normalize_unknown_event_type_maps_to_info(self):
+        """Unrecognized event types must map to 'info', not 'error'.
+
+        Mapping to 'error' caused a chain reaction: errors_captured gains an
+        entry → _finalize_kimi_result sets rc=1 even when kimi exits 0 →
+        _dispatch_kimi emits status='failure' for a perfectly valid completion.
+        Using 'info' breaks that chain: 'info' events are silently skipped by
+        the consumer without affecting errors_captured, completion_text, or
+        token_usage.
+        """
         raw = {"event_type": "weird_event", "data": "xyz"}
         event = normalize_kimi_event(raw, "T1", "dispatch-01")
-        self.assertEqual(event.event_type, "error")
-        self.assertIn("reason", event.data)
-        self.assertIn("weird_event", event.data["reason"])
+        self.assertEqual(event.event_type, "info")
+        self.assertIn("raw_type", event.data)
+        self.assertEqual(event.data["raw_type"], "weird_event")
 
     def test_event_has_correct_dispatch_and_terminal(self):
         raw = {"event_type": "complete"}
@@ -275,6 +284,52 @@ class TestSpawnKimiIntegration(unittest.TestCase):
         result = self._run_with_events(events, returncode=0)
         self.assertIsNotNone(result.error)
         self.assertIn("auth token expired", result.error)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_unknown_event_type_in_success_stream_does_not_cause_failure(self):
+        """Regression: unrecognized kimi event types must NOT flip status to failure.
+
+        Bug (PR #642 fallout): unknown event_type → mapped to 'error' canonical
+        event → added to errors_captured → _finalize_kimi_result set rc=1 even
+        when kimi exited 0 → _dispatch_kimi emitted status='failure' for a valid
+        completion.  After fix: unknown events map to 'info' and are silently
+        skipped.
+        """
+        events = [
+            {"event_type": "assistant_text", "content": "Here is the result."},
+            # An event type that kimi CLI may emit but the normalizer doesn't
+            # explicitly handle — must be ignored, not treated as an error.
+            {"event_type": "InternalDiagnostic", "detail": "tool_trace_dump"},
+            {"event_type": "usage_complete", "usage": {"prompt_tokens": 150, "completion_tokens": 60}},
+            {"event_type": "complete"},
+        ]
+        result = self._run_with_events(events, returncode=0)
+
+        # Status must reflect the real outcome: success.
+        self.assertIsNone(result.error, f"expected no error but got: {result.error!r}")
+        self.assertEqual(result.returncode, 0)
+
+        # Output must be captured.
+        self.assertIn("Here is the result.", result.completion_text)
+
+        # Token usage must be extracted.
+        self.assertIsNotNone(result.token_usage)
+        self.assertEqual(result.token_usage["input_tokens"], 150)
+        self.assertEqual(result.token_usage["output_tokens"], 60)
+
+    def test_real_kimi_error_event_still_causes_failure(self):
+        """Real kimi error events (with 'error' event_type) must still set failure.
+
+        The fix must not swallow genuine errors — only unrecognized informational
+        event types get the non-fatal 'info' treatment.
+        """
+        events = [
+            {"event_type": "assistant_text", "content": "Partial"},
+            {"event_type": "error", "message": "rate limit exceeded"},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNotNone(result.error)
+        self.assertIn("rate limit exceeded", result.error)
         self.assertNotEqual(result.returncode, 0)
 
 
