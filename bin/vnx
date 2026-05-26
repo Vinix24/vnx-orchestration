@@ -231,6 +231,8 @@ Commands:
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
   bootstrap-hooks    Deploy SessionStart hooks to .claude/hooks/ + settings.json
   regen-settings     Patch-manage settings.json (--merge|--full|--validate)
+  regen-worker-permissions  Overlay-merge worker_permissions.yaml preserving project overrides
+                     (--merge|--full|--validate)
   start [--profile X] Launch VNX tmux session (interactive profile selection)
                      Profiles: claude-only, claude-codex, claude-gemini, full-multi
   start --preset <name>  Start with a saved startup preset
@@ -1921,6 +1923,17 @@ main() {
       ;;
     regen-settings)
       cmd_regen_settings "$@"
+      ;;
+    regen-worker-permissions)
+      if ! type cmd_regen_worker_permissions &>/dev/null; then
+        _load_command "regen_worker_permissions" 2>/dev/null || true
+      fi
+      if type cmd_regen_worker_permissions &>/dev/null; then
+        cmd_regen_worker_permissions "$@"
+      else
+        err "[regen-worker-permissions] command not available (scripts/commands/regen_worker_permissions.sh missing)"
+        exit 1
+      fi
       ;;
     start)
       cmd_start "$@"

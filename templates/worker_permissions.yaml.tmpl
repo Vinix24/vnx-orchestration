@@ -1,8 +1,9 @@
 version: 1
 
-# VNX worker permission profiles.
-# Project-specific overrides survive rc-cutover via 'vnx regen-worker-permissions --merge'.
-# VNX-managed keys are listed in _vnx_meta.managed_keys below.
+# VNX worker permission profiles — shipped template.
+# Project-specific overrides (file_write_scope, project-added roles) survive
+# rc-cutover via 'vnx regen-worker-permissions --merge'.
+# DO NOT edit this template directly — edit the project copy at .vnx/worker_permissions.yaml.
 
 _vnx_meta:
   managed_keys:
@@ -14,7 +15,7 @@ _vnx_meta:
     - "terminal_assignments (vnx_baseline; project overrides win)"
   project_owned_keys:
     - "profiles.<role>.file_write_scope"
-    - "profiles.<project-role>  (roles not present in the template)"
+    - "profiles.<project-role>  (roles not present in this template)"
   description: >
     VNX worker permission profiles. Merge via 'vnx regen-worker-permissions --merge'.
     file_write_scope entries and project-added roles survive cutover unchanged.
