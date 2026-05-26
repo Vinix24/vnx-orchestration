@@ -315,6 +315,14 @@ if __name__ == "__main__":
     )
     _hb_thread.start()
 
+    # Scale chunk/total timeouts by --complexity so compute-heavy ("high")
+    # dispatches get more headroom and aren't killed by the per-chunk timeout
+    # during a long quiet-but-working step (e.g. static analysis). These are the
+    # *base* values fed into deliver_with_recovery; apply_runtime_overrides runs
+    # downstream so VNX_CHUNK_TIMEOUT / VNX_TOTAL_DEADLINE still take precedence.
+    from subprocess_dispatch_internals.runtime_overrides import complexity_timeout_defaults
+    _chunk_timeout, _total_deadline = complexity_timeout_defaults(args.complexity)
+
     try:
         ok = deliver_with_recovery(
             terminal_id=args.terminal_id,
@@ -323,6 +331,8 @@ if __name__ == "__main__":
             dispatch_id=args.dispatch_id,
             role=args.role,
             max_retries=args.max_retries,
+            chunk_timeout=_chunk_timeout,
+            total_deadline=_total_deadline,
             auto_commit=not args.no_auto_commit,
             gate=args.gate,
             dispatch_paths=_dispatch_paths,
