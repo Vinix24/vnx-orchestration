@@ -837,13 +837,13 @@ def _mock_gh_diff(diff_text: str, returncode: int = 0):
     return MagicMock(returncode=returncode, stdout=diff_text, stderr="")
 
 
-class TestRunCodexNetDeletionCheck:
-    """Unit tests for GateRunner._run_codex_net_deletion_check.
+# Unit tests for _run_codex_net_deletion_check live in
+# test_gate_runner_codex_net_deletion_check.py (committed separately).
+# This section holds only the integration tests for GateRunner.run().
 
-    Validates the HOLD-level deterministic sanity check that returns a
-    pre-emptive blocking result when a PR deletes >= _GATE_DELETION_FILE_HOLD
-    files, bypassing the AI reviewer entirely.
-    """
+
+class _NetDeletionPayloadHelper:
+    """Shared payload factory for net-deletion integration tests."""
 
     def _make_payload(self, pr_number=50, **extra):
         return {"gate": "codex_gate", "pr_number": pr_number, **extra}
