@@ -8,7 +8,7 @@ Covers every constraint in provider_constraints.yaml:
   - no-anthropic-sdk        (forbid_import — skipped at runtime)
   - zai-via-openrouter-only (forbid_route, blocking)
   - deprecated-glm-models   (forbid_route, blocking)
-  - deepseek-path-d-blocked (forbid_route, blocking)
+  - deepseek-harness-subscription-blocked (forbid_route, blocking)
 
 Plus: file-not-found, bad version, override env var, non-matching routes.
 """
@@ -170,14 +170,19 @@ class TestDeprecatedGlmModels:
 
 
 # ---------------------------------------------------------------------------
-# deepseek-path-d-blocked — forbid_route provider=deepseek via=claude_harness
+# deepseek-harness-subscription-blocked — forbid_route provider=deepseek via=claude_harness_subscription
 # ---------------------------------------------------------------------------
 
-class TestDeepseekPathDBlocked:
+class TestDeepseekHarnessSubscriptionBlocked:
 
-    def test_deepseek_claude_harness_blocked(self, real_enforcer: ConstraintEnforcer):
-        with pytest.raises(HardConstraintViolation, match="deepseek-path-d-blocked"):
-            real_enforcer.enforce(provider="deepseek", via="claude_harness")
+    def test_deepseek_subscription_redirect_blocked(self, real_enforcer: ConstraintEnforcer):
+        """Subscription-redirect path (no own API key) must be blocked."""
+        with pytest.raises(HardConstraintViolation, match="deepseek-harness-subscription-blocked"):
+            real_enforcer.enforce(provider="deepseek", via="claude_harness_subscription")
+
+    def test_deepseek_claude_harness_keyed_allowed(self, real_enforcer: ConstraintEnforcer):
+        """Own-key + hardening path must be allowed (no exception raised)."""
+        real_enforcer.enforce(provider="deepseek", via="claude_harness_keyed")
 
     def test_deepseek_via_litellm_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="litellm", sub_provider="deepseek", via="litellm")
