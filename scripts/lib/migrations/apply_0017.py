@@ -20,6 +20,19 @@ CREATE TABLE dispatches_v10 with INSERT … SELECT *, which failed with
 "table dispatches_v10 has 15 columns but 20 values were supplied" when the
 live dispatches table had grown beyond the original column set.
 
+PRAGMA-built DDL (codex round-1): the replacement table DDL is constructed
+PROGRAMMATICALLY from PRAGMA table_info (column name/type/notnull/default/pk)
+and PRAGMA index_list (origin='u' UNIQUE constraints) — it is NOT produced by
+regex-editing the old CREATE TABLE text. Regex-stripping was fragile: it only
+matched column definitions anchored at the start of a line, so single-line
+DDL (as stored in sqlite_master) or comma-prefixed column styles slipped
+through, leaving the old single-column UNIQUE in place while the composite
+UNIQUE was added on top — a false-positive "migrated" stamp that silently kept
+the pre-migration single-column uniqueness. Building from the live schema
+cannot false-positive: the old single-column UNIQUE is provably absent because
+it is never copied into the new DDL, while non-replaced UNIQUE constraints
+(e.g. dispatch_attempts.attempt_id) are preserved by enumerating index_list.
+
 ADR-005: emits NDJSON audit events to .vnx-data/events/schema_migrations.ndjson
 for migration_started, migration_completed, and migration_failed.
 
@@ -101,118 +114,151 @@ def _composite_unique_exists(
     return False
 
 
-def _strip_inline_unique(ddl: str, col: str) -> str:
-    """Remove the UNIQUE keyword from *col*'s inline column-definition line.
+# Default values that PRAGMA table_info returns as bare keywords — these must
+# NOT be wrapped in parentheses when reconstructed.
+_BARE_DEFAULT_KEYWORDS = frozenset(
+    {"CURRENT_TIME", "CURRENT_DATE", "CURRENT_TIMESTAMP", "NULL", "TRUE", "FALSE"}
+)
+_NUMERIC_DEFAULT_RE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
 
-    Handles both quoted and unquoted column names. Table-level UNIQUE(col)
-    entries are handled by _strip_table_level_single_unique separately.
+
+def _format_default(dflt: str) -> str:
+    """Render a `DEFAULT ...` clause from PRAGMA table_info's dflt_value.
+
+    table_info strips the outer parentheses from expression defaults: for
+    `DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))` it returns the bare
+    expression `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`. SQLite requires
+    expression defaults to be parenthesized, so anything that is not a bare
+    keyword (CURRENT_TIMESTAMP …), a string/blob literal, a numeric literal, or
+    already parenthesized is re-wrapped. Literals are emitted verbatim.
     """
-    lines = ddl.split("\n")
-    for i, line in enumerate(lines):
-        # Column definitions start with optional whitespace + col name (quoted or bare)
-        # followed by whitespace. We match both the inline case on its own line
-        # and the ALTER-TABLE-style compact line (, col TYPE...).
-        if re.match(r'\s*"?' + re.escape(col) + r'"?\s+', line):
-            lines[i] = re.sub(r"\bUNIQUE\b", "", line, flags=re.IGNORECASE)
-            lines[i] = re.sub(r"  +", " ", lines[i])
-    return "\n".join(lines)
+    token = dflt.strip()
+    upper = token.upper()
+    if upper in _BARE_DEFAULT_KEYWORDS:
+        return f"DEFAULT {token}"
+    if token.startswith("(") and token.endswith(")"):
+        return f"DEFAULT {token}"
+    is_string_literal = token.startswith("'") and token.endswith("'")
+    is_blob_literal = upper.startswith("X'") and token.endswith("'")
+    if is_string_literal or is_blob_literal or _NUMERIC_DEFAULT_RE.match(token):
+        return f"DEFAULT {token}"
+    return f"DEFAULT ({token})"
 
 
-def _strip_inline_references(ddl: str, col: str) -> str:
-    """Remove an inline REFERENCES clause from *col*'s column-definition line.
+def _column_definitions(
+    conn: sqlite3.Connection, table: str
+) -> tuple[list[str], list[str], list[str]]:
+    """Build column-definition SQL fragments from PRAGMA table_info.
 
-    Matches: REFERENCES table_name (col) with optional whitespace.
+    Returns (col_names, column_def_sql, pk_cols). Each column def faithfully
+    carries the live type, NOT NULL, DEFAULT, and PRIMARY KEY (inline only for a
+    single-column PK; composite PKs are emitted as a table-level clause by the
+    caller). AUTOINCREMENT is preserved for an INTEGER single-column primary key
+    when the current DDL declares it.
+
+    UNIQUE, REFERENCES, and CHECK are intentionally NOT reconstructed here —
+    UNIQUE constraints are handled selectively via _preserved_unique_constraints,
+    and the old single-column FK/UNIQUE that 0017 replaces are dropped by simply
+    never carrying them over.
     """
-    lines = ddl.split("\n")
-    for i, line in enumerate(lines):
-        if re.match(r'\s*"?' + re.escape(col) + r'"?\s+', line):
-            lines[i] = re.sub(
-                r"\s*REFERENCES\s+\w+\s*\([^)]*\)",
-                "",
-                lines[i],
-                flags=re.IGNORECASE,
-            )
-    return "\n".join(lines)
-
-
-def _strip_table_level_single_unique(ddl: str, col: str) -> str:
-    """Remove a table-level UNIQUE(col) constraint (single-column).
-
-    Handles the pattern: ,<ws>UNIQUE(<ws>col<ws>) which appears when the
-    constraint was added as a table-level clause rather than inline.
-    """
-    return re.sub(
-        r",\s*\bUNIQUE\s*\(\s*\"?" + re.escape(col) + r"\"?\s*\)",
-        "",
-        ddl,
-        flags=re.IGNORECASE,
+    info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    # row: (cid, name, type, notnull, dflt_value, pk)
+    pk_cols = [r[1] for r in info if r[5]]
+    single_pk = len(pk_cols) == 1
+    has_autoincrement = bool(
+        re.search(r"AUTOINCREMENT", _get_table_ddl(conn, table), re.IGNORECASE)
     )
+
+    col_names: list[str] = []
+    defs: list[str] = []
+    for _cid, name, ctype, notnull, dflt, pk in info:
+        col_names.append(name)
+        parts = [f'"{name}"']
+        if ctype:
+            parts.append(ctype)
+        if pk and single_pk:
+            parts.append("PRIMARY KEY")
+            if has_autoincrement and (ctype or "").upper() == "INTEGER":
+                parts.append("AUTOINCREMENT")
+        if notnull:
+            parts.append("NOT NULL")
+        if dflt is not None:
+            parts.append(_format_default(dflt))
+        defs.append(" ".join(parts))
+    return col_names, defs, pk_cols
+
+
+def _preserved_unique_constraints(
+    conn: sqlite3.Connection,
+    table: str,
+    drop_column_sets: list[frozenset[str]] | None = None,
+) -> list[str]:
+    """Return table-level `UNIQUE(...)` clauses to carry over to the new table.
+
+    Enumerates UNIQUE constraints (origin='u') via PRAGMA index_list. Any
+    constraint whose exact column-set matches an entry in *drop_column_sets* is
+    dropped (it is being replaced by the composite constraint 0017 adds). Every
+    other UNIQUE constraint — e.g. dispatch_attempts.attempt_id — is preserved.
+    """
+    drop_sets = [frozenset(s) for s in (drop_column_sets or [])]
+    clauses: list[str] = []
+    for idx in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        name, is_unique = idx[1], idx[2]
+        origin = idx[3] if len(idx) > 3 else None
+        if not is_unique:
+            continue
+        # origin 'u' = UNIQUE constraint; 'pk' = primary key (handled via
+        # table_info, skip here); 'c' = CREATE [UNIQUE] INDEX (not a table
+        # constraint, recreated separately by the migration's index DDL).
+        if origin is not None and origin != "u":
+            continue
+        if origin is None and not name.startswith("sqlite_autoindex_"):
+            continue
+        cols = [r[2] for r in conn.execute(f'PRAGMA index_info("{name}")').fetchall()]
+        if frozenset(cols) in drop_sets:
+            continue
+        quoted = ", ".join(f'"{c}"' for c in cols)
+        clauses.append(f"UNIQUE({quoted})")
+    return clauses
 
 
 def _rebuild_table_dynamic(
     conn: sqlite3.Connection,
     table: str,
     extra_constraints: list[str],
-    strip_inline_unique_cols: list[str] | None = None,
-    strip_inline_refs_cols: list[str] | None = None,
-    strip_single_unique_cols: list[str] | None = None,
+    drop_unique_column_sets: list[frozenset[str]] | None = None,
 ) -> None:
-    """Rebuild *table* in-place, preserving all columns and data.
+    """Rebuild *table* in-place from its live schema, preserving columns + data.
 
-    Strategy:
-    1. Read current column names via PRAGMA table_info (always accurate).
-    2. Read the current DDL from sqlite_master (reflects ALTER TABLE additions).
-    3. Rename table reference in DDL to a temporary name.
-    4. Strip specified inline UNIQUE / REFERENCES modifiers.
-    5. Strip specified table-level UNIQUE(single_col) constraints.
-    6. Add extra_constraints (composite UNIQUE, FK) before the closing paren.
-    7. CREATE TABLE tmp, INSERT with explicit column list, DROP orig, RENAME tmp.
+    Strategy (no regex-editing of the old DDL — see module docstring):
+    1. Read columns via PRAGMA table_info → faithful type/notnull/default/pk.
+    2. Read UNIQUE constraints via PRAGMA index_list → preserve all except the
+       single-column UNIQUE(s) in *drop_unique_column_sets* (replaced by 0017).
+    3. Emit CREATE TABLE <tmp> with those columns, the preserved UNIQUE clauses,
+       a table-level PRIMARY KEY clause for composite PKs, and *extra_constraints*
+       (the composite UNIQUE / FK that 0017 adds).
+    4. INSERT with the explicit pragma-derived column list, DROP orig, RENAME tmp.
 
-    The explicit column-list INSERT (not SELECT *) ensures the rebuild works
-    regardless of how many columns the source table has accumulated via
-    ALTER TABLE ADD COLUMN migrations since this migration was originally written.
+    The new DDL is built entirely from the live schema, so the old single-column
+    UNIQUE that 0017 replaces is provably absent (never copied) and the rebuild
+    works for any column count, single-line DDL, or comma-prefixed column style.
     """
     tmp = f"{table}__mig0017"
     conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
 
-    col_names = _get_column_names(conn, table)
-    ddl = _get_table_ddl(conn, table)
+    col_names, col_defs, pk_cols = _column_definitions(conn, table)
+    preserved_unique = _preserved_unique_constraints(conn, table, drop_unique_column_sets)
 
-    # Rename table in DDL
-    ddl = re.sub(
-        r"(?i)(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)"
-        r'(?:"?' + re.escape(table) + r'"?)',
-        lambda m: m.group(1) + f'"{tmp}"',
-        ddl,
-        count=1,
-    )
+    table_constraints: list[str] = []
+    if len(pk_cols) > 1:
+        quoted_pk = ", ".join(f'"{c}"' for c in pk_cols)
+        table_constraints.append(f"PRIMARY KEY({quoted_pk})")
+    table_constraints.extend(preserved_unique)
+    table_constraints.extend(extra_constraints)
 
-    # Strip inline UNIQUE from specified column definition lines
-    for col in (strip_inline_unique_cols or []):
-        ddl = _strip_inline_unique(ddl, col)
+    body = ",\n    ".join(col_defs + table_constraints)
+    conn.execute(f'CREATE TABLE "{tmp}" (\n    {body}\n)')
 
-    # Strip inline REFERENCES from specified column definition lines
-    for col in (strip_inline_refs_cols or []):
-        ddl = _strip_inline_references(ddl, col)
-
-    # Strip table-level UNIQUE(single_col) constraints
-    for col in (strip_single_unique_cols or []):
-        ddl = _strip_table_level_single_unique(ddl, col)
-
-    # Insert extra constraints before the final closing paren.
-    # rfind(')') gives the outermost closing paren that ends CREATE TABLE,
-    # even when column defaults contain nested parens like strftime(...).
-    last_paren = ddl.rfind(")")
-    if last_paren == -1:
-        raise sqlite3.OperationalError(
-            f"Malformed DDL for table '{table}': no closing paren found"
-        )
-    constraints_sql = ",\n    ".join(extra_constraints)
-    ddl = ddl[:last_paren] + f",\n    {constraints_sql}\n" + ddl[last_paren:]
-
-    conn.execute(ddl)
-
-    # Explicit column-list INSERT — safe for any number of columns
     quoted_cols = ", ".join(f'"{c}"' for c in col_names)
     conn.execute(
         f'INSERT INTO "{tmp}" ({quoted_cols}) SELECT {quoted_cols} FROM "{table}"'
@@ -220,7 +266,12 @@ def _rebuild_table_dynamic(
 
     conn.execute(f'DROP TABLE "{table}"')
     conn.execute(f'ALTER TABLE "{tmp}" RENAME TO "{table}"')
-    log.debug("apply_0017: rebuilt table '%s' dynamically (%d cols)", table, len(col_names))
+    log.debug(
+        "apply_0017: rebuilt '%s' from PRAGMA (%d cols, %d preserved UNIQUE)",
+        table,
+        len(col_names),
+        len(preserved_unique),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +293,8 @@ def _rebuild_dispatches(conn: sqlite3.Connection) -> None:
     _rebuild_table_dynamic(
         conn,
         "dispatches",
-        extra_constraints=["UNIQUE(\"dispatch_id\", \"project_id\")"],
-        strip_inline_unique_cols=["dispatch_id"],
-        strip_single_unique_cols=["dispatch_id"],
+        extra_constraints=['UNIQUE("dispatch_id", "project_id")'],
+        drop_unique_column_sets=[frozenset({"dispatch_id"})],
     )
     log.info("apply_0017: dispatches rebuilt with composite UNIQUE(dispatch_id, project_id)")
 
@@ -253,8 +303,10 @@ def _rebuild_dispatch_attempts(conn: sqlite3.Connection) -> None:
     """Rebuild dispatch_attempts with composite FK → dispatches(dispatch_id, project_id).
 
     The original single-column inline REFERENCES is replaced with the composite
-    table-level FOREIGN KEY. All other columns (including any added later) are
-    preserved dynamically.
+    table-level FOREIGN KEY. Inline FKs are never reconstructed from table_info,
+    so the old single-column REFERENCES is dropped simply by not carrying it
+    over. The attempt_id UNIQUE constraint is preserved automatically (it is not
+    in the drop set). All columns — including any added later — are preserved.
     """
     # Check whether the composite FK already exists via sqlite_master DDL inspection
     ddl_row = conn.execute(
@@ -277,7 +329,6 @@ def _rebuild_dispatch_attempts(conn: sqlite3.Connection) -> None:
             'FOREIGN KEY ("dispatch_id", "project_id")'
             ' REFERENCES dispatches("dispatch_id", "project_id")',
         ],
-        strip_inline_refs_cols=["dispatch_id"],
     )
     log.info(
         "apply_0017: dispatch_attempts rebuilt with composite FK → dispatches(dispatch_id, project_id)"
@@ -309,9 +360,7 @@ def _rebuild_terminal_leases(conn: sqlite3.Connection) -> None:
             ' REFERENCES dispatches("dispatch_id", "project_id")',
             'UNIQUE("terminal_id", "project_id")',
         ],
-        strip_inline_unique_cols=["terminal_id"],
-        strip_inline_refs_cols=["dispatch_id"],
-        strip_single_unique_cols=["terminal_id"],
+        drop_unique_column_sets=[frozenset({"terminal_id"})],
     )
     log.info(
         "apply_0017: terminal_leases rebuilt with composite UNIQUE(terminal_id, project_id)"
@@ -334,6 +383,110 @@ def _emit_migration_event(vnx_data_dir: Path, event_type: str, payload: dict) ->
     }
     with open(events_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# In-transaction schema-change sequence
+# ---------------------------------------------------------------------------
+
+def _apply_schema_changes(conn: sqlite3.Connection) -> None:
+    """Execute the full 0017 DDL/DML sequence inside the open transaction.
+
+    Steps, in dependency order:
+    1. worker_states.project_id (added if missing) + its index.
+    2. dispatches dynamic rebuild (composite UNIQUE) + indexes.
+    3. dispatch_attempts dynamic rebuild (composite FK) + indexes.
+    4. terminal_leases dynamic rebuild (composite UNIQUE + composite FK) + indexes.
+    5. Version stamp to v12.
+
+    dispatches is rebuilt BEFORE terminal_leases because terminal_leases carries
+    a composite FK → dispatches(dispatch_id, project_id); the referenced composite
+    UNIQUE must exist before the referencing table is created.
+
+    Extracted from apply_migration so that entry point stays well under the
+    70-executable-line threshold. The caller owns the BEGIN/COMMIT/ROLLBACK and
+    foreign_keys pragma; this helper only issues DDL/DML.
+    """
+    # ── 1. worker_states: add project_id (missed in v9) ────────────────────
+    if not _column_exists(conn, "worker_states", "project_id"):
+        conn.execute(
+            "ALTER TABLE worker_states ADD COLUMN"
+            " project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
+        )
+        log.info("apply_0017: added worker_states.project_id")
+    else:
+        log.info(
+            "apply_0017: worker_states.project_id already present;"
+            " ADD COLUMN skipped (column-guard, OI-095)"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_worker_states_project"
+        " ON worker_states(project_id)"
+    )
+
+    # ── 2. dispatches: dynamic rebuild (UNIQUE(dispatch_id, project_id)) ────
+    _rebuild_dispatches(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_state"
+        " ON dispatches(state, updated_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_terminal"
+        " ON dispatches(terminal_id, state)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_created"
+        " ON dispatches(created_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dispatches_project"
+        " ON dispatches(project_id)"
+    )
+
+    # ── 3. dispatch_attempts: dynamic rebuild (composite FK) ───────────────
+    _rebuild_dispatch_attempts(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attempt_dispatch"
+        " ON dispatch_attempts(dispatch_id, attempt_number)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attempt_state"
+        " ON dispatch_attempts(state, started_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attempt_terminal"
+        " ON dispatch_attempts(terminal_id, started_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attempt_project"
+        " ON dispatch_attempts(project_id)"
+    )
+
+    # ── 4. terminal_leases: dynamic rebuild (UNIQUE(terminal_id, project_id)) ─
+    _rebuild_terminal_leases(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lease_state"
+        " ON terminal_leases(state)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lease_dispatch"
+        " ON terminal_leases(dispatch_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lease_project"
+        " ON terminal_leases(project_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lease_terminal_project"
+        " ON terminal_leases(terminal_id, project_id)"
+    )
+
+    # ── 5. Version stamp ───────────────────────────────────────────────────
+    conn.execute(
+        "INSERT OR IGNORE INTO runtime_schema_version (version, description)"
+        " VALUES (12, 'Wave 5 PR-5.3: composite UNIQUE on terminal_leases"
+        " + dispatches; project_id on worker_states')"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -392,89 +545,8 @@ def apply_migration(
             conn.execute("BEGIN")
 
             try:
-                # ── 1. worker_states: add project_id (missed in v9) ────────────────
-                if not _column_exists(conn, "worker_states", "project_id"):
-                    conn.execute(
-                        "ALTER TABLE worker_states ADD COLUMN"
-                        " project_id TEXT NOT NULL DEFAULT 'vnx-dev'"
-                    )
-                    log.info("apply_0017: added worker_states.project_id")
-                else:
-                    log.info(
-                        "apply_0017: worker_states.project_id already present;"
-                        " ADD COLUMN skipped (column-guard, OI-095)"
-                    )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_worker_states_project"
-                    " ON worker_states(project_id)"
-                )
-
-                # ── 2. dispatches: dynamic rebuild (UNIQUE(dispatch_id, project_id)) ─
-                _rebuild_dispatches(conn)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_dispatch_state"
-                    " ON dispatches(state, updated_at DESC)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_dispatch_terminal"
-                    " ON dispatches(terminal_id, state)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_dispatch_created"
-                    " ON dispatches(created_at DESC)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_dispatches_project"
-                    " ON dispatches(project_id)"
-                )
-
-                # ── 3. dispatch_attempts: dynamic rebuild (composite FK) ────────────
-                _rebuild_dispatch_attempts(conn)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_attempt_dispatch"
-                    " ON dispatch_attempts(dispatch_id, attempt_number)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_attempt_state"
-                    " ON dispatch_attempts(state, started_at DESC)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_attempt_terminal"
-                    " ON dispatch_attempts(terminal_id, started_at DESC)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_attempt_project"
-                    " ON dispatch_attempts(project_id)"
-                )
-
-                # ── 4. terminal_leases: dynamic rebuild (UNIQUE(terminal_id, project_id)) ─
-                _rebuild_terminal_leases(conn)
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_lease_state"
-                    " ON terminal_leases(state)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_lease_dispatch"
-                    " ON terminal_leases(dispatch_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_lease_project"
-                    " ON terminal_leases(project_id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_lease_terminal_project"
-                    " ON terminal_leases(terminal_id, project_id)"
-                )
-
-                # ── 5. Version stamp ───────────────────────────────────────────────
-                conn.execute(
-                    "INSERT OR IGNORE INTO runtime_schema_version (version, description)"
-                    " VALUES (12, 'Wave 5 PR-5.3: composite UNIQUE on terminal_leases"
-                    " + dispatches; project_id on worker_states')"
-                )
-
+                _apply_schema_changes(conn)
                 conn.execute("COMMIT")
-
             except sqlite3.Error:
                 conn.execute("ROLLBACK")
                 raise

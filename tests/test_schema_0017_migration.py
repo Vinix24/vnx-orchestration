@@ -171,6 +171,99 @@ def _create_20col_dispatches_db(db_path: Path) -> None:
         conn.close()
 
 
+# Single-line DDL (no newlines) — the exact shape stored in sqlite_master that
+# defeated the old start-of-line regex. The single-column UNIQUE(dispatch_id) /
+# UNIQUE(terminal_id) must still be dropped by the PRAGMA-built rebuild.
+_DISPATCHES_DDL_SINGLE_LINE = (
+    "CREATE TABLE dispatches (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "dispatch_id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL DEFAULT 'vnx-dev', "
+    "state TEXT NOT NULL DEFAULT 'queued', terminal_id TEXT, track TEXT, "
+    "priority TEXT DEFAULT 'P2', pr_ref TEXT, gate TEXT, "
+    "attempt_count INTEGER NOT NULL DEFAULT 0, bundle_path TEXT, "
+    "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
+    "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
+    "expires_after TEXT, metadata_json TEXT DEFAULT '{}')"
+)
+_TERMINAL_LEASES_DDL_SINGLE_LINE = (
+    "CREATE TABLE terminal_leases (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "terminal_id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL DEFAULT 'vnx-dev', "
+    "state TEXT NOT NULL DEFAULT 'idle', dispatch_id TEXT, "
+    "generation INTEGER NOT NULL DEFAULT 1, leased_at TEXT, expires_at TEXT, "
+    "last_heartbeat_at TEXT, released_at TEXT, metadata_json TEXT DEFAULT '{}')"
+)
+
+# Comma-PREFIXED column style — the comma leads each line, so the column name is
+# never at the start of a line either. Also defeated the old regex.
+_DISPATCHES_DDL_COMMA_PREFIXED = """CREATE TABLE dispatches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT
+    , dispatch_id TEXT NOT NULL UNIQUE
+    , project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+    , state TEXT NOT NULL DEFAULT 'queued'
+    , terminal_id TEXT
+    , track TEXT
+    , priority TEXT DEFAULT 'P2'
+    , pr_ref TEXT
+    , gate TEXT
+    , attempt_count INTEGER NOT NULL DEFAULT 0
+    , bundle_path TEXT
+    , created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    , updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    , expires_after TEXT
+    , metadata_json TEXT DEFAULT '{}'
+)"""
+_TERMINAL_LEASES_DDL_COMMA_PREFIXED = """CREATE TABLE terminal_leases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT
+    , terminal_id TEXT NOT NULL UNIQUE
+    , project_id TEXT NOT NULL DEFAULT 'vnx-dev'
+    , state TEXT NOT NULL DEFAULT 'idle'
+    , dispatch_id TEXT
+    , generation INTEGER NOT NULL DEFAULT 1
+    , leased_at TEXT
+    , expires_at TEXT
+    , last_heartbeat_at TEXT
+    , released_at TEXT
+    , metadata_json TEXT DEFAULT '{}'
+)"""
+
+_DISPATCHES_15_COLS = [
+    "id", "dispatch_id", "project_id", "state", "terminal_id", "track",
+    "priority", "pr_ref", "gate", "attempt_count", "bundle_path",
+    "created_at", "updated_at", "expires_after", "metadata_json",
+]
+
+
+def _create_styled_pre_migration_db(
+    db_path: Path, dispatches_ddl: str, terminal_leases_ddl: str
+) -> None:
+    """Build the pre-migration DB but with dispatches + terminal_leases declared
+    using the given DDL style (single-line or comma-prefixed).
+
+    Seeds one dispatches row and two terminal_leases rows so data preservation
+    through the rebuild can be asserted. The stored sqlite_master.sql keeps the
+    exact formatting of *dispatches_ddl* / *terminal_leases_ddl*, which is what
+    reproduces the regex false-positive the PRAGMA-built rebuild closes.
+    """
+    _create_pre_migration_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        # FK enforcement defaults OFF, so dropping a referenced table is allowed.
+        conn.execute("DROP TABLE dispatches")
+        conn.execute("DROP TABLE terminal_leases")
+        conn.execute(dispatches_ddl)
+        conn.execute(terminal_leases_ddl)
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state)"
+            " VALUES ('styled-d1', 'vnx-dev', 'queued')"
+        )
+        conn.execute(
+            "INSERT INTO terminal_leases (terminal_id, state, generation)"
+            " VALUES ('T1', 'idle', 1), ('T2', 'idle', 1)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _create_terminal_leases_with_worker_pid_db(db_path: Path) -> None:
     """Build a DB where terminal_leases has the worker_pid column (added by #636).
 
@@ -650,5 +743,140 @@ def test_migration_dispatches_rebuilt_before_leases(tmp_path: Path) -> None:
         assert _has_composite_unique(
             db, "terminal_leases", frozenset({"terminal_id", "project_id"})
         )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Regex false-positive closure: single-line + comma-prefixed DDL
+#
+# The old rebuild regex-stripped the single-column UNIQUE only when the column
+# definition was anchored at the start of a line. Single-line DDL (as stored in
+# sqlite_master) and comma-prefixed column styles slipped through, leaving the
+# pre-migration single-column UNIQUE in place while the composite UNIQUE was
+# added on top — a false-positive "migrated" stamp. The PRAGMA-built rebuild
+# constructs the new DDL from table_info/index_list, so the old single-column
+# UNIQUE is provably absent (never copied). These tests fail under the old regex
+# approach and pass under the PRAGMA-built rebuild.
+# ---------------------------------------------------------------------------
+
+
+def _assert_styled_rebuild_correct(db: Path, tmp_path: Path) -> None:
+    """Shared assertions for a styled-DDL rebuild: composite present, the old
+    single-column UNIQUE gone, all columns + seeded data preserved."""
+    result = apply_migration(db, MIGRATION_SQL, vnx_data_dir=tmp_path)
+    assert result is True
+    assert _max_version(db) == 12
+
+    # Composite UNIQUE present on both hot tables.
+    assert _has_composite_unique(db, "dispatches", frozenset({"dispatch_id", "project_id"}))
+    assert _has_composite_unique(
+        db, "terminal_leases", frozenset({"terminal_id", "project_id"})
+    )
+
+    # The old single-column UNIQUE is GONE (this is what the false-positive kept).
+    # _has_composite_unique matches an index over EXACTLY the given column set, so
+    # a single-element frozenset detects a surviving single-column UNIQUE.
+    assert not _has_composite_unique(db, "dispatches", frozenset({"dispatch_id"})), (
+        "single-column UNIQUE(dispatch_id) survived the rebuild — false positive open"
+    )
+    assert not _has_composite_unique(db, "terminal_leases", frozenset({"terminal_id"})), (
+        "single-column UNIQUE(terminal_id) survived the rebuild — false positive open"
+    )
+
+    # All 15 columns preserved on dispatches.
+    cols = set(_get_columns(db, "dispatches"))
+    for col in _DISPATCHES_15_COLS:
+        assert col in cols, f"column '{col}' missing from dispatches after rebuild"
+
+    # Seeded rows preserved.
+    conn = sqlite3.connect(str(db))
+    try:
+        d_row = conn.execute(
+            "SELECT dispatch_id, state FROM dispatches WHERE dispatch_id = 'styled-d1'"
+        ).fetchone()
+        lease_count = conn.execute("SELECT COUNT(*) FROM terminal_leases").fetchone()[0]
+    finally:
+        conn.close()
+    assert d_row == ("styled-d1", "queued"), "dispatches row lost during rebuild"
+    assert lease_count == 2, f"terminal_leases rows lost during rebuild (got {lease_count})"
+
+
+def test_apply_migration_single_line_ddl(tmp_path: Path) -> None:
+    """Single-line DDL: rebuild succeeds, old single-column UNIQUE gone, data kept."""
+    db = tmp_path / "coord.db"
+    _create_styled_pre_migration_db(
+        db, _DISPATCHES_DDL_SINGLE_LINE, _TERMINAL_LEASES_DDL_SINGLE_LINE
+    )
+    _assert_styled_rebuild_correct(db, tmp_path)
+
+
+def test_apply_migration_comma_prefixed_ddl(tmp_path: Path) -> None:
+    """Comma-prefixed DDL: rebuild succeeds, old single-column UNIQUE gone, data kept."""
+    db = tmp_path / "coord.db"
+    _create_styled_pre_migration_db(
+        db, _DISPATCHES_DDL_COMMA_PREFIXED, _TERMINAL_LEASES_DDL_COMMA_PREFIXED
+    )
+    _assert_styled_rebuild_correct(db, tmp_path)
+
+
+def test_single_line_ddl_constraint_list_has_no_single_column_unique(tmp_path: Path) -> None:
+    """Prove the false positive is closed: after a single-line-DDL rebuild, NO
+    UNIQUE index over exactly {dispatch_id} (or {terminal_id}) remains."""
+    db = tmp_path / "coord.db"
+    _create_styled_pre_migration_db(
+        db, _DISPATCHES_DDL_SINGLE_LINE, _TERMINAL_LEASES_DDL_SINGLE_LINE
+    )
+    apply_migration(db, MIGRATION_SQL, vnx_data_dir=tmp_path)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        for table, single_col in (("dispatches", "dispatch_id"), ("terminal_leases", "terminal_id")):
+            unique_column_sets = []
+            for idx in conn.execute(f"PRAGMA index_list({table})").fetchall():
+                if not idx[2]:  # unique flag
+                    continue
+                info = conn.execute(f'PRAGMA index_info("{idx[1]}")').fetchall()
+                unique_column_sets.append(frozenset(r[2] for r in info))
+            assert frozenset({single_col}) not in unique_column_sets, (
+                f"{table}: single-column UNIQUE({single_col}) still in constraint list"
+            )
+            assert frozenset({single_col, "project_id"}) in unique_column_sets, (
+                f"{table}: composite UNIQUE({single_col}, project_id) missing"
+            )
+    finally:
+        conn.close()
+
+
+def test_comma_prefixed_ddl_preserves_non_replaced_unique(tmp_path: Path) -> None:
+    """The rebuild drops ONLY the replaced single-column UNIQUE — a non-replaced
+    UNIQUE (dispatch_attempts.attempt_id) must survive."""
+    db = tmp_path / "coord.db"
+    _create_styled_pre_migration_db(
+        db, _DISPATCHES_DDL_COMMA_PREFIXED, _TERMINAL_LEASES_DDL_COMMA_PREFIXED
+    )
+    apply_migration(db, MIGRATION_SQL, vnx_data_dir=tmp_path)
+
+    # attempt_id UNIQUE must still be enforced after dispatch_attempts rebuild.
+    assert _has_composite_unique(db, "dispatch_attempts", frozenset({"attempt_id"})), (
+        "attempt_id UNIQUE was dropped — non-replaced constraint lost in rebuild"
+    )
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state)"
+            " VALUES ('dup-d', 'vnx-dev', 'queued')"
+        )
+        conn.execute(
+            "INSERT INTO dispatch_attempts (attempt_id, dispatch_id, project_id, terminal_id)"
+            " VALUES ('att-dup', 'dup-d', 'vnx-dev', 'T1')"
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO dispatch_attempts (attempt_id, dispatch_id, project_id, terminal_id)"
+                " VALUES ('att-dup', 'dup-d', 'vnx-dev', 'T2')"
+            )
+            conn.commit()
     finally:
         conn.close()
