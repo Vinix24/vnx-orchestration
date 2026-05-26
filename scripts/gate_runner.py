@@ -43,6 +43,10 @@ _REVIEWER_VERDICT_TEMPLATE = (
     "```\n"
 )
 
+# Minimum deleted-file count before injecting a Net-Deletion Alert into the reviewer prompt.
+# Mirrors DELETION_FILE_WARN in codex_final_gate.py and pre_merge_gate.py (both use 5).
+_GATE_DELETION_FILE_WARN = 5
+
 # Gate type → CLI binary mapping
 GATE_BINARIES: Dict[str, str] = {
     "gemini_review": "gemini",
@@ -227,6 +231,49 @@ class GateRunner:
         )
 
     @staticmethod
+    def _extract_deleted_files_from_diff(diff_content: str) -> List[str]:
+        """Parse unified diff output and return paths of fully deleted files.
+
+        A file is considered deleted when a ``deleted file mode`` header immediately
+        follows its ``diff --git a/path b/path`` line. Modified files have an index
+        line instead and are not included.
+
+        Uses subprocess.run so tests can patch gate_runner.subprocess.run.
+        """
+        deleted: List[str] = []
+        current_file: Optional[str] = None
+        for line in diff_content.splitlines():
+            if line.startswith("diff --git "):
+                parts = line.split(" ", 3)
+                current_file = (
+                    parts[3][2:] if len(parts) == 4 and parts[3].startswith("b/") else None
+                )
+            elif line.startswith("deleted file mode") and current_file is not None:
+                deleted.append(current_file)
+                current_file = None
+        return deleted
+
+    @staticmethod
+    def _build_deletion_alert_section(diff_content: str) -> str:
+        """Return a formatted Net-Deletion Alert block for reviewer prompts.
+
+        Returns an empty string when the deleted-file count is below
+        ``_GATE_DELETION_FILE_WARN``. When at or above the threshold, returns a
+        markdown block listing all deleted file paths so the reviewer notices the
+        scope reduction and can flag accidental deletions.
+        """
+        deleted_files = GateRunner._extract_deleted_files_from_diff(diff_content)
+        if len(deleted_files) < _GATE_DELETION_FILE_WARN:
+            return ""
+        file_list = "\n".join(f"- `{f}`" for f in deleted_files)
+        return (
+            f"\n\n## Net-Deletion Alert ({len(deleted_files)} file(s) deleted)\n\n"
+            "> **Review required**: these files are fully deleted in this PR. "
+            "Confirm each deletion is intentional and within declared scope.\n\n"
+            f"{file_list}"
+        )
+
+    @staticmethod
     def _fetch_gh_pr_diff(pr_number: Optional[int]) -> str:
         """Fetch authoritative PR diff via gh pr diff.
 
@@ -257,16 +304,18 @@ class GateRunner:
 
         Uses subprocess.run so tests can patch gate_runner.subprocess.run.
         Raises on missing pr_number or gh pr diff failure — no silent empty-diff fallback.
+        Injects a Net-Deletion Alert section when >= _GATE_DELETION_FILE_WARN files are deleted.
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        deletion_alert = GateRunner._build_deletion_alert_section(diff_content)
         l3 = (
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
             "do not flag pre-existing code.\n\n"
-            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
+            f"{diff_content}{deletion_alert}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
             dispatch_metadata={"role": "reviewer"},
@@ -280,16 +329,18 @@ class GateRunner:
 
         Uses subprocess.run so tests can patch gate_runner.subprocess.run.
         Raises on missing pr_number or gh pr diff failure — no silent empty-diff fallback.
+        Injects a Net-Deletion Alert section when >= _GATE_DELETION_FILE_WARN files are deleted.
         """
         branch = request_payload.get("branch", "")
         risk = (request_payload.get("risk_class") or "medium")
         pr_number = request_payload.get("pr_number")
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
+        deletion_alert = GateRunner._build_deletion_alert_section(diff_content)
         l3 = (
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
             "do not flag pre-existing code.\n\n"
-            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
+            f"{diff_content}{deletion_alert}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
             dispatch_metadata={"role": "reviewer"},
