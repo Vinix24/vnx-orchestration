@@ -72,7 +72,7 @@ class TestFileSizeGates:
     def test_shell_file_blocking_threshold(self, tmp_path):
         """Shell file over blocking threshold should produce blocking check."""
         test_file = tmp_path / "test.sh"
-        test_file.write_text("\n" * 550)  # 550 lines, over 500 blocking for shell
+        test_file.write_text("\n" * 650)  # 650 lines, over 600 blocking for shell
 
         checks = check_file_size(test_file)
 
