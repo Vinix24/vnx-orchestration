@@ -143,6 +143,7 @@ source "$SCRIPT_DIR/lib/dispatch_logging.sh"
 source "$SCRIPT_DIR/lib/dispatch_lifecycle.sh"
 source "$SCRIPT_DIR/lib/dispatch_deliver.sh"
 source "$SCRIPT_DIR/lib/dispatch_create.sh"
+source "$SCRIPT_DIR/lib/dispatcher_supervisor_ticks.sh"
 
 # Large-payload threshold (referenced by dispatch_deliver.sh tmux_load_buffer_safe)
 VNX_DISPATCH_MAX_INLINE="${VNX_DISPATCH_MAX_INLINE:-51200}"  # 50KB default
@@ -550,20 +551,7 @@ _cleanup_stuck_dispatches() {
             # Releasing a claim that belongs to a different dispatch corrupts the
             # new dispatch's terminal ownership (codex PR-4 finding 1).
             local _current_claimed_by
-            export _VNX_STUCK_TERMINAL="$_stuck_terminal"
-            _current_claimed_by=$(python3 - 2>/dev/null <<'PYEOF'
-import json, os
-state_file = os.path.join(os.environ.get("VNX_STATE_DIR", ""), "terminal_state.json")
-terminal   = os.environ.get("_VNX_STUCK_TERMINAL", "")
-try:
-    with open(state_file, "r", encoding="utf-8") as fh:
-        d = json.load(fh)
-    print(((d.get("terminals") or {}).get(terminal) or {}).get("claimed_by") or "")
-except Exception:
-    print("")
-PYEOF
-            ) || _current_claimed_by=""
-            unset _VNX_STUCK_TERMINAL
+            _current_claimed_by=$(python3 "$SCRIPT_DIR/lib/get_terminal_claimed_by.py" "$_stuck_terminal" 2>/dev/null) || _current_claimed_by=""
 
             if [ "$_current_claimed_by" = "$_stuck_dispatch_id" ]; then
                 if ! release_terminal_claim "$_stuck_terminal" "$_stuck_dispatch_id"; then
@@ -597,51 +585,6 @@ PYEOF
             log "V8 WARN: Failed to quarantine stuck dispatch file: $stuck_file"
         fi
     done < <(find "$ACTIVE_DIR" -name "*.md" -type f -mmin +60 2>/dev/null || :)
-}
-
-# --- Unified supervisor: throttled runtime_supervise tick (SUP-PR3) ---
-# Invokes RuntimeSupervisor.supervise_all() at most once per 60s when
-# VNX_SUPERVISOR_MODE=unified. Default legacy mode is bit-identical.
-_maybe_runtime_supervise() {
-    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
-    local interval="${VNX_RUNTIME_SUPERVISE_INTERVAL:-60}"
-    local state_file="$STATE_DIR/.last_runtime_supervise_ts"
-    local now last
-    now=$(date +%s)
-    last=0
-    if [[ -f "$state_file" ]]; then
-        last=$(cat "$state_file" 2>/dev/null || echo 0)
-        [[ "$last" =~ ^[0-9]+$ ]] || last=0
-    fi
-    if (( now - last < interval )); then
-        return 0
-    fi
-    local log_file="$VNX_LOGS_DIR/runtime_supervise.log"
-    mkdir -p "$(dirname "$log_file")"
-    python3 "$VNX_DIR/scripts/lib/runtime_supervise.py" >> "$log_file" 2>&1 || true
-    echo "$now" > "$state_file"
-}
-
-_unified_supervisor_lease_sweep_tick() {
-    # SUP-PR2: throttled lease_sweep tick. Activates only when
-    # VNX_SUPERVISOR_MODE=unified. Default (unset/legacy) = no behavior change.
-    [[ "${VNX_SUPERVISOR_MODE:-legacy}" == "unified" ]] || return 0
-
-    local state_file="$VNX_DATA_DIR/state/.last_lease_sweep_ts"
-    local interval="${VNX_LEASE_SWEEP_INTERVAL_SEC:-30}"
-    local now last
-    now=$(date +%s)
-    last=0
-    if [[ -f "$state_file" ]]; then
-        last=$(cat "$state_file" 2>/dev/null || echo 0)
-        [[ "$last" =~ ^[0-9]+$ ]] || last=0
-    fi
-    if (( now - last >= interval )); then
-        mkdir -p "$VNX_LOGS_DIR" "$(dirname "$state_file")"
-        python3 "$SCRIPT_DIR/lib/lease_sweep.py" \
-            >> "$VNX_LOGS_DIR/lease_sweep.log" 2>&1 || true
-        echo "$now" > "$state_file"
-    fi
 }
 
 process_dispatches() {
