@@ -49,10 +49,18 @@ CREATE TABLE IF NOT EXISTS terminal_leases (
     expires_at          TEXT,
     last_heartbeat_at   TEXT,
     released_at         TEXT,
+    worker_pid          INTEGER,
     metadata_json       TEXT    DEFAULT '{}',
     FOREIGN KEY (dispatch_id, project_id) REFERENCES dispatches(dispatch_id, project_id),
     UNIQUE(terminal_id, project_id)
 );
+
+-- worker_pid (INTEGER, nullable): OS PID of the worker process currently
+-- attached to this terminal, or NULL when none. Written by
+-- pool_state_repo.store_worker_pid() (called from subprocess_dispatch) and read
+-- by the lease-reaper / runtime_supervise path. On a DB that predates this
+-- column it is self-healed idempotently by the init path
+-- (project_id_migration.ensure_worker_pid_column), independent of user_version.
 
 -- Non-project_id indexes are safe here because these columns exist in v1.
 -- project_id indexes (idx_lease_project, idx_lease_terminal_project) are
