@@ -329,8 +329,8 @@ def _run_git(args: List[str], cwd: str) -> Optional[str]:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[traceability-audit] _run_git({args!r}) failed: {exc}", file=sys.stderr)
     return None
 
 
@@ -345,8 +345,8 @@ def _run_gh(args: List[str], cwd: str) -> Optional[str]:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[traceability-audit] _run_gh({args!r}) failed: {exc}", file=sys.stderr)
     return None
 
 

@@ -489,3 +489,83 @@ class TestIterReceiptsDedup:
         results = list(iter_receipts(ndjson, since=None, until=None))
         assert len(results) == 2
         assert {r.dispatch_id for r in results} == {"ok", "ok2"}
+
+
+# ---------------------------------------------------------------------------
+# 16. _run_git / _run_gh: exception paths return None, never raise
+# ---------------------------------------------------------------------------
+
+class TestRunHelperExceptionPaths:
+    """Regression tests for the silent-except fix in _run_git/_run_gh.
+
+    Both helpers are fallback-safe wrappers: when subprocess raises (e.g.
+    git/gh not installed, CWD not found), they must return None rather than
+    propagating the exception to the caller, which handles None by trying
+    alternative approaches. Behavior must be identical before/after the lint fix.
+    """
+
+    def test_run_git_returns_none_on_file_not_found(self, tmp_path):
+        """_run_git returns None when git binary does not exist."""
+        import unittest.mock as mock
+        with mock.patch(
+            "traceability_audit.subprocess.run",
+            side_effect=FileNotFoundError("git: not found"),
+        ):
+            result = ta._run_git(["log", "--oneline", "-1"], str(tmp_path))
+        assert result is None
+
+    def test_run_git_returns_none_on_timeout(self, tmp_path):
+        """_run_git returns None when subprocess.TimeoutExpired is raised."""
+        import subprocess
+        import unittest.mock as mock
+        with mock.patch(
+            "traceability_audit.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["git"], timeout=30),
+        ):
+            result = ta._run_git(["log"], str(tmp_path))
+        assert result is None
+
+    def test_run_gh_returns_none_on_file_not_found(self, tmp_path):
+        """_run_gh returns None when gh binary does not exist."""
+        import unittest.mock as mock
+        with mock.patch(
+            "traceability_audit.subprocess.run",
+            side_effect=FileNotFoundError("gh: not found"),
+        ):
+            result = ta._run_gh(["pr", "list"], str(tmp_path))
+        assert result is None
+
+    def test_run_gh_returns_none_on_timeout(self, tmp_path):
+        """_run_gh returns None when subprocess.TimeoutExpired is raised."""
+        import subprocess
+        import unittest.mock as mock
+        with mock.patch(
+            "traceability_audit.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=60),
+        ):
+            result = ta._run_gh(["pr", "list"], str(tmp_path))
+        assert result is None
+
+    def test_run_git_logs_to_stderr_on_exception(self, tmp_path, capsys):
+        """_run_git logs the failure to stderr instead of swallowing it silently."""
+        import unittest.mock as mock
+        with mock.patch(
+            "traceability_audit.subprocess.run",
+            side_effect=OSError("permission denied"),
+        ):
+            ta._run_git(["log"], str(tmp_path))
+        captured = capsys.readouterr()
+        assert "traceability-audit" in captured.err
+        assert "permission denied" in captured.err
+
+    def test_run_gh_logs_to_stderr_on_exception(self, tmp_path, capsys):
+        """_run_gh logs the failure to stderr instead of swallowing it silently."""
+        import unittest.mock as mock
+        with mock.patch(
+            "traceability_audit.subprocess.run",
+            side_effect=OSError("permission denied"),
+        ):
+            ta._run_gh(["pr", "list"], str(tmp_path))
+        captured = capsys.readouterr()
+        assert "traceability-audit" in captured.err
+        assert "permission denied" in captured.err
