@@ -837,13 +837,16 @@ def _mock_gh_diff(diff_text: str, returncode: int = 0):
     return MagicMock(returncode=returncode, stdout=diff_text, stderr="")
 
 
-# Unit tests for _run_codex_net_deletion_check live in
-# test_gate_runner_codex_net_deletion_check.py (committed separately).
-# This section holds only the integration tests for GateRunner.run().
+# Unit tests for _run_codex_net_deletion_check that exercise threshold behaviour,
+# graceful degradation, result structure, and filesystem persistence directly on
+# the static method (not via GateRunner.run()).  These complement the deeper suite
+# in test_gate_runner_codex_hold.py with slightly different assertion angles
+# (e.g. exact result-file name, required-keys enumeration).
+# Integration tests for GateRunner.run() follow in TestCodexGateRunNetDeletionIntegration.
 
 
-class _NetDeletionPayloadHelper:
-    """Shared payload factory for net-deletion integration tests."""
+class TestGateRunnerNetDeletionUnit:
+    """Unit-level tests for GateRunner._run_codex_net_deletion_check."""
 
     def _make_payload(self, pr_number=50, **extra):
         return {"gate": "codex_gate", "pr_number": pr_number, **extra}
