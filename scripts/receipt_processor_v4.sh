@@ -390,27 +390,9 @@ _rp_apply_bootstrap_protection() {
         log "WARN" "Marking current report state as baseline. Historical reports skipped."
 
         # Find newest report mtime via Python for cross-platform compatibility.
+        # Logic lives in scripts/lib/rp_find_newest_report_mtime.py (OI-1525/1524).
         local new_watermark
-        new_watermark=$(python3 - "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" "$now" <<'PY'
-import sys
-from pathlib import Path
-
-unified, headless, fallback = sys.argv[1], sys.argv[2], int(sys.argv[3])
-max_mtime = 0
-for d in (unified, headless):
-    p = Path(d)
-    if not p.is_dir():
-        continue
-    for f in p.glob("*.md"):
-        try:
-            mtime = int(f.stat().st_mtime)
-            if mtime > max_mtime:
-                max_mtime = mtime
-        except OSError as e:
-            print(f"warning: stat failed for {f}: {e}", file=sys.stderr)
-print(max_mtime if max_mtime > 0 else fallback)
-PY
-)
+        new_watermark=$(python3 "$SCRIPT_DIR/lib/rp_find_newest_report_mtime.py" "$UNIFIED_REPORTS" "$HEADLESS_REPORTS" "$now")
         [ -z "$new_watermark" ] && new_watermark="$now"
 
         local _old_watermark
