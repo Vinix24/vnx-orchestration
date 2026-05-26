@@ -39,10 +39,23 @@ QUALITY_INTELLIGENCE_TABLES: tuple[str, ...] = (
 )
 
 # Runtime Coordination: hot tables that need project_id at Phase 0.
+#
+# worker_states is included here even though its project_id column was
+# originally introduced by migration 0017. The v9 schema creates
+# worker_states WITHOUT project_id, and the v10 schema's
+# ``CREATE TABLE IF NOT EXISTS worker_states`` is a no-op on a DB that
+# already has the v9 table — so freshly-initialised and desynced DBs end up
+# missing worker_states.project_id unless 0017 happens to run. 0017 is
+# version-gated and also performs an invasive composite-UNIQUE rebuild, so it
+# will not re-run on a DB whose runtime_schema_version is already >= 12.
+# Listing worker_states here lets the idempotent init path self-heal the
+# column (and the ``idx_worker_states_project`` index) on every init,
+# independent of schema version. Closes the worker_states half of OI-095.
 RUNTIME_COORDINATION_TABLES: tuple[str, ...] = (
     "dispatches",
     "dispatch_attempts",
     "terminal_leases",
+    "worker_states",
     "coordination_events",
     "incident_log",
     "intelligence_injections",
