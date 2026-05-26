@@ -101,6 +101,7 @@ from subprocess_dispatch_internals.state_paths import (
 
 __all__ = [
     "_extract_role_from_instruction",
+    "_select_dispatch_path",
     "SubprocessAdapter",
     "HeadlessContextTracker",
     "WorkerHealthMonitor",
@@ -144,6 +145,67 @@ __all__ = [
     "_capture_dispatch_outcome",
     "_update_pattern_confidence",
 ]
+
+
+def _select_dispatch_path(
+    task_class: str,
+    complexity: str = "medium",
+    current_model: str = "sonnet",
+    env: "dict[str, str] | None" = None,
+    auto_route_applied: bool = False,
+) -> "tuple[str | None, str]":
+    """Resolve the dispatch lane and effective Claude model from the routing policy.
+
+    Returns ``(cheap_lane_provider, effective_model)`` where:
+
+    - ``cheap_lane_provider`` is the non-Claude lane string (e.g.
+      ``"litellm:moonshot:kimi-k2-0905-default"``) when the routing policy
+      selects a non-Claude provider, or ``None`` when the dispatch stays on
+      Claude.
+    - ``effective_model`` is the Claude model to use (``"sonnet"``,
+      ``"haiku"``, ``"opus"``), unchanged from ``current_model`` whenever
+      a non-Claude lane is selected.
+
+    Short-circuit conditions that return ``(None, current_model)`` unchanged:
+    - ``VNX_ROUTING_POLICY_ENABLED`` is absent or not ``"1"`` in *env*.
+    - ``task_class`` is empty.
+    - ``auto_route_applied`` is ``True`` (smart_router already ran; do not
+      override its decision with the coarser routing_policy).
+    - Any exception raised by the routing policy (file-not-found, bad YAML,
+      unexpected errors) — fail open so dispatch continues on the current
+      Claude model.
+
+    Critical regression fix: the old ``__main__`` block fell back to the first
+    Claude model in ``fallback_chain`` when the lane was non-Claude.  This
+    silently routed the dispatch through Claude instead of the intended provider.
+    This function never touches ``fallback_chain`` for non-Claude lanes.
+    """
+    _env = env if env is not None else dict(os.environ)
+
+    # Guard: feature flag, empty task_class, or smart_router already decided.
+    if _env.get("VNX_ROUTING_POLICY_ENABLED") != "1":
+        return None, current_model
+    if not task_class:
+        return None, current_model
+    if auto_route_applied:
+        return None, current_model
+
+    try:
+        from routing_policy import decide_lane, lane_to_claude_model  # noqa: PLC0415
+        decision = decide_lane(task_class=task_class, complexity=complexity, env=_env)
+        claude_model = lane_to_claude_model(decision.lane)
+        if claude_model is not None:
+            # Claude lane: override model, no cheap-lane provider.
+            return None, claude_model
+        # Non-Claude lane: return lane as-is; do NOT fall through to fallback_chain.
+        return decision.lane, current_model
+    except Exception as exc:  # noqa: BLE001
+        import logging as _log_mod  # noqa: PLC0415
+        _log_mod.getLogger(__name__).warning(
+            "routing_policy: decision failed (%s); falling back to --model=%s",
+            exc, current_model,
+        )
+        return None, current_model
 
 
 def _pool_heartbeat_loop(
@@ -259,40 +321,18 @@ if __name__ == "__main__":
                 _route_exc, args.model,
             )
 
-    if not _auto_route_applied and os.environ.get("VNX_ROUTING_POLICY_ENABLED") == "1" and args.task_class:
-        try:
-            from routing_policy import decide_lane, lane_to_claude_model
-            _decision = decide_lane(
-                task_class=args.task_class,
-                complexity=args.complexity,
-            )
-            _claude_model = lane_to_claude_model(_decision.lane)
-            if _claude_model is not None:
-                # Claude lane: override model directly.
-                _effective_model = _claude_model
-            else:
-                # LiteLLM lane: log routing intent; full LiteLLM path wired separately.
-                # Fallback to first Claude lane in the fallback_chain, or keep current model.
-                _fallback_claude = next(
-                    (lane_to_claude_model(fb) for fb in _decision.fallback_chain
-                     if lane_to_claude_model(fb) is not None),
-                    None,
-                )
-                if _fallback_claude is not None:
-                    _effective_model = _fallback_claude
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).info(
-                "routing_policy: task_class=%s complexity=%s -> lane=%s "
-                "(rule=%s) effective_model=%s",
-                args.task_class, args.complexity,
-                _decision.lane, _decision.rule_name, _effective_model,
-            )
-        except Exception as _routing_exc:
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).warning(
-                "routing_policy: decision failed (%s); falling back to --model=%s",
-                _routing_exc, args.model,
-            )
+    _cheap_lane_provider, _effective_model = _select_dispatch_path(
+        task_class=args.task_class,
+        complexity=args.complexity,
+        current_model=_effective_model,
+        auto_route_applied=_auto_route_applied,
+    )
+    if _cheap_lane_provider is not None or _effective_model != args.model:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).info(
+            "dispatch_path: task_class=%s complexity=%s -> cheap_lane=%s effective_model=%s",
+            args.task_class, args.complexity, _cheap_lane_provider, _effective_model,
+        )
 
     _state_dir = _default_state_dir()
     _db_path = _state_dir / "runtime_coordination.db"
@@ -314,6 +354,32 @@ if __name__ == "__main__":
         daemon=True,
     )
     _hb_thread.start()
+
+    if _cheap_lane_provider is not None:
+        # Non-Claude lane chosen by routing_policy: stop the heartbeat thread, then
+        # delegate execution to provider_dispatch.  provider_dispatch owns receipt +
+        # unified_report emission after the spawn completes; we must not also call
+        # deliver_with_recovery (which would spawn a Claude process instead).
+        _hb_stop.set()
+        _hb_thread.join(timeout=5)
+        import provider_dispatch as _pd  # noqa: PLC0415
+        _pd_argv = [
+            "--provider", _cheap_lane_provider,
+            "--terminal-id", args.terminal_id,
+            "--dispatch-id", args.dispatch_id,
+            "--instruction", args.instruction,
+            "--model", args.model,
+            "--role", args.role or _ROLE_FALLBACK,
+            "--max-retries", str(args.max_retries),
+            "--gate", args.gate,
+        ]
+        if args.no_auto_commit:
+            _pd_argv.append("--no-auto-commit")
+        if args.dispatch_paths:
+            _pd_argv.extend(["--dispatch-paths", args.dispatch_paths])
+        if args.pr_id:
+            _pd_argv.extend(["--pr-id", args.pr_id])
+        sys.exit(_pd.main(_pd_argv))
 
     # Scale chunk/total timeouts by --complexity so compute-heavy ("high")
     # dispatches get more headroom and aren't killed by the per-chunk timeout
