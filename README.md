@@ -10,18 +10,17 @@ VNX is an open-source governance-first orchestration runtime for AI CLI workflow
 
 **No framework to import. No cloud dependency. Governance, provenance, and operator control built in.**
 
-## Status (2026-05-20)
+## Status (2026-05-26)
 
-Wave 5/6/7 zijn gemerged. Wave 8 (Smart Router) in flight via PR-split.
-Komende stappen: pre-cutover hardening -> Wave 2a centralisatie (Hybrid C,
-MC -> sales-copilot -> SEOcrawler over 5 dagen) -> Wave 3 DB retirement.
+Wave 5/6/7/8 gemerged. rc9 hardening: cheap-lane routing via provider_dispatch, governance receipt gaps gesloten (GOV-2/3), deepseek-harness constraint herbenoemd.
+Komende stappen: Wave 2a centralisatie (Hybrid C, MC -> sales-copilot -> SEOcrawler over 5 dagen) -> Wave 3 DB retirement.
 
 Volledige roadmap: [claudedocs/roadmap-2026-05-20-master.md][roadmap].
 
 [roadmap]: claudedocs/roadmap-2026-05-20-master.md
 
-Current release: `v1.0.0-rc3` — multi-provider milestone (2026-05-17). Five providers in production with provider-agnostic governance: Claude (Opus/Sonnet/Haiku), Codex (GPT-5.2-codex), Gemini (2.5 Pro/Flash), Kimi CLI (K2.6), LiteLLM bridge (DeepSeek V4 Pro/Flash, GLM-5.1 via OpenRouter).
-See [CHANGELOG.md](CHANGELOG.md) for the release summary.
+Current release: `v1.0.0-rc9` — governance hardening + cheap-lane routing (2026-05-26). Cheap-lane dispatches now route through provider_dispatch (kimi/codex/gemini as cheap-lane workers). `traceability_audit` tool cross-references the full dispatch→receipt→PR→commit chain and reports gaps. `pr_merge.py` canonical merge path emits `pr_merged` receipts for full FPY tracking.
+See [CHANGELOG.md](CHANGELOG.md) for the full release summary.
 
 **API contract is stable from this release forward.** Dispatch envelope, receipt schema, NDJSON ledger format, and 14 ADRs (`docs/governance/decisions/ADR-001` through `ADR-014`) are now backwards-compatibility-honoring. v1.0.0 final ships after Phase 5 reader cutover validation.
 
@@ -195,6 +194,25 @@ Agent hits 65% context → blocked from further tool calls
 
 Zero human intervention. Zero lost work. The receipt ledger maintains a complete chain across rotations.
 
+## What's new in v1.0.0-rc9 (2026-05-26)
+
+### Cheap-lane routing via provider_dispatch (CL1-CL3)
+
+Cheap-lane dispatches now execute through the provider-agnostic `provider_dispatch` entry-point instead of the hardcoded Claude fallback. Non-claude lanes (kimi/codex/gemini) work as cheap-lane workers with correct receipt capture (status, output, tokens).
+
+- **CL1 (#644)** Non-claude receipt fix — kimi/codex completion receipts now capture correct status + tokens
+- **CL2 (#652)** Cheap-lane execution via `provider_dispatch` — removes Claude-only path from subprocess dispatch
+- **CL3 (#643)** Constraint renamed: `deepseek-path-d-blocked` → `deepseek-harness-subscription-blocked`. Own-key + hardening path now explicitly allowed (measured 0 calls to `api.anthropic.com`); subscription-redirect remains blocked.
+
+### Governance receipt gaps closed (GOV-2/3)
+
+- **GOV-2 (#654)** `scripts/pr_merge.py` canonical merge path emits `pr_merged` receipt atomically on every merge/closure, fixing the FPY/history gap where merged PRs left no governance trail. `backfill_pr_merged_receipts.py` reconciles historical PRs.
+- **GOV-3 (#655)** `scripts/traceability_audit.py` — re-runnable tool that cross-references the full dispatch→receipt→PR→commit chain and reports gaps in four categories (A–D). Supports date-range filters, atomic markdown output. 44 unit tests included.
+
+### OI refactors (#645-#650, #653, #657)
+
+Eight size-threshold refactors that modularize oversized scripts: quality-db bootstrap migration registry, benchmark report writers, dispatcher stuck-cleanup, receipt-proc mtime-calc, doctor worktree/settings checks, install-central shim template, and the two-part `migrate_to_central_vnx.py` split into `migrate_import` + `migrate_schema` modules.
+
 ## What's new since v1.0.0-rc1 (May 2026)
 
 > Strategic replan v1.2 organizes work into 6 waves. v1.0.0-rc1 itself shipped Wave 0 + 0.5 (architectural stabilization + Phase 6 P4 migration). Wave 1 (shadow read cutover) and Wave 5 P0/P1 (smart-context injection) shipped on top of the rc1 baseline and are still pending burn-in before the v1.0.0 final tag. 12 additional PRs (#462–#480) shipped post-rc1 — see [CHANGELOG.md](CHANGELOG.md) "Unreleased" for the full PR list.
@@ -366,13 +384,13 @@ vnx doctor --strict              # full pre-flight validation
 ```bash
 git clone https://github.com/Vinix24/vnx-orchestration.git
 cd vnx-orchestration
-bash install-central.sh --version v1.0.0-rc3
+bash install-central.sh --version v1.0.0-rc9
 ```
 
-Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc3/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
+Central install places VNX at `~/.vnx-system/versions/v1.0.0-rc9/` with atomic symlink swap. Each project pins its version via `.vnx-version`. Per-project customizations go in `.vnx-overrides/skills/`, `.vnx-overrides/schemas/`, and `.vnx-overrides/configs/` — central install reads these before falling back to the shared installation.
 
 ```bash
-vnx update --to v1.0.0-rc3       # Flip to a specific version (central install)
+vnx update --to v1.0.0-rc9       # Flip to a specific version (central install)
 vnx doctor --strict              # Full pre-flight: schema check, skill coverage, worktree orphans, active dispatch drain
 ```
 
@@ -540,20 +558,21 @@ Detailed comparisons: [VNX vs Claude Code](docs/comparisons/vnx_vs_claude_code.m
 
 Active development. Priorities shift based on real usage patterns. Full detail in [ROADMAP.md](./ROADMAP.md); recent shipping history in [CHANGELOG.md](./CHANGELOG.md).
 
-### Recently landed (Wave 5, 6, 7, 8 — May 2026)
+### Recently landed (Wave 5, 6, 7, 8 + rc9 hardening — May 2026)
 
 - **Wave 5** (SHIPPED 2026-05-16) — Control Centre + multi-project supervision (single supervisor session managing N per-project T0 orchestrators, schema v12 multi-tenant lease isolation, cross-project intelligence aggregator)
 - **Wave 6** (SHIPPED 2026-05-16) — Workers=N elastic pool with `vnx pool` CLI, queue-aware + cost-aware scaling policies, dead-worker reap, schema v14
 - **Wave 7** (SHIPPED 2026-05-17) — Multi-provider via LiteLLM (DeepSeek/Kimi/GLM), provider governance unification (uniform receipt + report shape), Kimi CLI as 5th provider with OAuth, intelligence injection + token/cost tracking equal first-class across all 5 providers
 - **Wave 8** (SHIPPED 2026-05-17) — Smart router with task-class-aware model selection, hard provider constraint enforcement (`HardConstraintViolation` on policy breach), YAML frontmatter guardrails for uniform report schema, weekly drift + monthly benchmark cadence, self-learning `route_decisions_watcher.py`
 - **Benchmark infrastructure** — reproducible 9-model × 7-task suite + routing recommendations published
+- **rc9 hardening** (SHIPPED 2026-05-26) — cheap-lane routing via `provider_dispatch` (CL1-CL3), `traceability_audit` tool (GOV-3), `pr_merge.py` canonical merge path with `pr_merged` receipt (GOV-2), 8 OI size-threshold refactors (#645-#650, #653, #657)
 
 ### Known gaps / deferred
 
 - **Headless context rotation** (OI-1073) — subprocess workers use single-shot dispatch; active token-stream tracking, auto-rotation, handover writing, and continuation prompt injection are deferred. Interactive terminals retain native Claude Code rotation.
 - **MCP server** — expose VNX state to external Claude sessions; not yet built.
 - **v1.0.0 final tag** — operator decision after Wave 5-8 centralization burn-in validates on mission-control + sales-copilot + SEOcrawler.
-- **Path D (Claude-harness for non-Claude models)** — blocked pending telemetry-leak resolution (`claude` v2.1.136 hits `api.anthropic.com` 8× even with `BASE_URL` redirect, verified 2026-05-10).
+- **Path D (Claude-harness with own DeepSeek key)** — resolved in rc9 (CL3). Own-key + hardening (`ANTHROPIC_API_KEY` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + MCP off) measured at 0 calls to `api.anthropic.com` on claude v2.1.150. Constraint renamed to `deepseek-harness-subscription-blocked` — subscription-redirect (riding OAuth without own key) remains blocked.
 
 ### Future horizons (post-1.0, non-binding)
 
