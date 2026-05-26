@@ -38,72 +38,6 @@ def _extract_role_from_instruction(instruction: str) -> str | None:
     m = _ROLE_HEADER_RE.search(instruction)
     return m.group(1) if m else None
 
-
-def _select_dispatch_path(
-    task_class: str,
-    complexity: str,
-    current_model: str,
-    auto_route_applied: bool = False,
-    env: "dict | None" = None,
-) -> "tuple[str | None, str]":
-    """Apply VNX routing_policy to select the dispatch execution path.
-
-    Returns ``(cheap_lane_provider, effective_model)`` where:
-
-    * ``cheap_lane_provider`` is not None — caller must delegate to provider_dispatch
-      using that string as ``--provider``.  Receipt + unified_report are emitted by
-      provider_dispatch after the spawn completes.
-    * ``cheap_lane_provider`` is None — caller proceeds on the Claude path using
-      ``effective_model`` (which may differ from ``current_model`` when a Claude lane
-      overrides it, e.g. sonnet-4-6 → haiku-4-5).
-
-    Guards applied (any false → returns (None, current_model)):
-    * ``VNX_ROUTING_POLICY_ENABLED=1`` must be set.
-    * ``task_class`` must be non-empty.
-    * ``auto_route_applied=True`` skips this (smart_router already decided).
-
-    Any exception from ``decide_lane`` falls back to ``(None, current_model)`` with a
-    warning log — caller continues on the Claude path unchanged.
-    """
-    import logging as _log_mod  # noqa: PLC0415
-    _log = _log_mod.getLogger(__name__)
-
-    _env = env if env is not None else dict(os.environ)
-    if auto_route_applied or not task_class or _env.get("VNX_ROUTING_POLICY_ENABLED") != "1":
-        return (None, current_model)
-
-    try:
-        from routing_policy import decide_lane, lane_to_claude_model  # noqa: PLC0415
-        _decision = decide_lane(task_class=task_class, complexity=complexity)
-        _claude_model = lane_to_claude_model(_decision.lane)
-
-        if _claude_model is not None:
-            # Claude lane: override the model, stay on the Claude execution path.
-            _log.info(
-                "routing_policy: task_class=%s complexity=%s -> lane=%s "
-                "(rule=%s) effective_model=%s",
-                task_class, complexity, _decision.lane, _decision.rule_name, _claude_model,
-            )
-            return (None, _claude_model)
-
-        # Non-Claude (cheap) lane: signal caller to delegate to provider_dispatch.
-        # Intentionally NOT falling back to the first Claude model in fallback_chain —
-        # the fallback_chain is for runtime failure (API down), not for routing intent.
-        _log.info(
-            "routing_policy: task_class=%s complexity=%s -> lane=%s "
-            "(rule=%s) delegating to provider_dispatch",
-            task_class, complexity, _decision.lane, _decision.rule_name,
-        )
-        return (_decision.lane, current_model)
-
-    except Exception as _routing_exc:
-        _log.warning(
-            "routing_policy: decision failed (%s); falling back to model=%s",
-            _routing_exc, current_model,
-        )
-        return (None, current_model)
-
-
 sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
@@ -167,7 +101,6 @@ from subprocess_dispatch_internals.state_paths import (
 
 __all__ = [
     "_extract_role_from_instruction",
-    "_select_dispatch_path",
     "SubprocessAdapter",
     "HeadlessContextTracker",
     "WorkerHealthMonitor",
@@ -326,16 +259,40 @@ if __name__ == "__main__":
                 _route_exc, args.model,
             )
 
-    # Wave 7 PR-7.4 + CL2: apply routing_policy via _select_dispatch_path.
-    # Returns (cheap_lane_provider, effective_model):
-    #   cheap_lane_provider not None → delegate to provider_dispatch (non-Claude).
-    #   cheap_lane_provider None     → proceed with Claude using effective_model.
-    _cheap_lane_provider, _effective_model = _select_dispatch_path(
-        task_class=args.task_class,
-        complexity=args.complexity,
-        current_model=_effective_model,
-        auto_route_applied=_auto_route_applied,
-    )
+    if not _auto_route_applied and os.environ.get("VNX_ROUTING_POLICY_ENABLED") == "1" and args.task_class:
+        try:
+            from routing_policy import decide_lane, lane_to_claude_model
+            _decision = decide_lane(
+                task_class=args.task_class,
+                complexity=args.complexity,
+            )
+            _claude_model = lane_to_claude_model(_decision.lane)
+            if _claude_model is not None:
+                # Claude lane: override model directly.
+                _effective_model = _claude_model
+            else:
+                # LiteLLM lane: log routing intent; full LiteLLM path wired separately.
+                # Fallback to first Claude lane in the fallback_chain, or keep current model.
+                _fallback_claude = next(
+                    (lane_to_claude_model(fb) for fb in _decision.fallback_chain
+                     if lane_to_claude_model(fb) is not None),
+                    None,
+                )
+                if _fallback_claude is not None:
+                    _effective_model = _fallback_claude
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).info(
+                "routing_policy: task_class=%s complexity=%s -> lane=%s "
+                "(rule=%s) effective_model=%s",
+                args.task_class, args.complexity,
+                _decision.lane, _decision.rule_name, _effective_model,
+            )
+        except Exception as _routing_exc:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).warning(
+                "routing_policy: decision failed (%s); falling back to --model=%s",
+                _routing_exc, args.model,
+            )
 
     _state_dir = _default_state_dir()
     _db_path = _state_dir / "runtime_coordination.db"
@@ -365,32 +322,6 @@ if __name__ == "__main__":
     # downstream so VNX_CHUNK_TIMEOUT / VNX_TOTAL_DEADLINE still take precedence.
     from subprocess_dispatch_internals.runtime_overrides import complexity_timeout_defaults
     _chunk_timeout, _total_deadline = complexity_timeout_defaults(args.complexity)
-
-    if _cheap_lane_provider is not None:
-        # Non-Claude lane chosen by routing_policy: stop the heartbeat thread, then
-        # delegate execution to provider_dispatch.  provider_dispatch owns receipt +
-        # unified_report emission after the spawn completes; we must not also call
-        # deliver_with_recovery (which would spawn a Claude process instead).
-        _hb_stop.set()
-        _hb_thread.join(timeout=5)
-        import provider_dispatch as _pd  # noqa: PLC0415
-        _pd_argv = [
-            "--provider", _cheap_lane_provider,
-            "--terminal-id", args.terminal_id,
-            "--dispatch-id", args.dispatch_id,
-            "--instruction", args.instruction,
-            "--model", args.model,
-            "--role", args.role or _ROLE_FALLBACK,
-            "--max-retries", str(args.max_retries),
-            "--gate", args.gate,
-        ]
-        if args.no_auto_commit:
-            _pd_argv.append("--no-auto-commit")
-        if args.dispatch_paths:
-            _pd_argv.extend(["--dispatch-paths", args.dispatch_paths])
-        if args.pr_id:
-            _pd_argv.extend(["--pr-id", args.pr_id])
-        sys.exit(_pd.main(_pd_argv))
 
     try:
         ok = deliver_with_recovery(
