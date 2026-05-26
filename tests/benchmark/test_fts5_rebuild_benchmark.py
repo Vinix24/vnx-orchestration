@@ -227,6 +227,148 @@ class TestMetricKeys:
             assert key in v, f"Missing validation key: {key}"
 
 
+class TestCollectSourceInfo:
+    def test_returns_correct_keys(self, synthetic_db: Path, tmp_path: Path):
+        """_collect_source_info returns a dict with all expected PRAGMA keys."""
+        work_dir = tmp_path / "work"
+        source_info, work_db = bm._collect_source_info(synthetic_db, work_dir)
+
+        for key in ("path", "size_bytes", "journal_mode", "page_size", "page_count", "work_copy", "copy_wall_seconds"):
+            assert key in source_info, f"Missing key: {key}"
+
+    def test_work_copy_matches_returned_path(self, synthetic_db: Path, tmp_path: Path):
+        """source_info['work_copy'] matches the returned work_db path."""
+        work_dir = tmp_path / "work"
+        source_info, work_db = bm._collect_source_info(synthetic_db, work_dir)
+
+        assert source_info["work_copy"] == str(work_db)
+        assert work_db.exists()
+
+    def test_copy_wall_seconds_non_negative(self, synthetic_db: Path, tmp_path: Path):
+        """copy_wall_seconds is a non-negative float."""
+        work_dir = tmp_path / "work"
+        source_info, _ = bm._collect_source_info(synthetic_db, work_dir)
+
+        assert isinstance(source_info["copy_wall_seconds"], float)
+        assert source_info["copy_wall_seconds"] >= 0
+
+    def test_source_db_not_mutated(self, synthetic_db: Path, tmp_path: Path):
+        """Source DB file is not modified during source info collection."""
+        work_dir = tmp_path / "work"
+        size_before = synthetic_db.stat().st_size
+
+        bm._collect_source_info(synthetic_db, work_dir)
+
+        assert synthetic_db.stat().st_size == size_before
+
+    def test_path_and_size_bytes_match_source(self, synthetic_db: Path, tmp_path: Path):
+        """path and size_bytes fields reflect the original source DB."""
+        work_dir = tmp_path / "work"
+        source_info, _ = bm._collect_source_info(synthetic_db, work_dir)
+
+        assert source_info["path"] == str(synthetic_db)
+        assert source_info["size_bytes"] == synthetic_db.stat().st_size
+
+
+class TestWriteReports:
+    def _build_report(self, synthetic_db: Path, work_db: Path, table_results: list) -> dict:
+        from datetime import datetime, timezone
+
+        fts5_results = [t for t in table_results if t.get("is_fts5") and not t.get("error")]
+        total_wall = sum(t["wall_seconds"] for t in fts5_results if t.get("wall_seconds") is not None)
+        return {
+            "meta": {
+                "run_date": datetime.now(timezone.utc).isoformat(),
+                "script": "test",
+                "psutil_available": bm._HAVE_PSUTIL,
+            },
+            "source_db": {
+                "path": str(synthetic_db),
+                "size_bytes": synthetic_db.stat().st_size,
+                "journal_mode": "wal",
+                "page_size": 4096,
+                "page_count": 1,
+                "work_copy": str(work_db),
+            },
+            "tables": table_results,
+            "summary": {
+                "fts5_tables_benchmarked": [t["table"] for t in fts5_results],
+                "total_wall_seconds": round(total_wall, 3),
+                "recommended_maintenance_window_seconds": round(total_wall * 1.5, 3),
+                "risk_classification": bm._risk_classification(total_wall),
+            },
+        }
+
+    def test_both_files_created(self, synthetic_db: Path, tmp_path: Path):
+        """_write_reports creates both JSON and MD files."""
+        work_dir = tmp_path / "work"
+        report_dir = tmp_path / "reports"
+        work_db = bm._copy_db(synthetic_db, work_dir)
+
+        pre_rss = bm._baseline_memory_rss()
+        pre_io = bm._disk_io_snapshot()
+        table_results = [bm._benchmark_table(work_db, "code_snippets", pre_rss, pre_io)]
+        report = self._build_report(synthetic_db, work_db, table_results)
+
+        bm._write_reports(report, report_dir, "test-stem")
+
+        assert (report_dir / "test-stem.json").exists()
+        assert (report_dir / "test-stem.md").exists()
+
+    def test_no_tmp_files_linger(self, synthetic_db: Path, tmp_path: Path):
+        """No .tmp sidecar files remain after _write_reports completes."""
+        work_dir = tmp_path / "work"
+        report_dir = tmp_path / "reports"
+        work_db = bm._copy_db(synthetic_db, work_dir)
+
+        pre_rss = bm._baseline_memory_rss()
+        pre_io = bm._disk_io_snapshot()
+        table_results = [bm._benchmark_table(work_db, "code_snippets", pre_rss, pre_io)]
+        report = self._build_report(synthetic_db, work_db, table_results)
+
+        bm._write_reports(report, report_dir, "test-stem")
+
+        assert not (report_dir / "test-stem.json.tmp").exists()
+        assert not (report_dir / "test-stem.md.tmp").exists()
+
+    def test_json_parses_with_expected_keys(self, synthetic_db: Path, tmp_path: Path):
+        """Written JSON parses cleanly and contains expected top-level keys."""
+        import json
+
+        work_dir = tmp_path / "work"
+        report_dir = tmp_path / "reports"
+        work_db = bm._copy_db(synthetic_db, work_dir)
+
+        pre_rss = bm._baseline_memory_rss()
+        pre_io = bm._disk_io_snapshot()
+        table_results = [bm._benchmark_table(work_db, "code_snippets", pre_rss, pre_io)]
+        report = self._build_report(synthetic_db, work_db, table_results)
+
+        bm._write_reports(report, report_dir, "test-stem")
+
+        parsed = json.loads((report_dir / "test-stem.json").read_text())
+        for key in ("meta", "source_db", "tables", "summary"):
+            assert key in parsed, f"Missing top-level key in JSON: {key}"
+
+    def test_md_contains_expected_headings(self, synthetic_db: Path, tmp_path: Path):
+        """Written Markdown contains all required section headings."""
+        work_dir = tmp_path / "work"
+        report_dir = tmp_path / "reports"
+        work_db = bm._copy_db(synthetic_db, work_dir)
+
+        pre_rss = bm._baseline_memory_rss()
+        pre_io = bm._disk_io_snapshot()
+        table_results = [bm._benchmark_table(work_db, "code_snippets", pre_rss, pre_io)]
+        report = self._build_report(synthetic_db, work_db, table_results)
+
+        bm._write_reports(report, report_dir, "test-stem")
+
+        content = (report_dir / "test-stem.md").read_text()
+        assert "FTS5 Rebuild Benchmark" in content
+        assert "## Summary" in content
+        assert "## Maintenance Window Recommendation" in content
+
+
 class TestReportOutput:
     def test_json_report_written_atomically(self, synthetic_db: Path, tmp_path: Path):
         """JSON report exists and parses cleanly after benchmark run."""

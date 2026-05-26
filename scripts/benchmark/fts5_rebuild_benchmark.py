@@ -231,6 +231,47 @@ def _write_json_report(report: dict, path: Path) -> None:
     os.replace(tmp, path)
 
 
+def _collect_source_info(source_db: Path, work_dir: Path) -> "tuple[dict, Path]":
+    """Collect source DB PRAGMA metadata and create a working copy for benchmarking.
+
+    Returns (source_info dict, path to work copy).
+    """
+    src_conn = sqlite3.connect(str(source_db), timeout=30)
+    journal_mode = src_conn.execute("PRAGMA journal_mode").fetchone()[0]
+    page_size = src_conn.execute("PRAGMA page_size").fetchone()[0]
+    page_count = src_conn.execute("PRAGMA page_count").fetchone()[0]
+    src_conn.close()
+
+    source_info: dict = {
+        "path": str(source_db),
+        "size_bytes": source_db.stat().st_size,
+        "journal_mode": journal_mode,
+        "page_size": page_size,
+        "page_count": page_count,
+        "work_copy": "",
+    }
+
+    print("[benchmark] Copying DB to work dir...")
+    t_copy_start = time.monotonic()
+    work_db = _copy_db(source_db, work_dir)
+    t_copy_end = time.monotonic()
+    print(f"[benchmark] Copy done in {t_copy_end - t_copy_start:.1f}s -> {work_db}")
+    source_info["work_copy"] = str(work_db)
+    source_info["copy_wall_seconds"] = round(t_copy_end - t_copy_start, 3)
+
+    return source_info, work_db
+
+
+def _write_reports(report: dict, report_dir: Path, stem: str) -> None:
+    """Write JSON and Markdown reports and print their file locations."""
+    json_path = report_dir / f"{stem}.json"
+    md_path = report_dir / f"{stem}.md"
+    _write_json_report(report, json_path)
+    _write_md_report(report, md_path)
+    print(f"[benchmark] JSON report: {json_path}")
+    print(f"[benchmark] MD report:   {md_path}")
+
+
 def _write_md_report(report: dict, path: Path) -> None:
     lines = []
     meta = report["meta"]
@@ -385,30 +426,7 @@ def main() -> None:
     print(f"[benchmark] Work dir:  {work_dir}")
     print(f"[benchmark] Tables:    {tables}")
 
-    # --- Source DB metadata ---
-    src_conn = sqlite3.connect(str(source_db), timeout=30)
-    journal_mode = src_conn.execute("PRAGMA journal_mode").fetchone()[0]
-    page_size = src_conn.execute("PRAGMA page_size").fetchone()[0]
-    page_count = src_conn.execute("PRAGMA page_count").fetchone()[0]
-    src_conn.close()
-
-    source_info = {
-        "path": str(source_db),
-        "size_bytes": source_db.stat().st_size,
-        "journal_mode": journal_mode,
-        "page_size": page_size,
-        "page_count": page_count,
-        "work_copy": "",
-    }
-
-    # --- Copy DB ---
-    print(f"[benchmark] Copying DB to work dir...")
-    t_copy_start = time.monotonic()
-    work_db = _copy_db(source_db, work_dir)
-    t_copy_end = time.monotonic()
-    print(f"[benchmark] Copy done in {t_copy_end - t_copy_start:.1f}s -> {work_db}")
-    source_info["work_copy"] = str(work_db)
-    source_info["copy_wall_seconds"] = round(t_copy_end - t_copy_start, 3)
+    source_info, work_db = _collect_source_info(source_db, work_dir)
 
     # --- Benchmark each table ---
     pre_rss = _baseline_memory_rss()
@@ -452,15 +470,7 @@ def main() -> None:
         },
     }
 
-    # --- Write reports ---
-    json_path = report_dir / f"{stem}.json"
-    md_path = report_dir / f"{stem}.md"
-
-    _write_json_report(report, json_path)
-    _write_md_report(report, md_path)
-
-    print(f"[benchmark] JSON report: {json_path}")
-    print(f"[benchmark] MD report:   {md_path}")
+    _write_reports(report, report_dir, stem)
 
     risk = report["summary"]["risk_classification"]
     print(
