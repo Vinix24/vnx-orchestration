@@ -91,9 +91,14 @@ class TestExistingConstraintsNotRegressed:
         with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
             enforcer.enforce(provider="zai", model="glm-4.5")
 
-    def test_deepseek_claude_harness_still_blocked(self, enforcer: ConstraintEnforcer):
-        with pytest.raises(HardConstraintViolation, match="deepseek-path-d-blocked"):
-            enforcer.enforce(provider="deepseek", via="claude_harness")
+    def test_deepseek_harness_subscription_still_blocked(self, enforcer: ConstraintEnforcer):
+        """Subscription-redirect path remains blocked after kimi enforcer fix."""
+        with pytest.raises(HardConstraintViolation, match="deepseek-harness-subscription-blocked"):
+            enforcer.enforce(provider="deepseek", via="claude_harness_subscription")
+
+    def test_deepseek_harness_keyed_allowed(self, enforcer: ConstraintEnforcer):
+        """Own-key + hardening path is allowed — kimi fix must not regress this."""
+        enforcer.enforce(provider="deepseek", via="claude_harness_keyed")
 
     def test_litellm_deepseek_via_litellm_allowed(self, enforcer: ConstraintEnforcer):
         enforcer.enforce(provider="litellm", sub_provider="deepseek", via="litellm")
