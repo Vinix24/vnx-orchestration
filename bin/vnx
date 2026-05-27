@@ -80,7 +80,43 @@ else
   export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
   export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
   export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
-  export VNX_DATA_DIR="${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}"
+  # PR-PIP-2: ordered state-root resolution (lockstep with scripts/lib/vnx_paths.sh
+  # and vnx_paths.py). This inline fallback only runs when vnx_paths.sh is absent;
+  # keep the ordering identical: explicit > VNX_DATA_HOME/<id> > ~/.vnx-data/<id>
+  # if exists > project-local if exists > XDG default. Collision-safe on missing id.
+  if [ -z "${VNX_DATA_DIR:-}" ]; then
+    _vnx_pid=""
+    if [ -n "${VNX_PROJECT_ID:-}" ] && printf '%s' "$VNX_PROJECT_ID" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'; then
+      _vnx_pid="$VNX_PROJECT_ID"
+    else
+      _vnx_pid_dir="$PROJECT_ROOT"
+      while [ -n "$_vnx_pid_dir" ]; do
+        if [ -f "$_vnx_pid_dir/.vnx-project-id" ]; then
+          _vnx_pid_first="$(head -1 "$_vnx_pid_dir/.vnx-project-id" 2>/dev/null | tr -d '[:space:]')"
+          if [ -n "$_vnx_pid_first" ] && printf '%s' "$_vnx_pid_first" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'; then
+            _vnx_pid="$_vnx_pid_first"
+          fi
+          break
+        fi
+        [ "$_vnx_pid_dir" = "/" ] && break
+        _vnx_pid_dir="$(dirname "$_vnx_pid_dir")"
+      done
+      unset _vnx_pid_dir _vnx_pid_first
+    fi
+    if [ -n "${VNX_DATA_HOME:-}" ] && [ -n "$_vnx_pid" ]; then
+      VNX_DATA_DIR="${VNX_DATA_HOME%/}/$_vnx_pid"
+    elif [ -n "$_vnx_pid" ] && [ -d "$HOME/.vnx-data/$_vnx_pid" ]; then
+      VNX_DATA_DIR="$HOME/.vnx-data/$_vnx_pid"
+    elif [ -d "$PROJECT_ROOT/.vnx-data" ]; then
+      VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+    elif [ -n "$_vnx_pid" ]; then
+      VNX_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/vnx/$_vnx_pid"
+    else
+      VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+    fi
+    unset _vnx_pid
+  fi
+  export VNX_DATA_DIR
   export VNX_STATE_DIR="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
   export VNX_DISPATCH_DIR="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}"
   export VNX_LOGS_DIR="${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}"

@@ -2,22 +2,30 @@
 """vnx status — show current VNX project dispatch and agent status."""
 
 import json
-import os
 from pathlib import Path
+
+from vnx_cli import _engine
 
 
 def vnx_status(args) -> int:
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
     emit_json = getattr(args, "json", False)
 
-    vnx_data = project_dir / ".vnx-data"
+    # PR-PIP-2: a project is "initialized" by its tracked in-project config
+    # (.vnx/ + .vnx-project-id), not by a project-local .vnx-data tree — the
+    # runtime tree now lives under the resolved (out-of-project) state root.
+    initialized = (project_dir / ".vnx").is_dir() or (
+        project_dir / _engine.PROJECT_FILE_NAME
+    ).is_file()
 
-    if not vnx_data.is_dir():
+    if not initialized:
         if emit_json:
             print(json.dumps({"initialized": False, "error": "not initialized"}))
         else:
             print("VNX project not initialized. Run `vnx init` first.")
         return 1
+
+    vnx_data = _engine.resolve_data_root(project_dir)
 
     # Active dispatches
     active_dir = vnx_data / "dispatches" / "active"
