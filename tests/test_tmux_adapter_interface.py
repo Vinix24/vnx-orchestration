@@ -246,7 +246,15 @@ class TestDirectCouplingFreeze:
     """Ensure no new direct tmux subprocess calls exist outside tmux_adapter.py."""
 
     PROTECTED_PATH = Path(__file__).parent.parent / "scripts" / "lib"
-    ADAPTER_FILES = {"tmux_adapter.py", "tmux_session_profile.py"}
+    # Modules authorized to own direct tmux subprocess calls. tmux_interactive_dispatch.py
+    # (PR-TMUX-1) is a tmux-owning lane: it spawns ephemeral detached sessions
+    # (new-session -d / capture-pane / kill-session) that TmuxAdapter does not expose,
+    # so it belongs in this allowlist alongside the adapter modules.
+    ADAPTER_FILES = {
+        "tmux_adapter.py",
+        "tmux_session_profile.py",
+        "tmux_interactive_dispatch.py",
+    }
 
     def test_no_direct_tmux_in_protected_modules(self) -> None:
         """No scripts/lib/*.py file (except adapter files) should call tmux directly."""
