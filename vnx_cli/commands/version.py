@@ -9,15 +9,10 @@ from pathlib import Path
 
 
 def _read_version_file() -> str:
-    here = Path(__file__).resolve()
-    # vnx_cli/commands/version.py -> vnx_cli/commands -> vnx_cli -> project root
-    for ancestor in [here.parent, here.parent.parent, here.parent.parent.parent]:
-        version_file = ancestor / "VERSION"
-        if version_file.is_file():
-            content = version_file.read_text(encoding="utf-8").strip()
-            if content:
-                return content
-    return "unknown"
+    # Single source of truth: vnx_cli.__version__ (package metadata in an
+    # installed wheel, root VERSION file in a dev checkout).
+    from vnx_cli import __version__
+    return __version__
 
 
 def _git_commit(repo_dir: Path) -> str:
