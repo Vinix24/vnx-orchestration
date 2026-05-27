@@ -499,7 +499,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = os.environ.get("VNX_CODEX_MODEL", "")
+    model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
     try:
@@ -537,6 +537,44 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_codex: event archive+clear failed: %s", _exc)
+
+
+def _resolve_codex_model() -> str:
+    """Load codex model key from registry (openai section), fallback to hardcoded default.
+
+    Returns the registry model key (e.g. 'gpt-5.2-codex') so the receipt model field
+    is never empty when VNX_CODEX_MODEL is unset.
+    """
+    _CODEX_FALLBACK = "gpt-5.2-codex"
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+    except Exception as e:
+        logger.error("provider_dispatch: registry load failed for codex: %s", e)
+        return _CODEX_FALLBACK
+    cfg = registry.get("openai")
+    if cfg is None or not cfg.models:
+        return _CODEX_FALLBACK
+    return next(iter(cfg.models.keys()))
+
+
+def _resolve_kimi_model_label() -> str:
+    """Load kimi CLI default model key from registry (kimi_cli section), fallback to 'kimi-default'.
+
+    Returns the registry model key (e.g. 'kimi-default') so the receipt model field
+    is never the generic 'default' string when VNX_KIMI_MODEL is unset.
+    """
+    _KIMI_FALLBACK = "kimi-default"
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+    except Exception as e:
+        logger.error("provider_dispatch: registry load failed for kimi_cli: %s", e)
+        return _KIMI_FALLBACK
+    cfg = registry.get("kimi_cli")
+    if cfg is None or not cfg.models:
+        return _KIMI_FALLBACK
+    return next(iter(cfg.models.keys()))
 
 
 def _resolve_deepseek_model() -> str:
@@ -742,7 +780,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         return 1
 
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
-    model_label = model or "default"
+    model_label = model or _resolve_kimi_model_label()
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
