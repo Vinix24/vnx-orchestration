@@ -93,6 +93,7 @@ Related docs:
 
 Common operational/support scripts:
 
+- `scripts/local-ci.sh` — local mirror of `.github/workflows/vnx-ci.yml` gates; runs all 16 gates, prints pass/fail matrix, exits 1 if any fail. Usage: `./scripts/local-ci.sh [--base-ref <ref>] [--with-npm] [--help]`. Use to verify a branch before pushing without consuming GitHub Actions minutes.
 - `scripts/generate_valid_dashboard.sh` — dashboard launcher and validator
 - `scripts/check_intelligence_health.py` — health check for intelligence surfaces
 - `scripts/cleanup_auto.sh` — cleanup automation

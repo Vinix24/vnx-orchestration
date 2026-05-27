@@ -29,6 +29,7 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/intelligence_import.py' \
     --glob '!**/vnx_install.py' \
     --glob '!**/commands/merge_preflight.sh' \
+    --glob '!**/local-ci.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' \
     --glob '!**/check_installer_no_template_leak.sh' || true)
@@ -56,6 +57,7 @@ else
     --exclude='intelligence_import.py' \
     --exclude='vnx_install.py' \
     --exclude='merge_preflight.sh' \
+    --exclude='local-ci.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' \
     --exclude='check_installer_no_template_leak.sh' || true)
