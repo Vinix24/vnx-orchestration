@@ -18,8 +18,11 @@ _deliver_receipt_to_t0_pane() {
 
     # Ghost-receipt filter: skip pastes for stop-hook triggers without real dispatch context.
     # Prevents flooding T0 pane when long-running sessions emit interim Stop events.
+    # Pattern covers: bare 'unknown', 'unknown-*' variants, 'no-id', and empty string.
+    # Primary fix is filename-based dispatch_id extraction in report_parser.py; this
+    # is the vangnet for any residual cases where no real id can be derived at all.
     case "$dispatch_id" in
-        unknown-*|no-id)
+        unknown-*|unknown|no-id|"")
             log "INFO" "Skipping ghost receipt paste: dispatch_id=$dispatch_id"
             return 0
             ;;

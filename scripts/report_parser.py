@@ -157,6 +157,20 @@ class ReportParser:
         if str(metadata.get("dispatch_id", "")).strip().lower() in {"", "unknown", "none", "null"}:
             metadata.pop("dispatch_id", None)
 
+        # Filename-based dispatch_id fallback: when content parsing yielded nothing,
+        # derive dispatch_id from the report filename by stripping known suffixes.
+        # Example: '20260527-132804-pip-repackage-namespace_report.md'
+        #       -> '20260527-132804-pip-repackage-namespace'
+        # Only applied when dispatch_id is still absent after content extraction.
+        if not metadata.get("dispatch_id") and hasattr(self, '_current_filename') and self._current_filename:
+            _fn = self._current_filename
+            for _suffix in ('_report.md', '_report.txt', '_report', '.md', '.txt'):
+                if _fn.endswith(_suffix):
+                    _fn = _fn[:-len(_suffix)]
+                    break
+            if _fn and _fn.lower() not in {'unknown', 'none', 'null', ''}:
+                metadata['dispatch_id'] = _fn
+
         # Phase 1B: Extract session_id (multiple patterns)
         # Pattern 1: **Session**: abc-def-123 (markdown bold) - accepts alphanumeric, hyphens, underscores
         session_match = re.search(r'\*\*Session\*\*:\s*([a-zA-Z0-9\-_]+)', content[:2000], re.IGNORECASE)
