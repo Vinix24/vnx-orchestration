@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vnx-orchestration"
-version = "1.0.0-rc3"
+dynamic = ["version"]
 description = "Governance-first runtime for AI agents (NDJSON receipts, SPC-grade quality gates)"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -25,8 +25,40 @@ Homepage = "https://github.com/Vinix24/vnx-orchestration"
 Repository = "https://github.com/Vinix24/vnx-orchestration"
 
 [tool.setuptools]
-packages = ["vnx_cli", "vnx_cli.commands"]
-include-package-data = true
+include-package-data = false
 
+# Single source of truth for the version: the root VERSION file.
+# pyproject derives from it -> wheel metadata derives from pyproject ->
+# vnx_cli.__version__ reads it back via importlib.metadata. No drift.
+[tool.setuptools.dynamic]
+version = {file = ["VERSION"]}
+
+# Ship the full engine, not just the CLI shim. Engine trees live at the repo
+# root as siblings of vnx_cli/; they install as top-level packages so the
+# installed layout keeps scripts/ + schemas/ + skills/ as siblings (the layout
+# scripts/lib/vnx_paths.py resolves VNX_HOME from). namespaces=true is required
+# because the engine trees carry no __init__.py.
+[tool.setuptools.packages.find]
+where = ["."]
+namespaces = true
+include = [
+    "vnx_cli*",
+    "scripts*",
+    "schemas",
+    "skills",
+    "templates",
+    "configs",
+    "hooks*",
+]
+
+# Recursive globs ship every asset (sql, sh, json, yaml, md, extensionless git
+# hooks, ...) regardless of whether the holding subdir is an importable package.
+# This is what carries schemas/migrations/*.sql and the hyphenated skills/*
+# dirs into the wheel.
 [tool.setuptools.package-data]
-"vnx_cli" = ["templates/**/*", "schemas/**/*"]
+scripts = ["**/*"]
+schemas = ["**/*"]
+skills = ["**/*"]
+templates = ["**/*"]
+configs = ["**/*"]
+hooks = ["**/*"]

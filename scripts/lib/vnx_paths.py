@@ -35,6 +35,30 @@ def _resolve_overrides_dir(project_root: Path) -> Optional[Path]:
     return None
 
 
+def _resolve_packaged_vnx_home() -> Optional[Path]:
+    """Resolve VNX_HOME for a pip-installed (site-packages) layout.
+
+    In an installed wheel the engine ships as top-level dirs next to the
+    ``vnx_cli`` package, so ``scripts/lib/vnx_paths.py`` sits at
+    ``<site-packages>/scripts/lib/vnx_paths.py`` with ``schemas/``, ``skills/``,
+    etc. as siblings. We resolve that engine root explicitly and confirm the
+    layout (``schemas/`` + ``scripts/`` present) before trusting it.
+
+    Returns None for a dev checkout or editable install so the existing
+    ``__file__``-walk / git-based resolution stays in control. Detection keys on
+    the module living under a ``site-packages``/``dist-packages`` root, which a
+    source checkout never does.
+    """
+    here = Path(__file__).resolve()
+    if not any(part in ("site-packages", "dist-packages") for part in here.parts):
+        return None
+    # scripts/lib/vnx_paths.py -> scripts/lib -> scripts -> engine root
+    engine_root = here.parent.parent.parent
+    if (engine_root / "schemas").is_dir() and (engine_root / "scripts").is_dir():
+        return engine_root
+    return None
+
+
 def _resolve_vnx_home() -> Path:
     vnx_home = os.environ.get("VNX_HOME")
     if vnx_home:
@@ -43,6 +67,12 @@ def _resolve_vnx_home() -> Path:
     vnx_bin = os.environ.get("VNX_BIN") or os.environ.get("VNX_EXECUTABLE")
     if vnx_bin:
         return Path(vnx_bin).expanduser().resolve().parent.parent
+
+    # Packaged install: resolve the engine root from the installed layout
+    # before falling back to the dev-checkout walk below.
+    packaged = _resolve_packaged_vnx_home()
+    if packaged is not None:
+        return packaged
 
     here = Path(__file__).resolve()
     # scripts/lib/vnx_paths.py -> scripts/lib -> scripts -> VNX_HOME
