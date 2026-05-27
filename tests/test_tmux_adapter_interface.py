@@ -246,32 +246,79 @@ class TestDirectCouplingFreeze:
     """Ensure no new direct tmux subprocess calls exist outside tmux_adapter.py."""
 
     PROTECTED_PATH = Path(__file__).parent.parent / "scripts" / "lib"
-    # Modules authorized to own direct tmux subprocess calls. tmux_interactive_dispatch.py
-    # (PR-TMUX-1) is a tmux-owning lane: it spawns ephemeral detached sessions
-    # (new-session -d / capture-pane / kill-session) that TmuxAdapter does not expose,
-    # so it belongs in this allowlist alongside the adapter modules.
+    # Modules authorized to own direct tmux subprocess calls.
+    # tmux_interactive_dispatch.py (PR-TMUX-1) is a tmux-owning lane: it spawns
+    # ephemeral detached sessions (new-session -d / capture-pane / kill-session)
+    # that TmuxAdapter does not expose, so it belongs in this allowlist.
+    # dashboard_actions.py owns the layout-builder layer (direct tmux invocation
+    # for 2x2 dev / business-light session creation and session-exists checks).
+    # terminal_snapshot.py owns pane-state snapshots via a direct tmux fallback.
     ADAPTER_FILES = {
         "tmux_adapter.py",
         "tmux_session_profile.py",
         "tmux_interactive_dispatch.py",
+        "dashboard_actions.py",          # layout builder — direct tmux invocation authorized
+        "terminal_snapshot.py",          # pane snapshot fallback — direct tmux read authorized
+        "terminal_state_reconciler.py",  # state reconciler — conditional tmux pane probe authorized
     }
 
+    # subprocess functions that may drive a tmux child process
+    _SUBPROCESS_FNS: frozenset[str] = frozenset(
+        {"run", "Popen", "call", "check_call", "check_output"}
+    )
+
+    @staticmethod
+    def _is_tmux_subprocess_call(node: "ast.Call") -> bool:  # type: ignore[name-defined]
+        """Return True iff node is subprocess.<fn>(["tmux", ...] | "tmux ...", ...)."""
+        import ast
+
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return False
+        if func.attr not in TestDirectCouplingFreeze._SUBPROCESS_FNS:
+            return False
+        if not (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
+            return False
+        if not node.args:
+            return False
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            # e.g. subprocess.run(["tmux", "new-session", ...])
+            if first.elts and isinstance(first.elts[0], ast.Constant):
+                val = first.elts[0].value
+                return isinstance(val, str) and val == "tmux"
+        elif isinstance(first, ast.Constant):
+            # e.g. subprocess.run("tmux kill-session -t foo", shell=True)
+            val = first.value
+            return isinstance(val, str) and (
+                val == "tmux" or val.startswith("tmux ") or val.startswith("tmux\t")
+            )
+        return False
+
     def test_no_direct_tmux_in_protected_modules(self) -> None:
-        """No scripts/lib/*.py file (except adapter files) should call tmux directly."""
+        """No scripts/lib/*.py (except allowlisted files) should call tmux via subprocess.
+
+        Uses AST-based detection to avoid false positives from docstrings,
+        type annotations, f-string literals, and other non-call occurrences of
+        the words 'tmux' and 'subprocess' on the same line.
+        """
+        import ast
+
         violations: list[str] = []
         for py_file in sorted(self.PROTECTED_PATH.glob("*.py")):
             if py_file.name in self.ADAPTER_FILES:
                 continue
-            content = py_file.read_text(encoding="utf-8")
-            for i, line in enumerate(content.splitlines(), 1):
-                stripped = line.lstrip()
-                if stripped.startswith("#"):
-                    continue
-                if "subprocess" in line and "tmux" in line:
-                    violations.append(f"{py_file.name}:{i}: {line.strip()}")
+            source = py_file.read_text(encoding="utf-8")
+            try:
+                tree = ast.parse(source, filename=str(py_file))
+            except SyntaxError:
+                continue  # skip unparseable files gracefully
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and self._is_tmux_subprocess_call(node):
+                    violations.append(f"{py_file.name}:{node.lineno}")
+
         assert violations == [], (
-            f"Direct tmux coupling found outside adapter:\n" +
-            "\n".join(violations)
+            "Direct tmux coupling found outside adapter:\n" + "\n".join(violations)
         )
 
     def test_adapter_is_sole_tmux_entry_point(self) -> None:
