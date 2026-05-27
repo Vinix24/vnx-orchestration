@@ -158,7 +158,18 @@ def _default_launch_command(
     profile for PATH/MCP, then start an interactive ``claude`` pinned to *model*.
     ``--dangerously-skip-permissions`` is added only when *skip_permissions* is
     set (autonomous detached workers cannot answer permission prompts).
+
+    Raises ValueError if *extra_flags* contains ``-p``, ``--print``, or
+    ``--print=…``: those flags convert an interactive session to headless,
+    defeating the subscription-safe guarantee of this lane.
     """
+    if extra_flags:
+        for token in extra_flags.split():
+            if token in ("-p", "--print") or token.startswith("--print="):
+                raise ValueError(
+                    f"extra_flags must not contain -p/--print: "
+                    "the interactive lane must stay on the subscription"
+                )
     flags = ""
     if skip_permissions:
         flags = " --dangerously-skip-permissions"
@@ -388,13 +399,18 @@ class TmuxInteractiveDispatch:
         processor route; it calls ``append_receipt`` directly so a clean
         ``status`` receipt for this dispatch_id lands in the canonical NDJSON,
         which is what Phase A polls on.
+
+        The path to ``append_receipt.py`` is ABSOLUTE so it resolves correctly
+        regardless of the worker's cwd (which is ``.claude/terminals/T{n}``
+        when skill-discovery dirs are present).
         """
+        append_receipt = self._project_root / "scripts" / "append_receipt.py"
         return (
             "\n\n---\n\n## Completion Protocol (interactive lane)\n\n"
             "When you have finished AND committed, emit a completion receipt "
             "directly so the orchestrator can detect completion. Run:\n\n"
             "```bash\n"
-            "python3 scripts/append_receipt.py --receipt "
+            f"python3 {append_receipt} --receipt "
             f"'{{\"event_type\": \"subprocess_completion\", "
             f"\"dispatch_id\": \"{dispatch_id}\", "
             f"\"terminal\": \"{terminal_id}\", "
@@ -725,6 +741,12 @@ class TmuxInteractiveDispatch:
 
         attached = self._attach(session) if attach else False
 
+        # Snapshot baseline BEFORE delivering the instruction.  Any matching
+        # receipt that already exists in the NDJSON (stale / reused dispatch_id)
+        # is counted in the baseline so _wait_for_receipt only returns on a
+        # FRESH receipt beyond that count — avoids false Phase-A completion.
+        baseline = len(self._matching_receipts(dispatch_id, completion_statuses))
+
         # 4. assemble context (base + role; Wave5 only if smart_context given)
         body = self._assemble_context(
             terminal_id, instruction, role, dispatch_id, model, smart_context
@@ -790,6 +812,7 @@ class TmuxInteractiveDispatch:
             deadline_seconds=deadline_seconds,
             poll_interval=poll_interval,
             completion_statuses=completion_statuses,
+            baseline_count=baseline,
         )
 
         if receipt is None:

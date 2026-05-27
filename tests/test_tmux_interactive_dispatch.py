@@ -314,6 +314,37 @@ class TestPhaseANegative(_LaneTestCase):
         handle_path = self.state_dir / "tmux_interactive" / f"{self.DISPATCH_ID}.json"
         self.assertTrue(handle_path.exists())
 
+    def test_stale_receipt_does_not_complete_phase_a(self):
+        """A pre-existing completion receipt for the same dispatch_id must NOT
+        trigger a false Phase-A success.  The baseline snapshot taken before
+        delivery ensures the stale receipt is counted in the baseline so only
+        a fresh receipt (len > baseline) would satisfy the wait."""
+        # Pre-write a stale matching completion receipt for the dispatch_id.
+        stale = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": self.TERMINAL,
+            "status": "done",
+            "source": "stale_from_prior_run",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(stale) + "\n")
+
+        # emit_receipt=False: the stub worker never emits a fresh receipt.
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            terminal_id=self.TERMINAL,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane, fake, deadline_seconds=0.2, poll_interval=0.02)
+
+        # The stale receipt must NOT count as completion — must time out.
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+
 
 class TestPhaseBClose(_LaneTestCase):
     def _dispatched_lane(self):
@@ -410,6 +441,21 @@ class TestHelpers(_LaneTestCase):
     def test_default_completion_statuses(self):
         self.assertIn("done", DEFAULT_COMPLETION_STATUSES)
         self.assertIn("failed", DEFAULT_COMPLETION_STATUSES)
+
+    def test_extra_flags_rejects_print_mode(self):
+        """extra_flags containing -p or --print must raise ValueError (billing
+        invariant: the interactive lane must never become headless)."""
+        with self.assertRaises(ValueError):
+            _default_launch_command("sonnet", extra_flags="-p")
+        with self.assertRaises(ValueError):
+            _default_launch_command("sonnet", extra_flags="--print")
+        with self.assertRaises(ValueError):
+            _default_launch_command("sonnet", extra_flags="--print=stream")
+        # A benign extra flag must still build the command without error.
+        cmd = _default_launch_command("sonnet", extra_flags="--verbose")
+        self.assertIn("--verbose", cmd)
+        self.assertNotIn("-p", cmd.split())
+        self.assertNotIn("--print", cmd.split())
 
 
 if __name__ == "__main__":
