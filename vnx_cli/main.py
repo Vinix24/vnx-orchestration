@@ -29,6 +29,13 @@ def main() -> None:
         metavar="DIR",
         help="target directory (default: current directory)",
     )
+    init_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="ID",
+        help="explicit project_id (default: derived from the directory name); "
+             "must match ^[a-z][a-z0-9-]{1,31}$",
+    )
 
     # doctor subcommand
     doctor_parser = subparsers.add_parser(
