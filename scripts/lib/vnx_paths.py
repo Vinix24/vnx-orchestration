@@ -38,11 +38,14 @@ def _resolve_overrides_dir(project_root: Path) -> Optional[Path]:
 def _resolve_packaged_vnx_home() -> Optional[Path]:
     """Resolve VNX_HOME for a pip-installed (site-packages) layout.
 
-    In an installed wheel the engine ships as top-level dirs next to the
-    ``vnx_cli`` package, so ``scripts/lib/vnx_paths.py`` sits at
-    ``<site-packages>/scripts/lib/vnx_paths.py`` with ``schemas/``, ``skills/``,
-    etc. as siblings. We resolve that engine root explicitly and confirm the
-    layout (``schemas/`` + ``scripts/`` present) before trusting it.
+    In an installed wheel the engine ships under the ``vnx_orchestration``
+    namespace package (PR-PIP-REPACKAGE), so this module sits at
+    ``<site-packages>/vnx_orchestration/scripts/lib/vnx_paths.py`` with
+    ``schemas/``, ``skills/``, etc. as siblings of ``scripts/`` inside
+    ``vnx_orchestration/``. Because the walk is relative to this file's own
+    location, the same three-parent walk also resolves a legacy top-level wheel
+    (``<site-packages>/scripts/lib/vnx_paths.py``); the ``schemas/`` + ``scripts/``
+    presence check confirms whichever layout produced the install.
 
     Returns None for a dev checkout or editable install so the existing
     ``__file__``-walk / git-based resolution stays in control. Detection keys on
@@ -53,6 +56,7 @@ def _resolve_packaged_vnx_home() -> Optional[Path]:
     if not any(part in ("site-packages", "dist-packages") for part in here.parts):
         return None
     # scripts/lib/vnx_paths.py -> scripts/lib -> scripts -> engine root
+    # (= <site-packages>/vnx_orchestration in a namespaced wheel).
     engine_root = here.parent.parent.parent
     if (engine_root / "schemas").is_dir() and (engine_root / "scripts").is_dir():
         return engine_root
@@ -215,6 +219,139 @@ def _resolve_project_root(vnx_home: Path) -> Path:
     return default_root
 
 
+def _project_id_from_marker(project_root: Path) -> Optional[str]:
+    """Read a validated project_id from the nearest ``.vnx-project-id`` marker.
+
+    Walks up from project_root (and honors the ``VNX_PROJECT_ID`` env-var first)
+    looking for ``.vnx-project-id``; returns the validated first line. Unlike the
+    full identity chain this needs no operator_id, so a freshly ``vnx init``-ed
+    project (which writes only ``.vnx-project-id``) still resolves a project_id
+    for state-root purposes. Returns None when no valid id is found.
+    """
+    env_pid = os.environ.get("VNX_PROJECT_ID")
+    if env_pid and _PROJECT_ID_RE.match(env_pid.strip()):
+        return env_pid.strip()
+    try:
+        start = Path(project_root).expanduser().resolve()
+    except OSError:
+        return None
+    for ancestor in [start, *start.parents]:
+        marker = ancestor / ".vnx-project-id"
+        if not marker.is_file():
+            continue
+        try:
+            first_line = marker.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError):
+            return None
+        if _PROJECT_ID_RE.match(first_line):
+            return first_line
+        return None
+    return None
+
+
+def _resolve_state_project_id(project_root: Path) -> Optional[str]:
+    """Best-effort project_id for state-root resolution (never raises).
+
+    Resolution order:
+      1. Canonical identity chain via ``vnx_identity.try_resolve_identity``
+         (env > .vnx-project-id file > registry; requires operator+project).
+      2. Lenient ``.vnx-project-id`` marker / ``VNX_PROJECT_ID`` env lookup,
+         which needs no operator_id — so a fresh ``vnx init`` project resolves.
+
+    Returns None when no validated project_id is available, so
+    _resolve_state_root applies its collision-safe project-local fallback
+    instead of guessing a shared id.
+    """
+    try:
+        from vnx_identity import try_resolve_identity
+        identity = try_resolve_identity(cwd=project_root)
+    except Exception:  # pragma: no cover - non-raising contract, belt-and-suspenders
+        identity = None
+    if identity is not None:
+        pid = getattr(identity, "project_id", None)
+        if pid and _PROJECT_ID_RE.match(pid):
+            return pid
+    return _project_id_from_marker(project_root)
+
+
+def _resolve_state_root(project_id: Optional[str], project_root: Path) -> Path:
+    """Resolve the VNX runtime data root (the ``.vnx-data`` equivalent).
+
+    Ordered resolution — first applicable wins:
+      1. ``VNX_DATA_DIR_EXPLICIT=1`` + ``VNX_DATA_DIR``  — explicit override
+         (worktree isolation, CI, tests rely on this).
+      2. ``VNX_DATA_HOME`` + project_id  — ``$VNX_DATA_HOME/<project_id>``.
+      3. ``~/.vnx-data/<project_id>`` *if it already exists*  — keep resolving
+         existing central installs to their current location.
+      4. ``<project_root>/.vnx-data`` *if it already exists*  — keep resolving
+         existing dev checkouts / pre-migration installs in place.
+      5. XDG default  — ``${XDG_DATA_HOME:-~/.local/share}/vnx/<project_id>``
+         for a fresh, clean-footprint install.
+
+    The existence-gated legacy branches (3, 4) are checked *before* the XDG
+    default so that the existing dev checkouts and central installs keep
+    resolving to where their state already lives (per PR-PIP-2: "breek de
+    bestaande dev-checkout/central resolutie NIET"). A fresh install has
+    neither legacy dir and lands on the XDG user-data-dir.
+
+    Collision-safety: a per-project directory is only ever formed from a
+    *resolved* project_id. When project_id is None we never substitute a shared
+    default id (which would collide every project into one dir); we fall back to
+    the legacy project-local ``<project_root>/.vnx-data`` instead. No guessing.
+    """
+    # 1. Explicit override — highest precedence.
+    explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
+    explicit_val = os.environ.get("VNX_DATA_DIR")
+    if explicit_flag and explicit_val:
+        return Path(explicit_val).expanduser().resolve()
+
+    pid = project_id if (project_id and _PROJECT_ID_RE.match(project_id)) else None
+    local = project_root / ".vnx-data"
+
+    # 2. VNX_DATA_HOME — operator-chosen data home, per-project subdir.
+    data_home = os.environ.get("VNX_DATA_HOME")
+    if data_home and pid:
+        return (Path(data_home).expanduser() / pid).resolve()
+
+    # 3. Existing central install — keep resolving to ~/.vnx-data/<id>.
+    if pid:
+        central = Path.home() / ".vnx-data" / pid
+        if central.is_dir():
+            return central.resolve()
+
+    # 4. Existing dev checkout / pre-migration install — keep project-local dir.
+    if local.is_dir():
+        return local.resolve()
+
+    # 5. Fresh install (clean footprint): XDG user-data-dir.
+    if pid:
+        xdg_base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        return (Path(xdg_base).expanduser() / "vnx" / pid).resolve()
+
+    # Collision-safety: no resolvable project_id and no existing layout — never
+    # guess a shared id. Stay project-local rather than collide projects.
+    return local.resolve()
+
+
+def resolve_data_root(project_root) -> Path:
+    """Public: resolve the VNX runtime data root for an explicit project_root.
+
+    Honors the same ordered resolution as :func:`resolve_paths` (explicit
+    override > ``VNX_DATA_HOME`` > existing ``~/.vnx-data/<id>`` > existing
+    project-local ``.vnx-data`` > XDG default), but anchored on the *given*
+    project_root rather than the env/VNX_HOME-resolved one. The project_id is
+    resolved leniently from that root (env, ``.vnx-project-id`` marker, or
+    identity chain). Used by the pip console-script commands (``vnx_cli``)
+    which operate on a ``--project-dir`` argument instead of the ambient repo.
+
+    Collision-safe: an unresolvable project_id never collapses to a shared
+    default; resolution falls back to the project-local ``.vnx-data`` instead.
+    """
+    project_root = Path(project_root).expanduser().resolve()
+    pid = _resolve_state_project_id(project_root)
+    return _resolve_state_root(pid, project_root)
+
+
 def resolve_paths() -> Dict[str, str]:
     vnx_home = _resolve_vnx_home()
     project_root = _resolve_project_root(vnx_home)
@@ -224,19 +361,17 @@ def resolve_paths() -> Dict[str, str]:
 
     _explicit_flag = os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1"
     _explicit_val = os.environ.get("VNX_DATA_DIR")
-    if _explicit_flag and _explicit_val:
-        vnx_data_dir = Path(_explicit_val).expanduser().resolve()
-    else:
-        if _explicit_val and not _explicit_flag:
-            warnings.warn(
-                f"VNX_DATA_DIR env-var set ({_explicit_val}) but "
-                "VNX_DATA_DIR_EXPLICIT=1 is required for it to be honored. "
-                "Ignoring and using VNX_HOME-resolved project root. "
-                "See https://github.com/Vinix24/vnx-orchestration/issues/225",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        vnx_data_dir = (project_root / ".vnx-data").resolve()
+    if _explicit_val and not _explicit_flag:
+        warnings.warn(
+            f"VNX_DATA_DIR env-var set ({_explicit_val}) but "
+            "VNX_DATA_DIR_EXPLICIT=1 is required for it to be honored. "
+            "Ignoring and using the resolved state root. "
+            "See https://github.com/Vinix24/vnx-orchestration/issues/225",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    _state_project_id = _resolve_state_project_id(project_root)
+    vnx_data_dir = _resolve_state_root(_state_project_id, project_root)
 
     paths = {
         "VNX_HOME": str(vnx_home),

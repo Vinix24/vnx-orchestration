@@ -33,9 +33,11 @@ def _resolve_vnx_home() -> str:
         return env_val
 
     try:
-        scripts_lib = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "lib")
-        if scripts_lib not in sys.path:
-            sys.path.insert(0, scripts_lib)
+        # Route through the shared engine bootstrap so the packaged
+        # (<site-packages>/vnx_orchestration) and dev-checkout layouts resolve
+        # identically (PR-PIP-REPACKAGE). Do not recompute scripts/lib inline.
+        from vnx_cli import _engine
+        _engine.ensure_engine_on_path()
         from vnx_paths import resolve_paths  # type: ignore[import]
         return resolve_paths().get("VNX_HOME", "unresolved")
     except Exception:

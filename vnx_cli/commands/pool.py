@@ -13,13 +13,15 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 from typing import List, Optional
 
-# Bootstrap scripts/lib into path so pool_manager etc. are importable.
-_LIB_DIR = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "lib")
-if _LIB_DIR not in sys.path:
-    sys.path.insert(0, _LIB_DIR)
+# Bootstrap scripts/lib into path so pool_manager etc. are importable. Route
+# through the shared engine bootstrap so the packaged
+# (<site-packages>/vnx_orchestration) and dev-checkout layouts resolve
+# identically (PR-PIP-REPACKAGE). Do not recompute scripts/lib inline.
+from vnx_cli import _engine  # noqa: E402
+
+_engine.ensure_engine_on_path()
 
 from pool_manager import ExecResult, PoolManager  # noqa: E402
 from pool_state_repo import PoolStateRepository  # noqa: E402
