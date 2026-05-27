@@ -270,9 +270,22 @@ class TmuxInteractiveDispatch:
         None so the dispatch still spawns, mirroring TmuxAdapter.validate_lease.
         """
         try:
-            from runtime_coordination import acquire_lease, get_connection
+            from runtime_coordination import (
+                acquire_lease,
+                get_connection,
+                register_dispatch,
+            )
 
             with get_connection(self._state_dir) as conn:
+                # Register the dispatch first (idempotent) so the lease's
+                # dispatch_id FK is satisfied — the real flow registers via the
+                # queue before leasing; the lane registers on its own behalf.
+                register_dispatch(
+                    conn,
+                    dispatch_id=dispatch_id,
+                    terminal_id=terminal_id,
+                    actor="tmux_interactive",
+                )
                 lease = acquire_lease(
                     conn,
                     terminal_id=terminal_id,
