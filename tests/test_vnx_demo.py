@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -21,6 +22,7 @@ from vnx_demo import (
     AVAILABLE_SCENARIOS,
     DEFAULT_SCENARIO,
     list_scenarios,
+    main,
 )
 
 
@@ -197,3 +199,20 @@ class TestScenarioListing:
 
     def test_default_scenario_exists(self):
         assert DEFAULT_SCENARIO in AVAILABLE_SCENARIOS
+
+    def test_cli_list_explains_when_assets_missing(self, vnx_env, capsys):
+        with patch("vnx_demo.list_scenarios", return_value=[
+            {"name": "governance-pipeline", "description": "Demo", "available": False},
+            {"name": "context-rotation", "description": "Demo", "available": False},
+        ]):
+            old_argv = sys.argv
+            sys.argv = ["vnx_demo.py", "list"]
+            try:
+                rc = main()
+            finally:
+                sys.argv = old_argv
+
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "No demo scenarios are installed" in captured.out
+        assert "[missing]" in captured.out

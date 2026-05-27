@@ -5,47 +5,44 @@
 ```bash
 git clone https://github.com/Vinix24/vnx-orchestration.git
 cd vnx-orchestration
-pip install -e .  # or: ./install.sh /path/to/project
+pip install -e .
+# or install VNX into an existing project:
+# ./install.sh /path/to/project
 ```
 
-## Step 2: Initialize
+## Step 2: Initialize Starter Mode
 
 ```bash
-vnx init
-# Creates .vnx/, agents/, .vnx-data/
+vnx init --starter
+# Creates .vnx-data/ starter runtime state inside your project
 ```
 
-## Step 3: Your First Agent
-
-VNX ships with a hello-world example agent:
+## Step 3: Check Health
 
 ```bash
-ls examples/hello-world/
-# CLAUDE.md   config.yaml
+vnx doctor
+# Confirms the install and starter runtime are healthy
 ```
 
-## Step 4: Dispatch
+## Step 4: Confirm Status
 
 ```bash
-vnx dispatch-agent --agent hello-world --instruction "Write a greeting for a new VNX user"
-# Watch the agent run headlessly...
-# [ok] Dispatch created: .vnx-data/dispatches/pending/hello-world-001.md
-# [ok] Agent started — writing to .vnx-data/unified_reports/
+vnx status
+# Shows starter mode, terminal state, queue counts, and receipts
 ```
 
-## Step 5: Check Results
+## Step 5: Inspect Machine-Readable State
 
 ```bash
-cat .vnx-data/unified_reports/*.md
-# Your agent's output report appears here
+vnx status --json | python3 -m json.tool
+# Useful for scripts and sanity checks
 ```
 
-## Step 6: Run Quality Gate
+## Step 6: Grow Into Operator Mode
 
 ```bash
-vnx gate-check --pr 1
-# Codex + Gemini review your agent's work
-# [ok] Gate passed — no blocking findings
+vnx init --operator
+# Upgrade when you want the full tmux grid and multi-track orchestration
 ```
 
 ## What's Next?

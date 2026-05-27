@@ -301,6 +301,10 @@ def main() -> int:
         return run_setup_demo(target_dir=args.target)
     elif args.action == "list":
         scenarios = list_scenarios()
+        available_count = sum(1 for scenario in scenarios if scenario["available"])
+        if available_count == 0:
+            print("No demo scenarios are installed in this checkout.")
+            print("Run `vnx demo setup` from a distribution that includes demo assets, or use the starter quickstart instead.\n")
         for s in scenarios:
             status = "available" if s["available"] else "missing"
             print(f"  {s['name']:30s} [{status}]  {s['description']}")

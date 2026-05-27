@@ -131,6 +131,39 @@ def empty_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture()
+def starter_dir(tmp_path: Path) -> Path:
+    data_dir = tmp_path / ".vnx-data"
+    state_dir = data_dir / "state"
+    dispatch_dir = data_dir / "dispatches"
+    receipts_dir = data_dir / "receipts"
+    state_dir.mkdir(parents=True)
+    receipts_dir.mkdir(parents=True)
+    for status in ["pending", "active", "completed", "rejected", "failed"]:
+        (dispatch_dir / status).mkdir(parents=True)
+
+    (data_dir / "mode.json").write_text(json.dumps({"mode": "starter", "schema_version": 1}))
+    (state_dir / "terminal_state.json").write_text(json.dumps({
+        "mode": "starter",
+        "terminals": {
+            "T0": {
+                "terminal_id": "T0",
+                "status": "idle",
+                "last_activity": "2026-05-13T00:00:00Z",
+            }
+        },
+    }))
+    (state_dir / "panes.json").write_text(json.dumps({
+        "mode": "starter",
+        "t0": {"provider": "claude_code"},
+    }))
+    pending_bundle = dispatch_dir / "pending" / "dispatch-1"
+    pending_bundle.mkdir()
+    (pending_bundle / "bundle.json").write_text("{}")
+    (receipts_dir / "t0_receipts.ndjson").write_text('{"dispatch_id":"d1"}\n')
+    return data_dir.parent
+
+
 # ── Helper ─────────────────────────────────────────────────────────────
 
 def _run(argv=None, data_dir_=None):
@@ -364,6 +397,30 @@ class TestBothMissingFallback:
         rc, out = _run(argv=["--json"], data_dir_=empty_dir)
         data = json.loads(out)
         assert "error" in data
+
+
+class TestStarterModeFallback:
+    def test_starter_mode_exits_0(self, starter_dir: Path) -> None:
+        rc, _ = _run(data_dir_=starter_dir)
+        assert rc == 0
+
+    def test_starter_mode_output_mentions_starter(self, starter_dir: Path) -> None:
+        rc, out = _run(data_dir_=starter_dir)
+        assert rc == 0
+        assert "Starter Mode" in out
+        assert "T0" in out
+
+    def test_starter_mode_json_shape(self, starter_dir: Path) -> None:
+        rc, out = _run(argv=["--json"], data_dir_=starter_dir)
+        assert rc == 0
+        data = json.loads(out)
+        assert data["mode"] == "starter"
+        assert data["initialized"] is True
+        assert data["starter_runtime_available"] is True
+        assert data["strategy_available"] is False
+        assert data["t0_state_available"] is False
+        assert data["queues"]["pending"] == 1
+        assert data["receipts"] == 1
 
 
 # ── No write side effects ──────────────────────────────────────────────
