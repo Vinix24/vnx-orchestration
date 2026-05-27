@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# test_wheel_install.sh — fresh-venv packaging smoke test (PR-PIP-1 acceptance gate).
+# test_wheel_install.sh — fresh-venv packaging smoke test (PR-PIP-1 + PR-PIP-2
+# acceptance gate).
 #
 # Builds the wheel, installs it into a SCRATCH virtualenv, and proves the
 # installed artifact is a functional engine — not a hollow CLI shim:
@@ -8,6 +9,13 @@
 #   3. VNX_HOME resolves into site-packages and a schema-reading code path
 #      (quality_db_init.bootstrap_qi_db, which reads VNX_HOME/schemas/*.sql)
 #      succeeds against a scratch DB
+#
+# Then, in a PRISTINE HOME (no ~/.vnx-system, no ~/.vnx-data), proves the
+# pip-native state layout (PR-PIP-2):
+#   4. `vnx init` creates NO project-local .vnx-data/ (in-project footprint < 10 KB)
+#   5. runtime state lands in the XDG user-data-dir (~/.local/share/vnx/<id>)
+#   6. `vnx doctor` reports a RECOGNIZED packaged install (not "no install
+#      detected"), with state resolved OUTSIDE the package, and exits 0
 #
 # All venv invocations run from a NEUTRAL cwd with `python -P` and a sanitized
 # environment so the source checkout (CWD, VNX_HOME, PYTHONPATH) cannot shadow
@@ -83,17 +91,47 @@ WHEEL="$(ls "$DIST_DIR"/vnx_orchestration-*.whl 2>/dev/null | head -1)"
 ok "built $(basename "$WHEEL")"
 
 # --- engine-presence assertions (cheap, before install) --------------------
+# PR-PIP-REPACKAGE: the engine ships under the vnx_orchestration namespace
+# package, so wheel members are prefixed vnx_orchestration/ (not bare top-level).
 log "verifying engine payload in wheel ..."
 for needle in \
-    "scripts/lib/vnx_paths.py" \
-    "schemas/quality_intelligence.sql" \
-    "schemas/migrations/" \
-    "skills/" ; do
+    "vnx_orchestration/scripts/lib/vnx_paths.py" \
+    "vnx_orchestration/schemas/quality_intelligence.sql" \
+    "vnx_orchestration/schemas/migrations/" \
+    "vnx_orchestration/skills/" ; do
     "$PYTHON" -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); names=z.namelist(); sys.exit(0 if any(n.startswith(sys.argv[2]) or n==sys.argv[2] for n in names) else 1)" \
         "$WHEEL" "$needle" \
         || fail "wheel missing engine payload: $needle"
 done
-ok "wheel ships scripts/, schemas/*.sql, schemas/migrations/, skills/"
+ok "wheel ships vnx_orchestration/{scripts,schemas/*.sql,schemas/migrations,skills}"
+
+# --- top_level.txt namespace assertion (PR-PIP-REPACKAGE core gate) ---------
+# The wheel MUST NOT squat the PyPI namespace with bare engine dirs. top_level
+# must be exactly {vnx_cli, vnx_orchestration} — no bare scripts/schemas/
+# configs/hooks/templates/skills as top-level packages.
+log "verifying top_level.txt carries no bare engine packages ..."
+"$PYTHON" - "$WHEEL" <<'PYEOF' || fail "top_level.txt namespace assertion failed"
+import sys
+import zipfile
+
+wheel = sys.argv[1]
+z = zipfile.ZipFile(wheel)
+top_level_names = [n for n in z.namelist() if n.endswith("/top_level.txt")]
+if not top_level_names:
+    print("FAIL: wheel has no top_level.txt", file=sys.stderr)
+    sys.exit(1)
+tops = set(z.read(top_level_names[0]).decode("utf-8").split())
+forbidden = {"scripts", "schemas", "configs", "hooks", "templates", "skills"}
+squatters = tops & forbidden
+if squatters:
+    print(f"FAIL: top_level.txt squats bare engine packages: {sorted(squatters)}", file=sys.stderr)
+    sys.exit(1)
+if tops != {"vnx_cli", "vnx_orchestration"}:
+    print(f"FAIL: top_level.txt is {sorted(tops)}, expected ['vnx_cli', 'vnx_orchestration']", file=sys.stderr)
+    sys.exit(1)
+print(f"OK: top_level.txt = {sorted(tops)}")
+PYEOF
+ok "top_level.txt = {vnx_cli, vnx_orchestration} — no bare engine packages"
 
 # --- fresh venv + install --------------------------------------------------
 log "creating fresh venv + installing wheel ..."
@@ -135,16 +173,18 @@ cat > "$PROOF" <<'PYEOF'
 import sys
 from pathlib import Path
 
-import vnx_cli
+from vnx_cli import _engine
 
-root = Path(vnx_cli.__file__).resolve().parent.parent
+# Engine root: <site-packages>/vnx_orchestration in a namespaced wheel
+# (PR-PIP-REPACKAGE). Resolve via the shipped helper rather than assuming a
+# bare top-level scripts/ sibling of vnx_cli/.
+root = _engine.engine_root()
 if "site-packages" not in str(root) and "dist-packages" not in str(root):
-    print(f"FAIL: vnx_cli not loaded from an installed location: {root}", file=sys.stderr)
+    print(f"FAIL: engine not loaded from an installed location: {root}", file=sys.stderr)
     sys.exit(1)
 
-# Mirror how engine modules bootstrap their own lib dir.
-sys.path.insert(0, str(root / "scripts"))
-sys.path.insert(0, str(root / "scripts" / "lib"))
+# Bootstrap the engine's lib dir exactly as the CLI commands do.
+_engine.ensure_engine_on_path()
 
 from vnx_paths import resolve_paths
 
@@ -181,5 +221,128 @@ grep -q '^VNX_HOME ->' "$TMPROOT/schema.log" && grep -q '^OK:' "$TMPROOT/schema.
 ok "$(grep '^VNX_HOME ->' "$TMPROOT/schema.log")"
 ok "packaged engine reads VNX_HOME/schemas and initializes a DB"
 
+# --- PR-PIP-2: clean-HOME footprint + state-root + recognized install -------
+# Re-run init + doctor in a PRISTINE HOME (no ~/.vnx-system, no ~/.vnx-data) so
+# the pip-native layout is proven without any central/dev-checkout layout in
+# scope. This is the PR-PIP-2 acceptance gate.
+log "PR-PIP-2: clean-HOME init + doctor (state out of project) ..."
+
+CLEAN_HOME="$TMPROOT/clean-home"
+CLEAN_PROJECT="$TMPROOT/clean-project"
+mkdir -p "$CLEAN_HOME" "$CLEAN_PROJECT"
+
+# Pristine env: like clean_env, but also pins HOME to an empty scratch dir and
+# strips the user-data-dir + project-id inputs so resolution is driven only by
+# the clean HOME (→ XDG default ~/.local/share/vnx/<id>).
+pip2_env() {
+    env -u PYTHONPATH -u VNX_HOME -u VNX_BIN -u VNX_EXECUTABLE \
+        -u VNX_DATA_DIR -u VNX_STATE_DIR -u VNX_DATA_DIR_EXPLICIT \
+        -u VNX_DATA_HOME -u XDG_DATA_HOME -u VNX_PROJECT_ID \
+        -u PROJECT_ROOT -u VNX_PROJECT_ROOT -u VNX_CANONICAL_ROOT \
+        HOME="$CLEAN_HOME" "$@"
+}
+
+pip2_env "$VENV/bin/vnx" init --project-dir "$CLEAN_PROJECT" >"$TMPROOT/pip2_init.log" 2>&1 \
+    || { cat "$TMPROOT/pip2_init.log" >&2; fail "clean-HOME vnx init failed"; }
+
+# Assertion 1: NO project-local .vnx-data/ was created (clean footprint).
+[ ! -e "$CLEAN_PROJECT/.vnx-data" ] \
+    || fail "clean-HOME vnx init created a project-local .vnx-data/ (expected none)"
+ok "vnx init created no project-local .vnx-data/"
+
+# Assertion 2: in-project footprint < 10 KB (tracked config only).
+FOOT_BYTES="$(pip2_env "$VENV/bin/python" - "$CLEAN_PROJECT" <<'PYEOF'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+total = sum(
+    f.stat().st_size for f in root.rglob("*")
+    if f.is_file() and ".git" not in f.parts
+)
+print(total)
+PYEOF
+)"
+[ "$FOOT_BYTES" -lt 10240 ] \
+    || fail "in-project footprint ${FOOT_BYTES} bytes >= 10 KB (expected clean footprint)"
+ok "in-project footprint ${FOOT_BYTES} bytes (< 10 KB)"
+
+# Resolve the project_id init wrote, derive the expected XDG state root.
+PID2="$(head -1 "$CLEAN_PROJECT/.vnx-project-id" 2>/dev/null | tr -d '[:space:]')"
+[ -n "$PID2" ] || fail "vnx init did not write a .vnx-project-id marker"
+EXPECT_STATE="$CLEAN_HOME/.local/share/vnx/$PID2"
+
+# Assertion 3: state landed in the XDG user-data-dir, populated with the tree.
+[ -d "$EXPECT_STATE/dispatches/pending" ] \
+    || fail "runtime state not at XDG dir $EXPECT_STATE (dispatches/pending missing)"
+ok "runtime state at XDG user-data-dir: $EXPECT_STATE"
+
+# Assertion 4: doctor reports a RECOGNIZED (packaged) install + state outside
+# the package, and exits 0. Parse the structured --json output.
+# Capture the rc without tripping `set -e` (which would abort before we can
+# print the diagnostic). `|| DOCTOR_RC=$?` runs only on a non-zero exit.
+DOCTOR_RC=0
+pip2_env "$VENV/bin/vnx" doctor --project-dir "$CLEAN_PROJECT" --json \
+    >"$TMPROOT/pip2_doctor.json" 2>"$TMPROOT/pip2_doctor.err" || DOCTOR_RC=$?
+[ "$DOCTOR_RC" -eq 0 ] \
+    || { cat "$TMPROOT/pip2_doctor.json" "$TMPROOT/pip2_doctor.err" >&2; fail "clean-HOME vnx doctor exited $DOCTOR_RC (expected 0)"; }
+
+pip2_env "$VENV/bin/python" - "$TMPROOT/pip2_doctor.json" "$EXPECT_STATE" "$CLEAN_PROJECT" <<'PYEOF' \
+    || fail "clean-HOME doctor assertions failed (see above)"
+import json
+import sys
+from pathlib import Path
+
+doctor_json, expect_state, project_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.loads(Path(doctor_json).read_text(encoding="utf-8"))
+checks = {c["name"]: c for c in data["checks"]}
+
+
+def die(msg):
+    print(f"FAIL: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# No check may report the "no install detected" regression.
+for c in data["checks"]:
+    if "no VNX install detected" in c["detail"]:
+        die(f"doctor still reports 'no VNX install detected' on {c['name']}: {c['detail']}")
+
+mode = checks.get("install:mode")
+if mode is None:
+    die("doctor emitted no install:mode check")
+if mode["status"] != "PASS":
+    die(f"install:mode not PASS: {mode['status']} — {mode['detail']}")
+if "packaged" not in mode["detail"]:
+    die(f"install:mode did not detect a packaged (site-packages) install: {mode['detail']}")
+
+state_loc = checks.get("state:location")
+if state_loc is None:
+    die("doctor emitted no state:location check")
+if state_loc["status"] != "PASS":
+    die(f"state:location not PASS (state inside package/VNX_HOME?): {state_loc['detail']}")
+
+data_root_chk = checks.get("dir:data-root")
+if data_root_chk is None:
+    die("doctor emitted no dir:data-root check")
+if data_root_chk["status"] != "PASS":
+    die(f"dir:data-root not PASS: {data_root_chk['detail']}")
+# The reported data root must be the XDG dir, never inside the project map.
+resolved = data_root_chk["detail"]
+if Path(resolved).resolve() != Path(expect_state).resolve():
+    die(f"data root {resolved!r} != expected XDG dir {expect_state!r}")
+if Path(resolved).resolve().is_relative_to(Path(project_dir).resolve()):
+    die(f"data root {resolved!r} resolved INSIDE the project map {project_dir!r}")
+
+print(f"OK: doctor recognizes packaged install; state root {resolved} outside the project")
+PYEOF
+ok "vnx doctor: recognized packaged install, state outside project, exit 0"
+
+# Assertion 5: version still single-sourced under the clean HOME.
+CLEAN_VER="$(pip2_env "$VENV/bin/vnx" --version)"
+[ "$CLEAN_VER" = "vnx $META_VER" ] \
+    || fail "clean-HOME vnx --version ('$CLEAN_VER') != 'vnx $META_VER'"
+ok "vnx --version correct in clean HOME: $CLEAN_VER"
+
 echo
 ok "PR-PIP-1 wheel-install smoke PASSED ($(basename "$WHEEL"), v$META_VER)"
+ok "PR-PIP-2 clean-HOME state-root + footprint smoke PASSED (state: $EXPECT_STATE)"

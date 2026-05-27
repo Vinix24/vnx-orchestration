@@ -562,6 +562,37 @@ def check_contamination(paths: Dict[str, str]) -> List[CheckResult]:
     )]
 
 
+def check_state_root_location(paths: Dict[str, str]) -> List[CheckResult]:
+    """WARN if the runtime data root resolves inside the (immutable) package.
+
+    PR-PIP-2 parity with the vnx_cli doctor: a pip-installed engine must not
+    write runtime state under site-packages or VNX_HOME. If VNX_DATA_DIR lands
+    there, point the operator at VNX_DATA_HOME / the XDG default. Always WARN,
+    never FAIL — an operator may deliberately override paths.
+    """
+    data_dir = Path(paths["VNX_DATA_DIR"]).resolve()
+    vnx_home = Path(paths["VNX_HOME"]).resolve()
+
+    def _within(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    s = str(data_dir)
+    in_pkg = "site-packages" in s or "dist-packages" in s
+    in_home = _within(data_dir, vnx_home)
+    if in_pkg or in_home:
+        return [CheckResult(
+            "state", WARN,
+            f"Runtime data root inside package/VNX_HOME: {data_dir}",
+            remediation="Set VNX_DATA_HOME or rely on the XDG default "
+                        "(~/.local/share/vnx/<project_id>) to keep state out of the wheel",
+        )]
+    return [CheckResult("state", PASS, f"Runtime data root outside package: {data_dir}")]
+
+
 # ---------------------------------------------------------------------------
 # Runtime checks (delegates to vnx_doctor_runtime.py)
 # ---------------------------------------------------------------------------
@@ -622,6 +653,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_version(paths))
     results.extend(check_path_hygiene(paths))
     results.extend(check_contamination(paths))
+    results.extend(check_state_root_location(paths))
 
     if package_check:
         vnx_home = Path(paths["VNX_HOME"])
