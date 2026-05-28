@@ -2,6 +2,11 @@
 
 This guide covers migration paths from legacy VNX patterns to the upgraded system. Each section describes what changed, why, and how to migrate.
 
+Plain `vnx` means the pip-installed Python CLI and is intentionally limited to
+`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, and `update`.
+Operator commands in this guide run through the repo-local bash entrypoint
+`./bin/vnx` from the repository root.
+
 ---
 
 ## 1. Worktrees: Per-Terminal to Feature Worktrees
@@ -11,13 +16,13 @@ This guide covers migration paths from legacy VNX patterns to the upgraded syste
 | Aspect | Legacy (deprecated) | New (recommended) |
 |--------|--------------------|--------------------|
 | Model | One worktree per terminal (`-wt-T1`, `-wt-T2`, `-wt-T3`) | One worktree per feature/fix |
-| Creation | `vnx start` auto-creates per-terminal worktrees | `vnx new-worktree <feature-name>` |
-| Closure | Manual `git worktree remove` | `vnx finish-worktree <name>` (governance-aware) |
-| Preflight | None | `vnx merge-preflight <name>` (GO/NO-GO) |
+| Creation | `./bin/vnx start` auto-creates per-terminal worktrees | `./bin/vnx new-worktree <feature-name>` |
+| Closure | Manual `git worktree remove` | `./bin/vnx finish-worktree <name>` (governance-aware) |
+| Preflight | None | `./bin/vnx merge-preflight <name>` (GO/NO-GO) |
 
 ### Migration Steps
 
-1. **New features**: Use `vnx new-worktree <name>` for all new work. All terminals share one worktree per feature.
+1. **New features**: Use `./bin/vnx new-worktree <name>` for all new work. All terminals share one worktree per feature.
 2. **Existing per-terminal worktrees**: Continue working in them until the current feature is complete.
 3. **Legacy compatibility**: Set `VNX_WORKTREES=true` if you still need per-terminal worktrees during migration. This is deprecated and will be removed.
 
@@ -25,16 +30,16 @@ This guide covers migration paths from legacy VNX patterns to the upgraded syste
 
 ```bash
 # Create feature worktree
-vnx new-worktree my-feature --base main
+./bin/vnx new-worktree my-feature --base main
 
 # Work in the worktree (all terminals share it)
 cd /path/to/project-wt-my-feature
 
 # Before merge: check governance state
-vnx merge-preflight my-feature
+./bin/vnx merge-preflight my-feature
 
 # Close worktree (blocks on unresolved items unless --force)
-vnx finish-worktree my-feature
+./bin/vnx finish-worktree my-feature
 ```
 
 ---
@@ -45,9 +50,9 @@ vnx finish-worktree my-feature
 
 | Aspect | Legacy (deprecated) | New (recommended) |
 |--------|--------------------|--------------------|
-| Editing | Manual `settings.json` edits | `vnx regen-settings --merge` |
+| Editing | Manual `settings.json` edits | `./bin/vnx regen-settings --merge` |
 | Ownership | Entire file treated as VNX-owned | VNX patches only its keys; project config preserved |
-| First-time | Copy template, hand-edit | `vnx regen-settings --full` |
+| First-time | Copy template, hand-edit | `./bin/vnx regen-settings --full` |
 
 ### VNX-Owned Keys
 
@@ -58,8 +63,8 @@ VNX manages these keys in `settings.json`:
 
 ### Migration Steps
 
-1. **First time**: `vnx regen-settings --full` creates a complete `settings.json`
-2. **Updates**: `vnx regen-settings --merge` updates VNX keys, preserves your project-specific config
+1. **First time**: `./bin/vnx regen-settings --full` creates a complete `settings.json`
+2. **Updates**: `./bin/vnx regen-settings --merge` updates VNX keys, preserves your project-specific config
 3. **Project keys**: Any `env` or `permissions.allow` entries you add are preserved across merges
 4. **Deny rules**: VNX uses union semantics for `permissions.deny` — deny takes precedence over allow
 
@@ -77,7 +82,7 @@ VNX keys are defined in `templates/settings_vnx_keys.json.tmpl`. Do not edit thi
 |--------|--------|--------------------|
 | T0 review | Manual review of all claims | Automated contract verification + semantic review |
 | Receipt-time | No verification | `verify_claims.py` runs fast checks on contract |
-| Pre-merge | Manual T0 decision | `vnx gate-check --pr <ID>` produces GO/HOLD |
+| Pre-merge | Manual T0 decision | `./bin/vnx gate-check --pr <ID>` produces GO/HOLD |
 
 ### Migration Steps
 
@@ -93,7 +98,7 @@ VNX keys are defined in `templates/settings_vnx_keys.json.tmpl`. Do not edit thi
 
 2. **Run gate checks before merge**:
 ```bash
-vnx gate-check --pr PR-6
+./bin/vnx gate-check --pr PR-6
 ```
 
 3. **Review the verdict**: GO means all checks pass. HOLD shows exactly which checks failed and why.
@@ -134,7 +139,7 @@ vnx gate-check --pr PR-6
 3. **Existing installs**: Continue using `.claude/vnx-system/` — it remains fully functional as compatibility mode.
 4. **Shell helper** (optional): Install the global `vnx()` function to resolve the project-local binary automatically:
    ```bash
-   vnx install-shell-helper
+   ./bin/vnx install-shell-helper
    # Adds vnx() to ~/.zshrc or ~/.bashrc
    ```
    The helper checks for `.vnx/bin/vnx` first, then `.claude/vnx-system/bin/vnx`.
@@ -159,20 +164,29 @@ No hardcoded `/Users/...` paths remain in active VNX runtime code.
 
 | Aspect | Legacy | New (recommended) |
 |--------|--------|--------------------|
-| Status | `vnx_supervisor_simple.sh status` | `vnx status` |
-| Process list | `ps aux \| grep vnx` | `vnx ps` |
-| Cleanup | Manual `rm` of PID files | `vnx cleanup` |
-| Restart | Stop + start via supervisor | `vnx restart <process>` |
-| Recovery | Manual intervention | `vnx recover` |
+| Status | `vnx_supervisor_simple.sh status` | `vnx status` for pip status, `./bin/vnx status` for operator status |
+| Process list | `ps aux \| grep vnx` | `./bin/vnx ps` |
+| Cleanup | Manual `rm` of PID files | `./bin/vnx cleanup` |
+| Restart | Stop + start via supervisor | `./bin/vnx restart <process>` |
+| Recovery | Manual intervention | `./bin/vnx recover` |
 
 ### Quick Reference
 
 ```bash
-vnx status              # Session, terminals, queue, open items
-vnx ps                  # Process table with PID, PPID, uptime
-vnx ps --json           # Machine-readable output
-vnx cleanup --dry-run   # Preview orphan removal
-vnx cleanup             # Remove dead PIDs and stale locks
-vnx restart dispatcher  # Restart specific process
-vnx recover             # Full session recovery
+vnx status                    # Pip CLI project status
+./bin/vnx status              # Operator session, terminals, queue, open items
+./bin/vnx ps                  # Process table with PID, PPID, uptime
+./bin/vnx ps --json           # Machine-readable output
+./bin/vnx cleanup --dry-run   # Preview orphan removal
+./bin/vnx cleanup             # Remove dead PIDs and stale locks
+./bin/vnx restart dispatcher  # Restart specific process
+./bin/vnx recover             # Full session recovery
 ```
+
+## Appendix A: Two binaries
+
+VNX ships TWO `vnx` entry-points with different scopes:
+- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
+- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
+
+This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.
