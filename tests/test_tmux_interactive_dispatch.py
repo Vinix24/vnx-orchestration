@@ -9,6 +9,8 @@ No fixed terminal identities, no warm-open, no leases.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +28,7 @@ from tmux_interactive_dispatch import (
     TmuxResult,
     _assert_no_headless_flags,
     _default_launch_command,
+    _resolve_state_dir,
     _sanitize_session_name,
 )
 
@@ -194,7 +197,7 @@ class TestSingleShotSuccess(_LaneTestCase):
         expected_abs = str(self.state_dir / "scripts" / "append_receipt.py")
         delivered = "\n".join(fake.pasted)
         self.assertIn(
-            "python3 " + expected_abs,
+            "python3 '" + expected_abs + "'",
             delivered,
             "absolute path to append_receipt.py must appear in the delivered body",
         )
@@ -470,6 +473,109 @@ class TestTeardownIdempotent(_LaneTestCase):
         self.assertEqual(
             len(kill_cmds), 1,
             f"kill-session called {len(kill_cmds)} times; _torn_down guard must prevent double-kill",
+        )
+
+
+class TestCompletionProtocolIntegration(_LaneTestCase):
+    def test_completion_protocol_payload_accepted_by_append_receipt(self):
+        """Integration: completion-protocol receipt JSON passes _validate_receipt without error.
+
+        This test FAILS before the timestamp fix (missing_required_key: timestamp)
+        and PASSES after. It closes the gap that unit tests with stubbed
+        append_receipt missed.
+        """
+        from append_receipt_internals.common import AppendReceiptError
+        from append_receipt_internals.validation import _validate_receipt
+
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        # Extract single-quoted JSON after --receipt
+        m = re.search(r"--receipt '(.+?)'", protocol, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract --receipt JSON from completion protocol")
+
+        receipt = json.loads(m.group(1))
+
+        try:
+            _validate_receipt(receipt)
+        except AppendReceiptError as exc:
+            self.fail(f"_validate_receipt raised AppendReceiptError: {exc.message}")
+
+        self.assertTrue(receipt.get("timestamp"), "timestamp must be non-empty in protocol receipt")
+        self.assertEqual(receipt.get("event_type"), "subprocess_completion")
+        self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
+
+
+class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
+    def test_completion_protocol_env_pins_receipts_file_landing(self):
+        """Env-pin: VNX_STATE_DIR/VNX_DATA_DIR are prepended to the python3 command.
+
+        Invoking the extracted shell command (via subprocess shell=True) must write
+        the receipt to the lane's state_dir/t0_receipts.ndjson — proving that env is
+        the working channel (--receipts-file is also present as defensive belt-and-suspenders).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_dir = tmp_path / "state"
+            state_dir.mkdir()
+
+            real_project_root = SCRIPT_DIR.parent
+
+            lane = TmuxInteractiveDispatch(
+                state_dir=state_dir,
+                receipts_file=state_dir / "t0_receipts.ndjson",
+                project_root=real_project_root,
+            )
+
+            protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+            # Part 1: env vars present in the command string.
+            self.assertIn(f"VNX_STATE_DIR='{state_dir}'", protocol)
+            self.assertIn(f"VNX_DATA_DIR='{tmp_path}'", protocol)
+
+            # Part 2: extract the bash command and invoke it via shell.
+            m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+            self.assertIsNotNone(m, "could not extract bash command from completion protocol")
+            cmd_string = m.group(1).strip()
+
+            proc = subprocess.run(cmd_string, shell=True, capture_output=True, text=True)
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"shell command exited {proc.returncode}: stderr={proc.stderr}",
+            )
+
+            receipts_ndjson = state_dir / "t0_receipts.ndjson"
+            self.assertTrue(
+                receipts_ndjson.exists(),
+                f"receipt must land at {receipts_ndjson}",
+            )
+            lines = [
+                ln for ln in receipts_ndjson.read_text(encoding="utf-8").splitlines() if ln.strip()
+            ]
+            self.assertEqual(len(lines), 1, "exactly one receipt line must be written")
+
+
+class TestStateDirMatchesCanonical(unittest.TestCase):
+    """Regression guard: lane's _resolve_state_dir must agree with the canonical resolver.
+
+    Guards against future ad-hoc-resolver drift that caused the live central-install
+    receipt timeout bug (lane polled local path, worker wrote to central path via
+    project_root.resolve_state_dir).
+    """
+
+    def test_lane_state_dir_matches_append_receipt_resolver(self):
+        from project_root import resolve_state_dir as canonical
+
+        canonical_path = canonical()
+        lane_path = _resolve_state_dir()
+
+        self.assertEqual(
+            canonical_path,
+            lane_path,
+            f"MISMATCH: lane={lane_path!r} != canonical={canonical_path!r}",
         )
 
 
