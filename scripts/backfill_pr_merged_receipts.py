@@ -22,11 +22,14 @@ import argparse
 import datetime
 import fcntl
 import json
+import logging
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+
+log = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = SCRIPT_DIR / "lib"
@@ -172,11 +175,14 @@ def _gh_list_merged_prs(limit: int, since: Optional[str] = None) -> List[Dict[st
 
 
 def _load_dispatch_register_events() -> List[Dict[str, Any]]:
-    """Load dispatch_register.ndjson events. Best-effort — returns [] on failure."""
+    """Load dispatch_register.ndjson events. Best-effort — returns [] on graceful miss."""
     try:
         from dispatch_register import read_events
         return read_events()
-    except Exception:
+    except (ImportError, FileNotFoundError):
+        return []
+    except Exception as e:
+        log.warning("dispatch_register load failed: %s", e, exc_info=True)
         return []
 
 

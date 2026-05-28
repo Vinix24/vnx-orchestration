@@ -35,11 +35,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = SCRIPT_DIR / "lib"
@@ -76,8 +79,8 @@ def _lookup_dispatch_id_by_pr_number(pr_number: int) -> str:
         for ev in reversed(events):
             if ev.get("pr_number") == pr_number and ev.get("dispatch_id"):
                 return str(ev["dispatch_id"])
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("dispatch lookup failed: %s", e)
     return ""
 
 
