@@ -262,7 +262,7 @@ class TmuxInteractiveDispatch:
             "When you have finished AND committed, emit a completion receipt "
             "directly so the orchestrator can detect completion. Run:\n\n"
             "```bash\n"
-            f"python3 {append_receipt} --receipt "
+            f"python3 {append_receipt} --receipts-file '{self._receipts_file}' --receipt "
             f"'{{\"event_type\": \"subprocess_completion\", "
             f"\"dispatch_id\": \"{dispatch_id}\", "
             f"\"terminal\": \"{label}\", "

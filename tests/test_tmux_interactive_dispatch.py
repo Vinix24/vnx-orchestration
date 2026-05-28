@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -505,6 +506,66 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
         self.assertTrue(receipt.get("timestamp"), "timestamp must be non-empty in protocol receipt")
         self.assertEqual(receipt.get("event_type"), "subprocess_completion")
         self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
+
+
+class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
+    def test_completion_protocol_pins_receipts_file(self):
+        """Pin test: protocol contains --receipts-file with lane's exact resolved path,
+        and invoking append_receipt.py with the flag writes to that exact file."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        # Part 1: assert the flag appears in the protocol string, single-quoted.
+        expected_flag = f"--receipts-file '{lane._receipts_file}'"
+        self.assertIn(
+            expected_flag,
+            protocol,
+            f"completion protocol must contain {expected_flag!r}",
+        )
+
+        # Part 2: integration — invoke append_receipt.py with --receipts-file
+        # and assert the receipt lands at the explicit target, not the default.
+        append_receipt_py = SCRIPT_DIR / "append_receipt.py"
+        with tempfile.NamedTemporaryFile(suffix=".ndjson", delete=False) as tf:
+            tmp_receipts = Path(tf.name)
+        self.addCleanup(lambda: tmp_receipts.unlink(missing_ok=True))
+
+        receipt_json = json.dumps({
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-05-28T00:00:00Z",
+        })
+        proc = subprocess.run(
+            [
+                "python3",
+                str(append_receipt_py),
+                "--receipts-file",
+                str(tmp_receipts),
+                "--receipt",
+                receipt_json,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"append_receipt.py exited {proc.returncode}: {proc.stderr}",
+        )
+        self.assertTrue(
+            tmp_receipts.exists(),
+            "--receipts-file target must exist after append_receipt.py write",
+        )
+        lines = [ln for ln in tmp_receipts.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, "exactly one receipt line must be written to the explicit target")
+        written = json.loads(lines[0])
+        self.assertEqual(written["dispatch_id"], self.DISPATCH_ID)
+        self.assertEqual(written["status"], "done")
 
 
 class TestStateDirMatchesCanonical(unittest.TestCase):
