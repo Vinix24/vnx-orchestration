@@ -1,12 +1,57 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-21T07:04:56.577840+00:00
+**Last updated**: 2026-05-28T12:06:29.753025+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #675 — feat(route): enforce provider_constraints.yaml in dispatch pre-flight (PR-ROUTE-1) (#675) (2026-05-28)
+- #674 — docs(readme): rewrite for pip-1.0 + tmux-leaseless-lane + multi-provider architecture (PR-DOC-README) (#674) (2026-05-28)
+- #673 — fix(docs): align QUICKSTART/MIGRATION with real pip-CLI surface + hello-world examples/ fallback (PR-DOC-1) (#673) (2026-05-28)
+- #672 — fix(lane): compute success from receipt status + shell-quote completion-protocol values (PR-HYG-3) (#672) (2026-05-28)
+- #671 — refactor(start): drop upfront T1-T3 pane grid — T0 only at startup, workers spawn on-demand (PR-START-1) (#671) (2026-05-28)
+- #670 — fix(quality): emit tool_unavailable warnings + declare quality-extras in pyproject (PR-QUAL-1) (#670) (2026-05-28)
+- #669 — fix(obs): codex_spawn model-default to gpt-5.5 + token-usage extraction (PR-OBS-1) (#669) (2026-05-28)
+- #668 — chore(hygiene): remove schraplijst-Phase-1 dead modules (~4.1k LOC, fresh-verified) (PR-HYG-2B) (#668) (2026-05-28)
+- #667 — chore(hygiene): remove audit-identified dead code (unused imports, unreachable bin/vnx cases, ongebruikte helpers) (PR-HYG-2A) (#667) (2026-05-28)
+- #659 — refactor(migrate-central): split main into _parse_args + _run_apply (OI-1540/1532, part 3/3) (#659) (2026-05-26)
+- #658 — docs(rc9): changelog + readme sync (cheap-lanes, constraint-rename, OI-refactors, governance fixes) (#658) (2026-05-26)
+- #657 — refactor(migrate-central): extract migrate_schema module (OI-1536/1533, part 2/3) (#657) (2026-05-26)
+- #655 — feat(governance): traceability_audit tool — cross-ref PRs/commits/dispatches/receipts, report gaps (#655) (2026-05-26)
+- #654 — feat(governance): emit pr_merged receipt linking pr_number on merge/closure (fixes FPY/history gap) (#654) (2026-05-26)
+- #653 — refactor(migrate-central): extract migrate_import module (OI-1537/1539, part 1/3) (#653) (2026-05-26)
+- #652 — feat(subprocess-dispatch): execute cheap-lane via provider_dispatch instead of Claude fallback (CL2) (#652) (2026-05-26)
+- #650 — refactor(install-central): move shim content to template file (OI-1562) (#650) (2026-05-26)
+- #649 — refactor(doctor): extract worktree + settings checks from cmd_doctor (OI-1573) (#649) (2026-05-26)
+- #648 — refactor(receipt-proc): extract mtime-calc python from bootstrap-protection (OI-1525/1524) (#648) (2026-05-26)
+- #643 — refactor(providers): rename deepseek-path-d-blocked -> deepseek-harness-subscription-blocked; allow own-key+hardening, block subscription-redirect (#643) (2026-05-26)
+- #644 — fix(provider-dispatch): non-claude (kimi/codex) receipt captures correct status + output + tokens (#644) (2026-05-26)
+- #647 — refactor(dispatcher): extract stuck-cleanup python + supervisor-ticks (OI-1521/1523) (#647) (2026-05-26)
+- #646 — refactor(benchmark): extract source-info + report-writers from main (OI-1510) (#646) (2026-05-26)
+- #645 — refactor(quality-db): bootstrap_qi_db migration registry (OI-1542/1544/1541) (#645) (2026-05-26)
+- #642 — fix(quality-advisory): relax shell size thresholds (func 50->60, file 500->600) to cut false-positive OIs (#642) (2026-05-26)
+- #640 — fix(install): preserve project worker_permissions overrides across cutover (#640) (2026-05-26)
+- #638 — docs(strategy): three-tier public/private layering model (#638) (2026-05-26)
+- #639 — feat(supervisor): flood-safe crash-recovery sweep for orphaned active dispatches (#639) (2026-05-26)
+- #641 — fix(migration): 0017 dispatches/terminal_leases rebuild preserves all columns dynamically (unblocks build_t0_state) (#641) (2026-05-26)
+- #637 — fix(dispatch): complexity-scaled chunk_timeout / total_deadline defaults (#637) (2026-05-26)
+- #636 — fix(runtime-coord): add terminal_leases.worker_pid + schema-drift regression guard (#636) (2026-05-26)
+- #635 — fix(runtime-coord): self-heal worker_states.project_id in init (OI-095) (#635) (2026-05-26)
+- #627 — fix(install-central): shim exec bin/vnx not vnx-cli (was typo) (#627) (2026-05-25)
+- #626 — feat(wave2a-8): housekeeping — stale session cleanup + runbook D3/D4 (#626) (2026-05-25)
+- #625 — fix(wave2a-7): T0 template legacy path + doctor cross-platform glob (#625) (2026-05-25)
+- #624 — fix(wave2a-6): installer template-leak — no developer paths in install output (#624) (2026-05-25)
+- #623 — fix(wave2a): env isolation check + runbook v3 (PR-WAVE2A-5) (#623) (2026-05-25)
+- #622 — fix(wave2a): test-mode apply --test-apply flag (PR-WAVE2A-4) (#622) (2026-05-25)
+- #621 — fix(wave2a): backup retention policy --cleanup-backups (PR-WAVE2A-3) (#621) (2026-05-25)
+- #620 — fix(wave2a): per-project migrator mode --project flag (PR-WAVE2A-2) (#620) (2026-05-25)
+- #619 — fix(wave2a): TCC pre-flight check + per-project backup access probe (PR-WAVE2A-1) (#619) (2026-05-25)
+- #618 — docs(wave2a): robust pipeline architecture blueprint (PR-WAVE2A-BLUEPRINT) (#618) (2026-05-25)
+- #617 — fix(migrator): canonical bootstrap dispatch_experiments + rollback exception masking (PR-MIGRATOR-FIX-V2) (#617) (2026-05-24)
+- #616 — fix(migrator): canonical bootstrap schema-order for --fresh-central (PR-MIGRATOR-FIX) (#616) (2026-05-24)
+- #615 — feat(dashboard): VNX-branded light theme (PR-DASH-V2) (#615) (2026-05-21)
 - #614 — fix(resume): VNX_RESUME_IN_PROGRESS bypass for PAUSED-guards (#614) (2026-05-21)
 - #612 — feat(safety): PAUSED marker guards in daemon scripts (#612) (2026-05-21)
 - #613 — fix(singleton): atomic flock(2) replaces mkdir-race (closes OI-1518) (#613) (2026-05-21)
@@ -82,41 +127,6 @@ _Last 14 days — sourced from git merge commits._
 - #492 — chore(hardening): narrow silent-except in intelligence_selector.py (10 findings, OI-1437) (#492) (2026-05-14)
 - #491 — chore(hardening): narrow silent-except in build_t0_state.py (13 findings, OI-1437) (#491) (2026-05-14)
 - #489 — chore(contrib): add CONTRIBUTING.md + ci lint gate (atomic-write + silent-except) (#489) (2026-05-14)
-- #487 — chore(docs): CHANGELOG — OI-1370 systemic locking refactor series (#482-#486) (#487) (2026-05-13)
-- #486 — fix(oi-1370): PR N4 — final migration; close OI-1370 race comprehensively (#486) (2026-05-13)
-- #485 — feat(oi-1370): PR N3 — migrate compact_state.compact_receipts + backfill_headless_receipts to state_writer (#485) (2026-05-13)
-- #484 — feat(oi-1370): PR N2 — migrate gate_register_emit + cleanup_worker_exit to state_writer (#484) (2026-05-13)
-- #483 — feat(oi-1370): PR N1 — state_writer.append_locked helper (no behavior change) (#483) (2026-05-13)
-- #482 — docs(architect): OI-1370 systemic locking refactor plan (#482) (2026-05-13)
-- #481 — chore(docs): post-rc1 sprint refresh — CHANGELOG + README + FEATURE_PLAN regenerator (12 PRs) (#481) (2026-05-13)
-- #480 — feat(gates): validate + document Vertex routing path for gemini quota workaround (#480) (2026-05-13)
-- #467 — refactor(oi-1294): split compact_open_items_digest below 70-line threshold (#467) (2026-05-13)
-- #464 — chore(t0): canonical subprocess_dispatch.py routing in T0 template + skill (#464) (2026-05-13)
-- #463 — chore(start): default VNX_QUEUE_POPUP_ENABLED=0 in init-time preset templates (#463) (2026-05-13)
-- #465 — fix(security): OI-1369 — reject path traversal in project_id (^[a-z][a-z0-9-]{1,31}$) (#465) (2026-05-13)
-- #449 — docs(governance): ADR-011 amendment v2 — split subagent pilot into 2 sequential gates (#449) (2026-05-09)
-- #448 — docs(release): cut v1.0.0-rc1 — architectural stabilization milestone (#448) (2026-05-09)
-- #447 — docs(governance): ADR-011 amendment — resolve Tentative section to Conditional/Pilot (#447) (2026-05-09)
-- #446 — fix(migration): rewrite 0016 schema-first per ADR-009 (resolves OI-1375/1376/1377) (#446) (2026-05-09)
-- #445 — docs(governance): add ADR-013 (workers=N) + ADR-014 (autonomous chain dispatch) (#445) (2026-05-09)
-- #442 — chore(repo-hygiene): OI-1373 Tier 4 — move 18 FEATURE_PLAN files to private claudedocs/ (#442) (2026-05-09)
-- #441 — chore(repo-hygiene): OI-1373 Tier 2 — move strategy files to private claudedocs/ (#441) (2026-05-09)
-- #440 — chore(repo-hygiene): OI-1373 Tier 1 — move business agent drafts to private claudedocs/ (#440) (2026-05-09)
-- #439 — ci(governance): enforce ADR-003 — block Anthropic SDK imports (#439) (2026-05-09)
-- #432 — feat(migration): one-shot data import script (Phase 6 P4 — DRAFT, operator-review-required) (#432) (2026-05-09)
-- #438 — feat(skills): add database-engineer + intelligence-engineer specialists (#438) (2026-05-09)
-- #437 — ci(profile-a): exclude migration scripts from legacy path gate (#437) (2026-05-07)
-- #436 — docs(skill): add VNX CI workflow conclusion check before merge (t0-orchestrator) (#436) (2026-05-07)
-- #435 — fix(build_current_state): remove legacy path literal from line 263 hint (#435) (2026-05-07)
-- #434 — fix(dashboard): clean up agent stream lifecycle (#434) (2026-05-07)
-- #433 — chore(gemini): switch default reviewer model to gemini-2.5-pro for deeper reviews (#433) (2026-05-07)
-- #431 — feat(envelopes): per-project paths + four-tuple envelope (Phase 6 P3 v2) (#431) (2026-05-07)
-
-**WAVE 0**
-- #443 — chore(repo-hygiene): Wave 0 — OI-1373 Tier 3 + 9 stale docs archive (combined) (#443) (2026-05-09)
-
-**WAVE 1**
-- #457 — docs: refresh README + CHANGELOG for post-rc1 work (Wave 1 + Wave 5 P0/P1) (#457) (2026-05-10)
 
 **WAVE 5**
 - #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
@@ -125,25 +135,13 @@ _Last 14 days — sourced from git merge commits._
 **WAVE 8**
 - #570 — fix(wiring): activate 4 dead-code modules from Wave 8 fast-path (auto_apply, validator class, schema-emit, smart_router.route) (#570) (2026-05-17)
 
-**WAVE1**
-- #454 — feat(wave1): PR-W1.5 — Dashboard shadow wiring + canary divergence test pack + rollback docs (#454) (2026-05-10)
-- #453 — feat(wave1): PR-W1.4 — IntelligenceSelector + DispatchRegister shadow wiring (5 read sites) (#453) (2026-05-09)
-- #452 — feat(wave1): PR-W1.3 — T0 state-builder shadow wiring (4 read sites) (#452) (2026-05-09)
-- #451 — feat(wave1): PR-W1.2 — shadow_logger NDJSON writer + report CLI + rotation (#451) (2026-05-09)
-- #450 — feat(wave1): PR-W1.1 — shadow_verifier independent comparator with 6 hard metrics (#450) (2026-05-09)
-
-**WAVE2**
-- #478 — feat(wave2): Phase 1a redo — migrate function_size_gate to vnx_core + shim layer (#478) (2026-05-13)
-- #469 — feat(wave2): Phase 0a — vnx-orchestration package skeleton + build validation (#469) (2026-05-13)
-
 **WAVE4**
-- #468 — feat(wave4): OTel export foundation — dispatch completion metrics + span emission (opt-in via OTEL_EXPORTER_OTLP_ENDPOINT) (#468) (2026-05-13)
-
-**WAVE4.5**
-- #479 — feat(wave4.5): PR-2b redo — gate reviewer prompts use gh pr diff + fail-loud on errors (#479) (2026-05-13)
-- #477 — feat(wave4.5): PR-3 redo — guard build_intelligence_context against empty dispatch_id (audit-safe) (#477) (2026-05-13)
-- #472 — feat(wave4.5): PR-2 — codex/gemini adapters use PromptAssembler + tri-file activation (#472) (2026-05-13)
-- #471 — feat(wave4.5): PromptAssembler provider-agnostic methods (codex, gemini, litellm) (#471) (2026-05-13)
+- #633 — docs(wave4): central-install runbook + cutover procedure (PR-WAVE4-6) (#633) (2026-05-25)
+- #632 — test(wave4): central-install e2e integration tests (PR-WAVE4-5) (#632) (2026-05-25)
+- #631 — fix(regen-settings): guard against central-install write; detect pre-fix contamination (PR-WAVE4-4) (#631) (2026-05-25)
+- #630 — fix(bin): preserve VNX_PROJECT_ROOT across env reset; add write guard; redirect cmd_update (PR-WAVE4-3) (#630) (2026-05-25)
+- #629 — fix(install-central): write install-mode marker, export VNX_PROJECT_ROOT from shim, fix verify_install (PR-WAVE4-2) (#629) (2026-05-25)
+- #628 — fix(install-central): separate PROJECT_ROOT from VNX_HOME in central-install mode (PR-WAVE4-1) (#628) (2026-05-25)
 
 **WAVE4.6**
 - #513 — feat(wave4.6): PR-4.6.6 — unified event shape via CanonicalEvent + EventStore enforcement (#513) (2026-05-15)
@@ -162,13 +160,6 @@ _Last 14 days — sourced from git merge commits._
 - #523 — feat(wave5): PR-5.3 — multi-tenant lease isolation (schema v12) (#523) (2026-05-16)
 - #522 — feat(wave5): PR-5.1 — multi-project state aggregator write-pad (#522) (2026-05-16)
 - #521 — docs(wave5): PR-5.0 — ADR-017 Control Centre product-shape architecture (#521) (2026-05-16)
-- #462 — feat(wave5): CFX-W5-2 — plumbing gaps (pr_id key + headless daemon entry points) (#462) (2026-05-13)
-- #461 — feat(wave5): PR-W5.5 — production plumbing for P0-P4 context-bundle classes (#461) (2026-05-10)
-- #460 — feat(wave5): PR-W5.4 — schema introspection injection (DDL grounding for DB workers) (#460) (2026-05-10)
-- #459 — feat(wave5): PR-W5.3 — operator memory injection (curated wisdom into worker context) (#459) (2026-05-10)
-- #458 — feat(wave5): PR-W5.2 — code anchor injection (file:line current-state grounding) (#458) (2026-05-10)
-- #456 — feat(wave5): PR-W5.1 — ADR injection by file-touch (governance context to dispatches) (#456) (2026-05-10)
-- #455 — feat(wave5): PR-W5.0 — prior-round findings injection (highest signal-to-effort smart-context) (#455) (2026-05-10)
 
 **WAVE6**
 - #575 — fix(wave6): real spawn impl + config field reads + single heartbeat threshold (3 blockers) (#575) (2026-05-17)
