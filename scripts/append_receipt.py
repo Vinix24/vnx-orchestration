@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess  # noqa: F401  (mock.patch("append_receipt.subprocess.Popen") relies on this)
 import sys
 from pathlib import Path
@@ -37,37 +36,21 @@ from append_receipt_internals.common import (
     EXIT_IO_ERROR,
     EXIT_OK,
     EXIT_UNEXPECTED_ERROR,
-    REPO_ROOT as _REPO_ROOT,
     _emit,
     _get_open_items_manager,
-    _safe_subprocess,
-    _utc_now_iso,
     is_headless_t0,
     register_facade,
 )
 from append_receipt_internals.idempotency import (
-    IDEMPOTENCY_FIELDS,
-    _cache_file_for,
     _compute_idempotency_key,
-    _load_cache,
-    _lock_file_for,
-    _resolve_receipts_file,
-    _write_cache,
-    _write_receipt_under_lock,
 )
 from append_receipt_internals.validation import (
-    DISPATCH_REQUIRED_EVENTS,
-    STATE_MUTATION_EVENTS,
     _is_completion_event,
-    _is_subprocess_intermediate_completion,
-    _requires_dispatch_id,
-    _validate_receipt,
     _warn_if_review_gate_missing_dispatch_id,
 )
 from append_receipt_internals.report_extractor import _extract_changed_files_from_report
 from append_receipt_internals.git_provenance import (
     _build_git_provenance,
-    _extract_shortstat_value,
 )
 from append_receipt_internals.session_resolver import (
     _build_session_metadata,
@@ -78,7 +61,6 @@ from append_receipt_internals.session_resolver import (
     _rsi_check_provider_files,
 )
 from append_receipt_internals.quality import (
-    _SEVERITY_MAP,
     _count_quality_violations,
     _count_quality_violations_against_store,
     _register_quality_open_items,
@@ -87,11 +69,57 @@ from append_receipt_internals.register_emit import _emit_dispatch_register
 from append_receipt_internals.enrichment import _enrich_completion_receipt
 from append_receipt_internals.payload import (
     _maybe_trigger_state_rebuild,
-    _run_post_append_hooks,
     _trigger_receipt_classifier,
     _update_confidence_from_receipt,
     append_receipt_payload,
 )
+
+__all__ = [
+    "AppendReceiptError",
+    "AppendResult",
+    "EXIT_INVALID_INPUT",
+    "EXIT_IO_ERROR",
+    "EXIT_OK",
+    "EXIT_UNEXPECTED_ERROR",
+    "_build_git_provenance",
+    "_build_session_metadata",
+    "_compute_idempotency_key",
+    "_count_quality_violations",
+    "_count_quality_violations_against_store",
+    "_emit",
+    "_emit_dispatch_register",
+    "_enrich_completion_receipt",
+    "_extract_changed_files_from_report",
+    "_extract_session_token_usage",
+    "_get_open_items_manager",
+    "_is_completion_event",
+    "_maybe_trigger_state_rebuild",
+    "_parse_input",
+    "_register_quality_open_items",
+    "_resolve_model_provider",
+    "_resolve_session_id",
+    "_rsi_check_env_session",
+    "_rsi_check_provider_files",
+    "_trigger_receipt_classifier",
+    "_update_confidence_from_receipt",
+    "_warn_if_review_gate_missing_dispatch_id",
+    "append_receipt_payload",
+    "calculate_cqs",
+    "collect_terminal_snapshot",
+    "current_project_id",
+    "enrich_receipt_provenance",
+    "ensure_env",
+    "gate_events_file",
+    "generate_quality_advisory",
+    "get_changed_files",
+    "is_headless_t0",
+    "main",
+    "register_facade",
+    "resolve_state_dir",
+    "should_route_to_gate_stream",
+    "subprocess",
+    "validate_receipt_provenance",
+]
 
 # Register this module as the active facade so submodules can resolve
 # patchable names back to whichever module the test loaded.

@@ -887,26 +887,6 @@ def _has_composite_project_unique(
     return False
 
 
-def _has_single_column_unique(
-    con: sqlite3.Connection,
-    table: str,
-    key_col: str,
-) -> bool:
-    """Return True iff a UNIQUE index covers ONLY ``key_col`` (the
-    pre-rebuild state)."""
-    if not _table_exists(con, table):
-        return False
-    for row in con.execute(f"PRAGMA index_list({table})"):
-        idx_name = row[1]
-        is_unique = bool(row[2])
-        if not is_unique:
-            continue
-        cols = [r[2] for r in con.execute(f"PRAGMA index_info({idx_name})")]
-        if cols == [key_col]:
-            return True
-    return False
-
-
 def _rebuild_one_table(
     con: sqlite3.Connection,
     table: str,
