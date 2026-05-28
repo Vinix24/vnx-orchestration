@@ -23,8 +23,28 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
-from provider_spawns.codex_spawn import CodexSpawnResult, _kill_proc, spawn_codex
+from provider_spawns.codex_spawn import CodexSpawnResult, _build_cmd, _kill_proc, spawn_codex
 from canonical_event import CanonicalEvent
+
+
+# ---------------------------------------------------------------------------
+# Test 0: model defaults and explicit override
+# ---------------------------------------------------------------------------
+
+class TestCodexSpawnModelResolution:
+    """codex_spawn uses the current Codex CLI default unless explicitly overridden."""
+
+    def test_build_cmd_defaults_to_gpt55(self, monkeypatch):
+        monkeypatch.delenv("VNX_CODEX_DEFAULT_MODEL", raising=False)
+        assert _build_cmd("") == ["codex", "exec", "--json", "--model", "gpt-5.5"]
+
+    def test_build_cmd_uses_env_default(self, monkeypatch):
+        monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.5-test")
+        assert _build_cmd("") == ["codex", "exec", "--json", "--model", "gpt-5.5-test"]
+
+    def test_build_cmd_explicit_model_overrides_env_default(self, monkeypatch):
+        monkeypatch.setenv("VNX_CODEX_DEFAULT_MODEL", "gpt-5.5-test")
+        assert _build_cmd("gpt-5.5") == ["codex", "exec", "--json", "--model", "gpt-5.5"]
 
 
 
