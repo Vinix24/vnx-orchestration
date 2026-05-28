@@ -5,6 +5,20 @@ import sys
 import uuid
 from pathlib import Path
 
+from vnx_cli import _engine
+
+
+def _resolve_agent_path(project_dir: Path, agent: str) -> Path | None:
+    """Resolve an agent CLAUDE.md from project agents/ or examples/."""
+    candidates = [
+        project_dir / "agents" / agent / "CLAUDE.md",
+        project_dir / "examples" / agent / "CLAUDE.md",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
 
 def vnx_dispatch_agent(args) -> int:
     agent = args.agent
@@ -13,11 +27,11 @@ def vnx_dispatch_agent(args) -> int:
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
 
     # Validate agent CLAUDE.md exists
-    agent_claude_md = project_dir / "agents" / agent / "CLAUDE.md"
-    if not agent_claude_md.exists():
+    agent_claude_md = _resolve_agent_path(project_dir, agent)
+    if agent_claude_md is None:
         print(
             f"Error: agent '{agent}' not found. "
-            f"Expected: agents/{agent}/CLAUDE.md",
+            f"Expected: agents/{agent}/CLAUDE.md or examples/{agent}/CLAUDE.md",
             file=sys.stderr,
         )
         return 1
@@ -25,10 +39,9 @@ def vnx_dispatch_agent(args) -> int:
     # Generate a dispatch ID
     dispatch_id = f"D-{uuid.uuid4().hex[:8]}"
 
-    # Add scripts/lib/ to sys.path so subprocess_dispatch is importable
-    scripts_lib = project_dir / "scripts" / "lib"
-    if scripts_lib.is_dir() and str(scripts_lib) not in sys.path:
-        sys.path.insert(0, str(scripts_lib))
+    # Add the packaged engine to sys.path so subprocess_dispatch is importable
+    # for both editable checkouts and pip-installed wheels.
+    _engine.ensure_engine_on_path()
 
     try:
         from subprocess_dispatch import deliver_with_recovery  # type: ignore[import]

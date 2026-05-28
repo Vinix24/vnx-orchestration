@@ -22,24 +22,36 @@ For full navigation, start at `../DOCS_INDEX.md`.
 
 ## VNX CLI Quick Reference
 
+Plain `vnx` is the pip-installed Python CLI. It exposes the stable essentials:
+`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, and `update`.
+Operator commands run through `./bin/vnx` from the repository root.
+
 ```bash
-# Initialize VNX in a new project
-.claude/vnx-system/bin/vnx init
+# Initialize VNX in a new project with the pip CLI
+vnx init
 
 # Health check
-.claude/vnx-system/bin/vnx doctor
+vnx doctor
 
-# Launch orchestration (tmux session with T0-T3)
-.claude/vnx-system/bin/vnx start
+# Project status
+vnx status
+
+# Update the pip-installed CLI
+vnx update --dry-run
+```
+
+```bash
+# Launch orchestration (tmux session with T0-T3) from a repo checkout
+./bin/vnx start
 
 # Stop all processes
-.claude/vnx-system/bin/vnx stop
-
-# Update VNX from GitHub
-.claude/vnx-system/bin/vnx update
+./bin/vnx stop
 
 # Token cost report
-.claude/vnx-system/bin/vnx cost-report
+./bin/vnx cost-report
+
+# Operator recovery
+./bin/vnx recover
 ```
 
 ### Key Bindings (in tmux)
@@ -48,10 +60,8 @@ For full navigation, start at `../DOCS_INDEX.md`.
 - Mouse — Click to switch panes
 
 ### Demo Setup
-```bash
-# Create a demo project with 6 PRs, quality traps, and full VNX setup
-bash /path/to/.claude/vnx-system/demo/setup_demo.sh
-```
+Use `./bin/vnx demo` from a cloned `vnx-orchestration` repo root for the current
+demo workflow.
 
 ---
 
@@ -62,29 +72,29 @@ The primary workflow for new features uses feature worktrees:
 ### 1. Create a Feature Worktree
 
 ```bash
-vnx new-worktree my-feature --branch feature/my-feature --base main
+./bin/vnx new-worktree my-feature --branch feature/my-feature --base main
 ```
 
-This creates a git worktree, initializes isolated `.vnx-data`, bootstraps skills/terminals/hooks, merges settings, and validates with `vnx doctor`.
+This creates a git worktree, initializes isolated `.vnx-data`, bootstraps skills/terminals/hooks, merges settings, and validates with `./bin/vnx doctor`.
 
 ### 2. Work in the Worktree
 
 ```bash
 cd ../your-project-wt-my-feature
-vnx start
+./bin/vnx start
 ```
 
 ### 3. Monitor Session State
 
 ```bash
-vnx status          # Session overview: terminals, queue, open items
-vnx ps              # Process health with PID metadata
+./bin/vnx status    # Session overview: terminals, queue, open items
+./bin/vnx ps        # Process health with PID metadata
 ```
 
 ### 4. Pre-Merge Check
 
 ```bash
-vnx merge-preflight my-feature
+./bin/vnx merge-preflight my-feature
 ```
 
 Returns GO or NO-GO based on: git cleanliness, open items, PR queue status, active processes, and gate-check results.
@@ -92,7 +102,7 @@ Returns GO or NO-GO based on: git cleanliness, open items, PR queue status, acti
 ### 5. Close the Worktree
 
 ```bash
-vnx finish-worktree my-feature --delete-branch
+./bin/vnx finish-worktree my-feature --delete-branch
 ```
 
 Runs merge-preflight, stops worktree processes, merges intelligence back to main, removes worktree.
@@ -102,7 +112,7 @@ Runs merge-preflight, stops worktree processes, merges intelligence back to main
 VNX settings are patch-managed -- VNX updates only its owned keys:
 
 ```bash
-vnx regen-settings --merge   # Update VNX keys, preserve project config
+./bin/vnx regen-settings --merge   # Update VNX keys, preserve project config
 ```
 
 ### Shell Helper
@@ -110,12 +120,20 @@ vnx regen-settings --merge   # Update VNX keys, preserve project config
 For global `vnx` access from any project directory:
 
 ```bash
-vnx install-shell-helper   # Adds vnx() to ~/.zshrc or ~/.bashrc
+./bin/vnx install-shell-helper   # Adds vnx() to ~/.zshrc or ~/.bashrc
 ```
 
 The helper walks up from CWD to find the project-local `.vnx/bin/vnx` or `.claude/vnx-system/bin/vnx`.
 
-> **Deprecated**: Per-terminal worktrees are deprecated. Use `vnx new-worktree` for all new development.
+> **Deprecated**: Per-terminal worktrees are deprecated. Use `./bin/vnx new-worktree` for all new development.
+
+## Appendix A: Two binaries
+
+VNX ships TWO `vnx` entry-points with different scopes:
+- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
+- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
+
+This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.
 
 ---
 

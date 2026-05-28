@@ -1,351 +1,203 @@
 # VNX Onboarding Guide
 
-> From zero to your first dispatched task — in starter mode or operator mode.
+> From a fresh pip install to your first dispatched task, then onward to the
+> repo-local operator workflow.
 
-This guide walks you through setting up VNX and executing your first governed AI task. Choose starter mode to learn the fundamentals, then upgrade to operator mode when you need parallel agents.
-
----
-
-## Which Mode Should You Start With?
-
-| | Starter Mode | Operator Mode |
-|---|---|---|
-| **Best for** | First-time users, evaluation, simple projects | Production work, parallel features, team use |
-| **Terminals** | Single terminal | 4-terminal tmux grid (T0-T3) |
-| **AI providers** | One (Claude Code by default) | Multiple (Claude, Codex, Gemini, Kimi) |
-| **Dispatch model** | Sequential (one task at a time) | Parallel (three tasks simultaneously) |
-| **tmux required** | No | Yes |
-| **Time to first task** | ~5 minutes | ~15 minutes |
-
-Both modes share the same runtime: receipts, provenance, governance controls, and audit trails work identically.
+This guide separates the two supported command surfaces. Plain `vnx` is the
+pip-installed Python CLI for user-facing essentials. Repo-local automation,
+tmux orchestration, worktrees, gates, recovery, demos, and cost reports run
+through `./bin/vnx` from a cloned `vnx-orchestration` repository.
 
 ---
 
-## Part 1: Starter Mode
+## Part 1: Starter Path (Pip CLI)
 
 ### Step 1: Install
 
 ```bash
-# Install prerequisites (macOS)
-brew install jq
-
-# Clone VNX
-git clone https://github.com/Vinix24/vnx-orchestration.git
-
-# Install into your project
-cd vnx-orchestration
-./install.sh /path/to/your/project
+python3 -m pip install vnx-orchestration
+vnx version
 ```
 
-### Step 2: Initialize
+### Step 2: Initialize a Project
 
 ```bash
-cd /path/to/your/project
-vnx init --starter
-```
-
-This creates:
-- `.vnx/` — VNX runtime (git-ignored)
-- `.vnx-data/` — state directory with `mode.json` set to `starter`
-- `.claude/` — Claude Code configuration and skills
-
-### Step 3: Validate
-
-```bash
+mkdir -p my-vnx-project
+cd my-vnx-project
+vnx init
 vnx doctor
-```
-
-Doctor checks all dependencies, path resolution, and state integrity. Every check should pass. If something fails, the output tells you exactly what to fix.
-
-### Step 4: Check Status
-
-```bash
 vnx status
 ```
 
-Shows your current mode, terminal state, queue depth, and any open items. In starter mode, you'll see a single terminal.
+`vnx init` creates `.vnx/`, `.vnx-project-id`, an `agents/` scaffold, and a
+resolved runtime state directory.
 
-### Step 5: Your First Dispatch
+### Step 3: Create the Hello-World Agent
 
-In starter mode, you work directly with the AI agent in one terminal. The dispatch flow is:
-
-1. **Create a dispatch** — Tell the agent what to do via a structured task
-2. **Agent executes** — The AI works within the scoped instructions
-3. **Receipt generated** — A structured record of what was done
-4. **Gate check** — Deterministic quality validation
+`vnx dispatch-agent` accepts either `agents/<name>/CLAUDE.md` or
+`examples/<name>/CLAUDE.md`.
 
 ```bash
-# See available commands
-vnx help
+mkdir -p examples/hello-world
+cat > examples/hello-world/CLAUDE.md <<'EOF'
+# Hello World Agent
 
-# List any staged dispatches
-vnx staging-list
+Write a friendly, professional greeting for a new VNX user.
 
-# Promote a dispatch to execution
-vnx promote <dispatch-id>
-
-# After completion, run a gate check
-vnx gate-check --pr <PR-ID>
+Create a file called greeting.md in the current directory with:
+- A welcoming header
+- 2-3 sentences about VNX
+- Today's date
+- A sign-off
+EOF
 ```
 
-### Step 6: Explore the Audit Trail
+### Step 4: Dispatch
 
 ```bash
-# View receipts
-cat .vnx-data/state/t0_receipts.ndjson | python3 -m json.tool
-
-# Check API costs
-vnx cost-report
-
-# Analyze session patterns
-vnx analyze-sessions
+vnx dispatch-agent --agent hello-world --instruction "Write a greeting for a new VNX user"
+vnx status
 ```
 
-Every action is recorded. This is the core value proposition — you always know what happened, when, and why.
+This is the literal pip happy path: install, initialize, define an example
+agent, and dispatch it through the stable Python CLI.
 
-### Step 7: Try Demo Mode
-
-See operator mode in action without setting it up:
+### Step 5: Learn the Pip Surface
 
 ```bash
-vnx demo                              # Sample state and dispatches
-vnx demo --replay governance-pipeline # Replay a real 6-PR session
-vnx demo --dashboard                  # Dashboard with sample data
+vnx --help
+vnx doctor --strict
+vnx status --json
+vnx pool --help
+vnx update --dry-run
 ```
 
-Demo mode uses temp directories — nothing touches your project.
-
-### Upgrading to Operator Mode
-
-When you're ready for parallel agents:
-
-```bash
-vnx init --operator
-```
-
-This re-initializes with the full 4-terminal configuration. Your existing receipts and intelligence data are preserved.
+The pip CLI command set is intentionally small: `init`, `doctor`, `status`,
+`dispatch-agent`, `pool`, `version`, and `update`.
 
 ---
 
-## Part 2: Operator Mode
+## Part 2: Operator Path (Repo-Local Bash CLI)
 
-### Step 1: Install Additional Dependencies
+Use this path when you need the full VNX operator surface: tmux sessions,
+queue promotion, gate checks, worktrees, recovery, demos, and cost reports.
 
-```bash
-# macOS
-brew install tmux fswatch
-
-# Verify
-tmux -V      # tmux 3.x+
-fswatch --version
-```
-
-### Step 2: Initialize
+### Step 1: Clone and Install Operator Prerequisites
 
 ```bash
-cd /path/to/your/project
-vnx init --operator
-vnx doctor
+git clone https://github.com/Vinix24/vnx-orchestration.git
+cd vnx-orchestration
+brew install jq tmux fswatch
 ```
 
-Doctor now validates tmux, fswatch, and the full terminal grid configuration in addition to the base checks.
+### Step 2: Initialize Operator Mode
+
+```bash
+./bin/vnx init --operator
+./bin/vnx doctor
+```
 
 ### Step 3: Launch the Grid
 
 ```bash
-vnx start
+./bin/vnx start
 ```
 
-This opens a 2x2 tmux grid:
+This opens the 2x2 T0-T3 tmux grid used by the operator workflow.
 
-```
-┌────────────────────┬────────────────────┐
-│    T0 (Brain)      │    T1 (Worker)     │
-│    Read-Only       │    Track A         │
-├────────────────────┼────────────────────┤
-│    T2 (Worker)     │    T3 (Worker)     │
-│    Track B         │    Track C         │
-└────────────────────┴────────────────────┘
-```
-
-#### Multi-Provider Profiles
-
-Mix AI providers across terminals:
+### Step 4: Queue and Gate Workflow
 
 ```bash
-vnx start                    # All Claude Code (default)
-vnx start claude-codex       # T1: Codex CLI, T2: Claude Code
-vnx start claude-gemini      # T1: Gemini CLI, T2: Claude Code
-vnx start full-multi         # T1: Codex CLI, T2: Gemini CLI
+./bin/vnx staging-list
+./bin/vnx promote <dispatch-id>
+./bin/vnx gate-check --pr <PR-ID>
 ```
 
-### Step 4: Understand the Roles
+Press `Ctrl+G` inside tmux for the visual dispatch queue popup.
 
-**T0 — Orchestrator** (top-left)
-- Plans and breaks down work
-- Reviews receipts from workers
-- Promotes dispatches
-- Never writes code
-- Runs Claude Opus for strategic reasoning
-
-**T1 — Worker Track A** (top-right)
-- Primary implementation
-- Executes dispatches from T0
-- Writes reports on completion
-
-**T2 — Worker Track B** (bottom-left)
-- Testing, integration, validation
-- Independent from T1's work
-
-**T3 — Worker Track C** (bottom-right)
-- Code review, security analysis, deep investigation
-- Runs Claude Opus for analytical depth
-
-### Step 5: Navigate the Grid
+### Step 5: Feature Worktrees
 
 ```bash
-# From any terminal
-vnx jump T0                  # Focus T0
-vnx jump T1                  # Focus T1
-vnx jump --attention         # Focus the terminal needing human input
-
-# tmux shortcuts
-Ctrl+G                       # Open dispatch queue popup
-Ctrl+B D                     # Detach (session keeps running)
-Ctrl+B [arrow]               # Navigate between panes
+./bin/vnx new-worktree my-feature --base main
+cd ../vnx-orchestration-wt-my-feature
+./bin/vnx start
+./bin/vnx merge-preflight my-feature
+./bin/vnx finish-worktree my-feature --delete-branch
 ```
 
-### Step 6: The Dispatch Workflow
+Worktrees get isolated runtime state so feature sessions do not overwrite the
+main session.
 
-1. **Describe work to T0**: Tell it what you need built
-2. **T0 creates dispatches**: Scoped tasks with tracks, priorities, gates
-3. **Review in queue**: Press `Ctrl+G` to see pending dispatches
-4. **Approve**: Press `A` to accept, dispatcher routes to the right terminal
-5. **Monitor**: `vnx status` shows what each terminal is doing
-6. **Receive results**: Receipt processor delivers structured results to T0
-7. **Gate check**: `vnx gate-check` validates quality deterministically
-8. **Iterate**: T0 decides next steps based on results
-
-### Step 7: Feature Worktrees
-
-For feature work, isolate from `main`:
+### Step 6: Daily Operator Commands
 
 ```bash
-# Create worktree
-vnx worktree create my-feature --ref main
-cd ../your-project-wt-my-feature/
-
-# Work in isolation
-vnx start
-
-# Pre-merge check
-vnx merge-preflight my-feature
-
-# Finish and clean up
-vnx finish-worktree my-feature --delete-branch
+./bin/vnx status
+./bin/vnx ps
+./bin/vnx cost-report
+./bin/vnx recover
+./bin/vnx stop
 ```
 
-Worktrees get their own `.vnx-data/`, so session state is fully isolated.
-
-### Step 8: Session Intelligence
-
-After running several sessions, VNX mines patterns:
+### Step 7: Demos and Session Intelligence
 
 ```bash
-vnx analyze-sessions           # Parse logs, detect patterns
-vnx suggest review             # See tuning proposals
-vnx suggest accept 1,3,5       # Approve specific suggestions
-vnx suggest apply              # Apply to target files
-```
-
-Intelligence reveals which models perform best on which task types, where context rotations happen most, and where governance overhead can be reduced.
-
----
-
-## Common Operations Reference
-
-### Daily Workflow
-
-```bash
-vnx start                     # Launch grid
-vnx status                    # Check state
-# ... work with T0 ...
-vnx cost-report               # End-of-session costs
-vnx stop                      # Shut down
-```
-
-### Recovery
-
-```bash
-vnx recover                   # Fix stuck state, stale locks, orphan processes
-vnx doctor                    # Validate everything is healthy
-```
-
-### Monitoring
-
-```bash
-vnx status                    # Overview: terminals, queue, items
-vnx ps                        # Process health with PIDs
-vnx cost-report               # API spend per agent/task
-```
-
-### Queue Management
-
-```bash
-vnx staging-list              # Pending dispatches
-vnx promote <id>              # Promote to queue
-Ctrl+G                        # Visual queue popup
+./bin/vnx demo
+./bin/vnx demo --replay governance-pipeline
+./bin/vnx demo --dashboard
+./bin/vnx analyze-sessions
+./bin/vnx suggest review
+./bin/vnx suggest accept 1,3,5
+./bin/vnx suggest apply
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Command requires operator mode"
+### Pip CLI command not found
 
-You're in starter mode. Either:
-- Use `vnx init --operator` to upgrade
-- Use the starter-mode equivalent (check `vnx help`)
+```bash
+python3 -m pip install --upgrade vnx-orchestration
+vnx version
+```
+
+### Operator command not found
+
+Make sure you are in the cloned `vnx-orchestration` repository root and use the
+bash entrypoint:
+
+```bash
+./bin/vnx --help
+```
 
 ### `vnx doctor` reports failures
 
-Doctor output is actionable — each failure includes what to install or fix. Common issues:
-- Missing `tmux` → `brew install tmux` (operator mode only)
-- Missing `jq` → `brew install jq`
-- Missing `fswatch` → `brew install fswatch` (operator mode only)
-- Stale state → `vnx recover`
+Doctor output is actionable. Common fixes:
+- Missing `tmux`: `brew install tmux` (operator mode only)
+- Missing `jq`: `brew install jq`
+- Missing `fswatch`: `brew install fswatch` (operator mode only)
 
-### Terminal not responding
-
-```bash
-vnx recover                   # Clears locks, restarts stuck processes
-vnx ps                        # Check process health
-```
-
-### Context window full
-
-VNX handles this automatically via context rotation. If manual intervention is needed:
-- The agent writes a handover document
-- `/clear` resets the session
-- Fresh session resumes with handover context
-
-### Lost receipts
+### Stale Operator State
 
 ```bash
-vnx recover                   # Reprocesses orphaned reports
+./bin/vnx recover
+./bin/vnx ps
 ```
-
-The receipt processor re-scans `.vnx-data/unified_reports/` for unprocessed reports.
 
 ---
 
 ## Next Steps
 
 - **Example flows**: See [docs/examples/](../examples/) for realistic walkthroughs
-  - [Coding orchestration](../examples/example_coding_orchestration.md) — feature development with parallel agents
-  - [Headless research](../examples/example_headless_research.md) — structured analysis without interactive tmux
-  - [Content orchestration](../examples/example_content_orchestration.md) — documentation and non-coding tasks
 - **Architecture**: [docs/manifesto/ARCHITECTURE.md](../manifesto/ARCHITECTURE.md)
 - **Dispatch guide**: [docs/DISPATCH_GUIDE.md](../DISPATCH_GUIDE.md)
 - **Limitations**: [docs/manifesto/LIMITATIONS.md](../manifesto/LIMITATIONS.md)
 - **Comparisons**: [VNX vs Claude Code](../comparisons/vnx_vs_claude_code.md) | [VNX vs Frameworks](../comparisons/vnx_vs_frameworks.md)
+
+## Appendix A: Two binaries
+
+VNX ships TWO `vnx` entry-points with different scopes:
+- **`vnx`** (pip-installed Python CLI at `vnx_cli/main.py`): user-facing essentials (`init`, `doctor`, `status`, `dispatch-agent`, `pool`, `version`, `update`).
+- **`./bin/vnx`** (bash CLI in the repo): operator + automation surface (`gate-check`, `new-worktree`, `finish-worktree`, `merge-preflight`, `demo`, `start`, `recover`, `cost-report`). Run from the repo root.
+
+This split is intentional: the pip surface is stable + minimal; the bash surface is rich + repo-local.
