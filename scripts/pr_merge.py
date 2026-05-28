@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +51,34 @@ from governance_receipts import emit_governance_receipt
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+
+# Matches internal PR labels: pure numeric (PR-42) and alphanumeric (PR-HYG-1, PR-TMUX-3, PR-ROUTE-1).
+_PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
+
+
+def _extract_pr_id(subject: str) -> Optional[str]:
+    """Extract internal PR-N/PR-LABEL from commit subject or PR title.
+
+    Returns the first match as an uppercase string, e.g. "PR-HYG-1" or "PR-42".
+    Returns None if no internal PR label is found.
+    """
+    m = _PR_LABEL_RE.search(subject)
+    if m:
+        return f"PR-{m.group(1).upper()}"
+    return None
+
+
+def _lookup_dispatch_id_by_pr_number(pr_number: int) -> str:
+    """Look up dispatch_id in dispatch_register by pr_number. Best-effort, returns '' on miss."""
+    try:
+        from dispatch_register import read_events
+        events = read_events()
+        for ev in reversed(events):
+            if ev.get("pr_number") == pr_number and ev.get("dispatch_id"):
+                return str(ev["dispatch_id"])
+    except Exception:
+        pass
+    return ""
 
 
 def _gh(args: list[str], *, check: bool = False, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -97,9 +126,15 @@ def _emit_receipt(
     merge_method: str,
     pr_title: str,
     branch: str,
+    pr_id: str = "",
+    pr_id_resolution: str = "",
     receipts_file: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Write pr_merged receipt to t0_receipts.ndjson."""
+    """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
+
+    Dual-scheme: pr_number (GitHub numeric) + pr_id (internal PR-N/PR-LABEL).
+    pr_id_resolution='unmatched' when no internal label could be derived.
+    """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
         "conclusion": "merged",
@@ -107,6 +142,10 @@ def _emit_receipt(
         "pr_title": pr_title,
         "branch": branch,
     }
+    if pr_id:
+        kwargs["pr_id"] = pr_id
+    elif pr_id_resolution:
+        kwargs["pr_id_resolution"] = pr_id_resolution
     if dispatch_id:
         kwargs["dispatch_id"] = dispatch_id
     return emit_governance_receipt(
@@ -188,6 +227,12 @@ def merge_pr(
 
     result["success"] = True
 
+    # Derive internal PR-N label from title for dual-scheme receipt
+    pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
+    if not dispatch_id:
+        dispatch_id = _lookup_dispatch_id_by_pr_number(pr_number)
+    result["dispatch_id"] = dispatch_id
+
     # Emit receipt to t0_receipts.ndjson
     try:
         receipt = _emit_receipt(
@@ -196,6 +241,8 @@ def merge_pr(
             merge_method=merge_method,
             pr_title=result["pr_title"],
             branch=result["branch"],
+            pr_id=pr_id or "",
+            pr_id_resolution="" if pr_id else "unmatched",
             receipts_file=receipts_file,
         )
         result["receipt_status"] = receipt.get("append_status", "unknown")

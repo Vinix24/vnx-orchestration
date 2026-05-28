@@ -19,7 +19,10 @@ BILLING SAFETY: No Anthropic SDK. No direct API calls.
 from __future__ import annotations
 
 import argparse
+import datetime
+import fcntl
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,33 +39,113 @@ from governance_receipts import emit_governance_receipt
 EXIT_OK = 0
 EXIT_ERROR = 1
 
+_PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
+
+
+def _extract_pr_id_from_subject(subject: str) -> Optional[str]:
+    """Extract internal PR-N label from commit subject or PR title."""
+    m = _PR_LABEL_RE.search(subject)
+    return f"PR-{m.group(1).upper()}" if m else None
+
+
+def _lookup_dispatch_id_for_pr(
+    pr_number: int,
+    branch: str,
+    register_events: List[Dict[str, Any]],
+) -> str:
+    """Find dispatch_id from dispatch_register events by pr_number or branch-slug match.
+
+    Priority: pr_number exact match > branch-slug heuristic > '' (not found).
+    """
+    # 1. Exact pr_number match
+    for ev in reversed(register_events):
+        if ev.get("pr_number") == pr_number and ev.get("dispatch_id"):
+            return str(ev["dispatch_id"])
+
+    # 2. Branch-slug heuristic: tokenise branch and match against dispatch_id strings
+    if branch:
+        branch_raw = branch.lower().replace("/", "-").replace("_", "-")
+        tokens = [t for t in re.split(r"[-]+", branch_raw) if len(t) >= 4]
+        if tokens:
+            for ev in reversed(register_events):
+                did = str(ev.get("dispatch_id") or "")
+                if not did:
+                    continue
+                did_lower = did.lower()
+                matches = sum(1 for tok in tokens if tok in did_lower)
+                if matches >= max(1, len(tokens) // 2):
+                    return did
+
+    return ""
+
 
 def _resolve_receipts_path() -> Path:
     paths = ensure_env()
     return Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson"
 
 
-def _load_receipted_pr_numbers(receipts_path: Path) -> Set[int]:
-    """Return set of pr_number values already in t0_receipts.ndjson with event_type=pr_merged."""
-    if not receipts_path.exists():
-        return set()
-    result: Set[int] = set()
-    for line in receipts_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
+def _resolve_events_pr_merged_path() -> Path:
+    """Return path for ADR-005 events ledger: .vnx-data/events/pr_merged.ndjson."""
+    paths = ensure_env()
+    events_dir = Path(paths["VNX_STATE_DIR"]).parent / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    return events_dir / "pr_merged.ndjson"
+
+
+def _append_locked(path: Path, record: Dict[str, Any]) -> None:
+    """Append a JSON record to an NDJSON file under an exclusive lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _load_receipted_pr_numbers(
+    receipts_path: Path,
+    events_path: Optional[Path] = None,
+) -> Set[int]:
+    """Return set of pr_number values already receipted as pr_merged.
+
+    Scans both t0_receipts.ndjson and events/pr_merged.ndjson (ADR-005 ledger)
+    so idempotency works regardless of which path prior runs wrote to.
+
+    events_path: explicit override. When None, derived as receipts_path/../events/pr_merged.ndjson
+    (no env-var lookup, so test isolation is preserved).
+    """
+    result: Set[int] = set()
+    paths_to_scan: List[Path] = [receipts_path]
+
+    # Derive events path from receipts_path structure (state/ → events/pr_merged.ndjson)
+    if events_path is None:
+        candidate = receipts_path.parent.parent / "events" / "pr_merged.ndjson"
+        if candidate.resolve() != receipts_path.resolve():
+            events_path = candidate
+
+    if events_path is not None and events_path not in paths_to_scan:
+        paths_to_scan.append(events_path)
+
+    for path in paths_to_scan:
+        if not path.exists():
             continue
-        event = rec.get("event_type") or rec.get("event") or ""
-        if event == "pr_merged":
-            pn = rec.get("pr_number")
-            if pn is not None:
-                try:
-                    result.add(int(pn))
-                except (TypeError, ValueError):
-                    pass
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event = rec.get("event_type") or rec.get("event") or ""
+            if event == "pr_merged":
+                pn = rec.get("pr_number")
+                if pn is not None:
+                    try:
+                        result.add(int(pn))
+                    except (TypeError, ValueError):
+                        pass
     return result
 
 
@@ -72,11 +155,9 @@ def _gh_list_merged_prs(limit: int, since: Optional[str] = None) -> List[Dict[st
         "gh", "pr", "list",
         "--state", "merged",
         "--limit", str(max(limit, 1)),
-        "--json", "number,title,headRefName,mergedAt,baseRefName",
+        "--json", "number,title,headRefName,mergedAt,baseRefName,mergeCommit",
     ]
-    if since:
-        # gh does not support --search date filtering directly, handled post-fetch
-        pass
+    # gh does not support --search date filtering directly, handled post-fetch
     try:
         result = subprocess.run(
             args, capture_output=True, text=True, timeout=60, check=False,
@@ -90,30 +171,59 @@ def _gh_list_merged_prs(limit: int, since: Optional[str] = None) -> List[Dict[st
         return []
 
 
+def _load_dispatch_register_events() -> List[Dict[str, Any]]:
+    """Load dispatch_register.ndjson events. Best-effort — returns [] on failure."""
+    try:
+        from dispatch_register import read_events
+        return read_events()
+    except Exception:
+        return []
+
+
 def _emit_backfill_receipt(
     pr: Dict[str, Any],
     *,
-    receipts_file: Optional[str] = None,
+    pr_id: str = "",
+    dispatch_id: str = "",
+    events_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Emit a pr_merged receipt for a single PR (backfill mode)."""
+    """Emit a pr_merged receipt for a single PR to events/pr_merged.ndjson (ADR-005).
+
+    Dual-scheme: pr_number (GitHub numeric) + pr_id (internal PR-N/PR-LABEL).
+    pr_id_resolution='unmatched' when no internal label could be derived.
+    Uses the merge commit timestamp for accurate historical placement.
+    """
     pr_number = int(pr["number"])
-    kwargs: Dict[str, Any] = {
+    merged_at = pr.get("mergedAt", "")
+
+    # Use merge commit timestamp if available for accurate historical placement
+    merge_commit = pr.get("mergeCommit") or {}
+    commit_ts = str(merge_commit.get("committedDate") or merge_commit.get("authoredDate") or merged_at)
+
+    receipt: Dict[str, Any] = {
+        "timestamp": commit_ts or merged_at or datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "event_type": "pr_merged",
+        "status": "success",
+        "terminal": "T0",
+        "source": "backfill_pr_merged_receipts",
         "pr_number": pr_number,
         "conclusion": "merged",
         "merge_method": "unknown",
         "pr_title": pr.get("title", ""),
         "branch": pr.get("headRefName", ""),
-        "merged_at": pr.get("mergedAt", ""),
+        "merged_at": merged_at,
         "backfilled": True,
     }
-    return emit_governance_receipt(
-        "pr_merged",
-        status="success",
-        terminal="T0",
-        source="backfill_pr_merged_receipts",
-        receipts_file=receipts_file,
-        **kwargs,
-    )
+    if pr_id:
+        receipt["pr_id"] = pr_id
+    else:
+        receipt["pr_id_resolution"] = "unmatched"
+    if dispatch_id:
+        receipt["dispatch_id"] = dispatch_id
+
+    target_path = events_path if events_path is not None else _resolve_events_pr_merged_path()
+    _append_locked(target_path, receipt)
+    return receipt
 
 
 def _emit_register_event(pr_number: int) -> bool:
@@ -136,10 +246,18 @@ def backfill(
     since: Optional[str] = None,
     dry_run: bool = False,
     receipts_file: Optional[str] = None,
+    events_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Run the backfill and return a summary dict."""
+    """Run the backfill and return a summary dict.
+
+    Writes new pr_merged receipts to events/pr_merged.ndjson (ADR-005 ledger).
+    The receipts_file parameter is kept for backwards compatibility but is only
+    used to seed the already-receipted set (idempotency check).
+    events_path overrides the default events/pr_merged.ndjson destination.
+    """
     receipts_path = Path(receipts_file) if receipts_file else _resolve_receipts_path()
-    already_receipted = _load_receipted_pr_numbers(receipts_path)
+    resolved_events_path = events_path if events_path is not None else _resolve_events_pr_merged_path()
+    already_receipted = _load_receipted_pr_numbers(receipts_path, events_path=resolved_events_path)
 
     merged_prs = _gh_list_merged_prs(limit=limit, since=since)
 
@@ -156,6 +274,9 @@ def backfill(
         pr for pr in merged_prs
         if pr.get("number") is not None and int(pr["number"]) not in already_receipted
     ]
+
+    # Load dispatch_register events once for dispatch_id lookup
+    register_events = _load_dispatch_register_events()
 
     summary: Dict[str, Any] = {
         "total_merged_prs": len(merged_prs),
@@ -175,13 +296,24 @@ def backfill(
             "merged_at": pr.get("mergedAt", ""),
         }
 
+        # Derive dual-scheme fields
+        subject = pr.get("title", "") or pr.get("headRefName", "")
+        pr_id = _extract_pr_id_from_subject(subject)
+        dispatch_id = _lookup_dispatch_id_for_pr(pr_number, pr.get("headRefName", ""), register_events)
+        detail["pr_id"] = pr_id or ""
+        detail["dispatch_id"] = dispatch_id
+
         if dry_run:
             detail["action"] = "would_backfill"
         else:
             try:
-                receipt = _emit_backfill_receipt(pr, receipts_file=str(receipts_path))
+                receipt = _emit_backfill_receipt(
+                    pr,
+                    pr_id=pr_id or "",
+                    dispatch_id=dispatch_id,
+                    events_path=events_path,
+                )
                 detail["action"] = "backfilled"
-                detail["receipt_status"] = receipt.get("append_status", "unknown")
                 detail["register_ok"] = _emit_register_event(pr_number)
                 summary["backfilled"] += 1
             except Exception as exc:
