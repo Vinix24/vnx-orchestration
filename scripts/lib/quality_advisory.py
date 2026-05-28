@@ -42,6 +42,9 @@ class QualityCheck:
     message: str = ""
     evidence: str = ""
     action_required: bool = False
+    tool: Optional[str] = None
+    level: Optional[str] = None
+    code: Optional[str] = None
 
 
 @dataclass
@@ -62,6 +65,13 @@ class QualityAdvisory:
             "summary": self.summary,
             "t0_recommendation": self.t0_recommendation,
         }
+
+
+class CheckRecord(dict):
+    """Dict check record with attribute access for object-style callers."""
+
+    def __getattr__(self, name: str) -> Any:
+        return self.get(name)
 
 
 def get_changed_files(repo_root: Optional[Path] = None) -> List[Path]:
@@ -327,8 +337,12 @@ def _run_ruff_check(file_path: Path) -> List[QualityCheck]:
                     evidence=f"line={finding.get('location', {}).get('row')},code={ruff_code}",
                     action_required=False,
                 ))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        pass  # Linter not available or failed
+            if result.returncode != 0 and not findings:
+                checks.append(_tool_unavailable_check("ruff", file_path, "lint check", result=result))
+        elif result.returncode != 0:
+            checks.append(_tool_unavailable_check("ruff", file_path, "lint check", result=result))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as exc:
+        checks.append(_tool_unavailable_check("ruff", file_path, "lint check", exc=exc))
 
     return checks
 
@@ -362,8 +376,12 @@ def _run_shellcheck(file_path: Path) -> List[QualityCheck]:
                     evidence=f"line={finding.get('line')},code=SC{finding.get('code')}",
                     action_required=False,
                 ))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        pass  # Shellcheck not available or failed
+            if result.returncode != 0 and not findings:
+                checks.append(_tool_unavailable_check("shellcheck", file_path, "shell lint check", result=result))
+        elif result.returncode != 0:
+            checks.append(_tool_unavailable_check("shellcheck", file_path, "shell lint check", result=result))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as exc:
+        checks.append(_tool_unavailable_check("shellcheck", file_path, "shell lint check", exc=exc))
 
     return checks
 
@@ -398,10 +416,44 @@ def check_dead_code(file_path: Path) -> List[QualityCheck]:
                     evidence=f"line={match.group(2)},confidence={match.group(4)}%",
                     action_required=False,
                 ))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-        pass  # Vulture not available or failed
+        if result.returncode != 0 and not result.stdout.strip():
+            checks.append(_tool_unavailable_check("vulture", file_path, "dead-code check", result=result))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        checks.append(_tool_unavailable_check("vulture", file_path, "dead-code check", exc=exc))
 
     return checks
+
+
+def _tool_unavailable_check(
+    tool: str,
+    file_path: Path,
+    skipped_check: str,
+    exc: Optional[BaseException] = None,
+    result: Optional[subprocess.CompletedProcess[str]] = None,
+) -> QualityCheck:
+    error_class = "FileNotFoundError"
+    if exc is not None:
+        error_class = type(exc).__name__
+    if result is not None:
+        error_class = f"exit_{result.returncode}"
+
+    if error_class == "FileNotFoundError":
+        message = f"tool_unavailable: {tool} not installed; {skipped_check} skipped"
+    else:
+        message = f"tool_unavailable: {tool} failed ({error_class}); {skipped_check} skipped"
+
+    return QualityCheck(
+        check_id="tool_unavailable",
+        severity="warning",
+        file=str(file_path),
+        symbol=tool,
+        message=message,
+        evidence=f"tool={tool},error_class={error_class}",
+        action_required=False,
+        tool=tool,
+        level="warn",
+        code="tool_unavailable",
+    )
 
 
 def check_test_coverage_hygiene(changed_files: List[Path], repo_root: Path) -> List[QualityCheck]:
@@ -536,7 +588,7 @@ def _generate_open_items(checks: List[QualityCheck], blocking_only: bool) -> Lis
 
 
 def generate_quality_advisory(
-    changed_files: List[Path],
+    changed_files: List[Path | str],
     repo_root: Optional[Path] = None,
 ) -> QualityAdvisory:
     """Generate complete quality advisory for changed files.
@@ -552,23 +604,25 @@ def generate_quality_advisory(
         repo_root = Path.cwd()
 
     advisory = QualityAdvisory()
-    advisory.scope = [str(f) for f in changed_files]
+    changed_paths = [Path(f) for f in changed_files]
+    advisory.scope = [str(f) for f in changed_paths]
 
     all_checks: List[QualityCheck] = []
 
     # Run checks on each changed file
-    for file_path in changed_files:
+    for file_path in changed_paths:
         all_checks.extend(check_file_size(file_path))
         all_checks.extend(check_function_sizes(file_path))
         all_checks.extend(run_linting(file_path))
         all_checks.extend(check_dead_code(file_path))
 
     # Test coverage hygiene check (across all files)
-    all_checks.extend(check_test_coverage_hygiene(changed_files, repo_root))
+    all_checks.extend(check_test_coverage_hygiene(changed_paths, repo_root))
 
     # Convert checks to dict format
-    advisory.checks = [
-        {
+    advisory.checks = []
+    for c in all_checks:
+        record = CheckRecord({
             "check_id": c.check_id,
             "severity": c.severity,
             "file": c.file,
@@ -576,9 +630,14 @@ def generate_quality_advisory(
             "message": c.message,
             "evidence": c.evidence,
             "action_required": c.action_required,
-        }
-        for c in all_checks
-    ]
+        })
+        if c.tool is not None:
+            record["tool"] = c.tool
+        if c.level is not None:
+            record["level"] = c.level
+        if c.code is not None:
+            record["code"] = c.code
+        advisory.checks.append(record)
 
     # Calculate summary
     warning_count = sum(1 for c in all_checks if c.severity == "warning")

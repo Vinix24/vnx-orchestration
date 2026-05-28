@@ -11,6 +11,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import quality_advisory as quality_advisory_module
 from quality_advisory import (
     QualityCheck,
     check_file_size,
@@ -323,6 +324,26 @@ class TestQualityAdvisoryGeneration:
         assert "reason" in rec
         assert "suggested_dispatches" in rec
         assert "open_items" in rec
+
+    def test_missing_quality_tools_emit_tool_unavailable_warnings(self, tmp_path, monkeypatch):
+        """Missing ruff, shellcheck, and vulture should be visible warnings."""
+        py_file = tmp_path / "test.py"
+        py_file.write_text("x = 1\n")
+        sh_file = tmp_path / "test.sh"
+        sh_file.write_text("#!/usr/bin/env bash\necho ok\n")
+
+        def missing_tool(*args, **kwargs):
+            raise FileNotFoundError(args[0][0])
+
+        monkeypatch.setattr(quality_advisory_module.subprocess, "run", missing_tool)
+
+        advisory = generate_quality_advisory([py_file, sh_file], repo_root=tmp_path)
+        warnings = [c for c in advisory.checks if c.code == "tool_unavailable"]
+
+        assert {w.tool for w in warnings} == {"ruff", "shellcheck", "vulture"}
+        assert all(w.severity == "warning" for w in warnings)
+        assert all(w.level == "warn" for w in warnings)
+        assert all(w["code"] == "tool_unavailable" for w in warnings)
 
 
 class TestTerminalSnapshot:

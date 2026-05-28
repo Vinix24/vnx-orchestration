@@ -369,6 +369,7 @@ vnx doctor              # Validate everything
 ```
 
 Starter mode needs only bash, python3, git, and jq. Operator mode additionally requires tmux and fswatch.
+For full local-CI/audit functionality, install the quality extras with `pip install 'vnx-orchestration[quality]'`; install `shellcheck` separately as a system binary.
 
 ### Pipx (recommended for central deploy)
 

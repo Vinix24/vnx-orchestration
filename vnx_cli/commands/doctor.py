@@ -38,6 +38,12 @@ def _check_tools() -> list[Check]:
             status=PASS if found else FAIL,
             detail=found or f"{tool} not found in PATH",
         ))
+    shellcheck = shutil.which("shellcheck")
+    results.append(Check(
+        name="tool:shellcheck",
+        status=PASS if shellcheck else WARN,
+        detail=shellcheck or "shellcheck not found in PATH; shell lint checks will emit tool_unavailable warnings",
+    ))
     return results
 
 
