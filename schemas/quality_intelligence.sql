@@ -665,3 +665,42 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 
 INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', '0');
+
+-- ============================================================================
+-- ADR REGISTRY (PR-INT-1: queryable ADR table + FTS5 for Wave-5 injection)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS adrs (
+    adr_id              TEXT    NOT NULL,
+    project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+    status              TEXT    NOT NULL,
+    title               TEXT    NOT NULL,
+    decision_summary    TEXT    NOT NULL,
+    binding_rules       TEXT    NOT NULL DEFAULT '[]',
+    applies_to_tables   TEXT    NOT NULL DEFAULT '[]',
+    applies_to_skills   TEXT    NOT NULL DEFAULT '[]',
+    triggers            TEXT    NOT NULL DEFAULT '[]',
+    file_path           TEXT    NOT NULL,
+    indexed_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    source_hash         TEXT    NOT NULL,
+    PRIMARY KEY (adr_id, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_adrs_status ON adrs(status);
+
+-- FTS5 virtual table for semantic search over ADR content
+CREATE VIRTUAL TABLE IF NOT EXISTS adrs_fts USING fts5(
+    adr_id UNINDEXED,
+    title,
+    decision_summary,
+    binding_rules,
+    content='adrs',
+    content_rowid='rowid'
+);
+
+-- Triggers (adrs_ai, adrs_ad, adrs_au) are created by _migrate_v19 in quality_db_init.py.
+-- SQLite trigger bodies contain semicolons that confuse the schema SQL splitter,
+-- so they are managed via conn.execute() in Python, not via apply_script_if_below.
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.3.0-adr-registry', 'Add adrs table + FTS5 virtual table + sync triggers (PR-INT-1)');
