@@ -861,15 +861,6 @@ cmd_init_db() {
   log "[init-db] Quality intelligence database ready"
 }
 
-print_terminal_command() {
-  local terminal="$1"
-  local template_file="$2"
-  local index="$3"
-
-  printf '%s) %s\n' "$index" "$terminal"
-  printf '   cd %q && cat %q\n' "$PROJECT_ROOT" "$template_file"
-}
-
 # ── Comprehensive orchestration process cleanup ───────────────────────
 # Kills ALL VNX orchestration processes for this project. Previous
 # versions only killed smart_tap and dispatcher, causing duplicate
@@ -962,10 +953,6 @@ vnx_kill_all_orchestration() {
   fi
 
   sleep 1  # Brief pause to let processes exit cleanly
-}
-
-build_block_file() {
-  vnx_build_block_file "$1" "$2" "$MARKER_BEGIN" "$MARKER_END"
 }
 
 upsert_marked_block() {

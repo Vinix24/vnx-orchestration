@@ -5,8 +5,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .state_paths import _default_state_dir
+
+if TYPE_CHECKING:
+    from headless_context_tracker import HeadlessContextTracker
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +94,7 @@ def _split_handover_sections(handover_text: str) -> tuple[str, str]:
 def _write_rotation_handover(
     terminal_id: str,
     dispatch_id: str,
-    tracker: "HeadlessContextTracker",  # type: ignore[name-defined]
+    tracker: HeadlessContextTracker,
 ) -> None:
     """Write a rotation handover markdown file to .vnx-data/rotation_handovers/."""
     handover_dir = _default_state_dir().parent / "rotation_handovers"

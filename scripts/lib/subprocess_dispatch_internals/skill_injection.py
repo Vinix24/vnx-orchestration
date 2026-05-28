@@ -111,12 +111,6 @@ def _build_intelligence_section(
     )
 
 
-def _format_intelligence_items(items: list) -> str:
-    """Group items by class and render as markdown sections."""
-    from intelligence_injection import format_intelligence_items  # noqa: PLC0415
-    return format_intelligence_items(items)
-
-
 def _inject_skill_context(
     terminal_id: str,
     instruction: str,

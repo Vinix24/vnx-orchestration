@@ -134,6 +134,7 @@ __all__ = [
     "_normalize_repo_path",
     "_parse_dirty_files",
     "_extract_touched_paths_from_event",
+    "subprocess",
     "_detect_pending_handover",
     "_build_continuation_prompt",
     "_write_rotation_handover",
@@ -285,7 +286,6 @@ def _pool_heartbeat_loop(
     interval: float = 15.0,
 ) -> None:
     """Update terminal_leases.last_heartbeat_at every *interval* seconds."""
-    import threading as _thr
     while not stop_event.wait(timeout=interval):
         try:
             from pool_state_repo import PoolStateRepository
