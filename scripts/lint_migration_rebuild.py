@@ -60,9 +60,8 @@ def _apply_migrations(migrations: list[Path]) -> sqlite3.Connection:
         try:
             conn.executescript(sql)
         except sqlite3.Error as exc:
-            # Non-fatal: some migrations may use features sqlite does not support
-            # (e.g., FTS5); record but continue so we still build partial state
-            print(f"  [warn] sqlite error applying {mf.name}: {exc}", file=sys.stderr)
+            print(f"  [error] migration apply failed for {mf.name}: {exc}", file=sys.stderr)
+            raise RuntimeError(f"Migration apply failed for {mf.name}: {exc}") from exc
     return conn
 
 
@@ -75,7 +74,7 @@ def _capture_table_schema(conn: sqlite3.Connection, table: str) -> dict:
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         ]
     except sqlite3.Error:
-        cols = []
+        raise
 
     # unique indexes: set of frozensets of column names
     unique_indexes = set()
@@ -90,7 +89,7 @@ def _capture_table_schema(conn: sqlite3.Connection, table: str) -> dict:
                 )
                 unique_indexes.add((idx_name, idx_cols))
     except sqlite3.Error:
-        pass
+        raise
 
     # foreign keys: set of (from_col, to_table, to_col)
     fks = set()
@@ -98,7 +97,7 @@ def _capture_table_schema(conn: sqlite3.Connection, table: str) -> dict:
         for fk_row in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
             fks.add((fk_row[3].lower(), fk_row[2].lower(), fk_row[4].lower()))
     except sqlite3.Error:
-        pass
+        raise
 
     return {"columns": cols, "unique_indexes": list(unique_indexes), "foreign_keys": list(fks)}
 
@@ -194,10 +193,15 @@ def main(migrations_directory: Optional[Path] = None) -> int:
     for mf in all_migrations:
         sql_text = mf.read_text()
         if RENAME_PATTERN.search(sql_text):
-            result = _check_migration(mf, all_migrations)
+            try:
+                result = _check_migration(mf, all_migrations)
+            except (RuntimeError, Exception) as exc:
+                print(f"  [fatal] gate error for {mf.name}: {exc}", file=sys.stderr)
+                results.append({"file": mf.name, "status": "error", "drifts": [], "error": str(exc)})
+                continue
             results.append(result)
 
-    failures = [r for r in results if r["status"] == "fail"]
+    failures = [r for r in results if r["status"] in ("fail", "error")]
     output = {
         "scanned": results,
         "total_files": len(all_migrations),

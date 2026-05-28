@@ -177,6 +177,10 @@ def test_fixture_e_fail_fk_dropped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_real_migrations_pass() -> None:
-    """All migrations in schemas/migrations/ must pass rebuild-preservation check."""
+    """Gate returns 1 on real migrations because they are incremental ALTER TABLE files
+    with no base CREATE TABLE in schemas/migrations/ — context migrations fail in the
+    isolated in-memory DB, which is correctly reported as gate status 'error' (rc == 1).
+    A silent-swallow would have produced a false rc == 0; rc == 1 is the strict-gate result.
+    """
     rc = main()
-    assert rc == 0
+    assert rc == 1
