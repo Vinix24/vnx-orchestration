@@ -197,7 +197,7 @@ class TestSingleShotSuccess(_LaneTestCase):
         expected_abs = str(self.state_dir / "scripts" / "append_receipt.py")
         delivered = "\n".join(fake.pasted)
         self.assertIn(
-            "python3 " + expected_abs,
+            "python3 '" + expected_abs + "'",
             delivered,
             "absolute path to append_receipt.py must appear in the delivered body",
         )
@@ -509,63 +509,53 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
 
 
 class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
-    def test_completion_protocol_pins_receipts_file(self):
-        """Pin test: protocol contains --receipts-file with lane's exact resolved path,
-        and invoking append_receipt.py with the flag writes to that exact file."""
-        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
-        lane = self._make_lane(fake)
+    def test_completion_protocol_env_pins_receipts_file_landing(self):
+        """Env-pin: VNX_STATE_DIR/VNX_DATA_DIR are prepended to the python3 command.
 
-        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+        Invoking the extracted shell command (via subprocess shell=True) must write
+        the receipt to the lane's state_dir/t0_receipts.ndjson — proving that env is
+        the working channel (--receipts-file is also present as defensive belt-and-suspenders).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_dir = tmp_path / "state"
+            state_dir.mkdir()
 
-        # Part 1: assert the flag appears in the protocol string, single-quoted.
-        expected_flag = f"--receipts-file '{lane._receipts_file}'"
-        self.assertIn(
-            expected_flag,
-            protocol,
-            f"completion protocol must contain {expected_flag!r}",
-        )
+            real_project_root = SCRIPT_DIR.parent
 
-        # Part 2: integration — invoke append_receipt.py with --receipts-file
-        # and assert the receipt lands at the explicit target, not the default.
-        append_receipt_py = SCRIPT_DIR / "append_receipt.py"
-        with tempfile.NamedTemporaryFile(suffix=".ndjson", delete=False) as tf:
-            tmp_receipts = Path(tf.name)
-        self.addCleanup(lambda: tmp_receipts.unlink(missing_ok=True))
+            lane = TmuxInteractiveDispatch(
+                state_dir=state_dir,
+                receipts_file=state_dir / "t0_receipts.ndjson",
+                project_root=real_project_root,
+            )
 
-        receipt_json = json.dumps({
-            "event_type": "subprocess_completion",
-            "dispatch_id": self.DISPATCH_ID,
-            "terminal": "T1",
-            "status": "done",
-            "source": "tmux_interactive",
-            "timestamp": "2026-05-28T00:00:00Z",
-        })
-        proc = subprocess.run(
-            [
-                "python3",
-                str(append_receipt_py),
-                "--receipts-file",
-                str(tmp_receipts),
-                "--receipt",
-                receipt_json,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(
-            proc.returncode,
-            0,
-            f"append_receipt.py exited {proc.returncode}: {proc.stderr}",
-        )
-        self.assertTrue(
-            tmp_receipts.exists(),
-            "--receipts-file target must exist after append_receipt.py write",
-        )
-        lines = [ln for ln in tmp_receipts.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        self.assertEqual(len(lines), 1, "exactly one receipt line must be written to the explicit target")
-        written = json.loads(lines[0])
-        self.assertEqual(written["dispatch_id"], self.DISPATCH_ID)
-        self.assertEqual(written["status"], "done")
+            protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+            # Part 1: env vars present in the command string.
+            self.assertIn(f"VNX_STATE_DIR='{state_dir}'", protocol)
+            self.assertIn(f"VNX_DATA_DIR='{tmp_path}'", protocol)
+
+            # Part 2: extract the bash command and invoke it via shell.
+            m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+            self.assertIsNotNone(m, "could not extract bash command from completion protocol")
+            cmd_string = m.group(1).strip()
+
+            proc = subprocess.run(cmd_string, shell=True, capture_output=True, text=True)
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"shell command exited {proc.returncode}: stderr={proc.stderr}",
+            )
+
+            receipts_ndjson = state_dir / "t0_receipts.ndjson"
+            self.assertTrue(
+                receipts_ndjson.exists(),
+                f"receipt must land at {receipts_ndjson}",
+            )
+            lines = [
+                ln for ln in receipts_ndjson.read_text(encoding="utf-8").splitlines() if ln.strip()
+            ]
+            self.assertEqual(len(lines), 1, "exactly one receipt line must be written")
 
 
 class TestStateDirMatchesCanonical(unittest.TestCase):
