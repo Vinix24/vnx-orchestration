@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # VNX Command: start
-# Extracted from bin/vnx — launches the VNX tmux session with 2x2 grid.
+# Extracted from bin/vnx — launches the VNX T0 tmux session.
 #
 # This file is sourced by bin/vnx's command loader. All functions and variables
 # from the main script (log, err, vnx_kill_all_orchestration, _interactive_startup_menu,
@@ -139,26 +139,38 @@ cmd_start() {
     source "$runtime_dir/config.env"
     log "Loaded project config: $runtime_dir/config.env"
   fi
-  # PR-3: Provider configuration now uses Python module (vnx_start_runtime.py)
-  # for unified command building. Shell vars are still read from env for
-  # backward compat, but the Python module is the source of truth for
-  # command construction (eliminates duplicated case statements).
-  local t1_provider="${VNX_T1_PROVIDER:-claude_code}"
-  local t2_provider="${VNX_T2_PROVIDER:-claude_code}"
-  local t3_provider="${VNX_T3_PROVIDER:-claude_code}"
+  # Resolve the T0 provider once. Workers are spawned on demand outside startup.
+  local VNX_PROVIDER="${VNX_T0_PROVIDER:-${VNX_PROVIDER:-claude_code}}"
   local gemini_model="${VNX_GEMINI_MODEL:-gemini-2.5-pro}"
   local codex_model="${VNX_CODEX_MODEL:-gpt-5.1-codex-mini}"
   local t0_flags="${VNX_T0_FLAGS:-}"
 
   # Skip-permissions flags (from preset/custom config)
   local t0_skip="${VNX_T0_SKIP_PERMISSIONS:-0}"
-  local t1_skip="${VNX_T1_SKIP_PERMISSIONS:-0}"
-  local t2_skip="${VNX_T2_SKIP_PERMISSIONS:-0}"
-  local t3_skip="${VNX_T3_SKIP_PERMISSIONS:-0}"
 
   # Queue popup toggle (from preset/custom config)
   local queue_popup_enabled="${VNX_QUEUE_POPUP_ENABLED:-1}"
   export VNX_QUEUE_POPUP_ENABLED="$queue_popup_enabled"
+
+  local t0_model="${VNX_T0_MODEL:-default}"
+  local t0_cmd=""
+  local t0_provider_for_state="claude_code"
+  local t0_provider_label="Claude"
+  local t0_skip_flag=""
+  case "$VNX_PROVIDER" in
+    codex_cli|codex)
+      [ "$t0_skip" = "1" ] && t0_skip_flag=" --full-auto"
+      t0_cmd="codex -m $codex_model$t0_skip_flag"
+      t0_provider_for_state="codex"
+      t0_provider_label="Codex CLI" ;;
+    gemini_cli|gemini)
+      t0_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'"
+      t0_provider_for_state="gemini"
+      t0_provider_label="Gemini CLI" ;;
+    *)
+      [ "$t0_skip" = "1" ] && t0_skip_flag=" --dangerously-skip-permissions"
+      t0_cmd="claude --model $t0_model $t0_flags$t0_skip_flag" ;;
+  esac
 
   if ! command -v tmux >/dev/null 2>&1; then
     err "tmux is required for 'vnx start'. Install: brew install tmux"
@@ -170,7 +182,7 @@ cmd_start() {
   mkdir -p "$state_dir" \
            "$dispatch_dir"/{pending,active,completed,rejected} \
            "$log_dir" \
-           "$terms_dir"/{T0,T1,T2,T3}
+           "$terms_dir/T0"
 
   # If session already exists, attach to it. Auto-heal stale sessions that only
   # contain idle shells (no active Claude/Codex/Gemini process).
@@ -180,58 +192,23 @@ cmd_start() {
       | awk '$1=="node" || $1=="claude" || $1=="codex" || $1=="gemini" {c++} END {print c+0}')"
 
     # If a profile was explicitly selected, kill the existing session and restart
-    # fresh so the chosen providers are actually applied to T1/T2.
+    # fresh so the chosen T0 provider is actually applied.
     if [ -n "$profile_name" ] && [ "${active_cli_count:-0}" -gt 0 ]; then
-      log "Profile '$profile_name' selected — restarting session to apply providers (T1=$t1_provider, T2=$t2_provider)..."
+      log "Profile '$profile_name' selected — restarting session to apply T0 provider ($VNX_PROVIDER)..."
       vnx_kill_all_orchestration "$scripts_dir" "$log_dir" "profile_restart"
       tmux kill-session -t "$session_name" 2>/dev/null || true
       sleep 1
       # Fall through to fresh session creation below.
 
     elif [ "${active_cli_count:-0}" -eq 0 ]; then
-      log "Detected stale $session_name session (shells only). Re-launching terminal CLIs..."
+      log "Detected stale $session_name session (shells only). Re-launching T0 CLI..."
 
       # Kill ALL stale orchestration processes before re-launching CLIs.
       # Without this, re-heal creates duplicate supervisors/receipt_processors.
       vnx_kill_all_orchestration "$scripts_dir" "$log_dir" "session_reheal"
 
-      local T0 T1 T2 T3
+      local T0
       T0="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T0" '$2==p {print $1; exit}')"
-      T1="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T1" '$2==p {print $1; exit}')"
-      T2="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T2" '$2==p {print $1; exit}')"
-      T3="$(tmux list-panes -t "$session_name" -F '#{pane_id} #{pane_current_path}' 2>/dev/null | awk -v p="$terms_dir/T3" '$2==p {print $1; exit}')"
-
-      # Build launch commands with skip-permissions support (re-heal path)
-      # Model selection: use VNX_T{n}_MODEL env vars if set, otherwise defaults.
-      local t0_reheal_cmd t1_cmd t2_cmd t3_reheal_cmd
-      local t0_sf="" t1_sf="" t2_sf="" t3_sf=""
-      local t0_model="${VNX_T0_MODEL:-default}"
-      local t1_model="${VNX_T1_MODEL:-sonnet}"
-      local t2_model="${VNX_T2_MODEL:-sonnet}"
-      local t3_model="${VNX_T3_MODEL:-default}"
-      [ "$t0_skip" = "1" ] && t0_sf=" --dangerously-skip-permissions"
-      [ "$t3_skip" = "1" ] && t3_sf=" --dangerously-skip-permissions"
-      t0_reheal_cmd="claude --model $t0_model $t0_flags$t0_sf"
-      t3_reheal_cmd="claude --model $t3_model $t0_flags$t3_sf"
-
-      case "$t1_provider" in
-        codex_cli|codex)
-          [ "$t1_skip" = "1" ] && t1_sf=" --full-auto"
-          t1_cmd="codex -m $codex_model$t1_sf" ;;
-        gemini_cli|gemini) t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-        *)
-          [ "$t1_skip" = "1" ] && t1_sf=" --dangerously-skip-permissions"
-          t1_cmd="claude --model $t1_model$t1_sf" ;;
-      esac
-      case "$t2_provider" in
-        codex_cli|codex)
-          [ "$t2_skip" = "1" ] && t2_sf=" --full-auto"
-          t2_cmd="codex -m $codex_model$t2_sf" ;;
-        gemini_cli|gemini) t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-        *)
-          [ "$t2_skip" = "1" ] && t2_sf=" --dangerously-skip-permissions"
-          t2_cmd="claude --model $t2_model$t2_sf" ;;
-      esac
 
       local node_path=""
       node_path="$(_resolve_node_path 2>/dev/null)" || node_path=""
@@ -240,44 +217,25 @@ cmd_start() {
       local path_prefix="$VNX_HOME/bin"
       [ -n "$node_path" ] && path_prefix="$path_prefix:$node_path"
 
-      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_reheal_cmd" C-m
-      [ -n "$T1" ] && tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
-      [ -n "$T2" ] && tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-      [ -n "$T3" ] && tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_reheal_cmd" C-m
+      [ -n "$T0" ] && tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
 
-      if [ -n "$T0" ] && [ -n "$T1" ] && [ -n "$T2" ] && [ -n "$T3" ]; then
+      if [ -n "$T0" ]; then
         cat > "$state_dir/panes.json" <<PJSON
 {
   "session": "$session_name",
-  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
-  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "claude_code" },
-  "T1": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" },
-  "tracks": {
-    "A": { "pane_id": "$T1", "track": "A", "model": "$t1_model", "provider": "$t1_provider" },
-    "B": { "pane_id": "$T2", "track": "B", "model": "$t2_model", "provider": "$t2_provider" },
-    "C": { "pane_id": "$T3", "track": "C", "model": "$t3_model", "role": "deep", "provider": "$t3_provider" }
-  }
+  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "$t0_provider_for_state" },
+  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "$t0_provider_for_state" },
+  "tracks": {}
 }
 PJSON
-        # Reset terminal state to idle on session re-heal
-        local _ts
-        _ts="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+        # Startup creates T0 only; workers populate runtime state on demand.
         cat > "$state_dir/terminal_state.json" <<TSJSON
 {
   "schema_version": 1,
-  "terminals": {
-    "T1": { "terminal_id": "T1", "status": "idle", "last_activity": "$_ts", "version": 1 },
-    "T2": { "terminal_id": "T2", "status": "idle", "last_activity": "$_ts", "version": 1 },
-    "T3": { "terminal_id": "T3", "status": "idle", "last_activity": "$_ts", "version": 1 }
-  }
+  "terminals": {}
 }
 TSJSON
         tmux pipe-pane -o -t "$T0" "cat >> '$state_dir/t0_conversation.log'"
-        tmux pipe-pane -o -t "$T1" "cat >> '$state_dir/t1_conversation.log'"
-        tmux pipe-pane -o -t "$T2" "cat >> '$state_dir/t2_conversation.log'"
-        tmux pipe-pane -o -t "$T3" "cat >> '$state_dir/t3_conversation.log'"
 
         # Save declarative session profile (PR-3: A-R4, A-R5)
         python3 "$VNX_HOME/scripts/lib/tmux_session_profile.py" save \
@@ -351,11 +309,11 @@ TSJSON
   fi
 
   # ── Terminal .claude + .vnx-data symlinks ────────────────────────────
-  # Symlink each terminal's .claude → project root .claude so Claude Code
-  # discovers skills when CWD is a terminal subdirectory.
+  # Symlink T0's .claude → project root .claude so Claude Code discovers
+  # skills when CWD is the terminal subdirectory.
   # Symlink .vnx-data so report writes from terminal CWD land in the
   # project's runtime directory (not a relative path that escapes).
-  for d in T0 T1 T2 T3; do
+  for d in T0; do
     if [ ! -L "$terms_dir/$d/.claude" ]; then
       rm -rf "$terms_dir/$d/.claude"
       ln -s "$PROJECT_ROOT/.claude" "$terms_dir/$d/.claude"
@@ -369,71 +327,37 @@ TSJSON
   # ── Kill ALL stale orchestration processes ──────────────────────────────
   vnx_kill_all_orchestration "$scripts_dir" "$log_dir" "session_restart"
 
-  log "Launching VNX tmux session with 2x2 grid..."
+  log "Launching VNX tmux session with T0 only..."
 
-  # ── 2x2 grid layout (single window, 4 panes) ─────────────────────────
-  local T0 T1 T2 T3
+  # ── T0-only layout (single window, one pane) ─────────────────────────
+  local T0
   T0=$(tmux new-session -d -s "$session_name" -n main -c "$terms_dir/T0" -P -F '#{pane_id}')
   tmux set-option -t "$session_name" -g allow-rename off
   tmux set-window-option -t "$session_name:main" automatic-rename off
   tmux set-window-option -t "$session_name:main" allow-rename off
-  T1=$(tmux split-window -h -t "$T0" -c "$terms_dir/T1" -P -F '#{pane_id}')
-  T2=$(tmux split-window -v -t "$T0" -c "$terms_dir/T2" -P -F '#{pane_id}')
-  T3=$(tmux split-window -v -t "$T1" -c "$terms_dir/T3" -P -F '#{pane_id}')
 
-  # ── T1 provider configuration ─────────────────────────────────────────
-
-  # Pane titles and UI.
+  # Pane title and UI.
   tmux select-pane -t "$T0" -T "T0"
-  tmux select-pane -t "$T2" -T "T2"
-  tmux select-pane -t "$T3" -T "T3"
-
-  # Provider-aware pane titles
-  case "$t1_provider" in
-    codex_cli|codex) tmux select-pane -t "$T1" -T "T1 [CODEX]" ;;
-    gemini_cli|gemini) tmux select-pane -t "$T1" -T "T1 [GEMINI]" ;;
-    *) tmux select-pane -t "$T1" -T "T1" ;;
-  esac
-  case "$t2_provider" in
-    codex_cli|codex) tmux select-pane -t "$T2" -T "T2 [CODEX]" ;;
-    gemini_cli|gemini) tmux select-pane -t "$T2" -T "T2 [GEMINI]" ;;
-    *) tmux select-pane -t "$T2" -T "T2" ;;
-  esac
   tmux set -t "$session_name" -g pane-border-status top
   tmux set -t "$session_name" -g pane-border-format "#{pane_title}"
   tmux set -t "$session_name" -g mouse on
 
   # ── State files (panes.json + terminal_state.json) ─────────────────────
-  # PR-3: Delegated to Python for consistency and testability.
-  PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-    python3 "$VNX_HOME/scripts/lib/vnx_start_runtime.py" write-state \
-      --state-dir "$state_dir" \
-      --session "$session_name" \
-      --panes "{\"T0\":\"$T0\",\"T1\":\"$T1\",\"T2\":\"$T2\",\"T3\":\"$T3\"}" \
-    2>/dev/null || {
-      # Fallback: write inline if Python fails (resilience)
-      log "[start] WARN: Python state writer failed, using inline fallback"
-      local _ts; _ts="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
-      cat > "$state_dir/panes.json" <<PJSON
+  # Startup maps only T0. Workers create their own runtime lanes on demand.
+  cat > "$state_dir/panes.json" <<PJSON
 {
   "session": "$session_name",
-  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "${VNX_T0_MODEL:-default}", "provider": "claude_code" },
-  "T1": { "pane_id": "$T1", "track": "A", "model": "${VNX_T1_MODEL:-sonnet}", "provider": "$t1_provider" },
-  "T2": { "pane_id": "$T2", "track": "B", "model": "${VNX_T2_MODEL:-sonnet}", "provider": "$t2_provider" },
-  "T3": { "pane_id": "$T3", "track": "C", "model": "${VNX_T3_MODEL:-default}", "role": "deep", "provider": "${VNX_T3_PROVIDER:-claude_code}" }
+  "t0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "$t0_provider_for_state" },
+  "T0": { "pane_id": "$T0", "role": "orchestrator", "do_not_target": true, "model": "$t0_model", "provider": "$t0_provider_for_state" },
+  "tracks": {}
 }
 PJSON
-      cat > "$state_dir/terminal_state.json" <<TSJSON
+  cat > "$state_dir/terminal_state.json" <<TSJSON
 {
   "schema_version": 1,
-  "terminals": {
-    "T1": { "terminal_id": "T1", "status": "idle", "last_activity": "$_ts", "version": 1 },
-    "T2": { "terminal_id": "T2", "status": "idle", "last_activity": "$_ts", "version": 1 },
-    "T3": { "terminal_id": "T3", "status": "idle", "last_activity": "$_ts", "version": 1 }
-  }
+  "terminals": {}
 }
 TSJSON
-    }
   log "State files written (panes.json + terminal_state.json)"
 
   # ── Declarative session profile (PR-3: A-R4, A-R5) ──────────────────────
@@ -444,34 +368,15 @@ TSJSON
     2>/dev/null || log "[start] WARN: session profile save failed (non-fatal)"
 
   # ── Worktree initialization (if enabled) ────────────────────────────
-  # Per-terminal worktrees are DEPRECATED. Use 'vnx new-worktree <name>' instead.
-  # Legacy opt-in: set VNX_WORKTREES=true explicitly to re-enable.
+  # T0-only startup does not create per-terminal worker worktrees. Use
+  # 'vnx new-worktree <name>' for feature worktrees.
   if [ "${VNX_WORKTREES:-false}" = "true" ]; then
-    log "DEPRECATED: per-terminal worktrees are deprecated. Use 'vnx new-worktree <name>' for feature worktrees."
-    local worktree_script="$scripts_dir/vnx_worktree_setup.sh"
-    if [ -f "$worktree_script" ]; then
-      log "Initializing per-terminal worktrees (legacy mode)..."
-      bash "$worktree_script" init-terminals main 2>&1 | while read -r line; do log "WORKTREE: $line"; done
-
-      # Register worktree paths in terminal_state.json
-      for _wt_t in T1 T2 T3; do
-        local _wt_dir="${PROJECT_ROOT}-wt-${_wt_t}"
-        if [ -d "$_wt_dir" ]; then
-          python3 "$scripts_dir/terminal_state_shadow.py" \
-            set-worktree "$_wt_t" "$_wt_dir" 2>/dev/null || \
-            log "WARNING: Failed to register worktree path for $_wt_t"
-        fi
-      done
-      log "Worktree paths registered in terminal_state.json"
-    fi
+    log "Ignoring VNX_WORKTREES=true: T0-only startup no longer creates fixed worker worktrees."
   fi
 
   # ── Conversation capture (pipe-pane) ───────────────────────────────────
   tmux pipe-pane -o -t "$T0" "cat >> '$state_dir/t0_conversation.log'"
-  tmux pipe-pane -o -t "$T1" "cat >> '$state_dir/t1_conversation.log'"
-  tmux pipe-pane -o -t "$T2" "cat >> '$state_dir/t2_conversation.log'"
-  tmux pipe-pane -o -t "$T3" "cat >> '$state_dir/t3_conversation.log'"
-  log "Conversation capture enabled for T0-T3"
+  log "Conversation capture enabled for T0"
 
   # ── Orchestration components (if available) ────────────────────────────
   if [ -f "$scripts_dir/vnx_supervisor_simple.sh" ]; then
@@ -628,7 +533,7 @@ RESOLVER
   tmux set-environment -t "$session_name" VNX_DISPATCH_DIR "$dispatch_dir"
   tmux set-environment -t "$session_name" VNX_SKILLS_DIR "${VNX_SKILLS_DIR:-}"
 
-  # ── Launch CLI in each pane ───────────────────────────────────────────
+  # ── Launch CLI in the T0 pane ─────────────────────────────────────────
   # MCP FIX: Source shell profile to ensure MCP servers inherit proper
   # environment (node, nvm, PATH). Without this, MCP servers fail in tmux.
   # SKILL FIX: Explicit cd to terminal dir so Claude Code discovers
@@ -643,61 +548,7 @@ RESOLVER
   local path_prefix="$VNX_HOME/bin"
   [ -n "$node_path" ] && path_prefix="$path_prefix:$node_path"
 
-  # Provider-aware launch commands for T1, T2, and T3
-  # Skip-permissions: --dangerously-skip-permissions for Claude, --full-auto for Codex, --yolo already on Gemini
-  local t0_cmd t1_cmd t2_cmd t3_cmd
-  local t0_skip_flag="" t1_skip_flag="" t2_skip_flag="" t3_skip_flag=""
-  # Model selection: use VNX_T{n}_MODEL env vars if set, otherwise defaults.
-  local t0_model="${VNX_T0_MODEL:-default}"
-  local t1_model="${VNX_T1_MODEL:-sonnet}"
-  local t2_model="${VNX_T2_MODEL:-sonnet}"
-  local t3_model="${VNX_T3_MODEL:-default}"
-
-  # T0 skip-permissions (Claude only)
-  [ "$t0_skip" = "1" ] && t0_skip_flag=" --dangerously-skip-permissions"
-  t0_cmd="claude --model $t0_model $t0_flags$t0_skip_flag"
-
-  case "$t1_provider" in
-    codex_cli|codex)
-      [ "$t1_skip" = "1" ] && t1_skip_flag=" --full-auto"
-      t1_cmd="codex -m $codex_model$t1_skip_flag" ;;
-    gemini_cli|gemini)
-      t1_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-    *)
-      [ "$t1_skip" = "1" ] && t1_skip_flag=" --dangerously-skip-permissions"
-      t1_cmd="claude --model $t1_model $t0_flags$t1_skip_flag" ;;
-  esac
-  case "$t2_provider" in
-    codex_cli|codex)
-      [ "$t2_skip" = "1" ] && t2_skip_flag=" --full-auto"
-      t2_cmd="codex -m $codex_model$t2_skip_flag" ;;
-    gemini_cli|gemini)
-      t2_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-    *)
-      [ "$t2_skip" = "1" ] && t2_skip_flag=" --dangerously-skip-permissions"
-      t2_cmd="claude --model $t2_model $t0_flags$t2_skip_flag" ;;
-  esac
-  case "$t3_provider" in
-    codex_cli|codex)
-      [ "$t3_skip" = "1" ] && t3_skip_flag=" --full-auto"
-      t3_cmd="codex -m $codex_model$t3_skip_flag" ;;
-    gemini_cli|gemini)
-      t3_cmd="gemini --yolo -m $gemini_model --include-directories '$PROJECT_ROOT'" ;;
-    *)
-      [ "$t3_skip" = "1" ] && t3_skip_flag=" --dangerously-skip-permissions"
-      t3_cmd="claude --model $t3_model $t0_flags$t3_skip_flag" ;;
-  esac
   tmux send-keys -t "$T0" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=orchestrator && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T0' && $t0_cmd" C-m
-  tmux send-keys -t "$T1" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=A && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T1' && $t1_cmd" C-m
-  tmux send-keys -t "$T2" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=B && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T2' && $t2_cmd" C-m
-  tmux send-keys -t "$T3" "source ~/.zshrc 2>/dev/null && $env_clean && $env_set && export PATH=$path_prefix:\$PATH && export CLAUDE_ROLE=worker && export CLAUDE_TRACK=C && export CLAUDE_PROJECT_DIR='$PROJECT_ROOT' && cd '$terms_dir/T3' && $t3_cmd" C-m
-
-  # ── Grid balancing (equal pane sizes) ────────────────────────────────
-  local win_h half
-  win_h=$(tmux display-message -t "$session_name" -p '#{window_height}' 2>/dev/null || echo 40)
-  half=$(( win_h / 2 ))
-  tmux resize-pane -t "$T0" -y "$half" 2>/dev/null || true
-  tmux resize-pane -t "$T2" -y "$half" 2>/dev/null || true
 
   # Focus T0.
   tmux select-pane -t "$T0"
@@ -706,29 +557,14 @@ RESOLVER
   echo ""
   echo "VNX SESSION LAUNCHED"
   echo ""
-  local t1_label="Claude Sonnet" t2_label="Claude Sonnet" t3_label="Claude Opus"
-  case "$t1_provider" in
-    codex_cli|codex) t1_label="Codex CLI" ;;
-    gemini_cli|gemini) t1_label="Gemini CLI" ;;
-  esac
-  case "$t2_provider" in
-    codex_cli|codex) t2_label="Codex CLI" ;;
-    gemini_cli|gemini) t2_label="Gemini CLI" ;;
-  esac
-  case "$t3_provider" in
-    codex_cli|codex) t3_label="Codex CLI" ;;
-    gemini_cli|gemini) t3_label="Gemini CLI" ;;
-  esac
   [ -n "$profile_name" ] && echo "Profile: $profile_name"
   [ -n "$preset_name" ] && echo "Preset: $preset_name"
-  echo "Layout: 2x2 grid  |  T0: Opus  |  T1: $t1_label  |  T2: $t2_label  |  T3: $t3_label"
+  echo "Started T0 in tmux session $session_name. Workers spawn on-demand (subprocess or leaseless tmux lane); attach with \`tmux attach -t vnx-<dispatch_id>\` when needed."
+  echo "Layout: T0 only  |  T0: $t0_provider_label ($t0_model)"
 
   # Show skip-permissions status
   local skip_summary=""
   [ "$t0_skip" = "1" ] && skip_summary="${skip_summary}T0 "
-  [ "$t1_skip" = "1" ] && skip_summary="${skip_summary}T1 "
-  [ "$t2_skip" = "1" ] && skip_summary="${skip_summary}T2 "
-  [ "$t3_skip" = "1" ] && skip_summary="${skip_summary}T3 "
   if [ -n "$skip_summary" ]; then
     echo "Skip-permissions: ${skip_summary}"
   fi
@@ -739,7 +575,6 @@ RESOLVER
   echo "  Ctrl+G ......... Open dispatch queue popup"
   echo "  Ctrl+B Q ....... Open popup (tmux prefix style)"
   echo "  Ctrl+B D ....... Detach (keep running)"
-  echo "  Mouse .......... Click to select panes"
   echo ""
   echo "Logs: $log_dir/"
   echo ""
