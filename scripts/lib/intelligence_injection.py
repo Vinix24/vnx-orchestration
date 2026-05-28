@@ -223,7 +223,8 @@ def fetch_adr_context_section(
         try:
             from project_scope import current_project_id  # noqa: PLC0415
             _pid = current_project_id()
-        except Exception:
+        except (KeyError, AttributeError) as e:
+            logger.debug('project_id not in dispatch context, using vnx-dev default: %s', e)
             _pid = "vnx-dev"
 
     quality_db_path = state_dir / "quality_intelligence.db"
