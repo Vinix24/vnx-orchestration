@@ -1,7 +1,7 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-28T12:06:29.753025+00:00
+**Last updated**: 2026-05-28T20:58:00.607636+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
@@ -117,16 +117,6 @@ _Last 14 days — sourced from git merge commits._
 - #503 — fix(rp): bootstrap audit ordering + test infra hardening (close OI-1450/1451/1452) (#503) (2026-05-15)
 - #502 — fix(dispatcher): log stderr, script_dir leak, receipt processor bootstrap-mode (#502) (2026-05-15)
 - #500 — chore(hardening): narrow silent-except across replay_harness/cleanup_worker_exit/conversation_analyzer (9 findings, OI-1437) (#500) (2026-05-15)
-- #499 — chore(hardening): narrow silent-except in session_resolver.py (4 findings, OI-1437) (#499) (2026-05-14)
-- #498 — chore(hardening): narrow silent-except in api_operator.py (5 findings, OI-1437) (#498) (2026-05-14)
-- #497 — chore(hardening): narrow silent-except in append_receipt payload.py (5 findings, OI-1437) (#497) (2026-05-14)
-- #496 — chore(hardening): narrow silent-except in dispatch_register.py (5 findings, OI-1437) (#496) (2026-05-14)
-- #495 — chore(hardening): narrow silent-except in api_intelligence.py (6 findings, OI-1437) (#495) (2026-05-14)
-- #494 — chore(hardening): narrow silent-except in learning_loop.py (5 findings, OI-1437) (#494) (2026-05-14)
-- #493 — chore(hardening): narrow silent-except in gather_intelligence.py (6 findings, OI-1437) (#493) (2026-05-14)
-- #492 — chore(hardening): narrow silent-except in intelligence_selector.py (10 findings, OI-1437) (#492) (2026-05-14)
-- #491 — chore(hardening): narrow silent-except in build_t0_state.py (13 findings, OI-1437) (#491) (2026-05-14)
-- #489 — chore(contrib): add CONTRIBUTING.md + ci lint gate (atomic-write + silent-except) (#489) (2026-05-14)
 
 **WAVE 5**
 - #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
@@ -148,8 +138,6 @@ _Last 14 days — sourced from git merge commits._
 - #512 — feat(wave4.6): PR-4.6.5 — litellm_spawn handler extracted from litellm_adapter (#512) (2026-05-15)
 - #511 — feat(wave4.6): PR-4.6.3 — codex_spawn handler extracted from codex_adapter (#511) (2026-05-15)
 - #510 — feat(wave4.6): PR-4.6.4 — gemini_spawn handler extracted from gemini_adapter (#510) (2026-05-15)
-- #490 — feat(wave4.6): PR-4.6.2 — extract claude_spawn from subprocess_dispatch (byte-identical) (#490) (2026-05-14)
-- #488 — feat(wave4.6): PR-4.6.1 — provider_dispatch.py entry-point (additive shim) (#488) (2026-05-14)
 
 **WAVE5**
 - #532 — feat(wave5): PR-5.7 — operator demo runbook + Control Centre docs + completion report (#532) (2026-05-16)
@@ -199,5 +187,11 @@ _No completed features found in register or PR history._
 ## Planned (from ROADMAP.yaml)
 
 ### roadmap-autopilot — Roadmap Autopilot, Auto-Next Feature Loading, and Multi-Reviewer Gates
+Status: planned
+
+### fut-1 — Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1); seeding + composite-FK deferred to PR-FUT-2
+Status: active
+
+### fut-2 — Track tenant-scoping per ADR-007 — composite PK over project_id, seeding from roadmap, composite-FK dispatches.track → tracks(track_id, project_id), project-aware CLI
 Status: planned
 

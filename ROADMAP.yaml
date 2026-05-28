@@ -14,3 +14,24 @@ features:
       - claude_github_optional
     depends_on: []
     status: planned
+
+  - feature_id: fut-1
+    title: "Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1); seeding + composite-FK deferred to PR-FUT-2"
+    branch_name: feat/fut-1-track-schema
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on: []
+    status: active
+
+  - feature_id: fut-2
+    title: "Track tenant-scoping per ADR-007 — composite PK over project_id, seeding from roadmap, composite-FK dispatches.track → tracks(track_id, project_id), project-aware CLI"
+    branch_name: feat/fut-2-track-tenant-scope
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - fut-1
+    status: planned

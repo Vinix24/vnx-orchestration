@@ -391,12 +391,12 @@ class TestV21ProjectIdPreservation:
 
 
 # ---------------------------------------------------------------------------
-# sqlite_sequence preservation across 0022 and 0023 rebuilds
+# sqlite_sequence preservation across 0022 rebuild
 # ---------------------------------------------------------------------------
 
 class TestSqliteSequencePreservation:
-    """AUTOINCREMENT sequence must survive the RENAME→CREATE→INSERT→DROP rebuilds
-    in both 0022 and 0023 so IDs stay monotonically increasing."""
+    """AUTOINCREMENT sequence must survive the RENAME→CREATE→INSERT→DROP rebuild
+    in 0022 so IDs stay monotonically increasing."""
 
     def _base_db_with_rows(self, tmp_path: Path, n: int) -> sqlite3.Connection:
         """Build a pre-0022 DB with n dispatch rows."""
@@ -471,38 +471,3 @@ class TestSqliteSequencePreservation:
         )
         conn.close()
 
-    def test_sequence_preserved_after_0023(self, tmp_path):
-        """After both 0022 and 0023 rebuilds, the next auto-insert id still continues from N+1."""
-        n = 7
-
-        # Build pre-0022 DB
-        conn = self._base_db_with_rows(tmp_path, n)
-
-        # Apply 0022
-        sql_22 = (_MIGRATIONS / "0022_track_layer.sql").read_text(encoding="utf-8")
-        schema_migration.apply_script_if_below(conn, 22, sql_22)
-        conn.commit()
-
-        # Seed a minimal tracks table so 0023 FK is satisfiable
-        conn.execute(
-            "INSERT INTO tracks (track_id, title, goal_state, phase) VALUES ('t-test', 'T', 'G', 'active')"
-        )
-        conn.commit()
-
-        # Apply 0023
-        sql_23 = (_MIGRATIONS / "0023_dispatches_fk.sql").read_text(encoding="utf-8")
-        schema_migration.apply_script_if_below(conn, 23, sql_23)
-        conn.commit()
-
-        # Delete all rows, insert new, verify id continues from N+1
-        conn.execute("DELETE FROM dispatches")
-        conn.commit()
-        conn.execute("INSERT INTO dispatches (dispatch_id, state) VALUES ('new-post-0023', 'queued')")
-        conn.commit()
-        row = conn.execute("SELECT id FROM dispatches WHERE dispatch_id = 'new-post-0023'").fetchone()
-        assert row is not None
-        assert row[0] > n, (
-            f"After 0023 rebuild, expected id > {n} but got {row[0]}. "
-            "sqlite_sequence was not preserved."
-        )
-        conn.close()
