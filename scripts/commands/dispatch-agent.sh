@@ -60,6 +60,7 @@ DISPATCH_ID=$(
   VNX_AGENT="$AGENT" \
   VNX_PROJECT_ROOT="$PROJECT_ROOT" \
   VNX_INSTRUCTION="$INSTRUCTION" \
+  VNX_FEATURE_ID="${VNX_FEATURE_ID:-}" \
   python3 - <<'PYEOF'
 import os, json, sys
 from pathlib import Path
@@ -68,6 +69,7 @@ from datetime import datetime, timezone
 agent = os.environ["VNX_AGENT"]
 project_root = Path(os.environ["VNX_PROJECT_ROOT"])
 instruction = os.environ["VNX_INSTRUCTION"]
+feature_id = os.environ.get("VNX_FEATURE_ID", "")
 
 sys.path.insert(0, str(project_root / "scripts" / "lib"))
 from headless_dispatch_writer import generate_dispatch_id
@@ -87,7 +89,7 @@ payload = {
     "priority": "P1",
     "pr_id": None,
     "parent_dispatch": None,
-    "feature": "F40",
+    "feature": feature_id,
     "branch": None,
     "instruction": instruction,
     "context_files": [],

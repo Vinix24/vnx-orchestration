@@ -35,7 +35,6 @@ RISK_WEIGHT_WARNING = 10
 
 @dataclass
 class QualityCheck:
-    """Single quality check result."""
     check_id: str
     severity: str  # info|warning|blocking
     file: str
@@ -47,7 +46,6 @@ class QualityCheck:
 
 @dataclass
 class QualityAdvisory:
-    """Complete quality advisory for a completion receipt."""
     version: str = "1.0"
     generated_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     scope: List[str] = field(default_factory=list)
@@ -124,7 +122,6 @@ def get_changed_files(repo_root: Optional[Path] = None) -> List[Path]:
 
 
 def _parse_name_status(output: str, repo_root: Path) -> "List[Path]":
-    """Parse git diff --name-status output into resolved file paths."""
     changed_files = []
     for line in output.strip().split("\n"):
         if not line:
@@ -142,7 +139,6 @@ def _parse_name_status(output: str, repo_root: Path) -> "List[Path]":
 
 
 def check_file_size(file_path: Path) -> List[QualityCheck]:
-    """Check file size against thresholds."""
     checks = []
 
     try:
@@ -185,7 +181,6 @@ def check_file_size(file_path: Path) -> List[QualityCheck]:
 
 
 def check_function_sizes(file_path: Path) -> List[QualityCheck]:
-    """Check function sizes against thresholds."""
     checks = []
 
     if file_path.suffix == ".py":
@@ -197,7 +192,6 @@ def check_function_sizes(file_path: Path) -> List[QualityCheck]:
 
 
 def _check_python_function_sizes(file_path: Path) -> List[QualityCheck]:
-    """Check Python function sizes."""
     checks = []
 
     try:
@@ -239,7 +233,6 @@ def _check_python_function_sizes(file_path: Path) -> List[QualityCheck]:
 
 
 def _check_shell_function_sizes(file_path: Path) -> List[QualityCheck]:
-    """Check shell function sizes."""
     checks = []
     pattern = re.compile(r"^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{\s*$")
 
@@ -294,7 +287,6 @@ def _check_shell_function_sizes(file_path: Path) -> List[QualityCheck]:
 
 
 def run_linting(file_path: Path) -> List[QualityCheck]:
-    """Run linting checks on file."""
     checks = []
 
     if file_path.suffix == ".py":
@@ -306,7 +298,6 @@ def run_linting(file_path: Path) -> List[QualityCheck]:
 
 
 def _run_ruff_check(file_path: Path) -> List[QualityCheck]:
-    """Run ruff linter on Python file."""
     checks = []
 
     try:
@@ -343,7 +334,6 @@ def _run_ruff_check(file_path: Path) -> List[QualityCheck]:
 
 
 def _run_shellcheck(file_path: Path) -> List[QualityCheck]:
-    """Run shellcheck on shell script."""
     checks = []
 
     try:
@@ -379,7 +369,6 @@ def _run_shellcheck(file_path: Path) -> List[QualityCheck]:
 
 
 def check_dead_code(file_path: Path) -> List[QualityCheck]:
-    """Check for dead code (Python only)."""
     checks = []
 
     if file_path.suffix != ".py":
@@ -416,7 +405,6 @@ def check_dead_code(file_path: Path) -> List[QualityCheck]:
 
 
 def check_test_coverage_hygiene(changed_files: List[Path], repo_root: Path) -> List[QualityCheck]:
-    """Check if src changes have corresponding test changes."""
     checks = []
 
     # Find src files that changed
@@ -453,7 +441,6 @@ def calculate_risk_score(checks: List[QualityCheck]) -> int:
 
 
 def make_t0_decision(checks: List[QualityCheck], risk_score: int) -> Dict[str, Any]:
-    """Generate T0 recommendation based on checks and risk score."""
     blocking_count = sum(1 for c in checks if c.severity == "blocking")
     warning_count = sum(1 for c in checks if c.severity == "warning")
 
@@ -482,7 +469,6 @@ def make_t0_decision(checks: List[QualityCheck], risk_score: int) -> Dict[str, A
 
 
 def _generate_followup_tasks(checks: List[QualityCheck], blocking_only: bool) -> List[Dict[str, str]]:
-    """Generate suggested follow-up dispatch tasks."""
     tasks = []
 
     relevant_checks = [c for c in checks if c.severity == "blocking"] if blocking_only else checks
@@ -533,7 +519,6 @@ def _generate_followup_tasks(checks: List[QualityCheck], blocking_only: bool) ->
 
 
 def _generate_open_items(checks: List[QualityCheck], blocking_only: bool) -> List[Dict[str, Any]]:
-    """Generate open items list suitable for feature-plan format."""
     items = []
 
     relevant_checks = [c for c in checks if c.severity == "blocking"] if blocking_only else checks

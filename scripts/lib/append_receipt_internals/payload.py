@@ -342,11 +342,7 @@ def append_receipt_payload(
     receipt.setdefault("open_items_created", facade._count_quality_violations(receipt))
 
     receipts_file = _maybe_reroute_to_gate_stream(receipt, receipts_file)
-    # Codex round-7 finding 1 (BLOCKING): recompute receipt_path after the
-    # reroute so ghost-gate receipts write to gate_events.ndjson, not the
-    # original receipts file.  The reroute only reassigns the local
-    # receipts_file variable; without this line receipt_path (and cache_path
-    # below) still point at the pre-reroute location.
+    # Keep the resolved receipt path aligned with any gate-stream reroute.
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
     event_name = _validate_receipt(receipt)

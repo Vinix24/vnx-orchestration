@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 # VNX Command: doctor
 # Extracted from bin/vnx — validates VNX installation health.
 #
