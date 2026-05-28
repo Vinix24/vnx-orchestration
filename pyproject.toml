@@ -17,6 +17,11 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.20",
 ]
 
+# Full quality advisory/local-CI audit tools.
+# Install via `pip install vnx-orchestration[quality]`.
+[project.optional-dependencies]
+quality = ["vulture>=2.10", "ruff>=0.6"]
+
 [project.scripts]
 vnx = "vnx_cli.main:main"
 
