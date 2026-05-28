@@ -83,6 +83,11 @@ def _assert_dispatches_schema_intact(conn: sqlite3.Connection) -> None:
         )
 
 
+# Register PRAGMA pre-flight for 0022: any call to apply_script_if_below(22, ...)
+# triggers the column assertion, even when invoked outside of run().
+schema_migration.register_preflight(22, _assert_dispatches_schema_intact)
+
+
 # ---------------------------------------------------------------------------
 # Step 1: apply migration SQL
 # ---------------------------------------------------------------------------
@@ -99,6 +104,7 @@ def apply_migration(conn: sqlite3.Connection, project_root: Path) -> None:
         print(f"  [skip] migration 0022 already applied (user_version={current_version})")
         return
 
+    _assert_dispatches_schema_intact(conn)
     print("  [apply] migration 0022_track_layer.sql ...")
     schema_migration.apply_script_if_below(conn, 22, sql)
     print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
@@ -480,6 +486,9 @@ def run(project_root: Path | None = None) -> None:
 
         # Step 3b: nullify orphaned track refs that weren't mapped (FK safety for 0023)
         _nullify_orphaned_track_refs(conn)
+
+        # emit_events BEFORE commit — if emit fails, seed rolls back (ADR-005)
+        emit_events(conn, inserted_ids)
         conn.commit()
 
         # Step 4: apply 0023 — adds dispatches.track FK now that tracks are seeded
@@ -488,10 +497,6 @@ def run(project_root: Path | None = None) -> None:
 
         # Step 5
         set_initial_next_up(conn)
-
-        # Step 6
-        emit_events(conn, inserted_ids)
-
         conn.commit()
         print(f"\n  Migration complete. {len(tracks)} track(s) in DB.\n")
 
