@@ -210,7 +210,7 @@ def _needs_initial_migration(conn: sqlite3.Connection) -> bool:
     """Check if initial migration is needed.
 
     Modern path: PRAGMA user_version.
-    Legacy fallback: runtime_schema_version table (pre-CENTRAL-4 schema).
+    Legacy fallback: runtime_schema_version table.
     """
     pragma_version = schema_migration.get_user_version(conn)
     if pragma_version >= 1:
