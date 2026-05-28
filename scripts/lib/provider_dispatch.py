@@ -16,6 +16,8 @@ subprocess only.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import logging
 import os
 import sys
@@ -394,6 +396,137 @@ def _build_lane_key(base_sub: str, model_alias: "str | None") -> str:
     """
     alias = model_alias or _SUB_PROVIDER_DEFAULT_ALIAS.get(base_sub, "default")
     return f"litellm:{base_sub}:{alias}"
+
+
+def _litellm_parts(provider: str) -> tuple[str, "str | None"]:
+    sub_provider = provider.split(":", 1)[1] if provider.startswith("litellm:") else ""
+    sub_parts = sub_provider.split(":", 1)
+    base_sub = sub_parts[0] if sub_parts else ""
+    model_alias = sub_parts[1] if len(sub_parts) > 1 else None
+    return base_sub, model_alias
+
+
+def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> str:
+    """Resolve the model label used by dispatch pre-flight checks."""
+    if provider == "codex":
+        return os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+    if provider == "gemini":
+        return os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    if provider == "kimi":
+        return os.environ.get("VNX_KIMI_MODEL", "") or _resolve_kimi_model_label()
+    if provider.startswith("litellm:") or provider == "litellm":
+        base_sub, model_alias = _litellm_parts(provider)
+        env_model = os.environ.get("VNX_LITELLM_MODEL", "")
+        if env_model:
+            return env_model
+        if model_alias:
+            return model_alias
+        if getattr(args, "model", None) and args.model != "sonnet":
+            return args.model
+        if base_sub == "deepseek":
+            return _resolve_deepseek_model()
+        if base_sub == "moonshot":
+            return _resolve_moonshot_model(None)
+        if base_sub == "zai":
+            return _resolve_zai_model(None)
+        if base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
+            return _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
+        if base_sub:
+            return args.model
+    return args.model
+
+
+def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) -> bool:
+    if not (provider.startswith("litellm:") or provider == "litellm"):
+        return True
+    base_sub, model_alias = _litellm_parts(provider)
+    if os.environ.get("VNX_LITELLM_MODEL", "") or model_alias:
+        return True
+    if getattr(args, "model", None) and args.model != "sonnet":
+        return True
+    return base_sub in {"deepseek", "moonshot", "zai"}
+
+
+def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "str | None":
+    via_per_sub = {
+        "deepseek": "litellm",
+        "moonshot": "moonshot",
+        "openrouter": "openrouter",
+        "zai": "openrouter",
+    }
+    if provider.startswith("litellm:") or provider == "litellm":
+        return via_per_sub.get(sub_provider or "", "litellm")
+    if provider in ("claude", "codex", "gemini", "kimi"):
+        return "cli"
+    return None
+
+
+def _emit_constraint_failure_receipt(
+    args: argparse.Namespace,
+    provider: str,
+    model: str,
+    failure_reason: str,
+) -> None:
+    """Record fail-closed pre-flight failures before any provider spawn."""
+    state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+    receipt_path = state_dir / "t0_receipts.ndjson"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    receipt = {
+        "dispatch_id": args.dispatch_id,
+        "terminal_id": args.terminal_id,
+        "provider": provider,
+        "model": model,
+        "status": "failure",
+        "completion_pct": 0,
+        "risk": 0.0,
+        "duration_seconds": 0.0,
+        "token_usage": {"input": 0, "output": 0, "cache_hit": 0},
+        "cost_usd": 0.0,
+        "findings": [],
+        "pr_id": getattr(args, "pr_id", None),
+        "failure_reason": failure_reason,
+        "timestamp": now_ts,
+        "recorded_at": now_ts,
+    }
+    line = json.dumps(receipt, separators=(",", ":")) + "\n"
+    with receipt_path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _check_constraints(args: argparse.Namespace, provider: str):
+    """Run provider_constraints.yaml pre-flight and raise on blocking violations."""
+    from providers.constraint_enforcer import ConstraintViolationError, check_constraints  # noqa: PLC0415
+
+    sub_provider = None
+    if provider.startswith("litellm:"):
+        sub_provider, _model_alias = _litellm_parts(provider)
+    model = _constraint_model_for_provider(args, provider)
+    via = _constraint_via_for_provider(provider, sub_provider)
+    violations = check_constraints(
+        provider=provider,
+        sub_provider=sub_provider,
+        model=model,
+        terminal_id=args.terminal_id,
+        role=args.role,
+        via=via,
+        instruction_text=args.instruction,
+        env=os.environ,
+        check_registry=_constraint_registry_check_enabled(args, provider),
+    )
+    for violation in violations:
+        if violation.severity == "blocking":
+            raise ConstraintViolationError(violation)
+        if violation.override_applied:
+            logger.warning("[%s] warning overridden by env flag: %s", violation.code, violation.message)
+        else:
+            logger.warning("[%s] %s", violation.code, violation.message)
+    return violations
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -927,44 +1060,30 @@ def main(argv: list[str] | None = None) -> int:
                 _route_exc, args.provider, args.model,
             )
 
-    # PR-SR-2: enforce provider constraints before any handler runs.
-    try:
-        from constraint_enforcer import HardConstraintViolation, enforce as _enforce_route  # noqa: PLC0415
-
-        _sub = None
-        if provider.startswith("litellm:"):
-            _parts = provider.split(":", 2)
-            _sub = _parts[1] if len(_parts) > 1 else None
-
-        _VIA_PER_SUB: dict = {
-            "deepseek": "litellm",
-            "moonshot": "moonshot",
-            "openrouter": "openrouter",
-            "zai": "openrouter",
-        }
-        if provider.startswith("litellm:"):
-            _via = _VIA_PER_SUB.get(_sub or "", "litellm")
-        elif provider in ("claude", "codex", "gemini", "kimi"):
-            _via = "cli"
-        else:
-            _via = None
-
-        _enforce_route(
-            provider=provider.split(":")[0] if ":" in provider else provider,
-            sub_provider=_sub,
-            model=args.model,
-            terminal_id=args.terminal_id,
-            role=args.role,
-            via=_via,
+    if provider not in _IMPLEMENTED_PROVIDERS and not provider.startswith("litellm:"):
+        parser.error(
+            f"Unknown provider '{provider}'. "
+            "Accepted values: claude, codex, gemini, kimi, litellm:<model>."
         )
-    except HardConstraintViolation as exc:
-        print(f"provider_dispatch: constraint violation — {exc}", file=sys.stderr)
-        return 1
+
+    # PR-ROUTE-1: enforce provider constraints before any handler runs.
+    try:
+        _check_constraints(args, provider)
     except FileNotFoundError:
         if os.environ.get("VNX_CONSTRAINTS_STRICT") == "1":
             print("provider_dispatch: provider_constraints.yaml not found and VNX_CONSTRAINTS_STRICT=1", file=sys.stderr)
             return 1
-        logger.debug("provider_dispatch: provider_constraints.yaml not found — skipping enforcement")
+        logger.debug("provider_dispatch: provider_constraints.yaml not found - skipping enforcement")
+    except Exception as exc:
+        from providers.constraint_enforcer import ConstraintViolationError  # noqa: PLC0415
+
+        if not isinstance(exc, ConstraintViolationError):
+            raise
+        model = _constraint_model_for_provider(args, provider)
+        failure_reason = f"constraint violation: {exc}"
+        _emit_constraint_failure_receipt(args, provider, model, failure_reason)
+        print(f"provider_dispatch: constraint violation - {exc}", file=sys.stderr)
+        return 1
 
     if provider == "claude":
         return _dispatch_claude(args)
