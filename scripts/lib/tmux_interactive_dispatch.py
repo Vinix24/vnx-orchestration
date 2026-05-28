@@ -25,6 +25,7 @@ import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -255,17 +256,20 @@ class TmuxInteractiveDispatch:
         regardless of the worker's cwd.
         """
         append_receipt = self._project_root / "scripts" / "append_receipt.py"
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return (
             "\n\n---\n\n## Completion Protocol (interactive lane)\n\n"
             "When you have finished AND committed, emit a completion receipt "
             "directly so the orchestrator can detect completion. Run:\n\n"
             "```bash\n"
-            f"python3 {append_receipt} --receipt "
+            f"VNX_STATE_DIR='{self._state_dir}' VNX_DATA_DIR='{self._state_dir.parent}' "
+            f"python3 '{append_receipt}' --receipts-file '{self._receipts_file}' --receipt "
             f"'{{\"event_type\": \"subprocess_completion\", "
             f"\"dispatch_id\": \"{dispatch_id}\", "
             f"\"terminal\": \"{label}\", "
             "\"status\": \"done\", "
-            "\"source\": \"tmux_interactive\"}'\n"
+            "\"source\": \"tmux_interactive\", "
+            f"\"timestamp\": \"{ts}\"}}'\n"
             "```\n\n"
             "Use `\"status\": \"failed\"` instead if you could not complete the "
             "work. Always write your unified report first, then emit the receipt "
@@ -795,14 +799,9 @@ class TmuxInteractiveDispatch:
 # CLI — single-shot dispatch entry point
 # ---------------------------------------------------------------------------
 def _resolve_state_dir() -> Path:
-    """VNX_STATE_DIR, else VNX_DATA_DIR/state, else <root>/.vnx-data/state."""
-    env = os.environ.get("VNX_STATE_DIR", "").strip()
-    if env:
-        return Path(env)
-    data_dir = os.environ.get("VNX_DATA_DIR", "").strip()
-    if data_dir:
-        return Path(data_dir) / "state"
-    return Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
+    """Delegate to canonical project_root resolver; ensures lane and append_receipt share the same state dir."""
+    from project_root import resolve_state_dir
+    return resolve_state_dir(caller_file=__file__)
 
 
 def main(argv: "list[str] | None" = None) -> int:
