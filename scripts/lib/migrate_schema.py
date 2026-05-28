@@ -37,11 +37,8 @@ from scripts.lib.migrate_import import _table_exists  # noqa: E402
 class BootstrapFailure(RuntimeError):
     """Raised when the central DB is missing canonical structure required for import.
 
-    Round-3 fix-forward (Issue 4): rather than letting a per-row INSERT
-    OR IGNORE silently drop every row when a central table is absent,
-    pre-flight assert that every import-target table exists. If not,
-    surface the missing tables in the exception message so the operator
-    can diagnose the broken bootstrap before any data is moved.
+    Pre-flight checks assert that every import-target table exists so missing
+    tables are surfaced before any data is moved.
     """
 
 
