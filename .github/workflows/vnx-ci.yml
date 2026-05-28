@@ -369,3 +369,8 @@ jobs:
             exit 0
           fi
           printf '%s\n' "$added" | python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --scan-stdin
+
+      - name: Migration rebuild preservation
+        run: |
+          python3 scripts/lint_migration_rebuild.py
+          if [ $? -ne 0 ]; then exit 1; fi
