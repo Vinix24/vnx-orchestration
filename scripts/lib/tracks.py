@@ -448,7 +448,5 @@ def get_recent_receipts(
             (*dispatch_ids, limit),
         ).fetchall()
         return [dict(r) for r in rows]
-    except sqlite3.OperationalError:
-        return []
     finally:
         conn.close()

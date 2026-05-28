@@ -258,6 +258,31 @@ class TestSetNextUp:
 
 
 # ---------------------------------------------------------------------------
+# get_recent_receipts
+# ---------------------------------------------------------------------------
+
+class TestGetRecentReceipts:
+    def test_get_recent_receipts_raises_on_corrupt_db(self, monkeypatch, tmp_path):
+        class BrokenConnection:
+            def __init__(self):
+                self.closed = False
+
+            def execute(self, *args, **kwargs):
+                raise sqlite3.OperationalError("database disk image is malformed")
+
+            def close(self):
+                self.closed = True
+
+        conn = BrokenConnection()
+        monkeypatch.setattr(tracks, "_get_conn", lambda state_dir: conn)
+
+        with pytest.raises(sqlite3.OperationalError, match="malformed"):
+            tracks.get_recent_receipts(tmp_path, "track-01")
+
+        assert conn.closed is True
+
+
+# ---------------------------------------------------------------------------
 # link_open_item
 # ---------------------------------------------------------------------------
 
