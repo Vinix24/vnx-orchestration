@@ -601,10 +601,10 @@ def gap_prs_without_receipt(
                     linked = True
                     break
 
-        # Strategy 2b: direct pr_number field match (covers backfilled and forward-emit receipts)
+        # Strategy 2b: direct pr_number field match — only pr_merged events close the gap
         if not linked and pr.number:
             for r in receipts:
-                if r.raw.get("pr_number") == pr.number:
+                if r.raw.get("event_type") == "pr_merged" and r.raw.get("pr_number") == pr.number:
                     linked = True
                     break
 
