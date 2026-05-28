@@ -27,6 +27,7 @@ from tmux_interactive_dispatch import (
     TmuxResult,
     _assert_no_headless_flags,
     _default_launch_command,
+    _resolve_state_dir,
     _sanitize_session_name,
 )
 
@@ -504,6 +505,27 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
         self.assertTrue(receipt.get("timestamp"), "timestamp must be non-empty in protocol receipt")
         self.assertEqual(receipt.get("event_type"), "subprocess_completion")
         self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
+
+
+class TestStateDirMatchesCanonical(unittest.TestCase):
+    """Regression guard: lane's _resolve_state_dir must agree with the canonical resolver.
+
+    Guards against future ad-hoc-resolver drift that caused the live central-install
+    receipt timeout bug (lane polled local path, worker wrote to central path via
+    project_root.resolve_state_dir).
+    """
+
+    def test_lane_state_dir_matches_append_receipt_resolver(self):
+        from project_root import resolve_state_dir as canonical
+
+        canonical_path = canonical()
+        lane_path = _resolve_state_dir()
+
+        self.assertEqual(
+            canonical_path,
+            lane_path,
+            f"MISMATCH: lane={lane_path!r} != canonical={canonical_path!r}",
+        )
 
 
 if __name__ == "__main__":

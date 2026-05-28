@@ -798,14 +798,9 @@ class TmuxInteractiveDispatch:
 # CLI — single-shot dispatch entry point
 # ---------------------------------------------------------------------------
 def _resolve_state_dir() -> Path:
-    """VNX_STATE_DIR, else VNX_DATA_DIR/state, else <root>/.vnx-data/state."""
-    env = os.environ.get("VNX_STATE_DIR", "").strip()
-    if env:
-        return Path(env)
-    data_dir = os.environ.get("VNX_DATA_DIR", "").strip()
-    if data_dir:
-        return Path(data_dir) / "state"
-    return Path(__file__).resolve().parents[2] / ".vnx-data" / "state"
+    """Delegate to canonical project_root resolver; ensures lane and append_receipt share the same state dir."""
+    from project_root import resolve_state_dir
+    return resolve_state_dir(caller_file=__file__)
 
 
 def main(argv: "list[str] | None" = None) -> int:
