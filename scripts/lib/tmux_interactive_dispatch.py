@@ -261,19 +261,27 @@ class TmuxInteractiveDispatch:
         """
         append_receipt = self._project_root / "scripts" / "append_receipt.py"
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": dispatch_id,
+            "terminal": label,
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": ts,
+        }
+        state_dir = shlex.quote(str(self._state_dir))
+        data_dir = shlex.quote(str(self._state_dir.parent))
+        append_receipt_arg = shlex.quote(str(append_receipt))
+        receipts_file = shlex.quote(str(self._receipts_file))
+        receipt_arg = shlex.quote(json.dumps(receipt))
         return (
             "\n\n---\n\n## Completion Protocol (interactive lane)\n\n"
             "When you have finished AND committed, emit a completion receipt "
             "directly so the orchestrator can detect completion. Run:\n\n"
             "```bash\n"
-            f"VNX_STATE_DIR='{self._state_dir}' VNX_DATA_DIR='{self._state_dir.parent}' "
-            f"python3 '{append_receipt}' --receipts-file '{self._receipts_file}' --receipt "
-            f"'{{\"event_type\": \"subprocess_completion\", "
-            f"\"dispatch_id\": \"{dispatch_id}\", "
-            f"\"terminal\": \"{label}\", "
-            "\"status\": \"done\", "
-            "\"source\": \"tmux_interactive\", "
-            f"\"timestamp\": \"{ts}\"}}'\n"
+            f"VNX_STATE_DIR={state_dir} VNX_DATA_DIR={data_dir} "
+            f"python3 {append_receipt_arg} --receipts-file {receipts_file} --receipt "
+            f"{receipt_arg}\n"
             "```\n\n"
             "Use `\"status\": \"failed\"` instead if you could not complete the "
             "work. Always write your unified report first, then emit the receipt "
@@ -829,15 +837,22 @@ class TmuxInteractiveDispatch:
                 reason=f"receipt status={receipt.get('status')}",
                 metadata={"session": session, "status": receipt.get("status")},
             )
-            _teardown("success")
+            success = receipt is not None and receipt.get("status") not in (
+                "failed",
+                "blocked",
+            )
+            _teardown("success" if success else "worker_status_failed")
             return InteractiveDispatchResult(
-                success=True,
+                success=success,
                 dispatch_id=dispatch_id,
                 session=session,
                 label=label,
                 window_id=window_id,
                 pane_id=pane_id,
                 receipt=receipt,
+                failure_reason=(
+                    None if success else f"worker_status: {receipt.get('status')}"
+                ),
                 duration_seconds=time.monotonic() - start_time,
                 worktree_state=_wt_state[0],
                 worktree_path=str(worktree_handle.path) if worktree_handle else None,

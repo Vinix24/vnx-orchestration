@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,7 @@ class FakeTmux:
         launch_ok: bool = True,
         deliver_ok: bool = True,
         emit_receipt: bool = True,
+        receipt_status: str = "done",
         ready_content: str = "Welcome to Claude\n? for shortcuts",
     ) -> None:
         self.receipts_file = receipts_file
@@ -63,6 +65,7 @@ class FakeTmux:
         self._launch_ok = launch_ok
         self._deliver_ok = deliver_ok
         self._emit_receipt = emit_receipt
+        self._receipt_status = receipt_status
         self._ready_content = ready_content
         self.commands: list[list[str]] = []
         self.pasted: list[str] = []
@@ -133,7 +136,7 @@ class FakeTmux:
             "event_type": "subprocess_completion",
             "dispatch_id": self.dispatch_id,
             "terminal": "ephemeral",
-            "status": "done",
+            "status": self._receipt_status,
             "source": "tmux_interactive",
             "seq": self.receipts_written,
         }
@@ -200,9 +203,13 @@ class TestSingleShotSuccess(_LaneTestCase):
 
         expected_abs = str(self.state_dir / "scripts" / "append_receipt.py")
         delivered = "\n".join(fake.pasted)
-        self.assertIn(
-            "python3 '" + expected_abs + "'",
-            delivered,
+        m = re.search(r"```bash\n(.+?)\n```", delivered, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract bash command from delivered body")
+        argv = shlex.split(m.group(1).strip())
+        python_idx = argv.index("python3")
+        self.assertEqual(
+            argv[python_idx + 1],
+            expected_abs,
             "absolute path to append_receipt.py must appear in the delivered body",
         )
 
@@ -286,6 +293,69 @@ class TestSingleShotSuccess(_LaneTestCase):
         )
         delivered2 = "\n".join(fake2.pasted)
         self.assertNotIn("Edit ONLY within these paths", delivered2)
+
+
+class TestReceiptStatusControlsSuccess(_LaneTestCase):
+    def test_dispatch_returns_failure_on_failed_receipt(self):
+        """A worker failure receipt must produce a failed lane result."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            receipt_status="failed",
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.receipt)
+        self.assertEqual(result.receipt["status"], "failed")
+        self.assertIn("failed", result.failure_reason)
+
+    def test_dispatch_returns_failure_on_blocked_receipt(self):
+        """A worker blocked receipt must produce a failed lane result."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            receipt_status="blocked",
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.receipt)
+        self.assertEqual(result.receipt["status"], "blocked")
+        self.assertIn("blocked", result.failure_reason)
+
+    def test_dispatch_cli_exits_nonzero_on_failed(self):
+        """CLI return code propagates a failed worker receipt result."""
+        failed_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": "cli-failed-receipt",
+            "terminal": "ephemeral",
+            "status": "failed",
+            "source": "tmux_interactive",
+        }
+
+        def fake_dispatch(self_inner, instruction, dispatch_id, **kwargs):
+            return InteractiveDispatchResult(
+                success=False,
+                dispatch_id=dispatch_id,
+                receipt=failed_receipt,
+                failure_reason="worker_status: failed",
+            )
+
+        with patch.object(TmuxInteractiveDispatch, "dispatch", fake_dispatch):
+            with patch(
+                "tmux_interactive_dispatch._resolve_state_dir",
+                return_value=self.state_dir,
+            ):
+                rc = main([
+                    "--dispatch-id", "cli-failed-receipt",
+                    "--instruction", "do the thing",
+                    "--shared-worktree",
+                ])
+
+        self.assertNotEqual(rc, 0)
 
 
 class TestTimeoutTeardown(_LaneTestCase):
@@ -497,11 +567,10 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
 
         protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
 
-        # Extract single-quoted JSON after --receipt
-        m = re.search(r"--receipt '(.+?)'", protocol, re.DOTALL)
-        self.assertIsNotNone(m, "could not extract --receipt JSON from completion protocol")
-
-        receipt = json.loads(m.group(1))
+        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract bash command from completion protocol")
+        argv = shlex.split(m.group(1).strip())
+        receipt = json.loads(argv[argv.index("--receipt") + 1])
 
         try:
             _validate_receipt(receipt)
@@ -511,6 +580,45 @@ class TestCompletionProtocolIntegration(_LaneTestCase):
         self.assertTrue(receipt.get("timestamp"), "timestamp must be non-empty in protocol receipt")
         self.assertEqual(receipt.get("event_type"), "subprocess_completion")
         self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
+
+    def test_completion_protocol_shell_safe_quoting(self):
+        """Completion protocol shell command round-trips paths and JSON safely."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state_dir = tmp_path / "state dir's $(touch injected)"
+            receipts_file = state_dir / "receipts file's $(touch receipt).ndjson"
+            project_root = tmp_path / "project root's $(touch project)"
+            lane = TmuxInteractiveDispatch(
+                state_dir=state_dir,
+                receipts_file=receipts_file,
+                project_root=project_root,
+            )
+
+            protocol = lane._build_completion_protocol(
+                self.DISPATCH_ID,
+                "vincent's-test",
+            )
+
+            m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+            self.assertIsNotNone(m, "could not extract bash command from completion protocol")
+            argv = shlex.split(m.group(1).strip())
+
+            self.assertIn(f"VNX_STATE_DIR={state_dir}", argv)
+            self.assertIn(f"VNX_DATA_DIR={tmp_path}", argv)
+            python_idx = argv.index("python3")
+            self.assertEqual(
+                argv[python_idx + 1],
+                str(project_root / "scripts" / "append_receipt.py"),
+            )
+            self.assertEqual(
+                argv[argv.index("--receipts-file") + 1],
+                str(receipts_file),
+            )
+
+            receipt = json.loads(argv[argv.index("--receipt") + 1])
+            self.assertEqual(receipt["dispatch_id"], self.DISPATCH_ID)
+            self.assertEqual(receipt["terminal"], "vincent's-test")
+            self.assertEqual(receipt["status"], "done")
 
 
 class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
@@ -537,14 +645,23 @@ class TestCompletionProtocolPinsReceiptsFile(_LaneTestCase):
             protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
 
             # Part 1: env vars present in the command string.
-            self.assertIn(f"VNX_STATE_DIR='{state_dir}'", protocol)
-            self.assertIn(f"VNX_DATA_DIR='{tmp_path}'", protocol)
-
-            # Part 2: extract the bash command and invoke it via shell.
             m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
             self.assertIsNotNone(m, "could not extract bash command from completion protocol")
             cmd_string = m.group(1).strip()
+            argv = shlex.split(cmd_string)
+            self.assertIn(f"VNX_STATE_DIR={state_dir}", argv)
+            self.assertIn(f"VNX_DATA_DIR={tmp_path}", argv)
+            python_idx = argv.index("python3")
+            self.assertEqual(
+                argv[python_idx + 1],
+                str(real_project_root / "scripts" / "append_receipt.py"),
+            )
+            self.assertEqual(
+                argv[argv.index("--receipts-file") + 1],
+                str(state_dir / "t0_receipts.ndjson"),
+            )
 
+            # Part 2: extract the bash command and invoke it via shell.
             proc = subprocess.run(cmd_string, shell=True, capture_output=True, text=True)
             self.assertEqual(
                 proc.returncode,
