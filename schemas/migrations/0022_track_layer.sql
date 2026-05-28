@@ -111,7 +111,8 @@ ALTER TABLE dispatches RENAME TO dispatches_pre_v22;
 
 CREATE TABLE dispatches (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    dispatch_id     TEXT    NOT NULL UNIQUE,
+    dispatch_id     TEXT    NOT NULL,
+    project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
     state           TEXT    NOT NULL DEFAULT 'proposed'
                             CHECK (state IN (
                                 'proposed', 'ready', 'active', 'completed', 'failed',
@@ -130,15 +131,16 @@ CREATE TABLE dispatches (
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     expires_after   TEXT,
     metadata_json   TEXT    DEFAULT '{}',
-    operator_approved_at TEXT
+    operator_approved_at TEXT,
+    UNIQUE(dispatch_id, project_id)
 );
 
 INSERT INTO dispatches (
-    id, dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
+    id, dispatch_id, project_id, state, terminal_id, track, priority, pr_ref, gate,
     attempt_count, bundle_path, created_at, updated_at, expires_after, metadata_json
 )
 SELECT
-    id, dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
+    id, dispatch_id, project_id, state, terminal_id, track, priority, pr_ref, gate,
     attempt_count, bundle_path, created_at, updated_at, expires_after, metadata_json
 FROM dispatches_pre_v22;
 

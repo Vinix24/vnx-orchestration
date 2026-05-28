@@ -624,3 +624,91 @@ class TestWritePathsUnchangedByShadowMode:
         assert "write-test-flag-unset" in ids
         assert "write-test-flag-shadow" in ids
         assert "write-test-flag-1" in ids
+
+
+# ---------------------------------------------------------------------------
+# register_proposed_track_dispatch — ADR-005 audit ordering
+# ---------------------------------------------------------------------------
+
+import sqlite3 as _sqlite3
+
+
+def _make_state_dir(tmp_path: Path) -> Path:
+    """Create a state dir with a minimal dispatches DB for register tests."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    db_path = state_dir / "runtime_coordination.db"
+    conn = _sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("""
+        CREATE TABLE dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'queued',
+            terminal_id TEXT,
+            track TEXT,
+            priority TEXT DEFAULT 'P2',
+            pr_ref TEXT,
+            gate TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            bundle_path TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            expires_after TEXT,
+            metadata_json TEXT DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+    return state_dir
+
+
+class TestRegisterProposedTrackDispatch:
+    """ADR-005: NDJSON must precede SQLite; failure in audit write must abort creation."""
+
+    def test_raises_when_ndjson_write_fails(self, tmp_path):
+        state_dir = _make_state_dir(tmp_path)
+        with patch.object(dispatch_register, "_write_event_locked", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                dispatch_register.register_proposed_track_dispatch(
+                    state_dir, "disp-fail-001", "T1", "track-01", "PR-FUT-1"
+                )
+
+    def test_no_db_row_created_when_ndjson_write_fails(self, tmp_path):
+        state_dir = _make_state_dir(tmp_path)
+        with patch.object(dispatch_register, "_write_event_locked", side_effect=OSError("disk full")):
+            try:
+                dispatch_register.register_proposed_track_dispatch(
+                    state_dir, "disp-fail-002", "T1", "track-01", "PR-FUT-1"
+                )
+            except OSError:
+                pass
+
+        db_path = state_dir / "runtime_coordination.db"
+        conn = _sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT dispatch_id FROM dispatches WHERE dispatch_id = 'disp-fail-002'"
+        ).fetchone()
+        conn.close()
+        assert row is None, "No DB row must exist when NDJSON write failed"
+
+    def test_success_path_creates_db_row_and_ndjson(self, tmp_path):
+        state_dir = _make_state_dir(tmp_path)
+        dispatch_register.register_proposed_track_dispatch(
+            state_dir, "disp-ok-001", "T1", "track-01", "PR-FUT-1"
+        )
+        db_path = state_dir / "runtime_coordination.db"
+        conn = _sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT dispatch_id, state FROM dispatches WHERE dispatch_id = 'disp-ok-001'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[1] == "proposed"
+
+        ndjson_path = state_dir / "dispatch_register.ndjson"
+        assert ndjson_path.exists()
+        lines = [l for l in ndjson_path.read_text().splitlines() if l.strip()]
+        assert any("disp-ok-001" in l for l in lines)

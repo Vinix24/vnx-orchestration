@@ -617,13 +617,21 @@ def register_proposed_track_dispatch(
     track_id: str,
     pr_ref: str,
 ) -> None:
-    """Insert a proposed dispatch row + emit NDJSON audit event.
+    """Insert a proposed dispatch row + emit NDJSON audit event (ADR-005 compliant).
 
-    Routes dispatch creation through the register so the NDJSON audit trail
-    is always written alongside the DB row. Raises sqlite3.Error on DB failure;
-    NDJSON write is best-effort (never raises).
+    NDJSON write precedes the SQLite commit. If the audit write fails it raises
+    and no DB row is created. Raises sqlite3.Error on DB failure.
     """
     import sqlite3 as _sqlite3
+
+    # Build audit record before any I/O
+    record = _build_event_record(
+        "dispatch_created", dispatch_id, None,
+        pr_ref or "", terminal_id or "", "", None,
+    )
+
+    # Write NDJSON first — ADR-005 requires ledger before DB
+    _write_event_locked(Path(state_dir) / "dispatch_register.ndjson", record)
 
     db_path = Path(state_dir) / "runtime_coordination.db"
     conn = _sqlite3.connect(str(db_path), timeout=10.0)
@@ -640,15 +648,6 @@ def register_proposed_track_dispatch(
         conn.commit()
     finally:
         conn.close()
-
-    try:
-        record = _build_event_record(
-            "dispatch_created", dispatch_id, None,
-            pr_ref or "", terminal_id or "", "", None,
-        )
-        _write_event_locked(Path(state_dir) / "dispatch_register.ndjson", record)
-    except Exception:
-        pass
 
 
 # CLI for bash callers

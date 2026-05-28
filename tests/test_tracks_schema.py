@@ -35,7 +35,8 @@ def _base_db(tmp_path: Path) -> sqlite3.Connection:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dispatches (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id     TEXT    NOT NULL UNIQUE,
+            dispatch_id     TEXT    NOT NULL,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
             state           TEXT    NOT NULL DEFAULT 'queued',
             terminal_id     TEXT,
             track           TEXT,
@@ -47,7 +48,8 @@ def _base_db(tmp_path: Path) -> sqlite3.Connection:
             created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             expires_after   TEXT,
-            metadata_json   TEXT    DEFAULT '{}'
+            metadata_json   TEXT    DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
         )
     """)
     conn.execute("""
@@ -298,5 +300,91 @@ class TestTrackDependenciesConstraints:
                 "INSERT INTO track_dependencies "
                 "(from_track_id, to_track_id, kind, derivation_source) "
                 "VALUES ('track-02', 'track-01', 'hard', 'invalid_source')"
+            )
+            conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# v21 project_id + composite UNIQUE survival across migration 0022
+# ---------------------------------------------------------------------------
+
+class TestV21ProjectIdPreservation:
+    """Migration 0022 on a v21 DB (with project_id + composite UNIQUE) must
+    preserve project_id and enforce the composite UNIQUE post-migration."""
+
+    def _v21_db(self, tmp_path: Path) -> sqlite3.Connection:
+        """Build a v21-style DB with project_id and composite UNIQUE."""
+        db_path = tmp_path / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dispatches (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id     TEXT    NOT NULL,
+                project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+                state           TEXT    NOT NULL DEFAULT 'queued',
+                terminal_id     TEXT,
+                track           TEXT,
+                priority        TEXT    DEFAULT 'P2',
+                pr_ref          TEXT,
+                gate            TEXT,
+                attempt_count   INTEGER NOT NULL DEFAULT 0,
+                bundle_path     TEXT,
+                created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                expires_after   TEXT,
+                metadata_json   TEXT    DEFAULT '{}',
+                UNIQUE(dispatch_id, project_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS coordination_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id    TEXT,
+                event_type  TEXT,
+                entity_type TEXT,
+                entity_id   TEXT,
+                from_state  TEXT,
+                to_state    TEXT,
+                actor       TEXT,
+                reason      TEXT,
+                metadata_json TEXT,
+                occurred_at TEXT,
+                project_id  TEXT
+            )
+        """)
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state) VALUES ('d-x', 'vnx-dev', 'queued')"
+        )
+        conn.commit()
+        return conn
+
+    def test_migration_does_not_crash_on_v21(self, tmp_path):
+        conn = self._v21_db(tmp_path)
+        _apply_migration_0022(conn)
+
+    def test_project_id_column_present_after_migration(self, tmp_path):
+        conn = self._v21_db(tmp_path)
+        _apply_migration_0022(conn)
+        cols = _column_names(conn, "dispatches")
+        assert "project_id" in cols
+
+    def test_existing_row_project_id_preserved(self, tmp_path):
+        conn = self._v21_db(tmp_path)
+        _apply_migration_0022(conn)
+        row = conn.execute(
+            "SELECT project_id FROM dispatches WHERE dispatch_id = 'd-x'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "vnx-dev"
+
+    def test_composite_unique_enforced_after_migration(self, tmp_path):
+        conn = self._v21_db(tmp_path)
+        _apply_migration_0022(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, project_id, state) "
+                "VALUES ('d-x', 'vnx-dev', 'queued')"
             )
             conn.commit()

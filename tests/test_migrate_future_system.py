@@ -71,7 +71,8 @@ def _init_project(tmp_path: Path, roadmap_content: str = FIXTURE_ROADMAP) -> Pat
     conn.execute("""
         CREATE TABLE dispatches (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id     TEXT    NOT NULL UNIQUE,
+            dispatch_id     TEXT    NOT NULL,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
             state           TEXT    NOT NULL DEFAULT 'queued',
             terminal_id     TEXT,
             track           TEXT,
@@ -83,7 +84,8 @@ def _init_project(tmp_path: Path, roadmap_content: str = FIXTURE_ROADMAP) -> Pat
             created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             expires_after   TEXT,
-            metadata_json   TEXT    DEFAULT '{}'
+            metadata_json   TEXT    DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
         )
     """)
     conn.execute("""
@@ -222,13 +224,15 @@ class TestMigrateFutureSystem:
         conn.execute("""
             CREATE TABLE dispatches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                dispatch_id TEXT NOT NULL UNIQUE,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
                 state TEXT NOT NULL DEFAULT 'queued',
                 terminal_id TEXT, track TEXT, priority TEXT,
                 pr_ref TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
                 bundle_path TEXT, created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT '', expires_after TEXT,
-                metadata_json TEXT DEFAULT '{}'
+                metadata_json TEXT DEFAULT '{}',
+                UNIQUE(dispatch_id, project_id)
             )
         """)
         conn.execute("""
@@ -256,3 +260,61 @@ class TestMigrateFutureSystem:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
         assert version == 23
+
+
+class TestPragmaPreflightAssertion:
+    """_assert_dispatches_schema_intact raises RuntimeError when project_id missing."""
+
+    def _v9_style_project(self, tmp_path: Path) -> Path:
+        """Create a project with a v9-style dispatches table (no project_id)."""
+        project_dir = tmp_path / "v9project"
+        state_dir = project_dir / ".vnx-data" / "state"
+        state_dir.mkdir(parents=True)
+        claudedocs = project_dir / "claudedocs"
+        claudedocs.mkdir()
+        (claudedocs / "VNX-MASTER-ROADMAP-2026-05-28.md").write_text(
+            FIXTURE_ROADMAP, encoding="utf-8"
+        )
+
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL DEFAULT 'queued',
+                terminal_id TEXT, track TEXT, priority TEXT,
+                pr_ref TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                bundle_path TEXT, created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '', expires_after TEXT,
+                metadata_json TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE coordination_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT,
+                event_type TEXT, entity_type TEXT, entity_id TEXT,
+                from_state TEXT, to_state TEXT, actor TEXT, reason TEXT,
+                metadata_json TEXT, occurred_at TEXT, project_id TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return project_dir
+
+    def test_preflight_raises_on_missing_project_id(self, tmp_path):
+        project_dir = self._v9_style_project(tmp_path)
+        mod = _get_migrate_module()
+        with pytest.raises(RuntimeError, match="project_id"):
+            mod.run(project_dir)
+
+    def test_preflight_passes_on_v21_schema(self, tmp_path):
+        """v21 DB with project_id passes the preflight and migration proceeds."""
+        project_dir = _init_project(tmp_path)
+        mod = _get_migrate_module()
+        mod.run(project_dir)
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+        conn.close()
+        assert "project_id" in cols

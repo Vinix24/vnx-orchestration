@@ -7,6 +7,58 @@ import sys
 from vnx_cli import __version__
 
 
+def _register_track_subparser(subparsers: argparse.Action) -> None:
+    track_parser = subparsers.add_parser(
+        "track",
+        help="manage feature-tracks (new/activate/park/unpark/dispatch/list/show)",
+    )
+    track_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory (default: current directory)",
+    )
+    track_subs = track_parser.add_subparsers(dest="track_subcommand", metavar="SUBCOMMAND")
+
+    tn_parser = track_subs.add_parser("new", help="create a new track")
+    tn_parser.add_argument("track_id", metavar="TRACK_ID")
+    tn_parser.add_argument("--title", required=True, metavar="TITLE")
+    tn_parser.add_argument("--goal", required=True, metavar="GOAL")
+    tn_parser.add_argument("--priority", choices=["high", "medium", "low"], metavar="PRIORITY")
+    tn_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    ta_parser = track_subs.add_parser("activate", help="activate a queued track")
+    ta_parser.add_argument("track_id", metavar="TRACK_ID")
+    ta_parser.add_argument("--reason", metavar="REASON")
+    ta_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    tp_parser = track_subs.add_parser("park", help="park an active track")
+    tp_parser.add_argument("track_id", metavar="TRACK_ID")
+    tp_parser.add_argument("--reason", required=True, metavar="REASON")
+    tp_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    tu_parser = track_subs.add_parser("unpark", help="unpark a parked track to queued")
+    tu_parser.add_argument("track_id", metavar="TRACK_ID")
+    tu_parser.add_argument("--reason", metavar="REASON")
+    tu_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    td_parser = track_subs.add_parser("dispatch", help="create a dispatch for a track")
+    td_parser.add_argument("track_id", metavar="TRACK_ID")
+    td_parser.add_argument("--pr", required=True, metavar="PR-ID")
+    td_parser.add_argument("--terminal", required=True, choices=["T1", "T2", "T3"], metavar="TERMINAL")
+    td_parser.add_argument("--instruction-file", metavar="PATH")
+    td_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    tl_parser = track_subs.add_parser("list", help="list tracks")
+    tl_parser.add_argument("--phase", choices=["queued", "active", "parked", "done"], metavar="PHASE")
+    tl_parser.add_argument("--project-id", default="vnx-dev", metavar="PROJECT_ID")
+    tl_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+    ts_parser = track_subs.add_parser("show", help="show track detail")
+    ts_parser.add_argument("track_id", metavar="TRACK_ID")
+    ts_parser.add_argument("--project-dir", default=".", metavar="DIR")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="vnx",
@@ -130,55 +182,7 @@ def main() -> None:
     )
 
     # track subcommand
-    track_parser = subparsers.add_parser(
-        "track",
-        help="manage feature-tracks (new/activate/park/unpark/dispatch/list/show)",
-    )
-    track_parser.add_argument(
-        "--project-dir",
-        default=".",
-        metavar="DIR",
-        help="project directory (default: current directory)",
-    )
-    track_subs = track_parser.add_subparsers(dest="track_subcommand", metavar="SUBCOMMAND")
-
-    tn_parser = track_subs.add_parser("new", help="create a new track")
-    tn_parser.add_argument("track_id", metavar="TRACK_ID")
-    tn_parser.add_argument("--title", required=True, metavar="TITLE")
-    tn_parser.add_argument("--goal", required=True, metavar="GOAL")
-    tn_parser.add_argument("--priority", choices=["high", "medium", "low"], metavar="PRIORITY")
-    tn_parser.add_argument("--project-dir", default=".", metavar="DIR")
-
-    ta_parser = track_subs.add_parser("activate", help="activate a queued track")
-    ta_parser.add_argument("track_id", metavar="TRACK_ID")
-    ta_parser.add_argument("--reason", metavar="REASON")
-    ta_parser.add_argument("--project-dir", default=".", metavar="DIR")
-
-    tp_parser = track_subs.add_parser("park", help="park an active track")
-    tp_parser.add_argument("track_id", metavar="TRACK_ID")
-    tp_parser.add_argument("--reason", required=True, metavar="REASON")
-    tp_parser.add_argument("--project-dir", default=".", metavar="DIR")
-
-    tu_parser = track_subs.add_parser("unpark", help="unpark a parked track to queued")
-    tu_parser.add_argument("track_id", metavar="TRACK_ID")
-    tu_parser.add_argument("--reason", metavar="REASON")
-    tu_parser.add_argument("--project-dir", default=".", metavar="DIR")
-
-    td_parser = track_subs.add_parser("dispatch", help="create a dispatch for a track")
-    td_parser.add_argument("track_id", metavar="TRACK_ID")
-    td_parser.add_argument("--pr", required=True, metavar="PR-ID")
-    td_parser.add_argument("--terminal", required=True, choices=["T1", "T2", "T3"], metavar="TERMINAL")
-    td_parser.add_argument("--instruction-file", metavar="PATH")
-    td_parser.add_argument("--project-dir", default=".", metavar="DIR")
-
-    tl_parser = track_subs.add_parser("list", help="list tracks")
-    tl_parser.add_argument("--phase", choices=["queued", "active", "parked", "done"], metavar="PHASE")
-    tl_parser.add_argument("--project-id", default="vnx-dev", metavar="PROJECT_ID")
-    tl_parser.add_argument("--project-dir", default=".", metavar="DIR")
-
-    ts_parser = track_subs.add_parser("show", help="show track detail")
-    ts_parser.add_argument("track_id", metavar="TRACK_ID")
-    ts_parser.add_argument("--project-dir", default=".", metavar="DIR")
+    _register_track_subparser(subparsers)
 
     # update subcommand
     update_parser = subparsers.add_parser(

@@ -55,23 +55,20 @@ def _emit_track_event(
     actor: str,
     details: Optional[dict] = None,
 ) -> None:
-    """Best-effort: write one NDJSON audit line to track_events.ndjson."""
-    try:
-        _lib = Path(__file__).resolve().parent
-        if str(_lib) not in sys.path:
-            sys.path.insert(0, str(_lib))
-        import state_writer  # noqa: PLC0415
-        record: dict[str, Any] = {
-            "event_type": event_type,
-            "track_id": track_id,
-            "actor": actor,
-            "timestamp": _now_utc(),
-        }
-        if details:
-            record["details"] = details
-        state_writer.append_locked(Path(state_dir) / _TRACK_EVENTS_FILE, record)
-    except Exception:
-        pass
+    """Write one NDJSON audit line to track_events.ndjson. Raises on write failure (ADR-005)."""
+    _lib = Path(__file__).resolve().parent
+    if str(_lib) not in sys.path:
+        sys.path.insert(0, str(_lib))
+    import state_writer  # noqa: PLC0415
+    record: dict[str, Any] = {
+        "event_type": event_type,
+        "track_id": track_id,
+        "actor": actor,
+        "timestamp": _now_utc(),
+    }
+    if details:
+        record["details"] = details
+    state_writer.append_locked(Path(state_dir) / _TRACK_EVENTS_FILE, record)
 
 
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
@@ -130,12 +127,12 @@ def create_track(
                 metadata_json or "{}",
             ),
         )
+        _emit_track_event(state_dir, "track_created", track_id, "system", {"title": title})
         conn.commit()
         row = conn.execute("SELECT * FROM tracks WHERE track_id = ?", (track_id,)).fetchone()
         result = dict(row)
     finally:
         conn.close()
-    _emit_track_event(state_dir, "track_created", track_id, "system", {"title": title})
     return result
 
 
@@ -247,16 +244,16 @@ def transition_phase(
             (track_id, from_phase, to_phase, actor, reason, approval_id, now),
         )
 
+        _emit_track_event(
+            state_dir, "track_phase_transition", track_id, actor,
+            {"from": from_phase, "to": to_phase},
+        )
         conn.commit()
 
         updated = conn.execute("SELECT * FROM tracks WHERE track_id = ?", (track_id,)).fetchone()
         result = dict(updated)
     finally:
         conn.close()
-    _emit_track_event(
-        state_dir, "track_phase_transition", track_id, actor,
-        {"from": from_phase, "to": to_phase},
-    )
     return result
 
 
@@ -289,10 +286,10 @@ def set_next_up(state_dir: str | Path, track_id: str) -> None:
             "UPDATE tracks SET next_up = 1 WHERE track_id = ?",
             (track_id,),
         )
+        _emit_track_event(state_dir, "track_next_up_set", track_id, "system")
         conn.commit()
     finally:
         conn.close()
-    _emit_track_event(state_dir, "track_next_up_set", track_id, "system")
 
 
 # ---------------------------------------------------------------------------
@@ -327,13 +324,13 @@ def link_open_item(
             """,
             (track_id, oi_id, link_type, link_source, _now_utc()),
         )
+        _emit_track_event(
+            state_dir, "track_oi_linked", track_id, "system",
+            {"oi_id": oi_id, "link_type": link_type},
+        )
         conn.commit()
     finally:
         conn.close()
-    _emit_track_event(
-        state_dir, "track_oi_linked", track_id, "system",
-        {"oi_id": oi_id, "link_type": link_type},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -376,13 +373,13 @@ def add_dependency(
                 evidence_json, _now_utc(),
             ),
         )
+        _emit_track_event(
+            state_dir, "track_dep_added", from_track_id, "system",
+            {"to": to_track_id, "kind": kind},
+        )
         conn.commit()
     finally:
         conn.close()
-    _emit_track_event(
-        state_dir, "track_dep_added", from_track_id, "system",
-        {"to": to_track_id, "kind": kind},
-    )
 
 
 # ---------------------------------------------------------------------------

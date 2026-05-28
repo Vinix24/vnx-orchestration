@@ -68,6 +68,22 @@ def _source_hash(track_id: str, title: str, goal_state: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Step 0: PRAGMA pre-flight — guard against schema drift before rebuild
+# ---------------------------------------------------------------------------
+
+def _assert_dispatches_schema_intact(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    expected = {'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
+                'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
+                'expires_after', 'metadata_json'}
+    missing = expected - cols
+    if missing:
+        raise RuntimeError(
+            f'dispatches schema missing expected columns: {missing}. Refusing rebuild.'
+        )
+
+
+# ---------------------------------------------------------------------------
 # Step 1: apply migration SQL
 # ---------------------------------------------------------------------------
 
@@ -446,6 +462,9 @@ def run(project_root: Path | None = None) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
     try:
+        # Step 0: assert schema is intact before any rebuild
+        _assert_dispatches_schema_intact(conn)
+
         # Step 1: apply 0022 — creates track tables; dispatches rebuilt WITHOUT track FK
         apply_migration(conn, project_root)
         conn.commit()

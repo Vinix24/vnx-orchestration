@@ -10,6 +10,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -34,7 +35,8 @@ def _create_db(tmp_path: Path) -> Path:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dispatches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id TEXT NOT NULL UNIQUE,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
             state TEXT NOT NULL DEFAULT 'queued',
             terminal_id TEXT, track TEXT,
             priority TEXT DEFAULT 'P2',
@@ -43,7 +45,8 @@ def _create_db(tmp_path: Path) -> Path:
             bundle_path TEXT,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            expires_after TEXT, metadata_json TEXT DEFAULT '{}'
+            expires_after TEXT, metadata_json TEXT DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
         )
     """)
     conn.execute("""
@@ -174,3 +177,120 @@ class TestAddDependencyAudit:
         assert dep_events[0]["track_id"] == "track-02"
         assert dep_events[0]["details"]["to"] == "track-01"
         assert dep_events[0]["details"]["kind"] == "soft"
+
+
+# ---------------------------------------------------------------------------
+# ADR-005: mutation functions raise on audit write failure; no DB row committed
+# ---------------------------------------------------------------------------
+
+import state_writer as _sw
+
+
+class TestAuditWriteFailureRaises:
+    """All 5 mutation functions must raise and leave no committed DB row
+    when the NDJSON write fails (ADR-005 ledger-first guarantee)."""
+
+    def _count(self, state_dir: Path, table: str, where: str, val: str) -> int:
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {where} = ?", (val,)
+        ).fetchone()
+        conn.close()
+        return row[0]
+
+    def test_create_track_raises_on_audit_failure(self, state_dir):
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            with pytest.raises(OSError):
+                tracks.create_track(state_dir, "track-fail-01", "T", "G")
+
+    def test_create_track_no_row_after_audit_failure(self, state_dir):
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            try:
+                tracks.create_track(state_dir, "track-fail-02", "T", "G")
+            except OSError:
+                pass
+        assert self._count(state_dir, "tracks", "track_id", "track-fail-02") == 0
+
+    def test_transition_phase_raises_on_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-tp-01", "T", "G", phase="queued")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            with pytest.raises(OSError):
+                tracks.transition_phase(state_dir, "track-tp-01", "active", actor="operator")
+
+    def test_transition_phase_no_phase_change_after_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-tp-02", "T", "G", phase="queued")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            try:
+                tracks.transition_phase(state_dir, "track-tp-02", "active", actor="operator")
+            except OSError:
+                pass
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute("SELECT phase FROM tracks WHERE track_id = 'track-tp-02'").fetchone()
+        conn.close()
+        assert row[0] == "queued"
+
+    def test_set_next_up_raises_on_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-nu-01", "T", "G")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            with pytest.raises(OSError):
+                tracks.set_next_up(state_dir, "track-nu-01")
+
+    def test_set_next_up_not_committed_after_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-nu-02", "T", "G")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            try:
+                tracks.set_next_up(state_dir, "track-nu-02")
+            except OSError:
+                pass
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute("SELECT next_up FROM tracks WHERE track_id = 'track-nu-02'").fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    def test_link_open_item_raises_on_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-oi-01", "T", "G")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            with pytest.raises(OSError):
+                tracks.link_open_item(state_dir, "track-oi-01", "OI-x", "blocks", "manual")
+
+    def test_link_open_item_no_row_after_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-oi-02", "T", "G")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            try:
+                tracks.link_open_item(state_dir, "track-oi-02", "OI-y", "blocks", "manual")
+            except OSError:
+                pass
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT COUNT(*) FROM track_open_items WHERE track_id = 'track-oi-02'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 0
+
+    def test_add_dependency_raises_on_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-dep-a", "T", "G", phase="active")
+        tracks.create_track(state_dir, "track-dep-b", "T", "G")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            with pytest.raises(OSError):
+                tracks.add_dependency(state_dir, "track-dep-b", "track-dep-a", "hard", "manual")
+
+    def test_add_dependency_no_row_after_audit_failure(self, state_dir):
+        tracks.create_track(state_dir, "track-dep-c", "T", "G", phase="active")
+        tracks.create_track(state_dir, "track-dep-d", "T", "G")
+        with patch.object(_sw, "append_locked", side_effect=OSError("full")):
+            try:
+                tracks.add_dependency(state_dir, "track-dep-d", "track-dep-c", "hard", "manual")
+            except OSError:
+                pass
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT COUNT(*) FROM track_dependencies "
+            "WHERE from_track_id = 'track-dep-d'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 0
