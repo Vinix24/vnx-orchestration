@@ -28,6 +28,20 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# Pre-flight hook registry: migration version → list of fn(conn) callables.
+# Hooks run inside apply_script_if_below before any SQL executes.
+# Each fn must raise (e.g. RuntimeError) to abort; returning None means pass.
+_PREFLIGHT_HOOKS: dict[int, list] = {}
+
+
+def register_preflight(version: int, fn) -> None:
+    """Register fn(conn) as a pre-flight guard for migration *version*.
+
+    Called inside apply_script_if_below before SQL execution, so direct callers
+    cannot bypass the check by skipping the wrapper function.
+    """
+    _PREFLIGHT_HOOKS.setdefault(version, []).append(fn)
+
 
 def get_user_version(conn: sqlite3.Connection) -> int:
     """Return PRAGMA user_version for the connection's database."""
@@ -161,6 +175,9 @@ def apply_script_if_below(
     """
     if get_user_version(conn) >= target_version:
         return False
+
+    for hook in _PREFLIGHT_HOOKS.get(target_version, []):
+        hook(conn)  # raises on failure; prevents any SQL from executing
 
     statements = _split_sql_statements(sql)
     sp = f'"vnx_ver_{target_version}"'
