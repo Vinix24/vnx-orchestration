@@ -67,10 +67,8 @@ _IMPORT_BATCH_SIZE = 500
 # ``<project_id>:<original>`` so per-project identifiers remain unique after
 # consolidation.
 #
-# NOTE: this is the BASE list. Round-2 fix for Finding 2 generalizes the
-# detection to also cover columns whose name *ends with* ``_dispatch_id`` or
-# ``_pattern_id`` (e.g. ``related_dispatch_id``, ``parent_dispatch_id``); see
-# ``_collect_collision_columns`` below.
+# Exact-name collision prefix columns. Suffix matches are collected separately
+# in ``_collect_collision_columns`` below.
 COLLISION_PREFIX_COLUMNS: tuple[str, ...] = ("dispatch_id", "pattern_id")
 
 # Suffixes used for schema-driven collision detection. Any column name that
@@ -581,20 +579,9 @@ def _compare_counts(
 ) -> dict[str, dict]:
     """Compare per-project row counts; surface read failures via ``read_errors``.
 
-    Round-2 fix (Finding 4): a corrupt or unreadable source table no
-    longer silently degrades to zero rows. The condition is split into
-    'table absent' (fine — schema drift) vs 'table present but unreadable'
-    (fatal — appended to the shared ``read_errors`` list and surfaced as
-    a verification discrepancy).
-
-    Round-5 fix (Bug 3): when the central DB has the table but is
-    missing the ``project_id`` column, the verifier no longer silently
-    falls back to an unfiltered ``COUNT(*)``. That fallback could
-    produce per-project counts equal to the GLOBAL central total
-    (e.g. ``code_snippets`` reporting 855,159 for every project when
-    the FTS5 vtab was rebuilt without ``project_id``). Instead it now
-    records a ``central_missing_project_id`` read_error which becomes a
-    verification discrepancy.
+    Unreadable source tables and central tables missing ``project_id`` are
+    recorded as verification discrepancies instead of being counted as zero
+    rows or unfiltered central totals.
     """
     out: dict[str, dict] = {}
     tables_list = list(tables)
@@ -620,12 +607,8 @@ def _compare_counts(
                 # Source predates this table → acceptable schema drift.
                 continue
             if not central_present:
-                # Round-3 fix-forward (Issue 3): a missing central table
-                # while the source HAS the table is a hard failure, not a
-                # silent skip. Without this, an empty-bootstrap apply
-                # would happily declare "verification clean" against
-                # zero imported rows. Surfacing as a read_error promotes
-                # to a verification discrepancy (exit code 4).
+                # A missing central table while the source has data is a
+                # verification discrepancy, not acceptable schema drift.
                 read_errors.append(
                     {
                         "db": central_db_label,
@@ -651,12 +634,8 @@ def _compare_counts(
                 continue
             central_has_pid = _column_exists(con, tbl, "project_id")
             if not central_has_pid:
-                # Round-5 fix (Bug 3): central is missing project_id on a
-                # table that is in the import list. After 0010+0015 every
-                # import-target table MUST have project_id. A missing
-                # column means the migration didn't take, or the FTS5
-                # vtab was rebuilt without it — either way the unfiltered
-                # COUNT(*) fallback would lie. Surface as discrepancy.
+                # Import-target tables require project_id; otherwise an
+                # unfiltered central count would produce a false match.
                 read_errors.append(
                     {
                         "db": central_db_label,
@@ -705,11 +684,8 @@ def _collect_skipped_rows(
 ) -> list[dict[str, object]]:
     """Return *unresolved* skipped rows, optionally scoped to a run.
 
-    Round-2 fix (Finding 3): adds the ``resolved_at IS NULL`` filter so a
-    conflict logged on run 1 that succeeded on run 2 stops surfacing as a
-    verify_import discrepancy. When ``run_id`` is supplied, the query
-    further narrows to that run so a fresh apply is only judged against
-    its own outcomes.
+    Resolved conflicts are ignored, and ``run_id`` narrows verification to the
+    current apply run when supplied.
     """
     if not central_db.exists():
         return []

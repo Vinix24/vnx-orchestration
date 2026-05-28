@@ -285,7 +285,7 @@ Commands:
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
                        review --weekly  Aggregate last 7d suggestions by target file
-  insights           Read-only F57 dispatch parameter + behavioral intelligence signals
+  insights           Read-only dispatch parameter + behavioral intelligence signals
                        --json           Machine-readable JSON output
 
 Intelligence commands (git-tracked project knowledge):
@@ -1805,7 +1805,7 @@ cmd_worktree_status() {
 }
 
 # ── vnx update ─────────────────────────────────────────────────────────
-VNX_ORIGIN_URL="https://github.com/Vinix24/vnx-orchestration-system.git"
+VNX_ORIGIN_URL="https://github.com/Vinix24/vnx-orchestration.git"
 VNX_ORIGIN_FILE="$VNX_HOME/.vnx-origin"
 VNX_VERSION_LOCK="$VNX_HOME/version.lock"
 

@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 # VNX Command: start
 # Extracted from bin/vnx — launches the VNX tmux session with 2x2 grid.
 #
