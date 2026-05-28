@@ -22,6 +22,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Bootstrap sys.path so lib modules resolve regardless of cwd
@@ -68,6 +69,22 @@ def _source_hash(track_id: str, title: str, goal_state: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Audit NDJSON emission helper (ADR-005)
+# ---------------------------------------------------------------------------
+
+def _emit_migration_audit(events_dir: Path, event_type: str, details: dict) -> None:
+    """Write one NDJSON audit line to events/migration_audit.ndjson. Raises on failure (ADR-005)."""
+    import state_writer as _sw
+    ts = _now_utc()
+    rid = hashlib.sha256(
+        f'{event_type}:{json.dumps(details, sort_keys=True)}:{ts}'.encode()
+    ).hexdigest()[:16]
+    record: dict = {"event_type": event_type, "timestamp": ts, "record_id": rid, **details}
+    events_dir.mkdir(parents=True, exist_ok=True)
+    _sw.append_locked(events_dir / "migration_audit.ndjson", record)
+
+
+# ---------------------------------------------------------------------------
 # Step 0: PRAGMA pre-flight — guard against schema drift before rebuild
 # ---------------------------------------------------------------------------
 
@@ -77,15 +94,61 @@ def _assert_dispatches_schema_intact(conn: sqlite3.Connection) -> None:
                 'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
                 'expires_after', 'metadata_json'}
     missing = expected - cols
-    if missing:
+    extra = cols - expected
+    if missing or extra:
         raise RuntimeError(
-            f'dispatches schema missing expected columns: {missing}. Refusing rebuild.'
+            f'dispatches schema drift: missing={missing} extra={extra}. '
+            'Refusing rebuild — please add migration logic for the new columns first.'
+        )
+    indexes = list(conn.execute("PRAGMA index_list('dispatches')"))
+    composite_unique_exists = False
+    for idx in indexes:
+        if idx[2]:  # unique flag
+            idx_cols = [c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")]
+            if set(idx_cols) == {'dispatch_id', 'project_id'}:
+                composite_unique_exists = True
+                break
+    if not composite_unique_exists:
+        raise RuntimeError(
+            'dispatches missing UNIQUE(dispatch_id, project_id) — '
+            'was added in migration 0017, must be preserved'
         )
 
 
 # Register PRAGMA pre-flight for 0022: any call to apply_script_if_below(22, ...)
 # triggers the column assertion, even when invoked outside of run().
 schema_migration.register_preflight(22, _assert_dispatches_schema_intact)
+
+
+def _assert_dispatches_schema_post_0022(conn: sqlite3.Connection) -> None:
+    """Assert post-0022 schema is intact before 0023 rebuild."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
+    expected = {'id', 'dispatch_id', 'project_id', 'state', 'terminal_id', 'track', 'priority',
+                'pr_ref', 'gate', 'attempt_count', 'bundle_path', 'created_at', 'updated_at',
+                'expires_after', 'metadata_json', 'operator_approved_at'}
+    missing = expected - cols
+    extra = cols - expected
+    if missing or extra:
+        raise RuntimeError(
+            f'dispatches schema drift after 0022: missing={missing} extra={extra}. '
+            'Refusing 0023 rebuild — schema state does not match expected post-0022 shape.'
+        )
+    indexes = list(conn.execute("PRAGMA index_list('dispatches')"))
+    composite_unique_exists = False
+    for idx in indexes:
+        if idx[2]:  # unique flag
+            idx_cols = [c[2] for c in conn.execute(f"PRAGMA index_info('{idx[1]}')")]
+            if set(idx_cols) == {'dispatch_id', 'project_id'}:
+                composite_unique_exists = True
+                break
+    if not composite_unique_exists:
+        raise RuntimeError(
+            'dispatches missing UNIQUE(dispatch_id, project_id) after 0022 — '
+            'migration 0022 must preserve this constraint'
+        )
+
+
+schema_migration.register_preflight(23, _assert_dispatches_schema_post_0022)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +189,7 @@ def apply_migration_0023(conn: sqlite3.Connection, project_root: Path) -> None:
         print(f"  [skip] migration 0023 already applied (user_version={current_version})")
         return
 
+    _assert_dispatches_schema_post_0022(conn)
     print("  [apply] migration 0023_dispatches_fk.sql ...")
     schema_migration.apply_script_if_below(conn, 23, sql)
     print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
@@ -316,7 +380,7 @@ def seed_tracks(conn: sqlite3.Connection, tracks: list[dict]) -> list[str]:
 # Step 3: tag existing dispatches with track FK
 # ---------------------------------------------------------------------------
 
-def _nullify_orphaned_track_refs(conn: sqlite3.Connection) -> int:
+def _nullify_orphaned_track_refs(conn: sqlite3.Connection, events_dir: Optional[Path] = None) -> int:
     """NULL out dispatches.track values that don't match any seeded track.
 
     Must run after seed_tracks and before apply_migration_0023. Prevents FK
@@ -329,10 +393,12 @@ def _nullify_orphaned_track_refs(conn: sqlite3.Connection) -> int:
     count = result.rowcount
     if count:
         print(f"  [warn]  nullified {count} orphaned track ref(s) before FK enforcement")
+        if events_dir is not None:
+            _emit_migration_audit(events_dir, "dispatch_track_refs_nullified", {"count": count})
     return count
 
 
-def tag_dispatches(conn: sqlite3.Connection) -> int:
+def tag_dispatches(conn: sqlite3.Connection, events_dir: Optional[Path] = None) -> int:
     """Update dispatches.track based on PR-cluster prefix matching."""
     try:
         rows = conn.execute(
@@ -367,6 +433,8 @@ def tag_dispatches(conn: sqlite3.Connection) -> int:
 
     if tagged:
         print(f"  [ok]   tagged {tagged} dispatch(es) with track FK")
+        if events_dir is not None:
+            _emit_migration_audit(events_dir, "dispatches_track_tagged", {"tagged_count": tagged})
     return tagged
 
 
@@ -374,10 +442,12 @@ def tag_dispatches(conn: sqlite3.Connection) -> int:
 # Step 4: set next_up=1
 # ---------------------------------------------------------------------------
 
-def set_initial_next_up(conn: sqlite3.Connection) -> None:
+def set_initial_next_up(conn: sqlite3.Connection, events_dir: Optional[Path] = None) -> None:
     """Set next_up=1 on the first queued track whose dependencies are all done/active."""
     # Clear stale next_up flags
     conn.execute("UPDATE tracks SET next_up = 0 WHERE next_up = 1")
+    if events_dir is not None:
+        _emit_migration_audit(events_dir, "tracks_next_up_cleared", {})
 
     # Get all queued tracks ordered by sort_order
     queued = conn.execute(
@@ -401,6 +471,8 @@ def set_initial_next_up(conn: sqlite3.Connection) -> None:
         if all_satisfied:
             conn.execute("UPDATE tracks SET next_up = 1 WHERE track_id = ?", (track_id,))
             print(f"  [ok]   next_up=1 on {track_id}")
+            if events_dir is not None:
+                _emit_migration_audit(events_dir, "track_next_up_set", {"track_id": track_id})
             break
 
 
@@ -468,8 +540,13 @@ def run(project_root: Path | None = None) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
     try:
-        # Step 0: assert schema is intact before any rebuild
-        _assert_dispatches_schema_intact(conn)
+        # Step 0: assert schema is intact before any rebuild (version-aware guard)
+        _current_ver = schema_migration.get_user_version(conn)
+        if _current_ver < 22:
+            _assert_dispatches_schema_intact(conn)
+        elif _current_ver < 23:
+            _assert_dispatches_schema_post_0022(conn)
+        # version >= 23: both migrations already applied; no rebuild will run
 
         # Step 1: apply 0022 — creates track tables; dispatches rebuilt WITHOUT track FK
         apply_migration(conn, project_root)
@@ -481,22 +558,27 @@ def run(project_root: Path | None = None) -> None:
 
         inserted_ids = seed_tracks(conn, tracks)
 
+        events_dir = project_root / ".vnx-data" / "events"
+
         # Step 3: tag existing dispatches by PR-cluster prefix
-        tagged = tag_dispatches(conn)
+        tagged = tag_dispatches(conn, events_dir)
 
         # Step 3b: nullify orphaned track refs that weren't mapped (FK safety for 0023)
-        _nullify_orphaned_track_refs(conn)
+        _nullify_orphaned_track_refs(conn, events_dir)
 
         # emit_events BEFORE commit — if emit fails, seed rolls back (ADR-005)
         emit_events(conn, inserted_ids)
         conn.commit()
 
         # Step 4: apply 0023 — adds dispatches.track FK now that tracks are seeded
+        # Pre-condition: assert post-0022 schema intact before 0023 rebuild
+        if schema_migration.get_user_version(conn) < 23:
+            _assert_dispatches_schema_post_0022(conn)
         apply_migration_0023(conn, project_root)
         conn.commit()
 
         # Step 5
-        set_initial_next_up(conn)
+        set_initial_next_up(conn, events_dir)
         conn.commit()
         print(f"\n  Migration complete. {len(tracks)} track(s) in DB.\n")
 

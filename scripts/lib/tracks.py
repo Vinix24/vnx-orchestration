@@ -60,15 +60,19 @@ def _emit_track_event(
     if str(_lib) not in sys.path:
         sys.path.insert(0, str(_lib))
     import state_writer  # noqa: PLC0415
+    import hashlib as _hashlib
+    _ts = _now_utc()
+    _rid = _hashlib.sha256(f'{event_type}:{track_id}:{_ts}'.encode()).hexdigest()[:16]
     record: dict[str, Any] = {
         "event_type": event_type,
         "track_id": track_id,
         "actor": actor,
-        "timestamp": _now_utc(),
+        "timestamp": _ts,
+        "record_id": _rid,
     }
     if details:
         record["details"] = details
-    state_writer.append_locked(Path(state_dir) / _TRACK_EVENTS_FILE, record)
+    state_writer.append_locked(Path(state_dir).parent / "events" / _TRACK_EVENTS_FILE, record)
 
 
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:

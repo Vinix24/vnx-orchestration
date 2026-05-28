@@ -388,3 +388,121 @@ class TestV21ProjectIdPreservation:
                 "VALUES ('d-x', 'vnx-dev', 'queued')"
             )
             conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# sqlite_sequence preservation across 0022 and 0023 rebuilds
+# ---------------------------------------------------------------------------
+
+class TestSqliteSequencePreservation:
+    """AUTOINCREMENT sequence must survive the RENAME→CREATE→INSERT→DROP rebuilds
+    in both 0022 and 0023 so IDs stay monotonically increasing."""
+
+    def _base_db_with_rows(self, tmp_path: Path, n: int) -> sqlite3.Connection:
+        """Build a pre-0022 DB with n dispatch rows."""
+        db_path = tmp_path / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dispatches (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id     TEXT    NOT NULL,
+                project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+                state           TEXT    NOT NULL DEFAULT 'queued',
+                terminal_id     TEXT,
+                track           TEXT,
+                priority        TEXT    DEFAULT 'P2',
+                pr_ref          TEXT,
+                gate            TEXT,
+                attempt_count   INTEGER NOT NULL DEFAULT 0,
+                bundle_path     TEXT,
+                created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                expires_after   TEXT,
+                metadata_json   TEXT    DEFAULT '{}',
+                UNIQUE(dispatch_id, project_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS coordination_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id    TEXT,
+                event_type  TEXT,
+                entity_type TEXT,
+                entity_id   TEXT,
+                from_state  TEXT,
+                to_state    TEXT,
+                actor       TEXT,
+                reason       TEXT,
+                metadata_json TEXT,
+                occurred_at TEXT,
+                project_id  TEXT
+            )
+        """)
+        for i in range(n):
+            conn.execute(
+                "INSERT INTO dispatches (dispatch_id, state) VALUES (?, 'queued')",
+                (f"disp-{i:03d}",),
+            )
+        conn.commit()
+        return conn
+
+    def test_sequence_preserved_after_0022(self, tmp_path):
+        """After 0022 rebuild, the next auto-insert gets id > N (not reset to 1)."""
+        n = 5
+        conn = self._base_db_with_rows(tmp_path, n)
+        sql = (_MIGRATIONS / "0022_track_layer.sql").read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, 22, sql)
+        conn.commit()
+
+        # Delete all rows to force reliance on sqlite_sequence for next id
+        conn.execute("DELETE FROM dispatches")
+        conn.commit()
+
+        # Insert a new row and check the id is > n
+        conn.execute("INSERT INTO dispatches (dispatch_id, state) VALUES ('new-post-0022', 'queued')")
+        conn.commit()
+        row = conn.execute("SELECT id FROM dispatches WHERE dispatch_id = 'new-post-0022'").fetchone()
+        assert row is not None
+        assert row[0] > n, (
+            f"After 0022 rebuild, expected id > {n} but got {row[0]}. "
+            "sqlite_sequence was not preserved."
+        )
+        conn.close()
+
+    def test_sequence_preserved_after_0023(self, tmp_path):
+        """After both 0022 and 0023 rebuilds, the next auto-insert id still continues from N+1."""
+        n = 7
+
+        # Build pre-0022 DB
+        conn = self._base_db_with_rows(tmp_path, n)
+
+        # Apply 0022
+        sql_22 = (_MIGRATIONS / "0022_track_layer.sql").read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, 22, sql_22)
+        conn.commit()
+
+        # Seed a minimal tracks table so 0023 FK is satisfiable
+        conn.execute(
+            "INSERT INTO tracks (track_id, title, goal_state, phase) VALUES ('t-test', 'T', 'G', 'active')"
+        )
+        conn.commit()
+
+        # Apply 0023
+        sql_23 = (_MIGRATIONS / "0023_dispatches_fk.sql").read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, 23, sql_23)
+        conn.commit()
+
+        # Delete all rows, insert new, verify id continues from N+1
+        conn.execute("DELETE FROM dispatches")
+        conn.commit()
+        conn.execute("INSERT INTO dispatches (dispatch_id, state) VALUES ('new-post-0023', 'queued')")
+        conn.commit()
+        row = conn.execute("SELECT id FROM dispatches WHERE dispatch_id = 'new-post-0023'").fetchone()
+        assert row is not None
+        assert row[0] > n, (
+            f"After 0023 rebuild, expected id > {n} but got {row[0]}. "
+            "sqlite_sequence was not preserved."
+        )
+        conn.close()

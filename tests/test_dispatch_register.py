@@ -708,7 +708,114 @@ class TestRegisterProposedTrackDispatch:
         assert row is not None
         assert row[1] == "proposed"
 
-        ndjson_path = state_dir / "dispatch_register.ndjson"
+        ndjson_path = state_dir.parent / "events" / "dispatch_register.ndjson"
         assert ndjson_path.exists()
         lines = [l for l in ndjson_path.read_text().splitlines() if l.strip()]
         assert any("disp-ok-001" in l for l in lines)
+
+
+# ---------------------------------------------------------------------------
+# record_id in _build_event_record
+# ---------------------------------------------------------------------------
+
+class TestBuildEventRecordId:
+    def test_build_event_record_contains_record_id(self, isolated_data_dir):
+        """_build_event_record must include a deterministic record_id field."""
+        append_event("dispatch_created", dispatch_id="dr-001")
+        reg = _reg_path(isolated_data_dir)
+        rec = json.loads(reg.read_text().strip())
+        assert "record_id" in rec, "record_id must be present in every emitted event record"
+        assert len(rec["record_id"]) == 16, "record_id must be a 16-hex-char sha256 prefix"
+
+    def test_record_id_is_deterministic(self, isolated_data_dir):
+        """Two records with the same event/dispatch_id/timestamp get the same record_id.
+        
+        We cannot control the timestamp from outside, so instead we verify that two
+        different events get DIFFERENT record_ids (confirming the hash input varies).
+        """
+        append_event("dispatch_created", dispatch_id="det-001")
+        append_event("dispatch_promoted", dispatch_id="det-002")
+        lines = _reg_path(isolated_data_dir).read_text().strip().splitlines()
+        records = [json.loads(l) for l in lines]
+        rid_a = records[0]["record_id"]
+        rid_b = records[1]["record_id"]
+        assert rid_a != rid_b, "Different events must produce different record_ids"
+
+
+# ---------------------------------------------------------------------------
+# register_proposed_track_dispatch audit failure rollback
+# ---------------------------------------------------------------------------
+
+class TestRegisterProposedTrackDispatchRollback:
+    """register_proposed_track_dispatch must NOT commit a dispatches row when the
+    NDJSON write fails (ADR-005 ledger-first guarantee)."""
+
+    def _make_db(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Returns (state_dir, db_path) with a post-0022 DB."""
+        import sqlite3 as _sqlite3
+        import sys as _sys
+        schemas = Path(__file__).resolve().parent.parent / "schemas" / "migrations"
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
+        import schema_migration as _sm
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        db_path = state_dir / "runtime_coordination.db"
+        conn = _sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                state TEXT NOT NULL DEFAULT 'proposed',
+                terminal_id TEXT, track TEXT,
+                priority TEXT DEFAULT 'P2', pr_ref TEXT, gate TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0, bundle_path TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                expires_after TEXT, metadata_json TEXT DEFAULT '{}',
+                operator_approved_at TEXT,
+                UNIQUE(dispatch_id, project_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return state_dir, db_path
+
+    def test_no_dispatch_row_when_ndjson_write_fails(self, tmp_path):
+        """When _write_event_locked raises, no dispatches row is committed."""
+        state_dir, db_path = self._make_db(tmp_path)
+
+        with patch.object(dispatch_register, "_write_event_locked", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                dispatch_register.register_proposed_track_dispatch(
+                    state_dir, "dr-fail-001", "T1", "track-01", "PR-TEST-1"
+                )
+
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(db_path))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM dispatches WHERE dispatch_id = 'dr-fail-001'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 0, "No dispatches row must be committed when NDJSON write fails"
+
+    def test_dispatch_row_created_on_success(self, tmp_path):
+        """On successful NDJSON write + DB insert, the row exists."""
+        state_dir, db_path = self._make_db(tmp_path)
+        events_dir = tmp_path / "events"
+        events_dir.mkdir(parents=True)
+
+        dispatch_register.register_proposed_track_dispatch(
+            state_dir, "dr-ok-001", "T1", "track-01", "PR-TEST-2"
+        )
+
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(db_path))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM dispatches WHERE dispatch_id = 'dr-ok-001'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 1

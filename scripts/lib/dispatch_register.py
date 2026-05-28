@@ -31,6 +31,25 @@ except ImportError:
     _shadow_verifier = None  # type: ignore[assignment]
     _shadow_logger = None  # type: ignore[assignment]
 
+# ---------------------------------------------------------------------------
+# NDJSON write path documentation
+#
+# Two separate NDJSON paths exist in this module — intentional, not a bug:
+#
+# Path 1 (legacy, fire-and-forget): append_event()
+#   Writes to: <state_dir>/dispatch_register.ndjson
+#   Semantics: best-effort, never raises, suitable for fire-and-forget hooks
+#   Used by: all legacy callers (schema_migration hooks, CLI bash callers, etc.)
+#
+# Path 2 (transactional, ADR-005): register_proposed_track_dispatch()
+#   Writes to: <state_dir.parent>/events/dispatch_register.ndjson
+#   Semantics: raises on failure; NDJSON written before SQLite commit
+#   Used by: new track-layer operations requiring ledger-first guarantee
+#
+# DO NOT merge the two paths — legacy callers rely on best-effort semantics;
+# new callers must use the transactional path and handle OSError propagation.
+# ---------------------------------------------------------------------------
+
 # SQL template identifier used in shadow comparisons (no actual SQL — NDJSON source)
 _REGISTER_NDJSON_TEMPLATE = "dispatch_register.ndjson"
 
@@ -149,6 +168,11 @@ def _build_event_record(
         record["agent_id"] = agent_id
     if extra and isinstance(extra, dict):
         record["extra"] = extra
+    import hashlib as _hashlib
+    _primary = dispatch_id or feature_id or str(pr_number)
+    record["record_id"] = _hashlib.sha256(
+        f'{event}:{_primary}:{record["timestamp"]}'.encode()
+    ).hexdigest()[:16]
     return record
 
 
@@ -616,11 +640,16 @@ def register_proposed_track_dispatch(
     terminal_id: str,
     track_id: str,
     pr_ref: str,
+    *,
+    project_id: str = "vnx-dev",
 ) -> None:
     """Insert a proposed dispatch row + emit NDJSON audit event (ADR-005 compliant).
 
     NDJSON write precedes the SQLite commit. If the audit write fails it raises
     and no DB row is created. Raises sqlite3.Error on DB failure.
+
+    ``project_id`` is written into the dispatches row (defaults to ``vnx-dev``
+    for backwards compatibility with callers that do not supply it).
     """
     import sqlite3 as _sqlite3
 
@@ -630,8 +659,8 @@ def register_proposed_track_dispatch(
         pr_ref or "", terminal_id or "", "", None,
     )
 
-    # Write NDJSON first — ADR-005 requires ledger before DB
-    _write_event_locked(Path(state_dir) / "dispatch_register.ndjson", record)
+    # Write NDJSON first — ADR-005 requires ledger before DB; events/ not state/
+    _write_event_locked(Path(state_dir).parent / "events" / "dispatch_register.ndjson", record)
 
     db_path = Path(state_dir) / "runtime_coordination.db"
     conn = _sqlite3.connect(str(db_path), timeout=10.0)
@@ -640,10 +669,10 @@ def register_proposed_track_dispatch(
     try:
         conn.execute(
             """
-            INSERT INTO dispatches (dispatch_id, state, terminal_id, track, pr_ref)
-            VALUES (?, 'proposed', ?, ?, ?)
+            INSERT INTO dispatches (dispatch_id, project_id, state, terminal_id, track, pr_ref)
+            VALUES (?, ?, 'proposed', ?, ?, ?)
             """,
-            (dispatch_id, terminal_id, track_id, pr_ref),
+            (dispatch_id, project_id, terminal_id, track_id, pr_ref),
         )
         conn.commit()
     finally:

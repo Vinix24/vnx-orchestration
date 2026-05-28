@@ -142,7 +142,8 @@ def _cmd_dispatch(args) -> int:
     register = _require_dispatch_register()
     try:
         register.register_proposed_track_dispatch(
-            state_dir, dispatch_id, args.terminal, args.track_id, args.pr
+            state_dir, dispatch_id, args.terminal, args.track_id, args.pr,
+            project_id=track.get("project_id") or "vnx-dev",
         )
         print(f"  Created dispatch {dispatch_id}")
         print(f"  State: proposed (awaiting operator_approved_at)")

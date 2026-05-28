@@ -57,6 +57,9 @@ FROM dispatches_pre_v23;
 
 DROP TABLE dispatches_pre_v23;
 
+INSERT OR REPLACE INTO sqlite_sequence(name, seq)
+    SELECT 'dispatches', COALESCE(MAX(id), 0) FROM dispatches;
+
 -- Recreate dispatch indexes (dropped with the renamed table)
 CREATE INDEX IF NOT EXISTS idx_dispatch_state
     ON dispatches (state, updated_at DESC);

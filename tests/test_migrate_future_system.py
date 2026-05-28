@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _LIB = _PROJECT_ROOT / "scripts" / "lib"
@@ -318,3 +319,216 @@ class TestPragmaPreflightAssertion:
         cols = {row[1] for row in conn.execute("PRAGMA table_info('dispatches')")}
         conn.close()
         assert "project_id" in cols
+
+
+class TestEmitEventsOrdering:
+    """emit_events runs BEFORE conn.commit() on the seed step (ADR-005)."""
+
+    def test_emit_failure_rolls_back_seed(self, tmp_path):
+        """If emit_events raises, seed tracks are not committed to DB."""
+        project_dir = _init_project(tmp_path)
+        mod = _get_migrate_module()
+
+        with patch.object(mod, "emit_events", side_effect=RuntimeError("emit failed")):
+            with pytest.raises(RuntimeError, match="emit failed"):
+                mod.run(project_dir)
+
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        count = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+        conn.close()
+        assert count == 0, "Seed must be rolled back when emit_events fails"
+
+
+class TestBidirectionalPreflight:
+    """_assert_dispatches_schema_intact raises on extra columns AND missing UNIQUE."""
+
+    def _db_with_extra_column(self, tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
+        project_dir = tmp_path / "extra_col"
+        state_dir = project_dir / ".vnx-data" / "state"
+        state_dir.mkdir(parents=True)
+        claudedocs = project_dir / "claudedocs"
+        claudedocs.mkdir()
+        (claudedocs / "VNX-MASTER-ROADMAP-2026-05-28.md").write_text(
+            FIXTURE_ROADMAP, encoding="utf-8"
+        )
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                state TEXT NOT NULL DEFAULT 'queued',
+                terminal_id TEXT, track TEXT, priority TEXT,
+                pr_ref TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                bundle_path TEXT, created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '', expires_after TEXT,
+                metadata_json TEXT DEFAULT '{}',
+                extra_column TEXT,
+                UNIQUE(dispatch_id, project_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE coordination_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT,
+                event_type TEXT, entity_type TEXT, entity_id TEXT,
+                from_state TEXT, to_state TEXT, actor TEXT, reason TEXT,
+                metadata_json TEXT, occurred_at TEXT, project_id TEXT
+            )
+        """)
+        conn.commit()
+        return project_dir, conn
+
+    def test_raises_on_extra_column(self, tmp_path):
+        project_dir, conn = self._db_with_extra_column(tmp_path)
+        conn.close()
+        mod = _get_migrate_module()
+        with pytest.raises(RuntimeError, match="extra="):
+            mod.run(project_dir)
+
+    def test_raises_on_missing_unique(self, tmp_path):
+        """A dispatches table without UNIQUE(dispatch_id, project_id) fails preflight."""
+        project_dir = tmp_path / "no_unique"
+        state_dir = project_dir / ".vnx-data" / "state"
+        state_dir.mkdir(parents=True)
+        claudedocs = project_dir / "claudedocs"
+        claudedocs.mkdir()
+        (claudedocs / "VNX-MASTER-ROADMAP-2026-05-28.md").write_text(
+            FIXTURE_ROADMAP, encoding="utf-8"
+        )
+        db_path = state_dir / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                state TEXT NOT NULL DEFAULT 'queued',
+                terminal_id TEXT, track TEXT, priority TEXT,
+                pr_ref TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                bundle_path TEXT, created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '', expires_after TEXT,
+                metadata_json TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE coordination_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT,
+                event_type TEXT, entity_type TEXT, entity_id TEXT,
+                from_state TEXT, to_state TEXT, actor TEXT, reason TEXT,
+                metadata_json TEXT, occurred_at TEXT, project_id TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        mod = _get_migrate_module()
+        with pytest.raises(RuntimeError, match="UNIQUE"):
+            mod.run(project_dir)
+
+
+class TestPreflightBefore0023:
+    """Second preflight (_assert_dispatches_schema_post_0022) triggers before 0023 rebuild."""
+
+    def test_preflight_0023_registered(self):
+        """schema_migration has a preflight hook for version 23 after module import."""
+        mod = _get_migrate_module()
+        import schema_migration as _sm
+        assert 23 in _sm._PREFLIGHT_HOOKS, "preflight for 0023 must be registered"
+
+    def test_preflight_0023_raises_on_missing_operator_approved_at(self, tmp_path):
+        """If post-0022 schema is missing operator_approved_at, 0023 is refused."""
+        project_dir = _init_project(tmp_path)
+        mod = _get_migrate_module()
+
+        original_apply = schema_migration.apply_script_if_below
+
+        def patched_apply(conn, target_version, sql):
+            if target_version == 22:
+                # Apply 0022 but then DROP operator_approved_at to simulate drift
+                result = original_apply(conn, target_version, sql)
+                if result:
+                    conn.execute("ALTER TABLE dispatches RENAME TO dispatches_tmp_test")
+                    conn.execute("""
+                        CREATE TABLE dispatches (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            dispatch_id TEXT NOT NULL,
+                            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                            state TEXT NOT NULL DEFAULT 'queued',
+                            terminal_id TEXT, track TEXT, priority TEXT,
+                            pr_ref TEXT, gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                            bundle_path TEXT, created_at TEXT NOT NULL DEFAULT '',
+                            updated_at TEXT NOT NULL DEFAULT '', expires_after TEXT,
+                            metadata_json TEXT DEFAULT '{}',
+                            UNIQUE(dispatch_id, project_id)
+                        )
+                    """)
+                    conn.execute("INSERT INTO dispatches SELECT id, dispatch_id, project_id, state, terminal_id, track, priority, pr_ref, gate, attempt_count, bundle_path, created_at, updated_at, expires_after, metadata_json FROM dispatches_tmp_test")
+                    conn.execute("DROP TABLE dispatches_tmp_test")
+                return result
+            return original_apply(conn, target_version, sql)
+
+        with patch.object(schema_migration, "apply_script_if_below", patched_apply):
+            with pytest.raises(RuntimeError, match="operator_approved_at"):
+                mod.run(project_dir)
+
+
+class TestMigrationAuditNDJSON:
+    """Migration UPDATE blocks emit structured events to migration_audit.ndjson."""
+
+    def test_full_run_creates_migration_audit_file(self, project_dir):
+        mod = _get_migrate_module()
+        mod.run(project_dir)
+        audit_path = project_dir / ".vnx-data" / "events" / "migration_audit.ndjson"
+        assert audit_path.exists(), "migration_audit.ndjson must be created by run()"
+
+    def test_audit_contains_next_up_set_event(self, project_dir):
+        mod = _get_migrate_module()
+        mod.run(project_dir)
+        audit_path = project_dir / ".vnx-data" / "events" / "migration_audit.ndjson"
+        content = audit_path.read_text(encoding="utf-8")
+        import json as _json
+        events = [_json.loads(line) for line in content.splitlines() if line.strip()]
+        types = {e["event_type"] for e in events}
+        assert "track_next_up_set" in types or "tracks_next_up_cleared" in types, (
+            f"Expected next_up audit event, got event types: {types}"
+        )
+
+    def test_audit_events_have_record_id(self, project_dir):
+        mod = _get_migrate_module()
+        mod.run(project_dir)
+        audit_path = project_dir / ".vnx-data" / "events" / "migration_audit.ndjson"
+        content = audit_path.read_text(encoding="utf-8")
+        import json as _json
+        events = [_json.loads(line) for line in content.splitlines() if line.strip()]
+        for evt in events:
+            assert "record_id" in evt, f"Event missing record_id: {evt}"
+
+
+class TestPreflightThroughApplyScriptIfBelow:
+    """Preflight hook triggers even when apply_script_if_below is called directly (Fix 8)."""
+
+    def test_direct_apply_triggers_preflight_for_22(self, tmp_path):
+        """Directly calling apply_script_if_below(conn, 22, sql) triggers the v22 preflight."""
+        db_path = tmp_path / "direct.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        # Create a dispatches table WITHOUT project_id — should fail preflight
+        conn.execute("""
+            CREATE TABLE dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL DEFAULT 'queued'
+            )
+        """)
+        conn.commit()
+
+        mod = _get_migrate_module()
+        sql_path = _MIGRATIONS / "0022_track_layer.sql"
+        sql = sql_path.read_text(encoding="utf-8")
+        with pytest.raises(RuntimeError, match="project_id|schema drift"):
+            schema_migration.apply_script_if_below(conn, 22, sql)
+        conn.close()

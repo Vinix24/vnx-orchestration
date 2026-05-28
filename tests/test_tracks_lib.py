@@ -40,7 +40,8 @@ def _create_db(tmp_path: Path) -> Path:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS dispatches (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            dispatch_id     TEXT    NOT NULL UNIQUE,
+            dispatch_id     TEXT    NOT NULL,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
             state           TEXT    NOT NULL DEFAULT 'queued',
             terminal_id     TEXT,
             track           TEXT,
@@ -52,7 +53,8 @@ def _create_db(tmp_path: Path) -> Path:
             created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             expires_after   TEXT,
-            metadata_json   TEXT    DEFAULT '{}'
+            metadata_json   TEXT    DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
         )
     """)
     conn.execute("""

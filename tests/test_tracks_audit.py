@@ -67,7 +67,7 @@ def _create_db(tmp_path: Path) -> Path:
 
 
 def _read_events(state_dir: Path) -> list[dict]:
-    path = state_dir / "track_events.ndjson"
+    path = state_dir.parent / "events" / "track_events.ndjson"
     if not path.exists():
         return []
     events = []

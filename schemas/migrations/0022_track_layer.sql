@@ -146,6 +146,9 @@ FROM dispatches_pre_v22;
 
 DROP TABLE dispatches_pre_v22;
 
+INSERT OR REPLACE INTO sqlite_sequence(name, seq)
+    SELECT 'dispatches', COALESCE(MAX(id), 0) FROM dispatches;
+
 -- ============================================================================
 -- INDEXES — dispatches (rebuilt above)
 -- ============================================================================
