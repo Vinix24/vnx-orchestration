@@ -47,10 +47,23 @@ _TERMINAL_ID = "T1"
 _RAW_THREAD_STARTED = {"type": "thread.started"}
 _RAW_AGENT_MSG = {"type": "agent_message", "text": "LGTM. No blocking findings."}
 _RAW_TURN_COMPLETED = {"type": "turn.completed"}
+_RAW_TURN_COMPLETED_USAGE_0130 = {
+    "type": "turn.completed",
+    "usage": {
+        "input_tokens": 15545,
+        "cached_input_tokens": 6528,
+        "output_tokens": 23,
+        "reasoning_output_tokens": 14,
+    },
+}
 _RAW_ERROR = {"type": "error", "message": "something went wrong"}
 _RAW_ITEM_COMPLETED_AGENT = {
     "type": "item.completed",
     "item": {"type": "agent_message", "content": "Check passed."},
+}
+_RAW_ITEM_COMPLETED_AGENT_TEXT_0130 = {
+    "type": "item.completed",
+    "item": {"id": "item_0", "type": "agent_message", "text": "SMOKE_OK"},
 }
 _RAW_TOKEN_COUNT = {
     "event_msg": {
@@ -118,6 +131,21 @@ class TestNormalizerIdentity:
 
     def test_normalizer_identity_token_count(self):
         self._assert_identical(_RAW_TOKEN_COUNT)
+
+    def test_turn_completed_usage_shape_from_codex_0130(self):
+        event = _normalize_via_spawn(_RAW_TURN_COMPLETED_USAGE_0130)
+        assert event.event_type == "complete"
+        assert event.data["token_count"] == {
+            "input_tokens": 15545,
+            "output_tokens": 23,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 6528,
+        }
+
+    def test_item_completed_agent_message_text_shape_from_codex_0130(self):
+        event = _normalize_via_spawn(_RAW_ITEM_COMPLETED_AGENT_TEXT_0130)
+        assert event.event_type == "text"
+        assert event.data["text"] == "SMOKE_OK"
 
 
 # ---------------------------------------------------------------------------
