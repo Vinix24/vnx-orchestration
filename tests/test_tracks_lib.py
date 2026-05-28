@@ -288,6 +288,20 @@ class TestLinkOpenItem:
         with pytest.raises(tracks.TrackNotFoundError):
             tracks.link_open_item(state_dir, "track-nope", "OI-1", "warns", "manual")
 
+    def test_link_open_item_idempotent_no_duplicates(self, state_dir):
+        tracks.create_track(state_dir, "track-01", "T1", "G1")
+        tracks.link_open_item(state_dir, "track-01", "OI-1234", "blocks", "manual")
+        tracks.link_open_item(state_dir, "track-01", "OI-1234", "blocks", "manual")
+        tracks.link_open_item(state_dir, "track-01", "OI-1234", "blocks", "manual")
+
+        conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM track_open_items "
+            "WHERE track_id='track-01' AND oi_id='OI-1234' AND link_type='blocks'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 1
+
 
 # ---------------------------------------------------------------------------
 # add_dependency

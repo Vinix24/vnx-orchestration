@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 DB_FILENAME = "runtime_coordination.db"
+_TRACK_EVENTS_FILE = "track_events.ndjson"
 
 VALID_PHASES = frozenset({"queued", "active", "parked", "done"})
 
@@ -44,6 +46,32 @@ def _now_utc() -> str:
 
 def _db_path(state_dir: str | Path) -> Path:
     return Path(state_dir) / DB_FILENAME
+
+
+def _emit_track_event(
+    state_dir: str | Path,
+    event_type: str,
+    track_id: str,
+    actor: str,
+    details: Optional[dict] = None,
+) -> None:
+    """Best-effort: write one NDJSON audit line to track_events.ndjson."""
+    try:
+        _lib = Path(__file__).resolve().parent
+        if str(_lib) not in sys.path:
+            sys.path.insert(0, str(_lib))
+        import state_writer  # noqa: PLC0415
+        record: dict[str, Any] = {
+            "event_type": event_type,
+            "track_id": track_id,
+            "actor": actor,
+            "timestamp": _now_utc(),
+        }
+        if details:
+            record["details"] = details
+        state_writer.append_locked(Path(state_dir) / _TRACK_EVENTS_FILE, record)
+    except Exception:
+        pass
 
 
 def _get_conn(state_dir: str | Path) -> sqlite3.Connection:
@@ -104,9 +132,11 @@ def create_track(
         )
         conn.commit()
         row = conn.execute("SELECT * FROM tracks WHERE track_id = ?", (track_id,)).fetchone()
-        return dict(row)
+        result = dict(row)
     finally:
         conn.close()
+    _emit_track_event(state_dir, "track_created", track_id, "system", {"title": title})
+    return result
 
 
 def get_track(state_dir: str | Path, track_id: str) -> dict[str, Any] | None:
@@ -220,9 +250,14 @@ def transition_phase(
         conn.commit()
 
         updated = conn.execute("SELECT * FROM tracks WHERE track_id = ?", (track_id,)).fetchone()
-        return dict(updated)
+        result = dict(updated)
     finally:
         conn.close()
+    _emit_track_event(
+        state_dir, "track_phase_transition", track_id, actor,
+        {"from": from_phase, "to": to_phase},
+    )
+    return result
 
 
 def _has_updated_at(conn: sqlite3.Connection) -> bool:
@@ -257,6 +292,7 @@ def set_next_up(state_dir: str | Path, track_id: str) -> None:
         conn.commit()
     finally:
         conn.close()
+    _emit_track_event(state_dir, "track_next_up_set", track_id, "system")
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +330,10 @@ def link_open_item(
         conn.commit()
     finally:
         conn.close()
+    _emit_track_event(
+        state_dir, "track_oi_linked", track_id, "system",
+        {"oi_id": oi_id, "link_type": link_type},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +379,10 @@ def add_dependency(
         conn.commit()
     finally:
         conn.close()
+    _emit_track_event(
+        state_dir, "track_dep_added", from_track_id, "system",
+        {"to": to_track_id, "kind": kind},
+    )
 
 
 # ---------------------------------------------------------------------------

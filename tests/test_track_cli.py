@@ -1,5 +1,8 @@
 """tests/test_track_cli.py — CLI tests for `vnx track` subcommands.
 
+Includes tests for NDJSON audit trail written by `vnx track dispatch`
+(ADR-005 compliance, Finding 3 of dispatch 20260528-fut-1-fix1-codex-r1).
+
 Uses subprocess to invoke the installed `vnx` CLI (or falls back to
 running the module directly) against a temp project directory with a
 pre-initialized coordination DB.
@@ -7,6 +10,7 @@ pre-initialized coordination DB.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 import sys
@@ -214,4 +218,81 @@ class TestTrackShow:
 
     def test_show_nonexistent_exit_nonzero(self, project_dir):
         rc, out, err = _run_vnx(["track", "show", "track-nope"], project_dir)
+        assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# vnx track dispatch — NDJSON audit (ADR-005 / Finding 3)
+# ---------------------------------------------------------------------------
+
+class TestTrackDispatchAudit:
+    def _create_track(self, project_dir, track_id="track-01"):
+        _run_vnx(
+            ["track", "new", track_id, "--title", "T", "--goal", "G"],
+            project_dir,
+        )
+
+    def test_dispatch_exit_0(self, project_dir):
+        self._create_track(project_dir)
+        rc, out, err = _run_vnx(
+            ["track", "dispatch", "track-01", "--pr", "PR-FUT-1", "--terminal", "T1"],
+            project_dir,
+        )
+        assert rc == 0, f"stdout: {out}\nstderr: {err}"
+
+    def test_dispatch_row_created_in_db(self, project_dir):
+        self._create_track(project_dir)
+        _run_vnx(
+            ["track", "dispatch", "track-01", "--pr", "PR-FUT-1", "--terminal", "T1"],
+            project_dir,
+        )
+        db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT state, track, pr_ref FROM dispatches WHERE track = 'track-01'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "proposed"
+        assert row[2] == "PR-FUT-1"
+
+    def test_dispatch_ndjson_emitted(self, project_dir):
+        """dispatch_register.ndjson must contain a dispatch_created event after dispatch."""
+        self._create_track(project_dir)
+        _run_vnx(
+            ["track", "dispatch", "track-01", "--pr", "PR-FUT-1", "--terminal", "T1"],
+            project_dir,
+        )
+        register_path = project_dir / ".vnx-data" / "state" / "dispatch_register.ndjson"
+        assert register_path.exists(), "dispatch_register.ndjson not created"
+
+        events = []
+        for line in register_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+
+        dispatch_created = [e for e in events if e.get("event") == "dispatch_created"]
+        assert len(dispatch_created) >= 1, f"No dispatch_created event found; events={events}"
+
+    def test_dispatch_ndjson_contains_dispatch_id(self, project_dir):
+        """NDJSON event must reference the created dispatch_id."""
+        self._create_track(project_dir)
+        _run_vnx(
+            ["track", "dispatch", "track-01", "--pr", "PR-FUT-1", "--terminal", "T1"],
+            project_dir,
+        )
+        register_path = project_dir / ".vnx-data" / "state" / "dispatch_register.ndjson"
+        events = [
+            json.loads(ln) for ln in register_path.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        dispatch_ids = [e.get("dispatch_id", "") for e in events if e.get("event") == "dispatch_created"]
+        assert any("track-01" in did for did in dispatch_ids), f"dispatch_id not in events: {dispatch_ids}"
+
+    def test_dispatch_invalid_track_exit_nonzero(self, project_dir):
+        rc, out, err = _run_vnx(
+            ["track", "dispatch", "track-nope", "--pr", "PR-FUT-1", "--terminal", "T1"],
+            project_dir,
+        )
         assert rc != 0

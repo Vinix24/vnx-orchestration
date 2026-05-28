@@ -88,6 +88,27 @@ def apply_migration(conn: sqlite3.Connection, project_root: Path) -> None:
     print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
 
 
+def apply_migration_0023(conn: sqlite3.Connection, project_root: Path) -> None:
+    """Apply 0023_dispatches_fk.sql — adds tracks FK after seed+tag (Option A).
+
+    Pre-condition: tracks seeded + orphaned track refs nullified.
+    """
+    migration_path = _MIGRATIONS / "0023_dispatches_fk.sql"
+    if not migration_path.exists():
+        raise FileNotFoundError(f"Migration not found: {migration_path}")
+
+    sql = migration_path.read_text(encoding="utf-8")
+
+    current_version = schema_migration.get_user_version(conn)
+    if current_version >= 23:
+        print(f"  [skip] migration 0023 already applied (user_version={current_version})")
+        return
+
+    print("  [apply] migration 0023_dispatches_fk.sql ...")
+    schema_migration.apply_script_if_below(conn, 23, sql)
+    print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
+
+
 # ---------------------------------------------------------------------------
 # Step 2: parse master-roadmap tracks table
 # ---------------------------------------------------------------------------
@@ -273,6 +294,22 @@ def seed_tracks(conn: sqlite3.Connection, tracks: list[dict]) -> list[str]:
 # Step 3: tag existing dispatches with track FK
 # ---------------------------------------------------------------------------
 
+def _nullify_orphaned_track_refs(conn: sqlite3.Connection) -> int:
+    """NULL out dispatches.track values that don't match any seeded track.
+
+    Must run after seed_tracks and before apply_migration_0023. Prevents FK
+    violations from pre-existing dispatch rows with unknown track values.
+    """
+    result = conn.execute(
+        "UPDATE dispatches SET track = NULL "
+        "WHERE track IS NOT NULL AND track NOT IN (SELECT track_id FROM tracks)"
+    )
+    count = result.rowcount
+    if count:
+        print(f"  [warn]  nullified {count} orphaned track ref(s) before FK enforcement")
+    return count
+
+
 def tag_dispatches(conn: sqlite3.Connection) -> int:
     """Update dispatches.track based on PR-cluster prefix matching."""
     try:
@@ -409,7 +446,7 @@ def run(project_root: Path | None = None) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
     try:
-        # Step 1
+        # Step 1: apply 0022 — creates track tables; dispatches rebuilt WITHOUT track FK
         apply_migration(conn, project_root)
         conn.commit()
 
@@ -419,13 +456,21 @@ def run(project_root: Path | None = None) -> None:
 
         inserted_ids = seed_tracks(conn, tracks)
 
-        # Step 3
+        # Step 3: tag existing dispatches by PR-cluster prefix
         tagged = tag_dispatches(conn)
 
-        # Step 4
-        set_initial_next_up(conn)
+        # Step 3b: nullify orphaned track refs that weren't mapped (FK safety for 0023)
+        _nullify_orphaned_track_refs(conn)
+        conn.commit()
+
+        # Step 4: apply 0023 — adds dispatches.track FK now that tracks are seeded
+        apply_migration_0023(conn, project_root)
+        conn.commit()
 
         # Step 5
+        set_initial_next_up(conn)
+
+        # Step 6
         emit_events(conn, inserted_ids)
 
         conn.commit()

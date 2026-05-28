@@ -115,9 +115,18 @@ def _cmd_unpark(args) -> int:
         return 1
 
 
+def _require_dispatch_register():
+    scripts_lib = Path(__file__).resolve().parent.parent.parent / "scripts" / "lib"
+    if str(scripts_lib) not in sys.path:
+        sys.path.insert(0, str(scripts_lib))
+    import dispatch_register
+    return dispatch_register
+
+
 def _cmd_dispatch(args) -> int:
     """Create a dispatch row for a track (state=proposed)."""
-    import sqlite3
+    from datetime import datetime, timezone
+
     state_dir = _resolve_state_dir(args.project_dir)
     tracks_lib = _require_tracks_lib(state_dir)
 
@@ -126,32 +135,21 @@ def _cmd_dispatch(args) -> int:
         print(f"  Error: track not found: {args.track_id!r}", file=sys.stderr)
         return 1
 
-    import uuid
-    from datetime import datetime, timezone
-
-    dispatch_id = f"{args.track_id}-{args.pr}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    db_path = state_dir / "runtime_coordination.db"
-
-    conn = sqlite3.connect(str(db_path), timeout=10.0)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
+    dispatch_id = (
+        f"{args.track_id}-{args.pr}"
+        f"-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    )
+    register = _require_dispatch_register()
     try:
-        conn.execute(
-            """
-            INSERT INTO dispatches (dispatch_id, state, terminal_id, track, pr_ref)
-            VALUES (?, 'proposed', ?, ?, ?)
-            """,
-            (dispatch_id, args.terminal, args.track_id, args.pr),
+        register.register_proposed_track_dispatch(
+            state_dir, dispatch_id, args.terminal, args.track_id, args.pr
         )
-        conn.commit()
         print(f"  Created dispatch {dispatch_id}")
         print(f"  State: proposed (awaiting operator_approved_at)")
         return 0
     except Exception as exc:
         print(f"  Error: {exc}", file=sys.stderr)
         return 1
-    finally:
-        conn.close()
 
 
 def _cmd_list(args) -> int:

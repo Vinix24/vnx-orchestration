@@ -246,7 +246,8 @@ class TestMigrateFutureSystem:
         with pytest.raises((FileNotFoundError, ValueError)):
             mod.run(project_dir)
 
-    def test_schema_version_22_set(self, project_dir):
+    def test_schema_version_23_set(self, project_dir):
+        """Full migration run (0022 + 0023) ends at user_version=23."""
         mod = _get_migrate_module()
         mod.run(project_dir)
 
@@ -254,4 +255,4 @@ class TestMigrateFutureSystem:
         conn = sqlite3.connect(str(db_path))
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.close()
-        assert version == 22
+        assert version == 23

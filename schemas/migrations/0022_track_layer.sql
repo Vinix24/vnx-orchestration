@@ -6,7 +6,13 @@
 -- Design: claudedocs/FUTURE-SYSTEM-DESIGN-2026-05-28.md
 --
 -- Pre-migration state (v21): central install metadata.
--- Post-migration state (v22): track layer tables + dispatches extensions.
+-- Post-migration state (v22): track layer tables + dispatches rebuilt WITHOUT track FK.
+--
+-- FK deferral: dispatches.track is rebuilt here WITHOUT REFERENCES tracks(track_id).
+--   The FK is added in migration 0023, which runs after tracks are seeded and existing
+--   dispatch rows are tagged. This prevents FK violations on real v21 installs where
+--   dispatch rows with pre-existing track values exist before the tracks table is
+--   populated. Option A from dispatch 20260528-fut-1-fix1-codex-r1.
 --
 -- SQLite caveats:
 --   ALTER TABLE cannot add CHECK constraints to existing columns directly.
@@ -87,7 +93,8 @@ CREATE TABLE IF NOT EXISTS track_open_items (
     oi_id       TEXT    NOT NULL,
     link_type   TEXT    NOT NULL CHECK (link_type IN ('blocks', 'warns', 'related')),
     link_source TEXT    NOT NULL CHECK (link_source IN ('file_path', 'mention', 'manual')),
-    linked_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    linked_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (track_id, oi_id, link_type)
 );
 
 -- ============================================================================
@@ -113,7 +120,7 @@ CREATE TABLE dispatches (
                                 'dead_letter'
                             )),
     terminal_id     TEXT,
-    track           TEXT    REFERENCES tracks(track_id),
+    track           TEXT,
     priority        TEXT    DEFAULT 'P2',
     pr_ref          TEXT,
     gate            TEXT,

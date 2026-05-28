@@ -610,6 +610,47 @@ def _query_recent_dispatches(
     return legacy
 
 
+def register_proposed_track_dispatch(
+    state_dir: "str | Path",
+    dispatch_id: str,
+    terminal_id: str,
+    track_id: str,
+    pr_ref: str,
+) -> None:
+    """Insert a proposed dispatch row + emit NDJSON audit event.
+
+    Routes dispatch creation through the register so the NDJSON audit trail
+    is always written alongside the DB row. Raises sqlite3.Error on DB failure;
+    NDJSON write is best-effort (never raises).
+    """
+    import sqlite3 as _sqlite3
+
+    db_path = Path(state_dir) / "runtime_coordination.db"
+    conn = _sqlite3.connect(str(db_path), timeout=10.0)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute(
+            """
+            INSERT INTO dispatches (dispatch_id, state, terminal_id, track, pr_ref)
+            VALUES (?, 'proposed', ?, ?, ?)
+            """,
+            (dispatch_id, terminal_id, track_id, pr_ref),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        record = _build_event_record(
+            "dispatch_created", dispatch_id, None,
+            pr_ref or "", terminal_id or "", "", None,
+        )
+        _write_event_locked(Path(state_dir) / "dispatch_register.ndjson", record)
+    except Exception:
+        pass
+
+
 # CLI for bash callers
 def _cli(argv: list[str]) -> int:
     if len(argv) < 3 or argv[1] != "append":
