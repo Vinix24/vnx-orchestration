@@ -162,6 +162,8 @@ def load_all_receipts(
         data_dir / "state" / "t0_receipts.ndjson",
         project_root / ".vnx-intelligence" / "receipts" / "t0_receipts.ndjson",
         project_root / "receipts" / "t0_receipts.ndjson",
+        # ADR-005 backfill ledger: pr_merged receipts written by backfill_pr_merged_receipts.py
+        data_dir / "events" / "pr_merged.ndjson",
     ]
     # Also check central ~/.vnx-data
     home_central = Path.home() / ".vnx-data" / "state" / "t0_receipts.ndjson"
@@ -172,8 +174,11 @@ def load_all_receipts(
     records: List[ReceiptRecord] = []
     for path in candidates:
         for rec in iter_receipts(path, since, until):
-            # Dedup by dispatch_id + event_type + timestamp
-            key = f"{rec.dispatch_id}|{rec.event_type}|{rec.timestamp}"
+            # Dedup by dispatch_id + event_type + timestamp + pr_number.
+            # pr_number disambiguates pr_merged receipts that share the same second
+            # (batch-backfilled receipts often have identical timestamps).
+            pr_number_str = str(rec.raw.get("pr_number") or "")
+            key = f"{rec.dispatch_id}|{rec.event_type}|{rec.timestamp}|{pr_number_str}"
             if key not in seen_keys:
                 seen_keys.add(key)
                 records.append(rec)
@@ -593,6 +598,13 @@ def gap_prs_without_receipt(
             pr_num_str = str(pr.number)
             for r in receipts:
                 if pr_num_str in (r.dispatch_id or "") or gh_ref in (r.pr_id or ""):
+                    linked = True
+                    break
+
+        # Strategy 2b: direct pr_number field match — only pr_merged events close the gap
+        if not linked and pr.number:
+            for r in receipts:
+                if r.raw.get("event_type") == "pr_merged" and r.raw.get("pr_number") == pr.number:
                     linked = True
                     break
 

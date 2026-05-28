@@ -36,7 +36,9 @@ def vnx_env(tmp_path, monkeypatch):
     """Set up a minimal VNX environment with writable state directories."""
     data_dir = tmp_path / "data"
     state_dir = data_dir / "state"
+    events_dir = data_dir / "events"
     state_dir.mkdir(parents=True, exist_ok=True)
+    events_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
@@ -49,7 +51,12 @@ def vnx_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_REPORTS_DIR", str(data_dir / "unified_reports"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
     (data_dir / "dispatches").mkdir(parents=True, exist_ok=True)
-    return {"state_dir": state_dir, "data_dir": data_dir, "receipts_path": state_dir / "t0_receipts.ndjson"}
+    return {
+        "state_dir": state_dir,
+        "data_dir": data_dir,
+        "receipts_path": state_dir / "t0_receipts.ndjson",
+        "events_pr_merged": events_dir / "pr_merged.ndjson",
+    }
 
 
 def _load_receipts(path: Path) -> list[Dict[str, Any]]:
@@ -257,22 +264,25 @@ class TestBackfillPrMergedReceipts:
         ]
 
     def test_backfill_emits_receipt_for_missing_pr(self, vnx_env, monkeypatch):
-        """Backfill writes a receipt for every merged PR that lacks one."""
+        """Backfill writes receipts to events/pr_merged.ndjson (ADR-005 ledger)."""
         import backfill_pr_merged_receipts as bfr
 
         merged_prs = self._make_merged_prs([100, 101, 102])
         monkeypatch.setattr(bfr, "_gh_list_merged_prs", lambda limit, since: merged_prs)
+        monkeypatch.setattr(bfr, "_load_dispatch_register_events", lambda: [])
 
         receipts_path = vnx_env["receipts_path"]
-        summary = bfr.backfill(receipts_file=str(receipts_path))
+        events_path = vnx_env["events_pr_merged"]
+        summary = bfr.backfill(receipts_file=str(receipts_path), events_path=events_path)
 
         assert summary["missing_receipt_count"] == 3
         assert summary["backfilled"] == 3
         assert summary["errors"] == 0
 
+        # Backfilled receipts go to events/pr_merged.ndjson, not t0_receipts.ndjson
         for pr_n in [100, 101, 102]:
-            matching = _receipts_for_pr(receipts_path, pr_n)
-            assert len(matching) >= 1, f"Expected receipt for PR#{pr_n}"
+            matching = _receipts_for_pr(events_path, pr_n)
+            assert len(matching) >= 1, f"Expected receipt for PR#{pr_n} in events/pr_merged.ndjson"
             assert matching[0]["backfilled"] is True
 
     def test_backfill_skips_already_receipted_prs(self, vnx_env, monkeypatch):
@@ -281,7 +291,7 @@ class TestBackfillPrMergedReceipts:
 
         merged_prs = self._make_merged_prs([200, 201])
 
-        # Pre-populate a receipt for PR 200
+        # Pre-populate a receipt for PR 200 in t0_receipts.ndjson
         receipts_path = vnx_env["receipts_path"]
         existing = {
             "timestamp": "2026-05-01T09:00:00Z",
@@ -292,18 +302,20 @@ class TestBackfillPrMergedReceipts:
         receipts_path.write_text(json.dumps(existing) + "\n", encoding="utf-8")
 
         monkeypatch.setattr(bfr, "_gh_list_merged_prs", lambda limit, since: merged_prs)
+        monkeypatch.setattr(bfr, "_load_dispatch_register_events", lambda: [])
 
-        summary = bfr.backfill(receipts_file=str(receipts_path))
+        events_path = vnx_env["events_pr_merged"]
+        summary = bfr.backfill(receipts_file=str(receipts_path), events_path=events_path)
 
         assert summary["missing_receipt_count"] == 1
         assert summary["backfilled"] == 1
 
-        # PR 200 should not have an additional receipt
-        matching_200 = _receipts_for_pr(receipts_path, 200)
-        assert len(matching_200) == 1, "PR 200 already had a receipt, no duplicate expected"
+        # PR 200 was already in t0_receipts — no new receipt in events/
+        matching_200 = _receipts_for_pr(events_path, 200)
+        assert len(matching_200) == 0, "PR 200 already had a receipt, no backfill expected"
 
-        # PR 201 should now have one
-        matching_201 = _receipts_for_pr(receipts_path, 201)
+        # PR 201 should be in events/
+        matching_201 = _receipts_for_pr(events_path, 201)
         assert len(matching_201) == 1
 
     def test_dry_run_writes_nothing(self, vnx_env, monkeypatch):
@@ -312,16 +324,18 @@ class TestBackfillPrMergedReceipts:
 
         merged_prs = self._make_merged_prs([300, 301])
         monkeypatch.setattr(bfr, "_gh_list_merged_prs", lambda limit, since: merged_prs)
+        monkeypatch.setattr(bfr, "_load_dispatch_register_events", lambda: [])
 
         receipts_path = vnx_env["receipts_path"]
-        summary = bfr.backfill(dry_run=True, receipts_file=str(receipts_path))
+        events_path = vnx_env["events_pr_merged"]
+        summary = bfr.backfill(dry_run=True, receipts_file=str(receipts_path), events_path=events_path)
 
         assert summary["dry_run"] is True
         assert summary["missing_receipt_count"] == 2
         assert summary["backfilled"] == 0
 
-        # Nothing written
-        assert not receipts_path.exists() or not _load_receipts(receipts_path)
+        # Nothing written to events/
+        assert not events_path.exists() or not _load_receipts(events_path)
 
     def test_since_filter_excludes_old_prs(self, vnx_env, monkeypatch):
         """--since filters out PRs merged before the given date."""
@@ -332,16 +346,18 @@ class TestBackfillPrMergedReceipts:
             {"number": 401, "title": "new", "headRefName": "b-401", "mergedAt": "2026-05-15T00:00:00Z"},
         ]
         monkeypatch.setattr(bfr, "_gh_list_merged_prs", lambda limit, since: merged_prs)
+        monkeypatch.setattr(bfr, "_load_dispatch_register_events", lambda: [])
 
         receipts_path = vnx_env["receipts_path"]
-        summary = bfr.backfill(since="2026-01-01", receipts_file=str(receipts_path))
+        events_path = vnx_env["events_pr_merged"]
+        summary = bfr.backfill(since="2026-01-01", receipts_file=str(receipts_path), events_path=events_path)
 
         assert summary["missing_receipt_count"] == 1
         assert summary["backfilled"] == 1
 
-        # Only PR 401 should have a receipt
-        assert len(_receipts_for_pr(receipts_path, 401)) == 1
-        assert len(_receipts_for_pr(receipts_path, 400)) == 0
+        # Only PR 401 should have a receipt in events/
+        assert len(_receipts_for_pr(events_path, 401)) == 1
+        assert len(_receipts_for_pr(events_path, 400)) == 0
 
     def test_backfill_receipt_has_pr_number(self, vnx_env, monkeypatch):
         """Backfilled receipt has pr_number field for FPY/history query."""
@@ -349,11 +365,13 @@ class TestBackfillPrMergedReceipts:
 
         merged_prs = self._make_merged_prs([500])
         monkeypatch.setattr(bfr, "_gh_list_merged_prs", lambda limit, since: merged_prs)
+        monkeypatch.setattr(bfr, "_load_dispatch_register_events", lambda: [])
 
         receipts_path = vnx_env["receipts_path"]
-        bfr.backfill(receipts_file=str(receipts_path))
+        events_path = vnx_env["events_pr_merged"]
+        bfr.backfill(receipts_file=str(receipts_path), events_path=events_path)
 
-        matching = _receipts_for_pr(receipts_path, 500)
+        matching = _receipts_for_pr(events_path, 500)
         assert len(matching) == 1
         r = matching[0]
         assert r["pr_number"] == 500

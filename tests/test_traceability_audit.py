@@ -569,3 +569,42 @@ class TestRunHelperExceptionPaths:
         captured = capsys.readouterr()
         assert "traceability-audit" in captured.err
         assert "permission denied" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# 17. Strategy 2b: event_type=pr_merged strictness
+# ---------------------------------------------------------------------------
+
+class TestCategoryCStrategy2b:
+    """Strategy 2b must only close the gap for receipts with event_type='pr_merged'."""
+
+    def _pr_receipt(self, pr_number: int, event_type: str) -> ReceiptRecord:
+        raw = {"pr_number": pr_number, "event_type": event_type}
+        return ReceiptRecord(
+            dispatch_id="20260101-test",
+            pr_id="",
+            event_type=event_type,
+            status="success",
+            timestamp="2026-01-15T10:00:00Z",
+            commit_hash="",
+            terminal="T1",
+            source_file="test.ndjson",
+            raw=raw,
+        )
+
+    def test_pr_number_with_task_complete_does_not_close_gap(self):
+        """Receipt with pr_number but event_type='task_complete' must NOT trace the PR."""
+        prs = [_pr(number=700, internal_pr_ids=[], branch="feat/orphan")]
+        receipts = [self._pr_receipt(pr_number=700, event_type="task_complete")]
+        dispatches: list[DispatchRecord] = []
+        report = gap_prs_without_receipt(prs, receipts, dispatches)
+        assert report.gap_count == 1, "task_complete receipt with pr_number must not close cat-C gap"
+
+    def test_pr_number_with_pr_merged_closes_gap(self):
+        """Receipt with pr_number AND event_type='pr_merged' SHOULD trace the PR."""
+        prs = [_pr(number=701, internal_pr_ids=[], branch="feat/orphan2")]
+        receipts = [self._pr_receipt(pr_number=701, event_type="pr_merged")]
+        dispatches: list[DispatchRecord] = []
+        report = gap_prs_without_receipt(prs, receipts, dispatches)
+        assert report.gap_count == 0, "pr_merged receipt with matching pr_number must close cat-C gap"
+        assert report.traced == 1
