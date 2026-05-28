@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sqlite3
@@ -35,6 +37,27 @@ if sys_path_dir not in sys.path:
 logger = logging.getLogger(__name__)
 
 DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
+
+# Only simple identifiers are valid model names (no whitespace or shell metacharacters).
+_SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _assert_no_headless_flags(launch_cmd: str) -> None:
+    """Raise ValueError if the assembled launch command contains -p/--print/--print=…
+
+    Applied to the FINAL command regardless of how it was built (default builder,
+    custom launch_builder, or model interpolation) before _launch_claude is called.
+    """
+    try:
+        tokens = shlex.split(launch_cmd)
+    except ValueError:
+        tokens = launch_cmd.split()
+    for token in tokens:
+        if token in ("-p", "--print") or token.startswith("--print="):
+            raise ValueError(
+                f"headless flag {token!r} detected in assembled launch command; "
+                "this lane must use interactive claude (subscription), not headless"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +124,16 @@ def _default_launch_command(
 ) -> str:
     """Build the interactive ``claude`` launch line (NOT ``claude -p``).
 
-    Raises ValueError if *extra_flags* contains ``-p``, ``--print``, or
-    ``--print=…``: those flags convert an interactive session to headless,
-    defeating the subscription-safe guarantee of this lane.
+    Raises ValueError if *model* contains whitespace or shell metacharacters, or
+    if *extra_flags* contains ``-p``, ``--print``, or ``--print=…``: those flags
+    convert an interactive session to headless, defeating the subscription-safe
+    guarantee of this lane.
     """
+    if not _SAFE_MODEL_RE.match(model):
+        raise ValueError(
+            f"model {model!r} must be a simple identifier (e.g. 'sonnet', "
+            f"'claude-opus-4-7'); whitespace and shell metacharacters are not allowed"
+        )
     if extra_flags:
         for token in extra_flags.split():
             if token in ("-p", "--print") or token.startswith("--print="):
@@ -520,6 +549,13 @@ class TmuxInteractiveDispatch:
         cwd = self._project_root
         start_time = time.monotonic()
 
+        # Belt-and-suspenders: validate model before any session creation.
+        if not _SAFE_MODEL_RE.match(model):
+            raise ValueError(
+                f"model {model!r} must be a simple identifier (e.g. 'sonnet', "
+                f"'claude-opus-4-7'); whitespace and shell metacharacters are not allowed"
+            )
+
         # Idempotency guard: teardown runs exactly once across all exit paths.
         _torn_down = False
 
@@ -528,61 +564,99 @@ class TmuxInteractiveDispatch:
             if _torn_down:
                 return
             _torn_down = True
-            self._kill_session(session)
-            self._remove_handle(dispatch_id)
-            self._emit_event(
-                "interactive_exit",
-                dispatch_id=dispatch_id,
-                label=label,
-                reason=f"status={status}",
-                metadata={"session": session},
-            )
+            try:
+                self._kill_session(session)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("interactive: teardown kill-session %s: %s", session, exc)
+            try:
+                self._remove_handle(dispatch_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("interactive: teardown remove-handle %s: %s", dispatch_id, exc)
+            try:
+                self._emit_event(
+                    "interactive_exit",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason=f"status={status}",
+                    metadata={"session": session},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("interactive: teardown emit %s: %s", dispatch_id, exc)
 
-        # 1. Spawn detached session
-        spawned = self._spawn_session(session, cwd)
-        if spawned is None:
-            self._emit_event(
-                "interactive_spawn_failed",
-                dispatch_id=dispatch_id,
-                label=label,
-                reason="tmux new-session failed",
-            )
-            return InteractiveDispatchResult(
-                success=False,
-                dispatch_id=dispatch_id,
-                session=session,
-                label=label,
-                failure_reason="tmux new-session failed",
-                duration_seconds=time.monotonic() - start_time,
-            )
-
-        pane_id, window_id = spawned
-
-        # 2. Persist handle for crash-recovery / operator tmux attach
-        self._persist_handle(
-            dispatch_id,
-            {
-                "dispatch_id": dispatch_id,
-                "label": label,
-                "session": session,
-                "pane_id": pane_id,
-                "window_id": window_id,
-                "started_at": time.time(),
-            },
-        )
-        self._emit_event(
-            "interactive_spawn",
-            dispatch_id=dispatch_id,
-            label=label,
-            reason=f"spawned interactive claude in {session}",
-            metadata={"session": session, "pane_id": pane_id, "window_id": window_id},
-        )
-
+        # FIX 2: Global teardown envelope starts before _spawn_session so any
+        # exception after a session may exist still triggers teardown.
+        pane_id: "str | None" = None
+        window_id: "str | None" = None
         try:
-            # 3. Launch claude
+            # 1. Spawn detached session
+            spawned = self._spawn_session(session, cwd)
+            if spawned is None:
+                self._emit_event(
+                    "interactive_spawn_failed",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="tmux new-session failed",
+                )
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    failure_reason="tmux new-session failed",
+                    duration_seconds=time.monotonic() - start_time,
+                )
+
+            pane_id, window_id = spawned
+
+            # 2. Persist handle for crash-recovery / operator tmux attach
+            self._persist_handle(
+                dispatch_id,
+                {
+                    "dispatch_id": dispatch_id,
+                    "label": label,
+                    "session": session,
+                    "pane_id": pane_id,
+                    "window_id": window_id,
+                    "started_at": time.time(),
+                },
+            )
+            self._emit_event(
+                "interactive_spawn",
+                dispatch_id=dispatch_id,
+                label=label,
+                reason=f"spawned interactive claude in {session}",
+                metadata={"session": session, "pane_id": pane_id, "window_id": window_id},
+            )
+
+            # 3. Build launch command
             launch_cmd = self._launch_builder(
                 model, skip_permissions=skip_permissions, extra_flags=extra_flags
             )
+
+            # FIX 1: Final-command guard — bites regardless of how the command
+            # was built (default builder, custom launch_builder, model injection).
+            try:
+                _assert_no_headless_flags(launch_cmd)
+            except ValueError:
+                self._emit_event(
+                    "interactive_launch_failed",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="headless flag detected in launch command",
+                    metadata={"session": session},
+                )
+                _teardown("headless_flag_blocked")
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    window_id=window_id,
+                    pane_id=pane_id,
+                    failure_reason="headless_flag_blocked",
+                    duration_seconds=time.monotonic() - start_time,
+                )
+
             if not self._launch_claude(pane_id, launch_cmd):
                 self._emit_event(
                     "interactive_launch_failed",
@@ -695,8 +769,25 @@ class TmuxInteractiveDispatch:
                 duration_seconds=time.monotonic() - start_time,
             )
 
+        except Exception as _exc:  # noqa: BLE001
+            # Unexpected error (e.g. _persist_handle raises): convert to failure
+            # result so the caller always gets a structured outcome.
+            logger.warning(
+                "interactive: unexpected error in dispatch %s: %s", dispatch_id, _exc
+            )
+            _teardown("unexpected_error")
+            return InteractiveDispatchResult(
+                success=False,
+                dispatch_id=dispatch_id,
+                session=session,
+                label=label,
+                window_id=window_id,
+                pane_id=pane_id,
+                failure_reason="unexpected_error",
+                duration_seconds=time.monotonic() - start_time,
+            )
         finally:
-            # Catches unexpected exceptions; no-op if teardown already ran.
+            # No-op if teardown already ran; catches any remaining exit path.
             _teardown("exception")
 
 
