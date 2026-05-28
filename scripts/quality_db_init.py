@@ -23,7 +23,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 18
+HIGHEST_QI_VERSION = 19
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -499,6 +499,85 @@ def _migrate_v17(conn: sqlite3.Connection) -> None:
             log('INFO', f'Migrated {_htbl}: added invalidation_reason column')
 
 
+def _migrate_v19(conn: sqlite3.Connection) -> None:
+    """V19: adrs table + FTS5 virtual table + sync triggers (PR-INT-1).
+
+    Table/FTS5 may already exist on fresh installs (created by V1 base schema).
+    Triggers are always checked separately because trigger bodies contain
+    semicolons that the schema SQL splitter cannot handle.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='adrs'"
+    ).fetchone():
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS adrs (
+                adr_id              TEXT    NOT NULL,
+                project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+                status              TEXT    NOT NULL,
+                title               TEXT    NOT NULL,
+                decision_summary    TEXT    NOT NULL,
+                binding_rules       TEXT    NOT NULL DEFAULT '[]',
+                applies_to_tables   TEXT    NOT NULL DEFAULT '[]',
+                applies_to_skills   TEXT    NOT NULL DEFAULT '[]',
+                triggers            TEXT    NOT NULL DEFAULT '[]',
+                file_path           TEXT    NOT NULL,
+                indexed_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                source_hash         TEXT    NOT NULL,
+                PRIMARY KEY (adr_id, project_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_adrs_status ON adrs(status)")
+        log('INFO', 'Migrated: created adrs table (PR-INT-1)')
+
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='adrs_fts'"
+    ).fetchone():
+        conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS adrs_fts USING fts5(
+                adr_id UNINDEXED,
+                title,
+                decision_summary,
+                binding_rules,
+                content='adrs',
+                content_rowid='rowid'
+            )
+        """)
+        log('INFO', 'Migrated: created adrs_fts FTS5 virtual table (PR-INT-1)')
+
+    # Triggers checked separately — trigger bodies contain semicolons that the
+    # schema SQL splitter cannot handle, so they live here, not in quality_intelligence.sql.
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name='adrs_ai'"
+    ).fetchone():
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS adrs_ai AFTER INSERT ON adrs BEGIN
+                INSERT INTO adrs_fts(rowid, adr_id, title, decision_summary, binding_rules)
+                VALUES (new.rowid, new.adr_id, new.title, new.decision_summary, new.binding_rules);
+            END
+        """)
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name='adrs_ad'"
+    ).fetchone():
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS adrs_ad AFTER DELETE ON adrs BEGIN
+                INSERT INTO adrs_fts(adrs_fts, rowid, adr_id, title, decision_summary, binding_rules)
+                VALUES ('delete', old.rowid, old.adr_id, old.title, old.decision_summary, old.binding_rules);
+            END
+        """)
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name='adrs_au'"
+    ).fetchone():
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS adrs_au AFTER UPDATE ON adrs BEGIN
+                INSERT INTO adrs_fts(adrs_fts, rowid, adr_id, title, decision_summary, binding_rules)
+                VALUES ('delete', old.rowid, old.adr_id, old.title, old.decision_summary, old.binding_rules);
+                INSERT INTO adrs_fts(rowid, adr_id, title, decision_summary, binding_rules)
+                VALUES (new.rowid, new.adr_id, new.title, new.decision_summary, new.binding_rules);
+            END
+        """)
+        log('INFO', 'Migrated: created adrs FTS5 sync triggers (PR-INT-1)')
+
+
 def _migrate_v18(conn: sqlite3.Connection) -> None:
     """V18: dispatch_experiments (unified from dispatch_tracker.db).
 
@@ -575,6 +654,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     16: _migrate_v16,
     17: _migrate_v17,
     18: _migrate_v18,
+    19: _migrate_v19,
 }
 
 
@@ -654,7 +734,8 @@ def verify_database_structure() -> bool:
             'spc_control_limits',
             'spc_alerts',
             'confidence_events',
-            'report_findings'
+            'report_findings',
+            'adrs',
         ]
 
         # Expected views
