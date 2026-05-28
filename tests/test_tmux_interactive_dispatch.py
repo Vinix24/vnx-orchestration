@@ -24,6 +24,7 @@ from tmux_interactive_dispatch import (
     InteractiveDispatchResult,
     TmuxInteractiveDispatch,
     TmuxResult,
+    _assert_no_headless_flags,
     _default_launch_command,
     _sanitize_session_name,
 )
@@ -382,6 +383,76 @@ class TestStaleReceiptGuard(_LaneTestCase):
 
         self.assertFalse(result.success)
         self.assertIn("deadline", result.failure_reason)
+
+
+class TestHeadlessGuard(_LaneTestCase):
+    def test_model_with_dash_p_rejected(self):
+        """model='sonnet -p' raises ValueError before any tmux session is spawned."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        with self.assertRaises(ValueError):
+            self._fast_dispatch(lane, model="sonnet -p")
+        spawn_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertEqual(spawn_cmds, [], "no session must be spawned for an invalid model")
+
+    def test_model_with_print_rejected(self):
+        """model='sonnet --print' raises ValueError before any tmux session is spawned."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        with self.assertRaises(ValueError):
+            self._fast_dispatch(lane, model="sonnet --print")
+        spawn_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertEqual(spawn_cmds, [], "no session must be spawned for an invalid model")
+
+    def test_custom_launch_builder_with_dash_p_rejected(self):
+        """Custom launch_builder returning a command with '-p' is blocked by final-command guard."""
+        def bad_builder(model, *, skip_permissions=False, extra_flags=""):
+            return "claude -p something"
+
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            runner=fake,
+            launch_builder=bad_builder,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.failure_reason, "headless_flag_blocked")
+        # Guard fires before _launch_claude, so no literal-mode send-keys should occur.
+        literal_sends = [c for c in fake.commands if c and c[0] == "send-keys" and "-l" in c]
+        self.assertEqual(literal_sends, [], "launch send-keys must not happen when headless flag blocked")
+        self.assertTrue(fake.killed_sessions, "session must be killed on headless_flag_blocked teardown")
+
+    def test_assert_no_headless_flags_raises_on_dash_p(self):
+        """_assert_no_headless_flags raises ValueError for command containing -p."""
+        with self.assertRaises(ValueError):
+            _assert_no_headless_flags("source ~/.zshrc; claude --model sonnet -p")
+
+    def test_assert_no_headless_flags_passes_clean_command(self):
+        """_assert_no_headless_flags is silent for a clean interactive launch command."""
+        _assert_no_headless_flags("source ~/.zshrc 2>/dev/null; claude --model sonnet")
+
+
+class TestTeardownGlobal(_LaneTestCase):
+    def test_persist_handle_exception_still_tears_down(self):
+        """Exception in _persist_handle triggers teardown and returns a failure result."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        def raise_on_persist(dispatch_id, handle):
+            raise RuntimeError("simulated persist failure")
+
+        lane._persist_handle = raise_on_persist
+        result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success, "dispatch must return failure result when _persist_handle raises")
+        self.assertTrue(
+            fake.killed_sessions,
+            "session must be killed (teardown ran) even when _persist_handle raises",
+        )
 
 
 class TestTeardownIdempotent(_LaneTestCase):
