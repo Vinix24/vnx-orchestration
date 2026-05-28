@@ -343,7 +343,15 @@ if __name__ == "__main__":
         "--auto-route", action="store_true",
         help="Use smart_router to auto-select model (opt-in, default off).",
     )
+    parser.add_argument(
+        "--no-adr-inject", action="store_true",
+        help="Disable Wave-5 ADR context injection (debug/testing only).",
+    )
     args = parser.parse_args()
+
+    # Wave-5 ADR injection opt-out: set env var before instruction assembly (INT-2)
+    if getattr(args, "no_adr_inject", False):
+        os.environ["VNX_NO_ADR_INJECT"] = "1"
 
     # OI-1107: fall back to Role: header in instruction, then to a documented default.
     if args.role is None:
