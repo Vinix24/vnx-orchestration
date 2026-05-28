@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -30,7 +31,9 @@ from tmux_interactive_dispatch import (
     _default_launch_command,
     _resolve_state_dir,
     _sanitize_session_name,
+    main,
 )
+from tmux_worktree import ReapResult, WorktreeAllocateError, WorktreeHandle
 
 
 class FakeTmux:
@@ -165,6 +168,7 @@ class _LaneTestCase(unittest.TestCase):
             poll_interval=0.01,
             warmup_timeout=0.5,
             warmup_poll_interval=0.01,
+            isolated_worktree=False,  # existing tests focus on tmux logic, not worktree
         )
         kwargs.update(overrides)
         return lane.dispatch("Do the thing.", self.DISPATCH_ID, **kwargs)
@@ -249,6 +253,7 @@ class TestSingleShotSuccess(_LaneTestCase):
                 "Do the thing.", did,
                 model="sonnet", deadline_seconds=5.0,
                 poll_interval=0.01, warmup_timeout=0.5, warmup_poll_interval=0.01,
+                isolated_worktree=False,
             )
             sessions.append(r.session)
 
@@ -577,6 +582,176 @@ class TestStateDirMatchesCanonical(unittest.TestCase):
             lane_path,
             f"MISMATCH: lane={lane_path!r} != canonical={canonical_path!r}",
         )
+
+
+# ---------------------------------------------------------------------------
+# PR-TMUX-3: Worktree isolation integration tests
+# ---------------------------------------------------------------------------
+
+class _WorktreeTestCase(_LaneTestCase):
+    """Base for worktree-integration tests — injects a fake WorktreeHandle."""
+
+    def _make_handle(self, path: Path | None = None) -> WorktreeHandle:
+        wt_path = path or (self.state_dir / "worktrees" / f"dispatch-{self.DISPATCH_ID}")
+        wt_path.mkdir(parents=True, exist_ok=True)
+        return WorktreeHandle(
+            path=wt_path,
+            branch=f"dispatch/{self.DISPATCH_ID}",
+            base_sha="deadbeef" * 5,
+            base_ref="origin/main",
+            dispatch_id=self.DISPATCH_ID,
+        )
+
+
+class TestWorktreeDefaultIsolated(_WorktreeTestCase):
+    def test_dispatch_default_uses_isolated_worktree(self):
+        """dispatch() with no explicit isolated_worktree allocates a worktree (True is the default)."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        # Call lane.dispatch() directly — no isolated_worktree kwarg — to exercise the TRUE default.
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle) as mock_allocate:
+            with patch("tmux_interactive_dispatch.classify", return_value="clean"):
+                with patch(
+                    "tmux_interactive_dispatch.reap",
+                    return_value=ReapResult(removed=True),
+                ):
+                    result = lane.dispatch(
+                        "Do the thing.",
+                        self.DISPATCH_ID,
+                        role="backend-developer",
+                        model="sonnet",
+                        deadline_seconds=5.0,
+                        poll_interval=0.01,
+                        warmup_timeout=0.5,
+                        warmup_poll_interval=0.01,
+                    )
+
+        mock_allocate.assert_called_once()
+        call_kw = mock_allocate.call_args
+        called_id = call_kw.kwargs.get("dispatch_id") or (call_kw.args[0] if call_kw.args else None)
+        self.assertEqual(called_id, self.DISPATCH_ID)
+
+        new_session_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertTrue(new_session_cmds, "new-session must have been called")
+        ns_cmd = new_session_cmds[0]
+        c_idx = ns_cmd.index("-c") if "-c" in ns_cmd else -1
+        self.assertGreaterEqual(c_idx, 0, "-c flag must be present in new-session command")
+        self.assertEqual(ns_cmd[c_idx + 1], str(handle.path))
+
+
+class TestWorktreeSharedOptOut(_WorktreeTestCase):
+    def test_dispatch_shared_worktree_opt_out(self):
+        """isolated_worktree=False skips allocation and uses project_root as cwd (back-compat)."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch("tmux_interactive_dispatch.allocate") as mock_allocate:
+            # explicit False — ensures the shared path is tested
+            result = self._fast_dispatch(lane, isolated_worktree=False)
+
+        mock_allocate.assert_not_called()
+        new_session_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertTrue(new_session_cmds)
+        ns_cmd = new_session_cmds[0]
+        c_idx = ns_cmd.index("-c") if "-c" in ns_cmd else -1
+        self.assertGreaterEqual(c_idx, 0)
+        # cwd must be project_root (state_dir in _make_lane), not a worktree path
+        self.assertEqual(ns_cmd[c_idx + 1], str(self.state_dir))
+
+
+class TestWorktreeAllocateFailure(_WorktreeTestCase):
+    def test_dispatch_worktree_allocate_failure_no_spawn(self):
+        """allocate() raising WorktreeAllocateError aborts before any tmux spawn."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch(
+            "tmux_interactive_dispatch.allocate",
+            side_effect=WorktreeAllocateError("disk full"),
+        ):
+            result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        self.assertFalse(result.success)
+        self.assertIn("worktree_add_failed", result.failure_reason)
+        spawn_cmds = [c for c in fake.commands if c and c[0] == "new-session"]
+        self.assertEqual(spawn_cmds, [], "no tmux session must be spawned on allocate failure")
+
+
+class TestWorktreeTeardownLifecycle(_WorktreeTestCase):
+    def test_teardown_classifies_and_reaps(self):
+        """On success teardown, classify() and reap() are called; result has worktree_state."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        mock_reap = MagicMock(return_value=ReapResult(removed=True))
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch(
+                "tmux_interactive_dispatch.classify", return_value="clean"
+            ) as mock_classify:
+                with patch("tmux_interactive_dispatch.reap", mock_reap):
+                    result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        mock_classify.assert_called_once_with(handle)
+        mock_reap.assert_called_once_with(handle, "clean")
+        self.assertEqual(result.worktree_state, "clean")
+
+    def test_teardown_dirty_preserves_emits_event(self):
+        """Dirty worktree: reap preserves it and interactive_teardown_preserved is emitted."""
+        handle = self._make_handle()
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+        dirty_reap = ReapResult(removed=False, preserved_path=handle.path)
+
+        with patch("tmux_interactive_dispatch.allocate", return_value=handle):
+            with patch("tmux_interactive_dispatch.classify", return_value="dirty"):
+                with patch("tmux_interactive_dispatch.reap", return_value=dirty_reap):
+                    result = self._fast_dispatch(lane, isolated_worktree=True)
+
+        # Worktree directory still present (reap did not remove it in our mock).
+        self.assertTrue(handle.path.is_dir())
+
+        with get_connection(self.state_dir) as conn:
+            events = get_events(conn, entity_id=self.DISPATCH_ID)
+        event_types = {e["event_type"] for e in events}
+        self.assertIn(
+            "interactive_teardown_preserved",
+            event_types,
+            "interactive_teardown_preserved must be emitted for dirty worktree",
+        )
+        self.assertEqual(result.worktree_state, "dirty")
+
+
+class TestWorktreeCliFlags(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def test_cli_flags_isolated_and_base_ref_parsed(self):
+        """--shared-worktree and --base-ref are parsed and forwarded to dispatch()."""
+        captured: dict = {}
+
+        def fake_dispatch(self_inner, instruction, dispatch_id, **kwargs):
+            captured.update(kwargs)
+            return InteractiveDispatchResult(success=True, dispatch_id=dispatch_id)
+
+        with patch.object(TmuxInteractiveDispatch, "dispatch", fake_dispatch):
+            with patch(
+                "tmux_interactive_dispatch._resolve_state_dir",
+                return_value=self.state_dir,
+            ):
+                main([
+                    "--dispatch-id", "cli-wt-test",
+                    "--instruction", "do the thing",
+                    "--shared-worktree",
+                    "--base-ref", "origin/feature/foo",
+                ])
+
+        self.assertIs(captured.get("isolated_worktree"), False)
+        self.assertEqual(captured.get("base_ref"), "origin/feature/foo")
 
 
 if __name__ == "__main__":

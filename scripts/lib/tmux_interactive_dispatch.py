@@ -37,6 +37,8 @@ if sys_path_dir not in sys.path:
 
 logger = logging.getLogger(__name__)
 
+from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
+
 DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
 
 # Only simple identifiers are valid model names (no whitespace or shell metacharacters).
@@ -112,6 +114,8 @@ class InteractiveDispatchResult:
     receipt: "dict | None" = None
     failure_reason: "str | None" = None
     duration_seconds: float = 0.0
+    worktree_state: "str | None" = None
+    worktree_path: "str | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +535,8 @@ class TmuxInteractiveDispatch:
         dispatch_paths: "list[str] | str | None" = None,
         extra_flags: str = "",
         attach: bool = False,
+        isolated_worktree: bool = True,
+        base_ref: str = "origin/main",
     ) -> InteractiveDispatchResult:
         """Spawn -> drive -> collect -> teardown. Single-shot; no warm-open.
 
@@ -560,6 +566,34 @@ class TmuxInteractiveDispatch:
                 f"'claude-opus-4-7'); whitespace and shell metacharacters are not allowed"
             )
 
+        # Worktree isolation: allocate before session creation so a failed add
+        # never spawns a tmux session with an uncontrolled cwd.
+        worktree_handle: "WorktreeHandle | None" = None
+        _wt_state: "list[str | None]" = [None]
+
+        if isolated_worktree:
+            try:
+                worktree_handle = allocate(
+                    dispatch_id=dispatch_id,
+                    base_ref=base_ref,
+                    repo_root=self._project_root,
+                )
+                cwd = worktree_handle.path
+            except WorktreeAllocateError as exc:
+                self._emit_event(
+                    "interactive_worktree_add_failed",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason=str(exc),
+                )
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    failure_reason=f"worktree_add_failed: {exc}",
+                    duration_seconds=time.monotonic() - start_time,
+                )
+
         # Idempotency guard: teardown runs exactly once across all exit paths.
         _torn_down = False
 
@@ -572,6 +606,35 @@ class TmuxInteractiveDispatch:
                 self._kill_session(session)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("interactive: teardown kill-session %s: %s", session, exc)
+            if worktree_handle is not None:
+                try:
+                    cls = classify(worktree_handle)
+                    reap_result = reap(worktree_handle, cls)
+                    _wt_state[0] = cls
+                    self._emit_event(
+                        "interactive_teardown_worktree",
+                        dispatch_id=dispatch_id,
+                        label=label,
+                        metadata={
+                            "worktree_state": cls,
+                            "branch_kept_local": reap_result.branch_kept_local,
+                            "branch_kept_remote": reap_result.branch_kept_remote,
+                            "preserved_path": str(reap_result.preserved_path)
+                            if reap_result.preserved_path
+                            else None,
+                        },
+                    )
+                    if cls == "dirty":
+                        self._emit_event(
+                            "interactive_teardown_preserved",
+                            dispatch_id=dispatch_id,
+                            label=label,
+                            metadata={"preserved_path": str(reap_result.preserved_path)},
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "interactive: worktree reap failed for %s: %s", dispatch_id, exc
+                    )
             try:
                 self._remove_handle(dispatch_id)
             except Exception as exc:  # noqa: BLE001
@@ -622,6 +685,9 @@ class TmuxInteractiveDispatch:
                     "pane_id": pane_id,
                     "window_id": window_id,
                     "started_at": time.time(),
+                    "worktree_path": str(worktree_handle.path) if worktree_handle else None,
+                    "branch": worktree_handle.branch if worktree_handle else None,
+                    "base_sha": worktree_handle.base_sha if worktree_handle else None,
                 },
             )
             self._emit_event(
@@ -752,6 +818,8 @@ class TmuxInteractiveDispatch:
                     pane_id=pane_id,
                     failure_reason="receipt deadline exceeded",
                     duration_seconds=time.monotonic() - start_time,
+                    worktree_state=_wt_state[0],
+                    worktree_path=str(worktree_handle.path) if worktree_handle else None,
                 )
 
             self._emit_event(
@@ -771,6 +839,8 @@ class TmuxInteractiveDispatch:
                 pane_id=pane_id,
                 receipt=receipt,
                 duration_seconds=time.monotonic() - start_time,
+                worktree_state=_wt_state[0],
+                worktree_path=str(worktree_handle.path) if worktree_handle else None,
             )
 
         except Exception as _exc:  # noqa: BLE001
@@ -789,6 +859,8 @@ class TmuxInteractiveDispatch:
                 pane_id=pane_id,
                 failure_reason="unexpected_error",
                 duration_seconds=time.monotonic() - start_time,
+                worktree_state=_wt_state[0],
+                worktree_path=str(worktree_handle.path) if worktree_handle else None,
             )
         finally:
             # No-op if teardown already ran; catches any remaining exit path.
@@ -822,6 +894,21 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--skip-permissions", action="store_true", default=None)
     parser.add_argument("--extra-flags", default="")
     parser.add_argument("--attach", action="store_true")
+    wt_group = parser.add_mutually_exclusive_group()
+    wt_group.add_argument(
+        "--isolated-worktree",
+        dest="isolated_worktree",
+        action="store_true",
+        default=True,
+        help="(default) spawn worker in an ephemeral isolated git worktree",
+    )
+    wt_group.add_argument(
+        "--shared-worktree",
+        dest="isolated_worktree",
+        action="store_false",
+        help="spawn worker in the main repo checkout (opt-out of isolation)",
+    )
+    parser.add_argument("--base-ref", default="origin/main")
 
     args = parser.parse_args(argv)
     lane = TmuxInteractiveDispatch(_resolve_state_dir())
@@ -839,6 +926,8 @@ def main(argv: "list[str] | None" = None) -> int:
         skip_permissions=args.skip_permissions if args.skip_permissions else None,
         extra_flags=args.extra_flags,
         attach=args.attach,
+        isolated_worktree=args.isolated_worktree,
+        base_ref=args.base_ref,
     )
     print(json.dumps(result.__dict__, default=str))
     return 0 if result.success else 1
