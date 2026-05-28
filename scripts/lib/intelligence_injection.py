@@ -134,8 +134,9 @@ def _query_adrs_from_db(
                 )
                 rows = conn.execute(sql_no_fts, no_fts_params).fetchall()
                 return [dict(r) for r in rows]
-            except Exception:
-                return []
+            except sqlite3.OperationalError as e:
+                logger.warning('ADR DB query failed (table missing or corrupt): %s', e)
+                return []  # ADR injection is best-effort; missing/corrupt DB shouldn't block dispatch
         logger.debug("_query_adrs_from_db: OperationalError: %s", exc)
         return []
     finally:
