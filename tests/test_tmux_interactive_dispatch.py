@@ -9,6 +9,7 @@ No fixed terminal identities, no warm-open, no leases.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -471,6 +472,38 @@ class TestTeardownIdempotent(_LaneTestCase):
             len(kill_cmds), 1,
             f"kill-session called {len(kill_cmds)} times; _torn_down guard must prevent double-kill",
         )
+
+
+class TestCompletionProtocolIntegration(_LaneTestCase):
+    def test_completion_protocol_payload_accepted_by_append_receipt(self):
+        """Integration: completion-protocol receipt JSON passes _validate_receipt without error.
+
+        This test FAILS before the timestamp fix (missing_required_key: timestamp)
+        and PASSES after. It closes the gap that unit tests with stubbed
+        append_receipt missed.
+        """
+        from append_receipt_internals.common import AppendReceiptError
+        from append_receipt_internals.validation import _validate_receipt
+
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        # Extract single-quoted JSON after --receipt
+        m = re.search(r"--receipt '(.+?)'", protocol, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract --receipt JSON from completion protocol")
+
+        receipt = json.loads(m.group(1))
+
+        try:
+            _validate_receipt(receipt)
+        except AppendReceiptError as exc:
+            self.fail(f"_validate_receipt raised AppendReceiptError: {exc.message}")
+
+        self.assertTrue(receipt.get("timestamp"), "timestamp must be non-empty in protocol receipt")
+        self.assertEqual(receipt.get("event_type"), "subprocess_completion")
+        self.assertEqual(receipt.get("dispatch_id"), self.DISPATCH_ID)
 
 
 if __name__ == "__main__":
