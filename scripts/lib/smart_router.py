@@ -185,6 +185,47 @@ def _cost_aware_sort_key(c: "RouteCandidate") -> tuple:
     return (1, float("inf"), -c.composite_score)
 
 
+def _filter_by_constraints(
+    candidates: List[RouteCandidate],
+    env: Optional[Dict] = None,
+) -> "tuple[List[RouteCandidate], List[str]]":
+    """Filter candidates that would violate provider_constraints.yaml.
+
+    Consults providers.constraint_enforcer.check_constraints for each candidate
+    so smart_router never recommends a constraint-violating lane (G8).
+
+    Fail-open: on import error or any per-candidate exception, the candidate is
+    kept (safe over silent drop). Returns (allowed_candidates, applied_ids) where
+    applied_ids lists blocking constraint codes that filtered at least one model.
+    """
+    import os as _os  # noqa: PLC0415
+
+    try:
+        from providers.constraint_enforcer import check_constraints as _check  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return candidates, []
+
+    _env = env if env is not None else dict(_os.environ)
+    allowed: List[RouteCandidate] = []
+    applied: List[str] = []
+
+    for candidate in candidates:
+        try:
+            provider, model = parse_route_model_id(candidate.model_id)
+            violations = _check(provider=provider, model=model, env=_env)
+            blocking = [v for v in violations if v.severity == "blocking"]
+            if blocking:
+                for v in blocking:
+                    if v.code not in applied:
+                        applied.append(v.code)
+            else:
+                allowed.append(candidate)
+        except Exception:  # noqa: BLE001
+            allowed.append(candidate)
+
+    return allowed, applied
+
+
 def _load_recommendations(
     path: Optional[Path] = None,
 ) -> Dict[str, List[RouteCandidate]]:
@@ -259,6 +300,9 @@ def decide(
     task_class = classify_task(instruction, role=role, dispatch_paths=dispatch_paths)
     candidates = recommend(task_class, recommendations_path=recommendations_path)
 
+    # G8: filter constraint-violating candidates before picking primary/fallback.
+    candidates, _constraints_applied = _filter_by_constraints(candidates)
+
     primary = candidates[0] if candidates else None
     fallback = candidates[1] if len(candidates) > 1 else None
 
@@ -277,6 +321,7 @@ def decide(
         primary=primary,
         fallback=fallback,
         reason="; ".join(parts),
+        constraints_applied=_constraints_applied,
         cost_estimate=cost_estimate,
     )
 

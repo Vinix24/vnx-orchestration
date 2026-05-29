@@ -371,6 +371,7 @@ if __name__ == "__main__":
 
     # PR-SR-4: smart_router auto-route (opt-in, takes precedence over routing_policy).
     _auto_route_applied = False
+    _auto_cheap_lane: "str | None" = None  # G6: non-Claude provider from smart_router
     if getattr(args, "auto_route", False):
         try:
             from smart_router import decide as _smart_route, parse_route_model_id, write_route_decision  # noqa: PLC0415
@@ -386,7 +387,10 @@ if __name__ == "__main__":
                 )
                 if _r_provider == "claude":
                     _effective_model = _r_model
-                    _auto_route_applied = True
+                else:
+                    _auto_cheap_lane = _r_provider  # G6: route to non-Claude provider
+                    args.model = _r_model            # pass recommended model to provider_dispatch
+                _auto_route_applied = True  # G7: always skip routing_policy when smart_router ran
 
             _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
             write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
@@ -408,6 +412,9 @@ if __name__ == "__main__":
         current_model=_effective_model,
         auto_route_applied=_auto_route_applied,
     )
+    # G6: smart_router non-Claude selection takes precedence over routing_policy result.
+    if _auto_cheap_lane is not None:
+        _cheap_lane_provider = _auto_cheap_lane
     if _cheap_lane_provider is not None or _effective_model != args.model:
         import logging as _log_mod
         _log_mod.getLogger(__name__).info(
