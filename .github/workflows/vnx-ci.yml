@@ -369,3 +369,25 @@ jobs:
             exit 0
           fi
           printf '%s\n' "$added" | python3 "$VNX_HOME/scripts/ci_lint_patterns.py" --scan-stdin
+
+  profile-d:
+    name: Profile D (pip install smoke)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip build
+
+      - name: Run pip install smoke
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/ci/pip_install_smoke.sh"
