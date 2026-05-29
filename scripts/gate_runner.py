@@ -43,6 +43,15 @@ _REVIEWER_VERDICT_TEMPLATE = (
     "```\n"
 )
 
+# Net-deletion sanity instruction injected into every headless reviewer prompt.
+# Mirrors codex_final_gate._format_review_instructions item 6 so the same check
+# applies whether the gate is driven by a ReviewContract or the generic diff path.
+_NET_DELETION_SANITY_INSTRUCTION = (
+    "**Net deletion sanity**: Count files listed as entirely removed in this diff. "
+    "If ≥5 files are deleted, include a warning finding with the count and confirm "
+    "the deletions are intentional (not accidental scope reduction).\n\n"
+)
+
 # Gate type → CLI binary mapping
 GATE_BINARIES: Dict[str, str] = {
     "gemini_review": "gemini",
@@ -266,6 +275,7 @@ class GateRunner:
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
             "do not flag pre-existing code.\n\n"
+            f"{_NET_DELETION_SANITY_INSTRUCTION}"
             f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
@@ -289,6 +299,7 @@ class GateRunner:
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
             "do not flag pre-existing code.\n\n"
+            f"{_NET_DELETION_SANITY_INSTRUCTION}"
             f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(

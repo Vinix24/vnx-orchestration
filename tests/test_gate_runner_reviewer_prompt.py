@@ -139,6 +139,27 @@ class TestCodexPromptContent:
 
         assert "do not flag pre-existing code" in result
 
+    def test_codex_prompt_has_net_deletion_sanity_instruction(self):
+        payload = _make_payload(pr_number=88)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_codex_prompt(payload)
+
+        assert "Net deletion sanity" in result
+
+    def test_codex_prompt_net_deletion_includes_threshold(self):
+        payload = _make_payload(pr_number=88)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_codex_prompt(payload)
+
+        assert "≥5" in result
+
+    def test_codex_prompt_net_deletion_mentions_intentional(self):
+        payload = _make_payload(pr_number=88)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_codex_prompt(payload)
+
+        assert "intentional" in result
+
 
 # ---------------------------------------------------------------------------
 # Gemini path mirrors
@@ -198,6 +219,27 @@ class TestGeminiPathMirrors:
 
         assert isinstance(result, str)
         assert len(result) > 100
+
+    def test_gemini_prompt_has_net_deletion_sanity_instruction(self):
+        payload = _make_payload(pr_number=205)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_gemini_prompt(payload)
+
+        assert "Net deletion sanity" in result
+
+    def test_gemini_prompt_net_deletion_includes_threshold(self):
+        payload = _make_payload(pr_number=205)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_gemini_prompt(payload)
+
+        assert "≥5" in result
+
+    def test_gemini_net_deletion_mentions_scope_reduction(self):
+        payload = _make_payload(pr_number=205)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_gemini_prompt(payload)
+
+        assert "scope reduction" in result
 
 
 # ---------------------------------------------------------------------------
