@@ -437,8 +437,8 @@ class PoolManager:
         result = ExecResult(decision=decision)
 
         _config, _, members = self.load_state()
-        # Build membership_id -> terminal_id map for lease release
         mid_to_terminal = {m.membership_id: m.terminal_id for m in members}
+        mid_to_pid = {m.membership_id: m.pid for m in members}
 
         if decision.targets:  # OI-1483: use pre-computed targets from decide()
             membership_ids = list(decision.targets)
@@ -472,10 +472,31 @@ class PoolManager:
                         terminal_id, exc,
                     )
 
+                try:
+                    self._kill_subprocess(terminal_id, mid_to_pid.get(membership_id))
+                except Exception as exc:
+                    log.warning(
+                        "scale_down: kill failed for terminal=%s: %s",
+                        terminal_id, exc,
+                    )
+
+                try:
+                    from pool_worktree_manager import reap_worker_worktree  # noqa: E402
+                    reap_worker_worktree(terminal_id)
+                except Exception as exc:
+                    log.warning(
+                        "scale_down: worktree cleanup failed for terminal=%s: %s",
+                        terminal_id, exc,
+                    )
+
         return result
 
     def _execute_reap(self, decision: PoolDecision, now: float) -> ExecResult:
         result = ExecResult(decision=decision)
+
+        _config, _, members = self.load_state()
+        mid_to_terminal = {m.membership_id: m.terminal_id for m in members}
+        mid_to_pid = {m.membership_id: m.pid for m in members}
 
         for membership_id in decision.targets:
             try:
@@ -488,6 +509,26 @@ class PoolManager:
                 err = f"reap error for membership={membership_id}: {exc}"
                 result.errors.append(err)
                 log.exception("reap: error membership=%s", membership_id)
+                continue
+
+            terminal_id = mid_to_terminal.get(membership_id)
+            if terminal_id:
+                try:
+                    self._kill_subprocess(terminal_id, mid_to_pid.get(membership_id))
+                except Exception as exc:
+                    log.warning(
+                        "reap: kill failed for terminal=%s: %s",
+                        terminal_id, exc,
+                    )
+
+                try:
+                    from pool_worktree_manager import reap_worker_worktree  # noqa: E402
+                    reap_worker_worktree(terminal_id)
+                except Exception as exc:
+                    log.warning(
+                        "reap: worktree cleanup failed for terminal=%s: %s",
+                        terminal_id, exc,
+                    )
 
         return result
 
