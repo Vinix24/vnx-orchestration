@@ -126,6 +126,25 @@ Action when B3.1 triggers:
 
 P4 violated B3.1 implicitly across rounds 3-5; the lessons doc (`claudedocs/2026-05-09-p4-migration-architecture-lessons.md`) Section 6 documents the cost.
 
+### B3.2 sub-rule: Cumulative-blocker iteration cap (Phase 1 doc-only)
+
+In addition to B3.1's per-round threshold (≥3 NEW = architect), apply a CUMULATIVE check:
+
+- If round N has ≥1 NEW blocking finding AND cumulative blockers across all rounds ≥6:
+  → STOP iterating. Default to scope-shrink + OI per "OI Creation Policy", not fix-forward.
+- Exception: operator override via dispatch metadata `--override-b3-cumulative` flag with explicit reason.
+
+Rationale: per-round metric misses divergent patterns where each round introduces ≤2 new
+bugs while resolving prior ones. PR-FUT-2A demonstrated this 2026-05-29 with 4 rounds
+and 8 cumulative blockers without ever crossing the per-round threshold.
+
+Phase 1 (now): T0 applies this rule manually before each review-gate request.
+Phase 2 (post-1.0): `scripts/t0_iteration_health.py` machine-check with JSON output.
+
+Per claudedocs/T0-HARDENING-CODEX-REVIEW-2026-05-29.md: tool requires durable findings
+store, dedupe keys, NEW/blocking/repeated definitions, gate vocabulary mapping.
+Not 40 LOC; estimate ~150 LOC post-1.0.
+
 **Verification (when risk > 0.3 only)**:
 - Claimed file modified: `git log --oneline -1 -- <file>`
 - Fix present in code: Grep for the change
@@ -199,6 +218,38 @@ Use advisory as signal, not authority.
 
 4. `hold | risk > 0.8`
 - Block progression unless explicitly mitigated.
+
+### 4.1 Receipt status mapping (legacy + Wave 6 vocabulary)
+
+**Receipt lifecycle status:**
+
+| status | Meaning | T0 action |
+|---|---|---|
+| `done` | Worker completed; evidence present | Review |
+| `success` | Legacy alias for `done` | Review |
+| `failed` | Worker non-zero exit | REJECT, investigate |
+| `failure` | Legacy alias for `failed` | REJECT, investigate |
+| `unknown` | Intermediate state, receipt-processor still determining | WAIT for finale (TTL 30 min then re-poll) |
+
+**Review-gate lifecycle status:**
+
+| status | Meaning | T0 action |
+|---|---|---|
+| `requested` | Gate requested, runner pending | WAIT or start execution |
+| `queued` | Gate in queue, will run | WAIT |
+| `running` | Gate execution in progress | WAIT |
+| `completed` | Gate finished, see findings | Review verdict |
+| `pass` | No blocking findings | Proceed |
+| `blocked` | Blocking findings present | Fix-forward or escalate |
+| `not_configured` | Gate-policy references missing runner | Configure or skip |
+| `not_executable` | Runner present but cannot execute | Investigate environment |
+| `timeout` | Runner exceeded TTL | Retry or escalate |
+
+**Critical rule:** `unknown` is NEVER `failure`. Wait for final state or check report-evidence file BEFORE REJECT.
+
+PR-FUT-2A 2026-05-29 demonstrated: fix1 receipt cycled through 4× `unknown` over 30 min before eventually `done`.
+
+Phase 1 (now): doc-only mapping. Phase 2 (FUT-2b): normalize to 4-status terminology.
 
 ## 5. Doubt and Escalation Policy
 
@@ -502,6 +553,26 @@ Direct claude --print is acceptable ONLY for pure utility invocations (parsing, 
 Gate execution (codex_gate, gemini_review) uses `scripts/review_gate_manager.py request-and-execute` OR `scripts/t0_gate_enforcement.sh` — these create the canonical `review_gates/requests` and `review_gates/results` artifacts that closure verification depends on. `subprocess_dispatch.py` dispatches feature work to T1/T2/T3 workers; its `--gate` flag is metadata for auto-commit tagging, not gate execution.
 
 Rule of thumb: Does the work produce a PR or a measurement? Then subprocess_dispatch.py. Does the work produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
+
+### 9.3 Elastic worker pool (Wave 6, ADR-018)
+
+VNX has an elastic worker pool system shipped 2026-05-16 (ADR-018, PR-6.0 through PR-6.8).
+For parallel dispatches and high-throughput scenarios, prefer pool tooling over direct
+subprocess_dispatch.py terminal-pinning.
+
+**Existing CLI:** `bin/vnx pool {status,scale,config,reap}`
+
+**When to use pool model:**
+- Multiple independent dispatches that don't need terminal-specific state
+- Burn-in / batch hardening work
+- Worker workloads scoped by role (backend-developer, quality-engineer, architect)
+
+**Configuration per project:** `.vnx/vnx_workers.default.yaml` defines roles + providers + scaling.
+
+**State:** `worker_pools`, `pool_config`, `worker_pool_membership`, `worker_states` tables.
+
+**Backward-compat:** existing T1/T2/T3 terminal-pin via subprocess_dispatch.py
+continues to work. Pool is additive. Migration to pool-default is post-1.0 (FUT-3+).
 
 ## 10. Manager Block Quality Standard
 
