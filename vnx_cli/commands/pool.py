@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from typing import List, Optional
@@ -31,7 +32,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     """Show current pool state for a project."""
     project_id = _resolve_project_id(args.project)
     mgr = _make_manager_for_project_id(project_id, args.pool_id)
-    config, state, members = mgr.load_state()
+    try:
+        config, state, members = mgr.load_state()
+    except (sqlite3.OperationalError, RuntimeError) as exc:
+        print(
+            f"pool not initialized for project '{project_id}' — "
+            f"run: vnx init && vnx migrate (migration 0020)\n  detail: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     active = [m for m in members if m.status == "active"]
     if args.json:

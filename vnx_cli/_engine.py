@@ -42,12 +42,13 @@ def engine_root() -> Path:
 
 
 def ensure_engine_on_path() -> Path:
-    """Put the packaged engine's ``scripts/`` + ``scripts/lib`` on sys.path.
+    """Put the packaged engine's ``scripts/``, ``scripts/lib``, and
+    ``scripts/dream`` on sys.path.
 
     Idempotent. Returns the engine root so callers can reuse it.
     """
     root = engine_root()
-    for sub in (root / "scripts", root / "scripts" / "lib"):
+    for sub in (root / "scripts", root / "scripts" / "lib", root / "scripts" / "dream"):
         s = str(sub)
         if sub.is_dir() and s not in sys.path:
             sys.path.insert(0, s)

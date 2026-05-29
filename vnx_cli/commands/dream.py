@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
-sys.path.insert(0, str(_REPO_ROOT / "scripts" / "dream"))
+from vnx_cli import _engine
+_engine.ensure_engine_on_path()
 
 
 def _get_project_id(args) -> str | None:
