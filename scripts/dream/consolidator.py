@@ -12,12 +12,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+# Minimum number of core patterns (success_patterns + antipatterns) required to
+# proceed with consolidation. Below this threshold the cycle is skipped cleanly.
+_MIN_PATTERN_THRESHOLD: int = 1
+
+# Default kimi subprocess timeout in seconds; override via VNX_DREAM_KIMI_TIMEOUT.
+_DEFAULT_KIMI_TIMEOUT: int = 180
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from project_root import resolve_project_root
@@ -151,12 +160,22 @@ Patterns to consolidate:
 """
 
 
-def _dispatch_kimi_consolidation(patterns_input: dict, project_id: str) -> dict:
-    """Dispatch kimi K2.6 cheap-lane for pattern consolidation and parse the result."""
+def _dispatch_kimi_consolidation(
+    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_KIMI_TIMEOUT
+) -> dict:
+    """Dispatch kimi K2.6 cheap-lane for pattern consolidation and parse the result.
+
+    Raises subprocess.TimeoutExpired if kimi does not respond within ``timeout`` seconds.
+    """
     from kimi_wrapper import kimi_exec  # noqa: PLC0415
 
     prompt = _build_consolidation_prompt(patterns_input, project_id)
-    stdout = kimi_exec(prompt, dispatch_id=f"dream-{project_id}", project_id=project_id)
+    stdout = kimi_exec(
+        prompt,
+        dispatch_id=f"dream-{project_id}",
+        project_id=project_id,
+        timeout=timeout,
+    )
     text = _extract_kimi_text(stdout) or stdout
     return _parse_kimi_response(text)
 
@@ -206,52 +225,134 @@ def run_dream_cycle(
         }
     )
 
+    kimi_timeout = float(
+        os.environ.get("VNX_DREAM_KIMI_TIMEOUT", str(_DEFAULT_KIMI_TIMEOUT))
+    )
+
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    patterns = _fetch_patterns(conn, project_id)
-    total_input = sum(len(v) for v in patterns.values())
-
     try:
-        consolidation = _dispatch_kimi_consolidation(patterns, project_id)
-    except Exception as exc:
+        patterns = _fetch_patterns(conn, project_id)
+        total_input = sum(len(v) for v in patterns.values())
+
+        # Insufficient-data guard: skip cleanly when there are no core patterns to
+        # consolidate (e.g. freshly-bootstrapped DB). Kimi is NOT invoked. (GAP-7)
+        core_count = len(patterns.get("success_patterns", [])) + len(
+            patterns.get("antipatterns", [])
+        )
+        if core_count < _MIN_PATTERN_THRESHOLD:
+            _emit_dream_event(
+                {
+                    "event_type": "dream_cycle_skipped",
+                    "cycle_id": cycle_id,
+                    "project_id": project_id,
+                    "reason": "insufficient_data",
+                    "detail": (
+                        f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}"
+                    ),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            return {
+                "status": "skipped",
+                "cycle_id": cycle_id,
+                "reason": "insufficient_data",
+                "detail": f"core_count={core_count}",
+            }
+
+        try:
+            consolidation = _dispatch_kimi_consolidation(
+                patterns, project_id, timeout=kimi_timeout
+            )
+        except subprocess.TimeoutExpired:
+            _emit_dream_event(
+                {
+                    "event_type": "dream_cycle_timeout",
+                    "cycle_id": cycle_id,
+                    "project_id": project_id,
+                    "timeout_seconds": int(kimi_timeout),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            return {
+                "status": "timeout",
+                "cycle_id": cycle_id,
+                "reason": "kimi_timeout",
+                "timeout_seconds": int(kimi_timeout),
+            }
+        except Exception as exc:
+            _emit_dream_event(
+                {
+                    "event_type": "dream_cycle_failed",
+                    "cycle_id": cycle_id,
+                    "project_id": project_id,
+                    "error": str(exc)[:500],
+                }
+            )
+            raise
+
+        root = resolve_project_root(__file__)
+        review_dir = root / ".vnx-data" / "state" / "dream"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        review_path = review_dir / f"{cycle_id}-pending-review.json"
+        review_path.write_text(
+            json.dumps(
+                {
+                    "cycle_id": cycle_id,
+                    "project_id": project_id,
+                    "input_count": total_input,
+                    "consolidation": consolidation,
+                    "requires_operator_review": True,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        merged_count = len(consolidation.get("merged", []))
+        dropped_count = len(consolidation.get("dropped", []))
+        archived_count = len(consolidation.get("archived", []))
+        flagged_count = len(consolidation.get("flagged", []))
+
         _emit_dream_event(
             {
-                "event_type": "dream_cycle_failed",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "error": str(exc)[:500],
-            }
-        )
-        raise
-
-    root = resolve_project_root(__file__)
-    review_dir = root / ".vnx-data" / "state" / "dream"
-    review_dir.mkdir(parents=True, exist_ok=True)
-    review_path = review_dir / f"{cycle_id}-pending-review.json"
-    review_path.write_text(
-        json.dumps(
-            {
+                "event_type": "dream_cycle_completed",
                 "cycle_id": cycle_id,
                 "project_id": project_id,
                 "input_count": total_input,
-                "consolidation": consolidation,
-                "requires_operator_review": True,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+                "merged_count": merged_count,
+                "dropped_count": dropped_count,
+                "archived_count": archived_count,
+                "flagged_count": flagged_count,
+                "review_path": str(review_path),
+            }
+        )
 
-    merged_count = len(consolidation.get("merged", []))
-    dropped_count = len(consolidation.get("dropped", []))
-    archived_count = len(consolidation.get("archived", []))
-    flagged_count = len(consolidation.get("flagged", []))
+        if not dry_run:
+            conn.execute(
+                """
+                INSERT INTO dream_cycles
+                    (cycle_id, project_id, completed_at, status, provider,
+                     insights_input, merged_count, dropped_count, archived_count,
+                     flagged_count, report_path)
+                VALUES (?, ?, ?, 'completed', 'kimi', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cycle_id,
+                    project_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    total_input,
+                    merged_count,
+                    dropped_count,
+                    archived_count,
+                    flagged_count,
+                    str(review_path),
+                ),
+            )
+            conn.commit()
 
-    _emit_dream_event(
-        {
-            "event_type": "dream_cycle_completed",
+        return {
             "cycle_id": cycle_id,
-            "project_id": project_id,
             "input_count": total_input,
             "merged_count": merged_count,
             "dropped_count": dropped_count,
@@ -259,42 +360,8 @@ def run_dream_cycle(
             "flagged_count": flagged_count,
             "review_path": str(review_path),
         }
-    )
-
-    if not dry_run:
-        conn.execute(
-            """
-            INSERT INTO dream_cycles
-                (cycle_id, project_id, completed_at, status, provider,
-                 insights_input, merged_count, dropped_count, archived_count,
-                 flagged_count, report_path)
-            VALUES (?, ?, ?, 'completed', 'kimi', ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                cycle_id,
-                project_id,
-                datetime.now(timezone.utc).isoformat(),
-                total_input,
-                merged_count,
-                dropped_count,
-                archived_count,
-                flagged_count,
-                str(review_path),
-            ),
-        )
-        conn.commit()
-
-    conn.close()
-
-    return {
-        "cycle_id": cycle_id,
-        "input_count": total_input,
-        "merged_count": merged_count,
-        "dropped_count": dropped_count,
-        "archived_count": archived_count,
-        "flagged_count": flagged_count,
-        "review_path": str(review_path),
-    }
+    finally:
+        conn.close()
 
 
 def main() -> None:
@@ -315,6 +382,8 @@ def main() -> None:
 
     result = run_dream_cycle(args.project_id, db_path, args.dry_run)
     print(json.dumps(result, indent=2))
+    if result.get("status") == "timeout":
+        sys.exit(1)
 
 
 if __name__ == "__main__":

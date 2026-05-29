@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -226,6 +227,17 @@ def _make_fresh_receipts(tmp_path: Path) -> None:
     (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
 
 
+def _seed_pattern(db_path: Path) -> None:
+    """Insert one success_pattern so the insufficient-data guard passes."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO success_patterns (project_id, title) VALUES (?, ?)",
+        ("vnx-dev", "seeded-pattern"),
+    )
+    conn.commit()
+    conn.close()
+
+
 class TestDryRun:
     def test_dry_run_no_db_write(self, tmp_path):
         """Dry-run emits NDJSON and writes pending-review.json but skips dream_cycles INSERT."""
@@ -235,6 +247,7 @@ class TestDryRun:
         conn.commit()
         conn.close()
         _make_fresh_receipts(tmp_path)
+        _seed_pattern(db_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -265,6 +278,7 @@ class TestDryRun:
         conn.commit()
         conn.close()
         _make_fresh_receipts(tmp_path)
+        _seed_pattern(db_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -296,6 +310,7 @@ class TestDryRun:
         conn.commit()
         conn.close()
         _make_fresh_receipts(tmp_path)
+        _seed_pattern(db_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -430,6 +445,7 @@ class TestRunDreamCycleReceiptPreflight:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _seed_pattern(db_path)
 
         # Create a fresh receipt file
         processed = tmp_path / ".vnx-data" / "receipts" / "processed"
@@ -447,3 +463,152 @@ class TestRunDreamCycleReceiptPreflight:
 
         assert result.get("status") != "skipped"
         assert "cycle_id" in result
+
+
+# ---------------------------------------------------------------------------
+# Insufficient-data guard (empty DB with fresh receipts)
+# ---------------------------------------------------------------------------
+
+
+def _make_db_with_receipts(tmp_path: Path, *, with_patterns: bool = False) -> Path:
+    """Return a fresh DB path with receipts ready. Optionally seed one success pattern."""
+    db_path = tmp_path / "state" / "quality_intelligence.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(_DREAM_SCHEMA)
+    if with_patterns:
+        conn.execute(
+            "INSERT INTO success_patterns (project_id, title) VALUES (?, ?)",
+            ("vnx-dev", "a-pattern"),
+        )
+    conn.commit()
+    conn.close()
+
+    processed = tmp_path / ".vnx-data" / "receipts" / "processed"
+    processed.mkdir(parents=True, exist_ok=True)
+    (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
+    return db_path
+
+
+class TestInsufficientDataGuard:
+    """Fresh receipts present but 0 core patterns → skip without calling kimi."""
+
+    def test_empty_db_returns_skipped(self, tmp_path):
+        """run_dream_cycle skips quickly when success_patterns + antipatterns = 0."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=False)
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch("consolidator._dispatch_kimi_consolidation") as mock_kimi,
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "insufficient_data"
+        mock_kimi.assert_not_called()
+
+    def test_empty_db_emits_skipped_ndjson_event(self, tmp_path):
+        """Skipped-on-empty emits dream_cycle_skipped NDJSON event (ADR-005)."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=False)
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch("consolidator._dispatch_kimi_consolidation"),
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path)
+
+        event_files = list((tmp_path / ".vnx-data" / "events" / "dream").glob("*.ndjson"))
+        assert event_files, "No NDJSON event file written"
+        events = [
+            json.loads(line)
+            for line in event_files[0].read_text().strip().splitlines()
+        ]
+        skipped = [e for e in events if e.get("event_type") == "dream_cycle_skipped"]
+        assert skipped, "dream_cycle_skipped event not emitted"
+        assert skipped[0]["reason"] == "insufficient_data"
+
+    def test_non_empty_db_proceeds_to_kimi(self, tmp_path):
+        """run_dream_cycle calls kimi when at least one success pattern exists."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch(
+                "consolidator._dispatch_kimi_consolidation",
+                return_value=_FAKE_CONSOLIDATION,
+            ) as mock_kimi,
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=True)
+
+        mock_kimi.assert_called_once()
+        assert result.get("status") != "skipped"
+        assert "cycle_id" in result
+
+
+# ---------------------------------------------------------------------------
+# Kimi timeout guard
+# ---------------------------------------------------------------------------
+
+
+class TestKimiTimeout:
+    """Slow/stuck kimi must not hang the cycle indefinitely."""
+
+    def _make_timeout_error(self):
+        return subprocess.TimeoutExpired(cmd=["kimi"], timeout=1)
+
+    def test_timeout_returns_timeout_status(self, tmp_path):
+        """run_dream_cycle returns status='timeout' when kimi times out."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch(
+                "consolidator._dispatch_kimi_consolidation",
+                side_effect=self._make_timeout_error(),
+            ),
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path)
+
+        assert result["status"] == "timeout"
+        assert result["reason"] == "kimi_timeout"
+        assert "cycle_id" in result
+
+    def test_timeout_emits_timeout_ndjson_event(self, tmp_path):
+        """Timeout emits dream_cycle_timeout NDJSON event (ADR-005)."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch(
+                "consolidator._dispatch_kimi_consolidation",
+                side_effect=self._make_timeout_error(),
+            ),
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path)
+
+        event_files = list((tmp_path / ".vnx-data" / "events" / "dream").glob("*.ndjson"))
+        assert event_files, "No NDJSON event file written"
+        events = [
+            json.loads(line)
+            for line in event_files[0].read_text().strip().splitlines()
+        ]
+        timeout_events = [e for e in events if e.get("event_type") == "dream_cycle_timeout"]
+        assert timeout_events, "dream_cycle_timeout event not emitted"
+
+    def test_timeout_env_override(self, tmp_path, monkeypatch):
+        """VNX_DREAM_KIMI_TIMEOUT env var is passed to _dispatch_kimi_consolidation."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=True)
+        monkeypatch.setenv("VNX_DREAM_KIMI_TIMEOUT", "42")
+        captured = {}
+
+        def _capture_timeout(patterns, project_id, timeout=180.0):
+            captured["timeout"] = timeout
+            return _FAKE_CONSOLIDATION
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch("consolidator._dispatch_kimi_consolidation", side_effect=_capture_timeout),
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=True)
+
+        assert captured["timeout"] == 42.0
