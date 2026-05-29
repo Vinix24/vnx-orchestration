@@ -160,6 +160,20 @@ def _handle_success(
         model=model,
     )
     token_usage, cost_usd = _resolve_token_usage_and_cost(dispatch_id, sub_result, model)
+
+    # ADR-005: emit cost event BEFORE receipt write. Raises on failure — fail-loud.
+    from provider_costs import emit_provider_cost  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
+    emit_provider_cost(
+        provider="claude",
+        model=model or "sonnet",
+        input_tokens=token_usage.get("input") if token_usage else None,
+        output_tokens=token_usage.get("output") if token_usage else None,
+        cost_usd_estimate=cost_usd,
+        dispatch_id=dispatch_id,
+        project_id=_os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+    )
+
     _sd._ensure_unified_report(dispatch_id, terminal_id, "done")
     _sd._write_receipt(
         dispatch_id, terminal_id, "done",
