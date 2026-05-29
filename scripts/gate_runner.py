@@ -43,6 +43,15 @@ _REVIEWER_VERDICT_TEMPLATE = (
     "```\n"
 )
 
+# Net-deletion sanity instruction injected into both codex and gemini reviewer prompts.
+# Mirrors codex_final_gate.py review instruction #6 so the LLM reviewer flags accidental
+# scope reduction regardless of which path (contract-based vs. PR-number-based) is used.
+_NET_DELETION_SANITY_INSTRUCTION = (
+    "Net deletion sanity: Count files listed as entirely removed in the diff. "
+    "If ≥5 files are deleted, include a warning finding with the count and "
+    "confirm the deletions are intentional (not accidental scope reduction).\n\n"
+)
+
 # Gate type → CLI binary mapping
 GATE_BINARIES: Dict[str, str] = {
     "gemini_review": "gemini",
@@ -266,7 +275,7 @@ class GateRunner:
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
             "do not flag pre-existing code.\n\n"
-            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
+            f"{diff_content}\n\n{_NET_DELETION_SANITY_INSTRUCTION}{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
             dispatch_metadata={"role": "reviewer"},
@@ -289,7 +298,7 @@ class GateRunner:
             f"Review the PR diff below on branch {branch} (risk: {risk}). "
             "Findings MUST cite specific NEW lines from this diff — "
             "do not flag pre-existing code.\n\n"
-            f"{diff_content}\n\n{_REVIEWER_VERDICT_TEMPLATE}"
+            f"{diff_content}\n\n{_NET_DELETION_SANITY_INSTRUCTION}{_REVIEWER_VERDICT_TEMPLATE}"
         )
         assembled = PromptAssembler().assemble(
             dispatch_metadata={"role": "reviewer"},

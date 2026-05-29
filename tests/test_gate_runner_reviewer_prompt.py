@@ -139,6 +139,14 @@ class TestCodexPromptContent:
 
         assert "do not flag pre-existing code" in result
 
+    def test_codex_prompt_has_net_deletion_sanity_instruction(self):
+        payload = _make_payload(pr_number=89)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_codex_prompt(payload)
+
+        assert "Net deletion sanity" in result
+        assert "≥5" in result
+
 
 # ---------------------------------------------------------------------------
 # Gemini path mirrors
@@ -198,6 +206,14 @@ class TestGeminiPathMirrors:
 
         assert isinstance(result, str)
         assert len(result) > 100
+
+    def test_gemini_prompt_has_net_deletion_sanity_instruction(self):
+        payload = _make_payload(pr_number=206)
+        with mock.patch("gate_runner.subprocess.run", return_value=_mock_gh_success()):
+            result = GateRunner._build_gemini_prompt(payload)
+
+        assert "Net deletion sanity" in result
+        assert "≥5" in result
 
 
 # ---------------------------------------------------------------------------
