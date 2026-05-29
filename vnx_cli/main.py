@@ -271,6 +271,15 @@ def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_history_p.add_argument("--project-id", default=None, metavar="ID")
     dream_history_p.add_argument("--limit", type=int, default=10, metavar="N")
 
+    dream_install_p = dream_subs.add_parser(
+        "install-scheduler", help="install nightly auto-dream scheduler (macOS/Linux)"
+    )
+    dream_install_p.add_argument("--project-id", default=None, metavar="ID")
+
+    dream_subs.add_parser(
+        "uninstall-scheduler", help="remove nightly auto-dream scheduler"
+    )
+
 
 def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":

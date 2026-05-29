@@ -156,6 +156,34 @@ def _cmd_history(args) -> int:
     return 0
 
 
+def _cmd_install_scheduler(args) -> int:
+    project_id = _get_project_id(args)
+    if not project_id:
+        print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
+        return 1
+    from pathlib import Path
+    root, _ = _resolve_paths()
+    import scheduler  # type: ignore[import]
+    try:
+        msg = scheduler.install_scheduler(project_id=project_id, project_root=root)
+        print(msg)
+    except RuntimeError as exc:
+        print(f"error: {exc}")
+        return 1
+    return 0
+
+
+def _cmd_uninstall_scheduler(args) -> int:
+    import scheduler  # type: ignore[import]
+    try:
+        msg = scheduler.uninstall_scheduler()
+        print(msg)
+    except RuntimeError as exc:
+        print(f"error: {exc}")
+        return 1
+    return 0
+
+
 def vnx_dream(args) -> int:
     sub = getattr(args, "dream_subcommand", None)
     dispatch = {
@@ -163,8 +191,10 @@ def vnx_dream(args) -> int:
         "status": _cmd_status,
         "review": _cmd_review,
         "history": _cmd_history,
+        "install-scheduler": _cmd_install_scheduler,
+        "uninstall-scheduler": _cmd_uninstall_scheduler,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx dream {run|status|review|history}")
+    print("Usage: vnx dream {run|status|review|history|install-scheduler|uninstall-scheduler}")
     return 1
