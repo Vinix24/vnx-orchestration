@@ -13,6 +13,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,6 +87,24 @@ _KIMI_STREAM_JSON = (
     '\\"archived\\":[],\\"flagged\\":[],\\"summary\\":\\"ok\\"}"}\n'
     '{"event_type":"complete"}\n'
 )
+
+
+def _setup_receipts_and_pattern(tmp_path: Path, db_path: Path) -> None:
+    """Satisfy GAP-7 preflight: fresh receipts file + one pattern row."""
+    receipts = tmp_path / ".vnx-data" / "state" / "t0_receipts.ndjson"
+    receipts.parent.mkdir(parents=True, exist_ok=True)
+    fresh_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    receipts.write_text(
+        json.dumps({"event_type": "receipt", "timestamp": fresh_ts}) + "\n",
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO success_patterns (project_id, title) VALUES (?,?)",
+        ("vnx-dev", "test-pattern"),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _make_in_memory_db() -> sqlite3.Connection:
@@ -226,6 +245,7 @@ class TestDryRun:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _setup_receipts_and_pattern(tmp_path, db_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -255,6 +275,7 @@ class TestDryRun:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _setup_receipts_and_pattern(tmp_path, db_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -285,6 +306,7 @@ class TestDryRun:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _setup_receipts_and_pattern(tmp_path, db_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),

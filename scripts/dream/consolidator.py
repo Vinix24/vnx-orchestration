@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+# If the most recent receipt is older than this, preflight fails (GAP-7).
+_PREFLIGHT_MAX_STALE_HOURS: int = 48
+# Timestamp fields tried in order when checking receipt recency.
+_RECEIPT_TS_FIELDS: tuple[str, ...] = ("timestamp", "completed_at", "created_at")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from project_root import resolve_project_root
 
@@ -39,6 +44,53 @@ def _emit_dream_event(event: dict[str, Any]) -> None:
     event_path = events_dir / f"{today}.ndjson"
     with event_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
+
+
+def _preflight_receipts(
+    receipts_path: Path,
+    max_stale_hours: int = _PREFLIGHT_MAX_STALE_HOURS,
+) -> tuple[bool, str]:
+    """Verify receipt data is present and not stale before consolidation (GAP-7).
+
+    Returns (ok, reason). When ok=False the cycle must skip with incomplete_data=True.
+    Designed to fail-safe: parse errors on the timestamp field are tolerated
+    (don't block consolidation on ambiguous data; only block on clearly bad states).
+    """
+    if not receipts_path.exists():
+        return False, f"receipts file missing: {receipts_path}"
+    if receipts_path.stat().st_size == 0:
+        return False, "receipts file is empty (receipt processor may not be running)"
+
+    # Check recency of the last receipt line.
+    try:
+        last_line = ""
+        with receipts_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    last_line = stripped
+        if last_line:
+            receipt = json.loads(last_line)
+            for field in _RECEIPT_TS_FIELDS:
+                ts_str = receipt.get(field)
+                if not ts_str:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                    age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+                    if age_hours > max_stale_hours:
+                        return (
+                            False,
+                            f"most recent receipt is {age_hours:.1f}h old "
+                            f"(threshold {max_stale_hours}h) — receipt processor may be behind",
+                        )
+                    break  # Found a parseable timestamp; staleness check passed
+                except (ValueError, TypeError):
+                    continue
+    except (OSError, json.JSONDecodeError):
+        pass  # Tolerate read/parse errors; don't block on ambiguous state
+
+    return True, ""
 
 
 def _fetch_patterns(conn: sqlite3.Connection, project_id: str) -> dict[str, list[dict]]:
@@ -131,16 +183,40 @@ def run_dream_cycle(
     project_id: str,
     db_path: Path,
     dry_run: bool = False,
+    max_stale_hours: int = _PREFLIGHT_MAX_STALE_HOURS,
 ) -> dict[str, Any]:
     """Run a single dream consolidation cycle for a project.
 
     ADR-005: NDJSON emit before DB write.
     ADR-007: project_id required throughout.
+    GAP-7: preflight check aborts cycle on missing/stale receipt data.
     Returns a dict with cycle_id, counts, and review_path.
     """
     cycle_id = (
         f"dream-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     )
+
+    # GAP-7: preflight — check receipt data before touching DB.
+    root = resolve_project_root(__file__)
+    receipts_path = root / ".vnx-data" / "state" / "t0_receipts.ndjson"
+    ok, reason = _preflight_receipts(receipts_path, max_stale_hours)
+    if not ok:
+        _emit_dream_event(
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": cycle_id,
+                "project_id": project_id,
+                "reason": reason,
+                "incomplete_data": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return {
+            "cycle_id": cycle_id,
+            "skipped": True,
+            "incomplete_data": True,
+            "reason": reason,
+        }
 
     _emit_dream_event(
         {
@@ -156,6 +232,26 @@ def run_dream_cycle(
     patterns = _fetch_patterns(conn, project_id)
     total_input = sum(len(v) for v in patterns.values())
 
+    # Secondary guard: skip if no patterns to consolidate.
+    if total_input == 0:
+        conn.close()
+        _emit_dream_event(
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": cycle_id,
+                "project_id": project_id,
+                "reason": "no patterns to consolidate (all tables empty for this project_id)",
+                "incomplete_data": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return {
+            "cycle_id": cycle_id,
+            "skipped": True,
+            "incomplete_data": True,
+            "reason": "no patterns to consolidate",
+        }
+
     try:
         consolidation = _dispatch_kimi_consolidation(patterns, project_id)
     except Exception as exc:
@@ -169,7 +265,6 @@ def run_dream_cycle(
         )
         raise
 
-    root = resolve_project_root(__file__)
     review_dir = root / ".vnx-data" / "state" / "dream"
     review_dir.mkdir(parents=True, exist_ok=True)
     review_path = review_dir / f"{cycle_id}-pending-review.json"

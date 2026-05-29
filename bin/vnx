@@ -315,6 +315,11 @@ Pool commands (elastic worker pool management):
 Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
+  dream <sub>         Auto-dream memory consolidation (ADR-019)
+                       run --project-id <id>   Run consolidation cycle
+                       install-scheduler       Install nightly scheduler (macOS/Linux)
+                       uninstall-scheduler     Remove nightly scheduler
+                       status                  Show scheduler status
 
 Process commands (visibility and control):
   status             Show terminal health, dispatch queue, and gate results
@@ -2107,6 +2112,9 @@ main() {
       ;;
     pool)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
+      ;;
+    dream)
+      cmd_dream "$@"
       ;;
     help|-h|--help)
       usage

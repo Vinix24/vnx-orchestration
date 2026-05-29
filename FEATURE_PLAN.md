@@ -1,12 +1,16 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-29T05:11:24.774710+00:00
+**Last updated**: 2026-05-29T11:54:17.887606+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #699 — fix(a14-wire-0025): wire 0025_dream_consolidation.sql into quality-DB bootstrap (#699) (2026-05-29)
+- #697 — fix(a14-pr2-fix): address all 5 codex blocking findings on PR #696 (#697) (2026-05-29)
+- #691 — fix(issue-687): dispatches sqlite_sequence preservation in 0022 (#691) (2026-05-29)
+- #684 — feat(h-cost-tracking): universal cost tracking for all providers (#684) (2026-05-29)
 - #683 — refactor(hyg-4): extract subparser registrations and dispatch chain from main() (#683) (2026-05-29)
 - #682 — feat(d-role-prompts): add database-engineer, intelligence-engineer, security-engineer roles + update architect (#682) (2026-05-29)
 - #679 — feat(int-1): adrs table + FTS5 + indexer (PR-INT-1) (#679) (2026-05-29)
@@ -122,11 +126,13 @@ _Last 14 days — sourced from git merge commits._
 - #504 — refactor(conversation_analyzer): modularize into package — close OI-1438/1439/1440/1441/1442 (#504) (2026-05-15)
 - #503 — fix(rp): bootstrap audit ordering + test infra hardening (close OI-1450/1451/1452) (#503) (2026-05-15)
 - #502 — fix(dispatcher): log stderr, script_dir leak, receipt processor bootstrap-mode (#502) (2026-05-15)
-- #500 — chore(hardening): narrow silent-except across replay_harness/cleanup_worker_exit/conversation_analyzer (9 findings, OI-1437) (#500) (2026-05-15)
 
 **WAVE 5**
 - #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
 - #569 — docs: Wave 5/6/7/8 documentation overhaul (#569) (2026-05-17)
+
+**WAVE 6**
+- #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
 
 **WAVE 8**
 - #570 — fix(wiring): activate 4 dead-code modules from Wave 8 fast-path (auto_apply, validator class, schema-emit, smart_router.route) (#570) (2026-05-17)
@@ -159,6 +165,7 @@ _Last 14 days — sourced from git merge commits._
 - #521 — docs(wave5): PR-5.0 — ADR-017 Control Centre product-shape architecture (#521) (2026-05-16)
 
 **WAVE6**
+- #698 — fix(wave6-pool-lease-spawn): insert terminal_leases row before add_member in pool scale_up (#698) (2026-05-29)
 - #575 — fix(wave6): real spawn impl + config field reads + single heartbeat threshold (3 blockers) (#575) (2026-05-17)
 - #546 — fix(wave6): OI cleanup group 1 (idempotency + regex + ledger + audit) (#546) (2026-05-16)
 - #544 — feat(wave6): PR-6.8 — Control Centre pool-integration (cross-project pool view + supervisor) (#544) (2026-05-16)
