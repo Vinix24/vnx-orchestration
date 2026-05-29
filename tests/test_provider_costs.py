@@ -195,3 +195,35 @@ class TestRecordIdStability:
     def test_record_id_none_dispatch(self):
         r = provider_costs._make_record_id(None, "2026-05-29T12:00:00Z")
         assert len(r) == 32
+
+    def test_record_id_differs_for_different_token_counts_same_second(self):
+        # Two emits in the same second with different token counts must not collide.
+        r1 = provider_costs._make_record_id(
+            "dispatch-abc", "2026-05-29T12:00:00Z",
+            project_id="proj", event_type="provider_cost",
+            input_tokens=100, output_tokens=50,
+        )
+        r2 = provider_costs._make_record_id(
+            "dispatch-abc", "2026-05-29T12:00:00Z",
+            project_id="proj", event_type="provider_cost",
+            input_tokens=200, output_tokens=80,
+        )
+        assert r1 != r2
+
+    def test_timestamp_includes_microseconds(self, tmp_path, monkeypatch):
+        # emit_provider_cost must store a microsecond-precision timestamp.
+        costs_path = tmp_path / "events" / "provider_costs.ndjson"
+        monkeypatch.setattr(provider_costs, "_resolve_costs_path", lambda: costs_path)
+
+        provider_costs.emit_provider_cost(
+            provider="claude",
+            model="sonnet",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd_estimate=0.0001,
+            dispatch_id="ts-test-001",
+        )
+        event = _last_event(costs_path)
+        ts = event["timestamp"]
+        # ISO 8601 with microseconds: contains a dot before the timezone marker
+        assert "." in ts, f"expected microseconds in timestamp, got: {ts}"

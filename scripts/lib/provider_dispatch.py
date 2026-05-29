@@ -315,23 +315,17 @@ def _emit_governance(
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
-    # ADR-005: emit cost event BEFORE receipt/report writes.
-    try:
-        from provider_costs import emit_provider_cost  # noqa: PLC0415
-        emit_provider_cost(
-            provider=provider,
-            model=model_used,
-            input_tokens=token_usage.get("input") if token_usage else None,
-            output_tokens=token_usage.get("output") if token_usage else None,
-            cost_usd_estimate=cost_usd,
-            dispatch_id=args.dispatch_id,
-            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
-        )
-    except Exception as _cost_exc:
-        logger.warning(
-            "_emit_governance: provider_cost emit failed (non-fatal, dispatch=%s): %s",
-            args.dispatch_id, _cost_exc,
-        )
+    # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
+    from provider_costs import emit_provider_cost  # noqa: PLC0415
+    emit_provider_cost(
+        provider=provider,
+        model=model_used,
+        input_tokens=token_usage.get("input") if token_usage else None,
+        output_tokens=token_usage.get("output") if token_usage else None,
+        cost_usd_estimate=cost_usd,
+        dispatch_id=args.dispatch_id,
+        project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+    )
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:

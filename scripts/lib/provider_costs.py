@@ -105,9 +105,23 @@ def _compute_cost_from_rates(
     return round(cost, 8), False
 
 
-def _make_record_id(dispatch_id: str | None, timestamp: str) -> str:
-    """Stable idempotency key: sha256[:32] of dispatch_id+timestamp."""
-    raw = f"{dispatch_id or ''}:{timestamp}"
+def _make_record_id(
+    dispatch_id: str | None,
+    timestamp: str,
+    project_id: str = "",
+    event_type: str = "",
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> str:
+    """Stable idempotency key: sha256[:32] of all discriminating fields.
+
+    Includes token counts so two emits in the same second remain distinct.
+    Includes project_id per ADR-007.
+    """
+    raw = (
+        f"{dispatch_id or ''}:{project_id}:{event_type}:{timestamp}"
+        f":{input_tokens or 0}:{output_tokens or 0}"
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
@@ -136,8 +150,15 @@ def emit_provider_cost(
     Raises OSError/IOError on write failure — no silent except.
     """
     effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
-    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    record_id = _make_record_id(dispatch_id, timestamp)
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    record_id = _make_record_id(
+        dispatch_id,
+        timestamp,
+        project_id=effective_project_id,
+        event_type="provider_cost",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
     # Determine billing mode from cost_usd_estimate and rate table
     if cost_usd_estimate is not None:
