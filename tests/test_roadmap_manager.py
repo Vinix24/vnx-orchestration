@@ -408,3 +408,200 @@ def test_optional_gate_missing_does_not_block(roadmap_env, monkeypatch):
     result = manager.reconcile()
 
     assert result["verdict"] == "pass", "optional gate absence must not produce gates_incomplete"
+
+
+# ---------------------------------------------------------------------------
+# RA-4: human approval gate
+# ---------------------------------------------------------------------------
+
+
+def _make_high_risk_roadmap(project_root: Path) -> Path:
+    """Write a single high-risk human-policy feature roadmap."""
+    plan_dir = project_root / "roadmap" / "features" / "feature-hi"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    (plan_dir / "FEATURE_PLAN.md").write_text(
+        """# Feature: High Risk Feature
+
+**Status**: Draft
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate
+
+## Dependency Flow
+```text
+PR-0 (no dependencies)
+```
+
+## PR-0: High Risk PR
+**Track**: C
+**Priority**: P0
+**Complexity**: High
+**Skill**: @architect
+**Risk-Class**: high
+**Merge-Policy**: human
+**Review-Stack**: gemini_review,codex_gate
+**Dependencies**: []
+""",
+        encoding="utf-8",
+    )
+    roadmap_file = project_root / "ROADMAP_HR.yaml"
+    roadmap_file.write_text(
+        """features:
+  - feature_id: feature-hi
+    title: High Risk Feature
+    plan_path: roadmap/features/feature-hi/FEATURE_PLAN.md
+    branch_name: feature/hi
+    risk_class: high
+    merge_policy: human
+    review_stack: [gemini_review, codex_gate]
+    depends_on: []
+    status: planned
+""",
+        encoding="utf-8",
+    )
+    return roadmap_file
+
+
+def _setup_passing_gates(state_dir: Path) -> None:
+    gate_results_dir = state_dir / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    _write_gate_result(gate_results_dir, "PR-0", "gemini_review")
+    _write_gate_result(gate_results_dir, "PR-0", "codex_gate")
+
+
+def test_advance_blocked_awaiting_human_approval(roadmap_env, monkeypatch):
+    """high-risk feature: closure+gates pass but no approval token → awaiting_human_approval."""
+    project_root = roadmap_env["project_root"]
+    roadmap_file = _make_high_risk_roadmap(project_root)
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    _setup_passing_gates(roadmap_env["state_dir"])
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_file)
+    manager.load_feature("feature-hi")
+
+    result = manager.advance()
+
+    assert result["advanced"] is False
+    assert result["reason"] == "awaiting_human_approval"
+    assert result["feature_id"] == "feature-hi"
+    state = manager.load_state()
+    assert state["current_active_feature"] == "feature-hi", "feature must not progress without token"
+
+
+def test_advance_proceeds_after_approve_and_token_consumed(roadmap_env, monkeypatch):
+    """After approve, advance progresses and the token is consumed (single-use)."""
+    project_root = roadmap_env["project_root"]
+    roadmap_file = _make_high_risk_roadmap(project_root)
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    _setup_passing_gates(roadmap_env["state_dir"])
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_file)
+    manager.load_feature("feature-hi")
+
+    # First attempt: blocked
+    first = manager.advance()
+    assert first["advanced"] is False
+    assert first["reason"] == "awaiting_human_approval"
+
+    # Issue approval
+    token = manager.approve("feature-hi", actor="vincent", justification="looks good")
+    assert token["consumed"] is False
+    assert token["feature_id"] == "feature-hi"
+
+    # Second attempt: should proceed
+    result = manager.advance()
+    assert result["advanced"] is True or result["reason"] == "no_remaining_features"
+
+    # Token must be consumed (single-use)
+    token_path = manager._approval_token_path("feature-hi")
+    stored = json.loads(token_path.read_text(encoding="utf-8"))
+    assert stored["consumed"] is True, "token must be consumed after advance"
+    assert stored["consumed_at"] is not None
+
+    # Third attempt with no new token: blocked again on whatever comes next,
+    # but the old consumed token must not re-authorize.
+    # Reload state to check feature was actually advanced.
+    state = manager.load_state()
+    assert "feature-hi" in state["merged_features"], "feature-hi must be marked merged"
+
+
+def test_conditional_auto_low_advances_without_token(roadmap_env, monkeypatch):
+    """conditional_auto + low risk feature advances without any approval token."""
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    _setup_passing_gates(roadmap_env["state_dir"])
+
+    result = manager.advance()
+
+    # feature-a is conditional_auto + low → no token required → advances
+    assert result["advanced"] is True
+    assert result["reason"] == "loaded_next_feature"
+    assert result["next_feature"] == "feature-b"
+
+
+def test_approval_token_project_id_stamped_and_feature_pinned(roadmap_env, monkeypatch):
+    """ADR-007: token carries project_id; a token issued for feature-a cannot approve feature-b."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "proj-x")
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+
+    token = manager.approve("feature-a", actor="vincent", justification="ok")
+
+    # Token must be stamped with the correct project_id
+    assert token["project_id"] == "proj-x", "ADR-007: token must carry project_id"
+    assert token["feature_id"] == "feature-a"
+
+    # Attempting to load the token as approval for feature-b must return None
+    valid_for_b = manager._load_valid_approval_token("feature-b")
+    assert valid_for_b is None, "feature-a token must not authorize feature-b"
+
+    # The token IS valid for feature-a
+    valid_for_a = manager._load_valid_approval_token("feature-a")
+    assert valid_for_a is not None, "token must be valid for feature-a"
+    assert valid_for_a["consumed"] is False
+
+
+def test_consumed_token_does_not_reauthorize(roadmap_env, monkeypatch):
+    """A consumed token must not grant a second advance."""
+    project_root = roadmap_env["project_root"]
+    roadmap_file = _make_high_risk_roadmap(project_root)
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    _setup_passing_gates(roadmap_env["state_dir"])
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_file)
+    manager.load_feature("feature-hi")
+    manager.approve("feature-hi", actor="vincent", justification="ok")
+
+    # First advance consumes the token
+    r1 = manager.advance()
+    assert r1["advanced"] is True or r1["reason"] == "no_remaining_features"
+
+    # Manually re-activate feature-hi to simulate a second advance attempt
+    state = manager.load_state()
+    state["current_active_feature"] = "feature-hi"
+    state["merged_features"] = [f for f in state.get("merged_features", []) if f != "feature-hi"]
+    for f in state.get("features", []):
+        if f["feature_id"] == "feature-hi":
+            f["status"] = "active"
+    manager._save_state(state)
+
+    r2 = manager.advance()
+    assert r2["advanced"] is False
+    assert r2["reason"] == "awaiting_human_approval", "consumed token must not reauthorize"
