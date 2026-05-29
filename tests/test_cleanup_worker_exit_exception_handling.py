@@ -29,7 +29,7 @@ def _setup_state(tmp_path: Path, dispatch_id: str = "d-exc-001", terminal_id: st
     init_schema(state_dir)
 
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
         conn.commit()
 
     lm = LeaseManager(state_dir, auto_init=False)

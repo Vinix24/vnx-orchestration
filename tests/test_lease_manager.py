@@ -67,7 +67,7 @@ class _LMTestCase(unittest.TestCase):
     def _reg(self, dispatch_id: str, terminal_id: str = "T1") -> None:
         """Register a dispatch row so terminal_leases FK is satisfied."""
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
             conn.commit()
 
     def acquire(self, terminal_id: str, dispatch_id: str, **kwargs):

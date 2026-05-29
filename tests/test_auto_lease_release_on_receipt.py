@@ -56,7 +56,7 @@ def _setup(tmp: tempfile.TemporaryDirectory):
 def _acquire(lease_mgr: LeaseManager, state_dir: str, terminal_id: str, dispatch_id: str):
     """Register dispatch and acquire lease. Returns generation."""
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
         conn.commit()
     result = lease_mgr.acquire(terminal_id, dispatch_id=dispatch_id)
     return result.generation
@@ -127,7 +127,7 @@ class TestReleaseOnReceipt(unittest.TestCase):
         self.core.release_on_receipt("T2", dispatch_id="d-006")
 
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="d-007", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="d-007", terminal_id="T2", project_id="vnx-dev")
             conn.commit()
         new_lease = self.lease_mgr.acquire("T2", dispatch_id="d-007")
         self.assertEqual(new_lease.state, "leased")
@@ -139,7 +139,7 @@ class TestReleaseOnReceipt(unittest.TestCase):
         self.core.release_on_receipt("T1", dispatch_id="d-008")
 
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="d-009", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-009", terminal_id="T1", project_id="vnx-dev")
             conn.commit()
         r2 = self.lease_mgr.acquire("T1", dispatch_id="d-009")
         self.assertGreater(r2.generation, gen1)
@@ -227,7 +227,7 @@ class TestReleaseOnReceiptCLI(unittest.TestCase):
 
     def _acquire(self, terminal_id: str, dispatch_id: str) -> int:
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
             conn.commit()
         r = self.lease_mgr.acquire(terminal_id, dispatch_id=dispatch_id)
         return r.generation
@@ -372,7 +372,7 @@ class TestShellQuotingEdgeCases(unittest.TestCase):
 
         dispatch_id = "20260422-180510-w0-pr2-fix-A"
         with get_connection(state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1")
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1", project_id="vnx-dev")
             conn.commit()
         lease_mgr.acquire("T1", dispatch_id=dispatch_id)
 

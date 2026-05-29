@@ -191,7 +191,7 @@ class TestStampSourceDispatchIdsAllCallers:
         assert "dispatch-site1" in ids, f"source_dispatch_ids not stamped; got {ids}"
 
     def test_site2_dispatch_broker_register_proven_pattern(self, tmp_path):
-        """Site 2: dispatch_broker.register_dispatch (coord_state_dir from constructor)."""
+        """Site 2: dispatch_broker.register_dispatch (coord_state_dir from constructor, project_id="vnx-dev")."""
         state_dir, qdb, conn = _setup(tmp_path)
         row_id = _seed_success_pattern(conn, "Use structured output")
         item = _make_sp_item(row_id, "Use structured output")

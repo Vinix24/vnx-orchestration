@@ -18,6 +18,7 @@ from coordination_db import (
     InvalidTransitionError,
     _append_event,
     _dump,
+    _has_project_id_col,
     _new_event_id,
     _now_utc,
 )
@@ -69,6 +70,7 @@ def register_dispatch(
     conn: sqlite3.Connection,
     *,
     dispatch_id: str,
+    project_id: str,
     terminal_id: Optional[str] = None,
     track: Optional[str] = None,
     priority: str = "P2",
@@ -79,28 +81,68 @@ def register_dispatch(
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Register a new dispatch in the queued state (idempotent)."""
+    """Register a new dispatch in the queued state (idempotent).
+
+    ADR-007: project_id is MANDATORY — no silent default. project_id is stamped
+    on the INSERT row for column compliance.
+
+    dispatch_id is GLOBALLY UNIQUE (timestamped slugs by construction). The
+    idempotency check keys on dispatch_id alone so all downstream state-machine
+    operations (transition_dispatch, increment_attempt_count, etc.) remain
+    consistent — they all key on dispatch_id only.
+
+    If a row with the same dispatch_id exists under a DIFFERENT project_id,
+    ValueError is raised — cross-tenant dispatch_id reuse is a bug, not a
+    silent merge.
+
+    Full composite-keying of the entire dispatch state machine is deferred to
+    a post-launch hardening item.
+    """
+    has_pid = _has_project_id_col(conn, "dispatches")
+
+    # dispatch_id is globally unique — check without project_id filter so
+    # transition_dispatch and other dispatch_id-keyed APIs stay consistent.
     existing = conn.execute(
         "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
     ).fetchone()
     if existing:
+        if has_pid:
+            existing_pid = existing["project_id"]
+            if existing_pid and existing_pid != project_id:
+                raise ValueError(
+                    f"Cross-tenant dispatch_id reuse: {dispatch_id!r} is already registered "
+                    f"under project {existing_pid!r}; refusing registration under {project_id!r}"
+                )
         return dict(existing)
 
     now = _now_utc()
-    conn.execute(
-        """
-        INSERT INTO dispatches
-            (dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
-             bundle_path, expires_after, created_at, updated_at, metadata_json)
-        VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (dispatch_id, terminal_id, track, priority, pr_ref, gate,
-         bundle_path, expires_after, now, now, _dump(metadata)),
-    )
+    if has_pid:
+        conn.execute(
+            """
+            INSERT INTO dispatches
+                (dispatch_id, project_id, state, terminal_id, track, priority, pr_ref, gate,
+                 bundle_path, expires_after, created_at, updated_at, metadata_json)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispatch_id, project_id, terminal_id, track, priority, pr_ref, gate,
+             bundle_path, expires_after, now, now, _dump(metadata)),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO dispatches
+                (dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
+                 bundle_path, expires_after, created_at, updated_at, metadata_json)
+            VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispatch_id, terminal_id, track, priority, pr_ref, gate,
+             bundle_path, expires_after, now, now, _dump(metadata)),
+        )
     _append_event(
         conn, event_type="dispatch_queued", entity_type="dispatch",
         entity_id=dispatch_id, from_state=None, to_state="queued",
         actor=actor, reason="initial registration", metadata=metadata,
+        project_id=project_id,
     )
     return dict(
         conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()

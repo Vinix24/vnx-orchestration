@@ -185,7 +185,7 @@ class TestSchemaInit(_DbTestCase):
 class TestDispatchRegistration(_DbTestCase):
     def test_register_creates_queued_dispatch(self):
         with self.conn() as conn:
-            rec = register_dispatch(conn, dispatch_id="d-001", terminal_id="T1", track="A")
+            rec = register_dispatch(conn, dispatch_id="d-001", terminal_id="T1", track="A", project_id="vnx-dev")
             conn.commit()
         self.assertEqual(rec["dispatch_id"], "d-001")
         self.assertEqual(rec["state"], "queued")
@@ -193,16 +193,16 @@ class TestDispatchRegistration(_DbTestCase):
 
     def test_register_idempotent(self):
         with self.conn() as conn:
-            r1 = register_dispatch(conn, dispatch_id="d-001")
+            r1 = register_dispatch(conn, dispatch_id="d-001", project_id="vnx-dev")
             conn.commit()
-            r2 = register_dispatch(conn, dispatch_id="d-001", terminal_id="T2")
+            r2 = register_dispatch(conn, dispatch_id="d-001", terminal_id="T2", project_id="vnx-dev")
             conn.commit()
         # Second call must not change terminal_id (bundle immutability G-R6)
         self.assertEqual(r2["terminal_id"], r1["terminal_id"])
 
     def test_register_appends_event(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-002")
+            register_dispatch(conn, dispatch_id="d-002", project_id="vnx-dev")
             conn.commit()
             events = get_events(conn, entity_id="d-002")
         self.assertTrue(any(e["event_type"] == "dispatch_queued" for e in events))
@@ -216,7 +216,7 @@ class TestDispatchRegistration(_DbTestCase):
 class TestDispatchTransitions(_DbTestCase):
     def _setup_dispatch(self, dispatch_id: str = "d-t1") -> None:
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1")
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1", project_id="vnx-dev")
             conn.commit()
 
     def test_valid_transition_queued_to_claimed(self):
@@ -248,7 +248,7 @@ class TestDispatchTransitions(_DbTestCase):
 
     def test_full_success_path(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-full", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-full", terminal_id="T1", project_id="vnx-dev")
             transition_dispatch(conn, dispatch_id="d-full", to_state="claimed")
             transition_dispatch(conn, dispatch_id="d-full", to_state="delivering")
             transition_dispatch(conn, dispatch_id="d-full", to_state="accepted")
@@ -259,7 +259,7 @@ class TestDispatchTransitions(_DbTestCase):
 
     def test_attempt_count_increment(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-cnt")
+            register_dispatch(conn, dispatch_id="d-cnt", project_id="vnx-dev")
             count = increment_attempt_count(conn, "d-cnt")
             self.assertEqual(count, 1)
             count = increment_attempt_count(conn, "d-cnt")
@@ -271,7 +271,7 @@ class TestDispatchAttempts(_DbTestCase):
     def setUp(self):
         super().setUp()
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-att", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="d-att", terminal_id="T2", project_id="vnx-dev")
             conn.commit()
 
     def test_create_attempt(self):
@@ -314,7 +314,7 @@ class TestDispatchAttempts(_DbTestCase):
 class TestLeaseOperations(_DbTestCase):
     def test_acquire_lease(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-lease", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-lease", terminal_id="T1", project_id="vnx-dev")
             lease = acquire_lease(conn, terminal_id="T1", dispatch_id="d-lease")
             conn.commit()
         self.assertEqual(lease["state"], "leased")
@@ -323,7 +323,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_acquire_lease_appends_event(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-ev", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-ev", terminal_id="T1", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T1", dispatch_id="d-ev")
             conn.commit()
             events = get_events(conn, entity_id="T1")
@@ -331,8 +331,8 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_acquire_lease_on_busy_terminal_raises(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-a", terminal_id="T1")
-            register_dispatch(conn, dispatch_id="d-b", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-a", terminal_id="T1", project_id="vnx-dev")
+            register_dispatch(conn, dispatch_id="d-b", terminal_id="T1", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T1", dispatch_id="d-a")
             conn.commit()
             with self.assertRaises(InvalidTransitionError):
@@ -340,7 +340,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_renew_lease(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-renew", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="d-renew", terminal_id="T2", project_id="vnx-dev")
             lease = acquire_lease(conn, terminal_id="T2", dispatch_id="d-renew")
             conn.commit()
             gen = lease["generation"]
@@ -350,7 +350,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_renew_with_stale_generation_raises(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-stale", terminal_id="T3")
+            register_dispatch(conn, dispatch_id="d-stale", terminal_id="T3", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T3", dispatch_id="d-stale")
             conn.commit()
             with self.assertRaises(ValueError):
@@ -358,7 +358,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_release_lease(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-rel", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-rel", terminal_id="T1", project_id="vnx-dev")
             lease = acquire_lease(conn, terminal_id="T1", dispatch_id="d-rel")
             conn.commit()
             gen = lease["generation"]
@@ -369,7 +369,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_release_with_stale_generation_raises(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-sg", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-sg", terminal_id="T1", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T1", dispatch_id="d-sg")
             conn.commit()
             with self.assertRaises(ValueError):
@@ -377,7 +377,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_expire_lease(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-exp", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="d-exp", terminal_id="T2", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T2", dispatch_id="d-exp")
             conn.commit()
             expired = expire_lease(conn, terminal_id="T2")
@@ -386,7 +386,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_recover_lease(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-rec", terminal_id="T3")
+            register_dispatch(conn, dispatch_id="d-rec", terminal_id="T3", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T3", dispatch_id="d-rec")
             conn.commit()
             expire_lease(conn, terminal_id="T3")
@@ -398,7 +398,7 @@ class TestLeaseOperations(_DbTestCase):
 
     def test_recover_appends_events(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-rev", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-rev", terminal_id="T1", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T1", dispatch_id="d-rev")
             conn.commit()
             expire_lease(conn, terminal_id="T1")
@@ -420,8 +420,8 @@ class TestLeaseOperations(_DbTestCase):
 class TestCoordinationEvents(_DbTestCase):
     def test_events_are_append_only(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-ev1")
-            register_dispatch(conn, dispatch_id="d-ev2")
+            register_dispatch(conn, dispatch_id="d-ev1", project_id="vnx-dev")
+            register_dispatch(conn, dispatch_id="d-ev2", project_id="vnx-dev")
             conn.commit()
             all_events = get_events(conn)
         # At minimum 2 queued events
@@ -429,8 +429,8 @@ class TestCoordinationEvents(_DbTestCase):
 
     def test_get_events_filter_by_entity(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-f1")
-            register_dispatch(conn, dispatch_id="d-f2")
+            register_dispatch(conn, dispatch_id="d-f1", project_id="vnx-dev")
+            register_dispatch(conn, dispatch_id="d-f2", project_id="vnx-dev")
             conn.commit()
             events = get_events(conn, entity_id="d-f1")
         dispatch_ids = {e["entity_id"] for e in events}
@@ -440,7 +440,7 @@ class TestCoordinationEvents(_DbTestCase):
     def test_events_have_unique_ids(self):
         with self.conn() as conn:
             for i in range(5):
-                register_dispatch(conn, dispatch_id=f"d-uid-{i}")
+                register_dispatch(conn, dispatch_id=f"d-uid-{i}", project_id="vnx-dev")
             conn.commit()
             events = get_events(conn, limit=20)
         event_ids = [e["event_id"] for e in events]
@@ -463,7 +463,7 @@ class TestProjectTerminalState(_DbTestCase):
 
     def test_projection_leased_terminal_shows_working(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-proj", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="d-proj", terminal_id="T2", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T2", dispatch_id="d-proj")
             conn.commit()
             projection = project_terminal_state(conn)
@@ -477,7 +477,7 @@ class TestProjectTerminalState(_DbTestCase):
 
     def test_projection_expired_shows_recovering_status(self):
         with self.conn() as conn:
-            register_dispatch(conn, dispatch_id="d-expiry", terminal_id="T3")
+            register_dispatch(conn, dispatch_id="d-expiry", terminal_id="T3", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T3", dispatch_id="d-expiry")
             conn.commit()
             expire_lease(conn, terminal_id="T3")
