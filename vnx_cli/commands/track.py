@@ -7,15 +7,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from vnx_cli import _engine
+
 
 def _resolve_state_dir(project_dir: str | Path) -> Path:
     return Path(project_dir).resolve() / ".vnx-data" / "state"
 
 
 def _require_tracks_lib(state_dir: Path) -> Any:
-    scripts_lib = Path(__file__).resolve().parent.parent.parent / "scripts" / "lib"
-    if str(scripts_lib) not in sys.path:
-        sys.path.insert(0, str(scripts_lib))
+    _engine.ensure_engine_on_path()
     import tracks as tracks_lib
     return tracks_lib
 
@@ -30,9 +30,7 @@ def _resolve_project_id_for_read(args) -> str:
     if pid:
         return pid
 
-    scripts_lib = Path(__file__).resolve().parent.parent.parent / "scripts" / "lib"
-    if str(scripts_lib) not in sys.path:
-        sys.path.insert(0, str(scripts_lib))
+    _engine.ensure_engine_on_path()
     from project_root import resolve_project_id
     try:
         return resolve_project_id(getattr(args, "project_dir", "."))
@@ -146,9 +144,7 @@ def _cmd_unpark(args) -> int:
 
 
 def _require_dispatch_register():
-    scripts_lib = Path(__file__).resolve().parent.parent.parent / "scripts" / "lib"
-    if str(scripts_lib) not in sys.path:
-        sys.path.insert(0, str(scripts_lib))
+    _engine.ensure_engine_on_path()
     import dispatch_register
     return dispatch_register
 
