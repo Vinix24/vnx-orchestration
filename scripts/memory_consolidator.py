@@ -80,10 +80,15 @@ class MemoryConsolidator:
 
     def __init__(self) -> None:
         paths = ensure_env()
-        state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
-        self.db_path = state_dir / "quality_intelligence.db"
-        self.receipts_path = state_dir / "t0_receipts.ndjson"
-        self.audit_path = state_dir / "dispatch_audit.jsonl"
+        # Use VNX_DATA_DIR/state as authoritative db path (ADR-007: project_id-scoped).
+        # VNX_STATE_DIR in resolve_paths() honors the env var first and can be polluted
+        # by stale shell profile exports (e.g. pre-ADR-007 ~/.vnx-data/state). VNX_DATA_DIR
+        # is computed by _resolve_state_root without env-var pollution and is canonical.
+        _data_dir = Path(paths["VNX_DATA_DIR"]).expanduser().resolve()
+        _state_dir = _data_dir / "state"
+        self.db_path = _state_dir / "quality_intelligence.db"
+        self.receipts_path = _state_dir / "t0_receipts.ndjson"
+        self.audit_path = _state_dir / "dispatch_audit.jsonl"
 
         # Also look in .vnx-intelligence for receipts
         intel_receipts = (
