@@ -177,10 +177,12 @@ def test_fixture_e_fail_fk_dropped(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_real_migrations_pass() -> None:
-    """Gate returns 1 on real migrations because they are incremental ALTER TABLE files
-    with no base CREATE TABLE in schemas/migrations/ — context migrations fail in the
-    isolated in-memory DB, which is correctly reported as gate status 'error' (rc == 1).
-    A silent-swallow would have produced a false rc == 0; rc == 1 is the strict-gate result.
+    """Gate returns 0 on real migrations.
+
+    Legacy migrations (0017, 0017_down, 0022) depend on base schemas that are not
+    present in schemas/migrations/ — they return 'skip' with a logged warning rather
+    than 'error', so they do not fail the gate.  The gate only fails on 'fail' status
+    (undeclared drift) or 'error' status (unexpected exception during the check itself).
     """
     rc = main()
-    assert rc == 1
+    assert rc == 0

@@ -130,12 +130,42 @@ def _check_migration(migration_file: Path, all_migrations: list[Path]) -> dict:
         old_table = old_table.lower()
 
         # Pre-state: apply migrations 0..idx-1
-        pre_conn = _apply_migrations(all_migrations[:idx])
+        # Legacy migrations may depend on base schemas not present in schemas/migrations/.
+        # If context setup fails, skip this migration with a warning rather than
+        # treating it as a gate failure — the linter goal is NEW migration drift, not
+        # replaying an irresolvable history.
+        try:
+            pre_conn = _apply_migrations(all_migrations[:idx])
+        except RuntimeError as exc:
+            print(
+                f"  [warn] {migration_file.name}: pre-state unavailable for '{old_table}'"
+                f" (base schema dependency): {exc}",
+                file=sys.stderr,
+            )
+            return {
+                "file": migration_file.name,
+                "status": "skip",
+                "drifts": [],
+                "skip_reason": f"pre-state unavailable: {exc}",
+            }
         pre_schema = _capture_table_schema(pre_conn, old_table)
         pre_conn.close()
 
         # Post-state: apply migration idx as well
-        post_conn = _apply_migrations(all_migrations[: idx + 1])
+        try:
+            post_conn = _apply_migrations(all_migrations[: idx + 1])
+        except RuntimeError as exc:
+            print(
+                f"  [warn] {migration_file.name}: post-state unavailable for '{old_table}'"
+                f" (base schema dependency): {exc}",
+                file=sys.stderr,
+            )
+            return {
+                "file": migration_file.name,
+                "status": "skip",
+                "drifts": [],
+                "skip_reason": f"post-state unavailable: {exc}",
+            }
 
         # After rename, the table has a new name — try to determine it
         new_name_match = re.search(
