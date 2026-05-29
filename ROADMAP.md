@@ -1,101 +1,72 @@
 # VNX Orchestration Roadmap
 
-> Public roadmap. Detailed designs live in the operator's private working notes.
+> Public roadmap. Detailed designs live in `docs/manifesto/ROADMAP.md`.
 
-## Current: 1.0.0-rc1+wave7 (2026-05-17)
+## Current: 1.0.0 (2026-05-29)
 
-Wave 7 complete. Multi-provider end-to-end. 5 providers in production:
+1.0.0 is pip-installable and production-validated. ~120 PRs merged since the first Wave 5 delivery in mid-May. Capability summary below.
 
-- **Claude** (Opus 4.6/4.7, Sonnet 4.5/4.6, Haiku 4.5) via `claude -p` subprocess
-- **Codex** (GPT-5.2-codex) via `codex --dangerously-bypass-approvals-and-sandbox`
-- **Gemini** (2.5 Pro / 2.5 Flash) via `gemini` CLI
-- **Kimi CLI** (Kimi K2.6, K2-0905) via `kimi` CLI with OAuth (no API key)
-- **LiteLLM bridge** for DeepSeek V4-Pro/V4-Flash, Moonshot endpoints, and OpenRouter (GLM-5.1)
+### Always-on (default active)
 
-Provider-agnostic governance:
-- Uniform receipt + unified-report shape across all 5 providers
-- Intelligence injection equal first-class
-- End-to-end token usage + cost tracking
-- Reproducible 9-model × 7-task benchmark suite (`scripts/benchmark/`)
-- Routing recommendations published at `scripts/lib/providers/routing_recommendations.yaml`
+- **5-provider dispatch**: Claude (subscription tmux lane + subprocess burst), Codex CLI, Gemini CLI, Kimi CLI (OAuth), LiteLLM bridge (DeepSeek V4-Pro/V4-Flash, GLM-5.1 via OpenRouter)
+- **Governance receipts**: append-only NDJSON audit trail, uniform receipt + unified-report shape across all providers
+- **Intelligence injection**: context bundles, ADR injection, repo-map enrichment for all providers (#712), kimi intelligence wiring (#701)
+- **GOV-1 PreToolUse hook**: blocks raw worker spawns, enforces subprocess_dispatch path (#656)
+- **Elastic worker pool**: `vnx pool` CLI, queue-aware + cost-aware scaling, per-worker worktree isolation
+- **Central install**: `pip install vnx-orchestration`, `vnx init`, `vnx doctor --strict`
+- **Track layer**: schema + DAL + CLI + ADR-007 composite PK (FUT-1 + FUT-2, both done)
+- **ADR intelligence**: FTS5 ADR index + injection in dispatch context (INT-1, INT-2)
+- **Cost tracking**: universal cost tracking across all 5 providers (#684)
 
-## Wave 8: Smart Routing + Schema Enforcement + Self-Learning
+### Shipped opt-in (env-gated, not default)
 
-In design (operator-approved 2026-05-17). Five layers:
+- **Smart routing** (`VNX_AUTO_ROUTE=1`): cost-aware auto-route with constraint enforcement across all providers. Fully wired; default off because production routing mix still burns in.
+- **Pool task consumer** (`VNX_POOL_TASK_CONSUMER=1`): N-1/2/3 foundation — atomic dispatch claim, pool_worker_runner, consumer wiring. Default off; single-worker path remains default.
+- **Worktree isolation per dispatch** (`VNX_ISOLATED_WORKTREE=1`): per-dispatch git worktree with full provider isolation. Default off.
 
-### Layer 1 — Routing Decision (`scripts/lib/smart_router.py`)
-Per task-class auto-route with operator override. Classifier cascade: explicit `--task-class` tag → regex + role mapping → Haiku 4.5 classifier (only on confidence < 0.6). Pure-function `resolve_route()` returns `RouteDecision` with primary, fallbacks, applied constraints, and cost estimate.
+### Shipped dark (runnable, not user-facing)
 
-### Layer 2 — Uniform Reports
-YAML frontmatter enforced on `unified_reports/*.md`. Required fields: `dispatch_id`, `provider`, `model`, `task_class`, `cost_usd`, `tokens_in`, `tokens_out`. `route_decisions.ndjson` per decision. `t0_receipts.ndjson` with filled-in fields.
+- **Autopilot tick** (`RA-6`): `autopilot_tick` + scheduler wired; ships dark. Human-gate, step driver, and gate enforcement (RA-1..5, RA-3b) are active. Auto-advance requires explicit opt-in not yet exposed.
+- **Auto-dream self-learning loop**: consolidator core (ADR-019), CLI, scheduler, and T0 review-gate all runnable. Nightly cron trigger and central-path unification are pending before routine activation.
 
-### Layer 3 — Guardrails (model-agnostic, shell-script enforced)
-- Pre-dispatch: `scripts/guardrails/check_route.sh`
-- Post-dispatch: `scripts/guardrails/verify_report_schema.sh`
-- CI workflow: `.github/workflows/schema_guard.yml`
-- Runtime: `provider_dispatch.py` raises `HardConstraintViolation` on policy breach (T0 must be Opus, Kimi must be CLI-only, no Anthropic SDK, etc.)
+## Wave History
 
-### Layer 4 — Analysis Cadence
-- Weekly drift sample (1 task per model, 7 dispatches)
-- Monthly full benchmark (9 models × 7 tasks)
-- Triggered re-bench on new model addition or quality-drop alert
+All waves shipped and stable.
 
-### Layer 5 — Self-Learning Loop
-`route_decisions_watcher.py` reads NDJSON, detects production failure patterns per (model, task-class), auto-adjusts `routing_recommendations.yaml` via confidence-decay algorithm. Strong degradation flags a triggered re-bench.
+- **Wave 5** (2026-05-16): Control Centre, multi-project state aggregator, per-project T0 lifecycle
+- **Wave 6** (2026-05-16): Elastic worker pool, `vnx pool` CLI, ADR-018
+- **Wave 7** (2026-05-17): 5-provider production, benchmark suite, routing recommendations
+- **Wave 8** (2026-05-17): Smart router, constraint enforcer, report schema guardrails, pipx wheel
+- **Wave 4/central** (2026-05-17–25): Central install, `install-central.sh`, schema migrations 0017–0024, `vnx doctor --strict`
+- **1.0 sprint** (2026-05-29): RA-1..6 (roadmap autopilot gate hardening), N-1/2/3 pool-task-consumer foundation, auto-dream runnable, vulture dead-code sweep, FUT-1+2 (track layer), GOV-1 hook, kimi+repo-map enrichment, packaging hardening
 
-Estimated effort: 3 weeks solo work, 16 PRs, ~3490 LOC total.
+## Strategic Decisions (D-series, current)
 
-## Sneak Previews (in development)
+- **D1** Hybrid-explicit positioning — tool-first, platform-availability. Wave 5/6 code is foundation for future scale; not in critical hot-path for current solopreneur workflow.
+- **D2** Incremental centralization with per-project burn-in — complete.
+- **D6** Retain own routing (no DSPy/smolagents/LangGraph swap) — ADR-003 + governance differentiator.
+- **D11** Opus 4.7 on T0, Sonnet 4.6 on workers — measured on production data.
+- **DeepSeek via Claude harness**: measured 30% more effective than bare DeepSeek API call (tool-use loops, smart-context, structured diff). Allowed with own DeepSeek API key + hardening (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, MCP off). Never on production OAuth subscription.
 
-### Smart Dispatch Router
-Benchmark-data-driven model selection per task class. Operator-configurable cost caps per provider via `vnx.env`. Hard constraints enforced in code (`HardConstraintViolation`). Auto-fallback chain to guaranteed-quality model on primary failure. Telemetry written to `route_decisions.ndjson` for self-learning loop consumption.
+## Near-Term Open Items
 
-### VNX Centralization (pipx wheel)
-Single source of truth for VNX runtime across projects. `pipx install vnx-orchestration`. Per-project state isolation via `.vnx-data/` but shared core code. Burn-in path: mission-control (24-48h) → sales-copilot (48h) → SEOcrawler (maintenance window with rollback archive). Removes the 16-30 day drift between projects observed pre-Wave-8.
-
-### Self-Learning Routing
-`route_decisions.ndjson` watcher auto-adjusts `routing_recommendations.yaml` based on production success/fail patterns. Confidence-decay algorithm. Triggered re-bench when degradation detected. Closes the gap between static recommendations (PR #548) and runtime adaptation.
-
-### Module-Size CI Gate
-Prevents new 2500-LOC monoliths from landing. Configurable threshold per file pattern, explicit waiver mechanism for legitimate exceptions. Direct response to the `intelligence_selector.py` refactor of 2026-05-17 (2511 LOC → 9-module package).
-
-## Strategic Decisions (D-series, 2026-05)
-
-Public-facing summary of operator decisions driving Wave 8 sequencing:
-
-- **D1 ✅** Hybrid-explicit positioning (tool-first, platform-availability). Wave 5/6 code remains as foundation for future scale; not in critical hot-path for current solopreneur workflow.
-- **D2 ✅** Incremental centralization with per-project burn-in (mission-control → sales-copilot → SEOcrawler).
-- **D3 ✅** Conservative LOC reduction this week (2-3k verified-dead-code: chain_recovery, FPC cluster, old SQL snapshots, `vnx demo` retirement).
-- **D4 ✅** Re-activate conversation analyzer + launchd plist + 5-week backfill (`quality_intelligence.db` was 5 weeks stale, breaking smart-context freshness).
-- **D5 🚧** Critical gaps follow-up — `T2.ndjson` ring-buffer truncate (P0) + cross-project intelligence aggregator wire-in (P1).
-- **D6 ✅** Retain own routing (no swap to DSPy/smolagents/LangGraph) — ADR-003 spirit + governance differentiator.
-- **D7 🚧** Multi-project sync via pipx (blocked on D2 wheel release).
-- **D8 ✅** Kimi/GLM/DeepSeek benchmark complete + blog drafts ready (NL + EN).
-- **D9 🚧** Wave 8 public release — gated on mission-control validation via D2.
-- **D10 🚧** Blog publication strategy (LinkedIn → NL blog → EN blog).
-- **D11 ✅** Opus 4.6 → 4.7 — 4.7 on T0 (2.5× better on T0-orchestrator role per production data), 4.6 retained option for other terminals pending further analysis.
+- Nightly cron trigger for auto-dream self-learning loop
+- Central-path unification for dream receipt writes
+- `VNX_AUTO_ROUTE` and `VNX_POOL_TASK_CONSUMER` burn-in and default-on graduation
+- `VNX_ISOLATED_WORKTREE` default-on graduation
+- RA-6 autopilot-tick user-facing exposure
 
 ## Future Horizons (post-1.0, non-binding)
 
-### Business Task Benchmarks (Wave 9)
-Current benchmark suite is coding-tasks only (7 task-classes). Add B01-B08 business orchestration benchmarks (lead classification, email drafting, blog drafting, CRM enrichment, etc.). Separate suite at `scripts/benchmark_business/`. Estimated 1-2 weeks.
-
-### Multi-Operator Federation
-Multiple operators sharing infrastructure with isolated state. Target post-1.5.
-
-### Performance & Scale
-Optimize for 100+ concurrent dispatches. Pool autoscaling refinements. SQLite concurrency tuning (per Gemini external review, May 2026).
-
-### Integration Breadth
-Direct integrations with more LLM providers as Anthropic-compatible endpoints proliferate. Path D (Claude-harness for non-Claude models) remains blocked pending telemetry-leak resolution (`claude` v2.1.136 hits `api.anthropic.com` 8× even with `BASE_URL` redirect, verified 2026-05-10).
-
-### Domain Expansion
-Business agent skills beyond coding (lead intake, blog drafting, CRM enrichment). Builds on uniform-schema enforcement from Wave 8.
+- Business task benchmarks (B01-B08 orchestration tasks)
+- Multi-operator federation (post-1.5)
+- Performance optimisation for 100+ concurrent dispatches
+- Domain expansion beyond coding (lead intake, blog, CRM)
 
 ---
 
 Contributions welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-Most valuable contributions: test coverage, failure-mode hardening, provider adapters, docs clarity.
-
 For release history: see [CHANGELOG.md](./CHANGELOG.md).
+
+For architecture and milestone detail: see [docs/manifesto/ROADMAP.md](docs/manifesto/ROADMAP.md).
