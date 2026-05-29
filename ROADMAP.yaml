@@ -21,6 +21,7 @@ features:
     risk_class: medium
     merge_policy: human
     review_stack:
+      - gemini_review
       - codex_gate
     depends_on: []
     status: active
@@ -31,6 +32,7 @@ features:
     risk_class: high
     merge_policy: human
     review_stack:
+      - gemini_review
       - codex_gate
     depends_on:
       - fut-1

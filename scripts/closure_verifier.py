@@ -220,10 +220,14 @@ def _find_gate_result(
     pr_id: str,
     results_dir: Path,
     branch: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Search for a gate result file matching the PR and gate name.
 
-    If ``branch`` is provided, results from a different branch are rejected.
+    ADR-005: if ``branch`` is provided, results without a matching ``branch``
+    field are rejected as stale evidence from a prior feature.
+    ADR-007: if ``project_id`` is provided, results with a missing or
+    mismatched ``project_id`` field are rejected.
     If a result carries a ``report_path``, that file must exist on disk or the
     result is treated as stale and skipped.
     """
@@ -235,8 +239,16 @@ def _find_gate_result(
         data_pr_id = data.get("pr_id")
         if data_pr_id and data_pr_id != pr_id:
             return False
-        if branch and data.get("branch") and data["branch"] != branch:
-            return False
+        # ADR-007: project_id must be present and match when caller supplies one.
+        if project_id is not None:
+            data_pid = (data.get("project_id") or "").strip()
+            if not data_pid or data_pid != project_id:
+                return False
+        # ADR-005: branch must be present and match when caller supplies one.
+        # A branch-less result is stale evidence from a prior feature.
+        if branch:
+            if (data.get("branch") or "") != branch:
+                return False
         return True
 
     pr_slug = pr_id.lower().replace("-", "")
