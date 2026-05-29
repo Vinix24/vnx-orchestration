@@ -31,6 +31,8 @@ from vnx_worktree import worktree_start
 
 ALLOWED_DRIFT_CATEGORIES = {"bugfix", "post_cleanup", "governance_gap", "path/runtime regression"}
 
+APPROVALS_SUBDIR = "roadmap_approvals"
+
 
 def _root_file(project_root: Path, name: str) -> Path:
     return project_root / name
@@ -455,6 +457,87 @@ Implement the minimum blocking fix required before the roadmap may advance.
         )
         return result
 
+    def _approvals_dir(self) -> Path:
+        d = self.state_dir / APPROVALS_SUBDIR
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _approval_token_path(self, feature_id: str) -> Path:
+        safe_id = feature_id.replace("/", "_")
+        return self._approvals_dir() / f"{safe_id}.json"
+
+    def _feature_requires_human_approval(self, feature: Dict[str, Any]) -> bool:
+        """ADR-007: human gate required when merge_policy=human OR risk_class=high."""
+        return feature.get("merge_policy") == "human" or feature.get("risk_class") == "high"
+
+    def _load_valid_approval_token(self, feature_id: str) -> Optional[Dict[str, Any]]:
+        """Return an unconsumed, project_id-stamped, feature-pinned token — or None."""
+        token_path = self._approval_token_path(feature_id)
+        if not token_path.exists():
+            return None
+        try:
+            token = json.loads(token_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if token.get("project_id") != self.project_id:
+            return None
+        if token.get("feature_id") != feature_id:
+            return None
+        if token.get("consumed"):
+            return None
+        return token
+
+    def _consume_approval_token(self, feature_id: str) -> None:
+        """Invalidate the token (single-use). Atomic write."""
+        token_path = self._approval_token_path(feature_id)
+        try:
+            token = json.loads(token_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            return
+        token["consumed"] = True
+        token["consumed_at"] = utc_now_iso()
+        tmp = token_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(token, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(token_path))
+
+    def approve(self, feature_id: str, actor: str, justification: str) -> Dict[str, Any]:
+        """Issue a single-use human approval token for feature_id.
+
+        ADR-007: token is project_id-stamped and feature-pinned.
+        """
+        state = self.load_state()
+        features = state.get("features") or []
+        feature = next((f for f in features if f["feature_id"] == feature_id), None)
+        if not feature:
+            raise ValueError(f"Unknown feature_id: {feature_id}")
+
+        issued_at = utc_now_iso()
+        token: Dict[str, Any] = {
+            "project_id": self.project_id,
+            "feature_id": feature_id,
+            "actor": actor,
+            "justification": justification,
+            "issued_at": issued_at,
+            "consumed": False,
+            "consumed_at": None,
+        }
+        token_path = self._approval_token_path(feature_id)
+        tmp = token_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(token, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(token_path))
+
+        emit_governance_receipt(
+            "roadmap_human_approval",
+            status="success",
+            action="approve",
+            project_id=self.project_id,
+            feature_id=feature_id,
+            actor=actor,
+            justification=justification,
+            issued_at=issued_at,
+        )
+        return token
+
     def advance(self) -> Dict[str, Any]:
         state = self.load_state()
         reconcile_result = self.reconcile()
@@ -473,6 +556,25 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         state = self.load_state()
         current_id = state.get("current_active_feature")
+
+        # Human approval gate: merge_policy=human OR risk_class=high requires a valid token.
+        # conditional_auto + low delegates to auto_merge_policy (no token required).
+        if current_id:
+            cur_feature = next((f for f in state.get("features", []) if f["feature_id"] == current_id), None)
+            if cur_feature and self._feature_requires_human_approval(cur_feature):
+                token = self._load_valid_approval_token(current_id)
+                if not token:
+                    return {"advanced": False, "reason": "awaiting_human_approval", "feature_id": current_id}
+                self._consume_approval_token(current_id)
+                emit_governance_receipt(
+                    "roadmap_human_approval",
+                    status="success",
+                    action="consumed",
+                    project_id=self.project_id,
+                    feature_id=current_id,
+                    actor=token.get("actor"),
+                )
+
         if current_id and current_id not in state.get("merged_features", []):
             state.setdefault("merged_features", []).append(current_id)
             for item in state.get("features", []):
@@ -535,6 +637,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     advance_parser = sub.add_parser("advance")
     advance_parser.add_argument("--json", action="store_true")
 
+    approve_parser = sub.add_parser("approve")
+    approve_parser.add_argument("feature_id")
+    approve_parser.add_argument("--actor", required=True)
+    approve_parser.add_argument("--justification", required=True)
+    approve_parser.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     manager = RoadmapManager()
 
@@ -548,6 +656,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = manager.reconcile()
     elif args.command == "advance":
         result = manager.advance()
+    elif args.command == "approve":
+        result = manager.approve(args.feature_id, actor=args.actor, justification=args.justification)
     else:
         raise AssertionError("unreachable")
 
