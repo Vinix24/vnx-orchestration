@@ -23,7 +23,13 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-from gate_runner import GateRunner  # noqa: E402
+from gate_runner import (  # noqa: E402
+    GateRunner,
+    DELETION_FILE_WARN,
+    _extract_deleted_files_from_diff,
+    _format_net_deletion_alert,
+    _build_deletion_prefix,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -229,3 +235,211 @@ class TestFetchGhPrDiff:
             ["gh", "pr", "diff", "42"],
             capture_output=True, text=True, timeout=60,
         )
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity check helpers
+# ---------------------------------------------------------------------------
+
+def _make_deleted_file_diff(paths: list) -> str:
+    """Build a synthetic unified diff that deletes the given file paths."""
+    chunks = []
+    for p in paths:
+        chunks.append(
+            f"diff --git a/{p} b/{p}\n"
+            "deleted file mode 100644\n"
+            "index abc123..0000000\n"
+            f"--- a/{p}\n"
+            "+++ /dev/null\n"
+            "@@ -1,3 +0,0 @@\n"
+            "-line1\n"
+            "-line2\n"
+            "-line3\n"
+        )
+    return "\n".join(chunks)
+
+
+class TestExtractDeletedFilesFromDiff:
+    """_extract_deleted_files_from_diff must parse deleted files from a unified diff."""
+
+    def test_empty_diff_returns_empty(self):
+        assert _extract_deleted_files_from_diff("") == []
+
+    def test_added_only_diff_returns_empty(self):
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "new file mode 100644\n"
+            "index 0000000..abc123\n"
+            "--- /dev/null\n"
+            "+++ b/foo.py\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+line\n"
+        )
+        assert _extract_deleted_files_from_diff(diff) == []
+
+    def test_modified_file_not_counted(self):
+        diff = (
+            "diff --git a/bar.py b/bar.py\n"
+            "index abc..def 100644\n"
+            "--- a/bar.py\n"
+            "+++ b/bar.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " existing\n"
+            "+added\n"
+        )
+        assert _extract_deleted_files_from_diff(diff) == []
+
+    def test_single_deleted_file(self):
+        diff = _make_deleted_file_diff(["scripts/old.py"])
+        result = _extract_deleted_files_from_diff(diff)
+        assert result == ["scripts/old.py"]
+
+    def test_multiple_deleted_files(self):
+        paths = [f"old/file_{i}.py" for i in range(3)]
+        diff = _make_deleted_file_diff(paths)
+        result = _extract_deleted_files_from_diff(diff)
+        assert result == paths
+
+    def test_mixed_diff_counts_only_deleted(self):
+        deleted = _make_deleted_file_diff(["old/a.py", "old/b.py"])
+        added = (
+            "diff --git a/new/c.py b/new/c.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/new/c.py\n"
+            "@@ -0,0 +1,1 @@\n"
+            "+new\n"
+        )
+        result = _extract_deleted_files_from_diff(deleted + "\n" + added)
+        assert result == ["old/a.py", "old/b.py"]
+
+    def test_path_without_a_prefix_handled(self):
+        diff = (
+            "diff --git scripts/x.py scripts/x.py\n"
+            "deleted file mode 100644\n"
+        )
+        result = _extract_deleted_files_from_diff(diff)
+        # parts[2] = "scripts/x.py" — no "a/" prefix, returned as-is
+        assert result == ["scripts/x.py"]
+
+
+class TestFormatNetDeletionAlert:
+    """_format_net_deletion_alert must produce a well-structured alert block."""
+
+    def test_includes_file_count_in_header(self):
+        alert = _format_net_deletion_alert(["a.py", "b.py", "c.py", "d.py", "e.py"])
+        assert "5 file(s)" in alert
+
+    def test_lists_each_file(self):
+        files = ["old/foo.py", "old/bar.py"]
+        alert = _format_net_deletion_alert(files)
+        for f in files:
+            assert f"`{f}`" in alert
+
+    def test_includes_sanity_instruction(self):
+        alert = _format_net_deletion_alert(["x.py"])
+        assert "Net deletion sanity" in alert or "intentional" in alert
+
+    def test_includes_warn_label(self):
+        alert = _format_net_deletion_alert(["x.py"])
+        assert "WARN" in alert or "Net-Deletion Alert" in alert
+
+
+class TestBuildDeletionPrefix:
+    """_build_deletion_prefix must return empty string below threshold and alert above."""
+
+    def test_below_threshold_returns_empty(self):
+        diff = _make_deleted_file_diff([f"f{i}.py" for i in range(DELETION_FILE_WARN - 1)])
+        assert _build_deletion_prefix(diff) == ""
+
+    def test_at_threshold_returns_alert(self):
+        diff = _make_deleted_file_diff([f"f{i}.py" for i in range(DELETION_FILE_WARN)])
+        prefix = _build_deletion_prefix(diff)
+        assert "Net-Deletion Alert" in prefix
+
+    def test_above_threshold_returns_alert(self):
+        diff = _make_deleted_file_diff([f"f{i}.py" for i in range(DELETION_FILE_WARN + 3)])
+        prefix = _build_deletion_prefix(diff)
+        assert "Net-Deletion Alert" in prefix
+        assert f"{DELETION_FILE_WARN + 3} file(s)" in prefix
+
+    def test_empty_diff_returns_empty(self):
+        assert _build_deletion_prefix("") == ""
+
+    def test_no_deletions_returns_empty(self):
+        diff = "diff --git a/foo.py b/foo.py\nindex abc..def 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1,2 @@\n+added\n"
+        assert _build_deletion_prefix(diff) == ""
+
+
+class TestNetDeletionInjectedIntoCodexPrompt:
+    """_build_codex_prompt must include Net-Deletion Alert when >= DELETION_FILE_WARN files deleted."""
+
+    def _diff_with_n_deletions(self, n: int) -> str:
+        return _make_deleted_file_diff([f"old/file_{i}.py" for i in range(n)])
+
+    def test_no_alert_below_threshold(self):
+        diff = self._diff_with_n_deletions(DELETION_FILE_WARN - 1)
+        payload = {"pr_number": 1, "branch": "feat/x", "risk_class": "medium"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" not in result
+
+    def test_alert_injected_at_threshold(self):
+        diff = self._diff_with_n_deletions(DELETION_FILE_WARN)
+        payload = {"pr_number": 2, "branch": "feat/x", "risk_class": "medium"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" in result
+
+    def test_alert_injected_above_threshold(self):
+        diff = self._diff_with_n_deletions(DELETION_FILE_WARN + 5)
+        payload = {"pr_number": 3, "branch": "feat/x", "risk_class": "high"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "Net-Deletion Alert" in result
+        assert f"{DELETION_FILE_WARN + 5} file(s)" in result
+
+    def test_deleted_file_paths_listed_in_prompt(self):
+        diff = self._diff_with_n_deletions(DELETION_FILE_WARN)
+        payload = {"pr_number": 4, "branch": "feat/x", "risk_class": "low"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_codex_prompt(payload)
+        assert "`old/file_0.py`" in result
+
+
+class TestNetDeletionInjectedIntoGeminiPrompt:
+    """_build_gemini_prompt must apply the same net-deletion check as the codex path."""
+
+    def _diff_with_n_deletions(self, n: int) -> str:
+        return _make_deleted_file_diff([f"old/file_{i}.py" for i in range(n)])
+
+    def test_no_alert_below_threshold(self):
+        diff = self._diff_with_n_deletions(DELETION_FILE_WARN - 1)
+        payload = {"pr_number": 10, "branch": "feat/x", "risk_class": "medium"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_gemini_prompt(payload)
+        assert "Net-Deletion Alert" not in result
+
+    def test_alert_injected_at_threshold(self):
+        diff = self._diff_with_n_deletions(DELETION_FILE_WARN)
+        payload = {"pr_number": 11, "branch": "feat/x", "risk_class": "medium"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff, stderr="")):
+            result = GateRunner._build_gemini_prompt(payload)
+        assert "Net-Deletion Alert" in result
+
+    def test_gemini_and_codex_agree_on_threshold(self):
+        """Both paths must trigger at the same DELETION_FILE_WARN count."""
+        diff_below = self._diff_with_n_deletions(DELETION_FILE_WARN - 1)
+        diff_at = self._diff_with_n_deletions(DELETION_FILE_WARN)
+        payload = {"pr_number": 12, "branch": "feat/x", "risk_class": "medium"}
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff_below, stderr="")):
+            codex_below = GateRunner._build_codex_prompt(payload)
+            gemini_below = GateRunner._build_gemini_prompt(payload)
+        with mock.patch("gate_runner.subprocess.run", return_value=mock.Mock(returncode=0, stdout=diff_at, stderr="")):
+            codex_at = GateRunner._build_codex_prompt(payload)
+            gemini_at = GateRunner._build_gemini_prompt(payload)
+
+        assert ("Net-Deletion Alert" in codex_below) == ("Net-Deletion Alert" in gemini_below)
+        assert ("Net-Deletion Alert" in codex_at) == ("Net-Deletion Alert" in gemini_at)
+        assert "Net-Deletion Alert" not in codex_below
+        assert "Net-Deletion Alert" in codex_at
