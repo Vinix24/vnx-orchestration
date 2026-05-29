@@ -272,6 +272,9 @@ HELP
     return 1
   fi
 
+  local _ar_flag=()
+  [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
+
   local exit_code=0
   PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
   python3 "$dispatch_script" \
@@ -280,6 +283,7 @@ HELP
     --instruction "$instruction" \
     --model "$model_override" \
     ${role:+--role "$role"} \
+    "${_ar_flag[@]}" \
     || exit_code=$?
 
   if [ "$exit_code" -eq 0 ]; then
