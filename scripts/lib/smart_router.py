@@ -167,10 +167,36 @@ def classify_task(
 # Recommendations loader
 # ---------------------------------------------------------------------------
 
+# Composite score at or below which a model is considered incapable for the task class.
+_INCAPABLE_SCORE_FLOOR = 1.0
+
+
+def _cost_aware_sort_key(c: "RouteCandidate") -> tuple:
+    """Sort key for cost-aware candidate ranking.
+
+    Capable models (score > _INCAPABLE_SCORE_FLOOR) are ranked first, sorted by
+    cost ascending. Null cost is treated as infinity within the capable tier;
+    secondary tiebreak by score descending preserves stable ordering when costs
+    are equal or both unknown. Incapable models trail, sorted by score descending.
+    """
+    if c.composite_score > _INCAPABLE_SCORE_FLOOR:
+        cost = c.cost_usd_per_call if c.cost_usd_per_call is not None else float("inf")
+        return (0, cost, -c.composite_score)
+    return (1, float("inf"), -c.composite_score)
+
+
 def _load_recommendations(
     path: Optional[Path] = None,
 ) -> Dict[str, List[RouteCandidate]]:
-    """Load routing_recommendations.yaml and return parsed candidates per task class."""
+    """Load routing_recommendations.yaml and return parsed candidates per task class.
+
+    Candidates are enriched with cost_usd_per_call from wave7_models.yaml (via
+    cost_loader) and sorted cost-first within the capable tier (score > 1.0).
+    When wave7_models.yaml is absent, costs remain None and the sort falls back
+    to score-descending — identical to pre-cost-aware behavior.
+    """
+    from cost_loader import enrich_candidates as _enrich  # noqa: PLC0415
+
     yaml_path = path or _RECOMMENDATIONS_PATH
     if not yaml_path.exists():
         raise FileNotFoundError(
@@ -193,7 +219,8 @@ def _load_recommendations(
                 avg_duration_seconds=float(entry["avg_duration_seconds"]),
                 cost_usd_per_call=entry.get("cost_usd_per_call"),
             ))
-        candidates.sort(key=lambda c: c.composite_score, reverse=True)
+        _enrich(candidates)
+        candidates.sort(key=_cost_aware_sort_key)
         result[task_class] = candidates
 
     return result

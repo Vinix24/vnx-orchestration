@@ -107,11 +107,15 @@ PYEOF
 echo "[dispatch-agent] Created dispatch: $DISPATCH_ID"
 
 # --- execute via subprocess_dispatch.py ---
+_ar_flag=()
+[[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
+
 python3 "$SCRIPTS_LIB/subprocess_dispatch.py" \
   --terminal-id "T1" \
   --dispatch-id "$DISPATCH_ID" \
   --instruction "$INSTRUCTION" \
   --model "$MODEL" \
-  --role "$AGENT"
+  --role "$AGENT" \
+  "${_ar_flag[@]}"
 
 echo "[dispatch-agent] Agent dispatch complete: $DISPATCH_ID"
