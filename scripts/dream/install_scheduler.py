@@ -16,6 +16,7 @@ import argparse
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -73,7 +74,18 @@ def main() -> None:
     out_dir = Path.home() / "Library" / "LaunchAgents"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "com.vnx.auto-dream.plist"
-    out_path.write_text(rendered, encoding="utf-8")
+    # Atomic write: interrupted installs must not leave a partial plist.
+    fd, tmp_name = tempfile.mkstemp(dir=out_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(rendered)
+        os.replace(tmp_name, out_path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
     print(f"Wrote: {out_path}")
     print()

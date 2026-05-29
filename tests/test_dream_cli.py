@@ -240,6 +240,101 @@ class TestDreamHistory:
         assert ids[-1] == "dream-cycle-000"
 
 
+class TestCycleIdValidation:
+    """Finding 1 — cycle_id path-traversal guard."""
+
+    def test_dotdot_segment_is_rejected(self):
+        """`../escape` must raise ValueError."""
+        with pytest.raises(ValueError, match="Invalid cycle_id"):
+            review_gate._validate_cycle_id("../escape")
+
+    def test_slash_in_id_is_rejected(self):
+        """`a/b` must raise ValueError."""
+        with pytest.raises(ValueError, match="Invalid cycle_id"):
+            review_gate._validate_cycle_id("a/b")
+
+    def test_normal_cycle_id_passes(self):
+        """Typical cycle_id format must not raise."""
+        review_gate._validate_cycle_id("dream-20260529-120000-abcd1234")
+
+    def test_load_review_rejects_path_traversal(self, tmp_path):
+        """`_load_review` raises ValueError before constructing any path."""
+        state_dir = tmp_path / "state" / "dream"
+        state_dir.mkdir(parents=True)
+        with pytest.raises(ValueError, match="Invalid cycle_id"):
+            review_gate._load_review(state_dir, "../escape", "vnx-dev")
+
+    def test_approve_cycle_rejects_path_traversal(self, tmp_path):
+        """`approve_cycle` raises ValueError on unsafe cycle_id."""
+        db_path = _make_db(tmp_path)
+        with pytest.raises(ValueError, match="Invalid cycle_id"):
+            review_gate.approve_cycle(
+                "../escape", "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
+            )
+
+    def test_reject_cycle_rejects_path_traversal(self, tmp_path):
+        """`reject_cycle` raises ValueError on unsafe cycle_id."""
+        db_path = _make_db(tmp_path)
+        with pytest.raises(ValueError, match="Invalid cycle_id"):
+            review_gate.reject_cycle(
+                "../escape", "vnx-dev", "reason", db_path, data_root=tmp_path / ".vnx-data"
+            )
+
+
+def _make_db_no_archives(tmp_path: Path) -> Path:
+    """DB with dream_cycles only — archive INSERT will raise OperationalError."""
+    db_path = tmp_path / "quality_intelligence_no_arch.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS dream_cycles (
+        cycle_id          TEXT    NOT NULL,
+        project_id        TEXT    NOT NULL DEFAULT 'vnx-dev',
+        started_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        completed_at      TEXT,
+        status            TEXT    NOT NULL DEFAULT 'pending',
+        operator_reviewed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (cycle_id, project_id)
+    );
+    """)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestApproveArchiveFailure:
+    """Finding 2 — archive insert failure must not silently mark cycle reviewed."""
+
+    def test_approve_archive_failure_does_not_mark_reviewed(self, tmp_path):
+        """If archive INSERT fails, cycle must NOT be left as 'reviewed'."""
+        db_path = _make_db_no_archives(tmp_path)
+        cycle_id = "dream-20260529-160000-ab123456"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "INSERT INTO dream_cycles (cycle_id, project_id, completed_at, status)"
+            " VALUES (?,?,?,?)",
+            (cycle_id, "vnx-dev", "2026-05-29T16:00:00+00:00", "completed"),
+        )
+        conn.commit()
+        conn.close()
+        _write_pending_review(tmp_path, cycle_id, "vnx-dev")
+
+        with patch("review_gate.resolve_project_root", return_value=tmp_path):
+            with pytest.raises(sqlite3.OperationalError):
+                review_gate.approve_cycle(
+                    cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
+                )
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT status, operator_reviewed FROM dream_cycles WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()
+        conn.close()
+
+        assert row[0] != "reviewed", "cycle must not be marked reviewed when archive insert fails"
+        assert row[1] == 0, "operator_reviewed must remain 0 on archive failure"
+
+
 class TestReviewGateListsOnlyPending:
     def test_lists_only_pending(self, tmp_path):
         """list_pending_reviews filters out non-pending and wrong project_id files."""
