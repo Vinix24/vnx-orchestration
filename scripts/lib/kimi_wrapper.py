@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -92,24 +93,32 @@ def kimi_exec(
         cmd.extend(["-m", model])
 
     with open(os.devnull, "r") as devnull:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=devnull,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            result = subprocess.run(
-                cmd,
-                stdin=devnull,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                text=True,
-                start_new_session=True,
-            )
+            stdout_data, stderr_data = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            # Kill the entire process group so pipe-holding children also die.
+            # start_new_session=True guarantees kimi is its own process group leader,
+            # so os.killpg reaches all child processes that hold the pipe open.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
             logger.error(
                 "kimi_exec timed out after %.0fs (model=%s dispatch=%s)",
                 timeout, model, dispatch_id,
             )
             raise
 
-    stdout = result.stdout or ""
+    stdout = stdout_data or ""
     token_usage = _parse_kimi_token_usage(stdout)
     input_tokens = token_usage.get("input_tokens") if token_usage else None
     output_tokens = token_usage.get("output_tokens") if token_usage else None
@@ -126,9 +135,9 @@ def kimi_exec(
         metadata={"billing_mode": "subscription"},
     )
 
-    if result.returncode != 0:
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"kimi_exec failed: returncode={result.returncode} stderr={result.stderr[:500]!r}"
+            f"kimi_exec failed: returncode={proc.returncode} stderr={stderr_data[:500]!r}"
         )
 
     return stdout
