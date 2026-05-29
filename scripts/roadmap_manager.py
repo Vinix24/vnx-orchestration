@@ -395,11 +395,20 @@ Implement the minimum blocking fix required before the roadmap may advance.
         branch = feature.get("branch_name", "")
         for pr_id in pr_ids:
             for gate in required_gates:
-                result = _find_gate_result(gate, pr_id, gate_results_dir, branch=branch)
+                # ADR-007 + ADR-005: scope lookup to current project_id and branch.
+                result = _find_gate_result(gate, pr_id, gate_results_dir, branch=branch, project_id=self.project_id)
                 if result is None:
                     return True
                 passed, _ = gate_is_pass(result)
                 if not passed:
+                    return True
+                # Hole 1: status-only pass is insufficient (T0 7-invariant closure contract).
+                # Evidence must exist on disk and carry a contract_hash.
+                report_path = (result.get("report_path") or "").strip()
+                contract_hash = (result.get("contract_hash") or "").strip()
+                if not report_path or not Path(report_path).exists():
+                    return True
+                if not contract_hash:
                     return True
 
         return False

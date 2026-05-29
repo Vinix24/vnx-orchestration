@@ -211,6 +211,7 @@ class TestReportPathEnforcementStandardReceipt:
             "blocking_count": 0,
             "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
+            "branch": "feature/demo",
             # report_path intentionally absent
         }
         _write_gate_result(results_dir, "gemini_review", "PR-0", gemini_result)
@@ -234,6 +235,7 @@ class TestReportPathEnforcementStandardReceipt:
             "blocking_count": 0,
             "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
+            "branch": "feature/demo",
         }
         _write_gate_result(results_dir, "gemini_review", "PR-0", gemini_result)
 
@@ -257,6 +259,7 @@ class TestReportPathEnforcementStandardReceipt:
             "advisory_count": 1,
             "contract_hash": "abcdef1234567890",
             "report_path": str(report_file),
+            "branch": "feature/demo",
         }
         _write_gate_result(results_dir, "gemini_review", "PR-0", gemini_result)
 
@@ -301,6 +304,7 @@ class TestGateReportContradictionCompletedStatus:
             "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
             "report_path": str(report_file),
+            "branch": "feature/demo",
         }
         _write_gate_result(results_dir, "gemini_review", "PR-0", gemini_result)
 
@@ -326,6 +330,7 @@ class TestGateReportContradictionCompletedStatus:
             "blocking_count": 0,
             "contract_hash": "abcdef1234567890",
             "report_path": str(report_file),
+            "branch": "feature/demo",
         }
         _write_gate_result(results_dir, "gemini_review", "PR-0", gemini_result)
 
@@ -349,6 +354,7 @@ class TestGateReportContradictionCompletedStatus:
             "blocking_count": 0,
             "contract_hash": "abcdef1234567890",
             "report_path": str(report_file),
+            "branch": "feature/demo",
         }
         _write_gate_result(results_dir, "gemini_review", "PR-0", gemini_result)
 
@@ -593,6 +599,7 @@ class TestReportPathEnforcementCodexGate:
             "blocking_count": 0,
             "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
+            "branch": "feature/demo",
             # report_path intentionally absent
         }
         _write_gate_result(results_dir, "codex_gate", "PR-0", codex_result)
@@ -619,6 +626,7 @@ class TestReportPathEnforcementCodexGate:
             "advisory_count": 0,
             "contract_hash": "abcdef1234567890",
             "report_path": str(report_file),
+            "branch": "feature/demo",
         }
         _write_gate_result(results_dir, "codex_gate", "PR-0", codex_result)
 
