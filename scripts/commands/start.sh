@@ -565,10 +565,10 @@ RESOLVER
   # Cost-routing status — resolved from env (preset/config.env) or project config.yml
   local _routing_enabled="${VNX_ROUTING_POLICY_ENABLED:-}"
   if [ -z "$_routing_enabled" ]; then
-    _routing_enabled="$(python3 -c "
-import sys, yaml
+    _routing_enabled="$(VNX_PROJECT_ROOT="$PROJECT_ROOT" python3 -c "
+import os, yaml
 from pathlib import Path
-cfg = Path('$PROJECT_ROOT') / '.vnx' / 'config.yml'
+cfg = Path(os.environ['VNX_PROJECT_ROOT']) / '.vnx' / 'config.yml'
 try:
     d = yaml.safe_load(cfg.read_text()) if cfg.is_file() else {}
     print('1' if isinstance(d, dict) and d.get('routing_policy_enabled') else '0')

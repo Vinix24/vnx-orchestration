@@ -13,6 +13,7 @@ Verifies that:
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -86,6 +87,20 @@ class TestRoutingEnabledFromProjectConfig:
         vnx_dir.mkdir()
         (vnx_dir / "config.yml").write_text("- item1\n- item2\n", encoding="utf-8")
         assert _routing_enabled_from_project_config({"PROJECT_ROOT": str(tmp_path)}) is False
+
+    def test_path_with_spaces_reads_correctly(self, tmp_path):
+        """PROJECT_ROOT containing spaces must not break config reads."""
+        spaced = tmp_path / "my project root"
+        spaced.mkdir()
+        _make_project_config(spaced, routing_enabled=True)
+        assert _routing_enabled_from_project_config({"PROJECT_ROOT": str(spaced)}) is True
+
+    def test_path_with_single_quote_reads_correctly(self, tmp_path):
+        """PROJECT_ROOT containing a single quote must not break config reads."""
+        quoted = tmp_path / "vincent's project"
+        quoted.mkdir()
+        _make_project_config(quoted, routing_enabled=True)
+        assert _routing_enabled_from_project_config({"PROJECT_ROOT": str(quoted)}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +300,60 @@ class TestVnxInitWritesRoutingConfig:
         import yaml
         data = yaml.safe_load(config.read_text())
         assert data.get("routing_policy_enabled") is True
+
+
+# ---------------------------------------------------------------------------
+# Shell snippet safety — env-var pass avoids path interpolation injection
+# ---------------------------------------------------------------------------
+
+_SHELL_SNIPPET = """\
+VNX_PROJECT_ROOT="$1" python3 -c "
+import os, yaml
+from pathlib import Path
+cfg = Path(os.environ['VNX_PROJECT_ROOT']) / '.vnx' / 'config.yml'
+try:
+    d = yaml.safe_load(cfg.read_text()) if cfg.is_file() else {}
+    print('1' if isinstance(d, dict) and d.get('routing_policy_enabled') else '0')
+except Exception:
+    print('0')
+"
+"""
+
+
+class TestStartShShellSnippetSafety:
+    """Regression: PROJECT_ROOT passed via env var survives special chars in path."""
+
+    def _run_snippet(self, project_root: str) -> str:
+        result = subprocess.run(
+            ["bash", "-c", _SHELL_SNIPPET, "--", project_root],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"snippet failed: {result.stderr}"
+        return result.stdout.strip()
+
+    def test_plain_path_enabled(self, tmp_path):
+        _make_project_config(tmp_path, routing_enabled=True)
+        assert self._run_snippet(str(tmp_path)) == "1"
+
+    def test_plain_path_disabled(self, tmp_path):
+        _make_project_config(tmp_path, routing_enabled=False)
+        assert self._run_snippet(str(tmp_path)) == "0"
+
+    def test_path_with_spaces(self, tmp_path):
+        """Path with spaces must not break the env-var-based shell snippet."""
+        spaced = tmp_path / "my project root"
+        spaced.mkdir()
+        _make_project_config(spaced, routing_enabled=True)
+        assert self._run_snippet(str(spaced)) == "1"
+
+    def test_path_with_single_quote(self, tmp_path):
+        """Single quote in path must not break or inject into the shell snippet."""
+        quoted = tmp_path / "vincent's project"
+        quoted.mkdir()
+        _make_project_config(quoted, routing_enabled=True)
+        assert self._run_snippet(str(quoted)) == "1"
+
+    def test_missing_config_returns_0(self, tmp_path):
+        assert self._run_snippet(str(tmp_path)) == "0"
