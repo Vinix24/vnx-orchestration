@@ -61,7 +61,7 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "new-worktree", "finish-worktree", "worktree-start", "worktree-stop",
     "worktree-refresh", "worktree-status", "merge-preflight",
     "smoke", "package-check",
-    "dispatch", "gate",
+    "dispatch", "gate", "dream",
     "snapshot", "restore", "quiesce-check", "pause", "resume",
     "pool",
 })

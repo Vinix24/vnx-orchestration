@@ -2108,6 +2108,9 @@ main() {
     pool)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
       ;;
+    dream)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main dream "$@"
+      ;;
     help|-h|--help)
       usage
       ;;
