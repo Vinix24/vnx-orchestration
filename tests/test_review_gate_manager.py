@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def review_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_REPORTS_DIR", str(data_dir / "unified_reports"))
+    monkeypatch.setenv("VNX_HEADLESS_REPORTS_DIR", str(data_dir / "unified_reports" / "headless"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
     return project_root
 
@@ -202,7 +204,7 @@ def test_changed_files_auto_computed_from_branch(review_env, monkeypatch):
 
     captured_changed_files: list = []
 
-    def fake_request_reviews(self, pr_number, branch, review_stack, risk_class, changed_files, mode):
+    def fake_request_reviews(self, pr_number, branch, review_stack, risk_class, changed_files, mode, dispatch_id=""):
         captured_changed_files.extend(changed_files)
         return {"requested": []}
 
@@ -240,7 +242,7 @@ def test_changed_files_override_preserves_explicit(review_env, monkeypatch):
 
     captured_changed_files: list = []
 
-    def fake_request_reviews(self, pr_number, branch, review_stack, risk_class, changed_files, mode):
+    def fake_request_reviews(self, pr_number, branch, review_stack, risk_class, changed_files, mode, dispatch_id=""):
         captured_changed_files.extend(changed_files)
         return {"requested": []}
 
@@ -330,3 +332,95 @@ def test_main_handles_compute_failure_gracefully(review_env, monkeypatch):
         "request", "--pr", "55", "--branch", "feature/broken-refs", "--changed-files", "",
     ])
     assert exit_code == 2
+
+
+def test_compute_changed_files_fetch_called_before_diff(monkeypatch):
+    """fetch origin/<branch> is the first git call; diff uses origin/main...origin/<branch>."""
+    call_log = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = "scripts/fix.py\n"
+
+    def fake_run(cmd, **kwargs):
+        call_log.append(list(cmd))
+        return FakeProc()
+
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run)
+
+    files = rgm._compute_changed_files("feature/my-branch")
+
+    assert call_log[0] == ["git", "fetch", "origin", "feature/my-branch"], \
+        "first call must be git fetch origin <branch>"
+    diff_calls = [c for c in call_log if "diff" in c]
+    assert diff_calls, "a diff call must follow the fetch"
+    assert "origin/main...origin/feature/my-branch" in diff_calls[0], \
+        "diff must use origin/main...origin/<branch>"
+    assert files == ["scripts/fix.py"]
+
+
+def test_compute_changed_files_fetch_failure_is_nonfatal(monkeypatch):
+    """If git fetch fails, diff is still attempted and returns files on success."""
+    import subprocess as sp
+
+    fetch_raised = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = "scripts/fixed.py\n"
+
+    def fake_run(cmd, **kwargs):
+        if "fetch" in cmd:
+            fetch_raised.append(True)
+            raise sp.CalledProcessError(1, cmd)
+        return FakeProc()
+
+    monkeypatch.setattr(rgm.subprocess, "run", fake_run)
+
+    files = rgm._compute_changed_files("feature/fetch-fail")
+    assert fetch_raised, "fetch was attempted and failed"
+    assert files == ["scripts/fixed.py"], "diff still succeeded after fetch failure"
+
+
+def test_compute_changed_files_real_repo(tmp_path, monkeypatch):
+    """Real git repo: auto-compute fetches and diffs against origin/main correctly
+    when the branch is not checked out locally (simulates worktree with pinned main)."""
+    import subprocess as sp
+
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+
+    def rungit(args, *, cwd):
+        sp.run(["git"] + args, cwd=str(cwd), check=True, capture_output=True, env=git_env)
+
+    # Set up origin repo
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    rungit(["init"], cwd=origin)
+    rungit(["symbolic-ref", "HEAD", "refs/heads/main"], cwd=origin)
+    rungit(["config", "receive.denyCurrentBranch", "ignore"], cwd=origin)
+    (origin / "base.py").write_text("x = 1\n")
+    rungit(["add", "base.py"], cwd=origin)
+    rungit(["commit", "-m", "initial"], cwd=origin)
+
+    # Clone local before the feature branch exists — it has no origin/feature/test-scope
+    local = tmp_path / "local"
+    rungit(["clone", str(origin), str(local)], cwd=tmp_path)
+
+    # Now add the feature branch to origin (after clone, so local doesn't have it)
+    rungit(["checkout", "-b", "feature/test-scope"], cwd=origin)
+    (origin / "changed.py").write_text("y = 2\n")
+    rungit(["add", "changed.py"], cwd=origin)
+    rungit(["commit", "-m", "feat: add changed"], cwd=origin)
+    rungit(["checkout", "main"], cwd=origin)
+
+    monkeypatch.chdir(local)
+
+    files = rgm._compute_changed_files("feature/test-scope")
+    assert "changed.py" in files
+    assert "base.py" not in files
