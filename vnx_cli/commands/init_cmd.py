@@ -345,7 +345,14 @@ def vnx_init(args) -> int:
         "vnx_version": __version__,
     }
     _scaffold_claude_dir(project_dir, tmpl_root, ctx, force)
-    _scaffold_vnx_data_local(project_dir)
+    # Only create the project-local .vnx-data/ scaffold when the resolved
+    # data root is already inside the project directory. For fresh
+    # XDG/external installs the runtime dirs are under data_root (created
+    # above); silently creating a second local .vnx-data/ would cause the
+    # next resolver call to prefer it (step-4 "existing dev checkout" branch),
+    # contradicting the config and the init output (PR-PIP-2 clean-footprint).
+    if inside_project:
+        _scaffold_vnx_data_local(project_dir)
 
     written = _write_vnx_version(project_dir, __version__, force)
     print(f"  {'created' if written else 'exists '} .vnx-version ({__version__})")
