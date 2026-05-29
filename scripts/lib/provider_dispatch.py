@@ -926,10 +926,11 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
     model_label = model or _resolve_kimi_model_label()
+    enriched_instruction = _enrich_instruction(args)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
-            prompt=args.instruction,
+            prompt=enriched_instruction,
             model=model,
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
