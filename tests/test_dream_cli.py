@@ -6,6 +6,7 @@ Coverage:
 - test_dream_review_reject_archives_only: verify no archive rows on reject
 - test_dream_history_shows_recent_cycles: verify ordering DESC by completed_at
 - test_review_gate_lists_only_pending: verify pending-only filtering
+- TestResolvePathsCanonical: _resolve_paths uses vnx_paths.resolve_state_dir (not hardcoded local path)
 """
 from __future__ import annotations
 
@@ -362,3 +363,43 @@ class TestReviewGateListsOnlyPending:
 
         assert len(result) == 1
         assert result[0]["cycle_id"] == "cycle-001"
+
+
+class TestResolvePathsCanonical:
+    """_resolve_paths must use vnx_paths.resolve_state_dir, not the hardcoded local path.
+
+    Regression guard: before the fix, _resolve_paths returned
+    resolve_project_root() / '.vnx-data' / 'state' / 'quality_intelligence.db'
+    (the local worktree DB, schema v19, 951 patterns — causing the kimi hang).
+    After the fix it must use vnx_paths.resolve_state_dir() so the canonical
+    central DB is targeted (ADR-007: path is project_id-scoped).
+    """
+
+    def test_returns_canonical_db_path(self, tmp_path):
+        """db_path comes from resolve_state_dir(), not project_root/.vnx-data/state/."""
+        # Simulate: central state dir (e.g. ~/.vnx-data/vnx-dev/state)
+        # is different from the local project root's .vnx-data/state.
+        central_state = tmp_path / "central" / "vnx-dev" / "state"
+        local_root = tmp_path / "local-project"
+        local_root.mkdir(parents=True, exist_ok=True)
+
+        # Ensure vnx_cli is importable
+        repo_root = Path(__file__).resolve().parents[1]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+
+        import vnx_paths
+        import project_root as pr_mod
+        import vnx_cli.commands.dream as dream_mod
+
+        with patch.object(vnx_paths, "resolve_state_dir", return_value=central_state), \
+             patch.object(pr_mod, "resolve_project_root", return_value=local_root):
+            _, db_path = dream_mod._resolve_paths()
+
+        assert db_path == central_state / "quality_intelligence.db", (
+            f"Expected canonical central path, got {db_path}"
+        )
+        # Must NOT be the old hardcoded local path
+        assert db_path != local_root / ".vnx-data" / "state" / "quality_intelligence.db", (
+            "db_path must not be the hardcoded local worktree path"
+        )
