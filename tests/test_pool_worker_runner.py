@@ -5,9 +5,12 @@ Required coverage:
   - claims one dispatch, loads bundle, delegates to delivery, returns EXIT_OK
   - empty queue → EXIT_NO_WORK; no delivery call
   - FM-4: project_id mismatch → EXIT_PROJECT_MISMATCH; no delivery call
+  - path-traversal guard: dispatch_id with '../' or absolute path → EXIT_INVALID_DISPATCH_ID
+  - ledger events: claim_next_queued_dispatch (N-1) emits dispatch_claimed + dispatch_claim_provenance
+  - state-dir resolution: VNX_STATE_DIR='' + VNX_DATA_DIR set → canonical dir, not empty path
 """
 from __future__ import annotations
-import importlib.util as _ilu, json, sys, tempfile, unittest
+import importlib.util as _ilu, json, os, sys, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,7 +33,10 @@ _MIGS_SQL = Path(__file__).resolve().parent.parent / "schemas" / "migrations" / 
 def _apply_0026(state_dir):
     return _m26.apply_migration(db_path_from_state_dir(state_dir), _MIGS_SQL)
 
-from pool_worker_runner import EXIT_NO_WORK, EXIT_OK, EXIT_PROJECT_MISMATCH, EXIT_BUNDLE_MISSING, run  # noqa: E402
+from pool_worker_runner import (  # noqa: E402
+    EXIT_NO_WORK, EXIT_OK, EXIT_PROJECT_MISMATCH, EXIT_BUNDLE_MISSING,
+    EXIT_INVALID_DISPATCH_ID, run, _validate_dispatch_id, _resolve_state_dir,
+)
 
 
 class _Base(unittest.TestCase):
@@ -131,6 +137,95 @@ class TestBundleMissing(_Base):
             json.dumps({"dispatch_id": "d-noprompt", "target_profile": {"provider": "claude"}, "gate": ""}),
             encoding="utf-8")
         self.assertEqual(self._run(), EXIT_BUNDLE_MISSING)
+
+
+class TestPathTraversalGuard(_Base):
+    """Security: dispatch_id containing path separators or traversal must be refused."""
+
+    def test_dotdot_slash_refused(self):
+        """dispatch_id '../secret' triggers EXIT_INVALID_DISPATCH_ID, no file read."""
+        with patch("pool_worker_runner.claim_next_queued_dispatch", return_value="../secret"):
+            with patch("pool_worker_runner._deliver_claude") as m:
+                result = self._run()
+        self.assertEqual(result, EXIT_INVALID_DISPATCH_ID)
+        m.assert_not_called()
+
+    def test_absolute_path_refused(self):
+        """/etc/passwd as dispatch_id triggers EXIT_INVALID_DISPATCH_ID."""
+        with patch("pool_worker_runner.claim_next_queued_dispatch", return_value="/etc/passwd"):
+            with patch("pool_worker_runner._deliver_claude") as m:
+                result = self._run()
+        self.assertEqual(result, EXIT_INVALID_DISPATCH_ID)
+        m.assert_not_called()
+
+    def test_embedded_slash_refused(self):
+        """dispatch_id 'a/b' triggers EXIT_INVALID_DISPATCH_ID."""
+        with patch("pool_worker_runner.claim_next_queued_dispatch", return_value="a/b"):
+            with patch("pool_worker_runner._deliver_claude") as m:
+                result = self._run()
+        self.assertEqual(result, EXIT_INVALID_DISPATCH_ID)
+        m.assert_not_called()
+
+    def test_normal_slug_resolves(self):
+        """A well-formed dispatch_id resolves correctly and does not raise."""
+        with tempfile.TemporaryDirectory() as td:
+            dd = Path(td) / "dispatches"
+            dd.mkdir()
+            resolved = _validate_dispatch_id("20260529-abc123", dd)
+            self.assertTrue(str(resolved).startswith(os.path.realpath(dd)))
+            self.assertTrue(str(resolved).endswith("20260529-abc123"))
+
+
+class TestLedgerEventsOnClaim(_Base):
+    """ADR-005: claim_next_queued_dispatch (N-1) emits dispatch_claimed + dispatch_claim_provenance.
+
+    The runner must NOT emit a third duplicate event. We verify the N-1 events exist and that
+    pool_worker_runner itself does not emit an additional event of its own.
+    """
+
+    def test_n1_emits_two_events_runner_does_not_duplicate(self):
+        """After a real claim, exactly dispatch_claimed + dispatch_claim_provenance exist; no third."""
+        from coordination_db import get_events
+        self._queue("d-ledger")
+        self._bundle("d-ledger", instr="# ledger test")
+
+        with patch("pool_worker_runner._deliver_claude", return_value=EXIT_OK):
+            result = self._run(tid="T1", pid="proj")
+
+        self.assertEqual(result, EXIT_OK)
+
+        with get_connection(self.sd) as c:
+            dispatch_events = get_events(c, entity_id="d-ledger", limit=50)
+
+        event_types = [e["event_type"] for e in dispatch_events]
+        self.assertIn("dispatch_claimed", event_types)
+        self.assertIn("dispatch_claim_provenance", event_types)
+        # Runner must not add a third distinct event for the same dispatch
+        self.assertEqual(len(dispatch_events), 2,
+                         f"Expected exactly 2 events for dispatch, got {len(dispatch_events)}: {event_types}")
+
+
+class TestStateDirResolution(unittest.TestCase):
+    """VNX_STATE_DIR='' must fall through to VNX_DATA_DIR, not produce Path('') / 'state'."""
+
+    def test_empty_vnx_state_dir_falls_through_to_vnx_data_dir(self):
+        env = {"VNX_STATE_DIR": "", "VNX_DATA_DIR": "/tmp/mydata"}
+        with patch.dict(os.environ, env, clear=False):
+            result = _resolve_state_dir()
+        self.assertEqual(result, Path("/tmp/mydata") / "state")
+
+    def test_non_empty_vnx_state_dir_wins(self):
+        env = {"VNX_STATE_DIR": "/tmp/mystate", "VNX_DATA_DIR": "/tmp/mydata"}
+        with patch.dict(os.environ, env, clear=False):
+            result = _resolve_state_dir()
+        self.assertEqual(result, Path("/tmp/mystate"))
+
+    def test_both_absent_returns_default(self):
+        stripped = {k: v for k, v in os.environ.items()
+                    if k not in ("VNX_STATE_DIR", "VNX_DATA_DIR")}
+        with patch.dict(os.environ, stripped, clear=True):
+            result = _resolve_state_dir()
+        self.assertTrue(str(result).endswith(os.path.join(".vnx-data", "state")))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ No loop. Pool manager re-spawns on each tick. BILLING SAFETY: No Anthropic SDK.
 Claude: deliver_with_recovery (subprocess.Popen). Non-Claude: provider_dispatch.main.
 """
 from __future__ import annotations
-import logging, os, sys
+import logging, os, re, sys
 from pathlib import Path
 from typing import Optional
 
@@ -23,12 +23,42 @@ EXIT_DELIVERY_FAILED = 1
 EXIT_NO_WORK = 3           # ADR-018 Rule 2: queue empty; re-spawn on next tick
 EXIT_PROJECT_MISMATCH = 4  # ADR-018 FM-4: claimed dispatch project_id != worker project_id
 EXIT_BUNDLE_MISSING = 5    # bundle.json or prompt.txt absent for claimed dispatch
+EXIT_INVALID_DISPATCH_ID = 6  # dispatch_id failed security validation (path-traversal guard)
+
+# Safe slug: alphanumerics, hyphens, underscores, dots — no path separators or traversal
+_SAFE_DISPATCH_ID_RE = re.compile(r'^[A-Za-z0-9_\-\.]+$')
+
+
+def _validate_dispatch_id(dispatch_id: str, dispatch_dir: Path) -> Path:
+    """Validate dispatch_id is a safe slug and the resolved bundle path stays within dispatch_dir.
+
+    Raises ValueError with a descriptive message on any violation.
+    Returns the resolved bundle path on success.
+    """
+    if not dispatch_id or not _SAFE_DISPATCH_ID_RE.match(dispatch_id):
+        raise ValueError(
+            f"dispatch_id {dispatch_id!r} contains illegal characters (path separators, '..', "
+            "or is empty); refusing to resolve bundle path"
+        )
+    # Realpath-based containment check: resolved path must be strictly inside dispatch_dir
+    canonical_root = os.path.realpath(dispatch_dir)
+    resolved = os.path.realpath(Path(dispatch_dir) / dispatch_id)
+    if not resolved.startswith(canonical_root + os.sep) and resolved != canonical_root:
+        raise ValueError(
+            f"dispatch_id {dispatch_id!r} resolved to {resolved!r} which is outside "
+            f"dispatch root {canonical_root!r}; refusing"
+        )
+    return Path(resolved)
 
 
 def _resolve_state_dir() -> Path:
-    env = os.environ.get("VNX_STATE_DIR") or os.environ.get("VNX_DATA_DIR")
-    if env:
-        return Path(env) if "VNX_STATE_DIR" in os.environ else Path(env) / "state"
+    # Treat empty-string env vars as unset (VNX_STATE_DIR='' must fall through to VNX_DATA_DIR)
+    vnx_state = os.environ.get("VNX_STATE_DIR") or ""
+    vnx_data = os.environ.get("VNX_DATA_DIR") or ""
+    if vnx_state:
+        return Path(vnx_state)
+    if vnx_data:
+        return Path(vnx_data) / "state"
     return _LIB_DIR.parents[1] / ".vnx-data" / "state"
 
 
@@ -89,6 +119,15 @@ def run(terminal_id: str, project_id: str, *,
         return EXIT_NO_WORK
 
     logger.info("Claimed dispatch %r terminal=%s project=%s", dispatch_id, terminal_id, project_id)
+    # ADR-005 ledger: claim_next_queued_dispatch (N-1) already appended dispatch_claimed +
+    # dispatch_claim_provenance events inside the IMMEDIATE transaction. No duplicate emit here.
+
+    # Security: validate dispatch_id before any filesystem access (path-traversal guard)
+    try:
+        _validate_dispatch_id(dispatch_id, _dd)
+    except ValueError as exc:
+        logger.error("Path-traversal guard triggered for dispatch_id %r: %s", dispatch_id, exc)
+        return EXIT_INVALID_DISPATCH_ID
 
     # ADR-018 FM-4: verify project_id post-claim (defense-in-depth; claim already scoped)
     with get_connection(_sd) as conn:
