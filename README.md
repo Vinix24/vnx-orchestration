@@ -42,7 +42,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 I built this for my own work. It is open source because the architecture is portable. Use at your own discretion.
 
-Public 1.0 status as of this README merge on 2026-05-28: the package is pip-installable, `VERSION` is `1.0.0-rc3`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+Public 1.0 status as of this README merge on 2026-05-28: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 ## Credits
 

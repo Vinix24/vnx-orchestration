@@ -27,27 +27,18 @@ vnx doctor
 `vnx init` creates the tracked project scaffold (`.vnx/`, `.vnx-project-id`,
 and `agents/`) and a resolved runtime state directory.
 
-## Step 3: Create the Hello-World Agent
+## Step 3: Run the Hello-World Demo
 
-`dispatch-agent` resolves agents from either `agents/<name>/CLAUDE.md` or
-`examples/<name>/CLAUDE.md`. Create the quickstart example in `examples/`:
+The `hello-world` example agent ships with VNX. No files to create:
 
 ```bash
-mkdir -p examples/hello-world
-cat > examples/hello-world/CLAUDE.md <<'EOF'
-# Hello World Agent
-
-Write a friendly, professional greeting for a new VNX user.
-
-Create a file called greeting.md in the current directory with:
-- A welcoming header
-- 2-3 sentences about VNX
-- Today's date
-- A sign-off
-EOF
+vnx dispatch-agent --agent hello-world
 ```
 
-## Step 4: Dispatch
+`dispatch-agent` finds the packaged `hello-world` example automatically and uses
+its built-in default instruction. Pass `--instruction "..."` to override.
+
+## Step 4: Dispatch with a Custom Instruction
 
 ```bash
 vnx dispatch-agent --agent hello-world --instruction "Write a greeting for a new VNX user"

@@ -161,9 +161,10 @@ def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
     )
     dispatch_parser.add_argument(
         "--instruction",
-        required=True,
+        required=False,
+        default=None,
         metavar="TEXT",
-        help="instruction text to send to the agent",
+        help="instruction text to send to the agent (optional for agents with default_instruction in config.yaml)",
     )
     dispatch_parser.add_argument(
         "--model",

@@ -9,10 +9,11 @@ from vnx_cli import _engine
 
 
 def _resolve_agent_path(project_dir: Path, agent: str) -> Path | None:
-    """Resolve an agent CLAUDE.md from project agents/ or examples/."""
+    """Resolve an agent CLAUDE.md from project agents/, examples/, or packaged examples."""
     candidates = [
         project_dir / "agents" / agent / "CLAUDE.md",
         project_dir / "examples" / agent / "CLAUDE.md",
+        _engine.engine_root() / "examples" / agent / "CLAUDE.md",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -20,9 +21,26 @@ def _resolve_agent_path(project_dir: Path, agent: str) -> Path | None:
     return None
 
 
+def _read_default_instruction(config_path: Path) -> str | None:
+    """Read default_instruction value from config.yaml using line-by-line parse.
+
+    Avoids a PyYAML dependency in the pip console-script package.
+    Only handles top-level scalar values (not multi-line or anchored YAML).
+    """
+    try:
+        for line in config_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("default_instruction:"):
+                value = stripped.split(":", 1)[1].strip()
+                return value.strip('"').strip("'") or None
+    except OSError:
+        pass
+    return None
+
+
 def vnx_dispatch_agent(args) -> int:
     agent = args.agent
-    instruction = args.instruction
+    instruction = getattr(args, "instruction", None)
     model = getattr(args, "model", "sonnet")
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
 
@@ -32,6 +50,19 @@ def vnx_dispatch_agent(args) -> int:
         print(
             f"Error: agent '{agent}' not found. "
             f"Expected: agents/{agent}/CLAUDE.md or examples/{agent}/CLAUDE.md",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve instruction: explicit arg > default_instruction in config.yaml
+    if not instruction:
+        config_path = agent_claude_md.parent / "config.yaml"
+        instruction = _read_default_instruction(config_path)
+
+    if not instruction:
+        print(
+            f"Error: --instruction is required for agent '{agent}' "
+            "(no default_instruction found in config.yaml).",
             file=sys.stderr,
         )
         return 1
