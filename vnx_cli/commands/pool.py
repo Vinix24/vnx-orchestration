@@ -29,14 +29,15 @@ from pool_state_repo import PoolStateRepository  # noqa: E402
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show current pool state for a project."""
-    mgr = _make_manager(args.project, args.pool_id)
+    project_id = _resolve_project_id(args.project)
+    mgr = _make_manager_for_project_id(project_id, args.pool_id)
     config, state, members = mgr.load_state()
 
     active = [m for m in members if m.status == "active"]
     if args.json:
         print(json.dumps({
             "pool_id": config.pool_id,
-            "project_id": args.project,
+            "project_id": project_id,
             "current": len(active),
             "min": config.min_workers,
             "max": config.max_workers,
@@ -49,7 +50,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         }, indent=2))
     else:
         print(f"Pool: {config.pool_id}")
-        print(f"Project: {args.project}")
+        print(f"Project: {project_id}")
         print(
             f"Current: {len(active)} / policy={config.scaling_policy}"
             f" (min={config.min_workers}, max={config.max_workers})"
@@ -195,7 +196,11 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
 
 
 def _make_manager(project: Optional[str], pool_id: Optional[str]) -> PoolManager:
-    return PoolManager(project_id=_resolve_project_id(project), pool_id=pool_id or "default")
+    return _make_manager_for_project_id(_resolve_project_id(project), pool_id)
+
+
+def _make_manager_for_project_id(project_id: str, pool_id: Optional[str]) -> PoolManager:
+    return PoolManager(project_id=project_id, pool_id=pool_id or "default")
 
 
 def _fmt_age(timestamp: float) -> str:
@@ -218,13 +223,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_status.set_defaults(func=cmd_status)
 
     p_scale = sub.add_parser("scale", help="force scale pool to N workers")
-    p_scale.add_argument("--project", default=None)
+    p_scale.add_argument("--project", required=True)
     p_scale.add_argument("--to", type=int, required=True)
     p_scale.add_argument("--pool-id", dest="pool_id", default=None)
     p_scale.set_defaults(func=cmd_scale)
 
     p_config = sub.add_parser("config", help="update pool config")
-    p_config.add_argument("--project", default=None)
+    p_config.add_argument("--project", required=True)
     p_config.add_argument("--pool-id", dest="pool_id", default=None)
     p_config.add_argument("--min", type=int, dest="min")
     p_config.add_argument("--max", type=int, dest="max")
@@ -233,7 +238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_config.set_defaults(func=cmd_config)
 
     p_reap = sub.add_parser("reap", help="reap stale workers (dry-run by default)")
-    p_reap.add_argument("--project", default=None)
+    p_reap.add_argument("--project", required=True)
     p_reap.add_argument("--pool-id", dest="pool_id", default=None)
     p_reap.add_argument("--force", action="store_true", help="actually reap (default: dry-run)")
     p_reap.set_defaults(func=cmd_reap)
