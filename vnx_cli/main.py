@@ -169,6 +169,8 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
 
     tn_parser = track_subs.add_parser("new", help="create a new track")
     tn_parser.add_argument("track_id", metavar="TRACK_ID")
+    tn_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                           help="project_id for this track (required; ADR-007)")
     tn_parser.add_argument("--title", required=True, metavar="TITLE")
     tn_parser.add_argument("--goal", required=True, metavar="GOAL")
     tn_parser.add_argument("--priority", choices=["high", "medium", "low"], metavar="PRIORITY")
@@ -176,21 +178,29 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
 
     ta_parser = track_subs.add_parser("activate", help="activate a queued track")
     ta_parser.add_argument("track_id", metavar="TRACK_ID")
+    ta_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                           help="project_id for this track (required)")
     ta_parser.add_argument("--reason", metavar="REASON")
     ta_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
     tp_parser = track_subs.add_parser("park", help="park an active track")
     tp_parser.add_argument("track_id", metavar="TRACK_ID")
+    tp_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                           help="project_id for this track (required)")
     tp_parser.add_argument("--reason", required=True, metavar="REASON")
     tp_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
     tu_parser = track_subs.add_parser("unpark", help="unpark a parked track to queued")
     tu_parser.add_argument("track_id", metavar="TRACK_ID")
+    tu_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                           help="project_id for this track (required)")
     tu_parser.add_argument("--reason", metavar="REASON")
     tu_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
     td_parser = track_subs.add_parser("dispatch", help="create a dispatch for a track")
     td_parser.add_argument("track_id", metavar="TRACK_ID")
+    td_parser.add_argument("--project-id", required=True, metavar="PROJECT_ID",
+                           help="project_id for this track (required)")
     td_parser.add_argument("--pr", required=True, metavar="PR-ID")
     td_parser.add_argument("--terminal", required=True, choices=["T1", "T2", "T3"], metavar="TERMINAL")
     td_parser.add_argument("--instruction-file", metavar="PATH")
@@ -198,11 +208,16 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
 
     tl_parser = track_subs.add_parser("list", help="list tracks")
     tl_parser.add_argument("--phase", choices=["queued", "active", "parked", "done"], metavar="PHASE")
-    tl_parser.add_argument("--project-id", default="vnx-dev", metavar="PROJECT_ID")
+    tl_parser.add_argument("--project-id", default=None, metavar="PROJECT_ID",
+                           help="filter by project_id (default: resolved from git remote / VNX_PROJECT_ID)")
+    tl_parser.add_argument("--all-projects", action="store_true",
+                           help="show tracks across all projects (central operator view)")
     tl_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
     ts_parser = track_subs.add_parser("show", help="show track detail")
     ts_parser.add_argument("track_id", metavar="TRACK_ID")
+    ts_parser.add_argument("--project-id", default=None, metavar="PROJECT_ID",
+                           help="project_id (default: resolved from git remote / VNX_PROJECT_ID)")
     ts_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
 

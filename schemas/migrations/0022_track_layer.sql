@@ -9,10 +9,8 @@
 -- Post-migration state (v22): track layer tables + dispatches rebuilt WITHOUT track FK.
 --
 -- FK deferral: dispatches.track is rebuilt here WITHOUT REFERENCES tracks(track_id).
---   The FK is added in migration 0023, which runs after tracks are seeded and existing
---   dispatch rows are tagged. This prevents FK violations on real v21 installs where
---   dispatch rows with pre-existing track values exist before the tracks table is
---   populated. Option A from dispatch 20260528-fut-1-fix1-codex-r1.
+--   The dispatches.track column has no FK by design (Option B scope-shrink). A future
+--   migration may add the FK once tracks tenant-scoping (0024) stabilises.
 --
 -- SQLite caveats:
 --   ALTER TABLE cannot add CHECK constraints to existing columns directly.
