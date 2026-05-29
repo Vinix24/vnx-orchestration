@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 from vnx_cli import _engine
 _engine.ensure_engine_on_path()
+
+_NOT_IN_PROJECT_MSG = (
+    "not in a VNX project — run `vnx init` inside a git repo, or set VNX_CANONICAL_ROOT"
+)
 
 
 def _get_project_id(args) -> str | None:
@@ -28,7 +33,11 @@ def _resolve_paths() -> tuple[Path, Path]:
     """
     from project_root import resolve_project_root  # type: ignore[import]
     from vnx_paths import resolve_state_dir  # type: ignore[import]
-    root = resolve_project_root()
+    try:
+        root = resolve_project_root()
+    except RuntimeError:
+        print(f"error: {_NOT_IN_PROJECT_MSG}", file=sys.stderr)
+        sys.exit(1)
     state_dir = resolve_state_dir()
     return root, state_dir / "quality_intelligence.db"
 
