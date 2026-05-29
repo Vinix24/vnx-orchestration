@@ -463,6 +463,18 @@ def project_id_from_state_dir(state_dir: Path) -> str:
     return ""
 
 
+def resolve_project_id() -> Optional[str]:
+    """Return the resolved project_id for the current VNX context (best-effort, never raises).
+
+    Resolution order: identity chain > VNX_PROJECT_ID env > .vnx-project-id marker > None.
+    Used by nightly pipeline and CLI tools that need project_id without a full dispatch.
+    ADR-007: project_id is required on all cross-project operations.
+    """
+    vnx_home = _resolve_vnx_home()
+    project_root = _resolve_project_root(vnx_home)
+    return _resolve_state_project_id(project_root)
+
+
 def resolve_state_dir(project_root: "Path | None" = None) -> Path:
     """Return the VNX state directory.
 

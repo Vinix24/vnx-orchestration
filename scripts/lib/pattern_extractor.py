@@ -31,6 +31,12 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 def _default_db_path() -> Path:
+    # Prefer VNX_DATA_DIR/state — authoritative project_id-scoped root (ADR-007).
+    # VNX_STATE_DIR can be polluted by stale shell profile exports; VNX_DATA_DIR
+    # is computed by _resolve_state_root deterministically without env-var pollution.
+    data_dir = os.environ.get("VNX_DATA_DIR", "")
+    if data_dir:
+        return Path(data_dir) / "state" / "quality_intelligence.db"
     state_dir = os.environ.get("VNX_STATE_DIR", "")
     if state_dir:
         return Path(state_dir) / "quality_intelligence.db"
