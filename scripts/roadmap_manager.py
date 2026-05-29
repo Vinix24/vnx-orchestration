@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt, utc_now_iso
 from pr_queue_manager import PRQueueManager
-from closure_verifier import verify_closure
+from closure_verifier import verify_closure, _find_gate_result
+from gate_status import is_pass as gate_is_pass
 from project_scope import current_project_id
 from vnx_worktree import worktree_start
 
@@ -365,6 +367,41 @@ Implement the minimum blocking fix required before the roadmap may advance.
         )
         return state
 
+    def _gates_incomplete(self, feature: Dict[str, Any], gate_results_dir: Path) -> bool:
+        """Return True when any required gate lacks a PASS result for the feature's PRs.
+
+        Required gates: every entry in review_stack except claude_github_optional.
+        ADR-007: project_id stamping is preserved — this check is additive.
+        """
+        review_stack = feature.get("review_stack") or []
+        required_gates = [g for g in review_stack if g != "claude_github_optional"]
+        if not required_gates:
+            return False
+
+        feature_plan_path = _root_file(self.project_root, "FEATURE_PLAN.md")
+        pr_ids: List[str] = []
+        if feature_plan_path.exists():
+            content = feature_plan_path.read_text(encoding="utf-8")
+            pr_ids = re.findall(r"^##\s+(PR-\d+):", content, re.MULTILINE)
+
+        if not pr_ids:
+            return True
+
+        if not gate_results_dir.exists():
+            return True
+
+        branch = feature.get("branch_name", "")
+        for pr_id in pr_ids:
+            for gate in required_gates:
+                result = _find_gate_result(gate, pr_id, gate_results_dir, branch=branch)
+                if result is None:
+                    return True
+                passed, _ = gate_is_pass(result)
+                if not passed:
+                    return True
+
+        return False
+
     def reconcile(self) -> Dict[str, Any]:
         state = self.load_state()
         current_id = state.get("current_active_feature")
@@ -388,15 +425,26 @@ Implement the minimum blocking fix required before the roadmap may advance.
             claim_file=(self.paths.state_dir / "closure_claim.json") if (self.paths.state_dir / "closure_claim.json").exists() else None,
         )
         drift_items = self._detect_blocking_drift() if verification["verdict"] == "pass" else []
+        if verification["verdict"] == "pass" and drift_items:
+            verdict = "drift_blocked"
+        elif verification["verdict"] == "pass":
+            gate_results_dir = self.state_dir / "review_gates" / "results"
+            verdict = "gates_incomplete" if self._gates_incomplete(feature, gate_results_dir) else "pass"
+        else:
+            verdict = "blocked"
         result = {
-            "verdict": "pass" if verification["verdict"] == "pass" and not drift_items else ("drift_blocked" if drift_items else "blocked"),
+            "verdict": verdict,
             "feature_id": current_id,
             "closure_verification": verification,
             "drift_items": drift_items,
         }
         state["last_closure_verification_result"] = result
         state["last_verified_merge_commit"] = (((verification.get("pr") or {}).get("mergeCommit") or {}).get("oid"))
-        state["blocked_reason"] = "blocking_drift_detected" if drift_items else (None if verification["verdict"] == "pass" else "closure_verification_failed")
+        state["blocked_reason"] = (
+            "blocking_drift_detected" if drift_items else
+            ("gates_incomplete" if verdict == "gates_incomplete" else
+             (None if verdict == "pass" else "closure_verification_failed"))
+        )
         state["updated_at"] = utc_now_iso()
         self._save_state(state)
         emit_governance_receipt(
@@ -412,6 +460,9 @@ Implement the minimum blocking fix required before the roadmap may advance.
         reconcile_result = self.reconcile()
         if reconcile_result["verdict"] == "blocked":
             return {"advanced": False, "reason": "closure_verification_failed", "reconcile": reconcile_result}
+
+        if reconcile_result["verdict"] == "gates_incomplete":
+            return {"advanced": False, "reason": "gates_incomplete", "reconcile": reconcile_result}
 
         if reconcile_result["verdict"] == "drift_blocked":
             state = self.load_state()
