@@ -418,10 +418,68 @@ def _central_is_empty(qi_db: Path, rc_db: Path) -> bool:
     must run. Bookkeeping tables (``p4_import_*``) created by a previous
     failed apply do not count as "populated" — only the sentinel
     business tables matter.
+
+    Note: this function returns True for *both* a completely empty DB
+    (no tables) and one with only bookkeeping / partial-init tables (e.g.
+    ``dispatch_experiments`` from ``retroactive_backfill``). The
+    ``_qi_is_partial`` helper distinguishes these two sub-cases so the
+    apply flow can handle each correctly.
     """
     qi_fresh = not _has_table(qi_db, _QI_SENTINEL_TABLE)
     rc_fresh = not _has_table(rc_db, _RC_SENTINEL_TABLE)
     return qi_fresh or rc_fresh
+
+
+def _qi_is_partial(qi_db: Path) -> bool:
+    """True if the QI DB has tables but is missing the canonical sentinel.
+
+    OI-011 fix: ``retroactive_backfill._open_tracker()`` creates
+    ``dispatch_experiments`` in the central QI DB but skips all other
+    tables.  The result is a DB that ``_central_is_empty`` considers
+    "fresh" (missing ``success_patterns``) yet already contains data —
+    a partial-init limbo where ``bootstrap_qi_db`` should complete the
+    schema without requiring the ``--fresh-central`` operator gate
+    (which is reserved for truly empty, first-deploy DBs).
+
+    Returns True when ALL of:
+    - DB file exists and is non-empty.
+    - At least one table is present (not a truly-empty file).
+    - The sentinel table (``success_patterns``) is absent.
+
+    ``user_version`` is intentionally NOT checked here: DBs created
+    outside ``bootstrap_qi_db`` (e.g. test fixtures, legacy snapshots)
+    may have ``user_version=0`` while still containing the sentinel and
+    valid data.  Using ``user_version=0`` alone as an indicator would
+    incorrectly trigger bootstrap on those DBs and corrupt them.
+
+    ``bootstrap_qi_db`` is idempotent — existing tables and rows
+    (including ``dispatch_experiments`` data) are preserved via
+    ``CREATE TABLE IF NOT EXISTS`` and column-presence guards.
+    """
+    if not qi_db.exists() or qi_db.stat().st_size == 0:
+        return False
+    try:
+        con = sqlite3.connect(str(qi_db))
+        try:
+            table_count = con.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type IN ('table','virtual')"
+            ).fetchone()[0]
+            if table_count == 0:
+                return False  # truly empty file — not partial, treat as fresh
+            has_sentinel = (
+                con.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type IN ('table','virtual') AND name = ?",
+                    (_QI_SENTINEL_TABLE,),
+                ).fetchone()
+                is not None
+            )
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+    return not has_sentinel
 
 
 def _init_central_if_missing(qi_db: Path, rc_db: Path) -> None:
@@ -1825,11 +1883,20 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
 
     central_state.mkdir(parents=True, exist_ok=True)
 
+    # OI-011 fix: detect partial-init QI DB BEFORE the --fresh-central gate.
+    # A partial DB (e.g. dispatch_experiments only from retroactive_backfill)
+    # has tables but user_version=0 — it is NOT fresh and must NOT require
+    # --fresh-central, since existing data would be incorrectly abandoned.
+    # _init_central_if_missing is safe to call on a partial DB (idempotent).
+    central_qi_partial = _qi_is_partial(central_qi)
+
     # Round-3 fix-forward: detect a fresh central BEFORE creating empty
     # DB files. Without this gate, an operator who has just blown away
     # ~/.vnx-data/state/ would see "import complete" against empty DBs.
+    # OI-011: partial-init QI (data present, not truly empty) bypasses this
+    # gate — _init_central_if_missing handles the bootstrap idempotently.
     central_was_fresh = _central_is_empty(central_qi, central_rc)
-    if central_was_fresh and not args.fresh_central:
+    if central_was_fresh and not args.fresh_central and not central_qi_partial:
         LOG.error(
             "central appears fresh (missing canonical schema at %s); "
             "pass --fresh-central to acknowledge first-deploy bootstrap",
@@ -1847,10 +1914,23 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
 
     pre_snapshot = _snapshot_central(central_qi, central_rc)
     try:
-        if central_was_fresh:
+        if central_was_fresh and not central_qi_partial:
             LOG.info(
                 "central is fresh; running canonical bootstrap "
                 "(quality_db_init + coordination_db.init_schema)"
+            )
+            _init_central_if_missing(central_qi, central_rc)
+        elif central_qi_partial:
+            # OI-011 fix: partial-init QI DB (e.g. only dispatch_experiments
+            # created by retroactive_backfill._open_tracker()) — complete the
+            # bootstrap via _init_central_if_missing which handles both QI
+            # (idempotent: dispatch_experiments data preserved) and RC init.
+            # ADR-007: bootstrap_qi_db wires composite PKs over project_id.
+            LOG.info(
+                "partial-init central QI DB detected (tables present but "
+                "user_version=0 or missing sentinel '%s'); running canonical "
+                "bootstrap to complete schema — existing data preserved",
+                _QI_SENTINEL_TABLE,
             )
             _init_central_if_missing(central_qi, central_rc)
 

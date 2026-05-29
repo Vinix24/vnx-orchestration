@@ -365,20 +365,80 @@ def check_database(paths: Dict[str, str]) -> List[CheckResult]:
 
     try:
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute(
+        table_count = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        )
-        table_count = cursor.fetchone()[0]
+        ).fetchone()[0]
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_sentinel = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='success_patterns'"
+        ).fetchone() is not None
         conn.close()
-
-        if table_count >= 10:
-            return [CheckResult("database", PASS,
-                                f"Quality DB: {table_count} tables")]
-        return [CheckResult("database", FAIL,
-                            f"Quality DB incomplete: {table_count} tables (expected >= 10)",
-                            "Run: vnx init-db")]
     except sqlite3.Error as e:
         return [CheckResult("database", FAIL, f"Cannot read DB: {e}")]
+
+    results: List[CheckResult] = []
+
+    if table_count < 10:
+        results.append(CheckResult(
+            "database", FAIL,
+            f"Quality DB incomplete: {table_count} tables (expected >= 10)",
+            "Run: python3 scripts/quality_db_init.py or vnx doctor --repair-quality-db",
+        ))
+        return results
+
+    results.append(CheckResult("database", PASS, f"Quality DB: {table_count} tables"))
+
+    # OI-011 repair detection: partial-init (dispatch_experiments only from
+    # retroactive_backfill) or never-bootstrapped (user_version=0).
+    if user_version == 0 or not has_sentinel:
+        results.append(CheckResult(
+            "database", WARN,
+            f"Quality DB under-versioned: user_version={user_version}, "
+            f"sentinel={'present' if has_sentinel else 'MISSING'}. "
+            "Self-learning loop and intelligence layer will not function.",
+            "Run: python3 scripts/quality_db_init.py  "
+            "or: vnx doctor --repair-quality-db",
+        ))
+    else:
+        results.append(CheckResult(
+            "database", PASS,
+            f"Quality DB bootstrapped (user_version={user_version})",
+        ))
+
+    return results
+
+
+def repair_quality_db(paths: Dict[str, str]) -> int:
+    """Run bootstrap_qi_db against the central QI DB to complete partial init.
+
+    Idempotent: safe to run on fully-bootstrapped DBs (all migrations skip).
+    Returns 0 on success, 1 on failure.
+    """
+    db_path = Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
+    vnx_home = Path(paths["VNX_HOME"])
+    schema_file = vnx_home / "schemas" / "quality_intelligence.sql"
+
+    print(f"Repairing quality DB at {db_path}...")
+
+    if not schema_file.exists():
+        print(f"ERROR: schema file not found: {schema_file}", file=sys.stderr)
+        return 1
+
+    try:
+        import importlib
+        qdb = importlib.import_module("scripts.quality_db_init")
+        success = qdb.bootstrap_qi_db(db_path, schema_file)
+        if success:
+            conn = sqlite3.connect(str(db_path))
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            conn.close()
+            print(f"Quality DB repair complete. user_version={user_version}")
+            return 0
+        print("ERROR: bootstrap_qi_db returned False", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"ERROR: repair failed: {exc}", file=sys.stderr)
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -693,9 +753,22 @@ def main() -> int:
                         help="Runtime preflight only")
     parser.add_argument("--json", action="store_true",
                         help="Output all results as JSON")
+    parser.add_argument(
+        "--repair-quality-db",
+        action="store_true",
+        help=(
+            "OI-011 repair: run bootstrap_qi_db against the central quality DB "
+            "to complete a partial-init (e.g. dispatch_experiments-only from "
+            "retroactive_backfill). Idempotent — safe to run on a fully-bootstrapped "
+            "DB. Exits 0 on success, 1 on failure."
+        ),
+    )
     args = parser.parse_args()
 
     paths = ensure_env()
+
+    if args.repair_quality_db:
+        return repair_quality_db(paths)
 
     results = run_doctor(
         paths,
