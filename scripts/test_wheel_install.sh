@@ -146,7 +146,7 @@ log "asserting version single-source ..."
 META_VER="$(clean_env "$VENV/bin/python" -c 'from importlib.metadata import version; print(version("vnx-orchestration"))')"
 CLI_VER="$(clean_env "$VENV/bin/vnx" --version)"
 RAW_VER="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
-NORM_VER="$(printf '%s' "$RAW_VER" | tr -d '-')"   # PEP440-ish: 1.0.0-rc3 -> 1.0.0rc3
+NORM_VER="$(printf '%s' "$RAW_VER" | tr -d '-')"   # PEP440-ish: strip hyphens so 1.0.0 stays 1.0.0
 
 [ "$CLI_VER" = "vnx $META_VER" ] || fail "vnx --version ('$CLI_VER') != metadata ('vnx $META_VER')"
 [ "$META_VER" != "0.9.0" ] || fail "version still hardcoded 0.9.0 — drift not fixed"

@@ -127,7 +127,7 @@ def _register_update_subparser(subparsers: argparse.Action) -> None:
         "--to",
         dest="to_version",
         metavar="VERSION",
-        help="target version (e.g. '1.0.0-rc3' or 'edge')",
+        help="target version (e.g. '1.0.0' or 'edge')",
     )
     update_parser.add_argument(
         "--keep-last",
