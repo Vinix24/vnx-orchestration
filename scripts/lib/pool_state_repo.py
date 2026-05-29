@@ -533,6 +533,98 @@ class PoolStateRepository:
         finally:
             conn.close()
 
+    def add_or_refresh_pool_lease(
+        self,
+        terminal_id: str,
+        pid: Optional[int],
+        now: float,
+    ) -> None:
+        """INSERT or refresh a terminal_leases row for a pool worker (ADR-007, ADR-005).
+
+        Idempotent via ON CONFLICT DO UPDATE so re-spawn of the same terminal is safe.
+        Generates a unique lease_token (required by partial UNIQUE idx on lease_token != '').
+        dispatch_id stays NULL — pool workers are not bound to a single dispatch.
+        """
+        now_iso = _iso_now(now)
+        token = _uuid7()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO terminal_leases
+                    (terminal_id, project_id, state, worker_pid,
+                     last_heartbeat_at, lease_token)
+                VALUES (?, ?, 'leased', ?, ?, ?)
+                ON CONFLICT(terminal_id, project_id) DO UPDATE SET
+                    state             = 'leased',
+                    worker_pid        = excluded.worker_pid,
+                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    lease_token       = excluded.lease_token
+                """,
+                (terminal_id, self.project_id, pid, now_iso, token),
+            )
+            conn.commit()
+            log.debug(
+                "add_or_refresh_pool_lease: terminal=%s pid=%s project=%s",
+                terminal_id, pid, self.project_id,
+            )
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        self._emit_ledger("pool.lease.acquired", {
+            "terminal_id": terminal_id,
+            "project_id": self.project_id,
+            "pid": pid,
+            "now": now,
+        })
+
+    def release_pool_lease(
+        self,
+        terminal_id: str,
+        reason: str,
+        now: float,
+    ) -> None:
+        """Release a pool worker's terminal_leases row (ADR-005).
+
+        Sets state='released', clears lease_token so the partial unique index
+        slot is freed, and nulls worker_pid so the reaper ignores it.
+        """
+        now_iso = _iso_now(now)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE terminal_leases
+                SET state             = 'released',
+                    lease_token       = '',
+                    worker_pid        = NULL,
+                    last_heartbeat_at = ?
+                WHERE terminal_id = ? AND project_id = ?
+                  AND state != 'released'
+                """,
+                (now_iso, terminal_id, self.project_id),
+            )
+            conn.commit()
+            log.debug("release_pool_lease: terminal=%s reason=%s", terminal_id, reason)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        try:
+            self._emit_ledger("pool.lease.released", {
+                "terminal_id": terminal_id,
+                "project_id": self.project_id,
+                "reason": reason,
+                "now": now,
+            })
+        except Exception:
+            log.error("release_pool_lease: ledger emit failed for terminal=%s", terminal_id)
+
     def update_config(self, pool_id: str, updates: Dict) -> None:
         """Update pool_config fields. Keys map to PoolConfig field names."""
         _FIELD_MAP = {

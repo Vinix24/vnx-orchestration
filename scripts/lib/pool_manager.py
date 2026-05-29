@@ -271,6 +271,15 @@ class PoolManager:
                 )
 
             try:
+                self.repo.release_pool_lease(target.terminal_id, target.reason, now)
+            except Exception as exc:
+                log.warning(
+                    "reap: lease release failed for %s: %s",
+                    target.terminal_id,
+                    exc,
+                )
+
+            try:
                 from pool_worktree_manager import reap_worker_worktree  # noqa: E402
                 reap_worker_worktree(target.terminal_id)
             except Exception as exc:
@@ -384,16 +393,35 @@ class PoolManager:
                     role,
                 )
                 if spawn_result.success:
-                    self.repo.add_member(
-                        self.pool_id, terminal_id, provider, role, now,
-                        pid=spawn_result.pid,
-                    )
-                    result.spawned.append(terminal_id)
-                    log.info(
-                        "scale_up: spawned terminal=%s provider=%s",
-                        terminal_id,
-                        provider,
-                    )
+                    try:
+                        self.repo.add_or_refresh_pool_lease(
+                            terminal_id, spawn_result.pid, now
+                        )
+                        self.repo.add_member(
+                            self.pool_id, terminal_id, provider, role, now,
+                            pid=spawn_result.pid,
+                        )
+                        result.spawned.append(terminal_id)
+                        log.info(
+                            "scale_up: spawned terminal=%s provider=%s",
+                            terminal_id,
+                            provider,
+                        )
+                    except Exception as reg_exc:
+                        err = f"post-spawn registration failed for terminal={terminal_id}: {reg_exc}"
+                        result.errors.append(err)
+                        log.exception(
+                            "scale_up: registration error terminal=%s; cleaning up", terminal_id
+                        )
+                        self._kill_subprocess(terminal_id, spawn_result.pid)
+                        try:
+                            from pool_worktree_manager import reap_worker_worktree  # noqa: E402
+                            reap_worker_worktree(terminal_id)
+                        except Exception as wt_exc:
+                            log.warning(
+                                "scale_up: worktree cleanup failed for %s: %s",
+                                terminal_id, wt_exc,
+                            )
                 else:
                     err = f"spawn failed for terminal={terminal_id}: {spawn_result.error}"
                     result.errors.append(err)
@@ -408,13 +436,16 @@ class PoolManager:
     def _execute_scale_down(self, decision: PoolDecision, now: float) -> ExecResult:
         result = ExecResult(decision=decision)
 
+        _config, _, members = self.load_state()
+        # Build membership_id -> terminal_id map for lease release
+        mid_to_terminal = {m.membership_id: m.terminal_id for m in members}
+
         if decision.targets:  # OI-1483: use pre-computed targets from decide()
             membership_ids = list(decision.targets)
         else:
-            config, _, members = self.load_state()
             membership_ids = select_for_scale_down(
                 members=members,
-                provider_mix=config.provider_mix,
+                provider_mix=_config.provider_mix,
                 delta=decision.delta,
             )
 
@@ -429,6 +460,17 @@ class PoolManager:
                 err = f"reap error for membership={membership_id}: {exc}"
                 result.errors.append(err)
                 log.exception("scale_down: reap error membership=%s", membership_id)
+                continue
+
+            terminal_id = mid_to_terminal.get(membership_id)
+            if terminal_id:
+                try:
+                    self.repo.release_pool_lease(terminal_id, "scale_down", now)
+                except Exception as exc:
+                    log.warning(
+                        "scale_down: lease release failed for terminal=%s: %s",
+                        terminal_id, exc,
+                    )
 
         return result
 
