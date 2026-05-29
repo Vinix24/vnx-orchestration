@@ -250,6 +250,28 @@ def _update_gitignore(project_dir: Path) -> None:
     print(f"  updated .gitignore (added {marker})")
 
 
+def _emit_bootstrap_event(data_root: Path, status: str, error: str = "") -> None:
+    """Append an audit event to data_root/events/db_bootstrap.ndjson (ADR-005)."""
+    import fcntl
+    import json
+    from datetime import datetime, timezone
+
+    events_dir = data_root / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    log_path = events_dir / "db_bootstrap.ndjson"
+    record: dict = {
+        "event_type": "db_bootstrap",
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "status": status,
+    }
+    if error:
+        record["error"] = error
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    with open(log_path, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f.write(line)
+
+
 def _bootstrap_runtime_dbs(data_root: Path) -> None:
     """Bootstrap runtime_coordination.db and quality_intelligence.db. Idempotent.
 
@@ -267,6 +289,9 @@ def _bootstrap_runtime_dbs(data_root: Path) -> None:
          the old dispatches table) does not fail with "no such column: project_id".
       3. auto_apply: applies numbered migration runners 0017+ (tracks, pool,
          dispatches rebuild with CHECK, dream, dispatch claim).
+
+    Raises RuntimeError (or the original exception) if any core step fails.
+    quality_intelligence.db is advisory and warns instead of raising.
     """
     print()
     print("Bootstrapping runtime databases...")
@@ -274,30 +299,31 @@ def _bootstrap_runtime_dbs(data_root: Path) -> None:
     state_dir = data_root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # runtime_coordination.db — tracks, pool, dispatches, terminal_leases, etc.
-    try:
-        from coordination_db import init_schema, db_path_from_state_dir  # type: ignore
-        init_schema(state_dir)
-        db_path = db_path_from_state_dir(state_dir)
-        # Step 2: add project_id columns (migration 0010) before numbered runners.
-        # init_schema v1-v10 creates dispatches via CREATE TABLE IF NOT EXISTS, so
-        # the column is absent on a fresh DB. run_runtime_coordination_migration
-        # adds it idempotently; auto_apply 0022 then safely SELECTs project_id.
-        try:
-            from project_id_migration import run_runtime_coordination_migration  # type: ignore
-            run_runtime_coordination_migration(db_path)
-        except Exception as exc:
-            print(f"  warning: project_id migration skipped: {exc}", file=sys.stderr)
-        try:
-            from migrations.auto_apply import auto_apply  # type: ignore
-            auto_apply(db_path)
-        except Exception as exc:
-            print(f"  warning: migration auto_apply skipped: {exc}", file=sys.stderr)
-        print("  bootstrapped runtime_coordination.db")
-    except Exception as exc:
-        print(f"  warning: runtime_coordination.db bootstrap failed: {exc}", file=sys.stderr)
+    # runtime_coordination.db — CORE: must succeed, any failure raises.
+    from coordination_db import init_schema, db_path_from_state_dir  # type: ignore
+    init_schema(state_dir)
+    db_path = db_path_from_state_dir(state_dir)
 
-    # quality_intelligence.db — dream_cycles, code_snippets, etc.
+    # Step 2: add project_id columns (migration 0010) before numbered runners.
+    # init_schema v1-v10 creates dispatches via CREATE TABLE IF NOT EXISTS, so
+    # the column is absent on a fresh DB. run_runtime_coordination_migration
+    # adds it idempotently; auto_apply 0022 then safely SELECTs project_id.
+    from project_id_migration import run_runtime_coordination_migration  # type: ignore
+    run_runtime_coordination_migration(db_path)
+
+    # Step 3: numbered migration runners 0017+ (tracks, pool, dream, claim) — CORE.
+    from migrations.auto_apply import auto_apply  # type: ignore
+    auto_apply(db_path)
+
+    print("  bootstrapped runtime_coordination.db")
+
+    # ADR-005: emit ledger event so bootstrap is auditable.
+    try:
+        _emit_bootstrap_event(data_root, status="success")
+    except Exception:
+        pass  # advisory — never block bootstrap for an audit event
+
+    # quality_intelligence.db — dream_cycles, code_snippets, etc. (advisory).
     try:
         engine_root = _engine.engine_root()
         schema_file = engine_root / "schemas" / "quality_intelligence.sql"
@@ -400,7 +426,16 @@ def vnx_init(args) -> int:
         (data_root / subdir).mkdir(parents=True, exist_ok=True)
 
     # --- bootstrap runtime DBs so track/pool/dream work immediately ----------
-    _bootstrap_runtime_dbs(data_root)
+    try:
+        _bootstrap_runtime_dbs(data_root)
+    except Exception as exc:
+        print(f"\n  error: DB bootstrap failed: {exc}", file=sys.stderr)
+        print(
+            "  Runtime databases could not be initialized. Fix the error above and"
+            " run `vnx migrate` to retry.",
+            file=sys.stderr,
+        )
+        return 1
 
     inside_project = _is_within(data_root, project_dir)
 

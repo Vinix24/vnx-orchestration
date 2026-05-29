@@ -36,7 +36,11 @@ def vnx_migrate(args) -> int:
 
     print(f"Migrating VNX runtime databases at: {data_root}")
 
-    _bootstrap_runtime_dbs(data_root)
+    try:
+        _bootstrap_runtime_dbs(data_root)
+    except Exception as exc:
+        print(f"\n  error: migration failed: {exc}", file=sys.stderr)
+        return 1
 
     print()
     print("Migration complete.")

@@ -37,19 +37,17 @@ def _clear_schema_preflight_hooks():
     fresh-bootstrap safety. Clearing it here avoids test-order pollution.
     """
     import importlib
+    sm = None
     try:
         sm = importlib.import_module("schema_migration")
         saved = {k: list(v) for k, v in sm._PREFLIGHT_HOOKS.items()}
         sm._PREFLIGHT_HOOKS.clear()
-    except Exception:
+    except (ImportError, AttributeError):
         saved = None
     yield
-    if saved is not None:
-        try:
-            sm._PREFLIGHT_HOOKS.clear()
-            sm._PREFLIGHT_HOOKS.update(saved)
-        except Exception:
-            pass
+    if saved is not None and sm is not None:
+        sm._PREFLIGHT_HOOKS.clear()
+        sm._PREFLIGHT_HOOKS.update(saved)
 
 
 # ---------------------------------------------------------------------------
@@ -301,4 +299,69 @@ class TestPoolStatusErrorMessage:
         )
         assert "migration 0020" not in src, (
             "pool status must not reference internal migration number (dead-end UX)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud regression: bootstrap failure must exit non-zero
+# ---------------------------------------------------------------------------
+
+class TestBootstrapFailLoud:
+    """vnx init and vnx migrate must exit NON-ZERO when DB bootstrap fails.
+
+    Regression for: warnings-then-success on core DB failure (blocking finding).
+    """
+
+    def test_vnx_init_exits_nonzero_on_bootstrap_failure(self, tmp_path, monkeypatch):
+        """vnx init returns non-zero when _bootstrap_runtime_dbs raises."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        import vnx_cli.commands.init_cmd as init_mod
+
+        def _fail(data_root):
+            raise RuntimeError("simulated DB bootstrap failure")
+
+        monkeypatch.setattr(init_mod, "_bootstrap_runtime_dbs", _fail)
+
+        rc = init_mod.vnx_init(_init_args(tmp_path))
+        assert rc != 0, (
+            "vnx init must return non-zero when bootstrap fails — "
+            "silent success on broken DB is the bug we fixed"
+        )
+
+    def test_vnx_migrate_exits_nonzero_on_bootstrap_failure(self, tmp_path, monkeypatch):
+        """vnx migrate returns non-zero when _bootstrap_runtime_dbs raises."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        import vnx_cli.commands.migrate as migrate_mod
+
+        def _fail(data_root):
+            raise RuntimeError("simulated migration failure")
+
+        monkeypatch.setattr(migrate_mod, "_bootstrap_runtime_dbs", _fail)
+
+        args = argparse.Namespace(project_dir=str(tmp_path))
+        rc = migrate_mod.vnx_migrate(args)
+        assert rc != 0, (
+            "vnx migrate must return non-zero when bootstrap fails"
+        )
+
+    def test_vnx_init_bootstrap_failure_prints_error(self, tmp_path, monkeypatch, capsys):
+        """vnx init must print a clear error (not just a warning) on bootstrap failure."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / ".vnx-data"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        import vnx_cli.commands.init_cmd as init_mod
+
+        def _fail(data_root):
+            raise RuntimeError("injected failure")
+
+        monkeypatch.setattr(init_mod, "_bootstrap_runtime_dbs", _fail)
+
+        init_mod.vnx_init(_init_args(tmp_path))
+        captured = capsys.readouterr()
+        assert "error" in captured.err.lower(), (
+            "vnx init must print 'error' to stderr on bootstrap failure, not a silent warning"
         )
