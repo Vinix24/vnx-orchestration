@@ -268,6 +268,53 @@ class TestLitellmIntelligenceWiring:
 
 
 # ---------------------------------------------------------------------------
+# _dispatch_kimi intelligence wiring
+# ---------------------------------------------------------------------------
+
+class TestKimiIntelligenceWiring:
+
+    def test_kimi_spawn_receives_enriched_prompt(self, tmp_path):
+        args = _make_args("kimi")
+        result = _make_result_with_item()
+        spawn_result = _SpawnResult()
+        with patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path):
+            with _patch_selector(result):
+                with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=spawn_result) as mock_spawn:
+                    with _patch_governance():
+                        with patch("event_store.EventStore"):
+                            provider_dispatch._dispatch_kimi(args)
+        prompt_used = mock_spawn.call_args[1].get("prompt") or mock_spawn.call_args[0][0]
+        assert "TestAntipattern" in prompt_used
+        assert "base instruction" in prompt_used
+
+    def test_kimi_spawn_receives_original_when_no_intelligence(self, tmp_path):
+        args = _make_args("kimi", instruction="plain kimi task")
+        result = _make_result_empty()
+        spawn_result = _SpawnResult()
+        with patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path):
+            with _patch_selector(result):
+                with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=spawn_result) as mock_spawn:
+                    with _patch_governance():
+                        with patch("event_store.EventStore"):
+                            provider_dispatch._dispatch_kimi(args)
+        prompt_used = mock_spawn.call_args[1].get("prompt") or mock_spawn.call_args[0][0]
+        assert prompt_used == "plain kimi task"
+
+    def test_kimi_enrich_called_once_no_double_enrichment(self, tmp_path):
+        args = _make_args("kimi")
+        result = _make_result_empty()
+        spawn_result = _SpawnResult()
+        with patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path):
+            with _patch_selector(result):
+                with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=spawn_result):
+                    with _patch_governance():
+                        with patch("event_store.EventStore"):
+                            with patch.object(provider_dispatch, "_enrich_instruction", wraps=provider_dispatch._enrich_instruction) as mock_enrich:
+                                provider_dispatch._dispatch_kimi(args)
+        assert mock_enrich.call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # Claude path does NOT get double-injected
 # ---------------------------------------------------------------------------
 
