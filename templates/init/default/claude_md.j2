@@ -1,0 +1,24 @@
+## VNX Governance System
+
+Project: {{ project_name }} ({{ project_id }})
+VNX version: {{ vnx_version }}
+
+This project uses **VNX Glass Box Governance** for multi-agent orchestration.
+
+### Terminals
+- **T0** (Orchestrator): Plans work, reviews results. Does NOT write code.
+- **T1** (Track A): Primary implementation.
+- **T2** (Track B): Testing and validation.
+- **T3** (Track C): Code review and security.
+
+### Key Paths
+- `.vnx/` — Config (governance_profiles.yaml, config.yml). Commit this.
+- `.vnx-data/` — Runtime state (dispatches, receipts, logs). Do not commit.
+- `.claude/terminals/T0/CLAUDE.md` — T0-specific instructions.
+- `.claude/skills/` — Shared agent skills.
+
+### Quick Start
+1. `vnx doctor` — validate setup
+2. Edit `.claude/terminals/T0/CLAUDE.md` for your project context
+3. `vnx track new <id> --project-id {{ project_id }} --title "..." --goal "..."`
+4. Start T0 terminal: load `@t0-orchestrator`

@@ -8,13 +8,16 @@ marker, and an optional ``agents/`` scaffold. The runtime state tree
 (a user-data-dir for pip installs), never inside the project map. This keeps
 the committed footprint tiny (< 10 KB) and stops a pip-installed VNX from
 writing runtime state into the package or the repo.
+
+A-11 extension: adds .claude/ skeleton, local .vnx-data/ layout, .vnx-version
+pin, root CLAUDE.md and FEATURE_PLAN.md via Jinja2 templates (default/minimal).
 """
 
 import os
 import sys
 from pathlib import Path
 
-from vnx_cli import _engine
+from vnx_cli import _engine, __version__
 
 GOVERNANCE_PROFILES_YAML = """\
 # VNX Governance Profiles
@@ -99,6 +102,18 @@ VNX_DATA_SUBDIRS = [
     "locks",
 ]
 
+# Local .vnx-data/ subdirs written by the init scaffold (always project-local).
+VNX_DATA_INIT_SUBDIRS = [
+    "state",
+    "dispatches/pending",
+    "dispatches/active",
+    "dispatches/completed",
+    "events",
+    "unified_reports",
+]
+
+_VALID_TEMPLATES = {"default", "minimal"}
+
 
 def _atomic_write(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` via a tmp file + os.replace (atomic)."""
@@ -136,10 +151,127 @@ def _is_within(child: Path, parent: Path) -> bool:
         return False
 
 
+def _templates_root(template: str) -> Path:
+    """Return the path to the init template set (default or minimal)."""
+    return _engine.engine_root() / "templates" / "init" / template
+
+
+def _render_template(tmpl_path: Path, ctx: dict) -> str:
+    """Render a Jinja2 .j2 template file with ``ctx`` as the template context."""
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+    env = Environment(
+        loader=FileSystemLoader(str(tmpl_path.parent)),
+        undefined=StrictUndefined,
+        keep_trailing_newline=True,
+    )
+    return env.get_template(tmpl_path.name).render(**ctx)
+
+
+def _scaffold_claude_dir(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:
+    """Create the .claude/ skeleton from templates."""
+    claude_dir = project_dir / ".claude"
+
+    t0_md = claude_dir / "terminals" / "T0" / "CLAUDE.md"
+    t0_md.parent.mkdir(parents=True, exist_ok=True)
+    if not t0_md.exists() or force:
+        _atomic_write(t0_md, _render_template(tmpl_root / "terminals" / "T0_claude_md.j2", ctx))
+        print(f"  created {t0_md.relative_to(project_dir)}")
+    else:
+        print(f"  exists  {t0_md.relative_to(project_dir)}")
+
+    skills_dir = claude_dir / "skills"
+    if not skills_dir.exists():
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  created {skills_dir.relative_to(project_dir)}/")
+    else:
+        print(f"  exists  {skills_dir.relative_to(project_dir)}/")
+
+    settings_path = claude_dir / "settings.json"
+    if not settings_path.exists() or force:
+        _atomic_write(settings_path, _render_template(tmpl_root / "settings.json.j2", ctx))
+        print(f"  created {settings_path.relative_to(project_dir)}")
+    else:
+        print(f"  exists  {settings_path.relative_to(project_dir)}")
+
+
+def _scaffold_vnx_data_local(project_dir: Path) -> None:
+    """Create the project-local .vnx-data/ skeleton."""
+    vnx_data = project_dir / ".vnx-data"
+    for subdir in VNX_DATA_INIT_SUBDIRS:
+        (vnx_data / subdir).mkdir(parents=True, exist_ok=True)
+    print(f"  created .vnx-data/ (local scaffold)")
+
+
+def _write_vnx_version(project_dir: Path, version: str, force: bool) -> bool:
+    """Write .vnx-version to ``project_dir``. Returns True if written."""
+    path = project_dir / ".vnx-version"
+    if path.exists() and not force:
+        return False
+    _atomic_write(path, version + "\n")
+    return True
+
+
+def _write_root_claude_md(project_dir: Path, tmpl_root: Path, ctx: dict, force: bool) -> None:
+    path = project_dir / "CLAUDE.md"
+    if path.exists() and not force:
+        print("  exists  CLAUDE.md")
+        return
+    _atomic_write(path, _render_template(tmpl_root / "claude_md.j2", ctx))
+    print("  created CLAUDE.md")
+
+
+def _write_feature_plan(project_dir: Path, force: bool) -> None:
+    path = project_dir / "FEATURE_PLAN.md"
+    if path.exists() and not force:
+        print("  exists  FEATURE_PLAN.md")
+        return
+    _atomic_write(
+        path,
+        "# Feature Plan\n\n"
+        "<!-- Start a new track: vnx track new <id>"
+        " --project-id <proj-id> --title '...' --goal '...' -->\n",
+    )
+    print("  created FEATURE_PLAN.md")
+
+
+def _update_gitignore(project_dir: Path) -> None:
+    """Append .vnx-data/ to .gitignore if not already present."""
+    gi_path = project_dir / ".gitignore"
+    marker = ".vnx-data/"
+    if gi_path.exists():
+        content = gi_path.read_text(encoding="utf-8")
+        if marker in content:
+            print(f"  exists  .gitignore (already has {marker})")
+            return
+        new_content = content.rstrip() + "\n\n# VNX runtime state\n" + marker + "\n"
+    else:
+        new_content = "# VNX runtime state\n" + marker + "\n"
+    _atomic_write(gi_path, new_content)
+    print(f"  updated .gitignore (added {marker})")
+
+
 def vnx_init(args) -> int:
-    project_dir = Path(args.project_dir).resolve()
+    raw_dir = getattr(args, "project_path", None) or args.project_dir
+    project_dir = Path(raw_dir).resolve()
+    template = getattr(args, "template", "default") or "default"
+    force = getattr(args, "force", False)
+
+    if template not in _VALID_TEMPLATES:
+        print(f"  error: unknown template {template!r}. Choose: {', '.join(sorted(_VALID_TEMPLATES))}", file=sys.stderr)
+        return 1
 
     print(f"Initialising VNX project at: {project_dir}")
+    print(f"  template: {template}")
+
+    # Safety gate: abort if already initialised and --force not set.
+    version_pin = project_dir / ".vnx-version"
+    if version_pin.exists() and not force:
+        print(
+            f"\n  error: .vnx-version already exists ({version_pin.read_text().strip()}).\n"
+            "  Use --force to reinitialise.",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         project_id = _engine.derive_project_id(
@@ -203,6 +335,25 @@ def vnx_init(args) -> int:
         (data_root / subdir).mkdir(parents=True, exist_ok=True)
 
     inside_project = _is_within(data_root, project_dir)
+
+    # --- A-11: .claude/ skeleton, local .vnx-data/, version pin, CLAUDE.md -
+    print()
+    tmpl_root = _templates_root(template)
+    ctx = {
+        "project_name": project_dir.name,
+        "project_id": project_id,
+        "vnx_version": __version__,
+    }
+    _scaffold_claude_dir(project_dir, tmpl_root, ctx, force)
+    _scaffold_vnx_data_local(project_dir)
+
+    written = _write_vnx_version(project_dir, __version__, force)
+    print(f"  {'created' if written else 'exists '} .vnx-version ({__version__})")
+
+    _write_root_claude_md(project_dir, tmpl_root, ctx, force)
+    _write_feature_plan(project_dir, force)
+    _update_gitignore(project_dir)
+
     print()
     print(f"Runtime state: {data_root}")
     if inside_project:
@@ -215,9 +366,8 @@ def vnx_init(args) -> int:
     print()
     print("Next steps:")
     print("  1. Review .vnx/governance_profiles.yaml and adjust gates")
-    print("  2. Add agent instructions in agents/<terminal>/CLAUDE.md")
+    print("  2. Edit .claude/terminals/T0/CLAUDE.md for project-specific T0 instructions")
     print("  3. Run `vnx doctor` to validate your setup")
-    if inside_project:
-        print("  4. Add .vnx-data/ to .gitignore (runtime state — do not commit)")
+    print(f"  4. `vnx track new <id> --project-id {project_id} --title '...' --goal '...'`")
 
     return 0
