@@ -194,6 +194,7 @@ def run_dream_cycle(
     cycle_id = (
         f"dream-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     )
+    print(f"dream run: cycle={cycle_id} project={project_id}", flush=True)
 
     # GAP-7: receipt-completeness preflight — skip cycle on empty/stale data
     data_root = resolve_project_root(__file__) / ".vnx-data"
