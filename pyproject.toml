@@ -70,4 +70,5 @@ vnx_orchestration = [
     "templates/**/*",
     "configs/**/*",
     "hooks/**/*",
+    "examples/**/*",
 ]

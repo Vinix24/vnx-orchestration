@@ -1,5 +1,6 @@
 governance_profile: minimal
 description: "Demonstration agent for the VNX quickstart guide"
+default_instruction: "Write a greeting for a new VNX user"
 isolation:
   scope_type: example
   allowed_paths:
