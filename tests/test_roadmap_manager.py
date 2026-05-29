@@ -605,3 +605,78 @@ def test_consumed_token_does_not_reauthorize(roadmap_env, monkeypatch):
     r2 = manager.advance()
     assert r2["advanced"] is False
     assert r2["reason"] == "awaiting_human_approval", "consumed token must not reauthorize"
+
+
+# ---------------------------------------------------------------------------
+# RA-5: per-PR dispatch driver (step)
+# ---------------------------------------------------------------------------
+
+
+def test_step_dispatches_first_ready_pr(roadmap_env, monkeypatch):
+    """step creates+promotes a dispatch for the first dependency-ready PR, returns dispatch_id+pr_id."""
+    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    result = manager.run_feature_step()
+
+    assert result["status"] == "dispatched", f"expected dispatched, got: {result}"
+    assert result["pr_id"] == "PR-0"
+    assert result["dispatch_id"] is not None
+    assert result["feature_id"] == "feature-a"
+
+    # Dispatch must exist in pending/ (auto-approved via VNX_QUEUE_POPUP_ENABLED=0)
+    dispatch_dir = roadmap_env["project_root"] / ".vnx-data" / "dispatches"
+    pending_files = list((dispatch_dir / "pending").glob("*.md"))
+    assert len(pending_files) == 1, "exactly one dispatch must be in pending/"
+
+
+def test_step_second_call_no_ready_pr(roadmap_env, monkeypatch):
+    """second step returns no_ready_pr when only PR is already in_progress."""
+    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    first = manager.run_feature_step()
+    assert first["status"] == "dispatched"
+
+    second = manager.run_feature_step()
+    assert second["status"] == "no_ready_pr"
+    assert second["feature_id"] == "feature-a"
+
+
+def test_step_receipt_project_id_stamped(roadmap_env, monkeypatch):
+    """ADR-007: roadmap_dispatch_step receipt carries project_id."""
+    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+    monkeypatch.setenv("VNX_PROJECT_ID", "proj-step-test")
+    receipts = []
+    monkeypatch.setattr(rm, "emit_governance_receipt", lambda *a, **kw: receipts.append(kw))
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    manager.run_feature_step()
+
+    step_receipt = next(
+        (r for r in receipts if r.get("project_id") == "proj-step-test" and "dispatch_id" in r),
+        None,
+    )
+    assert step_receipt is not None, "roadmap_dispatch_step receipt not emitted"
+    assert step_receipt["pr_id"] == "PR-0"
+    assert step_receipt["feature_id"] == "feature-a"
+
+
+def test_step_no_active_feature_returns_status(roadmap_env, monkeypatch):
+    """step with no active feature returns no_active_feature without side effects."""
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    # intentionally do NOT load any feature
+
+    result = manager.run_feature_step()
+
+    assert result["status"] == "no_active_feature"

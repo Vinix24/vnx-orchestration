@@ -602,6 +602,72 @@ Implement the minimum blocking fix required before the roadmap may advance.
         self.load_feature(next_feature["feature_id"])
         return {"advanced": True, "reason": "loaded_next_feature", "next_feature": next_feature["feature_id"]}
 
+    def run_feature_step(self) -> Dict[str, Any]:
+        """Dispatch the next dependency-ready PR for the active feature.
+
+        ADR-007: emits project_id-stamped roadmap_dispatch_step receipt.
+        Respects VNX_QUEUE_POPUP_ENABLED env switch via promote_dispatch.
+        Returns dispatch_id + pr_id on success, or a no_ready_pr status without
+        side effects when no queued PR is dependency-ready.
+        """
+        state = self.load_state()
+        current_id = state.get("current_active_feature")
+        if not current_id:
+            return {"status": "no_active_feature", "reason": "no feature is currently active"}
+
+        pr_manager = PRQueueManager()
+        next_pr = pr_manager.get_next_pr()
+
+        if not next_pr:
+            emit_governance_receipt(
+                "roadmap_dispatch_step",
+                status="no_ready_pr",
+                project_id=self.project_id,
+                feature_id=current_id,
+            )
+            return {
+                "status": "no_ready_pr",
+                "feature_id": current_id,
+                "reason": "no dependency-ready PR in queue",
+            }
+
+        pr_id = next_pr["id"]
+        dispatch_id = pr_manager.create_dispatch_from_pr(pr_id)
+        if not dispatch_id:
+            return {
+                "status": "failed",
+                "feature_id": current_id,
+                "pr_id": pr_id,
+                "reason": "dispatch creation failed",
+            }
+
+        promoted = pr_manager.promote_dispatch(dispatch_id)
+        if not promoted:
+            return {
+                "status": "failed",
+                "feature_id": current_id,
+                "pr_id": pr_id,
+                "dispatch_id": dispatch_id,
+                "reason": "dispatch promotion failed",
+            }
+
+        pr_manager.update_pr_status(pr_id, "in_progress")
+
+        emit_governance_receipt(
+            "roadmap_dispatch_step",
+            status="success",
+            project_id=self.project_id,
+            feature_id=current_id,
+            pr_id=pr_id,
+            dispatch_id=dispatch_id,
+        )
+        return {
+            "status": "dispatched",
+            "feature_id": current_id,
+            "pr_id": pr_id,
+            "dispatch_id": dispatch_id,
+        }
+
     def status(self) -> Dict[str, Any]:
         state = self.load_state()
         return {
@@ -643,6 +709,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     approve_parser.add_argument("--justification", required=True)
     approve_parser.add_argument("--json", action="store_true")
 
+    step_parser = sub.add_parser("step")
+    step_parser.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     manager = RoadmapManager()
 
@@ -658,6 +727,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = manager.advance()
     elif args.command == "approve":
         result = manager.approve(args.feature_id, actor=args.actor, justification=args.justification)
+    elif args.command == "step":
+        result = manager.run_feature_step()
     else:
         raise AssertionError("unreachable")
 
