@@ -66,6 +66,7 @@ def _register_dispatch(state_dir, dispatch_id="d-001", terminal_id="T1", **kwarg
             terminal_id=terminal_id,
             track="B",
             **kwargs,
+        project_id="vnx-dev",
         )
         conn.commit()
     return result

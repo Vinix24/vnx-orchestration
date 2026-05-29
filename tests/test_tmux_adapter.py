@@ -64,7 +64,7 @@ def _make_adapter(state_dir: str, *, primary_path: bool = True) -> TmuxAdapter:
 def _register_and_lease(state_dir: str, dispatch_id: str, terminal_id: str) -> None:
     """Register a dispatch and acquire a lease for terminal in the DB."""
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
         acquire_lease(conn, terminal_id=terminal_id, dispatch_id=dispatch_id)
         conn.commit()
 

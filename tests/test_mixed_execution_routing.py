@@ -127,6 +127,7 @@ def _register_dispatch(state_dir, dispatch_id, terminal_id="T1"):
             priority="P1",
             bundle_path=f"/tmp/{dispatch_id}",
             actor="test",
+        project_id="vnx-dev",
         )
         conn.commit()
 

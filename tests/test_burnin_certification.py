@@ -111,7 +111,7 @@ def _make_run(registry, state_dir, dispatch_id=None, **kwargs):
     """Create a dispatch + attempt + run in a single call. Returns HeadlessRun."""
     did = dispatch_id or f"d-{uuid.uuid4().hex[:12]}"
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=did)
+        register_dispatch(conn, dispatch_id=did, project_id="vnx-dev")
         attempt = create_attempt(
             conn, dispatch_id=did, terminal_id="T1", attempt_number=1,
         )
@@ -131,7 +131,7 @@ def _create_test_dispatch(state_dir, dispatch_id=None):
     """Create a dispatch for adapter testing. Returns dispatch_id."""
     dispatch_id = dispatch_id or f"test-dispatch-{uuid.uuid4().hex[:8]}"
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1")
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id="T1", project_id="vnx-dev")
         conn.commit()
     return dispatch_id
 
@@ -174,7 +174,7 @@ class TestB1DurableIdentity:
     def test_identity_fields_are_complete(self, state_dir, registry):
         did = f"d-fields-{uuid.uuid4().hex[:8]}"
         with get_connection(state_dir) as conn:
-            register_dispatch(conn, dispatch_id=did)
+            register_dispatch(conn, dispatch_id=did, project_id="vnx-dev")
             attempt = create_attempt(conn, dispatch_id=did, terminal_id="T2", attempt_number=1)
             conn.commit()
         run = registry.create_run(

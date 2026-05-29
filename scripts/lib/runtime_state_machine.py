@@ -18,6 +18,7 @@ from coordination_db import (
     InvalidTransitionError,
     _append_event,
     _dump,
+    _has_project_id_col,
     _new_event_id,
     _now_utc,
 )
@@ -69,6 +70,7 @@ def register_dispatch(
     conn: sqlite3.Connection,
     *,
     dispatch_id: str,
+    project_id: str,
     terminal_id: Optional[str] = None,
     track: Optional[str] = None,
     priority: str = "P2",
@@ -79,31 +81,67 @@ def register_dispatch(
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Register a new dispatch in the queued state (idempotent)."""
-    existing = conn.execute(
-        "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-    ).fetchone()
+    """Register a new dispatch in the queued state (idempotent).
+
+    ADR-007: project_id is MANDATORY — no silent default. Idempotency is
+    scoped to the composite (dispatch_id, project_id) when the schema has the
+    project_id column, preventing cross-tenant collision where the same
+    dispatch_id in two projects would otherwise return the wrong row.
+    """
+    has_pid = _has_project_id_col(conn, "dispatches")
+
+    if has_pid:
+        existing = conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+    else:
+        existing = conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+        ).fetchone()
     if existing:
         return dict(existing)
 
     now = _now_utc()
-    conn.execute(
-        """
-        INSERT INTO dispatches
-            (dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
-             bundle_path, expires_after, created_at, updated_at, metadata_json)
-        VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (dispatch_id, terminal_id, track, priority, pr_ref, gate,
-         bundle_path, expires_after, now, now, _dump(metadata)),
-    )
+    if has_pid:
+        conn.execute(
+            """
+            INSERT INTO dispatches
+                (dispatch_id, project_id, state, terminal_id, track, priority, pr_ref, gate,
+                 bundle_path, expires_after, created_at, updated_at, metadata_json)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispatch_id, project_id, terminal_id, track, priority, pr_ref, gate,
+             bundle_path, expires_after, now, now, _dump(metadata)),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO dispatches
+                (dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
+                 bundle_path, expires_after, created_at, updated_at, metadata_json)
+            VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispatch_id, terminal_id, track, priority, pr_ref, gate,
+             bundle_path, expires_after, now, now, _dump(metadata)),
+        )
     _append_event(
         conn, event_type="dispatch_queued", entity_type="dispatch",
         entity_id=dispatch_id, from_state=None, to_state="queued",
         actor=actor, reason="initial registration", metadata=metadata,
+        project_id=project_id,
     )
+    if has_pid:
+        return dict(
+            conn.execute(
+                "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                (dispatch_id, project_id),
+            ).fetchone()
+        )
     return dict(
-        conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+        conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+        ).fetchone()
     )
 
 

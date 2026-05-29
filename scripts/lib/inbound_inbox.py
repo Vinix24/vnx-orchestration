@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from project_scope import current_project_id as _current_project_id
 from runtime_coordination import (
     _append_event,
     _now_utc,
@@ -385,6 +386,7 @@ class InboundInbox:
                 dispatch_row = register_dispatch(
                     conn,
                     dispatch_id=dispatch_id,
+                    project_id=_current_project_id(),
                     terminal_id=dispatch_params.get("terminal_id"),
                     track=dispatch_params.get("track"),
                     priority=dispatch_params.get("priority", "P2"),
