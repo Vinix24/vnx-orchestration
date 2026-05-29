@@ -85,27 +85,44 @@ def _resolve_dispatch_paths(raw: str) -> "list[str] | None":
 
 
 def _enrich_instruction(args: argparse.Namespace) -> str:
-    """Prepend intelligence context to instruction for non-Claude provider paths.
+    """Prepend intelligence context and repo map to instruction for non-Claude provider paths.
 
     Claude dispatches are enriched inside subprocess_dispatch.deliver_with_recovery
     via skill_injection._build_intelligence_section; this function handles the
     remaining providers (codex, gemini, litellm, kimi).
 
-    Returns the original instruction unchanged on any failure (best-effort).
+    Applies two layers (best-effort, each layer falls back silently on failure):
+    1. Intelligence injection (existing — ADR context, prior findings, etc.)
+    2. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher step)
+
+    Returns the original instruction unchanged on any failure.
     """
+    # Layer: intelligence injection (existing)
     try:
         from intelligence_injection import build_intelligence_section  # noqa: PLC0415
+        enriched = build_intelligence_section(
+            instruction=args.instruction,
+            dispatch_id=args.dispatch_id,
+            role=getattr(args, "role", None),
+            state_dir=_resolve_state_dir(),
+            pr_id=getattr(args, "pr_id", None),
+            dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+        )
     except ImportError as exc:
         logger.warning("_enrich_instruction: intelligence_injection unavailable (%s)", exc)
-        return args.instruction
-    return build_intelligence_section(
-        instruction=args.instruction,
-        dispatch_id=args.dispatch_id,
-        role=getattr(args, "role", None),
-        state_dir=_resolve_state_dir(),
-        pr_id=getattr(args, "pr_id", None),
-        dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-    )
+        enriched = args.instruction
+
+    # Layer: repo map (new — extends coverage to all providers)
+    try:
+        from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
+        enriched = apply_repo_map_layer(
+            enriched,
+            {"role": getattr(args, "role", None)},
+        )
+    except Exception as exc:
+        logger.warning("_enrich_instruction: repo map layer failed (%s) — skipping", exc)
+
+    return enriched
 
 
 def _extract_response_text(result: Any) -> str:
@@ -570,6 +587,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--auto-route", action="store_true",
         help="Use smart_router to auto-select provider+model (opt-in, default off).",
     )
+    parser.add_argument(
+        "--no-repo-map", action="store_true", dest="no_repo_map",
+        help="Skip repo map injection (mirrors --no-repo-map in subprocess_dispatch).",
+    )
     return parser
 
 
@@ -1033,6 +1054,10 @@ def main(argv: list[str] | None = None) -> int:
     # is a free-form string (litellm:<model>), not a fixed choices= set, so we
     # validate manually after parsing.
     args = parser.parse_args(argv)
+
+    # Propagate --no-repo-map flag to env var so apply_repo_map_layer picks it up.
+    if getattr(args, "no_repo_map", False):
+        os.environ["VNX_NO_REPO_MAP"] = "1"
 
     provider = args.provider
 
