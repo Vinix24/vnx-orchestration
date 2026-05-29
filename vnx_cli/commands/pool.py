@@ -37,7 +37,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     except (sqlite3.OperationalError, RuntimeError) as exc:
         print(
             f"pool not initialized for project '{project_id}' — "
-            f"run: vnx init && vnx migrate (migration 0020)\n  detail: {exc}",
+            f"run: vnx migrate (or vnx init on a fresh project)\n  detail: {exc}",
             file=sys.stderr,
         )
         return 1

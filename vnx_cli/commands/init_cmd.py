@@ -250,6 +250,71 @@ def _update_gitignore(project_dir: Path) -> None:
     print(f"  updated .gitignore (added {marker})")
 
 
+def _bootstrap_runtime_dbs(data_root: Path) -> None:
+    """Bootstrap runtime_coordination.db and quality_intelligence.db. Idempotent.
+
+    Runs after vnx init creates the directory scaffold. Applies the full
+    migration chain (v1-v10 base schema + project_id columns + 0017/0019/0020/
+    0022/0024/0026 runners) so that vnx track list, vnx pool status, and
+    vnx dream status return empty results instead of "no such table".
+
+    Step order matters:
+      1. init_schema: applies base schema v1 through v10 (dispatches table
+         created WITHOUT project_id — CREATE TABLE IF NOT EXISTS is a no-op).
+      2. run_runtime_coordination_migration: idempotently adds project_id column
+         to dispatches, terminal_leases, etc. (migration 0010). This must run
+         BEFORE auto_apply so that migration 0022 (which SELECTs project_id from
+         the old dispatches table) does not fail with "no such column: project_id".
+      3. auto_apply: applies numbered migration runners 0017+ (tracks, pool,
+         dispatches rebuild with CHECK, dream, dispatch claim).
+    """
+    print()
+    print("Bootstrapping runtime databases...")
+
+    state_dir = data_root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # runtime_coordination.db — tracks, pool, dispatches, terminal_leases, etc.
+    try:
+        from coordination_db import init_schema, db_path_from_state_dir  # type: ignore
+        init_schema(state_dir)
+        db_path = db_path_from_state_dir(state_dir)
+        # Step 2: add project_id columns (migration 0010) before numbered runners.
+        # init_schema v1-v10 creates dispatches via CREATE TABLE IF NOT EXISTS, so
+        # the column is absent on a fresh DB. run_runtime_coordination_migration
+        # adds it idempotently; auto_apply 0022 then safely SELECTs project_id.
+        try:
+            from project_id_migration import run_runtime_coordination_migration  # type: ignore
+            run_runtime_coordination_migration(db_path)
+        except Exception as exc:
+            print(f"  warning: project_id migration skipped: {exc}", file=sys.stderr)
+        try:
+            from migrations.auto_apply import auto_apply  # type: ignore
+            auto_apply(db_path)
+        except Exception as exc:
+            print(f"  warning: migration auto_apply skipped: {exc}", file=sys.stderr)
+        print("  bootstrapped runtime_coordination.db")
+    except Exception as exc:
+        print(f"  warning: runtime_coordination.db bootstrap failed: {exc}", file=sys.stderr)
+
+    # quality_intelligence.db — dream_cycles, code_snippets, etc.
+    try:
+        engine_root = _engine.engine_root()
+        schema_file = engine_root / "schemas" / "quality_intelligence.sql"
+        if schema_file.exists():
+            import contextlib
+            import io
+            from quality_db_init import bootstrap_qi_db  # type: ignore
+            qi_db = state_dir / "quality_intelligence.db"
+            with contextlib.redirect_stdout(io.StringIO()):
+                bootstrap_qi_db(qi_db, schema_file)
+            print("  bootstrapped quality_intelligence.db")
+        else:
+            print("  skipped quality_intelligence.db (schema file not found)", file=sys.stderr)
+    except Exception as exc:
+        print(f"  warning: quality_intelligence.db bootstrap failed: {exc}", file=sys.stderr)
+
+
 def vnx_init(args) -> int:
     raw_dir = getattr(args, "project_path", None) or args.project_dir
     project_dir = Path(raw_dir).resolve()
@@ -333,6 +398,9 @@ def vnx_init(args) -> int:
     # --- runtime layout under the resolved state root ---------------------
     for subdir in VNX_DATA_SUBDIRS:
         (data_root / subdir).mkdir(parents=True, exist_ok=True)
+
+    # --- bootstrap runtime DBs so track/pool/dream work immediately ----------
+    _bootstrap_runtime_dbs(data_root)
 
     inside_project = _is_within(data_root, project_dir)
 
