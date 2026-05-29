@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vnx.auto-dream</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{ vnx_bin_path }}</string>
+        <string>dream</string>
+        <string>run</string>
+        <string>--project-id</string>
+        <string>{{ project_id }}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>{{ project_root }}/.vnx-data/events/dream/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ project_root }}/.vnx-data/events/dream/launchd.err.log</string>
+</dict>
+</plist>
