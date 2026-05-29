@@ -250,6 +250,8 @@ def _build_cheap_lane_argv(
         argv.extend(["--dispatch-paths", args.dispatch_paths])
     if getattr(args, "pr_id", None):
         argv.extend(["--pr-id", args.pr_id])
+    if getattr(args, "no_repo_map", False):
+        argv.append("--no-repo-map")
     return argv
 
 
@@ -351,15 +353,40 @@ if __name__ == "__main__":
         "--no-adr-inject", action="store_true",
         help="Disable Wave-5 ADR context injection (debug/testing only).",
     )
+    parser.add_argument(
+        "--no-repo-map", action="store_true",
+        help="Skip repo map injection for this dispatch (e.g. review/research batches).",
+    )
     args = parser.parse_args()
 
     # Wave-5 ADR injection opt-out: set env var before instruction assembly (INT-2)
     if getattr(args, "no_adr_inject", False):
         os.environ["VNX_NO_ADR_INJECT"] = "1"
 
+    # Repo map opt-out: set env var so apply_repo_map_layer picks it up downstream.
+    if getattr(args, "no_repo_map", False):
+        os.environ["VNX_NO_REPO_MAP"] = "1"
+
     # OI-1107: fall back to Role: header in instruction, then to a documented default.
     if args.role is None:
         args.role = _extract_role_from_instruction(args.instruction) or _ROLE_FALLBACK
+
+    # Repo-map enrichment: apply before delivery so direct invocations (dispatch_deliver.sh,
+    # cheap-lane delegation) receive the same repo-map layer that the daemon provides.
+    # The double-injection guard in apply_repo_map_layer prevents re-injection when the
+    # instruction was already enriched (e.g. passed through from a daemon run).
+    try:
+        from dispatch_enricher import apply_repo_map_layer as _apply_repo_map  # noqa: PLC0415
+        args.instruction = _apply_repo_map(
+            args.instruction,
+            {"role": args.role},
+        )
+    except Exception as _repo_map_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(
+            "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
+            _repo_map_exc,
+        )
 
     _dispatch_paths: "list[str] | None" = None
     if args.dispatch_paths.strip():
