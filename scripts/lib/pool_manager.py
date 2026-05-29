@@ -199,7 +199,7 @@ class PoolManager:
         if config is None:
             raise RuntimeError(
                 f"No pool_config row for project={self.project_id} pool={self.pool_id}. "
-                "Run migration 0020 and bootstrap first."
+                "Run: vnx migrate (or vnx init on a fresh project)."
             )
         state = self.repo.get_state(self.pool_id, now)
         members = self.repo.list_members(self.pool_id)
