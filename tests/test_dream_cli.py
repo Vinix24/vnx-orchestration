@@ -134,10 +134,9 @@ class TestDreamReviewApprove:
         _insert_cycle(db_path, cycle_id, "vnx-dev", "2026-05-29T12:00:00+00:00")
         _write_pending_review(tmp_path, cycle_id, "vnx-dev")
 
-        with patch("review_gate.resolve_project_root", return_value=tmp_path):
-            review_gate.approve_cycle(
-                cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
-            )
+        review_gate.approve_cycle(
+            cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
+        )
 
         conn = sqlite3.connect(str(db_path))
         archive_rows = conn.execute(
@@ -164,10 +163,9 @@ class TestDreamReviewApprove:
         _insert_cycle(db_path, cycle_id, "vnx-dev", "2026-05-29T13:00:00+00:00")
         _write_pending_review(tmp_path, cycle_id, "vnx-dev")
 
-        with patch("review_gate.resolve_project_root", return_value=tmp_path):
-            review_gate.approve_cycle(
-                cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
-            )
+        review_gate.approve_cycle(
+            cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
+        )
 
         events = list((tmp_path / ".vnx-data" / "events" / "dream").glob("*.ndjson"))
         assert len(events) == 1
@@ -183,11 +181,10 @@ class TestDreamReviewReject:
         _insert_cycle(db_path, cycle_id, "vnx-dev", "2026-05-29T14:00:00+00:00")
         _write_pending_review(tmp_path, cycle_id, "vnx-dev")
 
-        with patch("review_gate.resolve_project_root", return_value=tmp_path):
-            review_gate.reject_cycle(
-                cycle_id, "vnx-dev", "test rejection", db_path,
-                data_root=tmp_path / ".vnx-data",
-            )
+        review_gate.reject_cycle(
+            cycle_id, "vnx-dev", "test rejection", db_path,
+            data_root=tmp_path / ".vnx-data",
+        )
 
         conn = sqlite3.connect(str(db_path))
         archive_count = conn.execute(
@@ -209,11 +206,10 @@ class TestDreamReviewReject:
         _insert_cycle(db_path, cycle_id, "vnx-dev", "2026-05-29T15:00:00+00:00")
         review_path = _write_pending_review(tmp_path, cycle_id, "vnx-dev")
 
-        with patch("review_gate.resolve_project_root", return_value=tmp_path):
-            review_gate.reject_cycle(
-                cycle_id, "vnx-dev", "low confidence", db_path,
-                data_root=tmp_path / ".vnx-data",
-            )
+        review_gate.reject_cycle(
+            cycle_id, "vnx-dev", "low confidence", db_path,
+            data_root=tmp_path / ".vnx-data",
+        )
 
         review = json.loads(review_path.read_text())
         assert review["rejected_reason"] == "low confidence"
@@ -319,11 +315,10 @@ class TestApproveArchiveFailure:
         conn.close()
         _write_pending_review(tmp_path, cycle_id, "vnx-dev")
 
-        with patch("review_gate.resolve_project_root", return_value=tmp_path):
-            with pytest.raises(sqlite3.OperationalError):
-                review_gate.approve_cycle(
-                    cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
-                )
+        with pytest.raises(sqlite3.OperationalError):
+            review_gate.approve_cycle(
+                cycle_id, "vnx-dev", db_path, data_root=tmp_path / ".vnx-data"
+            )
 
         conn = sqlite3.connect(str(db_path))
         row = conn.execute(
@@ -403,3 +398,22 @@ class TestResolvePathsCanonical:
         assert db_path != local_root / ".vnx-data" / "state" / "quality_intelligence.db", (
             "db_path must not be the hardcoded local worktree path"
         )
+
+
+class TestReviewGateResolveDataRoot:
+    """_resolve_data_root uses vnx_paths when no override is passed."""
+
+    def test_explicit_data_root_returned_unchanged(self, tmp_path):
+        """An explicit data_root argument is returned directly."""
+        explicit = tmp_path / "my-data"
+        result = review_gate._resolve_data_root(explicit)
+        assert result == explicit
+
+    def test_none_delegates_to_vnx_paths(self, tmp_path):
+        """When data_root is None, falls back to vnx_paths.resolve_paths()."""
+        import vnx_paths as _vnx_paths_mod
+        sentinel = tmp_path / "vnx-paths-dir"
+        paths_return = {"VNX_DATA_DIR": str(sentinel), "PROJECT_ROOT": str(tmp_path)}
+        with patch.object(_vnx_paths_mod, "resolve_paths", return_value=paths_return):
+            result = review_gate._resolve_data_root(None)
+        assert result == sentinel

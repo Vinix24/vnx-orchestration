@@ -17,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from project_root import resolve_project_root  # noqa: E402
+import vnx_paths as _vnx_paths
 
 _PLIST_LABEL = "com.vnx.auto-dream"
 _PLIST_NAME = f"{_PLIST_LABEL}.plist"
@@ -130,7 +130,7 @@ def install_scheduler(
     ADR-007: project_id on plist/cron for isolation.
     """
     if project_root is None:
-        project_root = resolve_project_root(__file__)
+        project_root = Path(_vnx_paths.resolve_paths()["PROJECT_ROOT"])
     if vnx_bin is None:
         vnx_bin = shutil.which("vnx") or "vnx"
 

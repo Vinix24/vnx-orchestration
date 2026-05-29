@@ -43,7 +43,6 @@ class TestInstallSchedulerMacOS:
             patch("scheduler.platform.system", return_value="Darwin"),
             patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", return_value=completed_ok) as mock_run,
-            patch("scheduler.resolve_project_root", return_value=tmp_path),
         ):
             result = scheduler.install_scheduler(
                 project_id="vnx-dev",
@@ -74,7 +73,6 @@ class TestInstallSchedulerMacOS:
             patch("scheduler.platform.system", return_value="Darwin"),
             patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", return_value=ok),
-            patch("scheduler.resolve_project_root", return_value=tmp_path),
         ):
             scheduler.install_scheduler("vnx-dev", project_root=tmp_path, vnx_bin="vnx")
             scheduler.install_scheduler("vnx-dev", project_root=tmp_path, vnx_bin="vnx")
@@ -103,7 +101,6 @@ class TestInstallSchedulerMacOS:
             patch("scheduler.platform.system", return_value="Darwin"),
             patch("scheduler.Path.home", return_value=tmp_path),
             patch("scheduler.subprocess.run", side_effect=mock_run),
-            patch("scheduler.resolve_project_root", return_value=tmp_path),
         ):
             with pytest.raises(RuntimeError, match="launchctl load failed"):
                 scheduler.install_scheduler("vnx-dev", project_root=tmp_path, vnx_bin="vnx")

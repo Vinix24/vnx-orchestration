@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from project_root import resolve_project_root  # noqa: E402
+import vnx_paths as _vnx_paths
 
 _ARCHIVE_REASON_MAP: dict[str, str] = {
     "dropped": "stale_30d",
@@ -58,8 +58,15 @@ def _emit_review_event(event: dict[str, Any], data_root: Path) -> None:
         fh.write(json.dumps(event) + "\n")
 
 
-def _resolve_data_root(data_root: Path | None) -> Path:
-    return data_root if data_root is not None else (resolve_project_root(__file__) / ".vnx-data")
+def _resolve_data_root(data_root: "Path | None") -> Path:
+    """Return canonical VNX data root (ADR-007: central-install compatible).
+
+    Uses vnx_paths so central installs resolve to ~/.vnx-data/<project_id> rather
+    than resolve_project_root(__file__)/.vnx-data (the VNX source repo).
+    """
+    if data_root is not None:
+        return data_root
+    return Path(_vnx_paths.resolve_paths()["VNX_DATA_DIR"])
 
 
 def _load_review(state_dir: Path, cycle_id: str, project_id: str) -> dict:
