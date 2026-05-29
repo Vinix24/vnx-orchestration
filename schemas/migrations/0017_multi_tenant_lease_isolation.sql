@@ -68,6 +68,11 @@ CREATE TABLE dispatches_v10 (
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     expires_after   TEXT,
     metadata_json   TEXT    DEFAULT '{}',
+    task_class      TEXT,
+    target_type     TEXT,
+    target_id       TEXT,
+    channel_origin  TEXT,
+    intelligence_payload TEXT,
     UNIQUE(dispatch_id, project_id)
 );
 

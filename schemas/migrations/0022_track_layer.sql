@@ -3,6 +3,9 @@
 -- Purpose: Promote dispatches.track to first-class by adding the parent tracks table
 --          and related link tables. Extends dispatches with state CHECK + operator gate.
 --
+-- preservation-allowlist: dispatches.task_class, dispatches.target_type, dispatches.target_id, dispatches.channel_origin, dispatches.intelligence_payload
+-- preservation-rationale: execution-targets router model retired in v22 track-layer redesign; task_class and intelligence_payload superseded by dispatch_metadata.intelligence_json; channel/target routing replaced by track-based orchestration
+--
 -- Design: claudedocs/FUTURE-SYSTEM-DESIGN-2026-05-28.md
 --
 -- Pre-migration state (v21): central install metadata.

@@ -176,13 +176,13 @@ def test_fixture_e_fail_fk_dropped(tmp_path: Path) -> None:
 # Real-world: actual schemas/migrations/ must pass
 # ---------------------------------------------------------------------------
 
-def test_real_migrations_skip_as_failure() -> None:
-    """Gate returns 1 because legacy migrations produce skip status.
+def test_real_migrations_pass() -> None:
+    """Gate returns 0 — all RENAME TO migrations replay cleanly with base-schema bootstrap.
 
-    Since skip is now treated as a failure (same as 'fail' / 'error'), the 3 legacy
-    migrations (0017, 0017_down, 0022) that cannot be replayed due to missing base
-    schemas correctly cause rc == 1.  A follow-up task adds a per-file skip-allowlist
-    so known-unreplayable legacy files can be explicitly exempted.
+    The bootstrap in _build_fresh_db seeds all prerequisite tables (v1-v9 + quality_intelligence)
+    before applying numbered migrations. 0017 can now run because worker_states exists,
+    and 0022 can now run because the full pre-state (0010-0021) applies cleanly.
+    If this test fails, the linter found real undeclared drift that must be fixed.
     """
     rc = main()
-    assert rc == 1
+    assert rc == 0

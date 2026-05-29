@@ -49,12 +49,46 @@ def _migrations_dir() -> Path:
 
 
 def _sorted_migrations(directory: Path):
-    return sorted(directory.glob("*.sql"), key=lambda f: f.name)
+    # Exclude _down.sql rollback scripts — applying them in sequence after their
+    # corresponding up migrations undoes the schema state and breaks later migrations.
+    # The linter checks forward-migration schema drift only.
+    return sorted(
+        (f for f in directory.glob("*.sql") if not f.name.endswith("_down.sql")),
+        key=lambda f: f.name,
+    )
+
+
+def _build_fresh_db() -> sqlite3.Connection:
+    """Create an in-memory DB bootstrapped with all base schemas.
+
+    Applies runtime_coordination.sql (v1) through v9 and quality_intelligence.sql
+    so that numbered migrations (0010+) have all prerequisite tables in place.
+    v10 is intentionally excluded — it documents the post-0017 state and would
+    conflict with migration replay.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA foreign_keys = ON")
+    root = _find_project_root()
+    schemas_dir = root / "schemas"
+    base_files = [
+        schemas_dir / "runtime_coordination.sql",
+        schemas_dir / "runtime_coordination_v2.sql",
+        schemas_dir / "runtime_coordination_v3.sql",
+        schemas_dir / "runtime_coordination_v4.sql",
+        schemas_dir / "runtime_coordination_v5.sql",
+        schemas_dir / "runtime_coordination_v6.sql",
+        schemas_dir / "runtime_coordination_v7.sql",
+        schemas_dir / "runtime_coordination_v8.sql",
+        schemas_dir / "runtime_coordination_v9.sql",
+        schemas_dir / "quality_intelligence.sql",
+    ]
+    for schema_file in base_files:
+        conn.executescript(schema_file.read_text())
+    return conn
 
 
 def _apply_migrations(migrations: list[Path]) -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn = _build_fresh_db()
     for mf in migrations:
         sql = mf.read_text()
         try:

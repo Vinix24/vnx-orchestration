@@ -391,7 +391,10 @@ CREATE TABLE IF NOT EXISTS session_analytics (
     -- Metadata
     file_size_bytes INTEGER,
     analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    analyzer_version TEXT DEFAULT '1.0.0'
+    analyzer_version TEXT DEFAULT '1.0.0',
+
+    -- Dispatch linkage (added in schema 8.0.6 for cost_per_dispatch view)
+    dispatch_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_terminal ON session_analytics (terminal, session_date DESC);
@@ -592,6 +595,35 @@ WHERE dm.outcome_status IS NOT NULL;
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.0.6-dispatch-analytics', 'Add dispatch_metadata table, dispatch_id columns, and analytics views');
+
+-- Confidence event log: tracks pattern confidence changes per dispatch
+CREATE TABLE IF NOT EXISTS confidence_events (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    dispatch_id         TEXT NOT NULL,
+    terminal            TEXT,
+    outcome             TEXT NOT NULL,
+    patterns_boosted    INTEGER DEFAULT 0,
+    patterns_decayed    INTEGER DEFAULT 0,
+    confidence_change   REAL NOT NULL,
+    occurred_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conf_events_dispatch  ON confidence_events (dispatch_id);
+CREATE INDEX IF NOT EXISTS idx_conf_events_occurred  ON confidence_events (occurred_at DESC);
+
+-- Tracks which patterns were offered (shown in context) for each dispatch
+CREATE TABLE IF NOT EXISTS dispatch_pattern_offered (
+    dispatch_id     TEXT NOT NULL,
+    pattern_id      TEXT NOT NULL,
+    pattern_title   TEXT NOT NULL,
+    offered_at      TEXT NOT NULL,
+    PRIMARY KEY (dispatch_id, pattern_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dpo_dispatch_id  ON dispatch_pattern_offered (dispatch_id);
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.0.7-confidence-and-offered', 'Add confidence_events and dispatch_pattern_offered tables');
 
 -- ============================================================================
 -- GOVERNANCE MEASUREMENT (Objective Quality Scoring + SPC)
