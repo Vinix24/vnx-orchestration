@@ -7,7 +7,6 @@ Manages PR queue with dependency tracking and state persistence
 
 import os
 import re
-import subprocess as _subprocess
 import sys
 import json
 import yaml

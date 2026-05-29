@@ -738,7 +738,7 @@ class SubprocessAdapter:
     # Shutdown
     # ------------------------------------------------------------------
 
-    def shutdown(self, graceful: bool = True) -> None:
+    def shutdown(self, _graceful: bool = True) -> None:
         """Stop all tracked subprocesses."""
         for terminal_id in list(self._processes.keys()):
             self.stop(terminal_id)
