@@ -103,6 +103,7 @@ from subprocess_dispatch_internals.state_paths import (
 
 __all__ = [
     "_extract_role_from_instruction",
+    "_routing_enabled_from_project_config",
     "_select_dispatch_path",
     "_build_cheap_lane_argv",
     "_execute_cheap_lane_dispatch",
@@ -154,6 +155,33 @@ __all__ = [
 ]
 
 
+def _routing_enabled_from_project_config(env: "dict[str, str]") -> bool:
+    """Return True when the project's .vnx/config.yml sets routing_policy_enabled: true.
+
+    Used as a fallback when VNX_ROUTING_POLICY_ENABLED is absent from the
+    environment — allows ``vnx init``-generated projects to default to
+    cost-optimised routing without requiring the operator to set an env var.
+
+    Requires PROJECT_ROOT in *env*; returns False when the key is absent,
+    the config file does not exist, or any parse error occurs (fail open).
+    Never raises.
+    """
+    project_root = (env or {}).get("PROJECT_ROOT")
+    if not project_root:
+        return False
+    try:
+        config_path = Path(project_root) / ".vnx" / "config.yml"
+        if not config_path.is_file():
+            return False
+        import yaml as _yaml  # noqa: PLC0415
+        data = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("routing_policy_enabled", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _select_dispatch_path(
     task_class: str,
     complexity: str = "medium",
@@ -190,8 +218,17 @@ def _select_dispatch_path(
     _env = env if env is not None else dict(os.environ)
 
     # Guard: feature flag, empty task_class, or smart_router already decided.
-    if _env.get("VNX_ROUTING_POLICY_ENABLED") != "1":
-        return None, current_model
+    # Priority: explicit env var > project config > disabled.
+    # Explicit "1" → enabled; explicit non-"1" (incl. "0") → disabled.
+    # Absent → check project config written by `vnx init`; disabled if not found.
+    _routing_env = _env.get("VNX_ROUTING_POLICY_ENABLED")
+    if _routing_env != "1":
+        if _routing_env is not None:
+            # Explicitly disabled (e.g. VNX_ROUTING_POLICY_ENABLED=0)
+            return None, current_model
+        if not _routing_enabled_from_project_config(_env):
+            return None, current_model
+        # Project config says enabled — proceed.
     if not task_class:
         return None, current_model
     if auto_route_applied:

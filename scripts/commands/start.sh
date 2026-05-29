@@ -562,6 +562,26 @@ RESOLVER
   echo "Started T0 in tmux session $session_name. Workers spawn on-demand (subprocess or leaseless tmux lane); attach with \`tmux attach -t vnx-<dispatch_id>\` when needed."
   echo "Layout: T0 only  |  T0: $t0_provider_label ($t0_model)"
 
+  # Cost-routing status — resolved from env (preset/config.env) or project config.yml
+  local _routing_enabled="${VNX_ROUTING_POLICY_ENABLED:-}"
+  if [ -z "$_routing_enabled" ]; then
+    _routing_enabled="$(python3 -c "
+import sys, yaml
+from pathlib import Path
+cfg = Path('$PROJECT_ROOT') / '.vnx' / 'config.yml'
+try:
+    d = yaml.safe_load(cfg.read_text()) if cfg.is_file() else {}
+    print('1' if isinstance(d, dict) and d.get('routing_policy_enabled') else '0')
+except Exception:
+    print('0')
+" 2>/dev/null)" || _routing_enabled="0"
+  fi
+  if [ "$_routing_enabled" = "1" ]; then
+    echo "Cost routing:  ENABLED (cheap-lanes via kimi/codex/gemini for eligible task-classes; set VNX_ROUTING_POLICY_ENABLED=0 to disable)"
+  else
+    echo "Cost routing:  DISABLED (set VNX_ROUTING_POLICY_ENABLED=1 or add routing_policy_enabled: true to .vnx/config.yml)"
+  fi
+
   # Show skip-permissions status
   local skip_summary=""
   [ "$t0_skip" = "1" ] && skip_summary="${skip_summary}T0 "
