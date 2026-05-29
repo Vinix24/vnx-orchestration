@@ -576,23 +576,24 @@ class GovernanceEnforcer:
         )
 
     def _check_dead_code_check(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
-        """vulture scripts/ --min-confidence 100 — skipped if vulture not installed."""
+        """vulture scripts/ --min-confidence 100 — fails (advisory) if vulture not installed."""
         try:
             proc = subprocess.run(
-                ["vulture", "scripts/", "--min-confidence", "100"],
+                ["vulture", "scripts/", "scripts/vulture_whitelist.py",
+                 "--min-confidence", "100"],
                 capture_output=True, text=True, timeout=30,
                 cwd=str(_REPO_ROOT),
             )
         except FileNotFoundError:
             return EnforcementResult(
-                check_name=cfg.name, level=cfg.level, passed=True,
-                message="vulture not installed — dead code check skipped",
+                check_name=cfg.name, level=cfg.level, passed=False,
+                message="vulture not installed — install via: pip install 'vnx-orchestration[quality]'",
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
         except subprocess.TimeoutExpired:
             return EnforcementResult(
-                check_name=cfg.name, level=cfg.level, passed=True,
-                message="vulture timed out — check skipped",
+                check_name=cfg.name, level=cfg.level, passed=False,
+                message="vulture timed out — dead code check inconclusive",
                 override_key=f"VNX_OVERRIDE_{cfg.name.upper()}",
             )
         findings = [l for l in proc.stdout.splitlines() if l.strip()]

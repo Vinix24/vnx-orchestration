@@ -51,10 +51,10 @@ def detect_starvation(pools: List[Dict]) -> List[Dict]:
     return [p for p in pools if p["active_count"] < p["min_workers"]]
 
 
-def detect_capacity_bound(pools: List[Dict], queue_threshold: int = 4) -> List[Dict]:
+def detect_capacity_bound(pools: List[Dict], _queue_threshold: int = 4) -> List[Dict]:
     """Return pools at or above max_workers (capacity-bound signal).
 
-    queue_threshold is reserved for future queue-depth enrichment; the current
+    _queue_threshold is reserved for future queue-depth enrichment; the current
     heuristic flags any pool that has reached max_workers.
     """
     return [p for p in pools if p["active_count"] >= p["max_workers"]]

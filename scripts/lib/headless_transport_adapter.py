@@ -167,7 +167,7 @@ class HeadlessAdapter:
         raise UnsupportedCapability("REHEAL", "headless",
             "Headless sessions use process-based identity, not pane-based")
 
-    def shutdown(self, graceful: bool = True) -> None:
+    def shutdown(self, _graceful: bool = True) -> None:
         """Stop all tracked processes."""
         for tid in list(self._procs):
             self.stop(tid)

@@ -44,7 +44,7 @@ class GeminiProvider(ClassifierProvider):
     def is_available(self) -> bool:
         return shutil.which("gemini") is not None
 
-    def classify(self, prompt: str, max_tokens: int = 1500) -> ClassifierResult:
+    def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
         cmd = ["gemini", "--model", self.model, "--prompt", prompt]
         start = time.monotonic()
         try:
