@@ -228,10 +228,17 @@ def _strip_stale_dispatches_track_fk(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def _dedupe_v22_phase_history_timestamps(conn: sqlite3.Connection) -> None:
-    """v22 occurred_at default is millisecond precision; bulk transitions can
-    share timestamps. Composite UNIQUE in v24 would reject those. Append
-    microsecond offset (.001Z, .002Z, ...) to make timestamps distinct
-    while preserving chronological order via stable id ordering.
+    """v22 occurred_at default is millisecond precision; bulk transitions
+    can share timestamps. Composite UNIQUE in v24 would reject those.
+    Append microsecond offset (.0001Z, .0002Z, ...) to make timestamps
+    distinct while preserving chronological order via stable id ordering.
+
+    KNOWN LIMITATIONS (tracked in OI-008 + GitHub roadmap):
+    - Dedupe-suffix collision possible if pre-existing v22 data has
+      timestamps matching the post-dedupe format (.NNN0001Z). Real-world
+      probability near-zero for default v22 strftime '%f' timestamps.
+    - Suffix '.0001Z' does not sort lex with '.NNNZ'. Chronological
+      ordering preserved via id sequence, not timestamp string sort.
     """
     rows = conn.execute("""
         SELECT id, occurred_at,

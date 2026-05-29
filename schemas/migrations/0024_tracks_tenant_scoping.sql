@@ -82,6 +82,25 @@ FROM tracks_pre_v24;
 --
 -- sqlite_sequence preservation required (kimi peer-review §1 — AUTOINCREMENT hazard).
 
+-- ============================================================
+-- KNOWN EDGE CASE: track_phase_history UNIQUE + v22 timestamp dedupe
+-- ============================================================
+-- The UNIQUE(track_id, project_id, occurred_at) constraint below is
+-- enforced via the _dedupe_v22_phase_history_timestamps helper in
+-- scripts/migrate_future_system.py. Two acknowledged edge cases:
+--
+-- 1. Dedupe-suffix collision: if v22 data already contains a row with
+--    occurred_at = '.NNN0001Z' from prior manual edits or non-default
+--    timestamp generation, dedupe may produce a colliding suffix.
+--    Real-world probability: near-zero for default v22 default
+--    timestamps (strftime '%f'). See OI-008 for tracking.
+--
+-- 2. Lexicographic ordering: the appended suffix '.NNN' + '0001Z'
+--    does not sort lex with '.NNN' + 'Z'. Chronological invariant is
+--    preserved via stable id ordering, but ad-hoc ORDER BY occurred_at
+--    queries may surprise. See GitHub issue (referenced in PR body).
+-- ============================================================
+
 ALTER TABLE track_phase_history RENAME TO track_phase_history_pre_v24;
 
 CREATE TABLE track_phase_history (
