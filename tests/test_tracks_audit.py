@@ -59,9 +59,10 @@ def _create_db(tmp_path: Path) -> Path:
     """)
     conn.commit()
 
-    sql = (_MIGRATIONS / "0022_track_layer.sql").read_text(encoding="utf-8")
-    schema_migration.apply_script_if_below(conn, 22, sql)
-    conn.commit()
+    for version, filename in [(22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")]:
+        sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        schema_migration.apply_script_if_below(conn, version, sql)
+        conn.commit()
     conn.close()
     return db_path.parent
 
@@ -85,25 +86,25 @@ def state_dir(tmp_path):
 
 class TestTrackCreatedAudit:
     def test_create_track_emits_event(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "Title", "Goal")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "Title", "Goal")
         events = _read_events(state_dir)
         assert any(e["event_type"] == "track_created" for e in events)
 
     def test_create_track_event_has_track_id(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "Title", "Goal")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "Title", "Goal")
         events = _read_events(state_dir)
         created = [e for e in events if e["event_type"] == "track_created"]
         assert len(created) >= 1
         assert created[0]["track_id"] == "track-01"
 
     def test_create_track_event_has_actor(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "Title", "Goal")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "Title", "Goal")
         events = _read_events(state_dir)
         created = [e for e in events if e["event_type"] == "track_created"]
         assert created[0]["actor"] == "system"
 
     def test_create_track_event_has_timestamp(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "Title", "Goal")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "Title", "Goal")
         events = _read_events(state_dir)
         created = [e for e in events if e["event_type"] == "track_created"]
         assert "timestamp" in created[0]
@@ -111,14 +112,14 @@ class TestTrackCreatedAudit:
 
 class TestTransitionPhaseAudit:
     def test_transition_emits_event(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T", "G", phase="queued")
-        tracks.transition_phase(state_dir, "track-01", "active", actor="operator")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T", "G", phase="queued")
+        tracks.transition_phase(state_dir, "track-01", "vnx-dev", "active", actor="operator")
         events = _read_events(state_dir)
         assert any(e["event_type"] == "track_phase_transition" for e in events)
 
     def test_transition_event_details(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T", "G", phase="queued")
-        tracks.transition_phase(state_dir, "track-01", "active", actor="T0")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T", "G", phase="queued")
+        tracks.transition_phase(state_dir, "track-01", "vnx-dev", "active", actor="T0")
         events = _read_events(state_dir)
         transitions = [e for e in events if e["event_type"] == "track_phase_transition"]
         assert len(transitions) >= 1
@@ -131,14 +132,14 @@ class TestTransitionPhaseAudit:
 
 class TestSetNextUpAudit:
     def test_set_next_up_emits_event(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T", "G")
-        tracks.set_next_up(state_dir, "track-01")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T", "G")
+        tracks.set_next_up(state_dir, "track-01", "vnx-dev")
         events = _read_events(state_dir)
         assert any(e["event_type"] == "track_next_up_set" for e in events)
 
     def test_set_next_up_event_track_id(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T", "G")
-        tracks.set_next_up(state_dir, "track-01")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T", "G")
+        tracks.set_next_up(state_dir, "track-01", "vnx-dev")
         events = _read_events(state_dir)
         next_up_events = [e for e in events if e["event_type"] == "track_next_up_set"]
         assert next_up_events[0]["track_id"] == "track-01"
@@ -146,14 +147,14 @@ class TestSetNextUpAudit:
 
 class TestLinkOpenItemAudit:
     def test_link_open_item_emits_event(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T", "G")
-        tracks.link_open_item(state_dir, "track-01", "OI-999", "blocks", "manual")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T", "G")
+        tracks.link_open_item(state_dir, "track-01", "vnx-dev", "OI-999", "blocks", "manual")
         events = _read_events(state_dir)
         assert any(e["event_type"] == "track_oi_linked" for e in events)
 
     def test_link_open_item_event_details(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T", "G")
-        tracks.link_open_item(state_dir, "track-01", "OI-999", "warns", "file_path")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T", "G")
+        tracks.link_open_item(state_dir, "track-01", "vnx-dev", "OI-999", "warns", "file_path")
         events = _read_events(state_dir)
         oi_events = [e for e in events if e["event_type"] == "track_oi_linked"]
         assert oi_events[0]["details"]["oi_id"] == "OI-999"
@@ -162,20 +163,20 @@ class TestLinkOpenItemAudit:
 
 class TestAddDependencyAudit:
     def test_add_dependency_emits_event(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T1", "G1", phase="active")
-        tracks.create_track(state_dir, "track-02", "T2", "G2")
-        tracks.add_dependency(state_dir, "track-02", "track-01", "hard", "manual")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1", phase="active")
+        tracks.create_track(state_dir, "track-02", "vnx-dev", "T2", "G2")
+        tracks.add_dependency(state_dir, "track-02", "vnx-dev", "track-01", "vnx-dev", "hard", "manual")
         events = _read_events(state_dir)
         assert any(e["event_type"] == "track_dep_added" for e in events)
 
     def test_add_dependency_event_details(self, state_dir):
-        tracks.create_track(state_dir, "track-01", "T1", "G1", phase="active")
-        tracks.create_track(state_dir, "track-02", "T2", "G2")
-        tracks.add_dependency(state_dir, "track-02", "track-01", "soft", "manual")
+        tracks.create_track(state_dir, "track-01", "vnx-dev", "T1", "G1", phase="active")
+        tracks.create_track(state_dir, "track-02", "vnx-dev", "T2", "G2")
+        tracks.add_dependency(state_dir, "track-02", "vnx-dev", "track-01", "vnx-dev", "soft", "manual")
         events = _read_events(state_dir)
         dep_events = [e for e in events if e["event_type"] == "track_dep_added"]
         assert dep_events[0]["track_id"] == "track-02"
-        assert dep_events[0]["details"]["to"] == "track-01"
+        assert dep_events[0]["details"]["to_track"] == "track-01"
         assert dep_events[0]["details"]["kind"] == "soft"
 
 
@@ -202,27 +203,27 @@ class TestAuditWriteFailureRaises:
     def test_create_track_raises_on_audit_failure(self, state_dir):
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             with pytest.raises(OSError):
-                tracks.create_track(state_dir, "track-fail-01", "T", "G")
+                tracks.create_track(state_dir, "track-fail-01", "vnx-dev", "T", "G")
 
     def test_create_track_no_row_after_audit_failure(self, state_dir):
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             try:
-                tracks.create_track(state_dir, "track-fail-02", "T", "G")
+                tracks.create_track(state_dir, "track-fail-02", "vnx-dev", "T", "G")
             except OSError:
                 pass
         assert self._count(state_dir, "tracks", "track_id", "track-fail-02") == 0
 
     def test_transition_phase_raises_on_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-tp-01", "T", "G", phase="queued")
+        tracks.create_track(state_dir, "track-tp-01", "vnx-dev", "T", "G", phase="queued")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             with pytest.raises(OSError):
-                tracks.transition_phase(state_dir, "track-tp-01", "active", actor="operator")
+                tracks.transition_phase(state_dir, "track-tp-01", "vnx-dev", "active", actor="operator")
 
     def test_transition_phase_no_phase_change_after_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-tp-02", "T", "G", phase="queued")
+        tracks.create_track(state_dir, "track-tp-02", "vnx-dev", "T", "G", phase="queued")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             try:
-                tracks.transition_phase(state_dir, "track-tp-02", "active", actor="operator")
+                tracks.transition_phase(state_dir, "track-tp-02", "vnx-dev", "active", actor="operator")
             except OSError:
                 pass
         db_path = state_dir / "runtime_coordination.db"
@@ -232,16 +233,16 @@ class TestAuditWriteFailureRaises:
         assert row[0] == "queued"
 
     def test_set_next_up_raises_on_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-nu-01", "T", "G")
+        tracks.create_track(state_dir, "track-nu-01", "vnx-dev", "T", "G")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             with pytest.raises(OSError):
-                tracks.set_next_up(state_dir, "track-nu-01")
+                tracks.set_next_up(state_dir, "track-nu-01", "vnx-dev")
 
     def test_set_next_up_not_committed_after_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-nu-02", "T", "G")
+        tracks.create_track(state_dir, "track-nu-02", "vnx-dev", "T", "G")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             try:
-                tracks.set_next_up(state_dir, "track-nu-02")
+                tracks.set_next_up(state_dir, "track-nu-02", "vnx-dev")
             except OSError:
                 pass
         db_path = state_dir / "runtime_coordination.db"
@@ -251,16 +252,16 @@ class TestAuditWriteFailureRaises:
         assert row[0] == 0
 
     def test_link_open_item_raises_on_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-oi-01", "T", "G")
+        tracks.create_track(state_dir, "track-oi-01", "vnx-dev", "T", "G")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             with pytest.raises(OSError):
-                tracks.link_open_item(state_dir, "track-oi-01", "OI-x", "blocks", "manual")
+                tracks.link_open_item(state_dir, "track-oi-01", "vnx-dev", "OI-x", "blocks", "manual")
 
     def test_link_open_item_no_row_after_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-oi-02", "T", "G")
+        tracks.create_track(state_dir, "track-oi-02", "vnx-dev", "T", "G")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             try:
-                tracks.link_open_item(state_dir, "track-oi-02", "OI-y", "blocks", "manual")
+                tracks.link_open_item(state_dir, "track-oi-02", "vnx-dev", "OI-y", "blocks", "manual")
             except OSError:
                 pass
         db_path = state_dir / "runtime_coordination.db"
@@ -272,18 +273,18 @@ class TestAuditWriteFailureRaises:
         assert row[0] == 0
 
     def test_add_dependency_raises_on_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-dep-a", "T", "G", phase="active")
-        tracks.create_track(state_dir, "track-dep-b", "T", "G")
+        tracks.create_track(state_dir, "track-dep-a", "vnx-dev", "T", "G", phase="active")
+        tracks.create_track(state_dir, "track-dep-b", "vnx-dev", "T", "G")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             with pytest.raises(OSError):
-                tracks.add_dependency(state_dir, "track-dep-b", "track-dep-a", "hard", "manual")
+                tracks.add_dependency(state_dir, "track-dep-b", "vnx-dev", "track-dep-a", "vnx-dev", "hard", "manual")
 
     def test_add_dependency_no_row_after_audit_failure(self, state_dir):
-        tracks.create_track(state_dir, "track-dep-c", "T", "G", phase="active")
-        tracks.create_track(state_dir, "track-dep-d", "T", "G")
+        tracks.create_track(state_dir, "track-dep-c", "vnx-dev", "T", "G", phase="active")
+        tracks.create_track(state_dir, "track-dep-d", "vnx-dev", "T", "G")
         with patch.object(_sw, "append_locked", side_effect=OSError("full")):
             try:
-                tracks.add_dependency(state_dir, "track-dep-d", "track-dep-c", "hard", "manual")
+                tracks.add_dependency(state_dir, "track-dep-d", "vnx-dev", "track-dep-c", "vnx-dev", "hard", "manual")
             except OSError:
                 pass
         db_path = state_dir / "runtime_coordination.db"
