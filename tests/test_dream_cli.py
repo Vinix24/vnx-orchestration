@@ -417,3 +417,74 @@ class TestReviewGateResolveDataRoot:
         with patch.object(_vnx_paths_mod, "resolve_paths", return_value=paths_return):
             result = review_gate._resolve_data_root(None)
         assert result == sentinel
+
+
+# ---------------------------------------------------------------------------
+# Graceful "not-in-project" exit (blk-dreamgrace)
+# ---------------------------------------------------------------------------
+
+import argparse  # noqa: E402
+
+
+class TestDreamGracefulExitOutsideProject:
+    """All dream subcommands must emit a guided message + exit(1) when
+    resolve_project_root() raises RuntimeError (i.e. outside a git repo)."""
+
+    def _make_args(self, subcommand: str, **kwargs) -> argparse.Namespace:
+        base = {"project_id": "test-project", "dream_subcommand": subcommand}
+        base.update(kwargs)
+        return argparse.Namespace(**base)
+
+    def _assert_guided_exit(self, capsys, exc_info):
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "vnx init" in captured.err, f"Guided message missing 'vnx init': {captured.err!r}"
+        assert "VNX_CANONICAL_ROOT" in captured.err, (
+            f"Guided message missing 'VNX_CANONICAL_ROOT': {captured.err!r}"
+        )
+        assert "Traceback" not in captured.err, "Raw traceback must not appear"
+
+    def test_cmd_status_guided_exit(self, capsys):
+        """vnx dream status exits cleanly with guided message when not in a project."""
+        import project_root as pr_mod
+        import vnx_cli.commands.dream as dream_mod
+
+        args = self._make_args("status")
+        with patch.object(pr_mod, "resolve_project_root", side_effect=RuntimeError("no git")):
+            with pytest.raises(SystemExit) as exc_info:
+                dream_mod._cmd_status(args)
+        self._assert_guided_exit(capsys, exc_info)
+
+    def test_cmd_run_guided_exit(self, capsys):
+        """vnx dream run exits cleanly with guided message when not in a project."""
+        import project_root as pr_mod
+        import vnx_cli.commands.dream as dream_mod
+
+        args = self._make_args("run", dry_run=False)
+        with patch.object(pr_mod, "resolve_project_root", side_effect=RuntimeError("no git")):
+            with pytest.raises(SystemExit) as exc_info:
+                dream_mod._cmd_run(args)
+        self._assert_guided_exit(capsys, exc_info)
+
+    def test_cmd_history_guided_exit(self, capsys):
+        """vnx dream history exits cleanly with guided message when not in a project."""
+        import project_root as pr_mod
+        import vnx_cli.commands.dream as dream_mod
+
+        args = self._make_args("history", limit=10)
+        with patch.object(pr_mod, "resolve_project_root", side_effect=RuntimeError("no git")):
+            with pytest.raises(SystemExit) as exc_info:
+                dream_mod._cmd_history(args)
+        self._assert_guided_exit(capsys, exc_info)
+
+    def test_resolve_paths_raises_system_exit_on_no_project(self, capsys):
+        """_resolve_paths() itself raises SystemExit(1) — not a raw RuntimeError."""
+        import project_root as pr_mod
+        import vnx_cli.commands.dream as dream_mod
+
+        with patch.object(pr_mod, "resolve_project_root", side_effect=RuntimeError("no git")):
+            with pytest.raises(SystemExit) as exc_info:
+                dream_mod._resolve_paths()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "vnx init" in captured.err
