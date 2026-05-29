@@ -121,20 +121,41 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         data = json.loads(out)
         assert data["pool_id"] == "default"
+        assert data["project_id"] == "test-proj"
         assert data["max"] == 4
         assert data["current"] == 1
         assert data["members"][0]["terminal_id"] == "WORKER-2"
         assert data["members"][0]["provider"] == "litellm"
 
     def test_status_works_without_project(self, capsys):
-        """--project defaults to 'default'; no error when omitted."""
-        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+        """--project omission displays the resolved project id."""
+        with (
+            patch("vnx_cli.commands.pool._resolve_project_id", return_value="vnx-dev") as resolve_project_id,
+            patch("vnx_cli.commands.pool.PoolManager") as MockMgr,
+        ):
             mgr = MockMgr.return_value
             mgr.load_state.return_value = (_make_config(), _make_state(), [])
             rc = main(argv=["status"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Project: default" in out
+        assert "Project: vnx-dev" in out
+        assert "Project: None" not in out
+        resolve_project_id.assert_called_once_with(None)
+        MockMgr.assert_called_once_with(project_id="vnx-dev", pool_id="default")
+
+    def test_status_json_uses_resolved_project_without_project(self, capsys):
+        with (
+            patch("vnx_cli.commands.pool._resolve_project_id", return_value="vnx-dev") as resolve_project_id,
+            patch("vnx_cli.commands.pool.PoolManager") as MockMgr,
+        ):
+            mgr = MockMgr.return_value
+            mgr.load_state.return_value = (_make_config(), _make_state(), [])
+            rc = main(argv=["status", "--json"])
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["project_id"] == "vnx-dev"
+        resolve_project_id.assert_called_once_with(None)
+        MockMgr.assert_called_once_with(project_id="vnx-dev", pool_id="default")
 
     def test_status_with_pool_id_passed_to_manager(self):
         with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
