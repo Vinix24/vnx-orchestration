@@ -71,3 +71,19 @@ vnx_orchestration = [
     "configs/**/*",
     "hooks/**/*",
 ]
+
+# Exclude build artifacts, caches, and non-runtime content from the wheel.
+[tool.setuptools.exclude-package-data]
+vnx_orchestration = [
+    "**/__pycache__/**",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "scripts/benchmark/results/**",
+    "**/*.log",
+    "tests/**",
+    "dist/**",
+    "build/**",
+    "**/*.egg-info/**",
+    ".vnx-data/**",
+]
