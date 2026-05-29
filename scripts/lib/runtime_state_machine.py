@@ -251,6 +251,86 @@ def create_attempt(
     )
 
 
+def claim_next_queued_dispatch(
+    conn: sqlite3.Connection,
+    terminal_id: str,
+    project_id: str,
+    actor: str = "runtime",
+) -> Optional[str]:
+    """Atomically claim the next queued dispatch for a project.
+
+    Uses BEGIN IMMEDIATE to serialize concurrent claimers — SQLite has no
+    SKIP LOCKED; this ensures the SELECT→UPDATE is atomic across writers.
+    Losers serialize and re-query; they get the next row or None.
+    Returns the dispatch_id string if a dispatch was claimed, None if the
+    queue is empty for this project.
+
+    ADR-007: scoped to project_id — a claimer for project A NEVER sees
+    project B queued rows. project_id is MANDATORY on every access.
+    See docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md.
+
+    Callers must pass a connection with no uncommitted DML. Setting
+    isolation_level=None (required for explicit BEGIN IMMEDIATE) commits
+    any pending implicit transaction on the connection.
+    """
+    conn.isolation_level = None  # autocommit mode for manual BEGIN IMMEDIATE control
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            """
+            SELECT dispatch_id FROM dispatches
+            WHERE project_id = ? AND state = 'queued'
+            ORDER BY priority ASC, created_at ASC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+
+        dispatch_id = row["dispatch_id"]
+        now = _now_utc()
+
+        # State transition: queued → claimed (validates + appends coordination event)
+        transition_dispatch(
+            conn,
+            dispatch_id=dispatch_id,
+            to_state="claimed",
+            actor=actor,
+            reason=f"queue claim by terminal {terminal_id}",
+            metadata={"terminal_id": terminal_id, "project_id": project_id},
+        )
+
+        # Update terminal_id and claim provenance columns (ADR-007: scoped by project_id)
+        table_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatches)").fetchall()}
+        if "claimed_by" in table_cols:
+            conn.execute(
+                """
+                UPDATE dispatches
+                SET terminal_id = ?, claimed_by = ?, claimed_at = ?
+                WHERE dispatch_id = ? AND project_id = ?
+                """,
+                (terminal_id, terminal_id, now, dispatch_id, project_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE dispatches SET terminal_id = ? WHERE dispatch_id = ? AND project_id = ?",
+                (terminal_id, dispatch_id, project_id),
+            )
+
+        conn.execute("COMMIT")
+        return dispatch_id
+
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+
+
 def update_attempt(
     conn: sqlite3.Connection,
     *,
