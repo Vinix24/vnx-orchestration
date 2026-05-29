@@ -2105,6 +2105,9 @@ main() {
     demo)
       cmd_demo "$@"
       ;;
+    migrate)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main migrate "$@"
+      ;;
     pool)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
       ;;

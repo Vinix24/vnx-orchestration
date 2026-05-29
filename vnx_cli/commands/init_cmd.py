@@ -250,6 +250,97 @@ def _update_gitignore(project_dir: Path) -> None:
     print(f"  updated .gitignore (added {marker})")
 
 
+def _emit_bootstrap_event(data_root: Path, status: str, error: str = "") -> None:
+    """Append an audit event to data_root/events/db_bootstrap.ndjson (ADR-005)."""
+    import fcntl
+    import json
+    from datetime import datetime, timezone
+
+    events_dir = data_root / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    log_path = events_dir / "db_bootstrap.ndjson"
+    record: dict = {
+        "event_type": "db_bootstrap",
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "status": status,
+    }
+    if error:
+        record["error"] = error
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    with open(log_path, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f.write(line)
+
+
+def _bootstrap_runtime_dbs(data_root: Path) -> None:
+    """Bootstrap runtime_coordination.db and quality_intelligence.db. Idempotent.
+
+    Runs after vnx init creates the directory scaffold. Applies the full
+    migration chain (v1-v10 base schema + project_id columns + 0017/0019/0020/
+    0022/0024/0026 runners) so that vnx track list, vnx pool status, and
+    vnx dream status return empty results instead of "no such table".
+
+    Step order matters:
+      1. init_schema: applies base schema v1 through v10 (dispatches table
+         created WITHOUT project_id — CREATE TABLE IF NOT EXISTS is a no-op).
+      2. run_runtime_coordination_migration: idempotently adds project_id column
+         to dispatches, terminal_leases, etc. (migration 0010). This must run
+         BEFORE auto_apply so that migration 0022 (which SELECTs project_id from
+         the old dispatches table) does not fail with "no such column: project_id".
+      3. auto_apply: applies numbered migration runners 0017+ (tracks, pool,
+         dispatches rebuild with CHECK, dream, dispatch claim).
+
+    Raises RuntimeError (or the original exception) if any core step fails.
+    quality_intelligence.db is advisory and warns instead of raising.
+    """
+    print()
+    print("Bootstrapping runtime databases...")
+
+    state_dir = data_root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # runtime_coordination.db — CORE: must succeed, any failure raises.
+    from coordination_db import init_schema, db_path_from_state_dir  # type: ignore
+    init_schema(state_dir)
+    db_path = db_path_from_state_dir(state_dir)
+
+    # Step 2: add project_id columns (migration 0010) before numbered runners.
+    # init_schema v1-v10 creates dispatches via CREATE TABLE IF NOT EXISTS, so
+    # the column is absent on a fresh DB. run_runtime_coordination_migration
+    # adds it idempotently; auto_apply 0022 then safely SELECTs project_id.
+    from project_id_migration import run_runtime_coordination_migration  # type: ignore
+    run_runtime_coordination_migration(db_path)
+
+    # Step 3: numbered migration runners 0017+ (tracks, pool, dream, claim) — CORE.
+    from migrations.auto_apply import auto_apply  # type: ignore
+    auto_apply(db_path)
+
+    print("  bootstrapped runtime_coordination.db")
+
+    # ADR-005: emit ledger event so bootstrap is auditable.
+    try:
+        _emit_bootstrap_event(data_root, status="success")
+    except Exception:
+        pass  # advisory — never block bootstrap for an audit event
+
+    # quality_intelligence.db — dream_cycles, code_snippets, etc. (advisory).
+    try:
+        engine_root = _engine.engine_root()
+        schema_file = engine_root / "schemas" / "quality_intelligence.sql"
+        if schema_file.exists():
+            import contextlib
+            import io
+            from quality_db_init import bootstrap_qi_db  # type: ignore
+            qi_db = state_dir / "quality_intelligence.db"
+            with contextlib.redirect_stdout(io.StringIO()):
+                bootstrap_qi_db(qi_db, schema_file)
+            print("  bootstrapped quality_intelligence.db")
+        else:
+            print("  skipped quality_intelligence.db (schema file not found)", file=sys.stderr)
+    except Exception as exc:
+        print(f"  warning: quality_intelligence.db bootstrap failed: {exc}", file=sys.stderr)
+
+
 def vnx_init(args) -> int:
     raw_dir = getattr(args, "project_path", None) or args.project_dir
     project_dir = Path(raw_dir).resolve()
@@ -333,6 +424,18 @@ def vnx_init(args) -> int:
     # --- runtime layout under the resolved state root ---------------------
     for subdir in VNX_DATA_SUBDIRS:
         (data_root / subdir).mkdir(parents=True, exist_ok=True)
+
+    # --- bootstrap runtime DBs so track/pool/dream work immediately ----------
+    try:
+        _bootstrap_runtime_dbs(data_root)
+    except Exception as exc:
+        print(f"\n  error: DB bootstrap failed: {exc}", file=sys.stderr)
+        print(
+            "  Runtime databases could not be initialized. Fix the error above and"
+            " run `vnx migrate` to retry.",
+            file=sys.stderr,
+        )
+        return 1
 
     inside_project = _is_within(data_root, project_dir)
 

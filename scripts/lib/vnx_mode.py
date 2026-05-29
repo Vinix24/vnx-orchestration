@@ -41,7 +41,7 @@ class VNXMode(str, Enum):
 # ---------------------------------------------------------------------------
 
 TIER_UNIVERSAL: FrozenSet[str] = frozenset({
-    "init", "doctor", "status", "recover", "help", "update",
+    "init", "migrate", "doctor", "status", "recover", "help", "update",
     "setup", "install-check", "install-validate",
 })
 

@@ -247,6 +247,19 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
     ts_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
 
+def _register_migrate_subparser(subparsers: argparse.Action) -> None:
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="apply runtime DB migrations (tracks, pool, dispatch tables)",
+    )
+    migrate_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to resolve data root from (default: current directory)",
+    )
+
+
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
     dream_parser = subparsers.add_parser(
         "dream",
@@ -319,6 +332,10 @@ def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser)
         from vnx_cli.commands.dream import vnx_dream
         sys.exit(vnx_dream(args))
 
+    elif args.command == "migrate":
+        from vnx_cli.commands.migrate import vnx_migrate
+        sys.exit(vnx_migrate(args))
+
     else:
         parser.print_help()
         sys.exit(0)
@@ -344,6 +361,7 @@ def main() -> None:
     _register_dispatch_agent_subparser(subparsers)
     _register_track_subparser(subparsers)
     _register_dream_subparser(subparsers)
+    _register_migrate_subparser(subparsers)
 
     args = parser.parse_args()
     _dispatch_command(args, parser)
