@@ -34,7 +34,7 @@ from pool_manager import (
     _spawn_via_provider_dispatch,
 )
 from pool_state_repo import PoolStateRepository
-from pool_state_fixtures import _BASE_SCHEMA, create_test_db_file
+from pool_state_fixtures import _BASE_SCHEMA, create_test_db_file, insert_lease
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +237,9 @@ class TestSpawnViaProviderDispatch:
 class TestPidInMembershipMetadata:
     def test_add_member_stores_pid(self, tmp_path):
         db_path = _setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
 
         membership_id = repo.add_member("default", "T1", "claude", "backend-developer", 1000.0, pid=54321)
@@ -247,6 +250,9 @@ class TestPidInMembershipMetadata:
 
     def test_add_member_without_pid_omits_key(self, tmp_path):
         db_path = _setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
 
         repo.add_member("default", "T1", "claude", "backend-developer", 1000.0)
@@ -257,6 +263,9 @@ class TestPidInMembershipMetadata:
 
     def test_list_members_reads_pid(self, tmp_path):
         db_path = _setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
         repo.add_member("default", "T1", "claude", "backend-developer", 1000.0, pid=12345)
 
@@ -268,6 +277,9 @@ class TestPidInMembershipMetadata:
 
     def test_list_members_pid_none_when_absent(self, tmp_path):
         db_path = _setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
         repo.add_member("default", "T1", "claude", "backend-developer", 1000.0)
 
@@ -278,6 +290,9 @@ class TestPidInMembershipMetadata:
 
     def test_list_members_pid_survives_json_roundtrip(self, tmp_path):
         db_path = _setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
         repo.add_member("default", "T1", "claude", "backend-developer", 1000.0, pid=2**31 - 1)
 
@@ -343,6 +358,9 @@ class TestReaperPidValidation:
         from pool_reaper import ReapConfig
 
         db_path = _setup_db(tmp_path, min_workers=0, max_workers=4)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
         repo.add_member("default", "T1", "claude", "backend-developer", 500.0, pid=11111)
 
