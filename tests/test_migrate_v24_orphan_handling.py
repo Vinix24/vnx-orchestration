@@ -72,14 +72,17 @@ def _insert_orphan_history(conn: sqlite3.Connection, orphan_track_id: str) -> No
 
     Must disable FK enforcement temporarily since v22 track_phase_history has
     REFERENCES tracks(track_id).
+    SQLite ignores PRAGMA foreign_keys inside an active transaction, so commit
+    the OFF state before the INSERT, then commit again before re-enabling.
     """
     conn.execute("PRAGMA foreign_keys = OFF")
+    conn.commit()
     conn.execute(
         "INSERT INTO track_phase_history (track_id, from_phase, to_phase, actor) VALUES (?, ?, ?, ?)",
         (orphan_track_id, "queued", "active", "operator"),
     )
-    conn.execute("PRAGMA foreign_keys = ON")
     conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
 
 
 # ---------------------------------------------------------------------------

@@ -304,3 +304,88 @@ def test_track_open_items_composite_pk(tmp_path):
     conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM track_open_items").fetchone()[0]
     assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: ADR-007 composite UNIQUE on track_phase_history (Priority 2)
+# ---------------------------------------------------------------------------
+
+def test_track_phase_history_composite_unique_over_project_id(tmp_path):
+    """ADR-007: track_phase_history must have UNIQUE index involving project_id."""
+    conn = _v22_then_v24(tmp_path)
+    unique_indexes = [
+        idx[1] for idx in conn.execute("PRAGMA index_list('track_phase_history')")
+        if idx[2] == 1  # unique flag
+    ]
+    assert any(
+        "project_id" in [col[2] for col in conn.execute(f"PRAGMA index_info('{name}')")]
+        for name in unique_indexes
+    ), "ADR-007: track_phase_history must have at least one UNIQUE index over project_id"
+    # Also verify the UNIQUE index has length >= 2 (composite, not single-column)
+    for name in unique_indexes:
+        idx_cols = [col[2] for col in conn.execute(f"PRAGMA index_info('{name}')")]
+        if "project_id" in idx_cols:
+            assert len(idx_cols) >= 2, (
+                f"ADR-007: UNIQUE index {name!r} includes project_id but length < 2"
+            )
+
+
+def test_track_phase_history_unique_constraint_rejects_duplicate_occurred_at(tmp_path):
+    """Behavioral: inserting two rows with same (track_id, project_id, occurred_at) raises."""
+    conn = _v22_then_v24(tmp_path)
+    conn.execute(
+        "INSERT INTO tracks (track_id, project_id, title, goal_state) VALUES (?, ?, ?, ?)",
+        ("track-01", "vnx-dev", "T", "G"),
+    )
+    ts = "2026-01-01T00:00:00.000Z"
+    conn.execute(
+        "INSERT INTO track_phase_history (track_id, project_id, from_phase, to_phase, actor, occurred_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ("track-01", "vnx-dev", "queued", "active", "operator", ts),
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO track_phase_history (track_id, project_id, from_phase, to_phase, actor, occurred_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("track-01", "vnx-dev", "active", "parked", "operator", ts),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: sqlite_sequence high-water-mark preservation (Priority 3)
+# ---------------------------------------------------------------------------
+
+def test_sqlite_sequence_preserves_high_water_after_delete(tmp_path):
+    """Regression: seq must survive to pre-v24 high-water even when rows were deleted."""
+    conn = _base_db(tmp_path)
+    _apply_v22(conn)
+    conn.execute(
+        "INSERT INTO tracks (track_id, title, goal_state) VALUES (?, ?, ?)",
+        ("t1", "T", "G"),
+    )
+    conn.execute(
+        "INSERT INTO track_phase_history (id, track_id, from_phase, to_phase, actor)"
+        " VALUES (1, 't1', 'queued', 'active', 'operator')"
+    )
+    conn.execute(
+        "INSERT INTO track_phase_history (id, track_id, from_phase, to_phase, actor)"
+        " VALUES (100, 't1', 'active', 'parked', 'operator')"
+    )
+    conn.execute("DELETE FROM track_phase_history WHERE id = 100")
+    conn.commit()
+
+    seq_before = conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name='track_phase_history'"
+    ).fetchone()[0]
+    assert seq_before == 100  # high-water before migration
+
+    _apply_v24(conn)
+
+    seq_after = conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name='track_phase_history'"
+    ).fetchone()[0]
+    assert seq_after >= seq_before, (
+        f"sqlite_sequence regressed: was {seq_before}, now {seq_after}. "
+        "Fix1 lesson: preserve from pre_v24 snapshot, not current MAX(id)."
+    )

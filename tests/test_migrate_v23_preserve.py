@@ -79,17 +79,19 @@ def _seed_v22_data(conn: sqlite3.Connection) -> None:
         )
     conn.commit()
 
-    # Phase history: track-01 activated
+    # Phase history: track-01 activated then parked.
+    # Explicit occurred_at timestamps prevent UNIQUE(track_id, project_id, occurred_at)
+    # collisions that arise when back-to-back inserts share the same millisecond.
     conn.execute(
         """
-        INSERT INTO track_phase_history (track_id, from_phase, to_phase, actor)
-        VALUES ('track-01', 'queued', 'active', 'operator')
+        INSERT INTO track_phase_history (track_id, from_phase, to_phase, actor, occurred_at)
+        VALUES ('track-01', 'queued', 'active', 'operator', '2026-01-01T00:00:00.000Z')
         """
     )
     conn.execute(
         """
-        INSERT INTO track_phase_history (track_id, from_phase, to_phase, actor)
-        VALUES ('track-01', 'active', 'parked', 'operator')
+        INSERT INTO track_phase_history (track_id, from_phase, to_phase, actor, occurred_at)
+        VALUES ('track-01', 'active', 'parked', 'operator', '2026-01-01T00:00:01.000Z')
         """
     )
     conn.commit()

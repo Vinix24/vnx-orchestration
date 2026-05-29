@@ -94,7 +94,8 @@ CREATE TABLE track_phase_history (
     reason      TEXT,
     approval_id TEXT,
     occurred_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    FOREIGN KEY (track_id, project_id) REFERENCES tracks(track_id, project_id)
+    FOREIGN KEY (track_id, project_id) REFERENCES tracks(track_id, project_id),
+    UNIQUE (track_id, project_id, occurred_at)  -- ADR-007 composite tenant constraint
 );
 
 INSERT INTO track_phase_history
@@ -106,8 +107,18 @@ FROM track_phase_history_pre_v24 h
 LEFT JOIN tracks t ON t.track_id = h.track_id
 WHERE t.track_id IS NOT NULL;
 
-INSERT OR REPLACE INTO sqlite_sequence(name, seq)
-    SELECT 'track_phase_history', COALESCE(MAX(id), 0) FROM track_phase_history;
+-- Preserve sqlite_sequence high-water-mark from the pre-v24 snapshot.
+-- sqlite_sequence has no UNIQUE constraint, so INSERT OR REPLACE creates duplicates.
+-- Use DELETE + INSERT to atomically set the correct seq value.
+-- Reading from 'track_phase_history_pre_v24' because ALTER TABLE RENAME updates sqlite_sequence names.
+DELETE FROM sqlite_sequence WHERE name = 'track_phase_history';
+INSERT INTO sqlite_sequence(name, seq)
+    VALUES ('track_phase_history',
+            COALESCE(
+                (SELECT seq FROM sqlite_sequence WHERE name = 'track_phase_history_pre_v24'),
+                (SELECT MAX(id) FROM track_phase_history),
+                0
+            ));
 
 -- ============================================================================
 -- STEP 3: REBUILD track_dependencies WITH from/to project_ids + COMPOSITE PK/FK

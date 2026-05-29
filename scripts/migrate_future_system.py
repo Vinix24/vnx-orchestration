@@ -164,6 +164,56 @@ def _warn_orphan_child_rows(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stale-FK repair: strip dispatches.track -> tracks(track_id) FK if present
+# ---------------------------------------------------------------------------
+
+def _strip_stale_dispatches_track_fk(conn: sqlite3.Connection) -> None:
+    """Remove the stale dispatches.track -> tracks(track_id) FK via table rebuild.
+
+    The superseded 0023_dispatches_fk.sql added this FK before it was removed
+    in FUT-1 Option B scope-shrink. If an operator applied that migration before
+    upgrading, the tracks RENAME in 0024 breaks unless the FK is stripped first.
+    This repair is safe: the FK existed only in the operator-side superseded
+    0023 application and carries no semantic constraint we need to preserve.
+    """
+    col_names = [row[1] for row in conn.execute("PRAGMA table_info('dispatches')")]
+    col_list = ", ".join(col_names)
+
+    conn.execute("ALTER TABLE dispatches RENAME TO dispatches_pre_v24_strip")
+    conn.execute("""
+        CREATE TABLE dispatches (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id     TEXT    NOT NULL,
+            project_id      TEXT    NOT NULL DEFAULT 'vnx-dev',
+            state           TEXT    NOT NULL DEFAULT 'proposed'
+                                    CHECK (state IN (
+                                        'proposed', 'ready', 'active', 'completed', 'failed',
+                                        'queued', 'claimed', 'delivering', 'accepted', 'running',
+                                        'timed_out', 'failed_delivery', 'expired', 'recovered',
+                                        'dead_letter'
+                                    )),
+            terminal_id     TEXT,
+            track           TEXT,
+            priority        TEXT    DEFAULT 'P2',
+            pr_ref          TEXT,
+            gate            TEXT,
+            attempt_count   INTEGER NOT NULL DEFAULT 0,
+            bundle_path     TEXT,
+            created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            expires_after   TEXT,
+            metadata_json   TEXT    DEFAULT '{}',
+            operator_approved_at TEXT,
+            UNIQUE(dispatch_id, project_id)
+        )
+    """)
+    conn.execute(
+        f"INSERT INTO dispatches ({col_list}) SELECT {col_list} FROM dispatches_pre_v24_strip"
+    )
+    conn.execute("DROP TABLE dispatches_pre_v24_strip")
+
+
+# ---------------------------------------------------------------------------
 # Step 4: apply 0024 migration
 # ---------------------------------------------------------------------------
 
@@ -180,6 +230,23 @@ def apply_migration_v24(conn: sqlite3.Connection, project_root: Path) -> None:
         return
 
     _assert_tracks_v22_intact(conn)
+
+    # Detect and strip stale FK from superseded 0023_dispatches_fk.sql.
+    # If operator applied that migration, dispatches has a FK to tracks(track_id)
+    # that would break the tracks RENAME in 0024.
+    stale_fks = [
+        row for row in conn.execute("PRAGMA foreign_key_list('dispatches')")
+        if row[2] == "tracks" and row[4] == "track_id"
+    ]
+    if stale_fks:
+        warnings.warn(
+            "Detected stale dispatches.track -> tracks(track_id) FK from superseded "
+            "0023_dispatches_fk.sql. Stripping FK before applying 0024.",
+            UserWarning,
+            stacklevel=2,
+        )
+        _strip_stale_dispatches_track_fk(conn)
+
     _warn_orphan_child_rows(conn)
     print("  [apply] migration 0024_tracks_tenant_scoping.sql ...")
     schema_migration.apply_script_if_below(conn, 24, sql)
