@@ -97,14 +97,24 @@ def _spawn_via_provider_dispatch(
             error=f"worktree creation failed: {exc}",
         )
 
-    dispatch_id = f"pool-spawn-{terminal_id}-{int(time.time() * 1000) % 100000}"
-    cmd = [
-        sys.executable, "-m", "scripts.lib.subprocess_dispatch",
-        "--terminal-id", terminal_id,
-        "--dispatch-id", dispatch_id,
-        "--instruction", f"Pool worker {terminal_id} for pool {pool_id}",
-        "--role", role,
-    ]
+    if os.environ.get("VNX_POOL_TASK_CONSUMER") == "1":
+        # Task-consumer mode (ADR-018 Rule 2 + FM-4): spawn the single-claim runner.
+        # Each worker claims one queued dispatch and exits; pool re-spawns on next tick.
+        cmd = [
+            sys.executable, "-m", "scripts.lib.pool_worker_runner",
+            "--terminal-id", terminal_id,
+            "--project-id", project_id,
+            "--pool-id", pool_id,
+        ]
+    else:
+        dispatch_id = f"pool-spawn-{terminal_id}-{int(time.time() * 1000) % 100000}"
+        cmd = [
+            sys.executable, "-m", "scripts.lib.subprocess_dispatch",
+            "--terminal-id", terminal_id,
+            "--dispatch-id", dispatch_id,
+            "--instruction", f"Pool worker {terminal_id} for pool {pool_id}",
+            "--role", role,
+        ]
 
     try:
         proc = subprocess.Popen(

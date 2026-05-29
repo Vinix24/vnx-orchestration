@@ -169,6 +169,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="VNX single-claim pool worker (ADR-018 Rule 2)")
     p.add_argument("--terminal-id", required=True)
     p.add_argument("--project-id", required=True)
+    p.add_argument("--pool-id", default=None)  # passed by pool_manager; reserved for future FM-4 scoping
     p.add_argument("--state-dir", default=None)
     p.add_argument("--dispatch-dir", default=None)
     p.add_argument("--model", default=None)
