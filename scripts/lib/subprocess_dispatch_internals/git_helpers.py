@@ -8,9 +8,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Per-dispatch worktree override set by VNX_ISOLATED_WORKTREE=1 path.
+# Module-level (not thread-local) because subprocess_dispatch __main__ is
+# single-dispatch-per-process; each invocation handles exactly one dispatch.
+_active_worktree_path: "Path | None" = None
+
+
+def _set_active_worktree(path: "Path | None") -> None:
+    """Register an isolated worktree path as the git root for this dispatch process."""
+    global _active_worktree_path
+    _active_worktree_path = path
+
+
+def _get_active_worktree() -> "Path | None":
+    """Return the currently active isolated worktree path, or None."""
+    return _active_worktree_path
+
 
 def _repo_root() -> Path:
-    """Resolve repo root: scripts/lib/subprocess_dispatch_internals/<this> -> ../../../."""
+    """Resolve the git root: uses isolated worktree when VNX_ISOLATED_WORKTREE=1."""
+    if _active_worktree_path is not None:
+        return _active_worktree_path
     return Path(__file__).resolve().parents[3]
 
 

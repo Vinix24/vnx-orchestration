@@ -54,8 +54,10 @@ from subprocess_dispatch_internals.git_helpers import (
     _check_commit_since,
     _commit_belongs_to_dispatch,
     _count_lines_changed_since_sha,
+    _get_active_worktree,
     _get_commit_hash,
     _get_current_branch,
+    _set_active_worktree,
 )
 from subprocess_dispatch_internals.handover import (
     _build_continuation_prompt,
@@ -147,6 +149,8 @@ __all__ = [
     "_capture_dispatch_parameters",
     "_capture_dispatch_outcome",
     "_update_pattern_confidence",
+    "_get_active_worktree",
+    "_set_active_worktree",
 ]
 
 
@@ -449,6 +453,38 @@ if __name__ == "__main__":
     from subprocess_dispatch_internals.runtime_overrides import complexity_timeout_defaults
     _chunk_timeout, _total_deadline = complexity_timeout_defaults(args.complexity)
 
+    # VNX_ISOLATED_WORKTREE=1: create a per-dispatch ephemeral worktree so
+    # concurrent workers operate on independent file trees and never share HEAD.
+    # Default (unset): no change — proven path runs exactly as before.
+    _isolated = os.environ.get("VNX_ISOLATED_WORKTREE") == "1"
+    _isolation_wt_path = None
+    _isolation_project_root = Path(__file__).resolve().parents[2]
+    if _isolated:
+        try:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).info(
+                "VNX_ISOLATED_WORKTREE=1: creating dispatch worktree for %s",
+                args.dispatch_id,
+            )
+            from dispatch_worktree_isolation import (
+                create_dispatch_worktree as _create_wt,
+                remove_dispatch_worktree as _remove_wt,
+            )
+            _isolation_wt_path = _create_wt(
+                args.dispatch_id,
+                project_root=_isolation_project_root,
+            )
+            _set_active_worktree(_isolation_wt_path)
+        except Exception as _wt_exc:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).error(
+                "VNX_ISOLATED_WORKTREE: worktree creation failed (%s); "
+                "falling back to shared repo root",
+                _wt_exc,
+            )
+            _isolated = False
+            _isolation_wt_path = None
+
     try:
         ok = deliver_with_recovery(
             terminal_id=args.terminal_id,
@@ -467,5 +503,14 @@ if __name__ == "__main__":
     finally:
         _hb_stop.set()
         _hb_thread.join(timeout=5)
+        if _isolated and _isolation_wt_path is not None:
+            _set_active_worktree(None)
+            try:
+                _remove_wt(args.dispatch_id, project_root=_isolation_project_root)
+            except Exception as _rm_exc:
+                import logging as _log_mod
+                _log_mod.getLogger(__name__).warning(
+                    "VNX_ISOLATED_WORKTREE: worktree cleanup failed: %s", _rm_exc,
+                )
 
     sys.exit(0 if ok else 1)
