@@ -8,11 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 # Layout created:
 #   ~/.vnx-system/
-#     versions/v1.0.0-rc2/     (immutable, content-addressed install)
+#     versions/v1.0.0/     (immutable, content-addressed install)
 #     current -> versions/...   (symlink, atomic switch)
 #     bin/vnx                   (shim that reads .vnx-version from project root)
 
-VERSION="v1.0.0-rc2"
+VERSION="v1.0.0"
 TARGET_DIR="${HOME}/.vnx-system"
 SOURCE_URL="https://github.com/Vinix24/vnx-orchestration"
 DRY_RUN=false
@@ -54,15 +54,15 @@ Usage: install-central.sh [OPTIONS]
 
 Options:
   --target <dir>    Install root (default: ~/.vnx-system)
-  --version <ver>   Version to install (default: v1.0.0-rc2)
+  --version <ver>   Version to install (default: v1.0.0)
   --source <url>    Git source URL (default: github.com/Vinix24/vnx-orchestration)
   --dry-run         Print steps without touching filesystem
   -h, --help        Show this help
 
 Examples:
   bash install-central.sh
-  bash install-central.sh --version v1.0.0-rc2 --dry-run
-  bash install-central.sh --target /opt/vnx-system --version v1.0.0-rc2
+  bash install-central.sh --version v1.0.0 --dry-run
+  bash install-central.sh --target /opt/vnx-system --version v1.0.0
 HELP
       exit 0 ;;
     *)
