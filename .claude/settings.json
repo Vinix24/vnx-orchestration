@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/pretooluse_block_raw_claude_spawn.sh\"'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "matcher": "",
