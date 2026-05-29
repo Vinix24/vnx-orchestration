@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import subprocess as _subprocess
 import sys
 from pathlib import Path
 
@@ -203,3 +204,85 @@ def test_advance_inserts_fixup_when_blocking_drift_detected(roadmap_env, monkeyp
     assert result["reason"] == "blocking_fixup_inserted"
     assert state["current_active_feature"].startswith("fixup-")
     assert state["inserted_fixups"]
+
+
+# ---------------------------------------------------------------------------
+# RA-2: git branch materialization
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def git_roadmap_env(roadmap_env):
+    """roadmap_env with an initialized git repo for branch creation tests."""
+    project_root = roadmap_env["project_root"]
+    _subprocess.run(["git", "init", "-b", "main"], cwd=str(project_root), capture_output=True)
+    _subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(project_root), capture_output=True)
+    _subprocess.run(["git", "config", "user.name", "Test"], cwd=str(project_root), capture_output=True)
+    (project_root / "README.md").write_text("init", encoding="utf-8")
+    _subprocess.run(["git", "add", "README.md"], cwd=str(project_root), capture_output=True)
+    _subprocess.run(["git", "commit", "-m", "init"], cwd=str(project_root), capture_output=True)
+    return roadmap_env
+
+
+def test_load_feature_creates_branch(git_roadmap_env, monkeypatch):
+    """load_feature creates the feature branch in git when absent."""
+    project_root = git_roadmap_env["project_root"]
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(git_roadmap_env["roadmap_file"])
+
+    manager.load_feature("feature-a", no_worktree=True)
+
+    r = _subprocess.run(
+        ["git", "-C", str(project_root), "show-ref", "--verify", "refs/heads/feature/a"],
+        capture_output=True,
+    )
+    assert r.returncode == 0, "feature/a branch must exist in git after load_feature"
+
+
+def test_load_feature_branch_creation_idempotent(git_roadmap_env, monkeypatch):
+    """Second load_feature call is a no-op: branch_created=False when branch already exists."""
+    receipts = []
+    monkeypatch.setattr(rm, "emit_governance_receipt", lambda *a, **kw: receipts.append(kw))
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(git_roadmap_env["roadmap_file"])
+
+    manager.load_feature("feature-a", no_worktree=True)
+    receipts.clear()
+
+    manager.load_feature("feature-a", no_worktree=True)
+
+    load_receipt = next((r for r in receipts if r.get("action") == "load_feature"), None)
+    assert load_receipt is not None
+    assert load_receipt["branch_created"] is False, "second call must be no-op (branch already exists)"
+
+
+def test_load_feature_receipt_carries_branch_info(git_roadmap_env, monkeypatch):
+    """roadmap_transition receipt carries branch_created, worktree_path, and project_id (ADR-007)."""
+    receipts = []
+    monkeypatch.setattr(rm, "emit_governance_receipt", lambda *a, **kw: receipts.append(kw))
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(git_roadmap_env["roadmap_file"])
+
+    manager.load_feature("feature-a", no_worktree=True)
+
+    load_receipt = next((r for r in receipts if r.get("action") == "load_feature"), None)
+    assert load_receipt is not None, "load_feature receipt not emitted"
+    assert "branch_created" in load_receipt, "receipt must carry branch_created"
+    assert "worktree_path" in load_receipt, "receipt must carry worktree_path"
+    assert load_receipt.get("project_id") is not None, "ADR-007: receipt must carry project_id"
+
+
+def test_load_feature_no_worktree_flag_skips_provisioning(git_roadmap_env, monkeypatch):
+    """--no-worktree prevents worktree_start from being called."""
+    start_calls = []
+
+    def _mock_worktree_start(*a, **kw):
+        start_calls.append(kw)
+        return type("R", (), {"success": True, "message": "/fake"})()
+
+    monkeypatch.setattr(rm, "worktree_start", _mock_worktree_start)
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(git_roadmap_env["roadmap_file"])
+
+    manager.load_feature("feature-a", no_worktree=True)
+
+    assert len(start_calls) == 0, "worktree_start must not be called when no_worktree=True"

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from governance_receipts import emit_governance_receipt, utc_now_iso
 from pr_queue_manager import PRQueueManager
 from closure_verifier import verify_closure
 from project_scope import current_project_id
+from vnx_worktree import worktree_start
 
 
 ALLOWED_DRIFT_CATEGORIES = {"bugfix", "post_cleanup", "governance_gap", "path/runtime regression"}
@@ -156,7 +158,41 @@ class RoadmapManager:
         manager = PRQueueManager()
         manager.load_feature_plan(str(_root_file(self.project_root, "FEATURE_PLAN.md")))
 
-    def load_feature(self, feature_id: str) -> Dict[str, Any]:
+    def _ensure_feature_branch(self, branch_name: str) -> bool:
+        """Create feature branch from origin/main if absent. Idempotent; returns True if created."""
+        cwd = str(self.project_root)
+        probe = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-dir"], capture_output=True)
+        if probe.returncode != 0:
+            return False
+        subprocess.run(["git", "-C", cwd, "fetch", "origin", "main"], capture_output=True)
+        exists = subprocess.run(
+            ["git", "-C", cwd, "show-ref", "--verify", f"refs/heads/{branch_name}"],
+            capture_output=True,
+        )
+        if exists.returncode == 0:
+            return False
+        for base in ("origin/main", "HEAD"):
+            r = subprocess.run(["git", "-C", cwd, "branch", branch_name, base], capture_output=True)
+            if r.returncode == 0:
+                return True
+        return False
+
+    def _provision_feature_worktree(self, branch_name: str) -> str:
+        """Create a git worktree for branch_name and initialize .vnx-data isolation. Returns path or empty."""
+        slug = branch_name.replace("/", "-")
+        wt_path = self.state_dir.parent / "worktrees" / slug
+        cwd = str(self.project_root)
+        if not wt_path.exists():
+            r = subprocess.run(
+                ["git", "-C", cwd, "worktree", "add", str(wt_path), branch_name],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                return ""
+        result = worktree_start(project_root=str(wt_path))
+        return str(wt_path) if result.success else ""
+
+    def load_feature(self, feature_id: str, no_worktree: bool = False) -> Dict[str, Any]:
         state = self.load_state()
         features = state.get("features") or []
         feature = next((item for item in features if item["feature_id"] == feature_id), None)
@@ -170,6 +206,10 @@ class RoadmapManager:
             raise FileNotFoundError(f"Feature plan not found: {plan_path}")
 
         self._materialize_plan(plan_path)
+
+        branch_name = feature["branch_name"]
+        branch_created = self._ensure_feature_branch(branch_name)
+        worktree_path = "" if no_worktree else self._provision_feature_worktree(branch_name)
 
         for item in features:
             if item["feature_id"] == feature_id:
@@ -188,10 +228,12 @@ class RoadmapManager:
             project_id=self.project_id,
             feature_id=feature_id,
             title=feature["title"],
-            branch_name=feature["branch_name"],
+            branch_name=branch_name,
             risk_class=feature["risk_class"],
             merge_policy=feature["merge_policy"],
             review_stack=feature["review_stack"],
+            branch_created=branch_created,
+            worktree_path=worktree_path,
         )
         return state
 
@@ -434,6 +476,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     load_parser = sub.add_parser("load")
     load_parser.add_argument("feature_id")
     load_parser.add_argument("--json", action="store_true")
+    load_parser.add_argument("--no-worktree", action="store_true", dest="no_worktree")
 
     reconcile_parser = sub.add_parser("reconcile")
     reconcile_parser.add_argument("--json", action="store_true")
@@ -449,7 +492,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.command == "status":
         result = manager.status()
     elif args.command == "load":
-        result = manager.load_feature(args.feature_id)
+        result = manager.load_feature(args.feature_id, no_worktree=getattr(args, "no_worktree", False))
     elif args.command == "reconcile":
         result = manager.reconcile()
     elif args.command == "advance":
