@@ -820,3 +820,105 @@ def test_step_no_active_feature_returns_status(roadmap_env, monkeypatch):
     result = manager.run_feature_step()
 
     assert result["status"] == "no_active_feature"
+
+
+# ---------------------------------------------------------------------------
+# RA-6: autopilot tick
+# ---------------------------------------------------------------------------
+
+
+def test_autopilot_tick_disabled_when_flag_unset(roadmap_env, monkeypatch):
+    """VNX_ROADMAP_AUTOPILOT unset → tick returns disabled, no progression."""
+    monkeypatch.delenv("VNX_ROADMAP_AUTOPILOT", raising=False)
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    result = manager.autopilot_tick()
+
+    assert result["status"] == "disabled"
+    state = manager.load_state()
+    assert state["current_active_feature"] == "feature-a", "flag off must not cause progression"
+
+
+def test_autopilot_tick_full_loop_advances_a_to_b(roadmap_env, monkeypatch):
+    """Full simulated loop: tick1 dispatches PR, tick2 (queue drained + gates pass) advances A→B."""
+    monkeypatch.setenv("VNX_ROADMAP_AUTOPILOT", "1")
+    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    _setup_passing_gates(roadmap_env["state_dir"])
+
+    # feature-a is conditional_auto + low risk → no approval token required
+    tick1 = manager.autopilot_tick()
+    assert tick1["status"] == "stepped", f"expected stepped, got: {tick1}"
+    assert tick1["pr_id"] == "PR-0"
+
+    # PR-0 is now in_progress; queue is drained → second tick advances
+    tick2 = manager.autopilot_tick()
+    assert tick2["status"] == "advanced", f"expected advanced, got: {tick2}"
+
+    state = manager.load_state()
+    assert state["current_active_feature"] == "feature-b"
+    assert "feature-a" in state["merged_features"]
+
+
+def test_autopilot_tick_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
+    """Queue drained but gates incomplete (RA-3) → tick blocked, no advancement."""
+    monkeypatch.setenv("VNX_ROADMAP_AUTOPILOT", "1")
+    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a", no_worktree=True)
+
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    # No gate results written → gates_incomplete
+
+    tick1 = manager.autopilot_tick()
+    assert tick1["status"] == "stepped"
+
+    tick2 = manager.autopilot_tick()
+    assert tick2["status"] == "blocked"
+    assert tick2["reason"] == "gates_incomplete"
+    state = manager.load_state()
+    assert state["current_active_feature"] == "feature-a", "must not advance with incomplete gates"
+
+
+def test_autopilot_tick_blocked_awaiting_human_approval(roadmap_env, monkeypatch):
+    """High-risk feature: queue drained + gates pass but no approval token → tick blocked (RA-4)."""
+    project_root = roadmap_env["project_root"]
+    roadmap_file = _make_high_risk_roadmap(project_root)
+
+    monkeypatch.setenv("VNX_ROADMAP_AUTOPILOT", "1")
+    monkeypatch.setenv("VNX_QUEUE_POPUP_ENABLED", "0")
+
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    _setup_passing_gates(roadmap_env["state_dir"], branch="feature/hi")
+
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_file)
+    manager.load_feature("feature-hi", no_worktree=True)
+
+    tick1 = manager.autopilot_tick()
+    assert tick1["status"] == "stepped"
+
+    tick2 = manager.autopilot_tick()
+    assert tick2["status"] == "blocked"
+    assert tick2["reason"] == "awaiting_human_approval"
+    state = manager.load_state()
+    assert state["current_active_feature"] == "feature-hi", "must not advance without approval token"

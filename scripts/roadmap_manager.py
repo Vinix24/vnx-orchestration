@@ -677,6 +677,47 @@ Implement the minimum blocking fix required before the roadmap may advance.
             "dispatch_id": dispatch_id,
         }
 
+    def autopilot_tick(self) -> Dict[str, Any]:
+        """Single-iteration autopilot tick. Feature-flag gated (VNX_ROADMAP_AUTOPILOT=1).
+
+        Sequence: run_feature_step → (if queue drained) advance.
+        advance() runs reconcile() internally (RA-3/3b gate enforcement) then the
+        human approval check (RA-4), so this tick composes the full RA-1..5 loop.
+
+        ADR-007: project_id-scoped via existing primitives — no extra scoping needed.
+        ADR-018 Rule 2: single-claim, no loop. Caller (silence_watchdog) schedules repetition.
+        """
+        if os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("1", "true", "True"):
+            return {"status": "disabled", "reason": "VNX_ROADMAP_AUTOPILOT not set"}
+
+        state = self.load_state()
+        if not state.get("current_active_feature"):
+            return {"status": "idle", "reason": "no_active_feature"}
+
+        step_result = self.run_feature_step()
+
+        if step_result["status"] == "dispatched":
+            return {
+                "status": "stepped",
+                "feature_id": step_result["feature_id"],
+                "pr_id": step_result["pr_id"],
+                "dispatch_id": step_result["dispatch_id"],
+            }
+
+        if step_result["status"] in ("failed", "no_active_feature"):
+            return {"status": step_result["status"], "step": step_result}
+
+        # Queue drained (no_ready_pr) → reconcile (via advance) + approval gate.
+        advance_result = self.advance()
+        if advance_result.get("advanced"):
+            return {"status": "advanced", "advance": advance_result}
+
+        return {
+            "status": "blocked",
+            "reason": advance_result.get("reason"),
+            "advance": advance_result,
+        }
+
     def status(self) -> Dict[str, Any]:
         state = self.load_state()
         return {
@@ -721,6 +762,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     step_parser = sub.add_parser("step")
     step_parser.add_argument("--json", action="store_true")
 
+    autopilot_parser = sub.add_parser("autopilot")
+    autopilot_parser.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     manager = RoadmapManager()
 
@@ -738,6 +782,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = manager.approve(args.feature_id, actor=args.actor, justification=args.justification)
     elif args.command == "step":
         result = manager.run_feature_step()
+    elif args.command == "autopilot":
+        result = manager.autopilot_tick()
     else:
         raise AssertionError("unreachable")
 
