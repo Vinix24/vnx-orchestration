@@ -645,6 +645,38 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _create_provider_worktree(dispatch_id: str) -> Optional[Path]:
+    """Create an isolated worktree for a provider dispatch.
+
+    Only called when VNX_ISOLATED_WORKTREE=1.  Returns the worktree Path on
+    success, None on failure (logs the error and falls back to shared path).
+    """
+    try:
+        from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
+        wt_path = create_dispatch_worktree(dispatch_id)
+        logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
+        return wt_path
+    except RuntimeError as exc:
+        logger.error(
+            "provider isolation: create_dispatch_worktree failed for %s: %s — running in shared worktree",
+            dispatch_id, exc,
+        )
+        return None
+
+
+def _remove_provider_worktree(dispatch_id: str) -> None:
+    """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent."""
+    try:
+        from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
+        remove_dispatch_worktree(dispatch_id)
+        logger.info("provider isolation: worktree removed (dispatch=%s)", dispatch_id)
+    except Exception as exc:
+        logger.warning(
+            "provider isolation: remove_dispatch_worktree failed for %s: %s",
+            dispatch_id, exc,
+        )
+
+
 def _dispatch_codex(args: argparse.Namespace) -> int:
     """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
@@ -667,6 +699,9 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_codex(
@@ -675,6 +710,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
+            cwd=isolation_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -703,6 +739,8 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_codex: event archive+clear failed: %s", _exc)
+        if isolation_cwd is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def _resolve_codex_model() -> str:
@@ -884,6 +922,9 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         )
 
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd_litellm: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd_litellm = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_litellm(
@@ -895,6 +936,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             lane=lane_key,
             tool_call_shape=_tool_call_shape,
             event_writer=event_store.append if event_store is not None else None,
+            cwd=isolation_cwd_litellm,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -923,6 +965,8 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_litellm: event archive+clear failed: %s", _exc)
+        if isolation_cwd_litellm is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -948,6 +992,9 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
     model_label = model or _resolve_kimi_model_label()
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd_kimi: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd_kimi = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
@@ -956,6 +1003,7 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
+            cwd=isolation_cwd_kimi,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -984,6 +1032,8 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_kimi: event archive+clear failed: %s", _exc)
+        if isolation_cwd_kimi is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def _dispatch_gemini(args: argparse.Namespace) -> int:
@@ -1006,6 +1056,9 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd_gemini: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd_gemini = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_gemini(
@@ -1014,6 +1067,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append,
+            cwd=isolation_cwd_gemini,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -1042,6 +1096,8 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_gemini: event archive+clear failed: %s", _exc)
+        if isolation_cwd_gemini is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def main(argv: list[str] | None = None) -> int:
