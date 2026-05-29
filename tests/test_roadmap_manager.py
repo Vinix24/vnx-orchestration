@@ -135,6 +135,42 @@ def test_advance_loads_next_feature_after_verified_merge(roadmap_env, monkeypatc
     assert "feature-a" in state["merged_features"]
 
 
+def test_project_id_mismatch_reinitializes_state(roadmap_env, monkeypatch):
+    """ADR-007: load_state() must refuse/re-initialize when file's project_id mismatches."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "project-a")
+    manager_a = rm.RoadmapManager()
+    manager_a.init_roadmap(roadmap_env["roadmap_file"])
+    manager_a.load_feature("feature-a")
+
+    # Switch to project-b — load_state() must not return project-a's features.
+    monkeypatch.setenv("VNX_PROJECT_ID", "project-b")
+    manager_b = rm.RoadmapManager()
+    state = manager_b.load_state()
+
+    assert state["current_active_feature"] is None, "cross-tenant feature must not leak"
+    assert state["features"] == [], "cross-tenant features must not leak"
+    assert state["project_id"] == "project-b"
+
+
+def test_unstamped_state_migrated_on_first_load(roadmap_env, monkeypatch):
+    """ADR-007: existing state file without project_id is stamped on first load, feature progress preserved."""
+    monkeypatch.setenv("VNX_PROJECT_ID", "project-a")
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+
+    # Simulate legacy unstamped file: remove project_id key.
+    state_path = roadmap_env["state_dir"] / "roadmap_state.json"
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    del raw["project_id"]
+    state_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    # Re-load — should stamp project_id and preserve feature progress.
+    state = manager.load_state()
+    assert state["project_id"] == "project-a"
+    assert state["current_active_feature"] == "feature-a", "feature progress must be preserved after migration"
+
+
 def test_advance_inserts_fixup_when_blocking_drift_detected(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
