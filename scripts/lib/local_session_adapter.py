@@ -232,7 +232,7 @@ class LocalSessionAdapter:
         raise UnsupportedCapability("REHEAL", "local_session",
             "Local sessions use process-based identity")
 
-    def shutdown(self, graceful: bool = True) -> None:
+    def shutdown(self, _graceful: bool = True) -> None:
         for tid in list(self._sessions):
             self.stop(tid)
 

@@ -482,7 +482,7 @@ class DispatchParameterTracker:
         return insights[:10]
 
     def get_recommended_parameters(
-        self, role: str = "", task_type: str = ""
+        self, role: str = "", _task_type: str = ""
     ) -> dict:
         """Return optimal parameter ranges based on experiment data.
 

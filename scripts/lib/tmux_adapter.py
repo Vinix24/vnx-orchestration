@@ -376,7 +376,7 @@ class TmuxAdapter:
                 pass
         return RehealResult(rehealed=False, old_ref=old_ref, strategy="work_dir", error="Reheal failed")
 
-    def shutdown(self, graceful: bool = True) -> None:
+    def shutdown(self, _graceful: bool = True) -> None:
         """Clean up resources. No-op for TmuxAdapter (tmux session persists)."""
         pass
 
