@@ -138,11 +138,12 @@ def test_orphan_dependency_row_is_skipped():
     conn.commit()
     # Dependency where to_track_id is orphan
     conn.execute("PRAGMA foreign_keys = OFF")
+    conn.commit()
     conn.execute(
         "INSERT INTO track_dependencies (from_track_id, to_track_id, kind, derivation_source) VALUES ('track-01', 'track-orphan', 'hard', 'manual')"
     )
-    conn.execute("PRAGMA foreign_keys = ON")
     conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
     _apply_v24(conn)
 
     count = conn.execute(
@@ -154,11 +155,12 @@ def test_orphan_dependency_row_is_skipped():
 def test_orphan_open_item_row_is_skipped():
     conn = _base_db()
     conn.execute("PRAGMA foreign_keys = OFF")
+    conn.commit()
     conn.execute(
         "INSERT INTO track_open_items (track_id, oi_id, link_type, link_source) VALUES ('track-orphan', 'OI-001', 'blocks', 'manual')"
     )
-    conn.execute("PRAGMA foreign_keys = ON")
     conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
     _apply_v24(conn)
 
     count = conn.execute(

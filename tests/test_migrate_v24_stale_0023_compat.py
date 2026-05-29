@@ -195,6 +195,68 @@ def test_dispatch_rows_preserved_after_stale_fk_strip():
     assert "d-002" in dispatch_ids, "d-002 must be preserved"
 
 
+def test_strip_stale_fk_preserves_dispatches_seq_high_water():
+    """_strip_stale_dispatches_track_fk must preserve the sqlite_sequence high-water mark.
+
+    Pattern: apply stale-FK (rebuilds dispatches, seq resets), then insert id=1 and id=100,
+    delete id=100 → seq=100, max(id)=1. Apply v24 (triggers stale-FK strip). Assert seq
+    remains >= 100 so the next insert lands at id=101, not id=2.
+
+    Note: high-water seeding happens AFTER _apply_stale_0023_dispatches_fk, because that
+    helper rebuilds dispatches itself and would regress an earlier seed.
+    """
+    conn = _base_db_v22()
+
+    # Apply stale FK first (dispatches rebuilt from empty, seq resets)
+    _apply_stale_0023_dispatches_fk(conn)
+
+    # Seed high-water AFTER the stale FK rebuild (track=NULL is FK-permitted)
+    conn.execute("INSERT INTO dispatches (id, dispatch_id, state) VALUES (1, 'd-001', 'queued')")
+    conn.execute("INSERT INTO dispatches (id, dispatch_id, state) VALUES (100, 'd-100', 'queued')")
+    conn.commit()
+    conn.execute("DELETE FROM dispatches WHERE id = 100")
+    conn.commit()
+
+    # Pre-condition: seq must be 100 at this point
+    seq_before = conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'dispatches'"
+    ).fetchone()
+    assert seq_before is not None and seq_before[0] >= 100, (
+        f"Precondition: seq should be >= 100 after inserting id=100, got {seq_before}"
+    )
+
+    # Confirm stale FK present before v24
+    fks = [
+        row for row in conn.execute("PRAGMA foreign_key_list('dispatches')")
+        if row[2] == "tracks" and row[4] == "track_id"
+    ]
+    assert fks, "Stale FK must exist before migration for this test to be meaningful"
+
+    import warnings as _warnings
+    with _warnings.catch_warnings(record=True):
+        _warnings.simplefilter("always")
+        migrate_future_system.apply_migration_v24(conn, _PROJECT_ROOT)
+    conn.commit()
+
+    # Assert seq not regressed
+    seq_after = conn.execute(
+        "SELECT MAX(seq) FROM sqlite_sequence WHERE name = 'dispatches'"
+    ).fetchone()[0]
+    assert seq_after is not None and seq_after >= 100, (
+        f"sqlite_sequence.seq for 'dispatches' regressed to {seq_after} after stale-FK strip + v24"
+    )
+
+    # Assert next insert lands at id=101, not id=2
+    conn.execute("INSERT INTO dispatches (dispatch_id, state) VALUES ('d-new', 'queued')")
+    conn.commit()
+    new_id = conn.execute(
+        "SELECT id FROM dispatches WHERE dispatch_id = 'd-new'"
+    ).fetchone()[0]
+    assert new_id >= 101, (
+        f"New dispatch id={new_id} — seq was not preserved through stale-FK strip"
+    )
+
+
 def test_v24_clean_path_unaffected_by_stale_fk_logic():
     """Without stale FK, apply_migration_v24 proceeds normally with no extra warning."""
     conn = _base_db_v22()

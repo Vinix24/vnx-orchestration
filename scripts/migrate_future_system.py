@@ -210,7 +210,47 @@ def _strip_stale_dispatches_track_fk(conn: sqlite3.Connection) -> None:
     conn.execute(
         f"INSERT INTO dispatches ({col_list}) SELECT {col_list} FROM dispatches_pre_v24_strip"
     )
+    conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dispatches'")
+    conn.execute("""
+        INSERT INTO sqlite_sequence(name, seq)
+        SELECT 'dispatches',
+               COALESCE(
+                   (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v24_strip'),
+                   (SELECT MAX(id) FROM dispatches),
+                   0
+               )
+    """)
     conn.execute("DROP TABLE dispatches_pre_v24_strip")
+
+
+# ---------------------------------------------------------------------------
+# v22 timestamp dedup: prevent UNIQUE(track_id, project_id, occurred_at) rejection
+# ---------------------------------------------------------------------------
+
+def _dedupe_v22_phase_history_timestamps(conn: sqlite3.Connection) -> None:
+    """v22 occurred_at default is millisecond precision; bulk transitions can
+    share timestamps. Composite UNIQUE in v24 would reject those. Append
+    microsecond offset (.001Z, .002Z, ...) to make timestamps distinct
+    while preserving chronological order via stable id ordering.
+    """
+    rows = conn.execute("""
+        SELECT id, occurred_at,
+               ROW_NUMBER() OVER (PARTITION BY track_id, occurred_at ORDER BY id) - 1 AS offset
+        FROM track_phase_history
+        ORDER BY id
+    """).fetchall()
+    for row_id, occurred_at, offset in rows:
+        if offset > 0:
+            base = occurred_at.rstrip("Z")
+            new_ts = (
+                f"{base}{offset:04d}Z"
+                if "." in base.rsplit("T", 1)[-1]
+                else f"{base}.{offset:04d}Z"
+            )
+            conn.execute(
+                "UPDATE track_phase_history SET occurred_at = ? WHERE id = ?",
+                (new_ts, row_id),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +287,7 @@ def apply_migration_v24(conn: sqlite3.Connection, project_root: Path) -> None:
         )
         _strip_stale_dispatches_track_fk(conn)
 
+    _dedupe_v22_phase_history_timestamps(conn)
     _warn_orphan_child_rows(conn)
     print("  [apply] migration 0024_tracks_tenant_scoping.sql ...")
     schema_migration.apply_script_if_below(conn, 24, sql)
