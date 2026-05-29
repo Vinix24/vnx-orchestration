@@ -126,6 +126,18 @@ def test_advance_loads_next_feature_after_verified_merge(roadmap_env, monkeypatc
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
 
+    # RA-3: required gate evidence must be present for advance to proceed.
+    gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    (gate_results_dir / "pr0-gemini_review-contract.json").write_text(
+        json.dumps({"pr_id": "PR-0", "gate": "gemini_review", "status": "pass"}),
+        encoding="utf-8",
+    )
+    (gate_results_dir / "pr0-codex_gate-contract.json").write_text(
+        json.dumps({"pr_id": "PR-0", "gate": "codex_gate", "status": "pass"}),
+        encoding="utf-8",
+    )
+
     result = manager.advance()
     state = manager.load_state()
 
@@ -286,3 +298,113 @@ def test_load_feature_no_worktree_flag_skips_provisioning(git_roadmap_env, monke
     manager.load_feature("feature-a", no_worktree=True)
 
     assert len(start_calls) == 0, "worktree_start must not be called when no_worktree=True"
+
+
+# ---------------------------------------------------------------------------
+# RA-3: gate evidence enforcement
+# ---------------------------------------------------------------------------
+
+
+def _write_gate_result(gate_results_dir: Path, pr_id: str, gate: str, status: str = "pass") -> None:
+    pr_slug = pr_id.lower().replace("-", "")
+    (gate_results_dir / f"{pr_slug}-{gate}-contract.json").write_text(
+        json.dumps({"pr_id": pr_id, "gate": gate, "status": status}),
+        encoding="utf-8",
+    )
+
+
+def test_reconcile_gates_incomplete_when_codex_missing(roadmap_env, monkeypatch):
+    """Closure structurally passes but codex gate result absent → gates_incomplete."""
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+
+    gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    _write_gate_result(gate_results_dir, "PR-0", "gemini_review")
+    # codex_gate intentionally absent
+
+    result = manager.reconcile()
+
+    assert result["verdict"] == "gates_incomplete"
+
+
+def test_advance_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
+    """gates_incomplete verdict → advance does NOT progress feature."""
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    # gate_results_dir intentionally not created → gates_incomplete
+
+    result = manager.advance()
+
+    assert result["advanced"] is False
+    assert result["reason"] == "gates_incomplete"
+    state = manager.load_state()
+    assert state["current_active_feature"] == "feature-a", "feature must not advance"
+
+
+def test_reconcile_passes_when_gemini_and_codex_both_pass(roadmap_env, monkeypatch):
+    """gemini PASS + codex PASS → reconcile passes → advance progresses to next feature."""
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+
+    gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    _write_gate_result(gate_results_dir, "PR-0", "gemini_review")
+    _write_gate_result(gate_results_dir, "PR-0", "codex_gate")
+
+    result = manager.reconcile()
+    assert result["verdict"] == "pass"
+
+
+def test_optional_gate_missing_does_not_block(roadmap_env, monkeypatch):
+    """claude_github_optional absent → does NOT produce gates_incomplete (advisory only)."""
+    manager = rm.RoadmapManager()
+
+    # Create a roadmap that includes claude_github_optional in review_stack.
+    project_root = roadmap_env["project_root"]
+    roadmap_with_optional = project_root / "ROADMAP_OPT.yaml"
+    roadmap_with_optional.write_text(
+        """features:
+  - feature_id: feature-opt
+    title: Feature Opt
+    plan_path: roadmap/features/feature-a/FEATURE_PLAN.md
+    branch_name: feature/opt
+    risk_class: medium
+    merge_policy: human
+    review_stack: [gemini_review, codex_gate, claude_github_optional]
+    depends_on: []
+    status: planned
+""",
+        encoding="utf-8",
+    )
+    manager.init_roadmap(roadmap_with_optional)
+    manager.load_feature("feature-opt")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+
+    gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    _write_gate_result(gate_results_dir, "PR-0", "gemini_review")
+    _write_gate_result(gate_results_dir, "PR-0", "codex_gate")
+    # claude_github_optional intentionally absent
+
+    result = manager.reconcile()
+
+    assert result["verdict"] == "pass", "optional gate absence must not produce gates_incomplete"
