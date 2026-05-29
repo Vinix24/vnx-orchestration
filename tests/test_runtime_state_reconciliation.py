@@ -81,7 +81,7 @@ class _Base(unittest.TestCase):
     def _register(self, dispatch_id: str, terminal_id: str = "T2", **kwargs):
         with get_connection(self.state_dir) as conn:
             row = register_dispatch(conn, dispatch_id=dispatch_id,
-                                    terminal_id=terminal_id, **kwargs)
+                                    terminal_id=terminal_id, **kwargs, project_id="vnx-dev")
             conn.commit()
         return row
 

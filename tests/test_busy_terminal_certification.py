@@ -68,7 +68,7 @@ def _make_core(state_dir: str, dispatch_dir: str) -> RuntimeCore:
 
 def _register(state_dir: str, dispatch_id: str, terminal_id: str = "T2") -> None:
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
         conn.commit()
 
 

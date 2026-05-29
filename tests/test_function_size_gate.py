@@ -8,12 +8,11 @@ import sys
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
-# Ensure vnx_core is resolvable (handles both pip-installed and dev/worktree contexts)
-_pkg = Path(__file__).resolve().parents[1] / "dist" / "vnx-orchestration"
-if _pkg.is_dir() and str(_pkg) not in sys.path:
-    sys.path.insert(0, str(_pkg))
+_lib = SCRIPTS_DIR / "lib"
+if str(_lib) not in sys.path:
+    sys.path.insert(0, str(_lib))
 
-from vnx_core.function_size_gate import FunctionBudget, evaluate_function_budgets, load_function_budgets, render_violations
+from function_size_gate import FunctionBudget, evaluate_function_budgets, load_function_budgets, render_violations
 
 
 def test_gate_flags_oversized_python_function(tmp_path: Path):

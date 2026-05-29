@@ -283,7 +283,7 @@ class _DBTestCase(unittest.TestCase):
     def _register_dispatch(self, dispatch_id):
         with get_connection(self.state_dir) as conn:
             from runtime_coordination import register_dispatch
-            register_dispatch(conn, dispatch_id=dispatch_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, project_id="vnx-dev")
             conn.commit()
 
 

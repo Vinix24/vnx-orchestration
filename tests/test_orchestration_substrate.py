@@ -292,7 +292,7 @@ class TestCodingManagerAdapter:
         init_schema(self._tmpdir)
         with get_connection(self._tmpdir) as conn:
             register_dispatch(conn, dispatch_id=dispatch_id,
-                              terminal_id=terminal_id, track="B")
+                              terminal_id=terminal_id, track="B", project_id="vnx-dev")
             acquire_lease(conn, terminal_id=terminal_id, dispatch_id=dispatch_id)
             conn.commit()
 

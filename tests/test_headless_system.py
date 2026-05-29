@@ -89,7 +89,7 @@ class _DBTestCase(unittest.TestCase):
     def _register_dispatch(self, dispatch_id: str, state: str = "queued", **kwargs):
         with get_connection(self.state_dir) as conn:
             from runtime_coordination import register_dispatch
-            register_dispatch(conn, dispatch_id=dispatch_id, **kwargs)
+            register_dispatch(conn, dispatch_id=dispatch_id, **kwargs, project_id="vnx-dev")
             if state != "queued":
                 from runtime_coordination import transition_dispatch
                 if state == "claimed":
