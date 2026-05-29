@@ -1,12 +1,18 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-28T21:13:49.276597+00:00
+**Last updated**: 2026-05-29T05:11:24.774710+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #683 — refactor(hyg-4): extract subparser registrations and dispatch chain from main() (#683) (2026-05-29)
+- #682 — feat(d-role-prompts): add database-engineer, intelligence-engineer, security-engineer roles + update architect (#682) (2026-05-29)
+- #679 — feat(int-1): adrs table + FTS5 + indexer (PR-INT-1) (#679) (2026-05-29)
+- #678 — feat(skills): add STEP 0 ADR-check to 5 skill SKILL.md files (#678) (2026-05-29)
+- #677 — fix(trace): dual-scheme pr_id+pr_number + backfill — cat-C gap 73% → 0% (PR-B-TRACE) (#677) (2026-05-29)
+- #676 — feat(future): track layer schema + CLI + migration (PR-FUT-1) (#676) (2026-05-28)
 - #675 — feat(route): enforce provider_constraints.yaml in dispatch pre-flight (PR-ROUTE-1) (#675) (2026-05-28)
 - #674 — docs(readme): rewrite for pip-1.0 + tmux-leaseless-lane + multi-provider architecture (PR-DOC-README) (#674) (2026-05-28)
 - #673 — fix(docs): align QUICKSTART/MIGRATION with real pip-CLI surface + hello-world examples/ fallback (PR-DOC-1) (#673) (2026-05-28)
@@ -124,6 +130,9 @@ _Last 14 days — sourced from git merge commits._
 
 **WAVE 8**
 - #570 — fix(wiring): activate 4 dead-code modules from Wave 8 fast-path (auto_apply, validator class, schema-emit, smart_router.route) (#570) (2026-05-17)
+
+**WAVE-5**
+- #680 — feat(int-2): Wave-5 ADR injection in dispatch context (#680) (2026-05-29)
 
 **WAVE4**
 - #633 — docs(wave4): central-install runbook + cutover procedure (PR-WAVE4-6) (#633) (2026-05-25)
