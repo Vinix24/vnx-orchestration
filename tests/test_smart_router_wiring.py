@@ -393,22 +393,24 @@ class TestDecideAndWriteRoundTrip:
         assert record["fallback_route"]["model_id"] == "claude-opus-4-6"
         assert record["outcome"] is None
 
-    def test_review_instruction_routes_to_opus(self, recommendations_yaml, state_dir):
+    def test_review_instruction_routes_to_cheapest_capable(self, recommendations_yaml, state_dir):
+        # Cost-aware routing: sonnet ($0.045/call) beats opus ($0.225/call) within
+        # the capable tier for 02_code_review even though opus has higher score (10.0 vs 9.5).
         decision = decide(
             instruction="review the PR changes for security issues",
             role="reviewer",
             recommendations_path=recommendations_yaml,
         )
         assert decision.task_class == "02_code_review"
-        assert decision.primary.model_id == "claude-opus-4-6"
+        assert decision.primary.model_id == "claude-sonnet-4-6"
 
         provider, model = parse_route_model_id(decision.primary.model_id)
         assert provider == "claude"
-        assert model == "opus"
+        assert model == "sonnet"
 
         write_route_decision("d-review-rt", decision, state_dir=state_dir)
 
         ndjson_path = state_dir / "route_decisions.ndjson"
         record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
-        assert record["chosen_route"]["model_id"] == "claude-opus-4-6"
-        assert record["chosen_route"]["composite_score"] == 10.0
+        assert record["chosen_route"]["model_id"] == "claude-sonnet-4-6"
+        assert record["chosen_route"]["composite_score"] == 9.5
