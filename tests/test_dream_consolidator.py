@@ -6,6 +6,7 @@ Coverage:
 - test_parse_kimi_response_strict_json: response JSON extraction
 - test_dry_run_no_db_write: dry-run skips dream_cycles INSERT
 - test_run_dream_cycle_happy_path: full cycle with mocked kimi
+- GAP-7 receipt-completeness preflight: stale/empty → skip with warning event
 """
 from __future__ import annotations
 
@@ -218,6 +219,13 @@ class TestExtractKimiText:
         assert consolidator._extract_kimi_text(stdout) == ""
 
 
+def _make_fresh_receipts(tmp_path: Path) -> None:
+    """Create a fresh processed receipt so the GAP-7 preflight passes."""
+    processed = tmp_path / ".vnx-data" / "receipts" / "processed"
+    processed.mkdir(parents=True, exist_ok=True)
+    (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
+
+
 class TestDryRun:
     def test_dry_run_no_db_write(self, tmp_path):
         """Dry-run emits NDJSON and writes pending-review.json but skips dream_cycles INSERT."""
@@ -226,6 +234,7 @@ class TestDryRun:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _make_fresh_receipts(tmp_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -255,6 +264,7 @@ class TestDryRun:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _make_fresh_receipts(tmp_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -285,6 +295,7 @@ class TestDryRun:
         conn.executescript(_DREAM_SCHEMA)
         conn.commit()
         conn.close()
+        _make_fresh_receipts(tmp_path)
 
         with (
             patch("consolidator.resolve_project_root", return_value=tmp_path),
@@ -309,3 +320,130 @@ class TestDryRun:
         assert event_types.index("dream_cycle_started") < event_types.index(
             "dream_cycle_completed"
         )
+
+
+# ---------------------------------------------------------------------------
+# GAP-7 receipt-completeness preflight tests
+# ---------------------------------------------------------------------------
+
+
+class TestCheckReceiptCompleteness:
+    def test_missing_processed_dir_returns_false(self, tmp_path):
+        """No receipts/processed dir → incomplete."""
+        data_root = tmp_path / ".vnx-data"
+        ok, reason = consolidator._check_receipt_completeness(data_root)
+        assert not ok
+        assert "absent" in reason
+
+    def test_empty_processed_dir_returns_false(self, tmp_path):
+        """Empty receipts/processed dir → incomplete."""
+        (tmp_path / ".vnx-data" / "receipts" / "processed").mkdir(parents=True)
+        ok, reason = consolidator._check_receipt_completeness(tmp_path / ".vnx-data")
+        assert not ok
+        assert "empty" in reason
+
+    def test_fresh_receipt_returns_true(self, tmp_path):
+        """A recently modified receipt file → complete."""
+        processed = tmp_path / ".vnx-data" / "receipts" / "processed"
+        processed.mkdir(parents=True)
+        (processed / "receipt-001.ndjson").write_text("{}", encoding="utf-8")
+        ok, reason = consolidator._check_receipt_completeness(tmp_path / ".vnx-data")
+        assert ok
+        assert reason == "ok"
+
+    def test_stale_receipts_return_false(self, tmp_path):
+        """All receipts older than max_age_hours → incomplete."""
+        import time
+        processed = tmp_path / ".vnx-data" / "receipts" / "processed"
+        processed.mkdir(parents=True)
+        old_file = processed / "receipt-old.ndjson"
+        old_file.write_text("{}", encoding="utf-8")
+        # Set mtime to 200 hours ago
+        old_ts = time.time() - (200 * 3600)
+        import os
+        os.utime(str(old_file), (old_ts, old_ts))
+
+        ok, reason = consolidator._check_receipt_completeness(
+            tmp_path / ".vnx-data", max_age_hours=48
+        )
+        assert not ok
+        assert "stale" in reason
+
+
+class TestRunDreamCycleReceiptPreflight:
+    def test_skips_when_no_receipts(self, tmp_path):
+        """run_dream_cycle returns status=skipped when receipts/processed absent."""
+        db_path = tmp_path / "state" / "quality_intelligence.db"
+        db_path.parent.mkdir(parents=True)
+        conn = __import__("sqlite3").connect(str(db_path))
+        conn.executescript(_DREAM_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        with patch("consolidator.resolve_project_root", return_value=tmp_path):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=False)
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "incomplete_data"
+
+    def test_skip_emits_ndjson_warning_event(self, tmp_path):
+        """Skipped cycle emits dream_cycle_skipped NDJSON event (ADR-005)."""
+        db_path = tmp_path / "state" / "quality_intelligence.db"
+        db_path.parent.mkdir(parents=True)
+        conn = __import__("sqlite3").connect(str(db_path))
+        conn.executescript(_DREAM_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        with patch("consolidator.resolve_project_root", return_value=tmp_path):
+            consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=False)
+
+        event_files = list((tmp_path / ".vnx-data" / "events" / "dream").glob("*.ndjson"))
+        assert len(event_files) == 1
+        lines = [json.loads(l) for l in event_files[0].read_text().strip().splitlines()]
+        assert any(e["event_type"] == "dream_cycle_skipped" for e in lines)
+        skipped = next(e for e in lines if e["event_type"] == "dream_cycle_skipped")
+        assert skipped["reason"] == "incomplete_data"
+
+    def test_skip_does_not_call_kimi(self, tmp_path):
+        """Skipped cycle must not invoke kimi consolidation."""
+        db_path = tmp_path / "state" / "quality_intelligence.db"
+        db_path.parent.mkdir(parents=True)
+        conn = __import__("sqlite3").connect(str(db_path))
+        conn.executescript(_DREAM_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch("consolidator._dispatch_kimi_consolidation") as mock_kimi,
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path)
+
+        mock_kimi.assert_not_called()
+
+    def test_proceeds_when_fresh_receipts_present(self, tmp_path):
+        """run_dream_cycle proceeds normally when fresh receipts exist."""
+        db_path = tmp_path / "state" / "quality_intelligence.db"
+        db_path.parent.mkdir(parents=True)
+        conn = __import__("sqlite3").connect(str(db_path))
+        conn.executescript(_DREAM_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        # Create a fresh receipt file
+        processed = tmp_path / ".vnx-data" / "receipts" / "processed"
+        processed.mkdir(parents=True)
+        (processed / "receipt-fresh.ndjson").write_text("{}", encoding="utf-8")
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch(
+                "consolidator._dispatch_kimi_consolidation",
+                return_value=_FAKE_CONSOLIDATION,
+            ),
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=True)
+
+        assert result.get("status") != "skipped"
+        assert "cycle_id" in result

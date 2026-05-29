@@ -14,7 +14,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -28,6 +28,40 @@ _TABLE_SORT_COL: dict[str, str] = {
     "antipatterns": "first_seen",
     "intelligence_injections": "injected_at",
 }
+
+
+def _check_receipt_completeness(
+    data_root: Path, max_age_hours: int = 48
+) -> tuple[bool, str]:
+    """GAP-7 preflight: verify recent processed receipts exist and are not stale.
+
+    Checks {data_root}/receipts/processed/ for any file modified within max_age_hours.
+    Returns (True, "ok") when fresh receipts are found, (False, reason) otherwise.
+    """
+    processed_dir = data_root / "receipts" / "processed"
+    if not processed_dir.exists():
+        return False, f"receipts/processed directory absent: {processed_dir}"
+
+    files = list(processed_dir.iterdir())
+    if not files:
+        return False, "receipts/processed is empty — no dispatch receipts found"
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    fresh = [
+        f for f in files
+        if datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) >= cutoff
+    ]
+    if not fresh:
+        most_recent_ts = max(
+            datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc) for f in files
+        )
+        age_h = (datetime.now(timezone.utc) - most_recent_ts).total_seconds() / 3600
+        return (
+            False,
+            f"all receipts stale (newest {age_h:.1f}h ago, threshold {max_age_hours}h)",
+        )
+
+    return True, "ok"
 
 
 def _emit_dream_event(event: dict[str, Any]) -> None:
@@ -141,6 +175,27 @@ def run_dream_cycle(
     cycle_id = (
         f"dream-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
     )
+
+    # GAP-7: receipt-completeness preflight — skip cycle on empty/stale data
+    data_root = resolve_project_root(__file__) / ".vnx-data"
+    complete, detail = _check_receipt_completeness(data_root)
+    if not complete:
+        _emit_dream_event(
+            {
+                "event_type": "dream_cycle_skipped",
+                "cycle_id": cycle_id,
+                "project_id": project_id,
+                "reason": "incomplete_data",
+                "detail": detail,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return {
+            "status": "skipped",
+            "cycle_id": cycle_id,
+            "reason": "incomplete_data",
+            "detail": detail,
+        }
 
     _emit_dream_event(
         {
