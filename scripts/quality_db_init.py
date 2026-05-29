@@ -23,7 +23,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 19
+HIGHEST_QI_VERSION = 20
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -634,6 +634,70 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
         log('INFO', 'Migrated: created dispatch_experiments table + indexes')
 
 
+def _migrate_v20(conn: sqlite3.Connection) -> None:
+    """V20: dream_cycles + dream_pattern_archives (ADR-019 auto-dream, ADR-007 composite PKs).
+
+    Wires schemas/migrations/0025_dream_consolidation.sql into the bootstrap.
+    File is named 0025 following sequential SQL file numbering; internal
+    version is v20 (next after v19). ADR-007: both tables carry composite PKs
+    over project_id.
+    """
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='dream_cycles'"
+    ).fetchone():
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dream_cycles (
+                cycle_id          TEXT    NOT NULL,
+                project_id        TEXT    NOT NULL DEFAULT 'vnx-dev',
+                started_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                completed_at      TEXT,
+                status            TEXT    NOT NULL DEFAULT 'pending'
+                                  CHECK (status IN ('pending','running','completed','failed','reviewed','rejected')),
+                provider          TEXT    NOT NULL DEFAULT 'kimi',
+                insights_input    INTEGER NOT NULL DEFAULT 0,
+                merged_count      INTEGER NOT NULL DEFAULT 0,
+                dropped_count     INTEGER NOT NULL DEFAULT 0,
+                archived_count    INTEGER NOT NULL DEFAULT 0,
+                flagged_count     INTEGER NOT NULL DEFAULT 0,
+                operator_reviewed INTEGER NOT NULL DEFAULT 0,
+                report_path       TEXT,
+                PRIMARY KEY (cycle_id, project_id)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dream_cycles_project_status "
+            "ON dream_cycles(project_id, status, started_at DESC)"
+        )
+        log('INFO', 'Migrated: created dream_cycles table + index (ADR-019, ADR-007 composite PK)')
+    if not conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='dream_pattern_archives'"
+    ).fetchone():
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dream_pattern_archives (
+                archive_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id            TEXT    NOT NULL,
+                project_id          TEXT    NOT NULL DEFAULT 'vnx-dev',
+                original_pattern_id INTEGER NOT NULL,
+                original_table      TEXT    NOT NULL
+                                    CHECK (original_table IN ('success_patterns','antipatterns','intelligence_injections')),
+                archived_reason     TEXT    NOT NULL
+                                    CHECK (archived_reason IN ('stale_30d','exact_duplicate','merged_into_other','operator_rejected')),
+                archived_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (cycle_id, project_id) REFERENCES dream_cycles(cycle_id, project_id)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dream_archives_cycle "
+            "ON dream_pattern_archives(cycle_id, project_id)"
+        )
+        # Pre-initialize sqlite_sequence high-water-mark (FUT-2A lesson)
+        conn.execute("DELETE FROM sqlite_sequence WHERE name = 'dream_pattern_archives'")
+        conn.execute(
+            "INSERT INTO sqlite_sequence(name, seq) VALUES ('dream_pattern_archives', 0)"
+        )
+        log('INFO', 'Migrated: created dream_pattern_archives table + index (ADR-019, ADR-007)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -655,6 +719,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     17: _migrate_v17,
     18: _migrate_v18,
     19: _migrate_v19,
+    20: _migrate_v20,
 }
 
 
@@ -736,6 +801,8 @@ def verify_database_structure() -> bool:
             'confidence_events',
             'report_findings',
             'adrs',
+            'dream_cycles',
+            'dream_pattern_archives',
         ]
 
         # Expected views
