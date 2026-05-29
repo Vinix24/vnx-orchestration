@@ -176,13 +176,13 @@ def test_fixture_e_fail_fk_dropped(tmp_path: Path) -> None:
 # Real-world: actual schemas/migrations/ must pass
 # ---------------------------------------------------------------------------
 
-def test_real_migrations_pass() -> None:
-    """Gate returns 0 on real migrations.
+def test_real_migrations_skip_as_failure() -> None:
+    """Gate returns 1 because legacy migrations produce skip status.
 
-    Legacy migrations (0017, 0017_down, 0022) depend on base schemas that are not
-    present in schemas/migrations/ — they return 'skip' with a logged warning rather
-    than 'error', so they do not fail the gate.  The gate only fails on 'fail' status
-    (undeclared drift) or 'error' status (unexpected exception during the check itself).
+    Since skip is now treated as a failure (same as 'fail' / 'error'), the 3 legacy
+    migrations (0017, 0017_down, 0022) that cannot be replayed due to missing base
+    schemas correctly cause rc == 1.  A follow-up task adds a per-file skip-allowlist
+    so known-unreplayable legacy files can be explicitly exempted.
     """
     rc = main()
-    assert rc == 0
+    assert rc == 1

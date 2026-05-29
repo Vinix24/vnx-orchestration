@@ -231,7 +231,7 @@ def main(migrations_directory: Optional[Path] = None) -> int:
                 continue
             results.append(result)
 
-    failures = [r for r in results if r["status"] in ("fail", "error")]
+    failures = [r for r in results if r["status"] in ("fail", "error", "skip")]
     output = {
         "scanned": results,
         "total_files": len(all_migrations),
