@@ -83,23 +83,36 @@ def register_dispatch(
 ) -> Dict[str, Any]:
     """Register a new dispatch in the queued state (idempotent).
 
-    ADR-007: project_id is MANDATORY — no silent default. Idempotency is
-    scoped to the composite (dispatch_id, project_id) when the schema has the
-    project_id column, preventing cross-tenant collision where the same
-    dispatch_id in two projects would otherwise return the wrong row.
+    ADR-007: project_id is MANDATORY — no silent default. project_id is stamped
+    on the INSERT row for column compliance.
+
+    dispatch_id is GLOBALLY UNIQUE (timestamped slugs by construction). The
+    idempotency check keys on dispatch_id alone so all downstream state-machine
+    operations (transition_dispatch, increment_attempt_count, etc.) remain
+    consistent — they all key on dispatch_id only.
+
+    If a row with the same dispatch_id exists under a DIFFERENT project_id,
+    ValueError is raised — cross-tenant dispatch_id reuse is a bug, not a
+    silent merge.
+
+    Full composite-keying of the entire dispatch state machine is deferred to
+    a post-launch hardening item.
     """
     has_pid = _has_project_id_col(conn, "dispatches")
 
-    if has_pid:
-        existing = conn.execute(
-            "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-            (dispatch_id, project_id),
-        ).fetchone()
-    else:
-        existing = conn.execute(
-            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-        ).fetchone()
+    # dispatch_id is globally unique — check without project_id filter so
+    # transition_dispatch and other dispatch_id-keyed APIs stay consistent.
+    existing = conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+    ).fetchone()
     if existing:
+        if has_pid:
+            existing_pid = existing["project_id"]
+            if existing_pid and existing_pid != project_id:
+                raise ValueError(
+                    f"Cross-tenant dispatch_id reuse: {dispatch_id!r} is already registered "
+                    f"under project {existing_pid!r}; refusing registration under {project_id!r}"
+                )
         return dict(existing)
 
     now = _now_utc()
@@ -131,17 +144,8 @@ def register_dispatch(
         actor=actor, reason="initial registration", metadata=metadata,
         project_id=project_id,
     )
-    if has_pid:
-        return dict(
-            conn.execute(
-                "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-                (dispatch_id, project_id),
-            ).fetchone()
-        )
     return dict(
-        conn.execute(
-            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-        ).fetchone()
+        conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
     )
 
 
