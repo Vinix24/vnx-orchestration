@@ -108,14 +108,19 @@ def _assemble_instruction(
 
 
 def _resolve_agent_cwd_and_log_profile(role: str | None) -> "Path | None":
-    """Resolve agents/{role}/ cwd and log governance_profile from config.yaml."""
+    """Resolve worker cwd: isolated worktree when active, else agents/{role}/ if present."""
     import subprocess_dispatch as _sd
+    from subprocess_dispatch_internals.git_helpers import _get_active_worktree
     agent_cwd = _sd._resolve_agent_cwd(role)
     if agent_cwd is not None:
         config_path = agent_cwd / "config.yaml"
         if config_path.exists():
             profile = _sd._load_agent_profile(config_path)
             logger.info("Agent %s using governance profile: %s", role, profile)
+    worktree = _get_active_worktree()
+    if worktree is not None:
+        logger.info("Isolated worktree active: worker cwd = %s", worktree)
+        return worktree
     return agent_cwd
 
 
