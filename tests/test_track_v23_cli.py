@@ -37,7 +37,7 @@ import schema_migration
 # ---------------------------------------------------------------------------
 
 def _make_db(tmp_path: Path) -> Path:
-    """Return state_dir Path with 0022+0023 applied.
+    """Return state_dir Path with 0022+0024 applied.
 
     Creates DB at tmp_path/.vnx-data/state/ to match CLI's _resolve_state_dir()
     which builds project_dir/.vnx-data/state/.
