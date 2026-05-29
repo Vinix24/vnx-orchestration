@@ -589,6 +589,10 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
     Schema mirrors scripts/lib/dispatch_parameter_tracker.py::init_schema() plus the
     project_id column that migration 0015 would later ADD COLUMN on existing DBs
     (here we create it upfront so fresh installs get the full schema immediately).
+
+    OI-011 fix: if the table already exists (e.g. created by
+    retroactive_backfill._open_tracker() without project_id), add the
+    project_id column so apply_composite_unique_constraints can proceed.
     """
     if not conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='dispatch_experiments'"
@@ -632,6 +636,22 @@ def _migrate_v18(conn: sqlite3.Connection) -> None:
             "ON dispatch_experiments (project_id)"
         )
         log('INFO', 'Migrated: created dispatch_experiments table + indexes')
+    else:
+        # Table already exists (e.g. from retroactive_backfill._open_tracker() which
+        # creates it without project_id). Ensure project_id is present so the
+        # composite UNIQUE rebuild in apply_composite_unique_constraints can proceed.
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(dispatch_experiments)"
+        ).fetchall()}
+        if "project_id" not in cols:
+            conn.execute(
+                "ALTER TABLE dispatch_experiments ADD COLUMN project_id TEXT"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_de_project_id "
+                "ON dispatch_experiments (project_id)"
+            )
+            log('INFO', 'Migrated dispatch_experiments: added missing project_id column + index')
 
 
 def _migrate_v20(conn: sqlite3.Connection) -> None:
