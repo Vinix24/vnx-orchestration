@@ -267,6 +267,11 @@ def transition_phase(
         now = _now_utc()
         completed_at = now if to_phase == "done" else None
 
+        _emit_track_event(
+            state_dir, "track_phase_transition", track_id, project_id, actor,
+            {"from": from_phase, "to": to_phase},
+        )
+
         conn.execute(
             """
             UPDATE tracks
@@ -283,11 +288,6 @@ def transition_phase(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (track_id, project_id, from_phase, to_phase, actor, reason, approval_id, now),
-        )
-
-        _emit_track_event(
-            state_dir, "track_phase_transition", track_id, project_id, actor,
-            {"from": from_phase, "to": to_phase},
         )
         conn.commit()
 
@@ -316,6 +316,7 @@ def set_next_up(state_dir: str | Path, track_id: str, project_id: str) -> None:
         if not row:
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
 
+        _emit_track_event(state_dir, "track_next_up_set", track_id, project_id, "system")
         conn.execute(
             "UPDATE tracks SET next_up = 0 WHERE project_id = ? AND next_up = 1",
             (project_id,),
@@ -324,7 +325,6 @@ def set_next_up(state_dir: str | Path, track_id: str, project_id: str) -> None:
             "UPDATE tracks SET next_up = 1 WHERE track_id = ? AND project_id = ?",
             (track_id, project_id),
         )
-        _emit_track_event(state_dir, "track_next_up_set", track_id, project_id, "system")
         conn.commit()
     finally:
         conn.close()
@@ -358,6 +358,10 @@ def link_open_item(
         ).fetchone():
             raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
 
+        _emit_track_event(
+            state_dir, "track_oi_linked", track_id, project_id, "system",
+            {"oi_id": oi_id, "link_type": link_type},
+        )
         conn.execute(
             """
             INSERT OR REPLACE INTO track_open_items
@@ -365,10 +369,6 @@ def link_open_item(
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (track_id, project_id, oi_id, link_type, link_source, _now_utc()),
-        )
-        _emit_track_event(
-            state_dir, "track_oi_linked", track_id, project_id, "system",
-            {"oi_id": oi_id, "link_type": link_type},
         )
         conn.commit()
     finally:
@@ -412,6 +412,10 @@ def add_dependency(
         ).fetchone():
             raise TrackNotFoundError(f"Track not found: ({to_track_id!r}, {to_project_id!r})")
 
+        _emit_track_event(
+            state_dir, "track_dep_added", from_track_id, from_project_id, "system",
+            {"to_track": to_track_id, "to_project": to_project_id, "kind": kind},
+        )
         conn.execute(
             """
             INSERT OR REPLACE INTO track_dependencies
@@ -424,10 +428,6 @@ def add_dependency(
                 kind, derivation_source, confidence,
                 evidence_json, _now_utc(),
             ),
-        )
-        _emit_track_event(
-            state_dir, "track_dep_added", from_track_id, from_project_id, "system",
-            {"to_track": to_track_id, "to_project": to_project_id, "kind": kind},
         )
         conn.commit()
     finally:

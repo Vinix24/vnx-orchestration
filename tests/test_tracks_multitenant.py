@@ -66,7 +66,7 @@ def _db_path(tmp_path: Path) -> Path:
     """)
     conn.commit()
 
-    for version, filename in [(22, "0022_track_layer.sql"), (23, "0023_tracks_tenant_scoping.sql")]:
+    for version, filename in [(22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")]:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()

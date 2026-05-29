@@ -1,7 +1,7 @@
-"""tests/test_tracks_v23_schema.py — migration 0023 schema validation.
+"""tests/test_tracks_v23_schema.py — migration 0024 schema validation.
 
 Verifies:
-- Migration 0023 runs cleanly on a v22 DB (fresh + seeded)
+- Migration 0024 runs cleanly on a v22 DB (fresh + seeded)
 - All 4 tables have composite PKs over (track_id, project_id)
 - sqlite_sequence preserved for track_phase_history (AUTOINCREMENT)
 - FK enforced: child rows reject non-existent (track_id, project_id) pairs
@@ -75,16 +75,16 @@ def _apply_v22(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _apply_v23(conn: sqlite3.Connection) -> None:
-    sql = (_MIGRATIONS / "0023_tracks_tenant_scoping.sql").read_text(encoding="utf-8")
-    schema_migration.apply_script_if_below(conn, 23, sql)
+def _apply_v24(conn: sqlite3.Connection) -> None:
+    sql = (_MIGRATIONS / "0024_tracks_tenant_scoping.sql").read_text(encoding="utf-8")
+    schema_migration.apply_script_if_below(conn, 24, sql)
     conn.commit()
 
 
-def _v22_then_v23(tmp_path: Path) -> sqlite3.Connection:
+def _v22_then_v24(tmp_path: Path) -> sqlite3.Connection:
     conn = _base_db(tmp_path)
     _apply_v22(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
     return conn
 
 
@@ -92,19 +92,19 @@ def _v22_then_v23(tmp_path: Path) -> sqlite3.Connection:
 # Tests: schema version
 # ---------------------------------------------------------------------------
 
-def test_user_version_is_23(tmp_path):
-    conn = _v22_then_v23(tmp_path)
-    assert schema_migration.get_user_version(conn) == 23
+def test_user_version_is_24(tmp_path):
+    conn = _v22_then_v24(tmp_path)
+    assert schema_migration.get_user_version(conn) == 24
 
 
 def test_migration_idempotent(tmp_path):
-    conn = _v22_then_v23(tmp_path)
-    # Re-applying 0023 must be a no-op
+    conn = _v22_then_v24(tmp_path)
+    # Re-applying 0024 must be a no-op
     result = schema_migration.apply_script_if_below(
-        conn, 23, (_MIGRATIONS / "0023_tracks_tenant_scoping.sql").read_text()
+        conn, 24, (_MIGRATIONS / "0024_tracks_tenant_scoping.sql").read_text()
     )
     assert result is False
-    assert schema_migration.get_user_version(conn) == 23
+    assert schema_migration.get_user_version(conn) == 24
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ def test_migration_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_tracks_composite_pk_prevents_duplicate_same_project(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     conn.execute(
         "INSERT INTO tracks (track_id, project_id, title, goal_state) VALUES (?, ?, ?, ?)",
         ("track-01", "vnx-dev", "Title A", "Goal A"),
@@ -126,7 +126,7 @@ def test_tracks_composite_pk_prevents_duplicate_same_project(tmp_path):
 
 
 def test_tracks_composite_pk_allows_same_id_different_project(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     conn.execute(
         "INSERT INTO tracks (track_id, project_id, title, goal_state) VALUES (?, ?, ?, ?)",
         ("track-01", "vnx-dev", "Title A", "Goal A"),
@@ -141,7 +141,7 @@ def test_tracks_composite_pk_allows_same_id_different_project(tmp_path):
 
 
 def test_tracks_columns_present(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
     assert "project_id" in cols
     assert "track_id" in cols
@@ -150,7 +150,7 @@ def test_tracks_columns_present(tmp_path):
 
 
 def test_tracks_v23_index_present(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     indexes = [row[1] for row in conn.execute("PRAGMA index_list('tracks')")]
     assert "ux_tracks_next_up_per_project" in indexes
 
@@ -160,7 +160,7 @@ def test_tracks_v23_index_present(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_track_phase_history_fk_enforced(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     # Insert without a matching track → FK violation
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -174,7 +174,7 @@ def test_track_phase_history_fk_enforced(tmp_path):
 
 
 def test_track_phase_history_fk_satisfied(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     conn.execute(
         "INSERT INTO tracks (track_id, project_id, title, goal_state) VALUES (?, ?, ?, ?)",
         ("track-01", "vnx-dev", "Title", "Goal"),
@@ -220,8 +220,8 @@ def test_track_phase_history_sqlite_sequence_preserved(tmp_path):
     max_id_before = conn.execute("SELECT MAX(id) FROM track_phase_history").fetchone()[0]
     assert max_id_before == 1
 
-    # Apply v23 migration
-    _apply_v23(conn)
+    # Apply v24 migration
+    _apply_v24(conn)
 
     # sqlite_sequence for track_phase_history must reflect the max id
     seq = conn.execute(
@@ -245,7 +245,7 @@ def test_track_phase_history_sqlite_sequence_preserved(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_track_dependencies_composite_pk(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     for pid in ("vnx-dev", "seocrawler-v2"):
         conn.execute(
             "INSERT INTO tracks (track_id, project_id, title, goal_state) VALUES (?, ?, ?, ?)",
@@ -284,7 +284,7 @@ def test_track_dependencies_composite_pk(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_track_open_items_composite_pk(tmp_path):
-    conn = _v22_then_v23(tmp_path)
+    conn = _v22_then_v24(tmp_path)
     for pid in ("vnx-dev", "seocrawler-v2"):
         conn.execute(
             "INSERT INTO tracks (track_id, project_id, title, goal_state) VALUES (?, ?, ?, ?)",

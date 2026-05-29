@@ -5,13 +5,14 @@ Steps:
   1. PRAGMA pre-flight: assert dispatches schema and UNIQUE constraint are intact
   2. Apply schemas/migrations/0022_track_layer.sql (idempotent via user_version)
   3. PRAGMA pre-flight: assert tracks v22 schema intact before composite-key rebuild
-  4. Apply schemas/migrations/0023_tracks_tenant_scoping.sql (idempotent via user_version)
+  4. Apply schemas/migrations/0024_tracks_tenant_scoping.sql (idempotent via user_version)
 """
 
 from __future__ import annotations
 
 import sqlite3
 import sys
+import warnings
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -89,7 +90,7 @@ def apply_migration(conn: sqlite3.Connection, project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: PRAGMA pre-flight for 0023 — assert v22 tracks schema intact
+# Step 2: PRAGMA pre-flight for 0024 — assert v22 tracks schema intact
 # ---------------------------------------------------------------------------
 
 _EXPECTED_TRACKS_V22_COLS = frozenset({
@@ -113,49 +114,75 @@ def _assert_tracks_v22_intact(conn: sqlite3.Connection) -> None:
         if required not in tables:
             raise RuntimeError(
                 f"Required table '{required}' not found. "
-                "Run migration 0022 before 0023."
+                "Run migration 0022 before 0024."
             )
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info('tracks')")}
     missing = _EXPECTED_TRACKS_V22_COLS - cols
     if missing:
         raise RuntimeError(
-            f"tracks schema drift before v23 migration: missing columns={missing}. "
+            f"tracks schema drift before v24 migration: missing columns={missing}. "
             "Expected v22 state."
         )
 
-    # Guard: if composite PK already present (ux_tracks_next_up_per_project from v23),
+    # Guard: if composite PK already present (ux_tracks_next_up_per_project from v24),
     # skip — migration was already applied to this tracks table.
     indexes = [row[1] for row in conn.execute("PRAGMA index_list('tracks')")]
     if 'ux_tracks_next_up_per_project' in indexes:
         raise RuntimeError(
-            "tracks already has v23 composite index 'ux_tracks_next_up_per_project'. "
-            "Migration 0023 should be skipped (user_version should be >= 23)."
+            "tracks already has v24 composite index 'ux_tracks_next_up_per_project'. "
+            "Migration 0024 should be skipped (user_version should be >= 24)."
         )
 
 
-schema_migration.register_preflight(23, _assert_tracks_v22_intact)
+schema_migration.register_preflight(24, _assert_tracks_v22_intact)
 
 
 # ---------------------------------------------------------------------------
-# Step 3: apply 0023 migration
+# Step 3: orphan warning check before v24 migration
 # ---------------------------------------------------------------------------
 
-def apply_migration_v23(conn: sqlite3.Connection, project_root: Path) -> None:
-    migration_path = _MIGRATIONS / "0023_tracks_tenant_scoping.sql"
+def _warn_orphan_child_rows(conn: sqlite3.Connection) -> None:
+    """Check for orphan child rows before v24 migration and warn. Does not block."""
+    checks = [
+        ("track_phase_history", "track_phase_history", "track_id"),
+        ("track_dependencies (from_track_id)", "track_dependencies", "from_track_id"),
+        ("track_dependencies (to_track_id)", "track_dependencies", "to_track_id"),
+        ("track_open_items", "track_open_items", "track_id"),
+    ]
+    for label, table, col in checks:
+        count = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {col} NOT IN (SELECT track_id FROM tracks)"
+        ).fetchone()[0]
+        if count:
+            warnings.warn(
+                f"v24 migration: {count} orphan row(s) in {label} "
+                f"({col} not in tracks) will be skipped",
+                UserWarning,
+                stacklevel=3,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Step 4: apply 0024 migration
+# ---------------------------------------------------------------------------
+
+def apply_migration_v24(conn: sqlite3.Connection, project_root: Path) -> None:
+    migration_path = _MIGRATIONS / "0024_tracks_tenant_scoping.sql"
     if not migration_path.exists():
         raise FileNotFoundError(f"Migration not found: {migration_path}")
 
     sql = migration_path.read_text(encoding="utf-8")
 
     current_version = schema_migration.get_user_version(conn)
-    if current_version >= 23:
-        print(f"  [skip] migration 0023 already applied (user_version={current_version})")
+    if current_version >= 24:
+        print(f"  [skip] migration 0024 already applied (user_version={current_version})")
         return
 
     _assert_tracks_v22_intact(conn)
-    print("  [apply] migration 0023_tracks_tenant_scoping.sql ...")
-    schema_migration.apply_script_if_below(conn, 23, sql)
+    _warn_orphan_child_rows(conn)
+    print("  [apply] migration 0024_tracks_tenant_scoping.sql ...")
+    schema_migration.apply_script_if_below(conn, 24, sql)
     print(f"  [ok]    user_version → {schema_migration.get_user_version(conn)}")
 
 
@@ -164,7 +191,7 @@ def apply_migration_v23(conn: sqlite3.Connection, project_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def run(project_root: Path | None = None) -> None:
-    """Apply track layer migrations: 0022 (track tables) + 0023 (tenant-scoping)."""
+    """Apply track layer migrations: 0022 (track tables) + 0024 (tenant-scoping)."""
     if project_root is None:
         project_root = resolve_project_root(__file__)
 
@@ -194,8 +221,8 @@ def run(project_root: Path | None = None) -> None:
         apply_migration(conn, project_root)
         conn.commit()
 
-        # Apply 0023 — rebuilds track tables with composite (track_id, project_id) PKs
-        apply_migration_v23(conn, project_root)
+        # Apply 0024 — rebuilds track tables with composite (track_id, project_id) PKs
+        apply_migration_v24(conn, project_root)
         conn.commit()
 
         print(f"\n  Migration complete. Schema at user_version={schema_migration.get_user_version(conn)}.\n")

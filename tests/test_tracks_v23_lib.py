@@ -35,7 +35,7 @@ import tracks
 # ---------------------------------------------------------------------------
 
 def _create_db(tmp_path: Path) -> Path:
-    """Create a minimal runtime_coordination.db with migrations 0022+0023 applied."""
+    """Create a minimal runtime_coordination.db with migrations 0022+0024 applied."""
     db_path = tmp_path / "state" / "runtime_coordination.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +68,7 @@ def _create_db(tmp_path: Path) -> Path:
     """)
     conn.commit()
 
-    for version, filename in [(22, "0022_track_layer.sql"), (23, "0023_tracks_tenant_scoping.sql")]:
+    for version, filename in [(22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")]:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()

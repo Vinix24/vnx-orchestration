@@ -59,7 +59,6 @@ def _make_db(tmp_path: Path) -> Path:
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             expires_after TEXT, metadata_json TEXT DEFAULT '{}',
-            operator_approved_at TEXT,
             UNIQUE(dispatch_id, project_id)
         )
     """)
@@ -73,7 +72,7 @@ def _make_db(tmp_path: Path) -> Path:
         )
     """)
     conn.commit()
-    for version, filename in [(22, "0022_track_layer.sql"), (23, "0023_tracks_tenant_scoping.sql")]:
+    for version, filename in [(22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")]:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()

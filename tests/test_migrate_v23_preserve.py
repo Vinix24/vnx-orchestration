@@ -1,11 +1,11 @@
-"""tests/test_migrate_v23_preserve.py — data preservation through 0022 → 0023.
+"""tests/test_migrate_v23_preserve.py — data preservation through 0022 → 0024.
 
 Verifies:
-- All track rows from v22 are preserved after 0023 migration
-- project_id stamped as 'vnx-dev' for all migrated rows
+- All track rows from v22 are preserved after 0024 migration
+- project_id stamped as 'vnx-dev' for all migrated rows (single-project seed)
 - sqlite_sequence preserved (no id reuse after migration)
 - Phase history, dependencies, open-item links preserved
-- Idempotent: re-running 0023 on v23 DB is a no-op
+- Idempotent: re-running 0024 on v24 DB is a no-op
 """
 
 from __future__ import annotations
@@ -113,9 +113,9 @@ def _seed_v22_data(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _apply_v23(conn: sqlite3.Connection) -> None:
-    sql = (_MIGRATIONS / "0023_tracks_tenant_scoping.sql").read_text(encoding="utf-8")
-    schema_migration.apply_script_if_below(conn, 23, sql)
+def _apply_v24(conn: sqlite3.Connection) -> None:
+    sql = (_MIGRATIONS / "0024_tracks_tenant_scoping.sql").read_text(encoding="utf-8")
+    schema_migration.apply_script_if_below(conn, 24, sql)
     conn.commit()
 
 
@@ -126,7 +126,7 @@ def _apply_v23(conn: sqlite3.Connection) -> None:
 def test_all_track_rows_preserved(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     rows = conn.execute("SELECT track_id FROM tracks ORDER BY sort_order").fetchall()
     assert len(rows) == 6
@@ -137,7 +137,7 @@ def test_all_track_rows_preserved(tmp_path):
 def test_project_id_stamped_vnx_dev(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     pids = {r[0] for r in conn.execute("SELECT DISTINCT project_id FROM tracks").fetchall()}
     assert pids == {"vnx-dev"}, f"Expected all rows stamped 'vnx-dev', got: {pids}"
@@ -150,7 +150,7 @@ def test_phase_history_preserved(tmp_path):
     max_id_before = conn.execute("SELECT MAX(id) FROM track_phase_history").fetchone()[0]
     assert max_id_before == 2
 
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     count = conn.execute("SELECT COUNT(*) FROM track_phase_history").fetchone()[0]
     assert count == 2
@@ -166,7 +166,7 @@ def test_phase_history_preserved(tmp_path):
 def test_sqlite_sequence_preserved_for_phase_history(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     seq = conn.execute(
         "SELECT seq FROM sqlite_sequence WHERE name = 'track_phase_history'"
@@ -190,7 +190,7 @@ def test_sqlite_sequence_preserved_for_phase_history(tmp_path):
 def test_dependencies_preserved(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     conn.row_factory = sqlite3.Row
     deps = conn.execute("SELECT * FROM track_dependencies").fetchall()
@@ -205,7 +205,7 @@ def test_dependencies_preserved(tmp_path):
 def test_open_items_preserved(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     ois = conn.execute("SELECT track_id, project_id, oi_id FROM track_open_items").fetchall()
     assert len(ois) == 1
@@ -214,21 +214,21 @@ def test_open_items_preserved(tmp_path):
     assert ois[0][2] == "OI-007"
 
 
-def test_user_version_is_23(tmp_path):
+def test_user_version_is_24(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
-    assert schema_migration.get_user_version(conn) == 23
+    _apply_v24(conn)
+    assert schema_migration.get_user_version(conn) == 24
 
 
 def test_idempotent_reapply(tmp_path):
     conn = _base_db()
     _seed_v22_data(conn)
-    _apply_v23(conn)
+    _apply_v24(conn)
 
     # Re-apply must be no-op
-    sql = (_MIGRATIONS / "0023_tracks_tenant_scoping.sql").read_text()
-    result = schema_migration.apply_script_if_below(conn, 23, sql)
+    sql = (_MIGRATIONS / "0024_tracks_tenant_scoping.sql").read_text()
+    result = schema_migration.apply_script_if_below(conn, 24, sql)
     assert result is False
 
     # Row count unchanged
