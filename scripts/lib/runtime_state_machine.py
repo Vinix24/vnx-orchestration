@@ -251,6 +251,101 @@ def create_attempt(
     )
 
 
+def claim_next_queued_dispatch(
+    conn: sqlite3.Connection,
+    terminal_id: str,
+    project_id: str,
+    actor: str = "runtime",
+) -> Optional[str]:
+    """Atomically claim the next queued dispatch for a project.
+
+    Uses BEGIN IMMEDIATE to serialize concurrent claimers — SQLite has no
+    SKIP LOCKED; this ensures the SELECT→UPDATE is atomic across writers.
+    Losers serialize and re-query; they get the next row or None.
+    Returns the dispatch_id string if a dispatch was claimed, None if the
+    queue is empty for this project.
+
+    ADR-007: scoped to project_id — a claimer for project A NEVER sees
+    project B queued rows. project_id is MANDATORY on every access.
+    See docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md.
+
+    Callers must pass a connection with no uncommitted DML. Setting
+    isolation_level=None (required for explicit BEGIN IMMEDIATE) commits
+    any pending implicit transaction on the connection.
+    """
+    conn.isolation_level = None  # autocommit mode for manual BEGIN IMMEDIATE control
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            """
+            SELECT dispatch_id FROM dispatches
+            WHERE project_id = ? AND state = 'queued'
+            ORDER BY priority ASC, created_at ASC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+
+        dispatch_id = row["dispatch_id"]
+        now = _now_utc()
+
+        # State transition: queued → claimed — composite key (ADR-007: never dispatch_id alone)
+        validate_dispatch_transition("queued", "claimed")
+        conn.execute(
+            "UPDATE dispatches SET state = 'claimed', updated_at = ? WHERE dispatch_id = ? AND project_id = ?",
+            (now, dispatch_id, project_id),
+        )
+        _append_event(
+            conn, event_type="dispatch_claimed", entity_type="dispatch",
+            entity_id=dispatch_id, from_state="queued", to_state="claimed",
+            actor=actor, reason=f"queue claim by terminal {terminal_id}",
+            metadata={"terminal_id": terminal_id, "project_id": project_id},
+            project_id=project_id,
+        )
+
+        # Provenance columns: claimed_by / claimed_at (ADR-007: composite key; ADR-005: audit event)
+        table_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatches)").fetchall()}
+        if "claimed_by" in table_cols:
+            conn.execute(
+                """
+                UPDATE dispatches
+                SET terminal_id = ?, claimed_by = ?, claimed_at = ?
+                WHERE dispatch_id = ? AND project_id = ?
+                """,
+                (terminal_id, terminal_id, now, dispatch_id, project_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE dispatches SET terminal_id = ? WHERE dispatch_id = ? AND project_id = ?",
+                (terminal_id, dispatch_id, project_id),
+            )
+        # ADR-005: ledger event for claimed_by/claimed_at provenance mutation
+        _append_event(
+            conn, event_type="dispatch_claim_provenance", entity_type="dispatch",
+            entity_id=dispatch_id, from_state=None, to_state=None,
+            actor=actor, reason=f"claim provenance stamped by terminal {terminal_id}",
+            metadata={
+                "terminal_id": terminal_id, "claimed_by": terminal_id,
+                "claimed_at": now, "dispatch_id": dispatch_id, "project_id": project_id,
+            },
+            project_id=project_id,
+        )
+
+        conn.execute("COMMIT")
+        return dispatch_id
+
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+
+
 def update_attempt(
     conn: sqlite3.Connection,
     *,
