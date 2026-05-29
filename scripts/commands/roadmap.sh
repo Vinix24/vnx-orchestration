@@ -4,7 +4,7 @@
 cmd_roadmap() {
   if [ "$#" -eq 0 ]; then
     cat <<'HELP'
-Usage: vnx roadmap <init|status|load|reconcile|advance|approve> [args]
+Usage: vnx roadmap <init|status|load|reconcile|advance|approve|step> [args]
 
 Commands:
   init <ROADMAP.yaml>                         Initialize roadmap registry state
@@ -15,6 +15,7 @@ Commands:
   approve <feature_id> --actor <name> --justification <text>
                                               Issue a single-use human approval token (required for
                                               merge_policy=human or risk_class=high features)
+  step                                        Dispatch the next dependency-ready PR for the active feature
 HELP
     return 0
   fi
