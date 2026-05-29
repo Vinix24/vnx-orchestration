@@ -7,6 +7,153 @@ import sys
 from vnx_cli import __version__
 
 
+def _register_doctor_subparser(subparsers: argparse.Action) -> None:
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="validate prerequisites and project structure",
+    )
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit results as JSON",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail (exit 1) on any warning or failure, not just failures",
+    )
+    doctor_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to validate (default: current directory)",
+    )
+
+
+def _register_version_subparser(subparsers: argparse.Action) -> None:
+    version_parser = subparsers.add_parser(
+        "version",
+        help="print VNX version, commit, VNX_HOME, pin, and Python info",
+    )
+    version_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to check for .vnx-version pin (default: current directory)",
+    )
+
+
+def _register_status_subparser(subparsers: argparse.Action) -> None:
+    status_parser = subparsers.add_parser(
+        "status",
+        help="show current dispatch and agent status",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit results as JSON",
+    )
+    status_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory to inspect (default: current directory)",
+    )
+
+
+def _register_init_subparser(subparsers: argparse.Action) -> None:
+    init_parser = subparsers.add_parser(
+        "init",
+        help="scaffold a new VNX project in the current directory",
+    )
+    init_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="target directory (default: current directory)",
+    )
+    init_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="ID",
+        help="explicit project_id (default: derived from the directory name); "
+             "must match ^[a-z][a-z0-9-]{1,31}$",
+    )
+
+
+def _register_pool_subparser(subparsers: argparse.Action) -> None:
+    pool_parser = subparsers.add_parser(
+        "pool",
+        help="manage elastic worker pools (status/scale/config/reap)",
+    )
+    pool_parser.add_argument(
+        "pool_args",
+        nargs=argparse.REMAINDER,
+        help="pool subcommand and arguments",
+    )
+
+
+def _register_update_subparser(subparsers: argparse.Action) -> None:
+    update_parser = subparsers.add_parser(
+        "update",
+        help="flip active VNX version in central install (pre-central-install scaffolding)",
+    )
+    update_parser.add_argument(
+        "--to",
+        dest="to_version",
+        metavar="VERSION",
+        help="target version (e.g. '1.0.0-rc3' or 'edge')",
+    )
+    update_parser.add_argument(
+        "--keep-last",
+        type=int,
+        default=3,
+        metavar="N",
+        help="number of old versions to retain (default: 3)",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print planned actions without making filesystem changes",
+    )
+    update_parser.add_argument(
+        "--rollback",
+        action="store_true",
+        help="revert current symlink to the previous version",
+    )
+
+
+def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
+    dispatch_parser = subparsers.add_parser(
+        "dispatch-agent",
+        help="dispatch a task to a named agent",
+    )
+    dispatch_parser.add_argument(
+        "--agent",
+        required=True,
+        metavar="NAME",
+        help="agent name (must have agents/<NAME>/CLAUDE.md)",
+    )
+    dispatch_parser.add_argument(
+        "--instruction",
+        required=True,
+        metavar="TEXT",
+        help="instruction text to send to the agent",
+    )
+    dispatch_parser.add_argument(
+        "--model",
+        default="sonnet",
+        metavar="MODEL",
+        help="model to use (default: sonnet)",
+    )
+    dispatch_parser.add_argument(
+        "--project-dir",
+        default=".",
+        metavar="DIR",
+        help="project directory (default: current directory)",
+    )
+
+
 def _register_track_subparser(subparsers: argparse.Action) -> None:
     track_parser = subparsers.add_parser(
         "track",
@@ -59,162 +206,7 @@ def _register_track_subparser(subparsers: argparse.Action) -> None:
     ts_parser.add_argument("--project-dir", default=".", metavar="DIR")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="vnx",
-        description="VNX — governance-first multi-agent orchestration for AI CLI workers",
-    )
-    parser.add_argument(
-        "--version", action="version", version=f"vnx {__version__}"
-    )
-
-    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
-
-    # init subcommand
-    init_parser = subparsers.add_parser(
-        "init",
-        help="scaffold a new VNX project in the current directory",
-    )
-    init_parser.add_argument(
-        "--project-dir",
-        default=".",
-        metavar="DIR",
-        help="target directory (default: current directory)",
-    )
-    init_parser.add_argument(
-        "--project-id",
-        default=None,
-        metavar="ID",
-        help="explicit project_id (default: derived from the directory name); "
-             "must match ^[a-z][a-z0-9-]{1,31}$",
-    )
-
-    # doctor subcommand
-    doctor_parser = subparsers.add_parser(
-        "doctor",
-        help="validate prerequisites and project structure",
-    )
-    doctor_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit results as JSON",
-    )
-    doctor_parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="fail (exit 1) on any warning or failure, not just failures",
-    )
-    doctor_parser.add_argument(
-        "--project-dir",
-        default=".",
-        metavar="DIR",
-        help="project directory to validate (default: current directory)",
-    )
-
-    # status subcommand
-    status_parser = subparsers.add_parser(
-        "status",
-        help="show current dispatch and agent status",
-    )
-    status_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="emit results as JSON",
-    )
-    status_parser.add_argument(
-        "--project-dir",
-        default=".",
-        metavar="DIR",
-        help="project directory to inspect (default: current directory)",
-    )
-
-    # dispatch-agent subcommand
-    dispatch_parser = subparsers.add_parser(
-        "dispatch-agent",
-        help="dispatch a task to a named agent",
-    )
-    dispatch_parser.add_argument(
-        "--agent",
-        required=True,
-        metavar="NAME",
-        help="agent name (must have agents/<NAME>/CLAUDE.md)",
-    )
-    dispatch_parser.add_argument(
-        "--instruction",
-        required=True,
-        metavar="TEXT",
-        help="instruction text to send to the agent",
-    )
-    dispatch_parser.add_argument(
-        "--model",
-        default="sonnet",
-        metavar="MODEL",
-        help="model to use (default: sonnet)",
-    )
-    dispatch_parser.add_argument(
-        "--project-dir",
-        default=".",
-        metavar="DIR",
-        help="project directory (default: current directory)",
-    )
-
-    # pool subcommand — delegates to vnx_cli.commands.pool for sub-subcommand parsing
-    pool_parser = subparsers.add_parser(
-        "pool",
-        help="manage elastic worker pools (status/scale/config/reap)",
-    )
-    pool_parser.add_argument(
-        "pool_args",
-        nargs=argparse.REMAINDER,
-        help="pool subcommand and arguments",
-    )
-
-    # version subcommand
-    version_parser = subparsers.add_parser(
-        "version",
-        help="print VNX version, commit, VNX_HOME, pin, and Python info",
-    )
-    version_parser.add_argument(
-        "--project-dir",
-        default=".",
-        metavar="DIR",
-        help="project directory to check for .vnx-version pin (default: current directory)",
-    )
-
-    # track subcommand
-    _register_track_subparser(subparsers)
-
-    # update subcommand
-    update_parser = subparsers.add_parser(
-        "update",
-        help="flip active VNX version in central install (pre-central-install scaffolding)",
-    )
-    update_parser.add_argument(
-        "--to",
-        dest="to_version",
-        metavar="VERSION",
-        help="target version (e.g. '1.0.0-rc3' or 'edge')",
-    )
-    update_parser.add_argument(
-        "--keep-last",
-        type=int,
-        default=3,
-        metavar="N",
-        help="number of old versions to retain (default: 3)",
-    )
-    update_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="print planned actions without making filesystem changes",
-    )
-    update_parser.add_argument(
-        "--rollback",
-        action="store_true",
-        help="revert current symlink to the previous version",
-    )
-
-    args = parser.parse_args()
-
+def _dispatch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.command == "init":
         from vnx_cli.commands.init_cmd import vnx_init
         sys.exit(vnx_init(args))
@@ -250,6 +242,30 @@ def main() -> None:
     else:
         parser.print_help()
         sys.exit(0)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="vnx",
+        description="VNX — governance-first multi-agent orchestration for AI CLI workers",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"vnx {__version__}"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    _register_doctor_subparser(subparsers)
+    _register_version_subparser(subparsers)
+    _register_status_subparser(subparsers)
+    _register_init_subparser(subparsers)
+    _register_pool_subparser(subparsers)
+    _register_update_subparser(subparsers)
+    _register_dispatch_agent_subparser(subparsers)
+    _register_track_subparser(subparsers)
+
+    args = parser.parse_args()
+    _dispatch_command(args, parser)
 
 
 if __name__ == "__main__":
