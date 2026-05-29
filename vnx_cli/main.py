@@ -67,6 +67,13 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         help="scaffold a new VNX project in the current directory",
     )
     init_parser.add_argument(
+        "project_path",
+        nargs="?",
+        default=None,
+        metavar="PROJECT_PATH",
+        help="target directory (default: current directory; overrides --project-dir)",
+    )
+    init_parser.add_argument(
         "--project-dir",
         default=".",
         metavar="DIR",
@@ -78,6 +85,24 @@ def _register_init_subparser(subparsers: argparse.Action) -> None:
         metavar="ID",
         help="explicit project_id (default: derived from the directory name); "
              "must match ^[a-z][a-z0-9-]{1,31}$",
+    )
+    init_parser.add_argument(
+        "--template",
+        default="default",
+        choices=["default", "minimal"],
+        metavar="TEMPLATE",
+        help="scaffold template: 'default' (full T0-T3) or 'minimal' (T0 only). Default: default",
+    )
+    init_parser.add_argument(
+        "--non-interactive",
+        dest="non_interactive",
+        action="store_true",
+        help="skip all interactive prompts (for CI / scripted use)",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing scaffold files (allows reinitialisation)",
     )
 
 
