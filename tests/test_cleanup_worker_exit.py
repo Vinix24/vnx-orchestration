@@ -63,6 +63,7 @@ class _CWETestCase(unittest.TestCase):
                 conn,
                 dispatch_id=self.dispatch_id,
                 terminal_id=self.terminal_id,
+            project_id="vnx-dev",
             )
             conn.commit()
         lease = self.lease_mgr.acquire(

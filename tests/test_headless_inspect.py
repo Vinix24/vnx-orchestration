@@ -65,7 +65,7 @@ class _InspectTestCase(unittest.TestCase):
     def _create_dispatch_and_attempt(self, dispatch_id: str) -> str:
         """Register a dispatch and create an attempt. Returns attempt_id."""
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, project_id="vnx-dev")
             attempt = create_attempt(
                 conn,
                 dispatch_id=dispatch_id,

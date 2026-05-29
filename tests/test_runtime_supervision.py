@@ -52,7 +52,7 @@ def _setup(tmp_path: str, *, stall_threshold: int = 180, startup_grace: int = 12
     init_schema(state_dir)
 
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id="d-001", terminal_id="T1", track="B")
+        register_dispatch(conn, dispatch_id="d-001", terminal_id="T1", track="B", project_id="vnx-dev")
         acquire_lease(conn, terminal_id="T1", dispatch_id="d-001")
         conn.commit()
 
@@ -299,7 +299,7 @@ class TestGhostDispatch(unittest.TestCase):
     def test_ghost_dispatch_detected(self):
         """Dispatch in 'running' but terminal is idle → ghost_dispatch."""
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="d-ghost", terminal_id="T1", track="A")
+            register_dispatch(conn, dispatch_id="d-ghost", terminal_id="T1", track="A", project_id="vnx-dev")
             transition_dispatch(conn, dispatch_id="d-ghost", to_state="claimed")
             transition_dispatch(conn, dispatch_id="d-ghost", to_state="delivering")
             transition_dispatch(conn, dispatch_id="d-ghost", to_state="accepted")
@@ -367,7 +367,7 @@ class TestRecoveryTimeout(unittest.TestCase):
     def test_recovery_timeout_detected(self):
         """Terminal stuck in expired > recovery_timeout → recovery_timeout."""
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="d-rt", terminal_id="T1")
+            register_dispatch(conn, dispatch_id="d-rt", terminal_id="T1", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T1", dispatch_id="d-rt")
             conn.commit()
         # Force lease to expired

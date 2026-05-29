@@ -67,7 +67,7 @@ class _RegistryTestCase(unittest.TestCase):
     def _create_dispatch_and_attempt(self, dispatch_id="d-test-1"):
         """Helper: register a dispatch and create an attempt, return (dispatch_id, attempt_id)."""
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, project_id="vnx-dev")
             attempt = create_attempt(
                 conn,
                 dispatch_id=dispatch_id,

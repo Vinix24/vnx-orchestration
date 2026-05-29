@@ -266,7 +266,7 @@ class TestTerminalView(unittest.TestCase):
             self._setup_db(state_dir)
 
             try:
-                register_dispatch(state_dir, "D-001", "T1")
+                register_dispatch(state_dir, "D-001", "T1", project_id="vnx-dev")
                 acquire_lease(state_dir, "T1", "D-001")
             except Exception:
                 pass  # Schema may differ — still test the view surface

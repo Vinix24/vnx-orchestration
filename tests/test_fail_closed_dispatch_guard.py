@@ -66,7 +66,7 @@ def _make_core(state_dir: str, dispatch_dir: str) -> RuntimeCore:
 def _register_dispatch_row(state_dir: str, dispatch_id: str, terminal_id: str = "T2") -> None:
     """Pre-register a dispatch row to satisfy terminal_leases FK constraint."""
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
         conn.commit()
 
 

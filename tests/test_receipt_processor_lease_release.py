@@ -58,7 +58,7 @@ def _setup(tmp: tempfile.TemporaryDirectory):
 
 def _acquire(lease_mgr: LeaseManager, state_dir: Path, terminal: str, dispatch_id: str) -> int:
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal)
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal, project_id="vnx-dev")
         conn.commit()
     return lease_mgr.acquire(terminal, dispatch_id=dispatch_id).generation
 
@@ -103,7 +103,7 @@ class TestReceiptProcessorLeaseReleaseAfterCrash(unittest.TestCase):
         self.core.release_on_receipt("T2", dispatch_id="d-crash-002")
 
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="d-next-002", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="d-next-002", terminal_id="T2", project_id="vnx-dev")
             conn.commit()
         new_lease = self.lease_mgr.acquire("T2", dispatch_id="d-next-002")
         self.assertEqual(new_lease.state, "leased")
