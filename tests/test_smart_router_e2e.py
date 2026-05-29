@@ -115,7 +115,8 @@ class TestAutoRouteNdjsonPersistence:
         record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
         assert record["chosen_route"]["model_id"] == "claude-opus-4-6"
 
-    def test_debug_task_routes_to_deepseek(self, recommendations_yaml, state_dir):
+    def test_debug_task_routes_to_deepseek(self, recommendations_yaml, state_dir, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         decision = decide(
             instruction="debug the failing test in subprocess_dispatch",
             role="debugger",
