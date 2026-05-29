@@ -27,6 +27,13 @@ from codex_final_gate import (
     evaluate_and_record,
     render_codex_prompt,
     main,
+    _parse_numstat_net,
+    _format_deleted_files_alert,
+    _apply_mass_deletion_warning,
+    DELETION_FILE_WARN,
+    DELETION_FILE_HOLD,
+    NET_LINE_DELETION_WARN,
+    NET_LINE_DELETION_HOLD,
 )
 
 
@@ -543,3 +550,279 @@ class TestCLI:
         receipt_path.write_text(receipt.to_json(), encoding="utf-8")
         exit_code = main(["check-clearance", "--contract", str(contract_path), "--receipt", str(receipt_path)])
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity: _parse_numstat_net
+# ---------------------------------------------------------------------------
+
+class TestParseNumstatNet:
+    def test_empty_input_returns_zero(self):
+        assert _parse_numstat_net("") == 0
+
+    def test_net_deletion_calculated_correctly(self):
+        # 10 lines added, 30 removed → net deletion = 20
+        output = "10\t30\tsomefile.py\n5\t0\tanother.py\n"
+        assert _parse_numstat_net(output) == 15  # (30+0) - (10+5)
+
+    def test_net_addition_returns_negative(self):
+        # More lines added than removed
+        output = "100\t10\tbig_feature.py\n"
+        assert _parse_numstat_net(output) == 10 - 100  # -90
+
+    def test_binary_files_skipped(self):
+        output = "-\t-\timage.png\n10\t5\tfile.py\n"
+        assert _parse_numstat_net(output) == 5 - 10  # -5
+
+    def test_all_binary_returns_zero(self):
+        output = "-\t-\ta.png\n-\t-\tb.jpg\n"
+        assert _parse_numstat_net(output) == 0
+
+    def test_pure_deletion_no_additions(self):
+        output = "0\t50\tdeleted_file.py\n"
+        assert _parse_numstat_net(output) == 50
+
+    def test_multiple_files_aggregated(self):
+        output = "2\t10\ta.py\n3\t20\tb.py\n1\t5\tc.py\n"
+        assert _parse_numstat_net(output) == (10 + 20 + 5) - (2 + 3 + 1)  # 29
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity: _format_deleted_files_alert
+# ---------------------------------------------------------------------------
+
+class TestFormatDeletedFilesAlert:
+    def test_warn_level_when_below_hold(self):
+        deleted = [f"file_{i}.py" for i in range(DELETION_FILE_WARN)]
+        lines = _format_deleted_files_alert(deleted)
+        header = lines[0]
+        assert "[WARN]" in header
+        assert "[HOLD]" not in header
+
+    def test_hold_level_at_hold_threshold(self):
+        deleted = [f"file_{i}.py" for i in range(DELETION_FILE_HOLD)]
+        lines = _format_deleted_files_alert(deleted)
+        header = lines[0]
+        assert "[HOLD]" in header
+
+    def test_file_count_in_header(self):
+        deleted = ["a.py", "b.py", "c.py"]
+        lines = _format_deleted_files_alert(deleted)
+        assert "3" in lines[0]
+
+    def test_each_file_listed(self):
+        deleted = ["scripts/foo.py", "tests/bar.py"]
+        lines = _format_deleted_files_alert(deleted)
+        text = "\n".join(lines)
+        assert "`scripts/foo.py`" in text
+        assert "`tests/bar.py`" in text
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity: _apply_mass_deletion_warning
+# ---------------------------------------------------------------------------
+
+class TestApplyMassDeletionWarning:
+    def _make_enforcement(self, **overrides):
+        defaults = dict(
+            required=False,
+            reasons=[],
+            risk_class="low",
+            merge_policy="human",
+            touches_governance=False,
+            touches_runtime=False,
+            high_risk_by_path=False,
+            mass_deletion_count=0,
+            mass_deletion_warn=False,
+            net_line_deletion=0,
+            net_line_deletion_warn=False,
+            warnings=[],
+            deleted_files=[],
+        )
+        defaults.update(overrides)
+        return CodexGateEnforcementResult(**defaults)
+
+    def test_no_warnings_passthrough(self):
+        enforcement = self._make_enforcement()
+        findings = [{"severity": "info", "message": "all clear"}]
+        result = _apply_mass_deletion_warning(enforcement, findings)
+        assert result == findings
+
+    def test_file_deletion_warn_prepended(self):
+        enforcement = self._make_enforcement(
+            mass_deletion_warn=True,
+            mass_deletion_count=7,
+        )
+        result = _apply_mass_deletion_warning(enforcement, [])
+        assert len(result) == 1
+        assert result[0]["severity"] == "warning"
+        assert "7" in result[0]["message"]
+        assert str(DELETION_FILE_WARN) in result[0]["message"]
+
+    def test_net_line_deletion_warn_prepended(self):
+        enforcement = self._make_enforcement(
+            net_line_deletion_warn=True,
+            net_line_deletion=250,
+        )
+        result = _apply_mass_deletion_warning(enforcement, [])
+        assert len(result) == 1
+        assert result[0]["severity"] == "warning"
+        assert "250" in result[0]["message"]
+        assert str(NET_LINE_DELETION_WARN) in result[0]["message"]
+
+    def test_both_warnings_prepended_before_existing_findings(self):
+        enforcement = self._make_enforcement(
+            mass_deletion_warn=True,
+            mass_deletion_count=6,
+            net_line_deletion_warn=True,
+            net_line_deletion=210,
+        )
+        existing = [{"severity": "info", "message": "test finding"}]
+        result = _apply_mass_deletion_warning(enforcement, existing)
+        assert len(result) == 3
+        # Both warnings are prepended before the existing finding
+        assert result[-1] == existing[0]
+        severities = {r["severity"] for r in result[:2]}
+        assert severities == {"warning"}
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity: enforce_codex_gate with deletion checks
+# ---------------------------------------------------------------------------
+
+class TestEnforceCodexGateDeletion:
+    def _make_low_risk_contract(self):
+        return _make_contract(
+            risk_class="low",
+            changed_files=["docs/README.md"],
+            review_stack=["gemini_review"],
+        )
+
+    def test_warn_level_sets_mass_deletion_warn_not_required(self, tmp_path):
+        from unittest.mock import patch
+        contract = self._make_low_risk_contract()
+        warn_files = [f"file_{i}.py" for i in range(DELETION_FILE_WARN)]  # exactly at warn
+        with patch("codex_final_gate._get_deleted_files", return_value=warn_files), \
+             patch("codex_final_gate._get_net_line_deletion", return_value=0):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert result.mass_deletion_warn is True
+        assert result.mass_deletion_count == DELETION_FILE_WARN
+        assert result.required is False
+        assert "mass_deletion_warning" in result.warnings
+        assert "mass_file_deletion" not in result.reasons
+
+    def test_hold_level_sets_required_true(self, tmp_path):
+        from unittest.mock import patch
+        contract = self._make_low_risk_contract()
+        hold_files = [f"file_{i}.py" for i in range(DELETION_FILE_HOLD)]
+        with patch("codex_final_gate._get_deleted_files", return_value=hold_files), \
+             patch("codex_final_gate._get_net_line_deletion", return_value=0):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert result.required is True
+        assert "mass_file_deletion" in result.reasons
+        assert result.mass_deletion_warn is False
+
+    def test_net_line_deletion_warn_threshold(self, tmp_path):
+        from unittest.mock import patch
+        contract = self._make_low_risk_contract()
+        with patch("codex_final_gate._get_deleted_files", return_value=[]), \
+             patch("codex_final_gate._get_net_line_deletion", return_value=NET_LINE_DELETION_WARN):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert result.net_line_deletion_warn is True
+        assert result.required is False
+        assert "net_line_deletion_warning" in result.warnings
+
+    def test_net_line_deletion_hold_sets_required(self, tmp_path):
+        from unittest.mock import patch
+        contract = self._make_low_risk_contract()
+        with patch("codex_final_gate._get_deleted_files", return_value=[]), \
+             patch("codex_final_gate._get_net_line_deletion", return_value=NET_LINE_DELETION_HOLD):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert result.required is True
+        assert "net_line_deletion" in result.reasons
+
+    def test_no_deletion_no_flags(self, tmp_path):
+        from unittest.mock import patch
+        contract = self._make_low_risk_contract()
+        with patch("codex_final_gate._get_deleted_files", return_value=[]), \
+             patch("codex_final_gate._get_net_line_deletion", return_value=0):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert result.mass_deletion_warn is False
+        assert result.net_line_deletion_warn is False
+        assert result.required is False
+
+    def test_git_failure_does_not_raise(self, tmp_path):
+        from unittest.mock import patch
+        contract = self._make_low_risk_contract()
+        with patch("codex_final_gate._get_deleted_files", return_value=None), \
+             patch("codex_final_gate._get_net_line_deletion", return_value=None):
+            result = enforce_codex_gate(contract, project_root=tmp_path)
+        assert result.mass_deletion_count == 0
+        assert result.net_line_deletion == 0
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity: render_codex_prompt with deleted_files
+# ---------------------------------------------------------------------------
+
+class TestRenderCodexPromptDeletion:
+    def test_deleted_files_alert_included_when_provided(self):
+        contract = _make_contract()
+        deleted = ["scripts/old_module.py", "tests/test_old.py"]
+        prompt = render_codex_prompt(contract, deleted_files=deleted)
+        assert "Net-Deletion Alert" in prompt
+        assert "`scripts/old_module.py`" in prompt
+        assert "`tests/test_old.py`" in prompt
+
+    def test_no_alert_when_deleted_files_none(self):
+        contract = _make_contract()
+        prompt = render_codex_prompt(contract, deleted_files=None)
+        assert "Net-Deletion Alert" not in prompt
+
+    def test_no_alert_when_deleted_files_empty(self):
+        contract = _make_contract()
+        prompt = render_codex_prompt(contract, deleted_files=[])
+        assert "Net-Deletion Alert" not in prompt
+
+    def test_hold_level_shown_for_large_deletion(self):
+        contract = _make_contract()
+        deleted = [f"file_{i}.py" for i in range(DELETION_FILE_HOLD)]
+        prompt = render_codex_prompt(contract, deleted_files=deleted)
+        assert "[HOLD]" in prompt
+
+    def test_warn_level_shown_for_small_deletion(self):
+        contract = _make_contract()
+        deleted = [f"file_{i}.py" for i in range(DELETION_FILE_WARN)]
+        prompt = render_codex_prompt(contract, deleted_files=deleted)
+        assert "[WARN]" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Net-deletion sanity: clearance result includes warnings key
+# ---------------------------------------------------------------------------
+
+class TestCheckGateClearanceWarnings:
+    def test_warnings_key_present_when_gate_not_required(self):
+        contract = _make_contract(
+            risk_class="low",
+            changed_files=["docs/README.md"],
+            review_stack=["gemini_review"],
+        )
+        result = check_gate_clearance(contract, None)
+        assert "warnings" in result
+
+    def test_warnings_key_present_when_required_no_receipt(self):
+        contract = _make_contract()
+        result = check_gate_clearance(contract, None)
+        assert "warnings" in result
+
+    def test_warnings_key_present_when_gate_cleared(self):
+        contract = _make_contract()
+        receipt = CodexFinalGateReceipt(
+            pr_id="PR-3",
+            verdict="pass",
+            required=True,
+            content_hash="abc123def456",
+        )
+        result = check_gate_clearance(contract, receipt)
+        assert "warnings" in result
