@@ -142,10 +142,21 @@ SELECT
     attempt_count, bundle_path, created_at, updated_at, expires_after, metadata_json
 FROM dispatches_pre_v22;
 
-DROP TABLE dispatches_pre_v22;
+-- DELETE+INSERT pattern BEFORE DROP TABLE (kimi peer-review lesson per ADR-005 / PR #685 fix3)
+-- Must run while dispatches_pre_v22 still exists: SQLite removes its sqlite_sequence
+-- row on DROP TABLE, making the high-water mark unrecoverable afterward.
+-- INSERT OR REPLACE is also wrong: sqlite_sequence has no UNIQUE on name in older SQLite,
+-- so it can create duplicate rows; and MAX(id) loses the high-water mark when rows were deleted.
+DELETE FROM sqlite_sequence WHERE name = 'dispatches';
+INSERT INTO sqlite_sequence(name, seq)
+    SELECT 'dispatches',
+           COALESCE(
+               (SELECT seq FROM sqlite_sequence WHERE name = 'dispatches_pre_v22'),
+               (SELECT MAX(id) FROM dispatches),
+               0
+           );
 
-INSERT OR REPLACE INTO sqlite_sequence(name, seq)
-    SELECT 'dispatches', COALESCE(MAX(id), 0) FROM dispatches;
+DROP TABLE dispatches_pre_v22;
 
 -- ============================================================================
 -- INDEXES — dispatches (rebuilt above)
