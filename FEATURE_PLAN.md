@@ -1,12 +1,49 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-29T05:11:24.774710+00:00
+**Last updated**: 2026-05-29T21:06:09.831069+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #732 — chore(packaging): wheel hygiene — exclude pycache/tests/benchmarks, remove stale dist/ (#732) (2026-05-29)
+- #735 — fix(dream): route all file I/O through canonical vnx_paths data root (#735) (2026-05-29)
+- #733 — fix(blk-readme): make quickstart work on clean pip install (#733) (2026-05-29)
+- #734 — fix(blk-initpath): guard _scaffold_vnx_data_local behind inside_project (#734) (2026-05-29)
+- #731 — fix(bootstrap): route dream/track through _engine bootstrap; guided pool status error (#731) (2026-05-29)
+- #729 — feat(ra6-autopilot-tick): autopilot_tick + scheduler wiring, ships DARK (#729) (2026-05-29)
+- #728 — Fix pool status project display (#728) (2026-05-29)
+- #727 — feat(pool): N-3 wire VNX_POOL_TASK_CONSUMER to pool_worker_runner spawn (#727) (2026-05-29)
+- #726 — feat(pool): N-2 pool_worker_runner single-claim entrypoint (#726) (2026-05-29)
+- #725 — fix(ra3b-gate-holes): close 4 advance-gate bypass holes (RA-3b) (#725) (2026-05-29)
+- #720 — feat(dispatch): atomic claim_next_queued_dispatch + migration 0026 (PR-N-1) (#720) (2026-05-29)
+- #724 — fix(gate): fetch origin/<branch> before diff, use origin/main...origin/<branch> (#724) (2026-05-29)
+- #723 — feat(ra5-step-driver): add step subcommand driving active feature PR queue (#723) (2026-05-29)
+- #721 — feat(ra4-human-gate): add human approval gate primitive to roadmap advance (#721) (2026-05-29)
+- #722 — fix(dream): resolve quality DB via canonical vnx_paths.resolve_state_dir (#722) (2026-05-29)
+- #719 — fix(dream): kill process group on kimi timeout, add entry log (PR-DREAM-HANG-2) (#719) (2026-05-29)
+- #718 — feat(ra3-gate-enforce): enforce review-gate evidence in reconcile/advance (#718) (2026-05-29)
+- #717 — test(fut-2b): ADR-007 structural regression tests for track child tables (#717) (2026-05-29)
+- #716 — feat(ra2-materialize): branch + worktree provisioning in load_feature (#716) (2026-05-29)
+- #715 — feat(dispatch): extend VNX_ISOLATED_WORKTREE to provider_dispatch (PR-PROVIDER-ISO) (#715) (2026-05-29)
+- #714 — feat(ra1-projectid): ADR-007 project_id stamp on roadmap_state.json + receipts (#714) (2026-05-29)
+- #713 — fix(hygiene): wire vulture, clear 100%-confidence dead-code findings (OI-001/OI-002/OI-005) (#713) (2026-05-29)
+- #712 — feat(dispatch): extend repo-map enrichment to all providers (PR-REPOMAP) (#712) (2026-05-29)
+- #711 — fix(dream): guard empty-DB hang + add kimi timeout (GAP-7/ADR-019) (#711) (2026-05-29)
+- #710 — fix(central-qdb): detect partial-init QI DB and complete bootstrap (OI-011) (#710) (2026-05-29)
+- #709 — feat(dispatch): complete smart-router for non-Claude providers + constraint-aware routing (#709) (2026-05-29)
+- #708 — feat(dream-scheduler-v2): install-scheduler subcommands + GAP-7 receipt preflight (#708) (2026-05-29)
+- #707 — fix(dream-mode-tier): register dream in TIER_OPERATOR_ONLY + bin/vnx dispatch (#707) (2026-05-29)
+- #706 — fix(pool): terminate subprocess and remove worktree on scale_down and reap (OI-010) (#706) (2026-05-29)
+- #705 — feat(dispatch): per-dispatch git worktree isolation, env-gated VNX_ISOLATED_WORKTREE (default off) (#705) (2026-05-29)
+- #656 — feat(governance): PreToolUse hook blocks raw claude worker-spawns, enforces subprocess_dispatch (#656) (2026-05-29)
+- #702 — feat(smart-routing-activate): cost-aware auto-route with VNX_AUTO_ROUTE env gate (#702) (2026-05-29)
+- #701 — fix(kimi-dispatch-enrichment): wire intelligence injection into kimi dispatch path (#701) (2026-05-29)
+- #699 — fix(a14-wire-0025): wire 0025_dream_consolidation.sql into quality-DB bootstrap (#699) (2026-05-29)
+- #697 — fix(a14-pr2-fix): address all 5 codex blocking findings on PR #696 (#697) (2026-05-29)
+- #691 — fix(issue-687): dispatches sqlite_sequence preservation in 0022 (#691) (2026-05-29)
+- #684 — feat(h-cost-tracking): universal cost tracking for all providers (#684) (2026-05-29)
 - #683 — refactor(hyg-4): extract subparser registrations and dispatch chain from main() (#683) (2026-05-29)
 - #682 — feat(d-role-prompts): add database-engineer, intelligence-engineer, security-engineer roles + update architect (#682) (2026-05-29)
 - #679 — feat(int-1): adrs table + FTS5 + indexer (PR-INT-1) (#679) (2026-05-29)
@@ -114,19 +151,13 @@ _Last 14 days — sourced from git merge commits._
 - #547 — feat(benchmark): suite infrastructure (9 models x 7 tasks orchestrator + judge + analyzer) (#547) (2026-05-16)
 - #537 — fix(oi-1479): token_usage extraction + cost_usd computation per provider (#537) (2026-05-16)
 - #533 — fix(oi-1476): align project_id regex + yaml placeholder substitution (#533) (2026-05-16)
-- #508 — chore(hardening): narrow silent-except across 7 hot files (14 findings, OI-1437) (#508) (2026-05-15)
-- #509 — chore(hardening): narrow silent-except across 13 singleton files (13 findings, OI-1437) (#509) (2026-05-15)
-- #506 — refactor(replay_harness): modularize into package — close OI-1443/1444/1445/1446/1447 (#506) (2026-05-15)
-- #507 — refactor(cleanup_worker_exit): decompose 104-line function — close OI-1448 (#507) (2026-05-15)
-- #505 — docs(adr-003): clarify API-key + CLI permitted; SDK still banned (#505) (2026-05-15)
-- #504 — refactor(conversation_analyzer): modularize into package — close OI-1438/1439/1440/1441/1442 (#504) (2026-05-15)
-- #503 — fix(rp): bootstrap audit ordering + test infra hardening (close OI-1450/1451/1452) (#503) (2026-05-15)
-- #502 — fix(dispatcher): log stderr, script_dir leak, receipt processor bootstrap-mode (#502) (2026-05-15)
-- #500 — chore(hardening): narrow silent-except across replay_harness/cleanup_worker_exit/conversation_analyzer (9 findings, OI-1437) (#500) (2026-05-15)
 
 **WAVE 5**
 - #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
 - #569 — docs: Wave 5/6/7/8 documentation overhaul (#569) (2026-05-17)
+
+**WAVE 6**
+- #692 — chore(h2-v2): T0 skill + CLAUDE.md hardening (Wave 6 pool discovery) (#692) (2026-05-29)
 
 **WAVE 8**
 - #570 — fix(wiring): activate 4 dead-code modules from Wave 8 fast-path (auto_apply, validator class, schema-emit, smart_router.route) (#570) (2026-05-17)
@@ -142,12 +173,6 @@ _Last 14 days — sourced from git merge commits._
 - #629 — fix(install-central): write install-mode marker, export VNX_PROJECT_ROOT from shim, fix verify_install (PR-WAVE4-2) (#629) (2026-05-25)
 - #628 — fix(install-central): separate PROJECT_ROOT from VNX_HOME in central-install mode (PR-WAVE4-1) (#628) (2026-05-25)
 
-**WAVE4.6**
-- #513 — feat(wave4.6): PR-4.6.6 — unified event shape via CanonicalEvent + EventStore enforcement (#513) (2026-05-15)
-- #512 — feat(wave4.6): PR-4.6.5 — litellm_spawn handler extracted from litellm_adapter (#512) (2026-05-15)
-- #511 — feat(wave4.6): PR-4.6.3 — codex_spawn handler extracted from codex_adapter (#511) (2026-05-15)
-- #510 — feat(wave4.6): PR-4.6.4 — gemini_spawn handler extracted from gemini_adapter (#510) (2026-05-15)
-
 **WAVE5**
 - #532 — feat(wave5): PR-5.7 — operator demo runbook + Control Centre docs + completion report (#532) (2026-05-16)
 - #530 — feat(wave5): PR-5.6 — hybrid dispatch routing with receipt-tail lifecycle tracker (#530) (2026-05-16)
@@ -159,6 +184,7 @@ _Last 14 days — sourced from git merge commits._
 - #521 — docs(wave5): PR-5.0 — ADR-017 Control Centre product-shape architecture (#521) (2026-05-16)
 
 **WAVE6**
+- #698 — fix(wave6-pool-lease-spawn): insert terminal_leases row before add_member in pool scale_up (#698) (2026-05-29)
 - #575 — fix(wave6): real spawn impl + config field reads + single heartbeat threshold (3 blockers) (#575) (2026-05-17)
 - #546 — fix(wave6): OI cleanup group 1 (idempotency + regex + ledger + audit) (#546) (2026-05-16)
 - #544 — feat(wave6): PR-6.8 — Control Centre pool-integration (cross-project pool view + supervisor) (#544) (2026-05-16)
@@ -182,8 +208,6 @@ _Last 14 days — sourced from git merge commits._
 - #519 — feat(wave7): PR-7.4 — cost-routing policy engine (feature-flag gated) (#519) (2026-05-15)
 - #518 — feat(wave7): PR-7.3 — GLM-5.1 lane via OpenRouter (z.AI direct deferred) (#518) (2026-05-15)
 - #517 — feat(wave7): PR-7.2 — Kimi K2.6 + K2-0905 lane via LiteLLM Moonshot endpoint (#517) (2026-05-15)
-- #516 — feat(wave7): PR-7.1 — DeepSeek V4 lane via LiteLLM subprocess bridge (#516) (2026-05-15)
-- #515 — feat(wave7): PR-7.0 — ADR-015 LiteLLM Path B for DeepSeek/Kimi/GLM integration (#515) (2026-05-15)
 
 ## Active features
 
@@ -196,11 +220,11 @@ _No completed features found in register or PR history._
 ## Planned (from ROADMAP.yaml)
 
 ### roadmap-autopilot — Roadmap Autopilot, Auto-Next Feature Loading, and Multi-Reviewer Gates
-Status: planned
+Status: shipped-dark
 
-### fut-1 — Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1); seeding + composite-FK deferred to PR-FUT-2
-Status: active
+### fut-1 — Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1)
+Status: done
 
 ### fut-2 — Track tenant-scoping per ADR-007 — composite PK over project_id, seeding from roadmap, composite-FK dispatches.track → tracks(track_id, project_id), project-aware CLI
-Status: planned
+Status: done
 

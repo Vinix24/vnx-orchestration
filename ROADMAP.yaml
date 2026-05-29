@@ -1,6 +1,15 @@
 roadmap_id: vnx-roadmap-autopilot
 title: VNX Multi-Feature Roadmap
 
+launch_state:
+  version: "1.0.0"
+  date: "2026-05-29"
+  note: >
+    1.0.0 is pip-installable and production-validated. Self-learning loop is runnable
+    (auto-dream shipped); nightly trigger and central-path unification are pending.
+    Smart routing (VNX_AUTO_ROUTE) and pool task consumer (VNX_POOL_TASK_CONSUMER)
+    are shipped opt-in. Roadmap autopilot tick (RA-6) ships dark (default off).
+
 features:
   - feature_id: roadmap-autopilot
     title: Roadmap Autopilot, Auto-Next Feature Loading, and Multi-Reviewer Gates
@@ -13,10 +22,14 @@ features:
       - codex_gate
       - claude_github_optional
     depends_on: []
-    status: planned
+    status: shipped-dark
+    notes: >
+      RA-1..6 merged (project_id stamp, branch+worktree provisioning, gate enforcement,
+      human-gate primitive, step driver, autopilot tick). RA-6 autopilot_tick ships dark
+      (default off, env-gated). RA-3b closed 4 advance-gate bypass holes.
 
   - feature_id: fut-1
-    title: "Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1); seeding + composite-FK deferred to PR-FUT-2"
+    title: "Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1)"
     branch_name: feat/fut-1-track-schema
     risk_class: medium
     merge_policy: human
@@ -24,7 +37,7 @@ features:
       - gemini_review
       - codex_gate
     depends_on: []
-    status: active
+    status: done
 
   - feature_id: fut-2
     title: "Track tenant-scoping per ADR-007 — composite PK over project_id, seeding from roadmap, composite-FK dispatches.track → tracks(track_id, project_id), project-aware CLI"
@@ -36,4 +49,5 @@ features:
       - codex_gate
     depends_on:
       - fut-1
-    status: planned
+    status: done
+    notes: "FUT-2a (composite PK + ADR-007 compliance) and FUT-2b (structural regression tests) both merged."
