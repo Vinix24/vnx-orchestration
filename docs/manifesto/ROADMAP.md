@@ -89,14 +89,53 @@ Task-class-aware model routing (`smart_router.py`), hard provider constraint enf
 
 Key deliverables: `smart_router.py`, `hard_constraints.py`, `route_decisions_watcher.py`.
 
+### 1.0 Sprint — Roadmap Autopilot, N-Scaling Foundation, Auto-Dream
+**Status**: `Completed` — SHIPPED 2026-05-29
+
+~40 PRs completing the 1.0 capability surface. Major additions:
+
+**Roadmap Autopilot (RA-1..6 + RA-3b)**
+Gate-enforced autopilot primitives for the roadmap advance flow. RA-1 stamps `project_id` on `roadmap_state.json` and receipts (ADR-007 compliance). RA-2 provisions branch + worktree on `load_feature`. RA-3 enforces review-gate evidence in reconcile/advance. RA-3b closes 4 advance-gate bypass holes. RA-4 adds a human-approval gate primitive. RA-5 adds a `step` subcommand driving the active feature PR queue. RA-6 wires `autopilot_tick` + scheduler — ships dark (default off), gated by `VNX_AUTOPILOT=1`.
+
+**N-Scaling Foundation (N-1/2/3)**
+N-1: atomic `claim_next_queued_dispatch` + migration 0026 for race-free queue consumption. N-2: `pool_worker_runner` single-claim entrypoint. N-3: `VNX_POOL_TASK_CONSUMER` wiring from pool worker spawn. Full pool-task-consumer path is opt-in; single-worker default unchanged.
+
+**Auto-Dream Self-Learning Loop (runnable, not fully-active)**
+ADR-019 `auto_dream` consolidator core: quality DB consolidation, CLI + scheduler, GAP-7 receipt preflight, T0 review-gate, kimi timeout guard, canonical vnx_paths I/O routing. The loop is runnable on-demand. Nightly cron trigger and central-path unification are pending before routine activation. Do not claim as "active" — it is runnable.
+
+**GOV-1 PreToolUse Hook**
+Blocks raw `claude` worker spawns at the Claude Code hook layer, enforcing the `subprocess_dispatch` path.
+
+**Smart Routing Activation**
+Full smart-router wired for non-Claude providers + constraint-aware routing (#709). Cost-aware auto-route activated via `VNX_AUTO_ROUTE=1` (#702). Opt-in; not the default dispatch path.
+
+**Worktree + Provider Isolation**
+Per-dispatch git worktree isolation (`VNX_ISOLATED_WORKTREE`, default off) extended to `provider_dispatch` for all providers.
+
+**Track Layer (FUT-1 + FUT-2)**
+`tracks` schema with DAL + CLI + audit-ordering (FUT-1). ADR-007 composite PK over `track_id + project_id`, tenant-scoping, composite-FK from `dispatches.track → tracks(track_id, project_id)` (FUT-2a). Structural regression tests for all track child tables (FUT-2b).
+
+**Intelligence + Enrichment**
+Repo-map enrichment extended to all providers (#712). Kimi intelligence injection wired (#701). ADR FTS5 index + injection in dispatch context (INT-1, INT-2).
+
+**Hygiene**
+Vulture dead-code detection wired; 100%-confidence dead-code cleared. Universal cost tracking across all 5 providers. Wheel packaging hardened (exclude pycache/tests/benchmarks, remove stale dist/).
+
+Key deliverables: `autopilot_tick.py`, `pool_worker_runner.py`, `auto_dream` package, `GOV-1` hook, `tracks` table + DAL, migration 0026.
+
 ---
 
 ## Milestones
 
-### Headless T0 Production
-**Status**: `Planned` — Target: Q2 2026
+### 1.0.0 Public Release
+**Status**: `Completed` — 2026-05-29
 
-Cutover from interactive T0 to autonomous headless T0 for standard feature chains. Requires benchmark scores above 85% at Level-3, plus 3-Layer Trigger System operational.
+pip-installable, 5-provider production, governance receipts, elastic pool, smart routing (opt-in), roadmap-autopilot gate hardening (RA-1..5 active, RA-6 dark), auto-dream self-learning loop runnable. See [1.0 Sprint section](#10-sprint--roadmap-autopilot-n-scaling-foundation-auto-dream) for full capability list.
+
+### Headless T0 Production
+**Status**: `Planned`
+
+Cutover from interactive T0 to autonomous headless T0 for standard feature chains. Requires benchmark scores above 85% at Level-3, plus 3-Layer Trigger System operational, plus RA-6 autopilot-tick promoted from dark.
 
 Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously across 10 consecutive real feature chains without operator override.
 
@@ -171,19 +210,12 @@ Success criteria: T0 makes correct dispatch/complete/wait decisions autonomously
 ## Next (After Committed Scope)
 
 ## Centralization Rollout
-**Status**: `Next`
-**Why**: Wave 8 shipped; central install path validated on vnx-orchestration-system. Rolling out to all 4 projects via pipx wheel + `install-central.sh`.
+**Status**: `Completed` for reference project; rollout to satellite projects ongoing.
+**Why**: Wave 8 shipped; central install path validated on vnx-orchestration-system.
 
 **Rollout order**
-1. vnx-orchestration-system (reference) — done
-2. SEOcrawler_v2 — next
-3. mission-control — following
-4. sales-copilot — final
-
-**Success Criteria**
-- All 4 projects pin via `.vnx-version` to `v1.0.0-rc3`
-- `vnx doctor --strict` passes on all 4 with no override warnings
-- `.vnx-overrides/` pattern adopted where projects need custom skills or schemas
+1. vnx-orchestration-system (reference) — done, 1.0.0 production
+2. SEOcrawler_v2, mission-control, sales-copilot — per project burn-in schedule
 
 ---
 
