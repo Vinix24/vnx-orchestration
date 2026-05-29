@@ -91,6 +91,7 @@ For round-2+ reviews of any PR, switch to adversarial framing:
 
 - Mandatory for round-2+ of any PR review
 - Mandatory if prior round found ≥3 blocking findings (B3.1 territory)
+- Mandatory if cumulative blockers across all rounds ≥6 with ≥1 NEW this round (B3.2 territory — see `@t0-orchestrator` §3 B3.2)
 - Optional but recommended for first review of any schema/migration/multi-tenant code
 
 ## Convergent failure mode awareness
