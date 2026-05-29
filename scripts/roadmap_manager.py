@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt, utc_now_iso
 from pr_queue_manager import PRQueueManager
 from closure_verifier import verify_closure
+from project_scope import current_project_id
 
 
 ALLOWED_DRIFT_CATEGORIES = {"bugfix", "post_cleanup", "governance_gap", "path/runtime regression"}
@@ -43,6 +45,7 @@ class RoadmapManager:
         paths = ensure_env()
         self.project_root = Path(paths["PROJECT_ROOT"]).resolve()
         self.state_dir = Path(paths["VNX_STATE_DIR"]).resolve()
+        self.project_id = current_project_id()
         self.paths = RoadmapPaths(
             project_root=self.project_root,
             state_dir=self.state_dir,
@@ -56,22 +59,42 @@ class RoadmapManager:
 
     def _save_state(self, state: Dict[str, Any]) -> None:
         self.paths.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp = self.paths.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(self.paths.state_file))
+
+    def _blank_state(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "roadmap_file": None,
+            "current_active_feature": None,
+            "features": [],
+            "inserted_fixups": [],
+            "merged_features": [],
+            "last_verified_merge_commit": None,
+            "last_closure_verification_result": None,
+            "blocked_reason": None,
+            "updated_at": utc_now_iso(),
+        }
 
     def load_state(self) -> Dict[str, Any]:
         if not self.paths.state_file.exists():
-            return {
-                "roadmap_file": None,
-                "current_active_feature": None,
-                "features": [],
-                "inserted_fixups": [],
-                "merged_features": [],
-                "last_verified_merge_commit": None,
-                "last_closure_verification_result": None,
-                "blocked_reason": None,
-                "updated_at": utc_now_iso(),
-            }
-        return json.loads(self.paths.state_file.read_text(encoding="utf-8"))
+            return self._blank_state()
+
+        state = json.loads(self.paths.state_file.read_text(encoding="utf-8"))
+
+        file_pid = state.get("project_id")
+        if file_pid is None:
+            # One-shot migration: stamp unstamped legacy state, preserve feature progress.
+            state["project_id"] = self.project_id
+            self._save_state(state)
+            return state
+
+        if file_pid != self.project_id:
+            # ADR-007: cross-tenant contamination guard — re-initialize rather than leak.
+            return self._blank_state()
+
+        return state
 
     def _normalize_feature(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         review_stack = raw.get("review_stack") or []
@@ -105,6 +128,7 @@ class RoadmapManager:
         state = self.load_state()
         state.update(
             {
+                "project_id": self.project_id,
                 "roadmap_file": str(roadmap_file.resolve()),
                 "features": features,
                 "current_active_feature": None,
@@ -121,6 +145,7 @@ class RoadmapManager:
             "roadmap_transition",
             status="success",
             action="init",
+            project_id=self.project_id,
             roadmap_file=str(roadmap_file.resolve()),
             feature_count=len(features),
         )
@@ -160,6 +185,7 @@ class RoadmapManager:
             "roadmap_transition",
             status="success",
             action="load_feature",
+            project_id=self.project_id,
             feature_id=feature_id,
             title=feature["title"],
             branch_name=feature["branch_name"],
@@ -375,7 +401,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
             state["blocked_reason"] = None
             state["updated_at"] = utc_now_iso()
             self._save_state(state)
-            emit_governance_receipt("roadmap_transition", status="success", action="advance_complete", merged_features=sorted(merged))
+            emit_governance_receipt("roadmap_transition", status="success", action="advance_complete", project_id=self.project_id, merged_features=sorted(merged))
             return {"advanced": False, "reason": "no_remaining_features"}
 
         self.load_feature(next_feature["feature_id"])
