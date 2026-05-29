@@ -24,10 +24,22 @@ def _get_project_id(args) -> str | None:
 
 
 def _resolve_paths() -> tuple[Path, Path]:
-    """Returns (project_root, db_path)."""
+    """Returns (project_root, db_path).
+
+    db_path resolves via vnx_paths.resolve_state_dir() — the same canonical
+    central chain the rest of the system uses. ADR-007: path is project_id-scoped.
+    """
     from project_root import resolve_project_root  # type: ignore[import]
+    from vnx_paths import resolve_state_dir  # type: ignore[import]
     root = resolve_project_root()
-    return root, root / ".vnx-data" / "state" / "quality_intelligence.db"
+    state_dir = resolve_state_dir()
+    return root, state_dir / "quality_intelligence.db"
+
+
+def _resolve_data_root() -> Path:
+    """Return the canonical VNX data root (.vnx-data parent of state dir)."""
+    from vnx_paths import resolve_state_dir  # type: ignore[import]
+    return resolve_state_dir().parent
 
 
 def _cmd_run(args) -> int:
@@ -48,7 +60,7 @@ def _cmd_status(args) -> int:
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
-    root, db_path = _resolve_paths()
+    _, db_path = _resolve_paths()
     if not db_path.exists():
         print(f"No dream cycles found for project '{project_id}'.")
         return 0
@@ -77,7 +89,7 @@ def _cmd_status(args) -> int:
           f"{r['insights_input']}/{r['merged_count']}/{r['dropped_count']}/{r['flagged_count']}")
     print(f"  reviewed    : {bool(r['operator_reviewed'])}")
     import review_gate  # type: ignore[import]
-    pending = review_gate.list_pending_reviews(project_id, root / ".vnx-data")
+    pending = review_gate.list_pending_reviews(project_id, _resolve_data_root())
     if pending:
         print(f"\n  Pending reviews ({len(pending)}):")
         for p in pending:
@@ -91,8 +103,8 @@ def _cmd_review(args) -> int:
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
-    root, db_path = _resolve_paths()
-    data_root = root / ".vnx-data"
+    _, db_path = _resolve_paths()
+    data_root = _resolve_data_root()
     import review_gate  # type: ignore[import]
     approve = getattr(args, "approve", False)
     reject = getattr(args, "reject", False)
