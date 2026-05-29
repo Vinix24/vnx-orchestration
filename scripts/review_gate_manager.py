@@ -160,18 +160,33 @@ def _parse_changed_files(value: str) -> List[str]:
 
 
 def _compute_changed_files(branch: str, *, strict: bool = False) -> List[str]:
-    """Auto-compute changed files by diffing branch against origin/main or main.
+    """Auto-compute changed files by diffing branch against origin/main.
+
+    Fetches origin/<branch> first so the ref exists locally even when the branch
+    is not checked out or when main is pinned to another worktree (bare 'main'
+    would fail with exit 128 in that case).
 
     When strict=True (review-gate context): raises RuntimeError on git failure so the
     caller is forced to handle missing scope data rather than silently proceeding.
     When strict=False (best-effort): logs a warning and raises ValueError — caller
     should catch and either abort or pass --changed-files explicitly.
     """
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as fetch_err:
+        print(
+            f"review_gate_manager: WARNING git fetch origin {branch!r} failed: {fetch_err}",
+            file=sys.stderr,
+        )
+
     last_err = None
-    for base in ("origin/main", "main"):
+    for spec in (f"origin/main...origin/{branch}", f"origin/main...{branch}"):
         try:
             proc = subprocess.run(
-                ["git", "diff", "--name-only", f"{base}...{branch}"],
+                ["git", "diff", "--name-only", spec],
                 capture_output=True, text=True, timeout=10, check=True,
             )
             return [f.strip() for f in proc.stdout.splitlines() if f.strip()]
@@ -179,7 +194,7 @@ def _compute_changed_files(branch: str, *, strict: bool = False) -> List[str]:
             last_err = e
     print(
         f"review_gate_manager: WARNING git diff failed for {branch!r} "
-        f"against origin/main/main — reviewers will lack scope context. "
+        f"against origin/main — reviewers will lack scope context. "
         f"Pass --changed-files explicitly to proceed. ({last_err})",
         file=sys.stderr,
     )
