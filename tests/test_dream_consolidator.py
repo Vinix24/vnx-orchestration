@@ -612,3 +612,74 @@ class TestKimiTimeout:
             consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=True)
 
         assert captured["timeout"] == 42.0
+
+
+# ---------------------------------------------------------------------------
+# Entry-print: no more zero-output hangs
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPrint:
+    """run_dream_cycle prints cycle_id+project at entry — before any blocking call."""
+
+    def test_entry_print_emitted_on_skipped_cycle(self, tmp_path, capsys):
+        """Entry print fires even when the cycle skips due to missing receipts."""
+        db_path = tmp_path / "quality_intelligence.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(_DREAM_SCHEMA)
+        conn.commit()
+        conn.close()
+
+        with patch("consolidator.resolve_project_root", return_value=tmp_path):
+            consolidator.run_dream_cycle("vnx-dev", db_path)
+
+        out = capsys.readouterr().out
+        assert "dream run: cycle=" in out
+        assert "vnx-dev" in out
+
+    def test_entry_print_emitted_before_kimi_call(self, tmp_path, capsys):
+        """Entry print fires before any kimi invocation — ordering guarantee."""
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=True)
+        call_order: list[str] = []
+
+        def _record_print(*args, **kwargs):
+            call_order.append("print")
+
+        def _fake_kimi(patterns, project_id, timeout=180.0):
+            call_order.append("kimi")
+            return _FAKE_CONSOLIDATION
+
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch("builtins.print", side_effect=_record_print),
+            patch("consolidator._dispatch_kimi_consolidation", side_effect=_fake_kimi),
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path, dry_run=True)
+
+        assert "print" in call_order
+        assert "kimi" in call_order
+        assert call_order.index("print") < call_order.index("kimi")
+
+    def test_empty_db_returns_skipped_under_5s(self, tmp_path):
+        """Empty DB with fresh receipts must return in <5s — no kimi spawn."""
+        import time
+        db_path = _make_db_with_receipts(tmp_path, with_patterns=False)
+        called = []
+
+        def _no_kimi(*a, **kw):
+            called.append(True)
+            raise AssertionError("kimi must not be called on empty DB")
+
+        t0 = time.monotonic()
+        with (
+            patch("consolidator.resolve_project_root", return_value=tmp_path),
+            patch("consolidator._dispatch_kimi_consolidation", side_effect=_no_kimi),
+        ):
+            result = consolidator.run_dream_cycle("vnx-dev", db_path)
+        elapsed = time.monotonic() - t0
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "insufficient_data"
+        assert not called, "kimi was invoked on empty DB"
+        assert elapsed < 5.0, f"took {elapsed:.2f}s — exceeded 5s threshold"
