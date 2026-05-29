@@ -29,7 +29,7 @@ _MIN_PATTERN_THRESHOLD: int = 1
 _DEFAULT_KIMI_TIMEOUT: int = 180
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from project_root import resolve_project_root
+import vnx_paths as _vnx_paths
 
 # Sort column per table — each table uses a different timestamp column name.
 _TABLE_SORT_COL: dict[str, str] = {
@@ -37,6 +37,18 @@ _TABLE_SORT_COL: dict[str, str] = {
     "antipatterns": "first_seen",
     "intelligence_injections": "injected_at",
 }
+
+
+def _resolve_data_root(data_root: "Path | None") -> Path:
+    """Return canonical VNX data root.
+
+    Uses vnx_paths so central installs resolve to ~/.vnx-data/<project_id> (or
+    VNX_DATA_HOME / XDG) rather than resolve_project_root(__file__)/.vnx-data.
+    ADR-007: project_id-scoped canonical paths.
+    """
+    if data_root is not None:
+        return data_root
+    return Path(_vnx_paths.resolve_paths()["VNX_DATA_DIR"])
 
 
 def _check_receipt_completeness(
@@ -73,10 +85,14 @@ def _check_receipt_completeness(
     return True, "ok"
 
 
-def _emit_dream_event(event: dict[str, Any]) -> None:
-    """Emit NDJSON event BEFORE any DB mutation (ADR-005)."""
-    root = resolve_project_root(__file__)
-    events_dir = root / ".vnx-data" / "events" / "dream"
+def _emit_dream_event(event: dict[str, Any], data_root: Path) -> None:
+    """Emit NDJSON event BEFORE any DB mutation (ADR-005).
+
+    ``data_root`` must be the canonical VNX data root (from _resolve_data_root),
+    NOT resolve_project_root(__file__)/.vnx-data — that path is the source repo
+    and breaks on central installs.
+    """
+    events_dir = data_root / "events" / "dream"
     events_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     event_path = events_dir / f"{today}.ndjson"
@@ -184,11 +200,14 @@ def run_dream_cycle(
     project_id: str,
     db_path: Path,
     dry_run: bool = False,
+    data_root: "Path | None" = None,
 ) -> dict[str, Any]:
     """Run a single dream consolidation cycle for a project.
 
     ADR-005: NDJSON emit before DB write.
     ADR-007: project_id required throughout.
+    ``data_root`` overrides the canonical data dir (useful in tests / CI).
+    When None, resolved via vnx_paths so central installs use ~/.vnx-data/<project_id>.
     Returns a dict with cycle_id, counts, and review_path.
     """
     cycle_id = (
@@ -196,9 +215,13 @@ def run_dream_cycle(
     )
     print(f"dream run: cycle={cycle_id} project={project_id}", flush=True)
 
+    # Resolve canonical data root once; all file I/O below uses _data_root.
+    # ADR-007: must NOT use resolve_project_root(__file__)/.vnx-data — that path
+    # is the VNX source repo and breaks on central installs.
+    _data_root = _resolve_data_root(data_root)
+
     # GAP-7: receipt-completeness preflight — skip cycle on empty/stale data
-    data_root = resolve_project_root(__file__) / ".vnx-data"
-    complete, detail = _check_receipt_completeness(data_root)
+    complete, detail = _check_receipt_completeness(_data_root)
     if not complete:
         _emit_dream_event(
             {
@@ -208,7 +231,8 @@ def run_dream_cycle(
                 "reason": "incomplete_data",
                 "detail": detail,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            },
+            _data_root,
         )
         return {
             "status": "skipped",
@@ -223,7 +247,8 @@ def run_dream_cycle(
             "cycle_id": cycle_id,
             "project_id": project_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        },
+        _data_root,
     )
 
     kimi_timeout = float(
@@ -252,7 +277,8 @@ def run_dream_cycle(
                         f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}"
                     ),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                },
+                _data_root,
             )
             return {
                 "status": "skipped",
@@ -273,7 +299,8 @@ def run_dream_cycle(
                     "project_id": project_id,
                     "timeout_seconds": int(kimi_timeout),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
+                },
+                _data_root,
             )
             return {
                 "status": "timeout",
@@ -288,12 +315,12 @@ def run_dream_cycle(
                     "cycle_id": cycle_id,
                     "project_id": project_id,
                     "error": str(exc)[:500],
-                }
+                },
+                _data_root,
             )
             raise
 
-        root = resolve_project_root(__file__)
-        review_dir = root / ".vnx-data" / "state" / "dream"
+        review_dir = _data_root / "state" / "dream"
         review_dir.mkdir(parents=True, exist_ok=True)
         review_path = review_dir / f"{cycle_id}-pending-review.json"
         review_path.write_text(
@@ -326,7 +353,8 @@ def run_dream_cycle(
                 "archived_count": archived_count,
                 "flagged_count": flagged_count,
                 "review_path": str(review_path),
-            }
+            },
+            _data_root,
         )
 
         if not dry_run:
@@ -374,14 +402,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    root = resolve_project_root(__file__)
+    paths = _vnx_paths.resolve_paths()
+    data_root = Path(paths["VNX_DATA_DIR"])
     db_path = (
         Path(args.db_path)
         if args.db_path
-        else root / ".vnx-data" / "state" / "quality_intelligence.db"
+        else data_root / "state" / "quality_intelligence.db"
     )
 
-    result = run_dream_cycle(args.project_id, db_path, args.dry_run)
+    result = run_dream_cycle(args.project_id, db_path, args.dry_run, data_root=data_root)
     print(json.dumps(result, indent=2))
     if result.get("status") == "timeout":
         sys.exit(1)
