@@ -15,6 +15,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -43,6 +44,12 @@ _mod = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 apply_migration_0026 = _mod.apply_migration
 
+_RUNNER_PATH_0017 = SCRIPT_DIR / "lib" / "migrations" / "apply_0017.py"
+_spec_0017 = _ilu.spec_from_file_location("apply_0017", _RUNNER_PATH_0017)
+_mod_0017 = _ilu.module_from_spec(_spec_0017)
+_spec_0017.loader.exec_module(_mod_0017)
+_rebuild_dispatches_composite = _mod_0017._rebuild_dispatches
+
 _MIGRATION_SQL = Path(__file__).resolve().parent.parent / "schemas" / "migrations" / "0026_dispatch_claim.sql"
 
 
@@ -58,7 +65,23 @@ class _DbTestCase(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.state_dir = self._tmpdir.name
         init_schema(self.state_dir)
+        # Stamp v13/v14 so apply_0026 predecessor guard passes (0019 and 0020 not applied here)
+        with get_connection(self.state_dir) as c:
+            c.execute(
+                "INSERT OR IGNORE INTO runtime_schema_version (version, description) VALUES (13, 'test-stub: 0019 T0 lifecycle tokens')"
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO runtime_schema_version (version, description) VALUES (14, 'test-stub: 0020 elastic worker pool')"
+            )
+            c.commit()
         _apply_0026(self.state_dir)
+        # Apply composite UNIQUE(dispatch_id, project_id) after apply_0026 adds project_id.
+        # init_schema v10.sql CREATE TABLE IF NOT EXISTS is a no-op (table exists from v1);
+        # apply_0017 skips (version already 12); rebuild directly so same-dispatch_id
+        # cross-project tests can insert two rows with the same dispatch_id.
+        with get_connection(self.state_dir) as c:
+            _rebuild_dispatches_composite(c)
+            c.commit()
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -182,6 +205,30 @@ class TestClaimCrossProjectIsolation(_DbTestCase):
         self.assertEqual(row_a["project_id"], "project-a")
         self.assertEqual(row_b["project_id"], "project-b")
 
+    def test_same_dispatch_id_only_transitions_own_project(self):
+        """ADR-007: same dispatch_id in two projects; claiming project-A ONLY transitions project-A row."""
+        self._insert_queued("shared-dispatch-001", project_id="project-a")
+        self._insert_queued("shared-dispatch-001", project_id="project-b")
+
+        with self.conn() as c:
+            result = claim_next_queued_dispatch(c, "T1", "project-a")
+
+        self.assertEqual(result, "shared-dispatch-001")
+
+        with self.conn() as c:
+            row_a = c.execute(
+                "SELECT state, terminal_id FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                ("shared-dispatch-001", "project-a"),
+            ).fetchone()
+            row_b = c.execute(
+                "SELECT state FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                ("shared-dispatch-001", "project-b"),
+            ).fetchone()
+
+        self.assertEqual(row_a["state"], "claimed", "project-a row must be claimed")
+        self.assertEqual(row_a["terminal_id"], "T1", "project-a terminal_id must be T1")
+        self.assertEqual(row_b["state"], "queued", "project-b row must not be affected")
+
 
 class TestClaimConcurrency(_DbTestCase):
     """10 threads × 5 queued dispatches → 5 distinct claims, 5 None, zero double-claims."""
@@ -266,6 +313,15 @@ class TestMigration0026Idempotency(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.state_dir = self._tmpdir.name
         init_schema(self.state_dir)
+        # Stamp v13/v14 so apply_0026 predecessor guard passes
+        with get_connection(self.state_dir) as c:
+            c.execute(
+                "INSERT OR IGNORE INTO runtime_schema_version (version, description) VALUES (13, 'test-stub: 0019 T0 lifecycle tokens')"
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO runtime_schema_version (version, description) VALUES (14, 'test-stub: 0020 elastic worker pool')"
+            )
+            c.commit()
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -343,6 +399,86 @@ class TestMigration0026Idempotency(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(row)
         self.assertEqual(row["version"], 15)
+
+
+class TestMigration0026PredecessorGuard(unittest.TestCase):
+    """Migration 0026 must refuse if DB is below predecessor v14 (ADR-007 migration safety)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.state_dir = self._tmpdir.name
+        init_schema(self.state_dir)  # leaves at v12 — below predecessor v14
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_refuses_on_db_below_predecessor(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            _apply_0026(self.state_dir)
+        self.assertIn("requires predecessor", str(ctx.exception))
+        self.assertIn("14", str(ctx.exception))
+
+    def test_accepts_on_correct_predecessor_and_is_idempotent(self):
+        with get_connection(self.state_dir) as c:
+            c.execute(
+                "INSERT OR IGNORE INTO runtime_schema_version (version, description) VALUES (13, 'test-stub')"
+            )
+            c.execute(
+                "INSERT OR IGNORE INTO runtime_schema_version (version, description) VALUES (14, 'test-stub')"
+            )
+            c.commit()
+        applied = _apply_0026(self.state_dir)
+        self.assertTrue(applied, "first apply on v14 DB must return True")
+
+        applied_again = _apply_0026(self.state_dir)
+        self.assertFalse(applied_again, "second apply must be idempotent skip")
+
+
+class TestClaimProvenanceAudit(_DbTestCase):
+    """ADR-005: claim mutation emits one dispatch_claim_provenance event with full provenance."""
+
+    def test_claim_emits_one_provenance_event(self):
+        self._insert_queued("prov-001", project_id="test-proj")
+        with self.conn() as c:
+            claim_next_queued_dispatch(c, "T1", "test-proj")
+
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT entity_id, metadata_json FROM coordination_events "
+                "WHERE event_type = 'dispatch_claim_provenance' AND entity_id = ?",
+                ("prov-001",),
+            ).fetchall()
+
+        self.assertEqual(len(rows), 1, "exactly one provenance event per claim")
+        meta = json.loads(rows[0]["metadata_json"])
+        self.assertEqual(meta["terminal_id"], "T1")
+        self.assertEqual(meta["project_id"], "test-proj")
+        self.assertEqual(meta["dispatch_id"], "prov-001")
+        self.assertIn("claimed_by", meta)
+        self.assertIn("claimed_at", meta)
+
+    def test_no_provenance_event_on_empty_queue(self):
+        with self.conn() as c:
+            result = claim_next_queued_dispatch(c, "T1", "test-proj")
+        self.assertIsNone(result)
+
+        with self.conn() as c:
+            row = c.execute(
+                "SELECT COUNT(*) as cnt FROM coordination_events "
+                "WHERE event_type = 'dispatch_claim_provenance'"
+            ).fetchone()
+        self.assertEqual(row["cnt"], 0)
+
+    def test_provenance_event_entity_id_matches_dispatch_id(self):
+        self._insert_queued("prov-002", project_id="test-proj")
+        with self.conn() as c:
+            claim_next_queued_dispatch(c, "T2", "test-proj")
+
+        with self.conn() as c:
+            row = c.execute(
+                "SELECT entity_id FROM coordination_events WHERE event_type = 'dispatch_claim_provenance'"
+            ).fetchone()
+        self.assertEqual(row["entity_id"], "prov-002")
 
 
 if __name__ == "__main__":

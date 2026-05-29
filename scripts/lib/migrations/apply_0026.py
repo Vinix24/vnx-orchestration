@@ -37,6 +37,7 @@ from coordination_db import get_connection_for_db
 log = logging.getLogger(__name__)
 
 _TARGET_VERSION = 15
+_PREDECESSOR_VERSION = 14  # 0020 elastic worker pool
 _MIGRATION_NAME = "0026_dispatch_claim"
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -92,6 +93,13 @@ def apply_migration(
             if current_version >= _TARGET_VERSION:
                 log.info("apply_0026: already at v%s; idempotent skip", _TARGET_VERSION)
                 return False
+
+            if current_version != _PREDECESSOR_VERSION:
+                raise RuntimeError(
+                    f"apply_0026: requires predecessor v{_PREDECESSOR_VERSION} "
+                    f"(0020 elastic worker pool); DB is at v{current_version}. "
+                    f"Run migrations 0019 and 0020 first."
+                )
 
             _emit_migration_event(
                 vnx_data_dir,

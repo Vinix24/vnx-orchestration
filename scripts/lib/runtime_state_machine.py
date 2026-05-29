@@ -293,17 +293,21 @@ def claim_next_queued_dispatch(
         dispatch_id = row["dispatch_id"]
         now = _now_utc()
 
-        # State transition: queued → claimed (validates + appends coordination event)
-        transition_dispatch(
-            conn,
-            dispatch_id=dispatch_id,
-            to_state="claimed",
-            actor=actor,
-            reason=f"queue claim by terminal {terminal_id}",
+        # State transition: queued → claimed — composite key (ADR-007: never dispatch_id alone)
+        validate_dispatch_transition("queued", "claimed")
+        conn.execute(
+            "UPDATE dispatches SET state = 'claimed', updated_at = ? WHERE dispatch_id = ? AND project_id = ?",
+            (now, dispatch_id, project_id),
+        )
+        _append_event(
+            conn, event_type="dispatch_claimed", entity_type="dispatch",
+            entity_id=dispatch_id, from_state="queued", to_state="claimed",
+            actor=actor, reason=f"queue claim by terminal {terminal_id}",
             metadata={"terminal_id": terminal_id, "project_id": project_id},
+            project_id=project_id,
         )
 
-        # Update terminal_id and claim provenance columns (ADR-007: scoped by project_id)
+        # Provenance columns: claimed_by / claimed_at (ADR-007: composite key; ADR-005: audit event)
         table_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatches)").fetchall()}
         if "claimed_by" in table_cols:
             conn.execute(
@@ -319,6 +323,17 @@ def claim_next_queued_dispatch(
                 "UPDATE dispatches SET terminal_id = ? WHERE dispatch_id = ? AND project_id = ?",
                 (terminal_id, dispatch_id, project_id),
             )
+        # ADR-005: ledger event for claimed_by/claimed_at provenance mutation
+        _append_event(
+            conn, event_type="dispatch_claim_provenance", entity_type="dispatch",
+            entity_id=dispatch_id, from_state=None, to_state=None,
+            actor=actor, reason=f"claim provenance stamped by terminal {terminal_id}",
+            metadata={
+                "terminal_id": terminal_id, "claimed_by": terminal_id,
+                "claimed_at": now, "dispatch_id": dispatch_id, "project_id": project_id,
+            },
+            project_id=project_id,
+        )
 
         conn.execute("COMMIT")
         return dispatch_id
