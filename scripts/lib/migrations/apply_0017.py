@@ -77,11 +77,6 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(r[1] == column for r in rows)
 
 
-def _get_column_names(conn: sqlite3.Connection, table: str) -> list[str]:
-    """Return ordered list of column names from PRAGMA table_info."""
-    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-
-
 def _get_table_ddl(conn: sqlite3.Connection, table: str) -> str:
     """Return the CREATE TABLE SQL from sqlite_master.
 

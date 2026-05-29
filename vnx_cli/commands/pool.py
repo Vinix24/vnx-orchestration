@@ -13,13 +13,15 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 from typing import List, Optional
 
-# Bootstrap scripts/lib into path so pool_manager etc. are importable.
-_LIB_DIR = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "lib")
-if _LIB_DIR not in sys.path:
-    sys.path.insert(0, _LIB_DIR)
+# Bootstrap scripts/lib into path so pool_manager etc. are importable. Route
+# through the shared engine bootstrap so the packaged
+# (<site-packages>/vnx_orchestration) and dev-checkout layouts resolve
+# identically (PR-PIP-REPACKAGE). Do not recompute scripts/lib inline.
+from vnx_cli import _engine  # noqa: E402
+
+_engine.ensure_engine_on_path()
 
 from pool_manager import ExecResult, PoolManager  # noqa: E402
 from pool_state_repo import PoolStateRepository  # noqa: E402
@@ -178,8 +180,22 @@ def cmd_reap(args: argparse.Namespace) -> int:
     return 0
 
 
-def _make_manager(project: str, pool_id: Optional[str]) -> PoolManager:
-    return PoolManager(project_id=project, pool_id=pool_id or "default")
+def _resolve_project_id(explicit: Optional[str]) -> str:
+    """Return the explicit project id or derive it from the .vnx-project-id marker."""
+    if explicit is not None:
+        return explicit
+    try:
+        from vnx_paths import project_id_from_state_dir, resolve_state_dir  # noqa: E402
+        derived = project_id_from_state_dir(resolve_state_dir())
+        if derived:
+            return derived
+    except Exception:
+        pass
+    return "default"
+
+
+def _make_manager(project: Optional[str], pool_id: Optional[str]) -> PoolManager:
+    return PoolManager(project_id=_resolve_project_id(project), pool_id=pool_id or "default")
 
 
 def _fmt_age(timestamp: float) -> str:
@@ -196,19 +212,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_status = sub.add_parser("status", help="show pool state")
-    p_status.add_argument("--project", default="default")
+    p_status.add_argument("--project", default=None)
     p_status.add_argument("--pool-id", dest="pool_id", default=None)
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=cmd_status)
 
     p_scale = sub.add_parser("scale", help="force scale pool to N workers")
-    p_scale.add_argument("--project", required=True)
+    p_scale.add_argument("--project", default=None)
     p_scale.add_argument("--to", type=int, required=True)
     p_scale.add_argument("--pool-id", dest="pool_id", default=None)
     p_scale.set_defaults(func=cmd_scale)
 
     p_config = sub.add_parser("config", help="update pool config")
-    p_config.add_argument("--project", required=True)
+    p_config.add_argument("--project", default=None)
     p_config.add_argument("--pool-id", dest="pool_id", default=None)
     p_config.add_argument("--min", type=int, dest="min")
     p_config.add_argument("--max", type=int, dest="max")
@@ -217,7 +233,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_config.set_defaults(func=cmd_config)
 
     p_reap = sub.add_parser("reap", help="reap stale workers (dry-run by default)")
-    p_reap.add_argument("--project", required=True)
+    p_reap.add_argument("--project", default=None)
     p_reap.add_argument("--pool-id", dest="pool_id", default=None)
     p_reap.add_argument("--force", action="store_true", help="actually reap (default: dry-run)")
     p_reap.set_defaults(func=cmd_reap)

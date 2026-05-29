@@ -27,31 +27,8 @@ For crash recovery or if state appears stale, run the individual repair tools be
 
 ## Crash Recovery (on-demand only)
 
-After any system crash or tmux session restart, if `t0_state.json` shows anomalies:
-
-1. Validate runtime schema (fallback): `python3 scripts/runtime_coordination_init.py`
-2. Repair stale leases: `python3 scripts/reconcile_queue_state.py --repair`
-3. Check for orphaned dispatches (active dispatch without completion receipt):
-   ```bash
-   ls .vnx-data/dispatches/active/
-   ```
-   If any exist: read the dispatch, check if worker has uncommitted changes, decide re-dispatch or resume.
-4. Verify pane IDs match live tmux (tmux fallback only — skip when dispatching via subprocess):
-   ```bash
-   tmux list-panes -a -F "#{pane_id} #{pane_current_path}"
-   ```
-   Update `.vnx-data/state/panes.json` if pane IDs changed.
-5. Check for unresolved incidents:
-   ```bash
-   sqlite3 .vnx-data/state/runtime_coordination.db \
-     "SELECT COUNT(*) FROM incident_log WHERE resolved_at IS NULL AND severity='blocking';"
-   ```
-
-## Email Digest Configuration
-To receive daily operator digests via email, set:
-- `VNX_DIGEST_EMAIL` — recipient email address
-- `VNX_SMTP_PASS` — SMTP password (Gmail app password)
-Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
+Follow the full procedure in `@t0-orchestrator` §6.2 Post-Crash Startup.
+Quick reference: validate schema → repair stale leases → reconcile queue → check orphaned dispatches → check incidents.
 
 ## Runtime Policy
 
@@ -99,26 +76,19 @@ Digest runs nightly at 02:00 via `scripts/conversation_analyzer_nightly.sh`.
 
 ## Headless Review Enforcement
 
-When a PR or feature policy requires a headless review gate:
+All 7 invariants must hold before PR closure. Any missing or mismatched surface blocks completion:
 
-1. T0 must trigger the gate through the review-gate flow.
-2. T0 must actively start execution unless a proven automatic runner exists in the repo.
-3. T0 must verify the request record exists under `.vnx-data/state/review_gates/requests/`.
-4. T0 must verify the result record exists under `.vnx-data/state/review_gates/results/`.
-5. T0 must verify the result links to the active review contract via `contract_hash`.
-6. T0 must verify `contract_hash` is non-empty.
-7. T0 must verify `report_path` is non-empty.
-8. T0 must verify an operator-readable markdown report exists under `$VNX_DATA_DIR/unified_reports/`.
-9. T0 must block PR completion and closure-ready claims if any of those surfaces are missing, contradictory, or ambiguous.
+| # | Invariant | Blocks on |
+|---|---|---|
+| 1 | Request record exists | `.vnx-data/state/review_gates/requests/` |
+| 2 | Execution actively started (not just `queued`) | Runner confirmed or dispatch sent |
+| 3 | Result record exists | `.vnx-data/state/review_gates/results/` |
+| 4 | `contract_hash` matches active review contract | Non-empty + matches |
+| 5 | `report_path` non-empty in result | Present in result payload |
+| 6 | Markdown report file exists | `$VNX_DATA_DIR/unified_reports/` |
+| 7 | Result JSON and report verdicts agree | No contradiction between the two |
 
-When result JSON and normalized report content disagree:
-- treat that as evidence failure, not as a soft warning
-- do not close the PR until the contradiction is dispositioned or corrected
-
-When a required gate remains only `queued` or `requested`:
-- do not passively treat it as running
-- do not close the PR
-- either start execution, dispatch execution, or classify the missing runner path as a blocker
+When result and report disagree: evidence failure, not a soft warning. Do not close.
 
 ### CI Workflow Conclusion Verification (mandatory before any merge)
 
@@ -165,6 +135,20 @@ T1 dispatches do NOT go through tmux send-keys.
 T1 receipts arrive in t0_receipts.ndjson with source="subprocess".
 T1 events stream to .vnx-data/events/T1.ndjson and are visible via SSE.
 The subprocess automatically loads T1's CLAUDE.md as skill context (injected by subprocess_dispatch.py).
+
+## Elastic Worker Pool (Wave 6, ADR-018)
+
+For parallel dispatches or high-throughput scenarios, use the elastic pool instead of direct terminal-pinning.
+
+**CLI:** `bin/vnx pool {status,scale,config,reap}`
+
+| Use pool when | Use terminal-pin when |
+|---|---|
+| Multiple independent dispatches | Terminal-specific state required |
+| Burn-in / batch hardening | Single interactive dispatch |
+| Role-scoped work (backend-developer, etc.) | Operator wants tmux visibility |
+
+Pool is additive — existing T1/T2/T3 subprocess routing continues unchanged. See `@t0-orchestrator` §9.3 and `docs/governance/decisions/ADR-018-elastic-worker-pool.md`.
 
 ## Quick Commands
 

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""vnx update — version-flip for central VNX install (pre-central-install scaffolding).
+"""vnx update — version-flip for central VNX install.
 
-Schema-bootstrap (--schema) is a no-op stub until CENTRAL-4 (idempotent schema bootstrap)
-merges. Atomic symlink flip via os.replace() ensures no partial-swap window.
+Atomic symlink flip via os.replace() ensures no partial-swap window.
 """
 
 import fcntl
@@ -16,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration"
+VNX_GIT_REMOTE = "https://github.com/Vinix24/vnx-orchestration.git"
 DEFAULT_KEEP_LAST = 3
 
 _VERSION_RE = re.compile(r"^(edge|latest|v?\d+\.\d+\.\d+(?:-[\w.]+)?)$")
@@ -234,9 +233,6 @@ def vnx_update(args) -> int:
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-
-    # Schema bootstrap: no-op until CENTRAL-4
-    print("Warning: schema-bootstrap skipped (no-op until CENTRAL-4 merges).")
 
     try:
         target_dir = _fetch_version(root, target, dry_run=dry_run)

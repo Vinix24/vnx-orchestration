@@ -5,6 +5,10 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from subprocess_adapter import StreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +51,7 @@ def _normalize_repo_path(path_str: str, repo_root: Path) -> str | None:
         return None
 
 
-def _extract_touched_paths_from_event(event: "StreamEvent | object") -> list[str]:  # type: ignore[name-defined]
+def _extract_touched_paths_from_event(event: StreamEvent | object) -> list[str]:
     """Return raw ``file_path`` / ``notebook_path`` strings from a tool_use event.
 
     Accepts a ``StreamEvent`` (or any object exposing ``.type`` + ``.data``).

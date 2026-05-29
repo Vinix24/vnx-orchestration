@@ -4,6 +4,33 @@ All notable changes to VNX Orchestration are documented here.
 
 Format: [keep-a-changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [semver](https://semver.org/).
 
+## [1.0.0-rc9] — 2026-05-26
+
+### Added
+
+- **feat(governance) GOV-3 (#655)** `scripts/traceability_audit.py` — re-runnable observability tool that cross-references PRs/commits/dispatches/receipts and reports traceability gaps. Four gap categories (A–D): dispatches without completion receipt, receipts with unresolvable dispatch_id, merged PRs without receipt cross-reference, completion receipts missing both pr_id and dispatch_id link. Supports `--since`/`--until` date range, `--repo PATH` override, atomic markdown output. 44 unit tests. First run against vnx-dev (2026-01-01 → 2026-05-26): Category C gaps at 6.0% (most PRs linked via branch-slug heuristic); Categories A/B/D reflect tmux-era receipt schema predating current linkage fields.
+- **feat(governance) GOV-2 (#654)** `scripts/pr_merge.py` canonical T0 merge path: instead of raw `gh pr merge`, T0 calls this script which merges the PR and atomically emits a `pr_merged` receipt (pr_number, dispatch_id, conclusion, merge_method) to `t0_receipts.ndjson` + `dispatch_register.ndjson`. `scripts/backfill_pr_merged_receipts.py` reconciles already-merged PRs against existing receipts; idempotent, supports `--dry-run` / `--limit` / `--since`. Fixes FPY/history gap: previously merged PRs left no governance trail.
+
+### Fixed
+
+- **fix(provider-dispatch) CL1 (#644)** Non-claude provider dispatch (kimi/codex) now captures correct `status`, `output`, and `tokens` in completion receipts. Receipt fields were being dropped for non-claude cheap lanes.
+
+### Changed
+
+- **feat(subprocess-dispatch) CL2 (#652)** Cheap-lane execution routes through `provider_dispatch` instead of Claude fallback. Subprocess dispatch now uses the provider-agnostic entry-point for cheap-lane tasks — removes the hardcoded Claude-only path and enables kimi/codex/gemini as cheap-lane workers.
+- **refactor(providers) CL3 (#643)** Constraint renamed: `deepseek-path-d-blocked` → `deepseek-harness-subscription-blocked`. Semantics expanded: own-key + hardening path (`ANTHROPIC_API_KEY` + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` + MCP off) is now explicitly **allowed**; subscription-redirect (no own key, rides OAuth subscription) remains blocked. Measured on claude v2.1.150: 0 calls to `api.anthropic.com` with own-key + hardening.
+
+### Refactored
+
+- **refactor(quality-db) OI #645** `bootstrap_qi_db` extracts migration registry (OI-1542/1544/1541) — migration blocks now indexed, removes inline migration sprawl.
+- **refactor(benchmark) OI #646** Extract source-info + report-writers from benchmark main (OI-1510) — cuts benchmark script below size threshold.
+- **refactor(dispatcher) OI #647** Extract stuck-cleanup python + supervisor-ticks from dispatcher (OI-1521/1523).
+- **refactor(receipt-proc) OI #648** Extract mtime-calc python from bootstrap-protection (OI-1525/1524).
+- **refactor(doctor) OI #649** Extract worktree + settings checks from `cmd_doctor` (OI-1573).
+- **refactor(install-central) OI #650** Move shim content to template file (OI-1562) — shim generator no longer embeds multi-line heredoc inline.
+- **refactor(migrate-central) OI #653** Extract `migrate_import` module from `migrate_to_central_vnx.py` (OI-1537/1539, part 1/3).
+- **refactor(migrate-central) OI #657** Extract `migrate_schema` module from `migrate_to_central_vnx.py` (OI-1536/1533, part 2/3).
+
 ## [1.0.0-rc3] — 2026-05-20
 
 ### Added

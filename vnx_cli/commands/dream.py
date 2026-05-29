@@ -1,0 +1,170 @@
+"""vnx dream — auto-dream consolidation CLI (ADR-019)."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
+sys.path.insert(0, str(_REPO_ROOT / "scripts" / "dream"))
+
+
+def _get_project_id(args) -> str | None:
+    pid = getattr(args, "project_id", None)
+    if pid:
+        return pid
+    from project_root import resolve_project_id  # type: ignore[import]
+    try:
+        return resolve_project_id()
+    except RuntimeError:
+        return None
+
+
+def _resolve_paths() -> tuple[Path, Path]:
+    """Returns (project_root, db_path)."""
+    from project_root import resolve_project_root  # type: ignore[import]
+    root = resolve_project_root()
+    return root, root / ".vnx-data" / "state" / "quality_intelligence.db"
+
+
+def _cmd_run(args) -> int:
+    project_id = _get_project_id(args)
+    if not project_id:
+        print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
+        return 1
+    dry_run = getattr(args, "dry_run", False)
+    root, db_path = _resolve_paths()
+    import consolidator  # type: ignore[import]
+    result = consolidator.run_dream_cycle(project_id, db_path, dry_run=dry_run)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _cmd_status(args) -> int:
+    project_id = _get_project_id(args)
+    if not project_id:
+        print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
+        return 1
+    root, db_path = _resolve_paths()
+    if not db_path.exists():
+        print(f"No dream cycles found for project '{project_id}'.")
+        return 0
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT cycle_id, status, completed_at, insights_input,"
+            " merged_count, dropped_count, flagged_count, operator_reviewed"
+            " FROM dream_cycles WHERE project_id=? ORDER BY completed_at DESC LIMIT 1",
+            (project_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        conn.close()
+    if not rows:
+        print(f"No dream cycles found for project '{project_id}'.")
+        return 0
+    r = rows[0]
+    print(f"Latest dream cycle — '{project_id}'")
+    print(f"  cycle_id    : {r['cycle_id']}")
+    print(f"  status      : {r['status']}")
+    print(f"  completed   : {r['completed_at']}")
+    print(f"  input/merged/dropped/flagged: "
+          f"{r['insights_input']}/{r['merged_count']}/{r['dropped_count']}/{r['flagged_count']}")
+    print(f"  reviewed    : {bool(r['operator_reviewed'])}")
+    import review_gate  # type: ignore[import]
+    pending = review_gate.list_pending_reviews(project_id, root / ".vnx-data")
+    if pending:
+        print(f"\n  Pending reviews ({len(pending)}):")
+        for p in pending:
+            print(f"    - {p['cycle_id']}")
+    return 0
+
+
+def _cmd_review(args) -> int:
+    cycle_id: str = args.cycle_id
+    project_id = _get_project_id(args)
+    if not project_id:
+        print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
+        return 1
+    root, db_path = _resolve_paths()
+    data_root = root / ".vnx-data"
+    import review_gate  # type: ignore[import]
+    approve = getattr(args, "approve", False)
+    reject = getattr(args, "reject", False)
+    reason = getattr(args, "reason", "operator rejected")
+    if not approve and not reject:
+        answer = input(f"Cycle {cycle_id}: [a]pprove / [r]eject? ").strip().lower()
+        approve = answer.startswith("a")
+        reject = answer.startswith("r")
+        if reject and not reason:
+            reason = input("Rejection reason: ").strip() or "operator rejected"
+    try:
+        if reject:
+            review_gate.reject_cycle(cycle_id, project_id, reason, db_path, data_root)
+            print(f"Cycle {cycle_id} rejected.")
+        else:
+            review_gate.approve_cycle(cycle_id, project_id, db_path, data_root)
+            print(f"Cycle {cycle_id} approved; consolidation applied.")
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 1
+    return 0
+
+
+def _cmd_history(args) -> int:
+    project_id = _get_project_id(args)
+    if not project_id:
+        print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
+        return 1
+    limit = getattr(args, "limit", 10)
+    _, db_path = _resolve_paths()
+    if not db_path.exists():
+        print(f"No dream cycles found for project '{project_id}'.")
+        return 0
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT cycle_id, status, completed_at, insights_input,"
+            " merged_count, dropped_count, archived_count, flagged_count, operator_reviewed"
+            " FROM dream_cycles WHERE project_id=? ORDER BY completed_at DESC LIMIT ?",
+            (project_id, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    finally:
+        conn.close()
+    if not rows:
+        print(f"No dream cycles found for project '{project_id}'.")
+        return 0
+    hdr = f"{'CYCLE_ID':<45} {'STATUS':<10} {'COMPLETED':<20} {'IN':>4} {'M':>3} {'D':>3} {'A':>3} {'F':>3} REV"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in rows:
+        rev = "Y" if r["operator_reviewed"] else "N"
+        ts = str(r["completed_at"] or "")[:20]
+        print(
+            f"{r['cycle_id']:<45} {r['status']:<10} {ts:<20}"
+            f" {r['insights_input']:>4} {r['merged_count']:>3} {r['dropped_count']:>3}"
+            f" {r['archived_count']:>3} {r['flagged_count']:>3} {rev:>3}"
+        )
+    return 0
+
+
+def vnx_dream(args) -> int:
+    sub = getattr(args, "dream_subcommand", None)
+    dispatch = {
+        "run": _cmd_run,
+        "status": _cmd_status,
+        "review": _cmd_review,
+        "history": _cmd_history,
+    }
+    if sub in dispatch:
+        return dispatch[sub](args)
+    print("Usage: vnx dream {run|status|review|history}")
+    return 1

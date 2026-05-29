@@ -96,3 +96,45 @@ def resolve_dispatch_dir(caller_file: str | None = None) -> Path:
     """Resolve VNX_DISPATCH_DIR: $VNX_DATA_DIR/dispatches by default."""
     data = resolve_data_dir(caller_file)
     return data / "dispatches"
+
+
+def resolve_project_id(project_dir: str | Path | None = None) -> str:
+    """Resolve the current project_id for tenant-scoped operations.
+
+    Resolution order:
+      1. VNX_PROJECT_ID env var (explicit override)
+      2. git remote 'origin' URL → last path component, stripped of .git suffix
+      3. Raise RuntimeError — no silent 'vnx-dev' default (ADR-007)
+
+    Raises RuntimeError if project_id cannot be determined.
+    """
+    env_val = os.environ.get("VNX_PROJECT_ID")
+    if env_val:
+        return env_val.strip()
+
+    start_dirs: list[Path] = []
+    if project_dir is not None:
+        start_dirs.append(Path(project_dir).resolve())
+    start_dirs.append(Path.cwd().resolve())
+
+    for start in start_dirs:
+        try:
+            out = subprocess.check_output(
+                ["git", "-C", str(start), "remote", "get-url", "origin"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            if out:
+                name = out.rstrip("/").split("/")[-1]
+                if name.endswith(".git"):
+                    name = name[:-4]
+                if name:
+                    return name
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            continue
+
+    raise RuntimeError(
+        "Cannot resolve project_id. Set VNX_PROJECT_ID env var or run from a git "
+        "repository with a configured 'origin' remote. "
+        "No silent 'vnx-dev' default — explicit project_id required (ADR-007)."
+    )

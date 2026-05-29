@@ -165,7 +165,9 @@ CREATE TABLE IF NOT EXISTS worker_pool_membership (
     released_at         TEXT,
     release_reason      TEXT,
     spawn_generation    INTEGER NOT NULL DEFAULT 1,
-    metadata_json       TEXT    DEFAULT '{}'
+    metadata_json       TEXT    DEFAULT '{}',
+    FOREIGN KEY (terminal_id, project_id)
+        REFERENCES terminal_leases(terminal_id, project_id)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pool_membership_active

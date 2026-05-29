@@ -36,8 +36,8 @@ providers:
     enabled: true
     api_key_env: OPENAI_API_KEY
     models:
-      gpt-5.2-codex:
-        litellm_name: "openai/gpt-5.2-codex"
+      gpt-5.5:
+        litellm_name: "openai/gpt-5.5"
         cost_input_per_mtok: 1.25
         cost_output_per_mtok: 10.00
         max_tokens: 32000
