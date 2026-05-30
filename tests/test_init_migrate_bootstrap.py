@@ -424,7 +424,7 @@ class TestBootstrapFailLoud:
 
         import vnx_cli.commands.init_cmd as init_mod
 
-        def _fail(data_root):
+        def _fail(data_root, project_id=None):
             raise RuntimeError("simulated DB bootstrap failure")
 
         monkeypatch.setattr(init_mod, "_bootstrap_runtime_dbs", _fail)
@@ -442,7 +442,7 @@ class TestBootstrapFailLoud:
 
         import vnx_cli.commands.migrate as migrate_mod
 
-        def _fail(data_root):
+        def _fail(data_root, project_id=None):
             raise RuntimeError("simulated migration failure")
 
         monkeypatch.setattr(migrate_mod, "_bootstrap_runtime_dbs", _fail)
@@ -460,7 +460,7 @@ class TestBootstrapFailLoud:
 
         import vnx_cli.commands.init_cmd as init_mod
 
-        def _fail(data_root):
+        def _fail(data_root, project_id=None):
             raise RuntimeError("injected failure")
 
         monkeypatch.setattr(init_mod, "_bootstrap_runtime_dbs", _fail)
@@ -470,3 +470,204 @@ class TestBootstrapFailLoud:
         assert "error" in captured.err.lower(), (
             "vnx init must print 'error' to stderr on bootstrap failure, not a silent warning"
         )
+
+
+# ---------------------------------------------------------------------------
+# Pool config row seeded for project_id after migrate (1.0.0 acceptance gap)
+# ---------------------------------------------------------------------------
+
+class TestPoolConfigSeedAfterMigrate:
+    """vnx migrate must insert a default pool_config row for the project_id.
+
+    Regression for: fresh pip install where pool_config had no row for the user's
+    project_id — only for 'vnx-dev' (the bootstrap row in migration 0020).
+    ADR-007: composite UNIQUE(project_id, pool_id).
+    """
+
+    def _get_pool_config_rows(self, db_path: Path) -> list:
+        """Return all pool_config rows as list of dicts."""
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute(
+                "SELECT project_id, pool_id, min_workers, max_workers, scale_policy "
+                "FROM pool_config ORDER BY project_id, pool_id"
+            ).fetchall()
+            return [{"project_id": r[0], "pool_id": r[1], "min_workers": r[2],
+                     "max_workers": r[3], "scale_policy": r[4]} for r in rows]
+        finally:
+            conn.close()
+
+    def test_pool_config_row_for_project_id_after_migrate(self, tmp_path, monkeypatch):
+        """After vnx migrate, pool_config has a row for the derived project_id."""
+        data_root = tmp_path / "runtime"
+        project_dir = tmp_path / "my-project"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        rc = vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+        assert rc == 0
+
+        db = data_root / "state" / "runtime_coordination.db"
+        rows = self._get_pool_config_rows(db)
+        project_ids = [r["project_id"] for r in rows]
+        assert "my-project" in project_ids, (
+            f"pool_config must have a row for 'my-project'; found project_ids: {project_ids}"
+        )
+
+    def test_pool_config_row_uses_default_pool_id(self, tmp_path, monkeypatch):
+        """The seeded pool_config row uses pool_id='default'."""
+        data_root = tmp_path / "runtime"
+        project_dir = tmp_path / "my-project"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+
+        db = data_root / "state" / "runtime_coordination.db"
+        rows = self._get_pool_config_rows(db)
+        my_rows = [r for r in rows if r["project_id"] == "my-project"]
+        assert len(my_rows) == 1, f"Expected exactly 1 pool_config row; got {my_rows}"
+        assert my_rows[0]["pool_id"] == "default"
+
+    def test_pool_config_row_idempotent_double_migrate(self, tmp_path, monkeypatch):
+        """Running vnx migrate twice must not duplicate pool_config rows or error."""
+        data_root = tmp_path / "runtime"
+        project_dir = tmp_path / "my-project"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        assert vnx_migrate(argparse.Namespace(project_dir=str(project_dir))) == 0
+        assert vnx_migrate(argparse.Namespace(project_dir=str(project_dir))) == 0
+
+        db = data_root / "state" / "runtime_coordination.db"
+        rows = self._get_pool_config_rows(db)
+        my_rows = [r for r in rows if r["project_id"] == "my-project"]
+        assert len(my_rows) == 1, (
+            f"Double migrate must not create duplicate pool_config rows; got {len(my_rows)}"
+        )
+
+    def test_worker_pools_row_seeded_for_project_id(self, tmp_path, monkeypatch):
+        """After vnx migrate, worker_pools has a row for the derived project_id."""
+        data_root = tmp_path / "runtime"
+        project_dir = tmp_path / "my-project"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+
+        db = data_root / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            rows = conn.execute(
+                "SELECT project_id, pool_id, state FROM worker_pools "
+                "WHERE project_id = ? AND pool_id = 'default'",
+                ("my-project",),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1, (
+            f"worker_pools must have a row for 'my-project/default'; got {rows}"
+        )
+        assert rows[0][2] == "idle"
+
+    def test_pool_config_seeded_by_init_with_project_id(self, tmp_path, monkeypatch):
+        """vnx init must also seed pool_config for the derived project_id."""
+        data_root = tmp_path / "runtime"
+        project_dir = tmp_path / "init-project"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        rc = vnx_init(_init_args(project_dir))
+        assert rc == 0
+
+        db = data_root / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            row = conn.execute(
+                "SELECT project_id FROM pool_config WHERE pool_id = 'default'",
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, "vnx init must seed pool_config for the project"
+        assert row[0] == "init-project"
+
+
+# ---------------------------------------------------------------------------
+# runtime_schema_version guaranteed after bootstrap (1.0.0 acceptance gap)
+# ---------------------------------------------------------------------------
+
+class TestRuntimeSchemaVersionAfterBootstrap:
+    """runtime_schema_version table must exist and be stamped after vnx migrate.
+
+    Regression for: vnx doctor warning 'no such table: runtime_schema_version'
+    on fresh install. The bootstrap now explicitly ensures the table exists.
+    """
+
+    def test_runtime_schema_version_table_exists_after_migrate(self, tmp_path, monkeypatch):
+        """runtime_schema_version table must exist after vnx migrate."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        rc = vnx_migrate(argparse.Namespace(project_dir=str(tmp_path)))
+        assert rc == 0
+
+        db = tmp_path / "state" / "runtime_coordination.db"
+        tables = _table_names(db)
+        assert "runtime_schema_version" in tables, (
+            f"runtime_schema_version must exist after vnx migrate; tables: {sorted(tables)}"
+        )
+
+    def test_runtime_schema_version_has_minimum_version(self, tmp_path, monkeypatch):
+        """runtime_schema_version must have at least the baseline version (10)."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        vnx_migrate(argparse.Namespace(project_dir=str(tmp_path)))
+
+        db = tmp_path / "state" / "runtime_coordination.db"
+        conn = sqlite3.connect(str(db))
+        try:
+            row = conn.execute(
+                "SELECT MAX(version) FROM runtime_schema_version"
+            ).fetchone()
+            max_version = row[0] if row and row[0] is not None else 0
+        finally:
+            conn.close()
+
+        assert max_version >= 10, (
+            f"runtime_schema_version must have version >= 10 after migrate; got {max_version}"
+        )
+
+    def test_doctor_schema_check_passes_after_migrate(self, tmp_path, monkeypatch):
+        """vnx doctor schema check must PASS (not WARN) after vnx migrate."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        vnx_migrate(argparse.Namespace(project_dir=str(tmp_path)))
+
+        from vnx_cli.commands.doctor import _check_schema_versions, PASS
+        checks = _check_schema_versions(tmp_path)
+        coord_checks = [c for c in checks if "runtime_coordination" in c.name]
+        assert coord_checks, "Expected a schema check for runtime_coordination.db"
+        for c in coord_checks:
+            assert c.status == PASS, (
+                f"Doctor schema check must PASS after migrate; got {c.status}: {c.detail}"
+            )

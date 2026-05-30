@@ -34,10 +34,19 @@ def vnx_migrate(args) -> int:
         print(f"  error: cannot resolve data root: {exc}", file=sys.stderr)
         return 1
 
+    # Derive project_id for pool_config seeding (reads .vnx-project-id marker
+    # or slugifies the directory name). Never raises — falls back to None so
+    # bootstrap still completes when the marker is absent.
+    project_id: str | None = None
+    try:
+        project_id = _engine.derive_project_id(project_dir)
+    except Exception:
+        pass
+
     print(f"Migrating VNX runtime databases at: {data_root}")
 
     try:
-        _bootstrap_runtime_dbs(data_root)
+        _bootstrap_runtime_dbs(data_root, project_id=project_id)
     except Exception as exc:
         print(f"\n  error: migration failed: {exc}", file=sys.stderr)
         return 1

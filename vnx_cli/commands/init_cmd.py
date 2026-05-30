@@ -272,7 +272,72 @@ def _emit_bootstrap_event(data_root: Path, status: str, error: str = "") -> None
         f.write(line)
 
 
-def _bootstrap_runtime_dbs(data_root: Path) -> None:
+def _seed_default_pool_rows(db_path: Path, project_id: str) -> None:
+    """Insert default pool_config + worker_pools rows for project_id. Idempotent.
+
+    Uses INSERT OR IGNORE so running twice is a no-op. ADR-007: composite
+    UNIQUE(project_id, pool_id) is enforced by the pool_config schema.
+    Silently skips if pool_config table does not yet exist (migration 0020
+    not applied) — that would be caught by the bootstrap error path above.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "INSERT OR IGNORE INTO pool_config "
+            "(project_id, pool_id, min_workers, max_workers, target_workers, "
+            "role_mix_json, provider_mix_json, scale_policy, cooldown_seconds) "
+            "VALUES (?, 'default', 0, 4, 0, "
+            "'[\"backend-developer\"]', '[\"claude\"]', 'queue_depth_v1', 120)",
+            (project_id,),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO worker_pools "
+            "(project_id, pool_id, state, current_size, target_size) "
+            "VALUES (?, 'default', 'idle', 0, 0)",
+            (project_id,),
+        )
+        conn.commit()
+    except Exception:
+        pass  # pool_config table absent (migration gap) — non-fatal; bootstrap raised above
+    finally:
+        conn.close()
+
+
+def _ensure_runtime_schema_version(db_path: Path) -> None:
+    """Guarantee runtime_schema_version table exists and has at least the baseline row.
+
+    Safety net: init_schema creates this table, but a partial or offline migration
+    could leave it missing. Creating it here with CREATE TABLE IF NOT EXISTS and
+    stamping the minimum version (10) prevents vnx doctor from warning
+    'no such table: runtime_schema_version' after a successful bootstrap.
+    Idempotent: INSERT OR IGNORE is a no-op if the row already exists.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_schema_version ("
+            "    version     INTEGER PRIMARY KEY,"
+            "    applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),"
+            "    description TEXT NOT NULL"
+            ")"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO runtime_schema_version (version, description) "
+            "VALUES (10, 'baseline: project_id migration')",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> None:
     """Bootstrap runtime_coordination.db and quality_intelligence.db. Idempotent.
 
     Runs after vnx init creates the directory scaffold. Applies the full
@@ -289,6 +354,8 @@ def _bootstrap_runtime_dbs(data_root: Path) -> None:
          the old dispatches table) does not fail with "no such column: project_id".
       3. auto_apply: applies numbered migration runners 0017+ (tracks, pool,
          dispatches rebuild with CHECK, dream, dispatch claim).
+      4. Seed default pool_config row for project_id (INSERT OR IGNORE).
+      5. Ensure runtime_schema_version table exists and is stamped.
 
     Raises RuntimeError (or the original exception) if any core step fails.
     quality_intelligence.db is advisory and warns instead of raising.
@@ -314,6 +381,17 @@ def _bootstrap_runtime_dbs(data_root: Path) -> None:
     # Step 3: numbered migration runners 0017+ (tracks, pool, dream, claim) — CORE.
     from migrations.auto_apply import auto_apply  # type: ignore
     auto_apply(db_path)
+
+    # Step 4: seed default pool_config + worker_pools rows for this project.
+    # Migration 0020 only seeds 'vnx-dev'; fresh user projects need their own row.
+    # INSERT OR IGNORE: idempotent — running migrate twice produces no duplicate.
+    # ADR-007: composite UNIQUE(project_id, pool_id).
+    if project_id:
+        _seed_default_pool_rows(db_path, project_id)
+
+    # Step 5: guarantee runtime_schema_version exists and has the baseline stamp.
+    # Defensive: init_schema creates it, but belt-and-suspenders after any migration path.
+    _ensure_runtime_schema_version(db_path)
 
     print("  bootstrapped runtime_coordination.db")
 
@@ -427,7 +505,7 @@ def vnx_init(args) -> int:
 
     # --- bootstrap runtime DBs so track/pool/dream work immediately ----------
     try:
-        _bootstrap_runtime_dbs(data_root)
+        _bootstrap_runtime_dbs(data_root, project_id=project_id)
     except Exception as exc:
         print(f"\n  error: DB bootstrap failed: {exc}", file=sys.stderr)
         print(
