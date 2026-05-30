@@ -147,7 +147,7 @@ VNX is a multi-terminal orchestration system enabling parallel development acros
 - **Terminal State Monitoring**: Real-time tracking of T0/T1/T2/T3 status and activity
 - **Lock Prevention System**: Automatic stale lock cleanup and timeout mechanisms
 - **Enhanced Dashboard**: Lock status visibility and terminal monitoring integration
-- **Receipt Bulletproofing**: Comprehensive prevention and recovery for stuck receipts
+- **Receipt Bulletproofing**: Prevention and recovery for stuck receipts
 - **Process Detection Fix**: Corrected Smart Tap V7 detection in dashboard monitoring
 
 **Version 7.1.1 Critical Fixes**:
@@ -160,7 +160,7 @@ VNX is a multi-terminal orchestration system enabling parallel development acros
 - **JSON Dispatch Format**: Machine-readable dispatches with automatic Markdown translation
 - **Enhanced Capture Window**: 200-line capture prevents [[DONE]] marker truncation
 - **Non-Intrusive Notifications**: Audio/visual alerts without blocking terminals
-- **Dual Format Support**: Both JSON and Markdown dispatches work seamlessly
+- **Dual Format Support**: Both JSON and Markdown dispatch formats are supported
 - **25ms Translation**: High-performance JSON-to-Markdown conversion
 - **JSON Archive**: Original JSON preserved in `.json/` directory
 

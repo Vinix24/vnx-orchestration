@@ -1377,7 +1377,7 @@ cp /tmp/test_intelligence.md $VNX_HOME/dispatches/pending/
 - Instruction/constraints/context injection
 - Universal role support (all agents)
 - Smart pane discovery
-- Robust template resolution
+- Reliable template resolution
 
 **V7.4** (Current Production):
 - Intelligence integration

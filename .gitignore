@@ -1,3 +1,6 @@
+# Python virtual environment (never commit)
+.venv/
+
 # VNX runtime artifacts (local only) — strategic docs moved to claudedocs/ (OI-1373 Tiers 1-5)
 .vnx-data/*
 .vnx-data/state/*

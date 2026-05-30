@@ -466,7 +466,7 @@ Detailed task instructions...
 1. **Quick (1K tokens)**: Last 10 events
 2. **Standard (3K tokens)**: Last 25 events
 3. **Detailed (5K tokens)**: Last 50 events + terminal insights
-4. **Comprehensive (10K tokens)**: Last 100 events + patterns + warnings
+4. **Deep (10K tokens)**: Last 100 events + patterns + warnings
 5. **Full (20K+ tokens)**: Last 200 events + complete context
 
 ### 4. Report Format (Markdown)
@@ -539,7 +539,7 @@ ps -axo pid=,command= | grep -F "$VNX_KILL_SCOPE" | grep -F "$fingerprint" | ...
 
 ### Process Cleanup (`vnx_kill_all_orchestration`)
 
-**Purpose**: Comprehensive process cleanup on `vnx stop` or `vnx start` (restart).
+**Purpose**: Full process cleanup on `vnx stop` or `vnx start` (restart).
 
 **Fingerprints killed** (active process types):
 - `dispatcher_v8_minimal.sh`
@@ -666,7 +666,7 @@ Level 2 (Standard): 3K tokens
 Level 3 (Detailed): 5K tokens
   └─► Last 50 events, terminal insights
 
-Level 4 (Comprehensive): 10K tokens
+Level 4 (Deep): 10K tokens
   └─► Last 100 events, warnings, correlations
 
 Level 5 (Full): 20K+ tokens

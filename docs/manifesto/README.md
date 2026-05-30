@@ -97,6 +97,6 @@ For implementation detail, see the main repository scripts and docs outside this
 ## Contributing / Collaboration
 
 - Current maintainer focus: architecture, governance model, and practical reliability in local workflows.
-- High-value contributions: robustness improvements, cross-provider adapters, test coverage, and docs quality.
+- High-value contributions: reliability improvements, cross-provider adapters, test coverage, and docs quality.
 - Especially welcome: Rust/Go-oriented contributors for a future production-grade engine.
 - Collaboration style: small, reviewable changes with clear evidence (tests, logs, and behavior proof).

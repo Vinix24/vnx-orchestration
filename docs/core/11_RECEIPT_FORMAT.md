@@ -308,4 +308,4 @@ offline (terminal disconnected)
 
 ---
 
-*This format ensures comprehensive task tracking with clear status progression and sprint phase awareness.*
+*This format tracks task status, sprint phase, and provides a structured audit trail.*

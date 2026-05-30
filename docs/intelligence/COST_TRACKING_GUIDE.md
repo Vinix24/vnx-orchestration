@@ -380,7 +380,7 @@ cat ~/.claude/sessions/abc-def-123-456.jsonl | head -5
 **Phase 4**: Auto Context Refresh
 - Mid-session summarization
 - Clean context restoration
-- Seamless session continuation
+- Session continuation
 
 See `RECEIPT_UPGRADE_PLAN.md` for complete roadmap.
 

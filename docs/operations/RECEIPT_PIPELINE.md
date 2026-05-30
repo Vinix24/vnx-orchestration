@@ -661,7 +661,7 @@ HEALTH_CHECK_INTERVAL=5         # Process health check interval (seconds)
 8. /ack_states directory structure
 9. Enhanced error handling and recovery
 
-### 📊 Metrics (2026-01-07 Post-Deployment)
+### Metrics (2026-01-07 Post-Deployment)
 - Receipt delivery: 0% → 100%
 - Terminal status accuracy: 60% → 95%+
 - Process stability: Frequent crashes → Stable with auto-recovery
