@@ -5,7 +5,7 @@
 - Claude Code + Codex CLI + Gemini CLI + Kimi CLI (provider auto-detection via session_resolver)
 - Single-repository workflows (one VNX instance per project)
 - Deployed across 3 independent projects (SaaS SEO tool, marketing website, VNX itself) via `vnx update`
-- Receipt-based cost observability (V4 — receipt_processor_v4 with git provenance per receipt)
+- Receipt-based cost observability (V4 — receipt_processor with git provenance per receipt)
 - Graceful crash recovery via ledger replay
 - T0 orchestrator: Claude Opus via Claude Code
 - T0 write restrictions enforced via Claude Code hooks (T0 cannot write files directly)

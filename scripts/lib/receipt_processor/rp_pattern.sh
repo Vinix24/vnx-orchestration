@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_pattern.sh - Pattern usage tracking and progress_state updates
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $SCRIPTS_DIR, $STATE_DIR, $VNX_STATE_DIR (env),
 #           and _rf_* fields populated by extract_receipt_fields()
 

@@ -48,7 +48,7 @@ from failure_classifier import (
 # =============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DISPATCHER = PROJECT_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+DISPATCHER = PROJECT_ROOT / "scripts" / "dispatcher_minimal.sh"
 
 
 def _extract_classify_function() -> str:

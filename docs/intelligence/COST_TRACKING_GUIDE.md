@@ -388,7 +388,7 @@ See `RECEIPT_UPGRADE_PLAN.md` for complete roadmap.
 
 - **RECEIPT_UPGRADE_PLAN.md** - Complete implementation roadmap
 - **11_RECEIPT_FORMAT.md** - Receipt schema specification
-- **receipt_processor_v4.sh** - Receipt processing implementation
+- **receipt_processor.sh** - Receipt processing implementation
 - **report_parser.py** - Report parsing and session extraction
 
 ---

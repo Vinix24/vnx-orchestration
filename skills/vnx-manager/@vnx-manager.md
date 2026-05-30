@@ -21,9 +21,9 @@ You are the guardian and architect of the VNX orchestration infrastructure. Your
 
 **Core Orchestration**:
 - `vnx_supervisor_simple.sh` - Process health monitoring and singleton enforcement
-- `dispatcher_v8_minimal.sh` - V8 dispatcher with native skills (87% token reduction)
-- `smart_tap_v7_json_translator.sh` - Terminal output parser (Manager Blocks → dispatches)
-- `receipt_processor_v4.sh` - Receipt validation and delivery
+- `dispatcher_minimal.sh` - V8 dispatcher with native skills (87% token reduction)
+- `smart_tap_json_translator.sh` - Terminal output parser (Manager Blocks → dispatches)
+- `receipt_processor.sh` - Receipt validation and delivery
 - `receipt_notifier.sh` - Receipt delivery to terminals
 
 **Intelligence Layer**:
@@ -41,7 +41,7 @@ You are the guardian and architect of the VNX orchestration infrastructure. Your
 - `verify_completion.py` - Task completion validation
 
 **State Management**:
-- `unified_state_manager_v2.py` - Centralized state tracking
+- `unified_state_manager.py` - Centralized state tracking
 - `pr_queue_manager.py` - PR queue and feature plan management
 - `validate_feature_plan.py` - Feature plan validation
 

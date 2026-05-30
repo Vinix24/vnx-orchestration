@@ -1,9 +1,9 @@
 # shellcheck shell=bash
 # rp_dedup.sh - Report dedup and flood protection
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, _spr_get_cutoff_seconds() from rp_time.sh,
 #           _sha256() from main, $PROCESSED_HASHES, $RECEIPT_FILE, $FLOOD_LOCKFILE,
-#           $FLOOD_LOCK_MAX_AGE, $FLOOD_THRESHOLD, get_pane_id_smart() from pane_manager_v2
+#           $FLOOD_LOCK_MAX_AGE, $FLOOD_THRESHOLD, get_pane_id_smart() from pane_manager
 
 # Check if report should be processed
 should_process_report() {

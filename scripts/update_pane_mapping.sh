@@ -111,12 +111,12 @@ echo "Saved to: $PANES_FILE"
 # Restart smart_tap to pick up new mapping
 echo "Restarting smart_tap with new pane mapping..."
 vnx_stop_by_fingerprints "smart_tap" "$PROCESS_LOG" "pane_mapping_refresh" 3 \
-  "smart_tap_v7_json_translator.sh" \
+  "smart_tap_json_translator.sh" \
   "smart_tap_with_editor_multi.sh" \
   "smart_tap_with_editor.sh" \
   "smart_tap_clean.sh" \
   "smart_tap_hybrid.sh" || true
 sleep 1
 cd "$VNX_DIR/scripts"
-nohup ./smart_tap_v7_json_translator.sh > /dev/null 2>&1 &
+nohup ./smart_tap_json_translator.sh > /dev/null 2>&1 &
 echo "Smart tap restarted"

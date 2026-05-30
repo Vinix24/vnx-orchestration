@@ -17,8 +17,8 @@ Project = Specific implementation using VNX
 ```
 vnx-system/
 ├── scripts/                      # All orchestration scripts
-│   ├── dispatcher_v8_minimal.sh
-│   ├── receipt_processor_v4.sh
+│   ├── dispatcher_minimal.sh
+│   ├── receipt_processor.sh
 │   ├── gather_intelligence.py
 │   ├── gate_runner.py
 │   └── [all other orchestration scripts]

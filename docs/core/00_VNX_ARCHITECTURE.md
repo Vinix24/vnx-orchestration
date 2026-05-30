@@ -165,7 +165,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 
 ## Core Components
 
-### 1. Dispatcher V8 (`dispatcher_v8_minimal.sh`)
+### 1. Dispatcher V8 (`dispatcher_minimal.sh`)
 
 **Purpose**: Native skill activation and instruction routing (V8.2 - Current Production)
 
@@ -208,7 +208,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Manages timeout detection
 - Updates dispatch status
 
-### 4. Receipt Processor V4 (`receipt_processor_v4.sh`) - Primary
+### 4. Receipt Processor V4 (`receipt_processor.sh`) - Primary
 
 **Purpose**: Parse new markdown reports into receipts, attach evidence to open items, append to `t0_receipts.ndjson`, and deliver the receipt into the T0 pane reliably.
 
@@ -237,7 +237,7 @@ The dashboard "Jump" button calls `POST /api/jump/{terminal}` which executes `vn
 - Normalizes metadata, tags, metrics, recommendations
 - Produces compact JSON for `t0_receipts.ndjson`
 
-**Note**: `report_watcher.sh` exists but production receipt ingestion is handled by `receipt_processor_v4.sh`.
+**Note**: `report_watcher.sh` exists but production receipt ingestion is handled by `receipt_processor.sh`.
 
 ### 7. Context Rotation Hooks (Stop/PostToolUse/SessionStart) - v2.4
 
@@ -514,8 +514,8 @@ Terminal status is determined by receipt-based activity detection.
 - Cleans up stale PID files
 
 **Core Processes** (managed by supervisor):
-- `dispatcher.pid` — `dispatcher_v8_minimal.sh`
-- `receipt_processor.pid` — `receipt_processor_v4.sh`
+- `dispatcher.pid` — `dispatcher_minimal.sh`
+- `receipt_processor.pid` — `receipt_processor.sh`
 - `heartbeat_ack_monitor.pid` — `heartbeat_ack_monitor.py`
 - `dashboard.pid` — `generate_valid_dashboard.sh`
 - `intelligence_daemon.pid` — `intelligence_daemon.py`
@@ -542,8 +542,8 @@ ps -axo pid=,command= | grep -F "$VNX_KILL_SCOPE" | grep -F "$fingerprint" | ...
 **Purpose**: Comprehensive process cleanup on `vnx stop` or `vnx start` (restart).
 
 **Fingerprints killed** (active process types):
-- `dispatcher_v8_minimal.sh`
-- `receipt_processor_v4.sh`
+- `dispatcher_minimal.sh`
+- `receipt_processor.sh`
 - `generate_t0_recommendations.py`
 - `generate_valid_dashboard.sh`
 - `vnx_supervisor_simple.sh`
@@ -626,7 +626,7 @@ On `vnx start`, the system:
 - Degrades gracefully if no dispatch or empty intelligence (A-5)
 - Logs each injection event to `intelligence_usage.ndjson` with timestamp, terminal, dispatch_id, pattern_ids (G-L7)
 
-**Contrast with T0**: T0 injection (`userpromptsubmit_intelligence_inject_v5.sh`) focuses on recommendations and quality hotspots, not terminal status noise.
+**Contrast with T0**: T0 injection (`userpromptsubmit_intelligence_inject.sh`) focuses on recommendations and quality hotspots, not terminal status noise.
 
 ### Quality Digest V3 (`build_t0_quality_digest.py`)
 
@@ -731,8 +731,8 @@ project-root/
 ├── .claude/vnx-system/              # VNX system code (git-tracked)
 │   ├── bin/vnx                      # CLI entry point
 │   ├── scripts/                     # Active orchestration scripts
-│   │   ├── dispatcher_v8_minimal.sh    # V8 native skills dispatcher
-│   │   ├── receipt_processor_v4.sh     # Receipt processing + T0 delivery
+│   │   ├── dispatcher_minimal.sh    # V8 native skills dispatcher
+│   │   ├── receipt_processor.sh     # Receipt processing + T0 delivery
 │   │   ├── report_parser.py
 │   │   ├── append_receipt.py           # Receipt + quality sidecar writer
 │   │   ├── generate_t0_recommendations.py

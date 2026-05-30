@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_append.sh - Append receipt + track patterns + mark processed
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() and log_structured_failure() from rp_logging.sh,
 #           _track_pattern_usage() / _track_pattern_success_fallback() from rp_pattern.sh,
 #           extract_timestamp() from rp_time.sh, _sha256() from main,

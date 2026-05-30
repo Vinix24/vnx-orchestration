@@ -17,7 +17,7 @@ This document is the single source of truth for what must happen when a dispatch
 
 The Terminal Exclusivity Contract (80) defines when a terminal is safe to dispatch to. It does not define what happens when delivery fails **after** a lease has been acquired. When delivery fails and the lease is not released, the target terminal is silently stranded in `busy` state. No new dispatch can reach that terminal until the lease TTL expires (default 600s) and the reconciler runs.
 
-Current code (dispatcher_v8_minimal.sh, lines 1486-1509) attempts cleanup on tmux delivery failure:
+Current code (dispatcher_minimal.sh, lines 1486-1509) attempts cleanup on tmux delivery failure:
 - Records `failed_delivery` in the broker.
 - Releases the canonical lease.
 - Releases the legacy terminal claim.
@@ -456,12 +456,12 @@ Quick reference for implementers.
 
 | File | Line | Gap | Contract Rule |
 |------|------|-----|---------------|
-| `dispatcher_v8_minimal.sh` | 523-533 | `rc_release_lease` is fire-and-forget; failure is logged but not escalated | DFL-3 |
-| `dispatcher_v8_minimal.sh` | 509-520 | `rc_delivery_failure` silently no-ops when `attempt_id` is empty | DFL-2 |
-| `dispatcher_v8_minimal.sh` | 1486-1494 | No process-exit trap protecting the lease-to-delivery window | DFL-1 |
-| `dispatcher_v8_minimal.sh` | 1486-1494 | `rc_release_lease` return code not checked | DFL-3 |
-| `dispatcher_v8_minimal.sh` | 1486-1494 | No structured audit record emitted for delivery failure | DFL-5 |
-| `dispatcher_v8_minimal.sh` | 1734-1737 | `rejected/` filesystem move not reconciled with broker DB state | SP-3 |
+| `dispatcher_minimal.sh` | 523-533 | `rc_release_lease` is fire-and-forget; failure is logged but not escalated | DFL-3 |
+| `dispatcher_minimal.sh` | 509-520 | `rc_delivery_failure` silently no-ops when `attempt_id` is empty | DFL-2 |
+| `dispatcher_minimal.sh` | 1486-1494 | No process-exit trap protecting the lease-to-delivery window | DFL-1 |
+| `dispatcher_minimal.sh` | 1486-1494 | `rc_release_lease` return code not checked | DFL-3 |
+| `dispatcher_minimal.sh` | 1486-1494 | No structured audit record emitted for delivery failure | DFL-5 |
+| `dispatcher_minimal.sh` | 1734-1737 | `rejected/` filesystem move not reconciled with broker DB state | SP-3 |
 
 ## Appendix D: Relationship To Other Contracts
 

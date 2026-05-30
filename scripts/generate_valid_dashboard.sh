@@ -358,11 +358,11 @@ SQL
 }
 
 while true; do
-    SMART_TAP=$(pgrep -f smart_tap_v7_json_translator | head -1 || echo "")
-    DISPATCHER=$(pgrep -f "dispatcher_v8_minimal|dispatcher_v7_compilation" | head -1 || echo "")
+    SMART_TAP=$(pgrep -f smart_tap_json_translator | head -1 || echo "")
+    DISPATCHER=$(pgrep -f "dispatcher_minimal|dispatcher_v7_compilation" | head -1 || echo "")
     QUEUE_WATCHER=$(pgrep -f queue_popup_watcher | head -1 || echo "")
     REPORT_WATCHER=$(pgrep -f report_watcher.sh | head -1 || echo "")
-    RECEIPT_PROCESSOR=$(pgrep -f receipt_processor_v4 | head -1 || echo "")
+    RECEIPT_PROCESSOR=$(pgrep -f receipt_processor | head -1 || echo "")
     SUPERVISOR=$(pgrep -f "vnx_supervisor_simple" | head -1 || echo "")
     if [ -z "$SUPERVISOR" ] && [ -f "$VNX_PIDS_DIR/vnx_supervisor.pid" ]; then
         PID_FROM_FILE=$(cat "$VNX_PIDS_DIR/vnx_supervisor.pid" 2>/dev/null || echo "")

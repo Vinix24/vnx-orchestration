@@ -254,21 +254,21 @@ TSJSON
         sleep 2
       else
         # Fallback mode only: without supervisor, start critical services directly.
-        if [ -f "$scripts_dir/smart_tap_v7_json_translator.sh" ]; then
+        if [ -f "$scripts_dir/smart_tap_json_translator.sh" ]; then
           cd "$scripts_dir"
-          nohup bash ./smart_tap_v7_json_translator.sh > "$log_dir/tap.log" 2>&1 &
+          nohup bash ./smart_tap_json_translator.sh > "$log_dir/tap.log" 2>&1 &
           log "Smart tap V7 re-started (PID: $!)"
           cd "$PROJECT_ROOT"
         fi
-        if [ -f "$scripts_dir/dispatcher_v8_minimal.sh" ]; then
+        if [ -f "$scripts_dir/dispatcher_minimal.sh" ]; then
           cd "$scripts_dir"
-          nohup bash ./dispatcher_v8_minimal.sh > "$log_dir/dispatcher.log" 2>&1 &
+          nohup bash ./dispatcher_minimal.sh > "$log_dir/dispatcher.log" 2>&1 &
           log "Dispatcher V8 re-started (PID: $!)"
           cd "$PROJECT_ROOT"
         fi
-        if [ -f "$scripts_dir/receipt_processor_v4.sh" ]; then
+        if [ -f "$scripts_dir/receipt_processor.sh" ]; then
           cd "$scripts_dir"
-          VNX_MODE=monitor nohup bash ./receipt_processor_v4.sh > "$log_dir/receipt_processor.log" 2>&1 &
+          VNX_MODE=monitor nohup bash ./receipt_processor.sh > "$log_dir/receipt_processor.log" 2>&1 &
           log "Receipt processor V4 re-started (PID: $!)"
           cd "$PROJECT_ROOT"
         fi
@@ -278,9 +278,9 @@ TSJSON
           log "Dashboard generator re-started (PID: $!)"
           cd "$PROJECT_ROOT"
         fi
-        if [ -f "$scripts_dir/unified_state_manager_v2.py" ]; then
+        if [ -f "$scripts_dir/unified_state_manager.py" ]; then
           cd "$scripts_dir"
-          nohup python3 ./unified_state_manager_v2.py > "$log_dir/state_manager.log" 2>&1 &
+          nohup python3 ./unified_state_manager.py > "$log_dir/state_manager.log" 2>&1 &
           log "State manager re-started (PID: $!)"
           cd "$PROJECT_ROOT"
         fi
@@ -387,21 +387,21 @@ TSJSON
     sleep 2
   else
     # Fallback mode only: without supervisor, start critical services directly.
-    if [ -f "$scripts_dir/smart_tap_v7_json_translator.sh" ]; then
+    if [ -f "$scripts_dir/smart_tap_json_translator.sh" ]; then
       cd "$scripts_dir"
-      nohup bash ./smart_tap_v7_json_translator.sh > "$log_dir/tap.log" 2>&1 &
+      nohup bash ./smart_tap_json_translator.sh > "$log_dir/tap.log" 2>&1 &
       log "Smart tap V7 started (PID: $!)"
       cd "$PROJECT_ROOT"
     fi
-    if [ -f "$scripts_dir/dispatcher_v8_minimal.sh" ]; then
+    if [ -f "$scripts_dir/dispatcher_minimal.sh" ]; then
       cd "$scripts_dir"
-      nohup bash ./dispatcher_v8_minimal.sh > "$log_dir/dispatcher.log" 2>&1 &
+      nohup bash ./dispatcher_minimal.sh > "$log_dir/dispatcher.log" 2>&1 &
       log "Dispatcher V8 started (PID: $!)"
       cd "$PROJECT_ROOT"
     fi
-    if [ -f "$scripts_dir/receipt_processor_v4.sh" ]; then
+    if [ -f "$scripts_dir/receipt_processor.sh" ]; then
       cd "$scripts_dir"
-      VNX_MODE=monitor nohup bash ./receipt_processor_v4.sh > "$log_dir/receipt_processor.log" 2>&1 &
+      VNX_MODE=monitor nohup bash ./receipt_processor.sh > "$log_dir/receipt_processor.log" 2>&1 &
       log "Receipt processor V4 started (PID: $!)"
       cd "$PROJECT_ROOT"
     fi
@@ -411,9 +411,9 @@ TSJSON
       log "Dashboard generator started (PID: $!)"
       cd "$PROJECT_ROOT"
     fi
-    if [ -f "$scripts_dir/unified_state_manager_v2.py" ]; then
+    if [ -f "$scripts_dir/unified_state_manager.py" ]; then
       cd "$scripts_dir"
-      nohup python3 ./unified_state_manager_v2.py > "$log_dir/state_manager.log" 2>&1 &
+      nohup python3 ./unified_state_manager.py > "$log_dir/state_manager.log" 2>&1 &
       log "State manager started (PID: $!)"
       cd "$PROJECT_ROOT"
     fi
