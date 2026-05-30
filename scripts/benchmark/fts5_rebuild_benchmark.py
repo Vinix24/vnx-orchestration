@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FTS5 rebuild benchmark for SEOcrawler quality_intelligence.db.
+"""FTS5 rebuild benchmark for quality_intelligence.db.
 
 Measures rebuild time on a COPY of the source DB. Never mutates production.
 Output: JSON + Markdown report in --report-dir for maintenance window planning.
