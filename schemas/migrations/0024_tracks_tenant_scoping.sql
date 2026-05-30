@@ -1,7 +1,7 @@
 -- VNX Migration 0024 — tracks tenant-scoping (ADR-007 compliance)
 --
 -- Purpose: Rebuild 4 track tables with composite keys over (track_id, project_id)
---          to support 4-project central VNX install (vnx-dev, seocrawler-v2, mc, salespilot).
+--          to support 4-project central VNX install (vnx-dev, example-project, mc, project-a).
 --
 -- Design: claudedocs/FUT-2-ARCHITECT-DESIGN-2026-05-29.md §2
 --

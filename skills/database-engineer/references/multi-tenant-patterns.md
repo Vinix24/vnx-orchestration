@@ -52,7 +52,7 @@ This pattern was the P4 round-5 fix for `terminal_leases`, `execution_targets`, 
 
 ## Pattern 3: Identifier prefix-rewrite
 
-For columns that are CROSS-references rather than primary identity (e.g. `coordination_events.entity_id` references `dispatches.dispatch_id`), there's a different fix: prefix the value at import time so two tenants' `dispatch_id="2026-05-01-foo"` become `"vnx-orchestration:2026-05-01-foo"` and `"sales-copilot:2026-05-01-foo"` in central, never colliding.
+For columns that are CROSS-references rather than primary identity (e.g. `coordination_events.entity_id` references `dispatches.dispatch_id`), there's a different fix: prefix the value at import time so two tenants' `dispatch_id="2026-05-01-foo"` become `"vnx-orchestration:2026-05-01-foo"` and `"project-a:2026-05-01-foo"` in central, never colliding.
 
 P4 implements this via `_prefix_value(project_id, value)`. The list of prefix-target columns is in `COLLISION_PREFIX_COLUMNS` and `_collect_collision_columns` (schema-driven extension).
 

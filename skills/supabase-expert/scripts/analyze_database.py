@@ -169,8 +169,8 @@ class SupabaseAnalyzer:
 
             return result
 
-    def check_seocrawler_performance(self):
-        """Check SEOcrawler specific performance metrics"""
+    def check_crawl_performance(self):
+        """Check crawl performance metrics"""
 
         # Check crawl_results query performance
         query_crawl = """
@@ -196,7 +196,7 @@ class SupabaseAnalyzer:
             cur.execute(query_crawl)
             crawl_metrics = cur.fetchone()
 
-            print("\n🕷️ SEOCRAWLER PERFORMANCE METRICS")
+            print("\nCRAWL PERFORMANCE METRICS")
             print("=" * 80)
             print(f"Total crawls (7 days): {crawl_metrics['total_rows']}")
             print(f"Unique URLs: {crawl_metrics['unique_urls']}")
@@ -254,7 +254,7 @@ class SupabaseAnalyzer:
             'table_sizes': self.check_table_sizes(),
             'missing_indexes': self.find_missing_indexes(),
             'slow_queries': self.analyze_slow_queries()[:5],  # Top 5
-            'seocrawler_metrics': self.check_seocrawler_performance()
+            'crawl_metrics': self.check_crawl_performance()
         }
 
         # Save report
@@ -284,7 +284,7 @@ def main():
         analyzer.check_table_sizes()
         analyzer.find_missing_indexes()
         analyzer.analyze_slow_queries()
-        analyzer.check_seocrawler_performance()
+        analyzer.check_crawl_performance()
 
         # Optional: optimize tables (be careful in production!)
         response = input("\n⚠️ Run VACUUM ANALYZE on tables? (y/n): ")

@@ -88,4 +88,5 @@ vnx_orchestration = [
     "**/*.egg-info/**",
     ".vnx-data/**",
     "schemas/prep_migrations/**",
+    "scripts/*_prep*",
 ]
