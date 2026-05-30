@@ -57,11 +57,10 @@ SpawnFn = Callable[[str, str, str, str, str], SpawnResult]
 
 
 def _default_db_path(project_id: str) -> Path:
-    """Resolve default DB path under VNX_STATE_DIR (via vnx_paths.resolve_state_dir)."""
+    """Resolve default DB path via canonical data-root chain (XDG-aware for pip installs)."""
     try:
-        from project_root import resolve_project_root  # type: ignore
-        root = resolve_project_root(__file__)
-        return root / ".vnx-data" / "state" / "runtime_coordination.db"
+        from vnx_paths import resolve_data_root as _resolve_data_root  # type: ignore
+        return _resolve_data_root(Path.cwd()) / "state" / "runtime_coordination.db"
     except Exception:
         return Path.cwd() / ".vnx-data" / "state" / "runtime_coordination.db"
 

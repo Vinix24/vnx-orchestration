@@ -11,7 +11,8 @@ from vnx_cli import _engine
 
 
 def _resolve_state_dir(project_dir: str | Path) -> Path:
-    return Path(project_dir).resolve() / ".vnx-data" / "state"
+    # Use canonical data-root chain (XDG-aware) so pip installs work without .vnx-data/ inside the project.
+    return _engine.resolve_data_root(Path(project_dir).resolve()) / "state"
 
 
 def _require_tracks_lib(state_dir: Path) -> Any:
