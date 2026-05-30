@@ -75,7 +75,7 @@ When making system changes, consider:
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: vnx-manager
+Skill actief: vnx-manager
 ```
 
 No exceptions. This must appear before any other content.
