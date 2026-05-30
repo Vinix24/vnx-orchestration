@@ -1,48 +1,147 @@
 # VNX
 
-VNX is a governance-first multi-agent orchestration framework for AI CLI workers. I built it to run on top of `claude`, `codex`, and `kimi` CLIs with no SDK imports, using tmux-based ephemeral worker dispatch and per-worker git worktree isolation.
+VNX runs AI coding CLI workers in tmux, isolated git worktrees, through review gates, with an append-only hash-chained receipt per dispatch.
 
-VNX exists because Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. The VNX leaseless tmux lane runs Claude workers as interactive tmux sessions, so the default Claude worker path stays on the subscription instead of the paid API lane.
+It is a local control plane for the AI coding CLIs that already sit on your machine. One orchestrator dispatches work to ephemeral workers; each worker runs in its own git worktree; review gates decide what merges; every dispatch leaves a receipt. VNX drives `claude`, `codex`, `gemini`, `kimi`, and local `ollama` with no vendor SDK. It calls the CLIs as subprocesses and never imports a provider library.
 
-The proof points are concrete: 2,000+ hours of Claude Code production use, append-only NDJSON receipts for audit-grade history, 1.450+ tests, and open source code on GitHub. The project is public at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+Most agent projects build SDK-native agents. I orchestrate the binaries instead. The difference shows up in the audit trail: I can reconstruct what was dispatched, what was reviewed, what merged, and what each gate cost.
+
+I built this for my own work, across 2,000+ hours of Claude Code. It is open source because the architecture is portable. Source is at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+
+This is not a security sandbox; it isolates work with tmux sessions and git worktrees. It is not compliance certification; it produces a local, append-only, inspectable audit trail. It is optimized for human-gated coding workflows, not fully autonomous merges.
+
+## Writing
+
+I wrote the architecture down as I built it. The full series is on [vincentvandeth.nl](https://vincentvandeth.nl). Start here.
+
+<!-- TODO: confirm blog URL base with Vincent before merge -->
+
+**Governance and trust**
+- [Glass-box governance for multi-agent AI](https://vincentvandeth.nl/blog/glass-box-governance-multi-agent-ai)
+- [Governance scoring: agent trust and autonomy](https://vincentvandeth.nl/blog/governance-scoring-agent-trust-autonomy)
+- [Autonomous agents do not exist](https://vincentvandeth.nl/blog/autonome-ai-agents-bestaan-niet)
+- [ISA 62443: AI governance and industrial safety](https://vincentvandeth.nl/blog/isa-62443-ai-governance-industrial-safety)
+
+**Receipts, audit, traceability**
+- [The NDJSON receipt ledger for AI audit trails](https://vincentvandeth.nl/blog/ndjson-receipt-ledger-ai-audit-trail)
+- [Traceability architecture: the AI decision receipt](https://vincentvandeth.nl/blog/traceability-architecture-ai-decision-receipt)
+- [The external watcher pattern for AI agent observation](https://vincentvandeth.nl/blog/external-watcher-pattern-ai-agent-observation)
+
+**Orchestration architecture**
+- [What is AI orchestration: terminal dispatch](https://vincentvandeth.nl/blog/wat-is-ai-orchestration-terminal-dispatch)
+- [Architecture beats models in AI agent dispatches](https://vincentvandeth.nl/blog/architecture-beats-models-ai-agent-dispatches)
+- [Multi-model AI orchestration from a single terminal](https://vincentvandeth.nl/blog/multi-model-ai-orchestration-single-terminal)
+- [Why no subagents in AI orchestration](https://vincentvandeth.nl/blog/waarom-geen-subagents-ai-orchestration)
+- [Routing is not orchestration](https://vincentvandeth.nl/blog/routing-not-orchestration-openclaw-governance)
+
+**Cost, context, production**
+- [The real cost of AI agents in production](https://vincentvandeth.nl/blog/real-cost-ai-agents-production)
+- [Zero-LLM context injection with VNX intelligence](https://vincentvandeth.nl/blog/zero-llm-context-injection-vnx-intelligence)
+- [Context rotation at scale](https://vincentvandeth.nl/blog/context-rotation-scale-vnx-implementation)
+- [Async quality gates for AI agent workflows](https://vincentvandeth.nl/blog/async-quality-gates-ai-agent-workflows)
+
+## What works today vs what is opt-in
+
+I am honest about maturity because the audit trail is the whole point and an overclaim would undercut it. The following is verified against code and receipts as of 2026-05-30.
+
+**Tier 1, in production.** Append-only NDJSON receipts with a hash-chained ledger. Multi-CLI provider hub with no vendor SDK (claude, codex, kimi, gemini, ollama). Review gates (codex and gemini) with deterministic CI as the third gate. Per-worker git worktree isolation with teardown classification. The interactive tmux worker lane. The provider-constraint YAML source of truth. Zero-LLM context injection and repo map. Cost tracking per gate invocation. Governed memory PAST and CURRENT.
+
+**Tier 2, shipped but opt-in and burning in.** Smart routing (`VNX_AUTO_ROUTE`), the elastic worker pool (`bin/vnx pool`), the track layer and roadmap autopilot, the consolidation loop (auto-dream), and governed memory FUTURE. These work mechanically, default off, and are not proven at the bar I hold Tier 1 to. I do not claim them as done.
+
+**Tier 3, designed, not built.** Parallel multi-track execution. The wave scheduler, merge lock, and file-scope derivation are designed, not shipped. Treat it as architecture, not a feature.
+
+Per-provider maturity differs. Worktree isolation is solid for single-dispatch work and races under parallel dispatch, which is why parallel sits in Tier 3.
 
 ## Install
 
 ```bash
 pip install vnx-orchestration
-vnx init
-vnx dispatch-agent --agent hello-world  # works via the examples/ fallback
+vnx init                                  # scaffold a VNX project in the current dir
+vnx migrate                               # apply runtime DB migrations
+vnx doctor                                # environment and dependency checks
+vnx dispatch-agent --agent hello-world    # works via the examples/ fallback
 ```
 
-There are two binaries on purpose during the 1.0 cutover. The pip-installed `vnx` covers the essentials, while checkout-only operator commands still live behind `./bin/vnx`, including `gate-check`, `new-worktree`, and `demo`.
+There are two binaries on purpose during the 1.0 cutover. The pip-installed `vnx` covers the essentials (`init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`). Checkout-only operator commands still live behind `./bin/vnx`, including `gate-check`, `new-worktree`, and `demo`. The `demo` path runs without API keys.
 
-## Multi-Provider Architecture
+## Architecture
+
+VNX uses a T0 orchestrator and ephemeral workers. The old fixed T1-T3 mental model is no longer the core; workers spawn per dispatch and leave behind receipts, reports, and worktree state.
+
+```
+   T0 orchestrator  (plans, dispatches, reviews; does not write code)
+        |
+        |  one dispatch
+        v
+   +----------------+   +----------------+   +----------------+
+   | ephemeral      |   | ephemeral      |   | ephemeral      |
+   | worker         |   | worker         |   | worker         |
+   | (git worktree) |   | (git worktree) |   | (git worktree) |
+   +-------+--------+   +-------+--------+   +-------+--------+
+           |                    |                    |
+           +---------+----------+----------+---------+
+                     v                     v
+              review gates          worktree teardown
+          (codex / gemini / CI)   (clean / pushed / dirty)
+                     |
+                     v
+   append-only NDJSON receipts  (hash-chained, one per dispatch)
+```
+
+Claude has two explicit lanes. The default worker lane is Claude on subscription through interactive tmux, in `scripts/lib/tmux_interactive_dispatch.py`. The opt-in burst lane is Claude on the paid API through subprocess `claude -p`.
+
+The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees.
+
+### Governed memory: past, current, future
+
+Memory is the unsolved problem in agentic AI. Most systems bolt a vector store onto a stateless model and call it memory. I treat memory as a governed state machine with three tenses, each with its own store and its own audit guarantees.
+
+The PAST is append-only NDJSON receipts: a hash-chained ledger of every dispatch, gate, and merge. It is forensic, not lossy. This is in production now, with thousands of receipts behind it.
+
+The CURRENT is `runtime_coordination.db` (SQLite WAL): real-time orchestration state, leases, tracks, and dispatch status that any terminal can read for situational awareness.
+
+The FUTURE is the track layer and roadmap autopilot: planned features modeled as project-scoped tracks with a dependency graph, which the system can advance under human approval gates. The autopilot ships opt-in and dark by default. It plans, but a human still approves the last step.
+
+A learning layer (`quality_intelligence.db`) consolidates the past into patterns and antipatterns that get injected into future dispatch context. The consolidation loop (auto-dream) is shipped and opt-in. It is burning in, not yet on by default.
+
+The point is not that the AI remembers. The point is that what it remembers is governed: every memory has a receipt, every plan has a gate, and a human owns the boundary.
+
+## Architecture decisions
+
+The decisions behind VNX are written down, not implied. There are 19 Architecture Decision Records under [docs/governance/decisions/](docs/governance/decisions/). The ones that shape the system most:
+
+- [ADR-005](docs/governance/decisions/ADR-005-ndjson-audit-ledger-primary.md): append-only NDJSON ledger as the primary observability surface
+- [ADR-006](docs/governance/decisions/ADR-006-staging-promote-human-gate.md): staging then promote, with a mandatory human approval gate
+- [ADR-008](docs/governance/decisions/ADR-008-dual-llm-adversarial-review.md): dual-LLM adversarial review (codex plus gemini) bound by a contract hash
+- [ADR-011](docs/governance/decisions/ADR-011-manager-worker-hierarchy.md): manager plus worker hierarchy with explicit depth, not depth-1 subagents
+- [ADR-012](docs/governance/decisions/ADR-012-hybrid-interactive-headless.md): hybrid interactive and headless execution, no retire-interactive
+- [ADR-014](docs/governance/decisions/ADR-014-autonomous-chain-dispatch.md): autonomous mode is pre-approved chain dispatch, never gate bypass
+
+For how the architecture got here, [docs/manifesto/EVOLUTION_TIMELINE.md](docs/manifesto/EVOLUTION_TIMELINE.md) reconstructs the technical evolution over roughly six months, including the private incubation provenance. The public repository is the extraction, hardening, and packaging of work that started inside a private product.
+
+## Multi-provider architecture
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by `scripts/lib/providers/provider_constraints.yaml`, a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
-
-Claude has two explicit paths. The default worker path is Claude on subscription through interactive tmux, implemented in `scripts/lib/tmux_interactive_dispatch.py`; the opt-in burst path is Claude on the paid API through subprocess `claude -p`.
 
 Kimi runs through the Kimi CLI with OAuth. VNX does not call the Moonshot SDK directly for that lane, which keeps attribution and rate-limit behavior in one place.
 
 OpenRouter is the gateway lane for GLM-5.1 from Zhipu and other routed models. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
 
-The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is about 30% more effective on coding and tool tasks than a bare DeepSeek API call, because the harness adds tool-use loops, smart-context injection, and structured diff output that the raw API does not provide.
+The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is about 30% more effective on coding and tool tasks than a bare DeepSeek API call, because the harness adds tool-use loops, context injection, and structured diff output that the raw API does not provide. This is a single-operator measurement, not a benchmark.
 
-## Architecture
+### Billing as a consequence, not a goal
 
-VNX uses a T0 orchestrator and ephemeral workers. The old fixed T1-T3 mental model is no longer the core model; workers spawn per dispatch and leave behind receipts, reports, and worktree state.
+VNX treats AI coding tools as interactive CLI workers, not SDK calls. A consequence falls out of that choice. Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. Because the default Claude worker lane is an interactive tmux session, it stays on the subscription instead of the paid API lane. This describes current public policy; vendors can change their terms.
 
-The leaseless single-shot tmux dispatch lane lives in `scripts/lib/tmux_interactive_dispatch.py`. Per-worker ephemeral git worktree isolation lives in `scripts/lib/tmux_worktree.py`, including teardown classification for clean, committed or pushed, and dirty worktrees.
-
-Append-only NDJSON receipts are the PAST-forensics source of truth. `runtime_coordination.db` runs as SQLite WAL for real-time CURRENT state, and `quality_intelligence.db` stores patterns, antipatterns, and context injection data for the learning layer.
+## Compared to dmux
 
 The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), which also pairs tmux with per-pane git worktrees. My choices differ on ephemeral-per-dispatch workers instead of long-lived panes, NDJSON receipts instead of interactive merge as the main record, and a teardown classifier that preserves dirty or pushed work instead of treating cleanup as one state.
 
 ## Status
 
-I built this for my own work. It is open source because the architecture is portable. Use at your own discretion.
+Public 1.0 as of this README on 2026-05-30: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
-Public 1.0 status as of this README merge on 2026-05-28: the package is pip-installable, `VERSION` is `1.0.0`, and the operator binary is still required for the full command surface. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md), [FEATURE_PLAN.md](FEATURE_PLAN.md), and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+I built this for my own work. Use at your own discretion.
 
 ## Credits
 
