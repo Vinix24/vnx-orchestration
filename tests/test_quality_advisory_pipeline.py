@@ -49,16 +49,16 @@ class TestFileSizeGates:
         assert "600" in checks[0].message
 
     def test_python_file_blocking_threshold(self, tmp_path):
-        """Python file over blocking threshold should produce blocking check."""
+        """Python file over soft-max threshold should produce warning (advisory, not blocking)."""
         test_file = tmp_path / "test.py"
-        test_file.write_text("\n" * 900)  # 900 lines, over 800 blocking
+        test_file.write_text("\n" * 900)  # 900 lines, over 800 soft max
 
         checks = check_file_size(test_file)
 
         assert len(checks) == 1
-        assert checks[0].severity == "blocking"
+        assert checks[0].severity == "warning"
         assert checks[0].check_id == "file_size_blocking"
-        assert checks[0].action_required is True
+        assert checks[0].action_required is False
 
     def test_shell_file_warning_threshold(self, tmp_path):
         """Shell file over warning threshold should produce warning."""
@@ -71,14 +71,14 @@ class TestFileSizeGates:
         assert checks[0].severity == "warning"
 
     def test_shell_file_blocking_threshold(self, tmp_path):
-        """Shell file over blocking threshold should produce blocking check."""
+        """Shell file over soft-max threshold should produce warning (advisory, not blocking)."""
         test_file = tmp_path / "test.sh"
-        test_file.write_text("\n" * 650)  # 650 lines, over 600 blocking for shell
+        test_file.write_text("\n" * 650)  # 650 lines, over 600 soft max for shell
 
         checks = check_file_size(test_file)
 
         assert len(checks) == 1
-        assert checks[0].severity == "blocking"
+        assert checks[0].severity == "warning"
 
 
 class TestFunctionSizeGates:
@@ -114,9 +114,9 @@ def small_function():
         assert checks[0].symbol == "large_function"
 
     def test_python_function_blocking_threshold(self, tmp_path):
-        """Python function over blocking threshold should produce blocking check."""
+        """Python function over soft-max threshold should produce warning (advisory, not blocking)."""
         test_file = tmp_path / "test.py"
-        # Create a 75-line function (over 70 blocking threshold)
+        # Create a 75-line function (over 70 soft-max threshold)
         lines = ["def huge_function():"]
         for i in range(75):
             lines.append(f"    x{i} = {i}")
@@ -125,8 +125,8 @@ def small_function():
         checks = check_function_sizes(test_file)
 
         assert len(checks) == 1
-        assert checks[0].severity == "blocking"
-        assert checks[0].action_required is True
+        assert checks[0].severity == "warning"
+        assert checks[0].action_required is False
 
     def test_shell_function_warning_threshold(self, tmp_path):
         """Shell function over warning threshold should produce warning."""
@@ -142,6 +142,69 @@ def small_function():
 
         assert len(checks) == 1
         assert checks[0].severity == "warning"
+
+
+class TestSizeAdvisoryPolicy:
+    """Verify that NO size check emits severity=blocking (policy: advisory only)."""
+
+    def test_large_python_file_is_warning_not_blocking(self, tmp_path):
+        test_file = tmp_path / "big.py"
+        test_file.write_text("x = 1\n" * 900)
+        checks = check_file_size(test_file)
+        assert all(c.severity == "warning" for c in checks)
+        assert all(c.action_required is False for c in checks)
+
+    def test_large_python_function_is_warning_not_blocking(self, tmp_path):
+        test_file = tmp_path / "big.py"
+        lines = ["def huge():"]
+        for i in range(100):
+            lines.append(f"    x{i} = {i}")
+        test_file.write_text("\n".join(lines))
+        checks = check_function_sizes(test_file)
+        assert all(c.severity == "warning" for c in checks)
+        assert all(c.action_required is False for c in checks)
+
+    def test_large_shell_function_is_warning_not_blocking(self, tmp_path):
+        test_file = tmp_path / "big.sh"
+        lines = ["big_fn() {"]
+        for i in range(80):
+            lines.append(f"  echo {i}")
+        lines.append("}")
+        test_file.write_text("\n".join(lines))
+        checks = check_function_sizes(test_file)
+        assert all(c.severity == "warning" for c in checks)
+        assert all(c.action_required is False for c in checks)
+
+    def test_check_id_stable_for_dedup(self, tmp_path):
+        """check_id must stay 'file_size_blocking'/'function_size_blocking' for OI dedup."""
+        py_file = tmp_path / "big.py"
+        py_file.write_text("x = 1\n" * 900)
+        size_checks = check_file_size(py_file)
+        assert any(c.check_id == "file_size_blocking" for c in size_checks)
+
+        lines = ["def huge():"] + [f"    x{i} = {i}" for i in range(100)]
+        py_file.write_text("\n".join(lines))
+        func_checks = check_function_sizes(py_file)
+        assert any(c.check_id == "function_size_blocking" for c in func_checks)
+
+    def test_no_blocking_from_size_in_full_advisory(self, tmp_path):
+        """generate_quality_advisory must never emit a blocking check for size."""
+        big_py = tmp_path / "bloated.py"
+        lines = ["def oversized():"]
+        for i in range(100):
+            lines.append(f"    x{i} = {i}")
+        lines += ["x = 1"] * 850
+        big_py.write_text("\n".join(lines))
+
+        advisory = generate_quality_advisory([big_py], repo_root=tmp_path)
+
+        size_checks = [
+            c for c in advisory.checks
+            if c.get("check_id", "").startswith("file_size") or c.get("check_id", "").startswith("function_size")
+        ]
+        assert len(size_checks) >= 1
+        assert all(c.get("severity") == "warning" for c in size_checks)
+        assert all(c.get("action_required") is False for c in size_checks)
 
 
 class TestRiskScoring:
