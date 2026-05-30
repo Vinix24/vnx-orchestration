@@ -56,7 +56,7 @@ def _resolve_project_id(explicit: Optional[str]) -> str:
         if pid:
             return pid
     except Exception:  # noqa: BLE001 — project_scope is optional in some contexts
-        pass
+        logger.debug("project_scope unavailable; falling back to VNX_PROJECT_ID env/default", exc_info=True)
     import os  # noqa: PLC0415
     return os.environ.get("VNX_PROJECT_ID", "vnx-dev")
 
