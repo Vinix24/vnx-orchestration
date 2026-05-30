@@ -355,12 +355,19 @@ def _bootstrap_runtime_dbs(data_root: Path, project_id: str | None = None) -> No
     from migrations.auto_apply import auto_apply  # type: ignore
     auto_apply(db_path)
 
-    # Safety: ensure runtime_schema_version has at least version 10 stamped so
-    # vnx doctor's schema check does not warn "no such table" or "version < 10".
-    # The migration chain should stamp it, but this INSERT OR IGNORE is a
-    # defense-in-depth guard for edge cases (e.g. partial prior run).
+    # Safety: ensure runtime_schema_version table exists and has at least version 10
+    # stamped. The migration chain creates and stamps it, but if init_schema ran
+    # against a packaged wheel where the schema SQL path resolves differently, the
+    # table may be absent — CREATE TABLE IF NOT EXISTS ensures the INSERT OR IGNORE
+    # below never hits "no such table: runtime_schema_version" (swallowed in caller).
     import sqlite3 as _sqlite3
     with _sqlite3.connect(str(db_path)) as _conn:
+        _conn.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_schema_version ("
+            "version INTEGER PRIMARY KEY, "
+            "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
+            "description TEXT NOT NULL)"
+        )
         _conn.execute(
             "INSERT OR IGNORE INTO runtime_schema_version (version, description) "
             "VALUES (10, 'runtime_coordination bootstrap')"
