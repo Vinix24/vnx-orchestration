@@ -911,9 +911,9 @@ Je bent een sales analyst voor een B2B software bedrijf.
 Er is een nieuw contactformulier binnengekomen. Beoordeel deze lead.
 
 Formulierdata:
-- Naam: Pieter Jansen
-- Email: p.jansen@vandermeijden-installatie.nl
-- Bedrijf: Van der Meijden Installatietechniek
+- Naam: Jan de Vries
+- Email: lead@example.com
+- Bedrijf: Example Company BV
 - Functie: Directeur-eigenaar
 - Aantal medewerkers: 35
 - Vraag: "We zoeken een betere manier om onze offertes en projecten bij te houden. Nu werken we nog met Excel maar dat wordt onoverzichtelijk bij 50+ lopende projecten. Budget is niet het probleem, we willen vooral iets dat onze monteurs ook in het veld kunnen gebruiken."
