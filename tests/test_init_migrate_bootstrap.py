@@ -306,6 +306,111 @@ class TestPoolStatusErrorMessage:
 # Fail-loud regression: bootstrap failure must exit non-zero
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Fresh pip install: data root outside project dir (XDG / VNX_DATA_HOME)
+# ---------------------------------------------------------------------------
+
+class TestFreshInstallPathResolution:
+    """track list and pool_manager must use the canonical data root, not hardcoded .vnx-data/.
+
+    Regression for: fresh pip install where data root is the XDG path
+    (~/.local/share/vnx/<project_id>/) rather than <project_dir>/.vnx-data/.
+    Both vnx track list and vnx pool status were looking in the hardcoded
+    project-local path and failing with "unable to open database file".
+    """
+
+    def test_track_list_returns_empty_when_data_root_outside_project(self, tmp_path, monkeypatch):
+        """vnx track list must not error when the DB is at an XDG-style data root."""
+        xdg_data_root = tmp_path / "xdg_data"
+        project_dir = tmp_path / "my_project"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(xdg_data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        rc = vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+        assert rc == 0
+
+        db_xdg = xdg_data_root / "state" / "runtime_coordination.db"
+        db_local = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+        assert db_xdg.exists(), "migrate must create DB at the resolved data root"
+        assert not db_local.exists(), "migrate must not create DB at hardcoded .vnx-data/"
+
+        from vnx_cli.commands.track import _resolve_state_dir
+        state_dir = _resolve_state_dir(project_dir)
+        assert str(xdg_data_root) in str(state_dir), (
+            f"_resolve_state_dir must use canonical data root for pip installs; got {state_dir}"
+        )
+
+        from tracks import list_tracks
+        result = list_tracks(state_dir, "test-project")
+        assert result == [], f"list_tracks must return [] on fresh DB, got {result!r}"
+
+    def test_track_resolve_state_dir_matches_migrate_data_root(self, tmp_path, monkeypatch):
+        """_resolve_state_dir must resolve to the same root that vnx migrate writes to."""
+        data_root = tmp_path / "explicit_root"
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        from vnx_cli.commands.track import _resolve_state_dir
+
+        vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+
+        state_dir = _resolve_state_dir(project_dir)
+        expected_db = state_dir / "runtime_coordination.db"
+        assert expected_db.exists(), (
+            f"_resolve_state_dir must point to the DB created by vnx migrate; "
+            f"expected {expected_db}"
+        )
+
+    def test_pool_default_db_path_honors_vnx_data_dir(self, tmp_path, monkeypatch):
+        """pool_manager._default_db_path must use the canonical data root (not hardcoded .vnx-data)."""
+        xdg_root = tmp_path / "xdg_pool"
+        monkeypatch.setenv("VNX_DATA_DIR", str(xdg_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from pool_manager import _default_db_path
+        db_path = _default_db_path("test-project")
+        assert str(xdg_root) in str(db_path), (
+            f"_default_db_path must use canonical data root for pip installs; got {db_path}"
+        )
+        assert ".vnx-data" not in str(db_path), (
+            f"_default_db_path must not hardcode .vnx-data when VNX_DATA_DIR is set; got {db_path}"
+        )
+
+    def test_track_list_error_free_after_migrate_no_local_vnx_data(self, tmp_path, monkeypatch):
+        """Acceptance test: init+migrate in a fresh project without .vnx-data/ locally."""
+        data_root = tmp_path / "runtime"
+        project_dir = tmp_path / "fresh_proj"
+        project_dir.mkdir()
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import vnx_init
+        from vnx_cli.commands.migrate import vnx_migrate
+
+        rc_init = vnx_init(_init_args(project_dir))
+        assert rc_init == 0, "vnx init must succeed"
+
+        rc_migrate = vnx_migrate(argparse.Namespace(project_dir=str(project_dir)))
+        assert rc_migrate == 0, "vnx migrate must succeed after init"
+
+        from vnx_cli.commands.track import _resolve_state_dir
+        from tracks import list_tracks
+
+        state_dir = _resolve_state_dir(project_dir)
+        tracks = list_tracks(state_dir, "fresh-proj")
+        assert tracks == [], (
+            f"vnx track list must return empty (not raise) after init+migrate; got {tracks!r}"
+        )
+
+
 class TestBootstrapFailLoud:
     """vnx init and vnx migrate must exit NON-ZERO when DB bootstrap fails.
 
