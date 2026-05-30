@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 6 P4 — One-shot data import: live migrator.
 
-Attaches all 4 source DBs (`vnx-dev`, `mc`, `sales-copilot`, `seocrawler-v2`)
+Attaches all 4 source DBs (`vnx-dev`, `mc`, `project-a`, `example-project`)
 in `?mode=ro` and copies their `quality_intelligence.db` and
 `runtime_coordination.db` rows into the central
 ``~/.vnx-data/state/quality_intelligence.db`` and

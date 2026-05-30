@@ -3,7 +3,7 @@
 
 Usage:
     # Mine global patterns across registered projects:
-    python3 scripts/intelligence_aggregator_cli.py mine --projects vnx-dev,sales-copilot,mc
+    python3 scripts/intelligence_aggregator_cli.py mine --projects vnx-dev,project-a,mc
 
     # Get recommendations for a project:
     python3 scripts/intelligence_aggregator_cli.py recommend --target vnx-dev

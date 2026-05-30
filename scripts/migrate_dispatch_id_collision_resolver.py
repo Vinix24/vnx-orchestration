@@ -422,7 +422,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-db", type=Path, required=True,
                    help="Path to the source SQLite DB file to resolve")
     p.add_argument("--project-id", required=True,
-                   help="Project identifier (e.g. seocrawler-v2)")
+                   help="Project identifier (e.g. example-project)")
     p.add_argument("--collision-list", type=Path, required=True,
                    help="Path to migrate_dry_run JSON manifest or flat list of IDs")
     p.add_argument(

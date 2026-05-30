@@ -102,7 +102,7 @@ const supabaseConfig = {
 ### Health Checks
 ```sql
 -- Database size monitoring
-SELECT pg_database_size('seocrawler_db');
+SELECT pg_database_size('example_db');
 
 -- Connection monitoring
 SELECT count(*) FROM pg_stat_activity;

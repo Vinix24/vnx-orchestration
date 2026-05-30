@@ -26,7 +26,7 @@ projects:
     coord_db: "{state}/runtime_coordination.db"
     intel_db: "{state}/quality_intelligence.db"
 
-  - id: sales-copilot
+  - id: project-a
     root: /path/to/project
     coord_db: "{state}/runtime_coordination.db"
     intel_db: "{state}/quality_intelligence.db"
@@ -36,7 +36,7 @@ projects:
     coord_db: "{state}/runtime_coordination.db"
     intel_db: "{state}/quality_intelligence.db"
 
-  - id: seocrawler-v2
+  - id: example-project
     root: /path/to/project
     coord_db: "{state}/runtime_coordination.db"
     intel_db: "{state}/quality_intelligence.db"

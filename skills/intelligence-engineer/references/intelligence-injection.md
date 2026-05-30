@@ -72,7 +72,7 @@ Pattern stored under `vnx-roadmap-autopilot`; registry renames to `vnx-orchestra
 Pattern starts at 0.5 confidence. If it's used 100x with success → bumped to 0.99. But if usage is biased (always for one type of dispatch), it shouldn't generalize. The `confidence_events` table records every change for audit; periodically review.
 
 ### Cross-project leakage (architectural risk)
-If you forget `WHERE project_id = ?` in a query, you'll inject mc's patterns into seocrawler's T0. This is exactly the kind of bug `database-engineer` skill exists to prevent.
+If you forget `WHERE project_id = ?` in a query, you'll inject mc's patterns into project-a's T0. This is exactly the kind of bug `database-engineer` skill exists to prevent.
 
 ## Federation (cross-project insights, P1)
 
