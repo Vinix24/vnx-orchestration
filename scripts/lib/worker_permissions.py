@@ -22,6 +22,7 @@ BILLING SAFETY: No Anthropic SDK. No api.anthropic.com calls.
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -29,6 +30,16 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Essential tools a headless code worker needs to read, write, and commit code.
+# Used as the fallback allow-list when no role-specific profile is available so
+# capability scoping never strips a worker of its ability to do backend work.
+DEFAULT_CODE_WORKER_TOOLS = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Grep", "Glob"]
+
+# Empty ambient-MCP config string handed to `claude --mcp-config`. Paired with
+# `--strict-mcp-config` this makes a worker reach ZERO MCP servers (no Supabase,
+# n8n, Gmail, etc.) — the core security win of the interim capability scoping.
+EMPTY_MCP_CONFIG = json.dumps({"mcpServers": {}}, separators=(",", ":"))
 
 
 def _resolve_permissions_yaml() -> Path:
@@ -124,6 +135,89 @@ def generate_claude_settings(profile: PermissionProfile) -> dict:
     return {
         "allowedTools": allowed,
     }
+
+
+def worker_scoped_enabled() -> bool:
+    """Whether headless workers spawn with scoped capabilities (default ON).
+
+    Returns True unless ``VNX_WORKER_SCOPED`` is explicitly set to a falsey value
+    (``0`` / ``false`` / ``no`` / ``off``). The falsey setting restores the legacy
+    ``--dangerously-skip-permissions`` posture — emergency rollback only, since it
+    re-opens the full ambient-MCP blast radius.
+    """
+    return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def default_code_worker_profile() -> PermissionProfile:
+    """Functional least-privilege profile for a headless code worker.
+
+    Used when no role-specific profile is available (unknown role, or a role whose
+    YAML profile declares no allowed_tools) so the scoped spawn still permits the
+    essential code-worker tools — never MCP, never skip-permissions.
+    """
+    return PermissionProfile(
+        role="code-worker",
+        allowed_tools=list(DEFAULT_CODE_WORKER_TOOLS),
+        denied_tools=["WebSearch", "WebFetch"],
+    )
+
+
+def resolve_worker_profile(
+    role: Optional[str],
+    yaml_path: Path | None = None,
+) -> PermissionProfile:
+    """Resolve a PermissionProfile for *role*, falling back to the code-worker default.
+
+    A missing/unknown role — or a role whose profile declares no allowed_tools —
+    yields :func:`default_code_worker_profile` so capability scoping never strips a
+    headless worker of the tools it needs to write code and commit.
+    """
+    if role:
+        profile = load_permissions(role, yaml_path)
+        if profile.allowed_tools:
+            return profile
+    return default_code_worker_profile()
+
+
+def build_claude_scope_args(
+    profile: PermissionProfile,
+    *,
+    permission_mode: str = "acceptEdits",
+) -> list[str]:
+    """Materialize a PermissionProfile into scoping CLI args for a headless ``claude``.
+
+    Replaces the blanket ``--dangerously-skip-permissions`` with a scoped-but-
+    functional posture:
+
+      - ``--permission-mode <mode>`` — ``acceptEdits`` auto-approves edits so a
+        no-TTY worker proceeds without prompts, while Bash/MCP stay gated.
+      - ``--strict-mcp-config --mcp-config {"mcpServers":{}}`` — ignore every
+        ambient MCP source; the default worker reaches ZERO MCP servers.
+      - ``--allowedTools`` / ``--disallowedTools`` — the profile's tool allow/deny
+        lists (the previously-dead :func:`generate_claude_settings`, now live).
+
+    The empty MCP config is the interim default; Wave 2 of the unified-dispatch
+    layer substitutes a populated config when a role declares ``mcp_servers``.
+    """
+    settings = generate_claude_settings(profile)
+    allowed = settings.get("allowedTools", [])
+    args = [
+        "--permission-mode",
+        permission_mode,
+        "--strict-mcp-config",
+        "--mcp-config",
+        EMPTY_MCP_CONFIG,
+    ]
+    if allowed:
+        args += ["--allowedTools", ",".join(allowed)]
+    if profile.denied_tools:
+        args += ["--disallowedTools", ",".join(profile.denied_tools)]
+    return args
 
 
 def generate_permission_preamble(profile: PermissionProfile) -> str:

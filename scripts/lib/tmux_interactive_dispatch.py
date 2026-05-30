@@ -39,6 +39,23 @@ logger = logging.getLogger(__name__)
 
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
 
+# Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4/§5):
+# detached ephemeral spawns drop --dangerously-skip-permissions for an empty
+# ambient MCP + acceptEdits posture. Imported defensively; if unavailable the
+# detached branch keeps the legacy flag rather than crash.
+try:
+    from worker_permissions import EMPTY_MCP_CONFIG, worker_scoped_enabled  # noqa: E402
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
+
+    def worker_scoped_enabled() -> bool:
+        return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+
 DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
 
 # Only simple identifiers are valid model names (no whitespace or shell metacharacters).
@@ -148,7 +165,18 @@ def _default_launch_command(
                 )
     flags = ""
     if skip_permissions:
-        flags = " --dangerously-skip-permissions"
+        # Detached/autonomous run (no TTY to answer prompts). Default: scope the
+        # spawn — empty ambient MCP + acceptEdits — instead of the blanket
+        # skip-permissions blast radius. VNX_WORKER_SCOPED=0 restores the legacy
+        # flag for emergency rollback.
+        if worker_scoped_enabled():
+            flags = (
+                " --permission-mode acceptEdits"
+                " --strict-mcp-config"
+                f" --mcp-config '{EMPTY_MCP_CONFIG}'"
+            )
+        else:
+            flags = " --dangerously-skip-permissions"
     if extra_flags:
         flags = f"{flags} {extra_flags}".rstrip()
     return f"source ~/.zshrc 2>/dev/null; claude --model {model}{flags}"
