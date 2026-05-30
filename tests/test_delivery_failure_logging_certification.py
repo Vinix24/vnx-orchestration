@@ -48,12 +48,13 @@ from failure_classifier import (
 # =============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DISPATCHER = PROJECT_ROOT / "scripts" / "dispatcher_minimal.sh"
+SCRIPT_DIR = PROJECT_ROOT / "scripts"
+DISPATCH_LOGGING = SCRIPT_DIR / "lib" / "dispatch_logging.sh"
 
 
 def _extract_classify_function() -> str:
-    """Extract _classify_blocked_dispatch() from the dispatcher."""
-    content = DISPATCHER.read_text(encoding="utf-8")
+    """Extract _classify_blocked_dispatch() from dispatch_logging.sh (moved from dispatcher)."""
+    content = DISPATCH_LOGGING.read_text(encoding="utf-8")
     start = content.index("_classify_blocked_dispatch() {")
     brace_depth = 0
     end = start
