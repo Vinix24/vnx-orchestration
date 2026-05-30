@@ -424,7 +424,7 @@ class TestBootstrapFailLoud:
 
         import vnx_cli.commands.init_cmd as init_mod
 
-        def _fail(data_root):
+        def _fail(data_root, **kwargs):
             raise RuntimeError("simulated DB bootstrap failure")
 
         monkeypatch.setattr(init_mod, "_bootstrap_runtime_dbs", _fail)
@@ -442,7 +442,7 @@ class TestBootstrapFailLoud:
 
         import vnx_cli.commands.migrate as migrate_mod
 
-        def _fail(data_root):
+        def _fail(data_root, **kwargs):
             raise RuntimeError("simulated migration failure")
 
         monkeypatch.setattr(migrate_mod, "_bootstrap_runtime_dbs", _fail)
@@ -460,7 +460,7 @@ class TestBootstrapFailLoud:
 
         import vnx_cli.commands.init_cmd as init_mod
 
-        def _fail(data_root):
+        def _fail(data_root, **kwargs):
             raise RuntimeError("injected failure")
 
         monkeypatch.setattr(init_mod, "_bootstrap_runtime_dbs", _fail)
