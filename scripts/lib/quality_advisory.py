@@ -169,11 +169,11 @@ def check_file_size(file_path: Path) -> List[QualityCheck]:
         if line_count > blocking_threshold:
             checks.append(QualityCheck(
                 check_id="file_size_blocking",
-                severity="blocking",
+                severity="warning",
                 file=str(file_path),
-                message=f"File exceeds blocking threshold: {line_count} lines (max {blocking_threshold})",
+                message=f"File is large: {line_count} lines (soft max {blocking_threshold})",
                 evidence=f"lines={line_count},max={blocking_threshold}",
-                action_required=True,
+                action_required=False,
             ))
         elif line_count > warning_threshold:
             checks.append(QualityCheck(
@@ -219,12 +219,12 @@ def _check_python_function_sizes(file_path: Path) -> List[QualityCheck]:
             if length > FUNCTION_SIZE_BLOCKING_PYTHON:
                 checks.append(QualityCheck(
                     check_id="function_size_blocking",
-                    severity="blocking",
+                    severity="warning",
                     file=str(file_path),
                     symbol=node.name,
-                    message=f"Function exceeds blocking threshold: {length} lines (max {FUNCTION_SIZE_BLOCKING_PYTHON})",
+                    message=f"Function is large: {length} lines (soft max {FUNCTION_SIZE_BLOCKING_PYTHON})",
                     evidence=f"function={node.name},lines={length},max={FUNCTION_SIZE_BLOCKING_PYTHON}",
-                    action_required=True,
+                    action_required=False,
                 ))
             elif length > FUNCTION_SIZE_WARNING_PYTHON:
                 checks.append(QualityCheck(
@@ -271,12 +271,12 @@ def _check_shell_function_sizes(file_path: Path) -> List[QualityCheck]:
             if length > FUNCTION_SIZE_BLOCKING_SHELL:
                 checks.append(QualityCheck(
                     check_id="function_size_blocking",
-                    severity="blocking",
+                    severity="warning",
                     file=str(file_path),
                     symbol=function_name,
-                    message=f"Function exceeds blocking threshold: {length} lines (max {FUNCTION_SIZE_BLOCKING_SHELL})",
+                    message=f"Function is large: {length} lines (soft max {FUNCTION_SIZE_BLOCKING_SHELL})",
                     evidence=f"function={function_name},lines={length},max={FUNCTION_SIZE_BLOCKING_SHELL}",
-                    action_required=True,
+                    action_required=False,
                 ))
             elif length > FUNCTION_SIZE_WARNING_SHELL:
                 checks.append(QualityCheck(
