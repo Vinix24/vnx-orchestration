@@ -155,9 +155,16 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         cache = int(details.get("cached_tokens", 0) or 0) or int(raw.get("prompt_cache_hit_tokens", 0) or 0)
         usage["cache_hit"] = cache
     elif provider in ("codex", "gemini", "kimi"):
-        usage["input"] = int(raw.get("input_tokens", 0) or 0)
-        usage["output"] = int(raw.get("output_tokens", 0) or 0)
-        usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
+        # Accept both the raw spawn shape (input_tokens/output_tokens/cache_read_tokens)
+        # AND an already-normalized shape (input/output/cache_read or cache_hit). A
+        # normalized dict reaching here previously yielded 0 — which then zeroed the
+        # receipt token_usage while the cost-event (computed from the same dict
+        # elsewhere) carried real numbers. Unify the extraction so both agree.
+        usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
+        usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
+        usage["cache_hit"] = int(
+            raw.get("cache_read_tokens", raw.get("cache_read", raw.get("cache_hit", 0))) or 0
+        )
     elif provider == "claude":
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
@@ -255,11 +262,22 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Opt
     if provider == "kimi":
         return _compute_kimi_cost(model, token_usage)
     pricing = _load_pricing_from_registry(provider, model)
-    if not pricing:
+    if pricing:
+        cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
+        cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
+        return round(cost_in + cost_out, 8)
+    # Registry miss — fall back to the provider_costs rate table so API lanes
+    # (litellm:deepseek/zai, codex-API, gemini) still resolve to real dollars
+    # rather than silently landing at 0. The rate table returns None for
+    # subscription/OAuth flat lanes, which is the correct documented-$0 result.
+    try:
+        from provider_costs import resolve_cost_usd  # noqa: PLC0415
+        return resolve_cost_usd(
+            provider, model, token_usage.get("input", 0), token_usage.get("output", 0)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_compute_cost: rate-table fallback failed for %s/%s: %s", provider, model, exc)
         return None
-    cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
-    cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
-    return round(cost_in + cost_out, 8)
 
 
 def _build_frontmatter(
@@ -306,6 +324,48 @@ def _build_frontmatter(
 _EMIT_MAX_RETRIES = 3
 _EMIT_RETRY_DELAY = 0.5  # seconds; multiplied by attempt number for backoff
 
+# Terminal → track mapping for headless provider dispatches (T0 plans, T1/T2/T3
+# execute Track A/B/C). Unknown terminals fall back to "headless".
+_TERMINAL_TRACK = {"T1": "A", "T2": "B", "T3": "C"}
+
+
+def _record_provider_metadata(
+    args: argparse.Namespace,
+    provider: str,
+    status: str,
+    report_path: Path,
+    state_dir: Path,
+) -> None:
+    """Best-effort: upsert a provider-stamped dispatch_metadata row.
+
+    This is what makes the self-learning/intelligence layer provider-aware: the
+    headless multi-provider path previously wrote NO dispatch_metadata row, so
+    non-Claude work created zero intelligence rows and the receipt processor's
+    outcome UPDATE was a silent no-op. Failures here never abort the dispatch.
+    """
+    try:
+        from dispatch_metadata_db import upsert_dispatch_provider_row  # noqa: PLC0415
+        db_path = Path(state_dir) / "quality_intelligence.db"
+        terminal = getattr(args, "terminal_id", "") or ""
+        upsert_dispatch_provider_row(
+            db_path,
+            dispatch_id=args.dispatch_id,
+            terminal=terminal,
+            provider=provider,
+            track=_TERMINAL_TRACK.get(terminal, "headless"),
+            role=getattr(args, "role", None),
+            gate=getattr(args, "gate", None) or None,
+            pr_id=getattr(args, "pr_id", None),
+            outcome_status=status,
+            report_path=str(report_path),
+            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+        )
+    except Exception as exc:  # noqa: BLE001 — metadata logging is non-fatal
+        logger.warning(
+            "_record_provider_metadata: failed for dispatch=%s provider=%s (non-fatal): %s",
+            getattr(args, "dispatch_id", "?"), provider, exc,
+        )
+
 
 def _emit_governance(
     args: argparse.Namespace,
@@ -332,6 +392,11 @@ def _emit_governance(
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
+    # Deterministic report path — emitted below by emit_unified_report. Computed
+    # up front so the receipt can carry the linkage even though the report write
+    # happens afterward (the path string is stable regardless of write order).
+    report_path = data_dir / "unified_reports" / f"{args.dispatch_id}.md"
+
     # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
     from provider_costs import emit_provider_cost  # noqa: PLC0415
     emit_provider_cost(
@@ -343,6 +408,11 @@ def _emit_governance(
         dispatch_id=args.dispatch_id,
         project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
     )
+
+    # Provider-aware self-learning: stamp a dispatch_metadata row so EVERY governed
+    # dispatch (incl. non-Claude) feeds the intelligence layer tagged by provider.
+    # Best-effort — metadata logging is non-fatal to the dispatch.
+    _record_provider_metadata(args, provider, status, report_path, state_dir)
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
@@ -360,6 +430,7 @@ def _emit_governance(
                 token_usage=token_usage,
                 cost_usd=cost_usd,
                 state_dir=state_dir,
+                report_path=str(report_path),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break

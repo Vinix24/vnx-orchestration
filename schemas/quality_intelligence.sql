@@ -519,6 +519,7 @@ CREATE TABLE IF NOT EXISTS dispatch_metadata (
     dispatch_id TEXT NOT NULL UNIQUE,
     terminal TEXT NOT NULL,
     track TEXT NOT NULL,
+    provider TEXT,
     role TEXT,
     skill_name TEXT,
     gate TEXT,
@@ -544,6 +545,12 @@ CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role);
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate);
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status);
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC);
+-- ADR-007: provider is a descriptive (non-key) column, so it carries no UNIQUE
+-- constraint. project_id is added by the multi-tenant migration (0010/0015), so
+-- the base schema indexes provider alone; _migrate_v21 upgrades this to the
+-- composite (project_id, provider) index once project_id exists, for
+-- tenant-scoped per-provider self-learning analytics.
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider ON dispatch_metadata (provider);
 
 -- Analytics views for dispatch correlation
 
@@ -704,3 +711,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS adrs_fts USING fts5(
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.3.0-adr-registry', 'Add adrs table + FTS5 virtual table + sync triggers (PR-INT-1)');
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.4.0-provider-aware', 'Add provider column to dispatch_metadata for provider-aware self-learning intelligence (non-Claude parity)');

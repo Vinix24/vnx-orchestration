@@ -23,7 +23,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 20
+HIGHEST_QI_VERSION = 21
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -718,6 +718,39 @@ def _migrate_v20(conn: sqlite3.Connection) -> None:
         log('INFO', 'Migrated: created dream_pattern_archives table + index (ADR-019, ADR-007)')
 
 
+def _migrate_v21(conn: sqlite3.Connection) -> None:
+    """V21: provider column on dispatch_metadata (provider-aware self-learning).
+
+    Non-Claude dispatches (codex/gemini/kimi/litellm) flow through
+    provider_dispatch._emit_governance, which now stamps the provider into the
+    dispatch_metadata row so the self-learning/intelligence layer is no longer
+    provider-blind.
+
+    ADR-007: provider is a descriptive (non-key) column, so it does not require a
+    composite UNIQUE constraint. The composite (project_id, provider) index is
+    created only when project_id already exists (added by the 0010/0015
+    multi-tenant migrations); otherwise a plain (provider) index is created and
+    the composite is established when project_id lands. This keeps the column
+    tenant-scoped-queryable without ordering coupling between the two migration
+    runners.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN provider TEXT")
+        log('INFO', 'Migrated dispatch_metadata: added provider column')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "project_id" in cols:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
+            "ON dispatch_metadata (project_id, provider)"
+        )
+    else:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
+            "ON dispatch_metadata (provider)"
+        )
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -740,6 +773,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     18: _migrate_v18,
     19: _migrate_v19,
     20: _migrate_v20,
+    21: _migrate_v21,
 }
 
 
