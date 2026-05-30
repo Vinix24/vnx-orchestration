@@ -361,40 +361,37 @@ class TestReviewGateListsOnlyPending:
 
 
 class TestResolvePathsCanonical:
-    """_resolve_paths must use vnx_paths.resolve_state_dir, not the hardcoded local path.
+    """_resolve_paths(project_dir) must anchor on _engine.resolve_data_root, not ambient env.
 
-    Regression guard: before the fix, _resolve_paths returned
-    resolve_project_root() / '.vnx-data' / 'state' / 'quality_intelligence.db'
-    (the local worktree DB, schema v19, 951 patterns — causing the kimi hang).
-    After the fix it must use vnx_paths.resolve_state_dir() so the canonical
-    central DB is targeted (ADR-007: path is project_id-scoped).
+    Regression guard: before PR-RESOLVER-UNIFY, _resolve_paths called
+    resolve_state_dir() with no args, reading VNX_HOME/ambient env — so dream
+    opened a different DB than migrate wrote. After the fix it uses
+    _engine.resolve_data_root(project_dir)/state so pool/dream are co-located.
     """
 
-    def test_returns_canonical_db_path(self, tmp_path):
-        """db_path comes from resolve_state_dir(), not project_root/.vnx-data/state/."""
-        # Simulate: central state dir (e.g. ~/.vnx-data/vnx-dev/state)
-        # is different from the local project root's .vnx-data/state.
-        central_state = tmp_path / "central" / "vnx-dev" / "state"
-        local_root = tmp_path / "local-project"
-        local_root.mkdir(parents=True, exist_ok=True)
+    def test_returns_engine_anchored_db_path(self, tmp_path):
+        """db_path comes from _engine.resolve_data_root(project_dir), not resolve_state_dir()."""
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        central_data = tmp_path / "central" / "vnx-dev"
+        local_root = project_dir
 
-        # Ensure vnx_cli is importable
         repo_root = Path(__file__).resolve().parents[1]
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
 
-        import vnx_paths
         import project_root as pr_mod
+        import vnx_cli._engine as engine_mod
         import vnx_cli.commands.dream as dream_mod
 
-        with patch.object(vnx_paths, "resolve_state_dir", return_value=central_state), \
+        with patch.object(engine_mod, "resolve_data_root", return_value=central_data) as mock_rdr, \
              patch.object(pr_mod, "resolve_project_root", return_value=local_root):
-            _, db_path = dream_mod._resolve_paths()
+            _, db_path = dream_mod._resolve_paths(project_dir)
 
-        assert db_path == central_state / "quality_intelligence.db", (
-            f"Expected canonical central path, got {db_path}"
+        mock_rdr.assert_called_once_with(project_dir)
+        assert db_path == central_data / "state" / "quality_intelligence.db", (
+            f"Expected engine-anchored path, got {db_path}"
         )
-        # Must NOT be the old hardcoded local path
         assert db_path != local_root / ".vnx-data" / "state" / "quality_intelligence.db", (
             "db_path must not be the hardcoded local worktree path"
         )
@@ -478,13 +475,14 @@ class TestDreamGracefulExitOutsideProject:
         self._assert_guided_exit(capsys, exc_info)
 
     def test_resolve_paths_raises_system_exit_on_no_project(self, capsys):
-        """_resolve_paths() itself raises SystemExit(1) — not a raw RuntimeError."""
+        """_resolve_paths(project_dir) raises SystemExit(1) — not a raw RuntimeError."""
+        from pathlib import Path
         import project_root as pr_mod
         import vnx_cli.commands.dream as dream_mod
 
         with patch.object(pr_mod, "resolve_project_root", side_effect=RuntimeError("no git")):
             with pytest.raises(SystemExit) as exc_info:
-                dream_mod._resolve_paths()
+                dream_mod._resolve_paths(Path("."))
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "vnx init" in captured.err

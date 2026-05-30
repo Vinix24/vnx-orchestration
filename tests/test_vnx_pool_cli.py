@@ -24,6 +24,8 @@ if str(_REPO_ROOT) not in sys.path:
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+from unittest.mock import ANY  # noqa: E402
+
 from pool_decision_engine import Membership, PoolConfig, PoolDecision, PoolState  # noqa: E402
 from pool_manager import ExecResult  # noqa: E402
 from pool_reaper import ReapTarget  # noqa: E402
@@ -91,11 +93,12 @@ def _make_exec_result(
 # ---------------------------------------------------------------------------
 
 class TestCmdStatus:
-    def _args(self, project: str = "test-proj", pool_id=None, json_out=False):
+    def _args(self, project: str = "test-proj", pool_id=None, json_out=False, project_dir="."):
         args = MagicMock()
         args.project = project
         args.pool_id = pool_id
         args.json = json_out
+        args.project_dir = project_dir
         return args
 
     def test_status_outputs_pool_state(self, capsys):
@@ -140,8 +143,8 @@ class TestCmdStatus:
         out = capsys.readouterr().out
         assert "Project: vnx-dev" in out
         assert "Project: None" not in out
-        resolve_project_id.assert_called_once_with(None)
-        MockMgr.assert_called_once_with(project_id="vnx-dev", pool_id="default")
+        resolve_project_id.assert_called_once_with(None, ".")
+        MockMgr.assert_called_once_with(project_id="vnx-dev", pool_id="default", db_path=ANY)
 
     def test_status_json_uses_resolved_project_without_project(self, capsys):
         with (
@@ -154,15 +157,15 @@ class TestCmdStatus:
         assert rc == 0
         data = json.loads(capsys.readouterr().out)
         assert data["project_id"] == "vnx-dev"
-        resolve_project_id.assert_called_once_with(None)
-        MockMgr.assert_called_once_with(project_id="vnx-dev", pool_id="default")
+        resolve_project_id.assert_called_once_with(None, ".")
+        MockMgr.assert_called_once_with(project_id="vnx-dev", pool_id="default", db_path=ANY)
 
     def test_status_with_pool_id_passed_to_manager(self):
         with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
             mgr = MockMgr.return_value
             mgr.load_state.return_value = (_make_config(pool_id="batch"), _make_state(), [])
             main(argv=["status", "--project", "proj-a", "--pool-id", "batch"])
-        MockMgr.assert_called_once_with(project_id="proj-a", pool_id="batch")
+        MockMgr.assert_called_once_with(project_id="proj-a", pool_id="batch", db_path=ANY)
 
     def test_status_empty_pool(self, capsys):
         with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
@@ -179,11 +182,12 @@ class TestCmdStatus:
 # ---------------------------------------------------------------------------
 
 class TestCmdScale:
-    def _args(self, project="proj", pool_id=None, to=3):
+    def _args(self, project="proj", pool_id=None, to=3, project_dir="."):
         args = MagicMock()
         args.project = project
         args.pool_id = pool_id
         args.to = to
+        args.project_dir = project_dir
         return args
 
     def test_scale_invokes_execute_with_correct_decision(self, capsys):
@@ -255,7 +259,7 @@ class TestCmdScale:
 # ---------------------------------------------------------------------------
 
 class TestCmdConfig:
-    def _args(self, project="proj", pool_id=None, min=None, max=None, policy=None, cooldown=None):
+    def _args(self, project="proj", pool_id=None, min=None, max=None, policy=None, cooldown=None, project_dir="."):
         args = MagicMock()
         args.project = project
         args.pool_id = pool_id
@@ -263,6 +267,7 @@ class TestCmdConfig:
         args.max = max
         args.policy = policy
         args.cooldown = cooldown
+        args.project_dir = project_dir
         return args
 
     def test_config_updates_min_max_policy_cooldown(self, capsys):
@@ -355,11 +360,12 @@ class TestCmdConfig:
 # ---------------------------------------------------------------------------
 
 class TestCmdReap:
-    def _args(self, project="proj", pool_id=None, force=False):
+    def _args(self, project="proj", pool_id=None, force=False, project_dir="."):
         args = MagicMock()
         args.project = project
         args.pool_id = pool_id
         args.force = force
+        args.project_dir = project_dir
         return args
 
     def test_reap_dry_run_default(self, capsys):
@@ -424,20 +430,30 @@ class TestCmdReap:
 # ---------------------------------------------------------------------------
 
 class TestArgparseBehavior:
-    def test_project_required_for_scale(self):
-        with pytest.raises(SystemExit) as exc:
-            main(argv=["scale", "--to", "3"])
-        assert exc.value.code != 0
+    def test_scale_works_without_project_when_project_dir_given(self, capsys):
+        """--project is optional for scale; project_id derived from --project-dir."""
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.load_state.return_value = (_make_config(), _make_state(), [_make_member()])
+            mgr.execute.return_value = _make_exec_result()
+            rc = main(argv=["scale", "--to", "1", "--project-dir", "."])
+        assert rc == 0
 
-    def test_project_required_for_config(self):
-        with pytest.raises(SystemExit) as exc:
-            main(argv=["config", "--max", "5"])
-        assert exc.value.code != 0
+    def test_config_works_without_project_when_project_dir_given(self, capsys):
+        """--project is optional for config; project_id derived from --project-dir."""
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.repo.get_config.return_value = _make_config()
+            rc = main(argv=["config", "--max", "5", "--project-dir", "."])
+        assert rc == 0
 
-    def test_project_required_for_reap(self):
-        with pytest.raises(SystemExit) as exc:
-            main(argv=["reap"])
-        assert exc.value.code != 0
+    def test_reap_works_without_project_when_project_dir_given(self, capsys):
+        """--project is optional for reap; project_id derived from --project-dir."""
+        with patch("vnx_cli.commands.pool.PoolManager") as MockMgr:
+            mgr = MockMgr.return_value
+            mgr.load_state.return_value = (_make_config(), _make_state(), [])
+            rc = main(argv=["reap", "--project-dir", "."])
+        assert rc == 0
 
     def test_to_required_for_scale(self):
         with pytest.raises(SystemExit) as exc:
