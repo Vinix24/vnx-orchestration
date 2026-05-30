@@ -77,6 +77,9 @@ config/
 # Old testing directory (merged into tests/)
 testing/
 
+# Private per-project prep migrations — never publish
+schemas/prep_migrations/
+
 # Environment files
 .env
 .env.*

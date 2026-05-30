@@ -40,7 +40,7 @@ BEFORE proposing any design, fix, or implementation:
    - ADR-010 (subprocess adapter as canonical Claude routing)
    List any ADR that applies to the task and how it constrains your solution.
 
-2. **Consult relevant memory** in `~/.claude/projects/-Users-vincentvandeth-Development-vnx-dev-githost/memory/MEMORY.md` — particularly entries about past architectural incidents.
+2. **Consult relevant memory** in `~/.claude/projects/<your-project>/memory/MEMORY.md` — particularly entries about past architectural incidents.
 
 3. **Check P4-style incident docs** in `claudedocs/` for analogous failures (e.g., `2026-05-09-p4-migration-architecture-lessons.md` for multi-tenant migration patterns).
 

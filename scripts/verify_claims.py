@@ -10,7 +10,6 @@ Supported checks:
   - file_changed:  Checks git diff --name-only for the file
   - pattern_match: Checks regex against file content
   - no_pattern:    Checks regex does NOT match file content
-  - bash_check:    Runs a shell command and checks exit code 0
 
 Exit codes:
   0  - All claims verified (or no contract block present)
@@ -46,15 +45,6 @@ from contract_parser import (
     Claim,
     parse_contract_from_file,
     find_dispatch_for_receipt,
-)
-
-# Timeout for bash_check commands (seconds) — keep lightweight
-BASH_CHECK_TIMEOUT = 10
-
-# Disallowed command patterns for bash_check (security)
-_DISALLOWED_COMMANDS = re.compile(
-    r"\b(rm\s+-rf|sudo|mkfs|dd\s+if=|shutdown|reboot|kill\s+-9|pytest|python\s+-m\s+pytest)\b",
-    re.IGNORECASE,
 )
 
 
@@ -225,57 +215,11 @@ def _check_no_pattern(claim: Claim, project_root: Path) -> Dict[str, Any]:
         }
 
 
-def _check_bash(claim: Claim, project_root: Path) -> Dict[str, Any]:
-    """Run a shell command and verify exit code 0."""
-    command = claim.command or ""
-
-    # Security: block dangerous commands
-    if _DISALLOWED_COMMANDS.search(command):
-        return {
-            "claim_type": "bash_check",
-            "command": command,
-            "passed": False,
-            "detail": "command blocked by security filter (disallowed pattern)",
-        }
-
-    try:
-        result = subprocess.run(
-            ["bash", "-c", command],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=BASH_CHECK_TIMEOUT,
-        )
-        passed = result.returncode == 0
-        return {
-            "claim_type": "bash_check",
-            "command": command,
-            "passed": passed,
-            "exit_code": result.returncode,
-            "detail": "command exited 0" if passed else f"command exited {result.returncode}",
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "claim_type": "bash_check",
-            "command": command,
-            "passed": False,
-            "detail": f"command timed out after {BASH_CHECK_TIMEOUT}s",
-        }
-    except OSError as exc:
-        return {
-            "claim_type": "bash_check",
-            "command": command,
-            "passed": False,
-            "detail": f"execution error: {exc}",
-        }
-
-
 _CHECK_DISPATCH = {
     "file_exists": _check_file_exists,
     "file_changed": _check_file_changed,
     "pattern_match": _check_pattern_match,
     "no_pattern": _check_no_pattern,
-    "bash_check": _check_bash,
 }
 
 
