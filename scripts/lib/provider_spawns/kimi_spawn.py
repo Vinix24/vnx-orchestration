@@ -97,6 +97,20 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
 
     event_type = (raw.get("event_type") or raw.get("type") or "")
 
+    # Detect HTTP-error-like JSON responses (e.g. {"status": 403, "message": "quota exceeded"})
+    # that kimi CLI may emit before or instead of stream-json events.
+    http_status = raw.get("status") or raw.get("code") or raw.get("error_code") or 0
+    try:
+        http_status = int(http_status)
+    except (TypeError, ValueError):
+        http_status = 0
+    raw_msg = raw.get("message") or raw.get("msg") or raw.get("error") or ""
+    if http_status in (401, 403, 429) or (not event_type and _is_quota_or_auth_error(str(raw_msg))):
+        return make("error", {
+            "reason": "quota_or_auth",
+            "message": f"[quota_or_auth] provider=kimi http_status={http_status} raw={str(raw)[:200]}",
+        })
+
     if event_type in ("assistant_text", "text"):
         return make("text", {"text": str(raw.get("content", ""))})
 
@@ -185,9 +199,29 @@ class _KimiNormalizerHost(StreamingDrainerMixin):
         return normalize_kimi_event(raw, self._current_terminal_id, self._current_dispatch_id)
 
 
+_QUOTA_OR_AUTH_PATTERNS = frozenset({
+    "403", "quota", "rate_limit", "ratelimit", "rate limit",
+    "unauthorized", "unauthenticated", "forbidden", "authentication",
+    "token expired", "invalid token", "access denied",
+})
+
+
+def _is_quota_or_auth_error(text: str) -> bool:
+    """Return True when text contains a kimi quota / auth / 403 signal."""
+    lower = (text or "").lower()
+    return any(pat in lower for pat in _QUOTA_OR_AUTH_PATTERNS)
+
+
 def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) -> list:
-    """Build the kimi argv list."""
-    cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", prompt]
+    """Build the kimi argv list.
+
+    --yolo is omitted by default; set VNX_KIMI_YOLO=1 to opt in.
+    Kimi's --print mode is non-interactive and does not require --yolo.
+    """
+    cmd = ["kimi", "--print", "--output-format", "stream-json"]
+    if os.environ.get("VNX_KIMI_YOLO") == "1":
+        cmd.append("--yolo")
+    cmd.extend(["-p", prompt])
     if model:
         cmd.extend(["-m", model])
     if work_dir:
@@ -279,8 +313,17 @@ def _consume_kimi_stream(
             reason = (data.get("reason") or "").lower()
             if "timeout" in reason or "deadline" in reason:
                 timed_out = True
-            msg = data.get("message") or data.get("reason") or str(data)[:200]
-            errors_captured.append(str(msg))
+            raw_line = data.get("raw", "")
+            msg_text = data.get("message") or data.get("reason") or str(data)[:200]
+            # Detect quota / auth / 403 signals from non-JSON lines or JSON error bodies.
+            # The drainer stores the original line in data["raw"] when JSON parsing fails.
+            if _is_quota_or_auth_error(raw_line) or _is_quota_or_auth_error(str(msg_text)):
+                errors_captured.append(
+                    f"[quota_or_auth] provider=kimi reason=quota_or_auth"
+                    f" msg={str(msg_text)[:200]!r} raw={str(raw_line)[:200]!r}"
+                )
+            else:
+                errors_captured.append(str(msg_text))
 
         if health_monitor is not None:
             health_monitor.update(canonical_event)
