@@ -189,6 +189,9 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
     """Apply migration 0010 to runtime_coordination.db. Idempotent.
 
     Stamps ``runtime_schema_version`` to 10 if not already present.
+    Creates the table first when absent — on some pip-wheel paths init_schema
+    may resolve a different schema directory and skip the base schema that would
+    normally create it, leaving the INSERT below to hit "no such table".
     """
     path = Path(db_path)
     if not path.exists():
@@ -201,6 +204,12 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
         # Self-heal the 2nd schema-code drift: terminal_leases.worker_pid.
         # Independent of the project_id columns above; nullable INTEGER.
         worker_pid_status = ensure_worker_pid_column(conn)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_schema_version ("
+            "version INTEGER PRIMARY KEY, "
+            "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
+            "description TEXT NOT NULL)"
+        )
         conn.execute(
             "INSERT OR IGNORE INTO runtime_schema_version (version, description) "
             "VALUES (?, ?)",
