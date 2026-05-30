@@ -13,7 +13,6 @@ Supported claim types:
   - file_changed:  Assert a file was modified (git diff check)
   - pattern_match: Assert a regex pattern appears in a file
   - no_pattern:    Assert a regex pattern does NOT appear in a file
-  - bash_check:    Assert a shell command exits 0 (lightweight only)
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ CLAIM_TYPES = frozenset({
     "file_changed",
     "pattern_match",
     "no_pattern",
-    "bash_check",
 })
 
 # Regex patterns for each claim line format:
@@ -37,7 +35,6 @@ CLAIM_TYPES = frozenset({
 #   - file_changed: /path/to/file
 #   - pattern_match: "regex pattern" in /path/to/file
 #   - no_pattern: "regex pattern" in /path/to/file
-#   - bash_check: `command args`
 _CLAIM_PATTERNS = {
     "file_exists": re.compile(
         r"^-\s*file_exists:\s*(?P<path>.+?)\s*$"
@@ -51,9 +48,6 @@ _CLAIM_PATTERNS = {
     "no_pattern": re.compile(
         r'^-\s*no_pattern:\s*"(?P<pattern>.+?)"\s+in\s+(?P<path>.+?)\s*$'
     ),
-    "bash_check": re.compile(
-        r"^-\s*bash_check:\s*`(?P<command>.+?)`\s*$"
-    ),
 }
 
 
@@ -64,7 +58,6 @@ class Claim:
     claim_type: str
     path: Optional[str] = None
     pattern: Optional[str] = None
-    command: Optional[str] = None
     line_number: int = 0
     raw_line: str = ""
 
@@ -74,8 +67,6 @@ class Claim:
             d["path"] = self.path
         if self.pattern is not None:
             d["pattern"] = self.pattern
-        if self.command is not None:
-            d["command"] = self.command
         d["line_number"] = self.line_number
         d["raw_line"] = self.raw_line
         return d
@@ -139,7 +130,6 @@ def _parse_claim_line(line: str, line_number: int) -> Optional[Claim]:
                 claim_type=claim_type,
                 path=groups.get("path"),
                 pattern=groups.get("pattern"),
-                command=groups.get("command"),
                 line_number=line_number,
                 raw_line=stripped,
             )
