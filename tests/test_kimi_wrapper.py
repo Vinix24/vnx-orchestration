@@ -21,6 +21,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
+import os
+
 import kimi_wrapper
 
 
@@ -205,3 +207,114 @@ class TestKimiTokenParsing:
     def test_parse_invalid_json_returns_none(self):
         result = kimi_wrapper._parse_kimi_token_usage("not json\n")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# --yolo opt-in (Wave 2 robustness)
+# ---------------------------------------------------------------------------
+
+class TestKimiExecYoloOptIn:
+    def test_no_yolo_by_default(self, monkeypatch):
+        """--yolo must NOT appear in the argv when VNX_KIMI_YOLO is unset."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        monkeypatch.delenv("VNX_KIMI_YOLO", raising=False)
+        mock_proc = _make_popen_result()
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("provider_costs.emit_provider_cost"):
+            kimi_wrapper.kimi_exec("prompt", dispatch_id="d-yolo-off")
+
+        args, _ = mock_popen.call_args
+        cmd = args[0]
+        assert "--yolo" not in cmd
+
+    def test_yolo_present_when_env_set(self, monkeypatch):
+        """--yolo must appear in the argv when VNX_KIMI_YOLO=1."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        monkeypatch.setenv("VNX_KIMI_YOLO", "1")
+        mock_proc = _make_popen_result()
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("provider_costs.emit_provider_cost"):
+            kimi_wrapper.kimi_exec("prompt", dispatch_id="d-yolo-on")
+
+        args, _ = mock_popen.call_args
+        cmd = args[0]
+        assert "--yolo" in cmd
+
+    def test_yolo_absent_when_env_zero(self, monkeypatch):
+        """Explicit VNX_KIMI_YOLO=0 must still suppress --yolo."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        monkeypatch.setenv("VNX_KIMI_YOLO", "0")
+        mock_proc = _make_popen_result()
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("provider_costs.emit_provider_cost"):
+            kimi_wrapper.kimi_exec("prompt", dispatch_id="d-yolo-zero")
+
+        args, _ = mock_popen.call_args
+        cmd = args[0]
+        assert "--yolo" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Non-JSON / 403 error handling (Wave 2 robustness)
+# ---------------------------------------------------------------------------
+
+class TestKimiExecQuotaAuth:
+    def test_403_stdout_raises_structured_runtime_error(self, monkeypatch):
+        """A 403-style non-JSON stdout must raise RuntimeError with reason=quota_or_auth."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        stdout_403 = "HTTP/1.1 403 Forbidden"
+        mock_proc = _make_popen_result(stdout=stdout_403, returncode=1)
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc), \
+             patch("provider_costs.emit_provider_cost"):
+            with pytest.raises(RuntimeError) as exc_info:
+                kimi_wrapper.kimi_exec("prompt", dispatch_id="d-403")
+
+        msg = str(exc_info.value)
+        assert "quota_or_auth" in msg
+        assert "403" in msg
+
+    def test_quota_exceeded_stdout_raises_structured_error(self, monkeypatch):
+        """'quota exceeded' in stdout must raise RuntimeError with reason=quota_or_auth."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        mock_proc = _make_popen_result(stdout="quota exceeded for account\n", returncode=1)
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc), \
+             patch("provider_costs.emit_provider_cost"):
+            with pytest.raises(RuntimeError) as exc_info:
+                kimi_wrapper.kimi_exec("prompt", dispatch_id="d-quota")
+
+        msg = str(exc_info.value)
+        assert "quota_or_auth" in msg
+
+    def test_unauthorized_stdout_raises_structured_error(self, monkeypatch):
+        """'unauthorized' in stdout must raise RuntimeError with reason=quota_or_auth."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        mock_proc = _make_popen_result(stdout="401 Unauthorized: token expired", returncode=1)
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc), \
+             patch("provider_costs.emit_provider_cost"):
+            with pytest.raises(RuntimeError) as exc_info:
+                kimi_wrapper.kimi_exec("prompt", dispatch_id="d-401")
+
+        msg = str(exc_info.value)
+        assert "quota_or_auth" in msg
+
+    def test_generic_nonzero_exit_raises_plain_error(self, monkeypatch):
+        """A non-quota non-zero exit must still raise RuntimeError (plain message)."""
+        monkeypatch.setenv("VNX_PROJECT_ID", "test-proj")
+        mock_proc = _make_popen_result(stdout="", returncode=2)
+
+        with patch("kimi_wrapper.subprocess.Popen", return_value=mock_proc), \
+             patch("provider_costs.emit_provider_cost"):
+            with pytest.raises(RuntimeError, match="kimi_exec failed"):
+                kimi_wrapper.kimi_exec("prompt", dispatch_id="d-generic-fail")
+
+    def test_is_quota_or_auth_line_helper(self):
+        assert kimi_wrapper._is_quota_or_auth_line("HTTP/1.1 403 Forbidden")
+        assert kimi_wrapper._is_quota_or_auth_line("quota exceeded for account")
+        assert kimi_wrapper._is_quota_or_auth_line("401 Unauthorized")
+        assert not kimi_wrapper._is_quota_or_auth_line("normal response body")

@@ -42,6 +42,7 @@ from adapter_types import (
     SpawnResult,
     StopResult,
 )
+from worker_permissions import build_claude_scoping_args, worker_scoping_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -209,9 +210,16 @@ class SubprocessAdapter:
         effective_instruction = instruction or config.get("instruction", dispatch_id)
         effective_model = model or config.get("model", "sonnet")
 
-        cmd = [
-            "claude",
-            "--dangerously-skip-permissions",
+        # Interim worker-capability scoping (WORKER-CAPABILITY-SCOPING-DESIGN.md §5).
+        # Default ON: drop the --dangerously-skip-permissions blanket for a scoped
+        # posture (empty ambient MCP + acceptEdits + a code-worker allow-list).
+        # VNX_WORKER_SCOPED=0 restores the legacy skip-permissions spawn.
+        cmd = ["claude"]
+        if worker_scoping_enabled():
+            cmd += build_claude_scoping_args()
+        else:
+            cmd.append("--dangerously-skip-permissions")
+        cmd += [
             "-p",
             "--output-format", "stream-json",
             "--verbose",

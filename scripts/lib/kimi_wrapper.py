@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """kimi_wrapper.py — Lightweight Kimi CLI wrapper with cost emission.
 
-Wraps `kimi --print --output-format stream-json --yolo -p <prompt>` and emits
+Wraps `kimi --print --output-format stream-json [-p <prompt>]` and emits
 a provider cost event to .vnx-data/events/provider_costs.ndjson per ADR-005.
+
+--yolo (auto-approve) is opt-in via VNX_KIMI_YOLO=1 (default OFF). Without it,
+kimi's --print mode is non-interactive and does not require auto-approval grants.
+
+Non-JSON / quota-403 stdout is detected and raises a structured RuntimeError
+(provider=kimi, reason=quota_or_auth) rather than a raw JSON parse error.
 
 Authentication via `kimi login` (OAuth). No API key required.
 Kimi is subscription-flat; cost_usd_estimate=None is emitted with billing_mode=subscription.
@@ -30,6 +36,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KIMI_MODEL = "kimi-k2.6"
 DEFAULT_TIMEOUT = 300.0
+
+# Markers that identify quota / auth / 403-style rejection bodies.
+_QUOTA_AUTH_MARKERS = frozenset({
+    "403", "401", "quota", "unauthorized", "auth", "forbidden",
+    "rate limit", "rate_limit", "token expired", "authentication",
+})
+
+
+def _is_quota_or_auth_line(text: str) -> bool:
+    """Return True if text looks like a quota/auth/403 rejection body."""
+    lower = text.lower()
+    return any(m in lower for m in _QUOTA_AUTH_MARKERS)
 
 
 def _parse_kimi_token_usage(stdout: str) -> Optional[dict]:
@@ -75,20 +93,27 @@ def kimi_exec(
     project_id: Optional[str] = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> str:
-    """Spawn `kimi --print --output-format stream-json --yolo -p <prompt>`.
+    """Spawn `kimi --print --output-format stream-json [-p <prompt>]`.
 
     stdin=DEVNULL per cli-headless-subprocess-pattern (prevents interactive hang).
     Kimi is subscription-flat: cost_usd_estimate=None, billing_mode=subscription.
 
+    --yolo (auto-approve) is opt-in via VNX_KIMI_YOLO=1 (default OFF).
+
     Emits a provider cost event via emit_provider_cost() and returns captured stdout.
 
     Raises subprocess.TimeoutExpired on timeout.
-    Raises RuntimeError on non-zero exit.
+    Raises RuntimeError on non-zero exit. When the stdout looks like a 403/quota/auth
+    rejection body, the RuntimeError message includes provider=kimi reason=quota_or_auth
+    and the first line of stdout for diagnosis.
     """
     from provider_costs import emit_provider_cost  # noqa: PLC0415
 
     effective_project_id = project_id or os.environ.get("VNX_PROJECT_ID", "vnx-dev")
-    cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", prompt]
+    cmd = ["kimi", "--print", "--output-format", "stream-json"]
+    if os.environ.get("VNX_KIMI_YOLO", "0") == "1":
+        cmd.append("--yolo")
+    cmd.extend(["-p", prompt])
     if model and model != DEFAULT_KIMI_MODEL:
         cmd.extend(["-m", model])
 
@@ -136,6 +161,13 @@ def kimi_exec(
     )
 
     if proc.returncode != 0:
+        first_stdout_line = next(
+            (ln.strip() for ln in stdout.splitlines() if ln.strip()), ""
+        )
+        if first_stdout_line and _is_quota_or_auth_line(first_stdout_line):
+            raise RuntimeError(
+                f"kimi_exec: provider=kimi reason=quota_or_auth raw={first_stdout_line[:200]}"
+            )
         raise RuntimeError(
             f"kimi_exec failed: returncode={proc.returncode} stderr={stderr_data[:500]!r}"
         )

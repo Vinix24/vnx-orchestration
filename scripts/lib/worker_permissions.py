@@ -126,6 +126,76 @@ def generate_claude_settings(profile: PermissionProfile) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Interim worker-capability scoping
+# (WORKER-CAPABILITY-SCOPING-DESIGN.md §5 — pre-full-binding)
+# ---------------------------------------------------------------------------
+
+# Empty MCP server set. Paired with --strict-mcp-config this gives the default
+# code worker ZERO ambient MCP reach (no Supabase / n8n / Gmail side-effects).
+# This is the core security win of the interim.
+EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
+
+# Tool set a headless code worker needs to function: full file CRUD + Bash
+# (incl. git) + search. Used when the dispatch role declares no profile so the
+# interim never silently strips a code worker's ability to write and commit.
+DEFAULT_CODE_WORKER_TOOLS = ["Read", "Write", "Edit", "MultiEdit", "Bash", "Glob", "Grep"]
+
+
+def default_code_worker_profile() -> PermissionProfile:
+    """Interim fallback profile for a headless code worker (no role binding yet).
+
+    Permits the full code-worker tool set. Zero-MCP isolation is enforced
+    separately by the spawn flags (build_claude_scoping_args), not by this
+    profile. The full role→capability binding lands in unified-layer Wave 2.
+    """
+    return PermissionProfile(role="code-worker", allowed_tools=list(DEFAULT_CODE_WORKER_TOOLS))
+
+
+def worker_scoping_enabled() -> bool:
+    """Whether the interim worker-capability scoping is active (default ON).
+
+    Set ``VNX_WORKER_SCOPED=0`` (or false/no/off) to revert to the legacy
+    ``--dangerously-skip-permissions`` posture. The flag makes the change
+    reversible per the design's sequencing note.
+    """
+    raw = os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def build_claude_scoping_args(
+    profile: PermissionProfile | None = None,
+    *,
+    permission_mode: str = "acceptEdits",
+) -> list[str]:
+    """Build the interim capability-scoping argv fragment for a headless claude worker.
+
+    Replaces the ``--dangerously-skip-permissions`` blanket with a scoped-but-
+    functional posture (WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4 / §5):
+
+      * ``--permission-mode <mode>`` — ``acceptEdits`` lets a no-TTY worker apply
+        edits without prompting while Bash/MCP stay gated by the allow-list.
+      * ``--strict-mcp-config`` + ``--mcp-config {"mcpServers":{}}`` — ignore all
+        ambient MCP sources and expose ZERO MCP servers (the core security win).
+      * ``--allowedTools <list>`` — materialized from ``generate_claude_settings``
+        so the worker keeps Read/Write/Edit/MultiEdit/Bash/Glob/Grep and can
+        still write code and commit.
+
+    profile defaults to the code-worker profile when not supplied.
+    """
+    if profile is None:
+        profile = default_code_worker_profile()
+    allowed = generate_claude_settings(profile).get("allowedTools", [])
+    args = [
+        "--permission-mode", permission_mode,
+        "--strict-mcp-config",
+        "--mcp-config", EMPTY_MCP_CONFIG,
+    ]
+    if allowed:
+        args += ["--allowedTools", ",".join(allowed)]
+    return args
+
+
 def generate_permission_preamble(profile: PermissionProfile) -> str:
     """Generate a CLAUDE.md-style permission block for injection into instructions.
 

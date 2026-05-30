@@ -4,7 +4,15 @@ Owns: spawn + stream-json parsing + canonical event normalization.
 Caller (provider_dispatch.py) handles: receipt, unified report, lease, etc.
 
 Kimi CLI invocation:
-    kimi --print --output-format stream-json --yolo -p "<prompt>"
+    kimi --print --output-format stream-json [-p "<prompt>"]
+
+--yolo is opt-in via VNX_KIMI_YOLO=1 (default OFF). Without --yolo, kimi's
+--print mode is non-interactive and does not require auto-approval grants.
+Running without --yolo avoids failures when the kimi CLI denies the flag.
+
+Non-JSON / quota-403 output is detected and surfaced as a structured error
+(provider=kimi, reason=quota_or_auth) rather than a raw JSON parse error or
+unhandled exception.
 
 Authentication: OAuth via `kimi login` (operator-managed). No API key in spawn.
 
@@ -31,6 +39,18 @@ from _streaming_drainer import StreamingDrainerMixin  # noqa: E402
 from canonical_event import CanonicalEvent  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Markers that identify quota / auth / 403-style rejection bodies (non-JSON kimi output).
+_QUOTA_AUTH_MARKERS = frozenset({
+    "403", "401", "quota", "unauthorized", "auth", "forbidden",
+    "rate limit", "rate_limit", "token expired", "authentication",
+})
+
+
+def _is_quota_or_auth_line(text: str) -> bool:
+    """Return True if text looks like a quota/auth/403 rejection body."""
+    lower = text.lower()
+    return any(m in lower for m in _QUOTA_AUTH_MARKERS)
 
 
 @dataclass
@@ -186,8 +206,18 @@ class _KimiNormalizerHost(StreamingDrainerMixin):
 
 
 def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) -> list:
-    """Build the kimi argv list."""
-    cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", prompt]
+    """Build the kimi argv list.
+
+    --yolo (auto-approve) is opt-in via VNX_KIMI_YOLO=1 (default OFF).
+    Kimi's --print mode is non-interactive by design; --yolo is not required
+    for headless operation and can be denied by the CLI, causing spurious
+    failures. Guard it behind an explicit env opt-in so production dispatches
+    are robust by default.
+    """
+    cmd = ["kimi", "--print", "--output-format", "stream-json"]
+    if os.environ.get("VNX_KIMI_YOLO", "0") == "1":
+        cmd.append("--yolo")
+    cmd.extend(["-p", prompt])
     if model:
         cmd.extend(["-m", model])
     if work_dir:
@@ -279,8 +309,17 @@ def _consume_kimi_stream(
             reason = (data.get("reason") or "").lower()
             if "timeout" in reason or "deadline" in reason:
                 timed_out = True
-            msg = data.get("message") or data.get("reason") or str(data)[:200]
-            errors_captured.append(str(msg))
+            raw_line = (data.get("raw") or "").strip()
+            base_msg = data.get("message") or data.get("reason") or str(data)[:200]
+            if raw_line and _is_quota_or_auth_line(raw_line):
+                # Classify 403/quota/auth bodies from non-JSON kimi output
+                msg = f"provider=kimi reason=quota_or_auth raw={raw_line[:200]}"
+            elif raw_line:
+                # Include raw line for other parse failures so callers can diagnose
+                msg = f"{base_msg} (raw={raw_line[:100]})"
+            else:
+                msg = str(base_msg)
+            errors_captured.append(msg)
 
         if health_monitor is not None:
             health_monitor.update(canonical_event)
@@ -363,7 +402,7 @@ def spawn_kimi(
     event_store: Optional[Any] = None,
     **kwargs: Any,
 ) -> KimiSpawnResult:
-    """Spawn ``kimi --print --output-format stream-json --yolo -p <prompt>``.
+    """Spawn ``kimi --print --output-format stream-json [-p <prompt>]``.
 
     Returns KimiSpawnResult on completion (success OR controlled failure).
     Returns KimiSpawnResult(returncode=127) when the kimi binary is absent.

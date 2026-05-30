@@ -20,6 +20,7 @@ if _LIB_DIR not in sys.path:
 from provider_spawns.kimi_spawn import (  # noqa: E402
     KimiSpawnResult,
     _build_kimi_cmd,
+    _is_quota_or_auth_line,
     normalize_kimi_event,
     spawn_kimi,
 )
@@ -45,9 +46,12 @@ def _mock_proc(stdout_events: list, returncode: int = 0) -> MagicMock:
 
 class TestBuildKimiCmd(unittest.TestCase):
     def test_constructs_correct_argv_no_model(self):
-        cmd = _build_kimi_cmd("hello world", None, None)
-        self.assertEqual(cmd[:6], ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p"])
-        self.assertEqual(cmd[6], "hello world")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_KIMI_YOLO", None)
+            cmd = _build_kimi_cmd("hello world", None, None)
+        self.assertNotIn("--yolo", cmd)
+        self.assertEqual(cmd[:5], ["kimi", "--print", "--output-format", "stream-json", "-p"])
+        self.assertEqual(cmd[5], "hello world")
 
     def test_passes_model_when_specified(self):
         cmd = _build_kimi_cmd("prompt", "kimi-k2-6", None)
@@ -174,14 +178,16 @@ class TestSpawnKimiSubprocess(unittest.TestCase):
             captured_cmd.extend(cmd)
             raise FileNotFoundError("not testing real spawn")
 
-        with patch("subprocess.Popen", side_effect=fake_popen):
-            spawn_kimi("my prompt", dispatch_id="d1", terminal_id="T1")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_KIMI_YOLO", None)
+            with patch("subprocess.Popen", side_effect=fake_popen):
+                spawn_kimi("my prompt", dispatch_id="d1", terminal_id="T1")
 
         self.assertIn("kimi", captured_cmd)
         self.assertIn("--print", captured_cmd)
         self.assertIn("--output-format", captured_cmd)
         self.assertIn("stream-json", captured_cmd)
-        self.assertIn("--yolo", captured_cmd)
+        self.assertNotIn("--yolo", captured_cmd)
         self.assertIn("-p", captured_cmd)
         self.assertIn("my prompt", captured_cmd)
 
@@ -331,6 +337,87 @@ class TestSpawnKimiIntegration(unittest.TestCase):
         self.assertIsNotNone(result.error)
         self.assertIn("rate limit exceeded", result.error)
         self.assertNotEqual(result.returncode, 0)
+
+
+class TestKimiRobustness(unittest.TestCase):
+    """Tests for --yolo opt-in and non-JSON/403 error handling (Wave 2 robustness)."""
+
+    def test_build_kimi_cmd_no_yolo_by_default(self):
+        """--yolo must NOT appear in the built command unless VNX_KIMI_YOLO=1."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VNX_KIMI_YOLO", None)
+            cmd = _build_kimi_cmd("hello", None, None)
+        self.assertNotIn("--yolo", cmd)
+
+    def test_build_kimi_cmd_yolo_when_env_set(self):
+        """--yolo appears in the built command when VNX_KIMI_YOLO=1."""
+        with patch.dict(os.environ, {"VNX_KIMI_YOLO": "1"}):
+            cmd = _build_kimi_cmd("hello", None, None)
+        self.assertIn("--yolo", cmd)
+
+    def test_is_quota_or_auth_line_detects_403(self):
+        self.assertTrue(_is_quota_or_auth_line("HTTP/1.1 403 Forbidden"))
+        self.assertTrue(_is_quota_or_auth_line("quota exceeded for this account"))
+        self.assertTrue(_is_quota_or_auth_line("401 Unauthorized"))
+        self.assertFalse(_is_quota_or_auth_line("normal response text"))
+
+    def _run_with_raw_bytes(self, raw_bytes: bytes, returncode: int = 1) -> "KimiSpawnResult":
+        """Run spawn_kimi piping raw bytes (not pre-serialized events)."""
+        read_fd, write_fd = os.pipe()
+
+        def _writer():
+            try:
+                os.write(write_fd, raw_bytes)
+            finally:
+                os.close(write_fd)
+
+        t = threading.Thread(target=_writer, daemon=True)
+        t.start()
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = returncode
+        fake_proc.poll.return_value = returncode
+        fake_proc.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        fake_proc.stderr = io.BytesIO(b"")
+        fake_proc.wait = MagicMock(return_value=returncode)
+        fake_proc.kill = MagicMock()
+
+        try:
+            with patch("provider_spawns.kimi_spawn._start_kimi_subprocess") as mock_start:
+                mock_start.return_value = (fake_proc, None)
+                result = spawn_kimi("prompt", dispatch_id="d1", terminal_id="T1")
+        finally:
+            t.join(timeout=5)
+        return result
+
+    def test_non_json_line_yields_structured_error_not_exception(self):
+        """A non-JSON kimi output line must produce a structured result.error, not raise."""
+        result = self._run_with_raw_bytes(b"HTTP 403 Forbidden: quota exceeded\n")
+        # Must not raise — returns a KimiSpawnResult
+        self.assertIsInstance(result, KimiSpawnResult)
+        self.assertIsNotNone(result.error)
+        # Must NOT expose a raw JSONDecodeError string
+        self.assertNotIn("Expecting value", result.error)
+
+    def test_403_line_surfaces_quota_or_auth_reason(self):
+        """A 403 body line must surface quota_or_auth in result.error (not a JSON parse error)."""
+        result = self._run_with_raw_bytes(b"HTTP/1.1 403 Forbidden\n")
+        self.assertIsNotNone(result.error)
+        self.assertIn("quota_or_auth", result.error)
+        self.assertIn("403", result.error)
+
+    def test_quota_line_surfaces_quota_or_auth_reason(self):
+        """A quota-exceeded plaintext body surfaces quota_or_auth in result.error."""
+        result = self._run_with_raw_bytes(b"quota exceeded for account\n")
+        self.assertIsNotNone(result.error)
+        self.assertIn("quota_or_auth", result.error)
+
+    def test_unknown_non_json_line_includes_raw_in_error(self):
+        """An unrecognized non-JSON line includes the raw text in result.error for diagnosis."""
+        result = self._run_with_raw_bytes(b"unexpected server error: connection reset\n")
+        self.assertIsNotNone(result.error)
+        # Not a quota/auth line — but raw should still be surfaced
+        self.assertIn("connection reset", result.error)
 
 
 class TestDispatchKimiEventStoreFailure(unittest.TestCase):

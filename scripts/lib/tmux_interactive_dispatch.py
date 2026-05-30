@@ -38,6 +38,7 @@ if sys_path_dir not in sys.path:
 logger = logging.getLogger(__name__)
 
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
+from worker_permissions import build_claude_scoping_args, worker_scoping_enabled  # noqa: E402
 
 DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
 
@@ -148,7 +149,16 @@ def _default_launch_command(
                 )
     flags = ""
     if skip_permissions:
-        flags = " --dangerously-skip-permissions"
+        # Detached (autonomous) runs cannot answer permission prompts. Interim
+        # scoping (WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4/§5, default ON):
+        # swap the --dangerously-skip-permissions blanket for a scoped posture
+        # (empty ambient MCP + acceptEdits + code-worker allow-list).
+        # VNX_WORKER_SCOPED=0 restores the legacy skip-permissions flag.
+        if worker_scoping_enabled():
+            scoped = " ".join(shlex.quote(tok) for tok in build_claude_scoping_args())
+            flags = f" {scoped}"
+        else:
+            flags = " --dangerously-skip-permissions"
     if extra_flags:
         flags = f"{flags} {extra_flags}".rstrip()
     return f"source ~/.zshrc 2>/dev/null; claude --model {model}{flags}"
