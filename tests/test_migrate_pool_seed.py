@@ -298,3 +298,79 @@ class TestPoolStatusAfterMigrate:
         mgr = PoolManager(project_id="myproject", pool_id="default", db_path=db)
         config, state, members = mgr.load_state()
         assert config.pool_id == "default"
+
+
+# ---------------------------------------------------------------------------
+# Resolver alignment: pool + dream must derive the SAME project_id + DB path
+# as migrate/init (PR-RESOLVER-UNIFY)
+# ---------------------------------------------------------------------------
+
+class TestResolverAlignment:
+    """pool and dream must resolve the same project_id + db_path as migrate.
+
+    ADR-007: every resolved id must be marker-backed (never 'default').
+    """
+
+    def test_pool_resolves_same_project_id_as_migrate(self, tmp_path, monkeypatch):
+        """vnx pool derive_project_id matches what migrate stamps in pool_config."""
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+        data_root = tmp_path / "data"
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        vnx_migrate(_migrate_args(project_dir))
+
+        from vnx_cli import _engine
+        derived_id = _engine.derive_project_id(project_dir)
+        assert derived_id == "myproject", f"derive_project_id returned {derived_id!r}"
+
+        db = _engine.resolve_data_root(project_dir) / "state" / "runtime_coordination.db"
+        assert db.exists(), f"DB not found at {db}"
+
+        count = _row_count(db, "pool_config", derived_id)
+        assert count == 1, (
+            f"pool_config row must exist for derived_id={derived_id!r}; got {count}"
+        )
+
+    def test_pool_db_path_matches_migrate_db_path(self, tmp_path, monkeypatch):
+        """_engine.resolve_data_root(project_dir)/state/runtime_coordination.db == migrate's DB."""
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+        data_root = tmp_path / "data"
+
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_root))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.migrate import vnx_migrate
+        vnx_migrate(_migrate_args(project_dir))
+
+        from vnx_cli import _engine
+        pool_db = _engine.resolve_data_root(project_dir) / "state" / "runtime_coordination.db"
+        migrate_db = data_root / "state" / "runtime_coordination.db"
+
+        assert pool_db.resolve() == migrate_db.resolve(), (
+            f"pool db_path {pool_db} != migrate db_path {migrate_db}"
+        )
+
+    def test_runtime_schema_version_table_created_on_bootstrap(self, tmp_path, monkeypatch):
+        """CREATE TABLE IF NOT EXISTS guard ensures runtime_schema_version never raises."""
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+
+        from vnx_cli.commands.init_cmd import _bootstrap_runtime_dbs
+        _bootstrap_runtime_dbs(tmp_path)
+
+        import sqlite3
+        db = tmp_path / "state" / "runtime_coordination.db"
+        assert db.exists()
+        conn = sqlite3.connect(str(db))
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_schema_version'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1, "runtime_schema_version table must exist after bootstrap"

@@ -269,26 +269,31 @@ def _register_dream_subparser(subparsers: argparse.Action) -> None:
 
     dream_run_p = dream_subs.add_parser("run", help="run a consolidation cycle")
     dream_run_p.add_argument("--project-id", default=None, metavar="ID")
+    dream_run_p.add_argument("--project-dir", dest="project_dir", default=".", metavar="DIR")
     dream_run_p.add_argument("--dry-run", action="store_true", help="emit events but skip DB writes")
 
     dream_status_p = dream_subs.add_parser("status", help="show latest cycle results")
     dream_status_p.add_argument("--project-id", default=None, metavar="ID")
+    dream_status_p.add_argument("--project-dir", dest="project_dir", default=".", metavar="DIR")
 
     dream_review_p = dream_subs.add_parser("review", help="approve or reject a pending cycle")
     dream_review_p.add_argument("cycle_id", metavar="CYCLE_ID")
     dream_review_p.add_argument("--project-id", default=None, metavar="ID")
+    dream_review_p.add_argument("--project-dir", dest="project_dir", default=".", metavar="DIR")
     dream_review_p.add_argument("--approve", action="store_true", help="approve without prompting")
     dream_review_p.add_argument("--reject", action="store_true", help="reject without prompting")
     dream_review_p.add_argument("--reason", default="operator rejected", metavar="REASON")
 
     dream_history_p = dream_subs.add_parser("history", help="show recent cycles")
     dream_history_p.add_argument("--project-id", default=None, metavar="ID")
+    dream_history_p.add_argument("--project-dir", dest="project_dir", default=".", metavar="DIR")
     dream_history_p.add_argument("--limit", type=int, default=10, metavar="N")
 
     dream_install_p = dream_subs.add_parser(
         "install-scheduler", help="install nightly auto-dream scheduler (macOS/Linux)"
     )
     dream_install_p.add_argument("--project-id", default=None, metavar="ID")
+    dream_install_p.add_argument("--project-dir", dest="project_dir", default=".", metavar="DIR")
 
     dream_subs.add_parser(
         "uninstall-scheduler", help="remove nightly auto-dream scheduler"

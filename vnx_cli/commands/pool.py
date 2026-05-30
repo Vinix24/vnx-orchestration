@@ -14,6 +14,7 @@ import json
 import sqlite3
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional
 
 # Bootstrap scripts/lib into path so pool_manager etc. are importable. Route
@@ -30,8 +31,8 @@ from pool_state_repo import PoolStateRepository  # noqa: E402
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show current pool state for a project."""
-    project_id = _resolve_project_id(args.project)
-    mgr = _make_manager_for_project_id(project_id, args.pool_id)
+    project_id = _resolve_project_id(args.project, args.project_dir)
+    mgr = _make_manager_for_project_id(project_id, args.pool_id, args.project_dir)
     try:
         config, state, members = mgr.load_state()
     except (sqlite3.OperationalError, RuntimeError) as exc:
@@ -76,7 +77,7 @@ def cmd_scale(args: argparse.Namespace) -> int:
     """Force scale pool to a specific worker count."""
     from pool_decision_engine import PoolDecision  # noqa: E402
 
-    mgr = _make_manager(args.project, args.pool_id)
+    mgr = _make_manager(args.project, args.pool_id, args.project_dir)
     config, _, members = mgr.load_state()
     current = len([m for m in members if m.status == "active"])
     target = args.to
@@ -118,7 +119,7 @@ _VALID_POLICIES = frozenset({"fixed", "queue_depth_v1", "queue_aware", "cost_awa
 
 def cmd_config(args: argparse.Namespace) -> int:
     """Update pool config fields (min/max/policy/cooldown)."""
-    mgr = _make_manager(args.project, args.pool_id)
+    mgr = _make_manager(args.project, args.pool_id, args.project_dir)
     pool_id = args.pool_id or "default"
     config = mgr.repo.get_config(pool_id)
     if not config:
@@ -170,7 +171,7 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 def cmd_reap(args: argparse.Namespace) -> int:
     """Reap stale workers; dry-run by default unless --force."""
-    mgr = _make_manager(args.project, args.pool_id)
+    mgr = _make_manager(args.project, args.pool_id, args.project_dir)
 
     if not args.force:
         from pool_reaper import ReapConfig, identify_reap_targets  # noqa: E402
@@ -190,26 +191,19 @@ def cmd_reap(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_project_id(explicit: Optional[str]) -> str:
-    """Return the explicit project id or derive it from the .vnx-project-id marker."""
-    if explicit is not None:
-        return explicit
-    try:
-        from vnx_paths import project_id_from_state_dir, resolve_state_dir  # noqa: E402
-        derived = project_id_from_state_dir(resolve_state_dir())
-        if derived:
-            return derived
-    except Exception:
-        pass
-    return "default"
+def _resolve_project_id(explicit: Optional[str], project_dir: str = ".") -> str:
+    """Derive project_id via marker > slug > path-hash (ADR-PIP-2). Never returns 'default'."""
+    return _engine.derive_project_id(Path(project_dir), explicit=explicit)
 
 
-def _make_manager(project: Optional[str], pool_id: Optional[str]) -> PoolManager:
-    return _make_manager_for_project_id(_resolve_project_id(project), pool_id)
+def _make_manager(project: Optional[str], pool_id: Optional[str], project_dir: str = ".") -> PoolManager:
+    project_id = _resolve_project_id(project, project_dir)
+    return _make_manager_for_project_id(project_id, pool_id, project_dir)
 
 
-def _make_manager_for_project_id(project_id: str, pool_id: Optional[str]) -> PoolManager:
-    return PoolManager(project_id=project_id, pool_id=pool_id or "default")
+def _make_manager_for_project_id(project_id: str, pool_id: Optional[str], project_dir: str = ".") -> PoolManager:
+    db_path = _engine.resolve_data_root(Path(project_dir)) / "state" / "runtime_coordination.db"
+    return PoolManager(project_id=project_id, pool_id=pool_id or "default", db_path=db_path)
 
 
 def _fmt_age(timestamp: float) -> str:
@@ -227,18 +221,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p_status = sub.add_parser("status", help="show pool state")
     p_status.add_argument("--project", default=None)
+    p_status.add_argument("--project-dir", dest="project_dir", default=".",
+                          help="project directory for id/path resolution (default: .)")
     p_status.add_argument("--pool-id", dest="pool_id", default=None)
     p_status.add_argument("--json", action="store_true")
     p_status.set_defaults(func=cmd_status)
 
     p_scale = sub.add_parser("scale", help="force scale pool to N workers")
-    p_scale.add_argument("--project", required=True)
+    p_scale.add_argument("--project", default=None,
+                         help="explicit project_id (derived from --project-dir if omitted)")
+    p_scale.add_argument("--project-dir", dest="project_dir", default=".",
+                         help="project directory for id/path resolution (default: .)")
     p_scale.add_argument("--to", type=int, required=True)
     p_scale.add_argument("--pool-id", dest="pool_id", default=None)
     p_scale.set_defaults(func=cmd_scale)
 
     p_config = sub.add_parser("config", help="update pool config")
-    p_config.add_argument("--project", required=True)
+    p_config.add_argument("--project", default=None,
+                          help="explicit project_id (derived from --project-dir if omitted)")
+    p_config.add_argument("--project-dir", dest="project_dir", default=".",
+                          help="project directory for id/path resolution (default: .)")
     p_config.add_argument("--pool-id", dest="pool_id", default=None)
     p_config.add_argument("--min", type=int, dest="min")
     p_config.add_argument("--max", type=int, dest="max")
@@ -247,7 +249,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_config.set_defaults(func=cmd_config)
 
     p_reap = sub.add_parser("reap", help="reap stale workers (dry-run by default)")
-    p_reap.add_argument("--project", required=True)
+    p_reap.add_argument("--project", default=None,
+                        help="explicit project_id (derived from --project-dir if omitted)")
+    p_reap.add_argument("--project-dir", dest="project_dir", default=".",
+                        help="project directory for id/path resolution (default: .)")
     p_reap.add_argument("--pool-id", dest="pool_id", default=None)
     p_reap.add_argument("--force", action="store_true", help="actually reap (default: dry-run)")
     p_reap.set_defaults(func=cmd_reap)

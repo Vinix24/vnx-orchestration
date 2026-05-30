@@ -57,7 +57,13 @@ SpawnFn = Callable[[str, str, str, str, str], SpawnResult]
 
 
 def _default_db_path(project_id: str) -> Path:
-    """Resolve default DB path via canonical data-root chain (XDG-aware for pip installs)."""
+    """Env-var-anchored fallback DB path. CLI callers should pass an explicit db_path."""
+    vnx_state = os.environ.get("VNX_STATE_DIR") or ""
+    if vnx_state:
+        return Path(vnx_state) / "runtime_coordination.db"
+    vnx_data = os.environ.get("VNX_DATA_DIR") or ""
+    if vnx_data:
+        return Path(vnx_data) / "state" / "runtime_coordination.db"
     try:
         from vnx_paths import resolve_data_root as _resolve_data_root  # type: ignore
         return _resolve_data_root(Path.cwd()) / "state" / "runtime_coordination.db"

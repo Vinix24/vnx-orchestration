@@ -16,45 +16,42 @@ _NOT_IN_PROJECT_MSG = (
 
 def _get_project_id(args) -> str | None:
     pid = getattr(args, "project_id", None)
-    if pid:
-        return pid
-    from project_root import resolve_project_id  # type: ignore[import]
+    project_dir = Path(getattr(args, "project_dir", "."))
     try:
-        return resolve_project_id()
-    except RuntimeError:
+        return _engine.derive_project_id(project_dir, explicit=pid)
+    except (ValueError, RuntimeError):
         return None
 
 
-def _resolve_paths() -> tuple[Path, Path]:
+def _resolve_paths(project_dir: Path) -> tuple[Path, Path]:
     """Returns (project_root, db_path).
 
-    db_path resolves via vnx_paths.resolve_state_dir() — the same canonical
-    central chain the rest of the system uses. ADR-007: path is project_id-scoped.
+    db_path anchors on project_dir via _engine.resolve_data_root so pool/dream
+    resolve the SAME DB as migrate/init/track/doctor (ADR-007, PR-RESOLVER-UNIFY).
     """
     from project_root import resolve_project_root  # type: ignore[import]
-    from vnx_paths import resolve_state_dir  # type: ignore[import]
     try:
         root = resolve_project_root()
     except RuntimeError:
         print(f"error: {_NOT_IN_PROJECT_MSG}", file=sys.stderr)
         sys.exit(1)
-    state_dir = resolve_state_dir()
+    state_dir = _engine.resolve_data_root(project_dir) / "state"
     return root, state_dir / "quality_intelligence.db"
 
 
-def _resolve_data_root() -> Path:
-    """Return the canonical VNX data root (.vnx-data parent of state dir)."""
-    from vnx_paths import resolve_state_dir  # type: ignore[import]
-    return resolve_state_dir().parent
+def _resolve_data_root(project_dir: Path) -> Path:
+    """Return the canonical VNX data root anchored on project_dir."""
+    return _engine.resolve_data_root(project_dir)
 
 
 def _cmd_run(args) -> int:
+    project_dir = Path(getattr(args, "project_dir", "."))
     project_id = _get_project_id(args)
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
     dry_run = getattr(args, "dry_run", False)
-    root, db_path = _resolve_paths()
+    root, db_path = _resolve_paths(project_dir)
     import consolidator  # type: ignore[import]
     result = consolidator.run_dream_cycle(project_id, db_path, dry_run=dry_run)
     print(json.dumps(result, indent=2))
@@ -62,11 +59,12 @@ def _cmd_run(args) -> int:
 
 
 def _cmd_status(args) -> int:
+    project_dir = Path(getattr(args, "project_dir", "."))
     project_id = _get_project_id(args)
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
-    _, db_path = _resolve_paths()
+    _, db_path = _resolve_paths(project_dir)
     if not db_path.exists():
         print(f"No dream cycles found for project '{project_id}'.")
         return 0
@@ -95,7 +93,7 @@ def _cmd_status(args) -> int:
           f"{r['insights_input']}/{r['merged_count']}/{r['dropped_count']}/{r['flagged_count']}")
     print(f"  reviewed    : {bool(r['operator_reviewed'])}")
     import review_gate  # type: ignore[import]
-    pending = review_gate.list_pending_reviews(project_id, _resolve_data_root())
+    pending = review_gate.list_pending_reviews(project_id, _resolve_data_root(project_dir))
     if pending:
         print(f"\n  Pending reviews ({len(pending)}):")
         for p in pending:
@@ -104,13 +102,14 @@ def _cmd_status(args) -> int:
 
 
 def _cmd_review(args) -> int:
+    project_dir = Path(getattr(args, "project_dir", "."))
     cycle_id: str = args.cycle_id
     project_id = _get_project_id(args)
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
-    _, db_path = _resolve_paths()
-    data_root = _resolve_data_root()
+    _, db_path = _resolve_paths(project_dir)
+    data_root = _resolve_data_root(project_dir)
     import review_gate  # type: ignore[import]
     approve = getattr(args, "approve", False)
     reject = getattr(args, "reject", False)
@@ -135,12 +134,13 @@ def _cmd_review(args) -> int:
 
 
 def _cmd_history(args) -> int:
+    project_dir = Path(getattr(args, "project_dir", "."))
     project_id = _get_project_id(args)
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
     limit = getattr(args, "limit", 10)
-    _, db_path = _resolve_paths()
+    _, db_path = _resolve_paths(project_dir)
     if not db_path.exists():
         print(f"No dream cycles found for project '{project_id}'.")
         return 0
@@ -175,12 +175,12 @@ def _cmd_history(args) -> int:
 
 
 def _cmd_install_scheduler(args) -> int:
+    project_dir = Path(getattr(args, "project_dir", "."))
     project_id = _get_project_id(args)
     if not project_id:
         print("error: cannot resolve project_id; set --project-id or VNX_PROJECT_ID")
         return 1
-    from pathlib import Path
-    root, _ = _resolve_paths()
+    root, _ = _resolve_paths(project_dir)
     import scheduler  # type: ignore[import]
     try:
         msg = scheduler.install_scheduler(project_id=project_id, project_root=root)
