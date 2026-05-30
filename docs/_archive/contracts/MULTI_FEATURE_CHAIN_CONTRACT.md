@@ -1,3 +1,5 @@
+> SUPERSEDED 2026-05-30 by docs/contracts/MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md. The track layer (FUT-1/2) replaced the monolithic single-chain model; invariant C-3 (one active feature, no parallelism) is relaxed to N concurrent tracks under disjoint-scope + per-track worktree + dependency-wave conditions.
+
 # Multi-Feature Chain Execution Contract
 
 **Status**: Accepted
