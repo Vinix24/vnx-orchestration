@@ -308,8 +308,34 @@ features:
         risk_class: low
     notes: "Doc-only. Must read 'design-ratified, implementation 1.2' in-doc so it is not mistaken for shipped behavior. Implementation lives in parallel-track-scheduler (1.2)."
 
+  - feature_id: tmux-lane-structural-refactor
+    title: "1.0 launch — June-15-critical: tmux subscription-lane PREPARE+GOVERN structural completion (tmux lane only, strangler-fig)"
+    branch_name: feat/tmux-lane-structural-refactor
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-governance-core
+      - launch-provider-intel
+    milestone: "1.0"
+    status: planned
+    notes: >
+      June-15-critical. The Anthropic OAuth change (June 15, 2026) makes claude-tmux-spawn
+      the only subscription-preserving lane and the default (#767). Builds on #766
+      (skill+intelligence enrichment) and #767 (default-routing). Scope: full PREPARE on
+      the tmux lane — permission preamble + worker-rules footer + report-contract directive;
+      full GOVERN close-out — guaranteed unified_report + validate_body before receipt
+      emission; env/receipt-consistency fix — VNX_STATE_DIR inherited into the tmux-spawn
+      worker so the receipt lands where the orchestrator reads it. Strangler-fig:
+      flag-gated + shadow-mode + burn-in before hard-enforce. Scoped to the tmux lane
+      ONLY. Full LaneRouter / all-lanes PREPARE/GOVERN unification and legacy deletion
+      defer to opt-a-envelope-extraction (1.1) and launch-option-b-parity (1.1). Provider
+      lanes (codex/gemini/kimi/litellm) are NOT June-15-critical.
+
   - feature_id: launch-option-b-parity
-    title: "1.0 launch — Option B parity: extract prepare()/govern() so skill+permission+intelligence+footer+report-contract are uniform across all lanes"
+    title: "Option B parity (all lanes): uniform prepare()/govern() across subprocess + tmux + all provider lanes"
     branch_name: feat/option-b-dispatch-parity
     risk_class: high
     merge_policy: human
@@ -317,16 +343,19 @@ features:
       - gemini_review
       - codex_gate
     depends_on:
-      - launch-renames
+      - tmux-lane-structural-refactor
       - launch-governance-core
       - launch-provider-intel
-    milestone: "1.0"
+    milestone: "1.1"
     status: planned
     notes: >
-      Not yet PR'd. Delivers Option A's BEHAVIOR (uniform enforcement) without its
-      STRUCTURE (the LaneRouter/envelope, deferred to opt-a-envelope-extraction in
-      1.1). Build the contract body BEFORE emit_unified_report (idempotency reorder).
-      Distinct module names from auto_report_contract.py and dispatch_footer.py.
+      Not yet PR'd. Extends the tmux-only PREPARE/GOVERN work (tmux-lane-structural-refactor,
+      1.0) to all remaining lanes: subprocess + provider lanes (codex/gemini/kimi/litellm).
+      Delivers Option A's BEHAVIOR (uniform enforcement) without its STRUCTURE (the
+      LaneRouter/envelope, deferred to opt-a-envelope-extraction). Build the contract body
+      BEFORE emit_unified_report (idempotency reorder). Distinct module names from
+      auto_report_contract.py and dispatch_footer.py. Provider lanes are NOT June-15-critical
+      and land here, post-launch.
 
   # ---- Post-1.0 roadmap (planned; ordered with dependencies) ----
   - feature_id: kimi-deepfix-major2
