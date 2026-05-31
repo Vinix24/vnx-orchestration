@@ -53,7 +53,7 @@ A **canonical surface** is a source of truth. It is written by a single authorit
 | **C-1** | `terminal_leases` (SQLite) | `runtime_coordination.db` | Terminal availability, lease ownership, dispatch assignment | `lease_manager.py`, `runtime_core.py` | Terminal Exclusivity (80) §2 |
 | **C-2** | `dispatches` table (SQLite) | `runtime_coordination.db` | Dispatch lifecycle state (queued→claimed→delivering→completed) | `dispatch_broker.py`, `runtime_core.py` | Schema: `runtime_coordination.sql` |
 | **C-3** | Dispatch filesystem directories | `.vnx-data/dispatches/{active,completed,pending,staging,rejected}/` | Runtime execution state — which PRs are active right now | Dispatcher (file moves) | Queue Truth (70) Rule P-2 |
-| **C-4** | Receipt trail | `.vnx-data/receipts/`, `t0_receipts.ndjson` | Completion confirmation, gate evidence | `receipt_processor_v4.sh` | Queue Truth (70) Rule P-3 |
+| **C-4** | Receipt trail | `.vnx-data/receipts/`, `t0_receipts.ndjson` | Completion confirmation, gate evidence | `receipt_processor.sh` | Queue Truth (70) Rule P-3 |
 | **C-5** | `FEATURE_PLAN.md` | Project root | PR existence, dependency graph, structural metadata | Human / planner | Queue Truth (70) Rule P-1 |
 | **C-6** | `coordination_events` (SQLite) | `runtime_coordination.db` | Immutable audit trail of all state transitions | Runtime coordination layer | Schema: `runtime_coordination.sql` |
 

@@ -59,7 +59,7 @@ mkdir -p "$PENDING_DIR" "$REJECTED_DIR"
 
 # --- Mirror dispatcher functions ---
 
-# Exact copy of _classify_blocked_dispatch from dispatcher_v8_minimal.sh
+# Exact copy of _classify_blocked_dispatch from dispatcher_minimal.sh
 _classify_blocked_dispatch() {
     local reason="$1"
     case "$reason" in

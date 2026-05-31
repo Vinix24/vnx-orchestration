@@ -8,7 +8,7 @@ The broker runs in two modes controlled by environment variables:
 
   VNX_BROKER_ENABLED (default "1")
     When "0", the broker is entirely disabled. load_broker() returns None.
-    The existing dispatcher_v8_minimal.sh path operates unmodified.
+    The existing dispatcher_minimal.sh path operates unmodified.
 
   VNX_BROKER_SHADOW (default "1")
     When "1" (shadow mode ON), the broker registers dispatches and writes

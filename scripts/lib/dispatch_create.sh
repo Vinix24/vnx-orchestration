@@ -1,6 +1,6 @@
 #!/bin/bash
 # dispatch_create.sh — Payload building functions for dispatcher V8.
-# Sourced by dispatcher_v8_minimal.sh.
+# Sourced by dispatcher_minimal.sh.
 # Requires: $VNX_DIR, $VNX_DATA_DIR, $ACTIVE_DIR set by orchestrator.
 # Requires: dispatch_logging.sh sourced first.
 

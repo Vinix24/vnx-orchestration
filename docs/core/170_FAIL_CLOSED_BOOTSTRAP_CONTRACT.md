@@ -32,7 +32,7 @@ When `VNX_DATA_DIR` is unset (e.g., a fresh shell, a tmux session without inheri
 
 **Defect 2: Non-Fatal Registration Before Lease Acquire**
 
-`rc_register()` in `dispatcher_v8_minimal.sh` (line 392-413) is explicitly non-fatal:
+`rc_register()` in `dispatcher_minimal.sh` (line 392-413) is explicitly non-fatal:
 
 ```bash
 if ! _rc_python "${args[@]}" > /dev/null; then
@@ -83,7 +83,7 @@ raise RuntimeError(
 
 **BOOT-2 (Directory Existence)**: `_get_dirs()` MUST verify that the resolved `state_dir` exists as a directory (or its parent exists and the directory can be created). If the directory does not exist and cannot be created, the function MUST raise a `RuntimeError` with the path that failed.
 
-**BOOT-3 (Dispatcher Startup Check)**: The dispatcher (`dispatcher_v8_minimal.sh`) MUST verify at startup that `VNX_STATE_DIR` and `VNX_DATA_DIR` are non-empty and point to existing directories. If either check fails, the dispatcher MUST exit with a non-zero return code and an error message:
+**BOOT-3 (Dispatcher Startup Check)**: The dispatcher (`dispatcher_minimal.sh`) MUST verify at startup that `VNX_STATE_DIR` and `VNX_DATA_DIR` are non-empty and point to existing directories. If either check fails, the dispatcher MUST exit with a non-zero return code and an error message:
 
 ```bash
 if [[ -z "${VNX_STATE_DIR:-}" ]] || [[ ! -d "$VNX_STATE_DIR" ]]; then
@@ -340,7 +340,7 @@ The only acceptable fallback is `VNX_RUNTIME_PRIMARY=0`, which explicitly disabl
 ## 8. Implementation Constraints For PR-1
 
 1. **BOOT-1**: Remove `/tmp` fallback from `_get_dirs()` in `runtime_core_cli.py`. Raise `RuntimeError` when vars are missing.
-2. **BOOT-3**: Add startup validation in `dispatcher_v8_minimal.sh` before the main loop.
+2. **BOOT-3**: Add startup validation in `dispatcher_minimal.sh` before the main loop.
 3. **BOOT-6 + BOOT-7**: Move `rc_register()` before `rc_acquire_lease()` in `dispatch_with_skill_activation()`. Make `rc_register()` fail-closed (return 1 on failure, caller blocks dispatch).
 4. **BOOT-9 through BOOT-11**: Implement `chain-closeout` subcommand in `runtime_core_cli.py` that releases all leases with generation increment and audit events.
 5. **BOOT-4**: Add DB existence check at dispatcher startup.
@@ -351,7 +351,7 @@ The only acceptable fallback is `VNX_RUNTIME_PRIMARY=0`, which explicitly disabl
 | File | Change | Contract Rule |
 |------|--------|---------------|
 | `scripts/runtime_core_cli.py` | Remove `/tmp` fallback in `_get_dirs()`, add `chain-closeout` subcommand | BOOT-1, BOOT-2, BOOT-9 |
-| `scripts/dispatcher_v8_minimal.sh` | Add startup precondition checks, reorder register before acquire, make register fail-closed | BOOT-3, BOOT-4, BOOT-6, BOOT-7 |
+| `scripts/dispatcher_minimal.sh` | Add startup precondition checks, reorder register before acquire, make register fail-closed | BOOT-3, BOOT-4, BOOT-6, BOOT-7 |
 | `scripts/lib/runtime_core.py` | Add `release_all_leases()` method to `LeaseManager` | BOOT-9 |
 | `scripts/lib/runtime_coordination.py` | Add `release_all_leases()` with generation increment and audit | BOOT-9, BOOT-11 |
 
@@ -402,7 +402,7 @@ The only acceptable fallback is `VNX_RUNTIME_PRIMARY=0`, which explicitly disabl
 | File | Line | Gap | Contract Rule |
 |------|------|-----|---------------|
 | `runtime_core_cli.py` | 59-70 | `_get_dirs()` falls back to `/tmp/vnx-state` | BOOT-1 |
-| `dispatcher_v8_minimal.sh` | 392-413 | `rc_register()` is non-fatal (logs and continues) | BOOT-7 |
-| `dispatcher_v8_minimal.sh` | 1562-1580 | Lease acquire (1562) before register (1580) — FK violation path | BOOT-6 |
-| `dispatcher_v8_minimal.sh` | startup | No VNX_STATE_DIR/VNX_DATA_DIR validation at startup | BOOT-3 |
+| `dispatcher_minimal.sh` | 392-413 | `rc_register()` is non-fatal (logs and continues) | BOOT-7 |
+| `dispatcher_minimal.sh` | 1562-1580 | Lease acquire (1562) before register (1580) — FK violation path | BOOT-6 |
+| `dispatcher_minimal.sh` | startup | No VNX_STATE_DIR/VNX_DATA_DIR validation at startup | BOOT-3 |
 | N/A | N/A | No chain-closeout procedure exists | BOOT-9, BOOT-10 |

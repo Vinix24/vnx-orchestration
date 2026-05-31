@@ -6,7 +6,7 @@ JSON line per anomaly to stderr, appends a `runtime_anomaly_detected` event
 to dispatch_register.ndjson per anomaly, and (unless --no-oi) writes
 durable open items for blocking-severity anomalies.
 
-Designed to be invoked from dispatcher_v8_minimal.sh on a 60s throttle when
+Designed to be invoked from dispatcher_minimal.sh on a 60s throttle when
 VNX_SUPERVISOR_MODE=unified.
 """
 from __future__ import annotations

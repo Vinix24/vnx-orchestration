@@ -43,7 +43,7 @@ The VNX State Management System provides atomic, auditable state tracking for te
                                 │
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                    receipt_processor_v4.sh                           │
+│                    receipt_processor.sh                           │
 │              Monitors Reports → Generates Receipts                   │
 │              Appends to t0_receipts.ndjson                          │
 └───────────────────────────────┬──────────────────────────────────────┘
@@ -296,7 +296,7 @@ GATE_PROGRESSION = {
 
 ### Receipt-Driven State Updates
 
-**Implementation**: `receipt_processor_v4.sh` lines 286-364
+**Implementation**: `receipt_processor.sh` lines 286-364
 
 #### Event: task_complete + status=success
 
@@ -391,7 +391,7 @@ update_progress_state.py \
 
 ### Receipt Processing Flow
 
-**Source**: `receipt_processor_v4.sh` lines 286-364
+**Source**: `receipt_processor.sh` lines 286-364
 
 ```bash
 # 1. Extract receipt metadata
@@ -687,7 +687,7 @@ T3 (Infrastructure) → Track C
 T-MANAGER           → No track (doesn't update progress_state.yaml)
 ```
 
-**Mapping Logic** (from receipt_processor_v4.sh lines 293-299):
+**Mapping Logic** (from receipt_processor.sh lines 293-299):
 ```bash
 case "$terminal" in
     T1) track="A" ;;
@@ -1066,7 +1066,7 @@ cat .claude/vnx-system/state/dashboard_status.json | jq '.tracks.A'
 **Diagnostic**:
 ```bash
 # 1. Check receipt processor is running
-ps aux | grep receipt_processor_v4.sh
+ps aux | grep receipt_processor.sh
 
 # 2. Check processing log
 tail -50 .claude/vnx-system/state/receipt_processing.log | grep PROGRESS_STATE
@@ -1082,7 +1082,7 @@ python3 .claude/vnx-system/scripts/update_progress_state.py \
 **Fixes**:
 ```bash
 # Restart receipt processor
-pkill -f receipt_processor_v4.sh
+pkill -f receipt_processor.sh
 # (supervisor will restart automatically)
 
 # Manual state reconciliation
@@ -1164,7 +1164,7 @@ cp .claude/vnx-system/state/progress_state.yaml \
    .claude/vnx-system/state/progress_state.yaml.backup.$(date +%Y%m%d-%H%M%S)
 
 # 2. Stop receipt processor
-pkill -f receipt_processor_v4.sh
+pkill -f receipt_processor.sh
 
 # 3. Rebuild from receipts
 python3 .claude/vnx-system/scripts/sync_progress_state_from_receipts.py --apply
@@ -1227,7 +1227,7 @@ python3 .claude/vnx-system/scripts/update_progress_state.py \
 
 ### Intelligence Integration
 
-**File**: `.claude/vnx-system/scripts/unified_state_manager_v2.py`
+**File**: `.claude/vnx-system/scripts/unified_state_manager.py`
 
 **Integration Point**: State manager reads progress_state.yaml
 
@@ -1445,7 +1445,7 @@ echo "=== E2E TEST COMPLETE ==="
 **Scripts**:
 - `.claude/vnx-system/scripts/update_progress_state.py` - Atomic state mutations
 - `.claude/vnx-system/scripts/sync_progress_state_from_receipts.py` - State reconciliation
-- `.claude/vnx-system/scripts/receipt_processor_v4.sh` - Receipt processing engine
+- `.claude/vnx-system/scripts/receipt_processor.sh` - Receipt processing engine
 - `.claude/vnx-system/scripts/generate_t0_brief.sh` - Brief generation
 
 **Documentation**:

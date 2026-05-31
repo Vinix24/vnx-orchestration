@@ -193,7 +193,7 @@ Generate reports in:
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: performance-profiler
+Skill actief: performance-profiler
 ```
 
 No exceptions. This must appear before any other content.

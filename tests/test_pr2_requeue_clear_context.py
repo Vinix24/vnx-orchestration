@@ -70,7 +70,7 @@ class TestClearContextDefault(unittest.TestCase):
 class TestSmartTapShellCwdNoise(unittest.TestCase):
     """'Shell cwd was reset' in block content must not trigger reject."""
 
-    SMART_TAP = SCRIPTS_DIR / "smart_tap_v7_json_translator.sh"
+    SMART_TAP = SCRIPTS_DIR / "smart_tap_json_translator.sh"
 
     def _run_reject_check(self, block_content: str) -> tuple[int, str, str]:
         """Run the validation logic inline using bash sourcing."""
@@ -127,7 +127,7 @@ class TestSmartTapShellCwdNoise(unittest.TestCase):
 class TestBlockedDispatchAudit(unittest.TestCase):
     """emit_blocked_dispatch_audit writes correct NDJSON with category/requeueable."""
 
-    DISPATCHER = SCRIPTS_DIR / "dispatcher_v8_minimal.sh"
+    DISPATCHER = SCRIPTS_DIR / "dispatcher_minimal.sh"
 
     def _emit_audit(
         self,

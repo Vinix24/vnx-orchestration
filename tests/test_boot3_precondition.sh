@@ -3,7 +3,7 @@
 # creates .vnx-data directories, so an unbootstrapped session is rejected
 # before the dispatcher can silently bootstrap a fresh runtime directory.
 #
-# Finding: scripts/dispatcher_v8_minimal.sh BOOT-3 was placed after mkdir -p
+# Finding: scripts/dispatcher_minimal.sh BOOT-3 was placed after mkdir -p
 # calls that created $VNX_DATA_DIR, defeating the directory-existence check.
 # Fix: BOOT-3 moved to immediately after vnx_paths.sh is sourced (line ~18).
 
@@ -11,7 +11,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DISPATCHER="$PROJECT_ROOT/scripts/dispatcher_v8_minimal.sh"
+DISPATCHER="$PROJECT_ROOT/scripts/dispatcher_minimal.sh"
 
 PASS=0
 FAIL=0

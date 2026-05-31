@@ -117,7 +117,7 @@ class TestEnforceCodexGate:
         contract = _make_contract(
             risk_class="low",
             review_stack=["gemini_review"],
-            changed_files=["scripts/dispatcher_v8_minimal.sh"],
+            changed_files=["scripts/dispatcher_minimal.sh"],
         )
         result = enforce_codex_gate(contract)
         assert result.required is True
@@ -485,7 +485,7 @@ class TestEvaluateAndRecord:
         contract = _make_contract(
             pr_id="",
             deliverables=[],
-            changed_files=["scripts/dispatcher_v8_minimal.sh"],
+            changed_files=["scripts/dispatcher_minimal.sh"],
         )
         receipt = evaluate_and_record(contract)
         assert receipt.verdict == "blocked"
