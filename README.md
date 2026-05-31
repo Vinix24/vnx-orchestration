@@ -2,7 +2,7 @@
 
 VNX is a governance-first multi-agent orchestration framework for AI CLI workers. I built it to run on top of `claude`, `codex`, and `kimi` CLIs with no SDK imports, using tmux-based ephemeral worker dispatch and per-worker git worktree isolation.
 
-VNX exists because Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. The VNX leaseless tmux lane runs Claude workers as interactive tmux sessions, so the default Claude worker path stays on the subscription instead of the paid API lane.
+VNX exists because Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. The VNX leaseless tmux lane runs Claude workers as interactive tmux sessions, keeping the default Claude worker path on the subscription rather than the paid API lane. The tmux lane is the production default and is actively being hardened ahead of the June 15 OAuth rollout; it works today and the structural refactor targeting full maturity is part of the 1.0 scope.
 
 The proof points are concrete: 2,000+ hours of Claude Code production use, append-only NDJSON receipts for audit-grade history, 1.450+ tests, and open source code on GitHub. The project is public at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
@@ -20,11 +20,11 @@ There are two binaries on purpose during the 1.0 cutover. The pip-installed `vnx
 
 VNX is not a thin "supports many models" wrapper. The provider layer is governed by `scripts/lib/providers/provider_constraints.yaml`, a machine-readable source of truth for constraints such as `kimi-via-cli-only`, `no-anthropic-sdk`, and `deepseek-harness-subscription-blocked`.
 
-Claude has two explicit paths. The default worker path is Claude on subscription through interactive tmux, implemented in `scripts/lib/tmux_interactive_dispatch.py`; the opt-in burst path is Claude on the paid API through subprocess `claude -p`.
+Claude has two explicit paths. The default worker path is Claude on subscription through interactive tmux, implemented in `scripts/lib/tmux_interactive_dispatch.py`; the opt-in burst path is Claude on the paid API through subprocess `claude -p`. The receipt format and intelligence layer are uniform across all lanes today. Per-lane parity on the full PREPARE/GOVERN envelope is the dispatch-unification work targeted for the 1.x release.
 
 Kimi runs through the Kimi CLI with OAuth. VNX does not call the Moonshot SDK directly for that lane, which keeps attribution and rate-limit behavior in one place.
 
-OpenRouter is the gateway lane for GLM-5.1 from Zhipu and other routed models. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
+OpenRouter is the gateway lane for GLM-5.1 from Zhipu today; arbitrary OpenAI-compatible models via the proxy lane are planned for a later release. Local Ollama is used for the resolver layer and privacy-sensitive work, including Gemma 4 E4B, where no data leaves the machine.
 
 The non-obvious path is DeepSeek through the Claude harness. VNX can run DeepSeek with my own DeepSeek API key plus hardening: `ANTHROPIC_BASE_URL` redirect, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, telemetry and updater traffic disabled, and MCP off. Operator measurement on Claude Code 2.1.150 on 2026-05-26 showed this path is about 30% more effective on coding and tool tasks than a bare DeepSeek API call, because the harness adds tool-use loops, smart-context injection, and structured diff output that the raw API does not provide.
 
