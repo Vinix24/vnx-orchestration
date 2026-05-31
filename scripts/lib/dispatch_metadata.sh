@@ -80,7 +80,7 @@ vnx_dispatch_extract_pr_id() {
 
 # Extract Project-ID stamp from a dispatch file. Returns empty string for
 # legacy dispatches (no Project-ID line). Used by cross-project contamination
-# guard in dispatcher_v8_minimal.sh (OI-1067).
+# guard in dispatcher_minimal.sh (OI-1067).
 vnx_dispatch_extract_project_id() {
     local file="$1"
     sed -n 's/^Project-ID:[[:space:]]*//Ip' "$file" | tr -d ' \t\r' | head -1

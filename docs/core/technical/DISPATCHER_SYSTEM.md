@@ -9,7 +9,7 @@
 ---
 
 > **NOTE**: This document describes the V7.3 template compilation dispatcher which is no longer
-> the production dispatcher. **V8.2 Minimal** (`dispatcher_v8_minimal.sh`) is the current
+> the production dispatcher. **V8.2 Minimal** (`dispatcher_minimal.sh`) is the current
 > production system. V7 is maintained as a reference and rollback option.
 >
 > For architecture overview, see `core/00_VNX_ARCHITECTURE.md`.
@@ -20,7 +20,7 @@
 
 ### Overview
 
-The V8 dispatcher (`dispatcher_v8_minimal.sh`) replaces V7's template compilation with native skill activation. This achieves an 87% token reduction (200 vs 1500 tokens per dispatch).
+The V8 dispatcher (`dispatcher_minimal.sh`) replaces V7's template compilation with native skill activation. This achieves an 87% token reduction (200 vs 1500 tokens per dispatch).
 
 ### Key Differences from V7
 
@@ -849,7 +849,7 @@ Dynamic, self-healing pane ID resolution for terminal delivery. Replaces static 
 
 ### Discovery Methods
 
-**Method 1: By Title** (pane_manager_v2.sh, Line 17-34):
+**Method 1: By Title** (pane_manager.sh, Line 17-34):
 ```bash
 discover_pane_by_title() {
     local terminal="$1"
@@ -870,7 +870,7 @@ discover_pane_by_title() {
 }
 ```
 
-**Method 2: By Working Directory** (pane_manager_v2.sh, Line 36-54):
+**Method 2: By Working Directory** (pane_manager.sh, Line 36-54):
 ```bash
 discover_pane_by_path() {
     local terminal="$1"
@@ -892,7 +892,7 @@ discover_pane_by_path() {
 }
 ```
 
-**Method 3: By Window Position** (pane_manager_v2.sh, Line 56-79):
+**Method 3: By Window Position** (pane_manager.sh, Line 56-79):
 ```bash
 discover_pane_by_window() {
     local terminal="$1"
@@ -927,7 +927,7 @@ discover_pane_by_window() {
 - Validation: Checks pane still exists before using cache
 - Auto-invalidation: On pane ID mismatch
 
-**Implementation** (pane_manager_v2.sh, Line 113-128):
+**Implementation** (pane_manager.sh, Line 113-128):
 ```bash
 # Check cache first
 local cache_file="$PANE_CACHE/${terminal}.pane"
@@ -1031,7 +1031,7 @@ RUN_ID=$(date +%s)
 │   └── dispatcher.log  # Dispatcher activity log
 └── scripts/
     ├── dispatcher_v7_compilation.sh
-    ├── pane_manager_v2.sh
+    ├── pane_manager.sh
     └── singleton_enforcer.sh
 ```
 
@@ -1346,8 +1346,8 @@ cp /tmp/test_intelligence.md $VNX_HOME/dispatches/pending/
 ### Files Reference
 
 **Core Scripts**:
-- `dispatcher_v8_minimal.sh` - Main dispatcher (V8 native skills)
-- `pane_manager_v2.sh` (~300 lines) - Pane discovery system
+- `dispatcher_minimal.sh` - Main dispatcher (V8 native skills)
+- `pane_manager.sh` (~300 lines) - Pane discovery system
 - `singleton_enforcer.sh` - Process singleton enforcement
 - `gather_intelligence.py` - Intelligence pattern gathering
 - `update_progress_state.py` - Atomic state updates

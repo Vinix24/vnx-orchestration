@@ -176,7 +176,7 @@ class TestClassifyBlockedDispatchCodes:
     def setup_classify(self, tmp_path):
         """Extract _classify_blocked_dispatch from the dispatcher."""
         self.project_root = Path(__file__).resolve().parent.parent
-        self.dispatcher = self.project_root / "scripts" / "dispatcher_v8_minimal.sh"
+        self.dispatcher = self.project_root / "scripts" / "dispatcher_minimal.sh"
         # Extract just the function definition to avoid sourcing the full dispatcher
         # (which acquires a singleton lock and starts the main loop)
         content = self.dispatcher.read_text(encoding="utf-8")

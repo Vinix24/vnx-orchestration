@@ -30,7 +30,7 @@ def test_conditional_auto_merge_blocked_for_high_risk_runtime_scope():
     decision = evaluate_auto_merge_policy(
         risk_class="low",
         merge_policy="conditional_auto",
-        changed_files=["scripts/dispatcher_v8_minimal.sh"],
+        changed_files=["scripts/dispatcher_minimal.sh"],
         gemini_review_passed=True,
         codex_gate_passed=True,
         required_checks_passed=True,
@@ -39,7 +39,7 @@ def test_conditional_auto_merge_blocked_for_high_risk_runtime_scope():
 
     assert decision.allowed is False
     assert "high_risk_change_scope" in decision.blockers
-    assert codex_final_gate_required(["scripts/dispatcher_v8_minimal.sh"]) is True
+    assert codex_final_gate_required(["scripts/dispatcher_minimal.sh"]) is True
 
 
 def test_conditional_auto_merge_blocked_when_risk_not_low():

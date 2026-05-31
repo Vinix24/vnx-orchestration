@@ -23,14 +23,14 @@ if SCRIPTS_LIB not in sys.path:
 from exit_classifier import (
     classify_exit,
     ClassificationResult,
-    SUCCESS,
-    TIMEOUT,
-    NO_OUTPUT,
-    INTERRUPTED,
-    INFRA_FAIL,
-    TOOL_FAIL,
-    PROMPT_ERR,
-    UNKNOWN,
+    FC_SUCCESS as SUCCESS,
+    FC_TIMEOUT as TIMEOUT,
+    FC_NO_OUTPUT as NO_OUTPUT,
+    FC_INTERRUPTED as INTERRUPTED,
+    FC_INFRA_FAIL as INFRA_FAIL,
+    FC_TOOL_FAIL as TOOL_FAIL,
+    FC_PROMPT_ERR as PROMPT_ERR,
+    FC_UNKNOWN as UNKNOWN,
 )
 
 

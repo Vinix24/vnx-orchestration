@@ -42,7 +42,7 @@ Mode: LEGACY ONLY (rollback — terminal_state_shadow path)
 | `VNX_CANONICAL_LEASE_ACTIVE` | `1` | `1` (unchanged) |
 
 When `VNX_RUNTIME_PRIMARY=0`:
-- `dispatcher_v8_minimal.sh` skips all `rc_*` function calls
+- `dispatcher_minimal.sh` skips all `rc_*` function calls
 - `load_runtime_core()` returns `None` — no broker/lease operations
 - `terminal_state_shadow.py` remains the sole ownership path (unchanged)
 - Existing dispatcher lock mechanism (`acquire_terminal_claim`) operates as before
@@ -76,7 +76,7 @@ If `bin/vnx` is unavailable, set the flag in your shell before starting the disp
 
 ```bash
 export VNX_RUNTIME_PRIMARY=0
-bash scripts/dispatcher_v8_minimal.sh
+bash scripts/dispatcher_minimal.sh
 ```
 
 Or in `.vnx-data/.env_override`:

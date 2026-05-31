@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_lock.sh - Receipt write lock (flock-based)
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $STATE_DIR
 
 # File descriptor for receipt write lock (flock-based, OS-level atomic)

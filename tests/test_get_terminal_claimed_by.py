@@ -233,7 +233,7 @@ class TestDispatcherSyntaxAfterExtraction:
     """bash -n must still pass on the main dispatcher after the refactor."""
 
     def test_dispatcher_bash_n_passes(self):
-        dispatcher = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+        dispatcher = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
         result = subprocess.run(
             ["bash", "-n", str(dispatcher)],
             capture_output=True,
