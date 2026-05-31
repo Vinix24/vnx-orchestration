@@ -388,6 +388,19 @@ if __name__ == "__main__":
             _repo_map_exc,
         )
 
+    # Footer injection: append T0 action-request footer so every dispatch instruction
+    # carries the orchestration prompt that tells T0 what to do after receiving the receipt.
+    # Mode is resolved from VNX_DISPATCH_FOOTER_MODE env var (normal|autonomous|enhanced).
+    try:
+        from dispatch_footer import append_dispatch_footer as _append_footer  # noqa: PLC0415
+        args.instruction = _append_footer(args.instruction)
+    except Exception as _footer_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(
+            "subprocess_dispatch: footer injection failed (%s) — proceeding without",
+            _footer_exc,
+        )
+
     _dispatch_paths: "list[str] | None" = None
     if args.dispatch_paths.strip():
         _dispatch_paths = [p.strip() for p in args.dispatch_paths.split(",") if p.strip()]

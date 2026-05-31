@@ -204,8 +204,36 @@ class TestDispatchIdFormat:
     def test_id_regex_rejects_bad_date(self) -> None:
         assert not DISPATCH_ID_RE.match("2026042-182004-task-A")  # short date
 
-    def test_id_regex_rejects_lowercase_track(self) -> None:
-        assert not DISPATCH_ID_RE.match("20260422-182004-task-a")
+    def test_id_regex_accepts_lowercase_in_slug(self) -> None:
+        # lowercase suffix is now part of the slug, not a track designator — must pass
+        assert DISPATCH_ID_RE.match("20260422-182004-task-a")
+
+    def test_id_regex_accepts_slug_only_id(self) -> None:
+        # slug without track suffix — new format, no -A/-B/-C
+        assert DISPATCH_ID_RE.match("20260531-204128-fix-760-validator")
+
+    def test_id_regex_accepts_slug_only_multi_segment(self) -> None:
+        assert DISPATCH_ID_RE.match("20260422-182004-my-task")
+
+    def test_id_regex_rejects_missing_slug(self) -> None:
+        assert not DISPATCH_ID_RE.match("20260422-182004-")
+
+    def test_id_regex_rejects_no_slug_segment(self) -> None:
+        assert not DISPATCH_ID_RE.match("20260422-182004")
+
+    def test_slug_only_id_passes_full_validation(self) -> None:
+        content = """
+Dispatch-ID: 20260531-204128-fix-760-validator
+
+### Description
+Fix the validator regex to accept slug-only dispatch IDs.
+
+### Scope
+- update DISPATCH_ID_RE
+"""
+        result = validate_dispatch_instruction(content)
+        d1 = [f for f in result.findings if f.rule == "D-1"]
+        assert len(d1) == 0, f"Slug-only ID should pass D-1 but got: {d1}"
 
     def test_dispatch_id_returned_in_result(self) -> None:
         result = validate_dispatch_instruction(MINIMAL_VALID)
