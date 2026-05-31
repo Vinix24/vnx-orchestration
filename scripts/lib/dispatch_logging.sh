@@ -1,6 +1,6 @@
 #!/bin/bash
 # dispatch_logging.sh — Logging and audit functions for dispatcher V8.
-# Sourced by dispatcher_v8_minimal.sh. Requires: $STATE_DIR set by orchestrator.
+# Sourced by dispatcher_minimal.sh. Requires: $STATE_DIR set by orchestrator.
 # Functions: log, log_structured_failure, _classify_blocked_dispatch,
 #            emit_blocked_dispatch_audit, emit_lease_cleanup_audit
 
@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(".")), "scripts"
 code, message, details, failure_code, dispatch_id, terminal_id, provider = sys.argv[1:8]
 event = {
     "event": "delivery_failure",
-    "component": "dispatcher_v8_minimal.sh",
+    "component": "dispatcher_minimal.sh",
     "code": code,
     "message": message,
 }

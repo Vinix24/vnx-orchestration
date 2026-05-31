@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Provider routing enforcement — pure logic, no tmux or dispatcher dependencies.
-# Sourced by dispatcher_v8_minimal.sh and directly testable in isolation.
+# Sourced by dispatcher_minimal.sh and directly testable in isolation.
 
 # Evaluate a provider routing requirement and return the outcome.
 #

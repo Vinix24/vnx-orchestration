@@ -1,6 +1,6 @@
 #!/bin/bash
 # dispatch_deliver.sh — tmux delivery, mode control, and delivery orchestration.
-# Sourced by dispatcher_v8_minimal.sh.
+# Sourced by dispatcher_minimal.sh.
 # Requires: $STATE_DIR, $VNX_DIR, $VNX_DISPATCH_PAYLOAD_DIR set by orchestrator.
 # Requires: dispatch_logging.sh and dispatch_lifecycle.sh sourced first.
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# DEPRECATED: report_watcher replaced by receipt_processor_v4.sh
+# DEPRECATED: report_watcher replaced by receipt_processor.sh
 # Exit immediately to prevent duplicate receipts
 exit 0
 

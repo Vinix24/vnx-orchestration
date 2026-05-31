@@ -6,7 +6,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-source "$SCRIPT_DIR/scripts/pane_manager_v2.sh"
+source "$SCRIPT_DIR/scripts/pane_manager.sh"
 
 fail=0
 pass=0

@@ -32,7 +32,7 @@
 
 ### 1.1 Dispatcher routing
 
-**`.claude/vnx-system/scripts/dispatcher_v8_minimal.sh`**
+**`.claude/vnx-system/scripts/dispatcher_minimal.sh`**
 - `track_to_terminal()` functie (regels ~350-360) → verwijderen
 - `[[TARGET:A]]` parsing → accepteer `[[TARGET:T1]]`
 - Dispatch filename suffix `-A.md` → `-T1.md`
@@ -46,7 +46,7 @@
 
 ### 1.2 Smart tap parser
 
-**`.claude/vnx-system/scripts/smart_tap_v7_json_translator.sh`**
+**`.claude/vnx-system/scripts/smart_tap_json_translator.sh`**
 - Parseert `Track: A` uit Manager Blocks → verwijder Track field parsing
 - Bouwt `[[TARGET:A]]` → verwacht `[[TARGET:T1]]`
 - Track extractie in JSON output → terminal ID direct
@@ -54,7 +54,7 @@
 
 ### 1.3 Receipt processor
 
-**`.claude/vnx-system/scripts/receipt_processor_v4.sh`**
+**`.claude/vnx-system/scripts/receipt_processor.sh`**
 - Track veld in receipt metadata → verwijder of negeer
 - Gebruikt al terminal ID intern voor routing
 - ~10 regels geraakt
@@ -166,7 +166,7 @@ Terminal: T1
 - `track` parameter in `gather_for_dispatch()` → `terminal`
 - Intelligence output: `"track"` veld → verwijderen (al terminal in apart veld)
 
-**`.claude/vnx-system/scripts/userpromptsubmit_intelligence_inject_v5.sh`**
+**`.claude/vnx-system/scripts/userpromptsubmit_intelligence_inject.sh`**
 - Brief parsing: `tracks.A` → `terminals.T1`
 
 ---
