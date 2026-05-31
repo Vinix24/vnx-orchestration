@@ -4,7 +4,7 @@ VNX is a governance-first multi-agent orchestration framework for AI CLI workers
 
 VNX exists because Anthropic's June 15, 2026 billing change moves headless `claude -p` usage to API credits while interactive Claude Code stays on a subscription. The VNX leaseless tmux lane runs Claude workers as interactive tmux sessions, so the default Claude worker path stays on the subscription instead of the paid API lane.
 
-The proof points are concrete: 2,000+ hours of Claude Code production use, append-only NDJSON receipts for audit-grade history, 1.450+ tests, and open source code on GitHub. The project is public at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
+The proof points are concrete: 2,000+ hours of Claude Code production use, append-only NDJSON receipts for audit-grade history, 1,450+ tests, and open source code on GitHub. The project is public at [github.com/Vinix24/vnx-orchestration](https://github.com/Vinix24/vnx-orchestration).
 
 ## Install
 

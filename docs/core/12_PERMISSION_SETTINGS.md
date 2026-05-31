@@ -5,7 +5,7 @@
 **Purpose**: Documentation for Permission Settings for VNX Terminals.
 
 ## Overview
-Claude Code CLI permission settings have been configured to allow seamless access between all VNX terminals (T0-T3) without repeated permission prompts.
+Claude Code CLI permission settings have been configured to allow direct access between all VNX terminals (T0-T3) without repeated permission prompts.
 
 ## Configuration
 
@@ -56,7 +56,7 @@ The `additionalDirectories` setting in the permissions section grants Claude Cod
 1. **No Permission Prompts**: Claude in T0 can read files from T1, T2, T3 without asking
 2. **Cross-Terminal Collaboration**: Terminals can inspect each other's work
 3. **VNX System Access**: All terminals can access orchestration files
-4. **Seamless Workflow**: No interruptions for file access permissions
+4. **Uninterrupted Workflow**: No prompts for file access permissions
 
 ## Important Notes
 
