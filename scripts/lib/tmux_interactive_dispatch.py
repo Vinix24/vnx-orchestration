@@ -239,19 +239,97 @@ class TmuxInteractiveDispatch:
         *,
         role: "str | None",
         smart_context: "str | None" = None,
+        terminal_id: "str | None" = None,
+        dispatch_id: "str | None" = None,
+        instruction: str = "",
+        dispatch_paths: "list[str] | None" = None,
+        pr_id: "str | None" = None,
     ) -> str:
-        """Build role-based context preamble + optional smart_context block."""
-        parts: list[str] = []
-        if role:
-            parts.append(f"## Role\n\nYou are operating as a **{role}** worker.")
-        else:
-            parts.append(
-                "## Worker Preamble\n\n"
-                "You are a VNX headless worker executing a dispatch instruction."
+        """Build enriched dispatch body: skill body + intelligence + instruction.
+
+        Reuses subprocess lane enrichers (_inject_skill_context) so the tmux-spawn
+        worker receives the same skill body + intelligence treatment as a headless
+        subprocess worker. Falls back to a legacy role label + instruction on failure.
+        Always includes *instruction* in the returned string.
+        """
+        dispatch_metadata: dict = {}
+        if dispatch_id:
+            dispatch_metadata["dispatch_id"] = dispatch_id
+        if dispatch_paths:
+            dispatch_metadata["dispatch_paths"] = dispatch_paths
+        if pr_id:
+            dispatch_metadata["pr_id"] = pr_id
+
+        enriched: "str | None" = None
+        try:
+            from subprocess_dispatch_internals.skill_injection import _inject_skill_context  # noqa: PLC0415
+            enriched = _inject_skill_context(
+                terminal_id or "",
+                instruction,
+                role,
+                dispatch_metadata,
             )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_assemble_context: skill injection failed (%s); falling back to role label",
+                exc,
+            )
+
+        if enriched is None:
+            # Fallback: legacy role label + instruction
+            if role:
+                header = f"## Role\n\nYou are operating as a **{role}** worker."
+            else:
+                header = (
+                    "## Worker Preamble\n\n"
+                    "You are a VNX headless worker executing a dispatch instruction."
+                )
+            parts: list[str] = [header]
+            if smart_context:
+                parts.append(smart_context)
+            parts.append(instruction)
+            return "\n\n".join(parts)
+
         if smart_context:
-            parts.append(smart_context)
-        return "\n\n".join(parts)
+            enriched = f"{smart_context}\n\n{enriched}"
+        return enriched
+
+    def _emit_unified_report(
+        self,
+        dispatch_id: str,
+        terminal_id: str,
+        instruction: str,
+        receipt: "dict | None",
+        duration_seconds: float,
+    ) -> None:
+        """Emit governance unified_report for audit parity with subprocess lane. Best-effort."""
+        try:
+            from governance_emit import emit_unified_report  # noqa: PLC0415
+            status = (receipt or {}).get("status", "done")
+            data_dir = self._state_dir.parent
+            emit_unified_report(
+                dispatch_id=dispatch_id,
+                terminal_id=terminal_id,
+                provider="claude",
+                instruction=instruction,
+                response_text=(
+                    f"Interactive tmux dispatch (lane: tmux_interactive). Status: {status}."
+                ),
+                findings=[],
+                duration_seconds=duration_seconds,
+                data_dir=data_dir,
+            )
+            logger.info(
+                "interactive: unified_report emitted dispatch=%s status=%s",
+                dispatch_id,
+                status,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "interactive: unified_report emission failed for %s: %s",
+                dispatch_id,
+                exc,
+            )
 
     def _build_completion_protocol(self, dispatch_id: str, label: str) -> str:
         """Footer instructing the worker to emit a clean receipt directly.
@@ -769,11 +847,16 @@ class TmuxInteractiveDispatch:
             # 5. Baseline snapshot BEFORE delivery (F3: stale-receipt guard)
             baseline = len(self._matching_receipts(dispatch_id, completion_statuses))
 
-            # 6. Assemble body
+            # 6. Assemble body (skill body + intelligence + instruction via enrichers)
             body = (
-                self._assemble_context(role=role, smart_context=smart_context)
-                + "\n\n"
-                + instruction
+                self._assemble_context(
+                    role=role,
+                    smart_context=smart_context,
+                    terminal_id=label,
+                    dispatch_id=dispatch_id,
+                    instruction=instruction,
+                    dispatch_paths=dispatch_paths,
+                )
                 + self._scope_note(dispatch_paths)
                 + self._build_completion_protocol(dispatch_id, label)
             )
@@ -816,6 +899,13 @@ class TmuxInteractiveDispatch:
             )
 
             if receipt is None:
+                self._emit_unified_report(
+                    dispatch_id=dispatch_id,
+                    terminal_id=label,
+                    instruction=instruction,
+                    receipt=None,
+                    duration_seconds=time.monotonic() - start_time,
+                )
                 _teardown("timeout")
                 return InteractiveDispatchResult(
                     success=False,
@@ -840,6 +930,13 @@ class TmuxInteractiveDispatch:
             success = receipt is not None and receipt.get("status") not in (
                 "failed",
                 "blocked",
+            )
+            self._emit_unified_report(
+                dispatch_id=dispatch_id,
+                terminal_id=label,
+                instruction=instruction,
+                receipt=receipt,
+                duration_seconds=time.monotonic() - start_time,
             )
             _teardown("success" if success else "worker_status_failed")
             return InteractiveDispatchResult(
