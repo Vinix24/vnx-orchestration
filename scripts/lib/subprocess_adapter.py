@@ -190,6 +190,7 @@ class SubprocessAdapter:
         resume_session: Optional[str] = None,
         cwd: Optional[Any] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        extra_cli_args: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -204,6 +205,12 @@ class SubprocessAdapter:
         cwd: if provided, the subprocess is started in that directory.  Pass
         the agent's project directory (e.g. agents/{role}/) so the headless
         process has the right working context.
+
+        extra_cli_args: if provided, these flags are inserted into the claude
+        argv after the standard flags and before --resume/instruction.  Used by
+        the DeepSeek-harness lane to force MCP off
+        (``--strict-mcp-config --mcp-config '{"mcpServers":{}}'``).  Default
+        None preserves byte-identical argv for the existing claude lane.
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
@@ -217,6 +224,8 @@ class SubprocessAdapter:
             "--verbose",
             "--model", effective_model,
         ]
+        if extra_cli_args:
+            cmd.extend(extra_cli_args)
         if resume_session:
             cmd.extend(["--resume", resume_session])
         cmd.append(effective_instruction)

@@ -110,18 +110,26 @@ constraints:
     audit_severity: blocking
     override_allowed: false
 
-  - id: deepseek-path-d-blocked
+  - id: deepseek-harness-subscription-blocked
     rule: forbid_route
     forbidden_route:
       provider: deepseek
-      via: claude_harness
+      via: claude_harness_oauth
     reason: >-
-      Path D (Claude binary with ANTHROPIC_BASE_URL redirect) blocked on
-      2026-05-10 — telemetry-leak verified, `claude` v2.1.136 still hits
-      api.anthropic.com 8x per session despite redirect
-      (project_deepseek_v4_pro_paths.md). Tier C network-namespace sandbox
-      is mandatory before Path D can be unblocked. Use Path B (LiteLLM
-      bridge) until that work lands.
+      The DeepSeek harness (Claude binary with ANTHROPIC_BASE_URL redirect to
+      api.deepseek.com/anthropic) protects the auth IDENTITY, not the
+      mechanism. Running the redirect while authenticated on the production
+      OAuth SUBSCRIPTION rides that account = same ban-class as no-anthropic-sdk
+      (opencode/openclaw precedent), so `via: claude_harness_oauth` stays
+      blocked. The own-key KEY-AUTH lane (`via: claude_harness_keyauth`) is
+      ALLOWED: measured on `claude` 2.1.150 (2026-05-26), with
+      ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY (key-auth, not OAuth) +
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 + MCP off
+      (--strict-mcp-config --mcp-config '{"mcpServers":{}}') = 0 calls to
+      api.anthropic.com. The old "8 hits/session" leak (v2.1.136) was telemetry
+      + OAuth-subscription validation; both vanish in key-auth mode. See
+      ~/.claude/rules/provider-constraints.md and
+      deepseek-path-d-leak-hardened.md.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false

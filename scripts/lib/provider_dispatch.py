@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -139,7 +139,7 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         usage["input"] = int(raw.get("input_tokens", 0) or 0)
         usage["output"] = int(raw.get("output_tokens", 0) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
-    elif provider == "claude":
+    elif provider in ("claude", "deepseek-harness"):
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
@@ -161,6 +161,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "codex": "openai",
     "gemini": "google",
     "kimi": "kimi",
+    "deepseek-harness": "deepseek",
 }
 
 
@@ -781,6 +782,77 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             logger.debug("_dispatch_kimi: event archive+clear failed: %s", _exc)
 
 
+def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
+    """Route to spawn_deepseek_harness for the governed DeepSeek-harness lane.
+
+    Execution lane (not a review lane): the ``claude`` CLI drives DeepSeek's
+    Anthropic-compatible endpoint with full tool-use, authenticated with the
+    OWN DeepSeek key in KEY-AUTH mode (never the OAuth subscription).  Reuses
+    the governed claude spawn path (SubprocessAdapter) so it emits a receipt and
+    is not the raw ``claude -p`` receipt-bypass the GOV-1 guard targets.
+
+    Fast-fails before any subprocess spawn when DEEPSEEK_API_KEY is absent —
+    the lane must never ride the production OAuth account.
+    """
+    from provider_spawns.deepseek_harness_spawn import (
+        DEEPSEEK_API_KEY_ENV,
+        resolve_harness_model,
+        spawn_deepseek_harness,
+    )
+
+    if not os.environ.get(DEEPSEEK_API_KEY_ENV):
+        print(
+            f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} env var "
+            "(own-key key-auth; OAuth subscription is forbidden for this lane)",
+            file=sys.stderr,
+        )
+        return _EX_USAGE
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_deepseek_harness: EventStore init failed; cannot proceed "
+            "without audit sink (ADR-005): %s",
+            _es_exc,
+        )
+        return 1
+
+    model = resolve_harness_model(args.model if args.model != "sonnet" else None)
+    enriched_instruction = _enrich_instruction(args)
+    start_time = datetime.now(timezone.utc)
+    try:
+        result = spawn_deepseek_harness(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+        )
+        end_time = datetime.now(timezone.utc)
+        model_used = result.model or model
+
+        if result.error:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            print(f"spawn_deepseek_harness failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "timeout")
+            print("spawn_deepseek_harness timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            return 1
+        _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success")
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_deepseek_harness: event archive+clear failed: %s", _exc)
+
+
 def _dispatch_gemini(args: argparse.Namespace) -> int:
     """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
 
@@ -906,6 +978,13 @@ def main(argv: list[str] | None = None) -> int:
         }
         if provider.startswith("litellm:"):
             _via = _VIA_PER_SUB.get(_sub or "", "litellm")
+        elif provider == "deepseek-harness":
+            # Own-key KEY-AUTH harness lane — sub_provider=deepseek so the
+            # deepseek-harness-subscription-blocked constraint can match on
+            # provider, while via=claude_harness_keyauth distinguishes this
+            # measured-safe lane from the blocked OAuth-subscription redirect.
+            _sub = "deepseek"
+            _via = "claude_harness_keyauth"
         elif provider in ("claude", "codex", "gemini", "kimi"):
             _via = "cli"
         else:
@@ -939,6 +1018,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if provider == "kimi":
         return _dispatch_kimi(args)
+
+    if provider == "deepseek-harness":
+        return _dispatch_deepseek_harness(args)
 
     if provider.startswith("litellm:") or provider == "litellm":
         return _dispatch_litellm(args)
