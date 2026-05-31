@@ -739,14 +739,24 @@ def _migrate_v21(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN provider TEXT")
         log('INFO', 'Migrated dispatch_metadata: added provider column')
     cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    # The base schema SQL always creates a plain (provider) index under this same
+    # name. A bare CREATE INDEX IF NOT EXISTS would silently skip on the name
+    # collision, leaving the DB permanently stuck on the plain (provider) index
+    # and the ADR-007 composite (project_id, provider) tenant-scoping silently
+    # lost. Drop first so the correct shape is always (re)created — idempotent on
+    # re-runs (DROP IF EXISTS is a no-op when the index is already absent).
+    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
     if "project_id" in cols:
+        # ADR-007: tenant-scoped composite once project_id exists, so per-provider
+        # self-learning analytics are queryable per project.
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
+            "CREATE INDEX idx_dispatch_meta_provider "
             "ON dispatch_metadata (project_id, provider)"
         )
+        log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index (ADR-007)')
     else:
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider "
+            "CREATE INDEX idx_dispatch_meta_provider "
             "ON dispatch_metadata (provider)"
         )
 

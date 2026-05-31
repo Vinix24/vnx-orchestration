@@ -66,13 +66,26 @@ def test_migration_adds_provider_column_and_index(tmp_path):
 
 
 def test_migration_v21_upgrades_to_composite_index_when_project_id_present(tmp_path):
-    """ADR-007: once project_id exists, the provider index becomes composite."""
+    """ADR-007: once project_id exists, the provider index becomes composite.
+
+    Reproduces the production bootstrap state: the base schema SQL has already
+    created the plain (provider) index under the same name. _migrate_v21 must
+    drop-then-recreate so the composite is genuinely created — a bare
+    CREATE INDEX IF NOT EXISTS would silently skip on the name collision and
+    leave the DB stuck on the plain index. This test does NOT manually drop the
+    index first, so it fails if v21 relies on IF NOT EXISTS.
+    """
     db = _bootstrap_db(tmp_path)
     conn = sqlite3.connect(str(db))
     conn.isolation_level = None
     try:
+        # Sanity: bootstrap left a plain (provider) index in place (no project_id yet).
+        pre_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_dispatch_meta_provider'"
+        ).fetchone()[0]
+        assert "project_id" not in pre_sql
+
         conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'")
-        conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
         quality_db_init._migrate_v21(conn)
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_dispatch_meta_provider'"
@@ -128,8 +141,23 @@ def test_compute_cost_rate_table_fallback_on_registry_miss():
 
 
 def test_compute_cost_none_when_zero_tokens():
-    assert provider_dispatch._compute_cost("codex", "gpt-5.2-codex",
-                                           {"input": 0, "output": 0, "cache_hit": 0}) is None
+    """Zero tokens → None via the guard, AND the same provider/model resolves a
+    real positive cost for non-zero tokens.
+
+    Asserting only ``is None`` on zero tokens short-circuits at the zero-token
+    guard and never exercises the codex cost path — it would pass even if codex
+    pricing resolution were entirely broken. Pairing it with a non-zero call
+    proves the None is specifically the zero-token guard, not a broken lookup,
+    so the provider cost path is genuinely tested.
+    """
+    provider, model = "codex", "gpt-5.2-codex"
+    assert provider_dispatch._compute_cost(
+        provider, model, {"input": 0, "output": 0, "cache_hit": 0}
+    ) is None
+    nonzero = provider_dispatch._compute_cost(
+        provider, model, {"input": 10_000, "output": 5_000, "cache_hit": 0}
+    )
+    assert nonzero is not None and nonzero > 0
 
 
 # ---------------------------------------------------------------------------
