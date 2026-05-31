@@ -710,7 +710,7 @@ Worker terminals (T1/T2/T3) should be resumed via a new dispatch, not by T0 manu
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: t0-orchestrator
+Skill actief: t0-orchestrator
 ```
 
 No exceptions. This must appear before any other content.
