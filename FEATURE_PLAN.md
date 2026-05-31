@@ -1,12 +1,27 @@
 <!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->
 
 # VNX Feature Plan
-**Last updated**: 2026-05-29T21:06:09.831069+00:00
+**Last updated**: 2026-05-31T15:18:22.509118+00:00
 
 ## Recently Merged
 _Last 14 days — sourced from git merge commits._
 
 **Other**
+- #753 — chore(security): remove dead prep-applier + de-advertise private products from public wheel (#753) (2026-05-30)
+- #752 — fix(security): pre-publish hardening — bash_check RCE + heartbeat shell-injection + strip private portfolio from wheel (#752) (2026-05-30)
+- #750 — refactor(hygiene): extract _validate_review_evidence helpers (no behavior change) (#750) (2026-05-30)
+- #749 — fix(hygiene): size findings are advisory (warning), not blocking + OI backfill (#749) (2026-05-30)
+- #747 — fix(migrate): create runtime_schema_version table before stamping it (#747) (2026-05-30)
+- #746 — fix(resolver-unify): unify project_id + DB path resolution for pool, dream, init (#746) (2026-05-30)
+- #745 — fix(migrate): seed default pool_config row + stamp runtime_schema_version (#745) (2026-05-30)
+- #743 — fix(migrate): bootstrap runtime_coordination.db + fix XDG path resolution for track/pool (#743) (2026-05-30)
+- #742 — chore(release): bump version rc3 → 1.0.0 for public launch (#742) (2026-05-29)
+- #740 — fix(blk-initmigrate): bootstrap runtime DBs in vnx init; add vnx migrate command (#740) (2026-05-29)
+- #741 — fix(selflearn): unify canonical DB path + add nightly dream phase (#741) (2026-05-29)
+- #738 — docs(1.0): update roadmap + archive superseded docs for 1.0 launch state (#738) (2026-05-29)
+- #730 — feat(ci): add Profile D pip-install smoke test (PR-CI-SMOKE) (#730) (2026-05-29)
+- #737 — fix(dream): guided exit when resolve_project_root fails outside git repo (#737) (2026-05-29)
+- #736 — feat(dispatch): scope register_dispatch to composite (dispatch_id, project_id) — ADR-007 (#736) (2026-05-29)
 - #732 — chore(packaging): wheel hygiene — exclude pycache/tests/benchmarks, remove stale dist/ (#732) (2026-05-29)
 - #735 — fix(dream): route all file I/O through canonical vnx_paths data root (#735) (2026-05-29)
 - #733 — fix(blk-readme): make quickstart work on clean pip install (#733) (2026-05-29)
@@ -135,22 +150,6 @@ _Last 14 days — sourced from git merge commits._
 - #565 — feat(pr-sr-4): smart_router wiring + route_decisions.ndjson (opt-in via --auto-route) (#565) (2026-05-17)
 - #566 — feat(pr-6.5b): per-worker git worktree manager (#566) (2026-05-17)
 - #564 — feat(pr-6.5c): worker heartbeat + PID validation in reaper (#564) (2026-05-17)
-- #563 — fix(kimi-spawn): handle Kimi CLI Wire Protocol camelCase events (TurnBegin/ContentPart/TextPart/etc) (#563) (2026-05-17)
-- #562 — feat(pr-6.5e): per-worker .vnx-data/workers/<terminal_id>/ subdirectory (#562) (2026-05-17)
-- #559 — feat(pr-sr-2): constraint enforcer with HardConstraintViolation + shell guard (#559) (2026-05-17)
-- #561 — feat(pr-sr-3): smart_router classifier + recommendation lookup (pure, unwired) (#561) (2026-05-17)
-- #560 — feat(pr-d5-f): provider spawns emit unified_report v1 frontmatter (shadow-mode) (#560) (2026-05-17)
-- #558 — feat(pr-6.5a): real subprocess spawn in pool_manager (replaces stub from PR-6.3) (#558) (2026-05-17)
-- #557 — feat(pr-6.5d): migration auto-apply hook in T0 state bootstrap (#557) (2026-05-17)
-- #556 — feat(pr-d5-e): unified report schema enforcement (JSONSchema + validator + guardrail) (#556) (2026-05-17)
-- #555 — feat(sr-1): provider constraints SSOT (7 hard guard-rails) (#555) (2026-05-17)
-- #554 — refactor(intelligence): split intelligence_selector.py (2511 LOC) per source module (#554) (2026-05-17)
-- #552 — feat(p0b): token usage + cost tracking end-to-end for all 5 providers (#552) (2026-05-17)
-- #551 — feat(p0a): intelligence injection for all providers (codex/gemini/litellm) (#551) (2026-05-17)
-- #548 — data(benchmark): 56-dispatch model comparison results + routing recommendations (#548) (2026-05-17)
-- #547 — feat(benchmark): suite infrastructure (9 models x 7 tasks orchestrator + judge + analyzer) (#547) (2026-05-16)
-- #537 — fix(oi-1479): token_usage extraction + cost_usd computation per provider (#537) (2026-05-16)
-- #533 — fix(oi-1476): align project_id regex + yaml placeholder substitution (#533) (2026-05-16)
 
 **WAVE 5**
 - #601 — docs: refresh README + ROADMAP for 1.0.0-rc2 (Wave 5/6/7/8 shipped + central install) (#601) (2026-05-18)
@@ -173,41 +172,13 @@ _Last 14 days — sourced from git merge commits._
 - #629 — fix(install-central): write install-mode marker, export VNX_PROJECT_ROOT from shim, fix verify_install (PR-WAVE4-2) (#629) (2026-05-25)
 - #628 — fix(install-central): separate PROJECT_ROOT from VNX_HOME in central-install mode (PR-WAVE4-1) (#628) (2026-05-25)
 
-**WAVE5**
-- #532 — feat(wave5): PR-5.7 — operator demo runbook + Control Centre docs + completion report (#532) (2026-05-16)
-- #530 — feat(wave5): PR-5.6 — hybrid dispatch routing with receipt-tail lifecycle tracker (#530) (2026-05-16)
-- #528 — feat(wave5): PR-5.5 — Control Centre CLI shell skill + operator commands (#528) (2026-05-16)
-- #525 — feat(wave5): PR-5.2 — per-project T0 lifecycle management (spawn/heartbeat/kill/reap) (#525) (2026-05-16)
-- #524 — feat(wave5): PR-5.4 — cross-project intelligence aggregator (global + per-project facets) (#524) (2026-05-16)
-- #523 — feat(wave5): PR-5.3 — multi-tenant lease isolation (schema v12) (#523) (2026-05-16)
-- #522 — feat(wave5): PR-5.1 — multi-project state aggregator write-pad (#522) (2026-05-16)
-- #521 — docs(wave5): PR-5.0 — ADR-017 Control Centre product-shape architecture (#521) (2026-05-16)
-
 **WAVE6**
 - #698 — fix(wave6-pool-lease-spawn): insert terminal_leases row before add_member in pool scale_up (#698) (2026-05-29)
 - #575 — fix(wave6): real spawn impl + config field reads + single heartbeat threshold (3 blockers) (#575) (2026-05-17)
-- #546 — fix(wave6): OI cleanup group 1 (idempotency + regex + ledger + audit) (#546) (2026-05-16)
-- #544 — feat(wave6): PR-6.8 — Control Centre pool-integration (cross-project pool view + supervisor) (#544) (2026-05-16)
-- #543 — feat(wave6): PR-6.7 — vnx pool CLI (status/scale/config/reap subcommands) (#543) (2026-05-16)
-- #542 — feat(wave6): PR-6.6 — health monitoring + dead-worker reap (tick = reap → decide → execute) (#542) (2026-05-16)
-- #541 — feat(wave6): PR-6.5 — provider-mix per pool with lowest-share-first allocation (#541) (2026-05-16)
-- #540 — feat(wave6): PR-6.4 — pluggable scaling policies (queue_depth_v1 + cost_aware_v1) (#540) (2026-05-16)
-- #539 — feat(wave6): PR-6.3 — PoolManager core (decision engine + state repo + manager) (#539) (2026-05-16)
-- #538 — feat(wave6): PR-6.2 — schema v14 elastic worker pool tables + migration scripts (#538) (2026-05-16)
-- #535 — feat(wave6): PR-6.1 — vnx_workers.yaml + WORKER_REGISTRY (ADR-013 implementation) (#535) (2026-05-16)
-- #534 — feat(wave6): PR-6.0 — ADR-018 elastic worker pool design freeze (#534) (2026-05-16)
 
 **WAVE7**
 - #579 — fix(wave7): claude cost tracking + kimi audit-gap status + redact prompt in logs (3 blockers) (#579) (2026-05-17)
 - #577 — fix(wave7): claude cost tracking + kimi audit-gap status + redact prompt in logs (3 blockers) (#577) (2026-05-17)
-- #550 — feat(wave7): PR-7.7 — Kimi CLI as 5th provider (OAuth via kimi login) (#550) (2026-05-17)
-- #545 — fix(wave7): OI cleanup group 2 — litellm usage stream + unified report .md suffix (#545) (2026-05-16)
-- #536 — feat(wave7): PR-7.6 — provider governance unification (receipt + unified report for all providers) (#536) (2026-05-16)
-- #531 — feat(wave7): vnx.env loader + DeepSeek V4-Pro/V4-Flash model registry update (#531) (2026-05-16)
-- #520 — feat(wave7): PR-7.5 — provider behavior contracts (capabilities + tool-shape + cache-control) (#520) (2026-05-15)
-- #519 — feat(wave7): PR-7.4 — cost-routing policy engine (feature-flag gated) (#519) (2026-05-15)
-- #518 — feat(wave7): PR-7.3 — GLM-5.1 lane via OpenRouter (z.AI direct deferred) (#518) (2026-05-15)
-- #517 — feat(wave7): PR-7.2 — Kimi K2.6 + K2-0905 lane via LiteLLM Moonshot endpoint (#517) (2026-05-15)
 
 ## Active features
 
@@ -227,4 +198,61 @@ Status: done
 
 ### fut-2 — Track tenant-scoping per ADR-007 — composite PK over project_id, seeding from roadmap, composite-FK dispatches.track → tracks(track_id, project_id), project-aware CLI
 Status: done
+
+### launch-wave0-hygiene — 1.0 launch — Wave 0 hygiene: untrack .venv + scratch, strip emoji/buzzwords (keep FEATURE_PLAN/PR_QUEUE tracked)
+Status: in_progress
+
+### launch-renames — 1.0 launch — Wave 1 renames: _vN files -> canonical names + compat shims (remove in 1.0.1)
+Status: in_progress
+
+### launch-scrub — 1.0 launch — Wave 1 scrub: remove residual private-project artifacts from repo + wheel
+Status: in_progress
+
+### launch-readme — 1.0 launch — Wave 1 credibility: README control-plane repositioning + ADR section + architecture diagram
+Status: in_progress
+
+### launch-governance-core — 1.0 launch — Wave 1b: role-based manager block + auto-inject T0-action footer (enforcement, not convention)
+Status: in_progress
+
+### launch-provider-intel — 1.0 launch — Wave 2: provider-aware intelligence + receipt token/cost + report linkage (ADR-007 provider column)
+Status: in_progress
+
+### launch-kimi-robust — 1.0 launch — Wave 2: kimi 1.44.0 robust spawn + fail-loud on empty extraction (drop --yolo)
+Status: in_progress
+
+### launch-capability-interim — 1.0 launch — Wave 2: scope worker capabilities (drop --dangerously-skip-permissions, empty ambient MCP)
+Status: in_progress
+
+### launch-deepseek-lane — 1.0 launch — governed DeepSeek-harness lane (own-key, key-auth, MCP-off, account-safe)
+Status: in_progress
+
+### launch-adr020-contract — 1.0 launch — ADR-020 parallel multi-track execution contract (design-ratified; implementation 1.2)
+Status: in_progress
+
+### launch-option-b-parity — 1.0 launch — Option B parity: extract prepare()/govern() so skill+permission+intelligence+footer+report-contract are uniform across all lanes
+Status: planned
+
+### kimi-deepfix-major2 — Kimi #763 info-bug deep fix + MAJOR-2 regression test
+Status: planned
+
+### log-rotation — Log-rotation fix: event-stream ring-buffer growth + receipt log size bounds
+Status: planned
+
+### opt-a-envelope-extraction — Option A envelope extraction: dispatch_envelope.py + LaneRouter + delete legacy duplicated PREPARE/GOVERN
+Status: planned
+
+### capability-binding-full — Full role->capability binding: mcp_servers allowlist + permission_mode per role + un-dead generate_claude_settings + per-adapter materialization + permission_enforcement receipt field
+Status: planned
+
+### per-folder-agents — Per-folder agents: folder-addressable role = skill + permission-profile + model
+Status: planned
+
+### openrouter-arbitrary — OpenRouter-arbitrary / OpenAI-compat proxy-gated lane class
+Status: planned
+
+### provider-hardening — Provider hardening: fail-loud on empty extraction + CI-canary per CLI version + version-pin
+Status: planned
+
+### usage-aware-routing — Usage/budget aggregator + usage-aware routing (clean-API + admin-API + receipt-OBSERVE) + Mission Control widget
+Status: planned
 
