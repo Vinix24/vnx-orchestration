@@ -84,17 +84,24 @@ def load_footer_template(mode: str = _DEFAULT_MODE) -> str:
 def append_dispatch_footer(instruction: str, mode: str = _DEFAULT_MODE) -> str:
     """Append T0 action-request footer to a dispatch instruction.
 
-    Idempotent: if the instruction already contains the footer sentinel
-    (``## ACTION REQUIRED: T0 Orchestrator Response``), returns unchanged.
+    Idempotent: returns unchanged when the instruction already contains either
+    the programmatic sentinel OR the first non-empty line of the loaded footer
+    body (guards against raw-template inclusions that lack the sentinel line).
 
     Returns the instruction unchanged on any failure (best-effort, non-fatal).
     """
     if _FOOTER_SENTINEL in instruction:
-        logger.debug("dispatch_footer: footer already present — skipping")
+        logger.debug("dispatch_footer: footer sentinel already present — skipping")
         return instruction
 
     footer = load_footer_template(mode)
     if not footer:
+        return instruction
+
+    # Second idempotence guard: raw footer body already embedded (no sentinel).
+    first_footer_line = next((ln for ln in footer.splitlines() if ln.strip()), "")
+    if first_footer_line and first_footer_line in instruction:
+        logger.debug("dispatch_footer: footer body already present — skipping")
         return instruction
 
     return instruction + "\n\n---\n\n" + _FOOTER_SENTINEL + "\n" + footer

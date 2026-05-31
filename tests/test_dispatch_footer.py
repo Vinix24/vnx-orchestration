@@ -154,3 +154,16 @@ class TestAppendDispatchFooter:
         for mode, filename in _FOOTER_FILES.items():
             path = footers_dir / filename
             assert path.exists(), f"Footer template missing for mode '{mode}': {path}"
+
+    def test_idempotent_when_raw_footer_body_present_without_sentinel(self):
+        """Regression: raw footer body already embedded (no sentinel) must not double-append."""
+        footer_body = load_footer_template("normal")
+        assert footer_body, "Prerequisite: normal footer must be non-empty"
+        # Simulate an instruction that already contains the raw footer body but no sentinel
+        instruction = "Do the task.\n\n" + footer_body
+        assert _FOOTER_SENTINEL not in instruction, "Precondition: sentinel must NOT be present"
+        result = append_dispatch_footer(instruction)
+        # Footer body must appear exactly once
+        assert result.count(footer_body) == 1, (
+            "Footer body appeared more than once — double-append bug not fixed"
+        )
