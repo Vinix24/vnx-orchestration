@@ -18,7 +18,7 @@ from .queue_depth_v1 import queue_depth_v1  # noqa: E402
 from .cost_aware_v1 import cost_aware_v1    # noqa: E402
 
 POLICIES = {
-    "fixed": lambda cfg, st, m: cfg.min_workers,
+    "fixed": lambda cfg, _st, m: cfg.min_workers,
     "queue_depth_v1": queue_depth_v1,
     "queue_aware": queue_depth_v1,   # backward-compat alias for PR-6.3
     "cost_aware_v1": cost_aware_v1,

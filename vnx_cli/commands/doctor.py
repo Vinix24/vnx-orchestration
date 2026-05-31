@@ -3,12 +3,15 @@
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
+
+from vnx_cli import _engine
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +38,16 @@ def _check_tools() -> list[Check]:
             status=PASS if found else FAIL,
             detail=found or f"{tool} not found in PATH",
         ))
+    shellcheck = shutil.which("shellcheck")
+    results.append(Check(
+        name="tool:shellcheck",
+        status=PASS if shellcheck else WARN,
+        detail=shellcheck or "shellcheck not found in PATH; shell lint checks will emit tool_unavailable warnings",
+    ))
     return results
 
 
-def _check_directories(project_dir: Path) -> list[Check]:
+def _check_directories(project_dir: Path, data_root: Path) -> list[Check]:
     results = []
 
     vnx_dir = project_dir / ".vnx"
@@ -48,11 +57,13 @@ def _check_directories(project_dir: Path) -> list[Check]:
         detail=str(vnx_dir) if vnx_dir.is_dir() else ".vnx/ missing — run `vnx init`",
     ))
 
-    vnx_data = project_dir / ".vnx-data"
+    # PR-PIP-2: the runtime data tree lives under the resolved state root
+    # (a user-data-dir for pip installs), no longer project-local .vnx-data.
     results.append(Check(
-        name="dir:.vnx-data",
-        status=PASS if vnx_data.is_dir() else FAIL,
-        detail=str(vnx_data) if vnx_data.is_dir() else ".vnx-data/ missing — run `vnx init`",
+        name="dir:data-root",
+        status=PASS if data_root.is_dir() else FAIL,
+        detail=str(data_root) if data_root.is_dir()
+        else f"runtime data root missing ({data_root}) — run `vnx init`",
     ))
 
     agents_dir = project_dir / "agents"
@@ -128,10 +139,69 @@ def _check_install_mode(project_dir: Path) -> Check:
             status=PASS,
             detail=f"mode: embedded, path: {embedded_path}",
         )
+
+    # PR-PIP-2: pip-installed engine — vnx_cli ships scripts/ + schemas/ as
+    # site-packages siblings. Detect that layout so a wheel install reports a
+    # recognized (healthy) mode instead of "no VNX install detected".
+    engine_root = _engine.engine_root()
+    engine_has_scripts = (engine_root / "scripts").is_dir()
+    if engine_has_scripts and _engine.is_packaged_install(engine_root):
+        return Check(
+            name="install:mode",
+            status=PASS,
+            detail=f"mode: packaged (site-packages), engine: {engine_root}",
+        )
+    if engine_has_scripts and (engine_root / "pyproject.toml").is_file():
+        return Check(
+            name="install:mode",
+            status=PASS,
+            detail=f"mode: source (dev checkout), engine: {engine_root}",
+        )
     return Check(
         name="install:mode",
         status=WARN,
-        detail="no VNX install detected (neither embedded nor central scripts/ tree found)",
+        detail="no VNX install detected (no embedded, central, packaged, or source scripts/ tree found)",
+    )
+
+
+def _check_state_root_location(data_root: Path) -> Check:
+    """WARN if the runtime state root resolves inside the (immutable) package.
+
+    PR-PIP-2 mitigation of the "state in immutable package" risk: a pip install
+    must not write runtime state under site-packages or VNX_HOME. If it does,
+    point the operator at VNX_DATA_HOME / the XDG default.
+    """
+    engine_root = _engine.engine_root()
+    candidates = [engine_root]
+    env_home = os.environ.get("VNX_HOME")
+    if env_home:
+        candidates.append(Path(env_home).expanduser())
+
+    def _within(child: Path, parent: Path) -> bool:
+        try:
+            child.resolve().relative_to(parent.resolve())
+            return True
+        except (ValueError, OSError):
+            return False
+
+    root_str = str(data_root)
+    in_site_packages = "site-packages" in root_str or "dist-packages" in root_str
+    in_engine = any(_within(data_root, c) for c in candidates)
+
+    if in_site_packages or in_engine:
+        return Check(
+            name="state:location",
+            status=WARN,
+            detail=(
+                f"runtime state root resolves inside the package/VNX_HOME ({data_root}) "
+                "— set VNX_DATA_HOME or rely on the XDG default "
+                "(~/.local/share/vnx/<project_id>) to keep state writable and out of the wheel"
+            ),
+        )
+    return Check(
+        name="state:location",
+        status=PASS,
+        detail=f"runtime state root outside the package: {data_root}",
     )
 
 
@@ -160,9 +230,9 @@ def _check_dual_install(project_dir: Path) -> Check:
     )
 
 
-def _check_schema_versions(project_dir: Path) -> list[Check]:
+def _check_schema_versions(data_root: Path) -> list[Check]:
     """Check PRAGMA user_version and runtime_schema_version on coordination databases."""
-    state_dir = project_dir / ".vnx-data" / "state"
+    state_dir = data_root / "state"
     db_specs = [
         ("runtime_coordination.db", MIN_RUNTIME_SCHEMA_VERSION),
         ("quality_intelligence.db", 0),
@@ -242,9 +312,9 @@ def _skill_resolvable(skill_ref: str, skill_dirs: list[Path]) -> bool:
     return False
 
 
-def _check_skill_coverage(project_dir: Path, strict: bool = False) -> Check:
+def _check_skill_coverage(project_dir: Path, data_root: Path, strict: bool = False) -> Check:
     """Audit skill/role refs in pending dispatches against resolvable skill directories."""
-    dispatch_dir = project_dir / ".vnx-data" / "dispatches" / "pending"
+    dispatch_dir = data_root / "dispatches" / "pending"
     if not dispatch_dir.is_dir():
         return Check(
             name="skills:coverage",
@@ -401,9 +471,9 @@ def _check_worktree_orphans(project_dir: Path) -> list[Check]:
     )]
 
 
-def _check_active_drain(project_dir: Path) -> Check:
+def _check_active_drain(data_root: Path) -> Check:
     """Count in-flight dispatches in runtime_coordination.db; advise drain if > 0."""
-    db_path = project_dir / ".vnx-data" / "state" / "runtime_coordination.db"
+    db_path = data_root / "state" / "runtime_coordination.db"
     if not db_path.exists():
         return Check(
             name="drain:active",
@@ -452,16 +522,23 @@ def vnx_doctor(args) -> int:
     emit_json = getattr(args, "json", False)
     strict = getattr(args, "strict", False)
 
+    # PR-PIP-2: resolve the runtime data root once (explicit > VNX_DATA_HOME >
+    # existing ~/.vnx-data/<id> > existing project-local > XDG default) and
+    # thread it through the runtime-tree checks so a clean (state-outside-project)
+    # install validates against where state actually lives.
+    data_root = _engine.resolve_data_root(project_dir)
+
     checks: list[Check] = []
     checks.extend(_check_tools())
-    checks.extend(_check_directories(project_dir))
+    checks.extend(_check_directories(project_dir, data_root))
     checks.append(_check_install_mode(project_dir))
+    checks.append(_check_state_root_location(data_root))
     checks.append(_check_dual_install(project_dir))
-    checks.extend(_check_schema_versions(project_dir))
-    checks.append(_check_skill_coverage(project_dir, strict=strict))
+    checks.extend(_check_schema_versions(data_root))
+    checks.append(_check_skill_coverage(project_dir, data_root, strict=strict))
     checks.append(_check_overrides(project_dir))
     checks.extend(_check_worktree_orphans(project_dir))
-    checks.append(_check_active_drain(project_dir))
+    checks.append(_check_active_drain(data_root))
 
     passed = sum(1 for c in checks if c.status == PASS)
     warned = sum(1 for c in checks if c.status == WARN)

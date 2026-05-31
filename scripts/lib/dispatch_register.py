@@ -31,6 +31,25 @@ except ImportError:
     _shadow_verifier = None  # type: ignore[assignment]
     _shadow_logger = None  # type: ignore[assignment]
 
+# ---------------------------------------------------------------------------
+# NDJSON write path documentation
+#
+# Two separate NDJSON paths exist in this module — intentional, not a bug:
+#
+# Path 1 (legacy, fire-and-forget): append_event()
+#   Writes to: <state_dir>/dispatch_register.ndjson
+#   Semantics: best-effort, never raises, suitable for fire-and-forget hooks
+#   Used by: all legacy callers (schema_migration hooks, CLI bash callers, etc.)
+#
+# Path 2 (transactional, ADR-005): register_proposed_track_dispatch()
+#   Writes to: <state_dir.parent>/events/dispatch_register.ndjson
+#   Semantics: raises on failure; NDJSON written before SQLite commit
+#   Used by: new track-layer operations requiring ledger-first guarantee
+#
+# DO NOT merge the two paths — legacy callers rely on best-effort semantics;
+# new callers must use the transactional path and handle OSError propagation.
+# ---------------------------------------------------------------------------
+
 # SQL template identifier used in shadow comparisons (no actual SQL — NDJSON source)
 _REGISTER_NDJSON_TEMPLATE = "dispatch_register.ndjson"
 
@@ -149,6 +168,11 @@ def _build_event_record(
         record["agent_id"] = agent_id
     if extra and isinstance(extra, dict):
         record["extra"] = extra
+    import hashlib as _hashlib
+    _primary = dispatch_id or feature_id or str(pr_number)
+    record["record_id"] = _hashlib.sha256(
+        f'{event}:{_primary}:{record["timestamp"]}'.encode()
+    ).hexdigest()[:16]
     return record
 
 
@@ -269,12 +293,7 @@ def append_event(
     if not dispatch_id and pr_number is None and not feature_id:
         return False
 
-    # Codex round-7 finding 3 (ADVISORY): resolve identity per-field so that a
-    # partial-identity caller (e.g. only operator_id supplied) still gets
-    # project_id resolved from env/context.  The previous condition fired only
-    # when ALL four fields were absent, silently skipping central mirror for any
-    # caller that supplied even one field.  Empty-string values are treated as
-    # unset (Python `or` semantics) per the caller contract.
+    # Resolve identity per-field so partial callers still receive missing values.
     if not (operator_id and project_id and orchestrator_id and agent_id):
         identity = _resolve_identity_for_register()
         operator_id = operator_id or identity.get("operator_id")
@@ -613,6 +632,51 @@ def _query_recent_dispatches(
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
         log.debug("Shadow comparison failed in _query_recent_dispatches: %s", e)
     return legacy
+
+
+def register_proposed_track_dispatch(
+    state_dir: "str | Path",
+    dispatch_id: str,
+    terminal_id: str,
+    track_id: str,
+    pr_ref: str,
+    *,
+    project_id: str = "vnx-dev",
+) -> None:
+    """Insert a proposed dispatch row + emit NDJSON audit event (ADR-005 compliant).
+
+    NDJSON write precedes the SQLite commit. If the audit write fails it raises
+    and no DB row is created. Raises sqlite3.Error on DB failure.
+
+    ``project_id`` is written into the dispatches row (defaults to ``vnx-dev``
+    for backwards compatibility with callers that do not supply it).
+    """
+    import sqlite3 as _sqlite3
+
+    # Build audit record before any I/O
+    record = _build_event_record(
+        "dispatch_created", dispatch_id, None,
+        pr_ref or "", terminal_id or "", "", None,
+    )
+
+    # Write NDJSON first — ADR-005 requires ledger before DB; events/ not state/
+    _write_event_locked(Path(state_dir).parent / "events" / "dispatch_register.ndjson", record)
+
+    db_path = Path(state_dir) / "runtime_coordination.db"
+    conn = _sqlite3.connect(str(db_path), timeout=10.0)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute(
+            """
+            INSERT INTO dispatches (dispatch_id, project_id, state, terminal_id, track, pr_ref)
+            VALUES (?, ?, 'proposed', ?, ?, ?)
+            """,
+            (dispatch_id, project_id, terminal_id, track_id, pr_ref),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # CLI for bash callers

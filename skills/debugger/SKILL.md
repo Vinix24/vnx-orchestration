@@ -30,6 +30,24 @@ Follow a structured debugging approach for every issue:
 
 ## Guidelines
 
+## STEP 0 — Foundational Check (Mandatory)
+
+BEFORE proposing any design, fix, or implementation:
+
+1. **Consult relevant ADRs** in `docs/governance/decisions/`. Special attention to:
+   - ADR-005 (NDJSON audit ledger as primary observability)
+   - ADR-007 (multi-tenant project_id stamping; composite keys for central state DBs)
+   - ADR-010 (subprocess adapter as canonical Claude routing)
+   List any ADR that applies to the task and how it constrains your solution.
+
+2. **Consult relevant memory** in `~/.claude/projects/<your-project>/memory/MEMORY.md` — particularly entries about past architectural incidents.
+
+3. **Check P4-style incident docs** in `claudedocs/` for analogous failures (e.g., `2026-05-09-p4-migration-architecture-lessons.md` for multi-tenant migration patterns).
+
+4. **State your foundational read aloud** at the start of your response. Example: "ADR-007 applies: new tabel X needs composite PK over project_id. Per P4 §4.2, single-column UNIQUE is a smell. Memory [[adr-007-multitenant-composite-keys]] confirms."
+
+Skipping STEP 0 is a process violation, not a shortcut. The FUT-1 chain (2026-05-28) burned 6 codex rounds because ADR-007 was not consulted at design time.
+
 ### Debugging Workflow
 1. Gather error context (stack traces, logs, state)
 2. Check recent changes (git diff, commit history)

@@ -36,7 +36,7 @@ from pool_manager import (
 )
 from pool_reaper import ReapConfig, ReapTarget
 from pool_state_repo import PoolStateRepository
-from pool_state_fixtures import create_test_db_file
+from pool_state_fixtures import create_test_db_file, insert_lease
 
 
 def _setup_db(tmp_path: Path, min_workers: int = 0, max_workers: int = 4) -> Path:
@@ -132,6 +132,9 @@ class TestSpawnIntegrationFullFlow:
         mock_popen.return_value = mock_proc
 
         db_path = _setup_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        insert_lease(conn, "T1")
+        conn.close()
         repo = PoolStateRepository(db_path, "vnx-dev")
         repo.add_member("default", "T1", "claude", "backend-developer", 100.0, pid=44444)
 

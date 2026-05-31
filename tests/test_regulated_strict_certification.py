@@ -28,11 +28,6 @@ from audit_bundle import (
     EvidenceType,
     audit_bundle_builder,
 )
-from regulated_strict_dashboard import (
-    RegulatedStrictStatus,
-    format_status_line,
-    regulated_strict_surface,
-)
 
 
 def _policy() -> RegulatedStrictApprovalPolicy:
@@ -146,37 +141,6 @@ class TestAuditBundleIntegrity:
 
     def test_five_evidence_types(self) -> None:
         assert len(list(EvidenceType)) == 5
-
-
-class TestDashboardVisibility:
-
-    def test_status_surface_created(self) -> None:
-        state = DispatchApprovalState(dispatch_id="d-cert")
-        policy = _policy()
-        status = regulated_strict_surface("d-cert", state, policy)
-        assert isinstance(status, RegulatedStrictStatus)
-
-    def test_status_line_format(self) -> None:
-        state = DispatchApprovalState(dispatch_id="d-cert")
-        policy = _policy()
-        status = regulated_strict_surface("d-cert", state, policy)
-        line = format_status_line(status)
-        assert isinstance(line, str)
-        assert len(line) > 0
-
-    def test_profile_locked(self) -> None:
-        state = DispatchApprovalState(dispatch_id="d-cert")
-        policy = _policy()
-        status = regulated_strict_surface("d-cert", state, policy)
-        assert status.profile_locked is True
-
-    def test_to_dict(self) -> None:
-        state = DispatchApprovalState(dispatch_id="d-cert")
-        policy = _policy()
-        status = regulated_strict_surface("d-cert", state, policy)
-        d = status.to_dict()
-        assert isinstance(d, dict)
-        assert "dispatch_id" in d
 
 
 class TestContractAlignment:

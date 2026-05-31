@@ -419,7 +419,7 @@ class TestCheckTerminalClassification(unittest.TestCase):
     def _create_zombie(self, dispatch_id, terminal_id, end_state):
         from runtime_coordination import register_dispatch
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
             conn.commit()
         self.lease_mgr.acquire(terminal_id, dispatch_id)
         # Transition to end_state to create zombie (lease not released)
@@ -455,7 +455,7 @@ class TestCheckTerminalClassification(unittest.TestCase):
         """Active lease with live dispatch does not include failure classification."""
         from runtime_coordination import register_dispatch
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="active-001", terminal_id="T2")
+            register_dispatch(conn, dispatch_id="active-001", terminal_id="T2", project_id="vnx-dev")
             conn.commit()
         self.lease_mgr.acquire("T2", "active-001")
         with get_connection(self.state_dir) as conn:

@@ -43,17 +43,28 @@ source "$SCRIPT_DIR/lib/vnx_paths.sh"
 ensure_env
 
 # Load user environment (VNX_DIGEST_EMAIL, VNX_SMTP_PASS, etc.)
+# Only load non-path vars: stale VNX_STATE_DIR / VNX_DATA_DIR from shell profiles
+# can override the correctly resolved values computed by ensure_env above and
+# cause writers (memory_consolidator, pattern_extractor) to use the pre-ADR-007
+# path (~/.vnx-data/state) instead of the canonical project_id-scoped path.
 for _rc in "$HOME/.zprofile" "$HOME/.zshrc"; do
     if [ -f "$_rc" ]; then
-        eval "$(grep '^export VNX_' "$_rc" 2>/dev/null || true)"
+        eval "$(grep '^export VNX_' "$_rc" 2>/dev/null \
+            | grep -v -E 'VNX_(STATE_DIR|DATA_DIR|DATA_HOME|DISPATCH_DIR|LOGS_DIR|PIDS_DIR|LOCKS_DIR|SOCKETS_DIR|REPORTS_DIR|HEADLESS_REPORTS_DIR|DB_DIR|HOME|CANONICAL_ROOT|INTELLIGENCE_DIR)=' \
+            || true)"
     fi
 done
+# Re-anchor canonical path vars after profile load (ADR-007: VNX_DATA_DIR is authoritative).
+# VNX_STATE_DIR must equal VNX_DATA_DIR/state so all writers and readers use the same db.
+export VNX_STATE_DIR="$VNX_DATA_DIR/state"
 
-LOG_FILE="$VNX_STATE_DIR/nightly_pipeline.log"
-LOCK_FILE="$VNX_STATE_DIR/nightly_pipeline.lock"
-PHASES_LOG="$VNX_STATE_DIR/nightly_pipeline_phases.ndjson"
-HEALTH_FILE="$VNX_STATE_DIR/nightly_pipeline_health.json"
-DB_PATH="$VNX_STATE_DIR/quality_intelligence.db"
+LOG_FILE="$VNX_DATA_DIR/state/nightly_pipeline.log"
+LOCK_FILE="$VNX_DATA_DIR/state/nightly_pipeline.lock"
+PHASES_LOG="$VNX_DATA_DIR/state/nightly_pipeline_phases.ndjson"
+HEALTH_FILE="$VNX_DATA_DIR/state/nightly_pipeline_health.json"
+# DB_PATH derived from VNX_DATA_DIR/state (authoritative, ADR-007: project_id-scoped).
+# NOT VNX_STATE_DIR which can be polluted by stale shell profile exports.
+DB_PATH="$VNX_DATA_DIR/state/quality_intelligence.db"
 
 PIPELINE_START="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 PHASES_RUN=0
@@ -165,9 +176,9 @@ log_msg "Health check: session_analytics rows=${SESSION_COUNT}"
 # ── Phase 2b: Behavioral analysis ────────────────────────────────────────────
 # Runs after session-dispatch linkage, before learning cycle.
 run_phase "2b-event-analyze" python3 "$SCRIPT_DIR/lib/event_analyzer.py" \
-    --all --output "$VNX_STATE_DIR/dispatch_behaviors.json"
+    --all --output "$VNX_DATA_DIR/state/dispatch_behaviors.json"
 run_phase "2c-pattern-extract" python3 "$SCRIPT_DIR/lib/pattern_extractor.py" \
-    --input "$VNX_STATE_DIR/dispatch_behaviors.json"
+    --input "$VNX_DATA_DIR/state/dispatch_behaviors.json"
 
 # ── Phase 4: Learning cycle ───────────────────────────────────────────────────
 run_phase "4-learning-cycle" python3 "$SCRIPT_DIR/learning_loop.py" run
@@ -175,8 +186,36 @@ run_phase "4-learning-cycle" python3 "$SCRIPT_DIR/learning_loop.py" run
 # ── Phase 4a: Memory consolidation (extract patterns from dispatch history) ───
 run_phase "4a-memory-consolidation" python3 "$SCRIPT_DIR/memory_consolidator.py" --days 7
 
-# ── Phase 4b: Weekly digest ───────────────────────────────────────────────────
-run_phase "4b-weekly-digest" python3 "$SCRIPT_DIR/weekly_digest.py"
+# ── Phase 4b: Dream consolidation (ADR-019: auto-dream memory consolidation) ──
+# Produces pending-review proposals for T0 operator review. Never auto-applies.
+# Human gate preserved per ADR-019 review_gate. ADR-007: project_id-scoped.
+# Skip when VNX_DREAM_ENABLED=0; active by default when project_id is resolvable.
+if [ "${VNX_DREAM_ENABLED:-1}" != "0" ]; then
+    _dream_pid="${VNX_PROJECT_ID:-}"
+    if [ -z "$_dream_pid" ]; then
+        _dream_pid="$(python3 -c "
+import sys, os
+sys.path.insert(0, '$SCRIPT_DIR/lib')
+try:
+    from vnx_paths import resolve_project_id
+    print(resolve_project_id() or '')
+except Exception:
+    print('')
+" 2>/dev/null || echo "")"
+    fi
+    if [ -n "$_dream_pid" ]; then
+        run_phase "4b-dream-consolidation" python3 "$SCRIPT_DIR/dream/consolidator.py" \
+            --project-id "$_dream_pid" \
+            --db-path "$DB_PATH"
+    else
+        log_msg "Phase 4b (dream): skipped — no project_id resolved (set VNX_PROJECT_ID or ensure .vnx-project-id exists)"
+        log_phase_result "4b-dream-consolidation" "skipped" "no_project_id"
+    fi
+    unset _dream_pid
+fi
+
+# ── Phase 4c: Weekly digest ───────────────────────────────────────────────────
+run_phase "4c-weekly-digest" python3 "$SCRIPT_DIR/weekly_digest.py"
 
 # ── Phase 5: Mark stale pending edits ────────────────────────────────────────
 run_phase "5-stale-edits" python3 "$SCRIPT_DIR/tag_intelligence.py" stale

@@ -17,7 +17,7 @@ if command -v rg >/dev/null 2>&1; then
     "$SCRIPTS_DIR" "$TEMPLATES_DIR" "$BIN_DIR" \
     --glob '**/*.sh' \
     --glob '**/*.py' \
-    --glob "$TEMPLATES_DIR/**/*.md" \
+    --glob '**/*.md' \
     --glob '!**/archived*' \
     --glob '!**/archive*' \
     --glob '!**/vnx_doctor.sh' \
@@ -30,7 +30,8 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/vnx_install.py' \
     --glob '!**/commands/merge_preflight.sh' \
     --glob '!**/*.deprecated' \
-    --glob '!**/*.log' || true)
+    --glob '!**/*.log' \
+    --glob '!**/check_installer_no_template_leak.sh' || true)
   # Also check bin/vnx (no extension, so glob won't match it)
   if [ -f "$BIN_DIR/vnx" ]; then
     local_matches=$(rg -n "$PATTERN" "$BIN_DIR/vnx" || true)
@@ -56,7 +57,8 @@ else
     --exclude='vnx_install.py' \
     --exclude='merge_preflight.sh' \
     --exclude='*.deprecated' \
-    --exclude='*.log' || true)
+    --exclude='*.log' \
+    --exclude='check_installer_no_template_leak.sh' || true)
   # Also check bin/vnx
   if [ -f "$BIN_DIR/vnx" ]; then
     local_matches=$(grep -n -E "$PATTERN" "$BIN_DIR/vnx" || true)

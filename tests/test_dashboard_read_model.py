@@ -195,7 +195,7 @@ class TestTerminalView(unittest.TestCase):
 
     def test_working_terminal(self):
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id="d-001", terminal_id="T1", track="B")
+            register_dispatch(conn, dispatch_id="d-001", terminal_id="T1", track="B", project_id="vnx-dev")
             acquire_lease(conn, terminal_id="T1", dispatch_id="d-001")
             conn.commit()
         mgr = WorkerStateManager(self.state_dir, auto_init=False)

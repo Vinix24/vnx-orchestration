@@ -259,7 +259,7 @@ def _write_gate_result(results_dir, gate, pr_id, data):
     return path
 
 
-def _make_gemini_result(pr_id="PR-0", status="pass", blocking_count=0, advisory_count=0, contract_hash="abcdef1234567890", report_path=""):
+def _make_gemini_result(pr_id="PR-0", status="pass", blocking_count=0, advisory_count=0, contract_hash="abcdef1234567890", report_path="", branch="feature/demo"):
     return {
         "gate": "gemini_review",
         "pr_id": pr_id,
@@ -268,10 +268,11 @@ def _make_gemini_result(pr_id="PR-0", status="pass", blocking_count=0, advisory_
         "advisory_count": advisory_count,
         "contract_hash": contract_hash,
         "report_path": report_path,
+        "branch": branch,
     }
 
 
-def _make_codex_result(pr_id="PR-0", verdict="pass", contract_hash="abcdef1234567890", report_path=""):
+def _make_codex_result(pr_id="PR-0", verdict="pass", contract_hash="abcdef1234567890", report_path="", branch="feature/demo"):
     return {
         "gate": "codex_final_gate",
         "pr_id": pr_id,
@@ -280,10 +281,11 @@ def _make_codex_result(pr_id="PR-0", verdict="pass", contract_hash="abcdef123456
         "content_hash": contract_hash,
         "contract_hash": contract_hash,
         "report_path": report_path,
+        "branch": branch,
     }
 
 
-def _make_claude_result(pr_id="PR-0", state="not_configured", contract_hash="abcdef1234567890"):
+def _make_claude_result(pr_id="PR-0", state="not_configured", contract_hash="abcdef1234567890", branch="feature/demo"):
     return {
         "gate": "claude_github_optional",
         "pr_id": pr_id,
@@ -291,6 +293,7 @@ def _make_claude_result(pr_id="PR-0", state="not_configured", contract_hash="abc
         "contributed_evidence": state in ("requested", "completed"),
         "was_intentionally_absent": state in ("not_configured", "configured_dry_run"),
         "contract_hash": contract_hash,
+        "branch": branch,
     }
 
 
@@ -772,6 +775,7 @@ def _make_gate_artifact_payload(
     report_path="",
     blocking=None,
     advisory=None,
+    branch="feature/demo",
 ):
     """Build a gate result payload that mirrors gate_artifacts.materialize_artifacts.
 
@@ -794,6 +798,7 @@ def _make_gate_artifact_payload(
         "residual_risk": "",
         "duration_seconds": 12.5,
         "recorded_at": "2026-04-29T10:00:00Z",
+        "branch": branch,
     }
 
 

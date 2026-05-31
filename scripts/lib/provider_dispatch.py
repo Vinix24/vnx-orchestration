@@ -16,6 +16,8 @@ subprocess only.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import logging
 import os
 import sys
@@ -83,27 +85,44 @@ def _resolve_dispatch_paths(raw: str) -> "list[str] | None":
 
 
 def _enrich_instruction(args: argparse.Namespace) -> str:
-    """Prepend intelligence context to instruction for non-Claude provider paths.
+    """Prepend intelligence context and repo map to instruction for non-Claude provider paths.
 
     Claude dispatches are enriched inside subprocess_dispatch.deliver_with_recovery
     via skill_injection._build_intelligence_section; this function handles the
     remaining providers (codex, gemini, litellm, kimi).
 
-    Returns the original instruction unchanged on any failure (best-effort).
+    Applies two layers (best-effort, each layer falls back silently on failure):
+    1. Intelligence injection (existing — ADR context, prior findings, etc.)
+    2. Repo-map layer (new — mirrors headless_dispatch_daemon's DispatchEnricher step)
+
+    Returns the original instruction unchanged on any failure.
     """
+    # Layer: intelligence injection (existing)
     try:
         from intelligence_injection import build_intelligence_section  # noqa: PLC0415
+        enriched = build_intelligence_section(
+            instruction=args.instruction,
+            dispatch_id=args.dispatch_id,
+            role=getattr(args, "role", None),
+            state_dir=_resolve_state_dir(),
+            pr_id=getattr(args, "pr_id", None),
+            dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
+        )
     except ImportError as exc:
         logger.warning("_enrich_instruction: intelligence_injection unavailable (%s)", exc)
-        return args.instruction
-    return build_intelligence_section(
-        instruction=args.instruction,
-        dispatch_id=args.dispatch_id,
-        role=getattr(args, "role", None),
-        state_dir=_resolve_state_dir(),
-        pr_id=getattr(args, "pr_id", None),
-        dispatch_paths=_resolve_dispatch_paths(getattr(args, "dispatch_paths", "") or ""),
-    )
+        enriched = args.instruction
+
+    # Layer: repo map (new — extends coverage to all providers)
+    try:
+        from dispatch_enricher import apply_repo_map_layer  # noqa: PLC0415
+        enriched = apply_repo_map_layer(
+            enriched,
+            {"role": getattr(args, "role", None)},
+        )
+    except Exception as exc:
+        logger.warning("_enrich_instruction: repo map layer failed (%s) — skipping", exc)
+
+    return enriched
 
 
 def _extract_response_text(result: Any) -> str:
@@ -314,6 +333,18 @@ def _emit_governance(
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
+    # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
+    from provider_costs import emit_provider_cost  # noqa: PLC0415
+    emit_provider_cost(
+        provider=provider,
+        model=model_used,
+        input_tokens=token_usage.get("input") if token_usage else None,
+        output_tokens=token_usage.get("output") if token_usage else None,
+        cost_usd_estimate=cost_usd,
+        dispatch_id=args.dispatch_id,
+        project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+    )
+
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
             receipt_path = emit_dispatch_receipt(
@@ -397,6 +428,158 @@ def _build_lane_key(base_sub: str, model_alias: "str | None") -> str:
     return f"litellm:{base_sub}:{alias}"
 
 
+def _litellm_parts(provider: str) -> tuple[str, "str | None"]:
+    sub_provider = provider.split(":", 1)[1] if provider.startswith("litellm:") else ""
+    sub_parts = sub_provider.split(":", 1)
+    base_sub = sub_parts[0] if sub_parts else ""
+    model_alias = sub_parts[1] if len(sub_parts) > 1 else None
+    return base_sub, model_alias
+
+
+def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> str:
+    """Resolve the model label used by dispatch pre-flight checks."""
+    if provider == "codex":
+        return os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
+    if provider == "gemini":
+        return os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
+    if provider == "kimi":
+        return os.environ.get("VNX_KIMI_MODEL", "") or _resolve_kimi_model_label()
+    if provider == "deepseek-harness":
+        from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
+
+        return resolve_harness_model(args.model if args.model != "sonnet" else None)
+    if provider.startswith("litellm:") or provider == "litellm":
+        base_sub, model_alias = _litellm_parts(provider)
+        env_model = os.environ.get("VNX_LITELLM_MODEL", "")
+        if env_model:
+            return env_model
+        if model_alias:
+            return model_alias
+        if getattr(args, "model", None) and args.model != "sonnet":
+            return args.model
+        if base_sub == "deepseek":
+            return _resolve_deepseek_model()
+        if base_sub == "moonshot":
+            return _resolve_moonshot_model(None)
+        if base_sub == "zai":
+            return _resolve_zai_model(None)
+        if base_sub and base_sub in _LITELLM_SUB_PROVIDER_DEFAULTS:
+            return _LITELLM_SUB_PROVIDER_DEFAULTS[base_sub]
+        if base_sub:
+            return args.model
+    return args.model
+
+
+def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) -> bool:
+    if provider == "deepseek-harness":
+        # The harness lane governs its model via resolve_harness_model (default
+        # deepseek-v4-pro) and the endpoint's authoritative model field — it is
+        # not a litellm-registry-driven route. The forbid_route subscription
+        # block is the real safety gate, not registry membership.
+        return False
+    if not (provider.startswith("litellm:") or provider == "litellm"):
+        return True
+    base_sub, model_alias = _litellm_parts(provider)
+    if os.environ.get("VNX_LITELLM_MODEL", "") or model_alias:
+        return True
+    if getattr(args, "model", None) and args.model != "sonnet":
+        return True
+    return base_sub in {"deepseek", "moonshot", "zai"}
+
+
+def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "str | None":
+    via_per_sub = {
+        "deepseek": "litellm",
+        "moonshot": "moonshot",
+        "openrouter": "openrouter",
+        "zai": "openrouter",
+    }
+    if provider.startswith("litellm:") or provider == "litellm":
+        return via_per_sub.get(sub_provider or "", "litellm")
+    if provider == "deepseek-harness":
+        # Own-key KEY-AUTH harness lane. The deepseek-harness-subscription-blocked
+        # constraint forbids via=claude_harness_subscription (the OAuth-subscription
+        # redirect). This measured-safe lane runs the own DeepSeek key in key-auth
+        # mode, so it routes via=claude_harness_keyed and clears pre-flight.
+        return "claude_harness_keyed"
+    if provider in ("claude", "codex", "gemini", "kimi"):
+        return "cli"
+    return None
+
+
+def _emit_constraint_failure_receipt(
+    args: argparse.Namespace,
+    provider: str,
+    model: str,
+    failure_reason: str,
+) -> None:
+    """Record fail-closed pre-flight failures before any provider spawn."""
+    state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
+    receipt_path = state_dir / "t0_receipts.ndjson"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    receipt = {
+        "dispatch_id": args.dispatch_id,
+        "terminal_id": args.terminal_id,
+        "provider": provider,
+        "model": model,
+        "status": "failure",
+        "completion_pct": 0,
+        "risk": 0.0,
+        "duration_seconds": 0.0,
+        "token_usage": {"input": 0, "output": 0, "cache_hit": 0},
+        "cost_usd": 0.0,
+        "findings": [],
+        "pr_id": getattr(args, "pr_id", None),
+        "failure_reason": failure_reason,
+        "timestamp": now_ts,
+        "recorded_at": now_ts,
+    }
+    line = json.dumps(receipt, separators=(",", ":")) + "\n"
+    with receipt_path.open("a", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(line)
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _check_constraints(args: argparse.Namespace, provider: str):
+    """Run provider_constraints.yaml pre-flight and raise on blocking violations."""
+    from providers.constraint_enforcer import ConstraintViolationError, check_constraints  # noqa: PLC0415
+
+    sub_provider = None
+    if provider.startswith("litellm:"):
+        sub_provider, _model_alias = _litellm_parts(provider)
+    elif provider == "deepseek-harness":
+        # sub_provider=deepseek lets the deepseek-harness-subscription-blocked
+        # constraint match on forbidden_route.provider=deepseek; the keyed via
+        # (set below) is what keeps this own-key lane clear of the block.
+        sub_provider = "deepseek"
+    model = _constraint_model_for_provider(args, provider)
+    via = _constraint_via_for_provider(provider, sub_provider)
+    violations = check_constraints(
+        provider=provider,
+        sub_provider=sub_provider,
+        model=model,
+        terminal_id=args.terminal_id,
+        role=args.role,
+        via=via,
+        instruction_text=args.instruction,
+        env=os.environ,
+        check_registry=_constraint_registry_check_enabled(args, provider),
+    )
+    for violation in violations:
+        if violation.severity == "blocking":
+            raise ConstraintViolationError(violation)
+        if violation.override_applied:
+            logger.warning("[%s] warning overridden by env flag: %s", violation.code, violation.message)
+        else:
+            logger.warning("[%s] %s", violation.code, violation.message)
+    return violations
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="VNX provider-agnostic dispatch entry (Wave 4.6)",
@@ -425,6 +608,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-route", action="store_true",
         help="Use smart_router to auto-select provider+model (opt-in, default off).",
+    )
+    parser.add_argument(
+        "--no-repo-map", action="store_true", dest="no_repo_map",
+        help="Skip repo map injection (mirrors --no-repo-map in subprocess_dispatch).",
     )
     return parser
 
@@ -480,6 +667,38 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _create_provider_worktree(dispatch_id: str) -> Optional[Path]:
+    """Create an isolated worktree for a provider dispatch.
+
+    Only called when VNX_ISOLATED_WORKTREE=1.  Returns the worktree Path on
+    success, None on failure (logs the error and falls back to shared path).
+    """
+    try:
+        from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: PLC0415
+        wt_path = create_dispatch_worktree(dispatch_id)
+        logger.info("provider isolation: worktree created at %s (dispatch=%s)", wt_path, dispatch_id)
+        return wt_path
+    except RuntimeError as exc:
+        logger.error(
+            "provider isolation: create_dispatch_worktree failed for %s: %s — running in shared worktree",
+            dispatch_id, exc,
+        )
+        return None
+
+
+def _remove_provider_worktree(dispatch_id: str) -> None:
+    """Remove the isolated worktree for a provider dispatch.  Best-effort; idempotent."""
+    try:
+        from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
+        remove_dispatch_worktree(dispatch_id)
+        logger.info("provider isolation: worktree removed (dispatch=%s)", dispatch_id)
+    except Exception as exc:
+        logger.warning(
+            "provider isolation: remove_dispatch_worktree failed for %s: %s",
+            dispatch_id, exc,
+        )
+
+
 def _dispatch_codex(args: argparse.Namespace) -> int:
     """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
@@ -500,8 +719,11 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
         )
         return 1
 
-    model = os.environ.get("VNX_CODEX_MODEL", "")
+    model = os.environ.get("VNX_CODEX_MODEL", "") or _resolve_codex_model()
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_codex(
@@ -510,6 +732,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
+            cwd=isolation_cwd,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -538,6 +761,46 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_codex: event archive+clear failed: %s", _exc)
+        if isolation_cwd is not None:
+            _remove_provider_worktree(args.dispatch_id)
+
+
+def _resolve_codex_model() -> str:
+    """Load codex model key from registry (openai section), fallback to hardcoded default.
+
+    Returns the registry model key (e.g. 'gpt-5.2-codex') so the receipt model field
+    is never empty when VNX_CODEX_MODEL is unset.
+    """
+    _CODEX_FALLBACK = "gpt-5.2-codex"
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+    except Exception as e:
+        logger.error("provider_dispatch: registry load failed for codex: %s", e)
+        return _CODEX_FALLBACK
+    cfg = registry.get("openai")
+    if cfg is None or not cfg.models:
+        return _CODEX_FALLBACK
+    return next(iter(cfg.models.keys()))
+
+
+def _resolve_kimi_model_label() -> str:
+    """Load kimi CLI default model key from registry (kimi_cli section), fallback to 'kimi-default'.
+
+    Returns the registry model key (e.g. 'kimi-default') so the receipt model field
+    is never the generic 'default' string when VNX_KIMI_MODEL is unset.
+    """
+    _KIMI_FALLBACK = "kimi-default"
+    try:
+        from providers import provider_registry as _reg
+        registry = _reg.load()
+    except Exception as e:
+        logger.error("provider_dispatch: registry load failed for kimi_cli: %s", e)
+        return _KIMI_FALLBACK
+    cfg = registry.get("kimi_cli")
+    if cfg is None or not cfg.models:
+        return _KIMI_FALLBACK
+    return next(iter(cfg.models.keys()))
 
 
 def _resolve_deepseek_model() -> str:
@@ -681,6 +944,9 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
         )
 
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd_litellm: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd_litellm = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_litellm(
@@ -692,6 +958,7 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             lane=lane_key,
             tool_call_shape=_tool_call_shape,
             event_writer=event_store.append if event_store is not None else None,
+            cwd=isolation_cwd_litellm,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -720,6 +987,8 @@ def _dispatch_litellm(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_litellm: event archive+clear failed: %s", _exc)
+        if isolation_cwd_litellm is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def _dispatch_kimi(args: argparse.Namespace) -> int:
@@ -743,15 +1012,20 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
         return 1
 
     model = os.environ.get("VNX_KIMI_MODEL", "") or None
-    model_label = model or "default"
+    model_label = model or _resolve_kimi_model_label()
+    enriched_instruction = _enrich_instruction(args)
+    isolation_cwd_kimi: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd_kimi = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_kimi(
-            prompt=args.instruction,
+            prompt=enriched_instruction,
             model=model,
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
+            cwd=isolation_cwd_kimi,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -780,6 +1054,8 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_kimi: event archive+clear failed: %s", _exc)
+        if isolation_cwd_kimi is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
@@ -873,6 +1149,9 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
 
     model = os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     enriched_instruction = _enrich_instruction(args)
+    isolation_cwd_gemini: Optional[Path] = None
+    if os.environ.get("VNX_ISOLATED_WORKTREE") == "1":
+        isolation_cwd_gemini = _create_provider_worktree(args.dispatch_id)
     start_time = datetime.now(timezone.utc)
     try:
         result = spawn_gemini(
@@ -881,6 +1160,7 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append,
+            cwd=isolation_cwd_gemini,
         )
         end_time = datetime.now(timezone.utc)
 
@@ -909,6 +1189,8 @@ def _dispatch_gemini(args: argparse.Namespace) -> int:
             event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
         except Exception as _exc:
             logger.debug("_dispatch_gemini: event archive+clear failed: %s", _exc)
+        if isolation_cwd_gemini is not None:
+            _remove_provider_worktree(args.dispatch_id)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -921,6 +1203,10 @@ def main(argv: list[str] | None = None) -> int:
     # is a free-form string (litellm:<model>), not a fixed choices= set, so we
     # validate manually after parsing.
     args = parser.parse_args(argv)
+
+    # Propagate --no-repo-map flag to env var so apply_repo_map_layer picks it up.
+    if getattr(args, "no_repo_map", False):
+        os.environ["VNX_NO_REPO_MAP"] = "1"
 
     provider = args.provider
 
@@ -961,51 +1247,30 @@ def main(argv: list[str] | None = None) -> int:
                 _route_exc, args.provider, args.model,
             )
 
-    # PR-SR-2: enforce provider constraints before any handler runs.
-    try:
-        from constraint_enforcer import HardConstraintViolation, enforce as _enforce_route  # noqa: PLC0415
-
-        _sub = None
-        if provider.startswith("litellm:"):
-            _parts = provider.split(":", 2)
-            _sub = _parts[1] if len(_parts) > 1 else None
-
-        _VIA_PER_SUB: dict = {
-            "deepseek": "litellm",
-            "moonshot": "moonshot",
-            "openrouter": "openrouter",
-            "zai": "openrouter",
-        }
-        if provider.startswith("litellm:"):
-            _via = _VIA_PER_SUB.get(_sub or "", "litellm")
-        elif provider == "deepseek-harness":
-            # Own-key KEY-AUTH harness lane — sub_provider=deepseek so the
-            # deepseek-harness-subscription-blocked constraint can match on
-            # provider, while via=claude_harness_keyauth distinguishes this
-            # measured-safe lane from the blocked OAuth-subscription redirect.
-            _sub = "deepseek"
-            _via = "claude_harness_keyauth"
-        elif provider in ("claude", "codex", "gemini", "kimi"):
-            _via = "cli"
-        else:
-            _via = None
-
-        _enforce_route(
-            provider=provider.split(":")[0] if ":" in provider else provider,
-            sub_provider=_sub,
-            model=args.model,
-            terminal_id=args.terminal_id,
-            role=args.role,
-            via=_via,
+    if provider not in _IMPLEMENTED_PROVIDERS and not provider.startswith("litellm:"):
+        parser.error(
+            f"Unknown provider '{provider}'. "
+            "Accepted values: claude, codex, gemini, kimi, deepseek-harness, litellm:<model>."
         )
-    except HardConstraintViolation as exc:
-        print(f"provider_dispatch: constraint violation — {exc}", file=sys.stderr)
-        return 1
+
+    # PR-ROUTE-1: enforce provider constraints before any handler runs.
+    try:
+        _check_constraints(args, provider)
     except FileNotFoundError:
         if os.environ.get("VNX_CONSTRAINTS_STRICT") == "1":
             print("provider_dispatch: provider_constraints.yaml not found and VNX_CONSTRAINTS_STRICT=1", file=sys.stderr)
             return 1
-        logger.debug("provider_dispatch: provider_constraints.yaml not found — skipping enforcement")
+        logger.debug("provider_dispatch: provider_constraints.yaml not found - skipping enforcement")
+    except Exception as exc:
+        from providers.constraint_enforcer import ConstraintViolationError  # noqa: PLC0415
+
+        if not isinstance(exc, ConstraintViolationError):
+            raise
+        model = _constraint_model_for_provider(args, provider)
+        failure_reason = f"constraint violation: {exc}"
+        _emit_constraint_failure_receipt(args, provider, model, failure_reason)
+        print(f"provider_dispatch: constraint violation - {exc}", file=sys.stderr)
+        return 1
 
     if provider == "claude":
         return _dispatch_claude(args)

@@ -203,6 +203,27 @@ def _haiku_enabled() -> bool:
     return os.environ.get("VNX_HAIKU_CLASSIFY", "0") not in ("0", "", "false", "False")
 
 
+def _autopilot_enabled() -> bool:
+    return os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("0", "", "false", "False")
+
+
+def _maybe_autopilot_tick(state_dir: Path, dry_run: bool) -> None:
+    """Call roadmap_manager.autopilot_tick if VNX_ROADMAP_AUTOPILOT=1.
+
+    ADR-018 Rule 2: no new daemon — reuses the existing silence_watchdog scheduler.
+    dry_run=True skips the tick to match headless_trigger dry-run semantics.
+    """
+    if dry_run or not _autopilot_enabled():
+        return
+    sys.path.insert(0, str(_REPO_ROOT / "scripts"))
+    try:
+        from roadmap_manager import RoadmapManager  # noqa: PLC0415
+        result = RoadmapManager().autopilot_tick()
+        _LOG.info("autopilot_tick: status=%s", result.get("status"))
+    except Exception as exc:
+        _LOG.error("autopilot_tick error: %s", exc)
+
+
 def llm_triage(anomalies: list[str]) -> str:
     """Ask haiku to classify: 'stuck' | 'normal' | 'recovering'. Fail-open on timeout."""
     prompt = (
@@ -299,6 +320,8 @@ def silence_watchdog(
             trigger_headless_t0("silence_anomaly", anomalies, state_dir, dry_run, trigger_state)
     else:
         _LOG.debug("Layer 2: no anomalies detected")
+
+    _maybe_autopilot_tick(state_dir, dry_run)
 
     if not trigger_state.shutdown_event.is_set():
         t = threading.Timer(interval, silence_watchdog, [state_dir, interval, trigger_state, dry_run])

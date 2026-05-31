@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 6 P4 — One-shot data import: live migrator.
 
-Attaches all 4 source DBs (`vnx-dev`, `mc`, `sales-copilot`, `seocrawler-v2`)
+Attaches all 4 source DBs (`vnx-dev`, `mc`, `project-a`, `example-project`)
 in `?mode=ro` and copies their `quality_intelligence.db` and
 `runtime_coordination.db` rows into the central
 ``~/.vnx-data/state/quality_intelligence.db`` and
@@ -55,7 +55,6 @@ import subprocess
 import sys
 import tarfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -78,10 +77,49 @@ from schema_versioning import (  # noqa: E402
     set_schema_version,
     check_schema_version,
 )
+from scripts.lib.migrate_import import (  # noqa: E402
+    ABORT_FLAG,
+    AbortRequested,
+    COLLISION_ENTITY_ID_COLUMN,
+    COLLISION_ENTITY_TABLE,
+    COLLISION_ENTITY_TYPE_COLUMN,
+    COLLISION_ENTITY_TYPES_PREFIXED,
+    COLLISION_JSON_ARRAY_COLUMNS,
+    COLLISION_NAMED_IDENTIFIER_COLUMNS,
+    COLLISION_PREFIX_COLUMNS,
+    COLLISION_PREFIX_SUFFIXES,
+    ImportSummary,
+    _IMPORT_BATCH_SIZE,
+    _collect_collision_columns,
+    _collect_json_array_columns,
+    _collect_skipped_rows,
+    _column_exists,
+    _common_columns,
+    _compare_counts,
+    _import_table,
+    _integer_primary_key,
+    _is_collision_column,
+    _mapped_central_rowid,
+    _now_utc_iso,
+    _prefix_json_array,
+    _prefix_value,
+    _record_rowid_mapping,
+    _record_skip,
+    _resolve_prior_skip,
+    _src_table_present,
+    _table_columns,
+    _table_exists,
+    check_abort,
+)
+from scripts.lib.migrate_schema import (  # noqa: E402
+    BootstrapFailure,
+    MigrationOrphanError,
+    _rebuild_fts5_code_snippets,
+    _rebuild_one_table_dynamic,
+)
 
 LOG = logging.getLogger("vnx.migrate.apply")
 
-ABORT_FLAG = Path.home() / ".vnx-aggregator" / "ABORT"
 CONFIRMATION_PHRASE = "MIGRATE-NOW-2026"
 DEFAULT_BACKUP_BASE = Path.home() / "Documents"
 CENTRAL_DATA_DIR = Path.home() / ".vnx-data" / "state"
@@ -90,14 +128,6 @@ MIGRATION_0010_PATH = REPO_ROOT / "schemas" / "migrations" / "0010_add_project_i
 MIGRATION_0015_PATH = REPO_ROOT / "schemas" / "migrations" / "0015_complete_project_id.sql"
 MIGRATION_0016_PATH = REPO_ROOT / "schemas" / "migrations" / "0016_rebuild_fts5.sql"
 QI_SCHEMA_PATH = REPO_ROOT / "schemas" / "quality_intelligence.sql"
-
-# Tables to import per source DB. Aligned with migrate_dry_run.PLAN_TABLES_*.
-# Note: `code_snippets` (FTS5 vtab) MUST be imported BEFORE migration 0016
-# rebuilds the FTS5 index — otherwise 0016 rebuilds over an empty table and
-# the resulting central index is useless. See Finding 3 in PR #432 review.
-# Streaming batch size for _import_table — bounds Python memory during import
-# of large FTS5 tables (code_snippets: 855k rows). OI-1377 / ADR-009.
-_IMPORT_BATCH_SIZE = 500
 
 IMPORT_TABLES_QI: tuple[str, ...] = (
     "success_patterns",
@@ -139,56 +169,11 @@ IMPORT_TABLES_RC: tuple[str, ...] = (
     "recommendation_outcomes",
 )
 
-# Schema-driven collision-prefixing candidates. Any imported table that carries
-# one of these exact column names gets its value rewritten to
-# ``<project_id>:<original>`` so per-project identifiers remain unique after
-# consolidation.
-#
-# NOTE: this is the BASE list. Round-2 fix for Finding 2 generalizes the
-# detection to also cover columns whose name *ends with* ``_dispatch_id`` or
-# ``_pattern_id`` (e.g. ``related_dispatch_id``, ``parent_dispatch_id``); see
-# ``_collect_collision_columns`` below.
-COLLISION_PREFIX_COLUMNS: tuple[str, ...] = ("dispatch_id", "pattern_id")
-
-# Suffixes used for schema-driven collision detection. Any column name that
-# ends in one of these suffixes (after the leading underscore) is treated as
-# a per-project identifier carrier and gets the ``<project_id>:`` prefix
-# rewritten on import. Examples: ``related_dispatch_id``, ``parent_dispatch_id``,
-# ``parent_pattern_id``.
-COLLISION_PREFIX_SUFFIXES: tuple[str, ...] = ("_dispatch_id", "_pattern_id")
-
-# Columns that store JSON arrays of dispatch/pattern IDs. Each element in the
-# array is rewritten to ``<project_id>:<element>`` on import so cross-tenant
-# references stay disjoint after consolidation. (Finding 2 round 2.)
-COLLISION_JSON_ARRAY_COLUMNS: tuple[str, ...] = ("source_dispatch_ids",)
-
-# Special-case: ``coordination_events.entity_id`` stores either a dispatch_id
-# or a pattern_id depending on ``entity_type``. We rewrite the value only when
-# the entity_type matches one of these prefix-eligible types. (Finding 2 round 2.)
-COLLISION_ENTITY_TABLE = "coordination_events"
-COLLISION_ENTITY_ID_COLUMN = "entity_id"
-COLLISION_ENTITY_TYPE_COLUMN = "entity_type"
-COLLISION_ENTITY_TYPES_PREFIXED: frozenset[str] = frozenset({"dispatch", "pattern"})
-
-# Free-text identifier columns that historically held a dispatch id but whose
-# name does not end in ``_dispatch_id``. Listed explicitly so future schemas
-# add to this set deliberately rather than accidentally inheriting the suffix
-# rule. (Finding 2 round 2.)
-COLLISION_NAMED_IDENTIFIER_COLUMNS: tuple[str, ...] = ("parent_dispatch",)
-
-
 # ---------------------------------------------------------------------------
 # Operator gates
 # ---------------------------------------------------------------------------
-
-
-def check_abort() -> None:
-    if ABORT_FLAG.exists():
-        raise AbortRequested(f"abort flag present: {ABORT_FLAG}")
-
-
-class AbortRequested(RuntimeError):
-    pass
+# check_abort, AbortRequested, ABORT_FLAG, and collision-prefix constants are
+# imported from scripts.lib.migrate_import at the top of this module.
 
 
 class BackupFailure(RuntimeError):
@@ -199,26 +184,8 @@ class VerificationFailure(RuntimeError):
     pass
 
 
-class BootstrapFailure(RuntimeError):
-    """Raised when the central DB is missing canonical structure required for import.
-
-    Round-3 fix-forward (Issue 4): rather than letting a per-row INSERT
-    OR IGNORE silently drop every row when a central table is absent,
-    pre-flight assert that every import-target table exists. If not,
-    surface the missing tables in the exception message so the operator
-    can diagnose the broken bootstrap before any data is moved.
-    """
-
-
-class MigrationOrphanError(RuntimeError):
-    """Raised when FTS5 rebuild finds code_snippets rows with no recoverable project_id.
-
-    Indicates orphan rows: no snippet_metadata match and no p4_import_rowid_map
-    entry exists for the snippet. The operator must either fix the source data
-    (ensure snippet_metadata covers all snippets) or re-run the full migration
-    so that p4_import_rowid_map is populated before migration 0016 fires.
-    OI-1376 / ADR-009.
-    """
+# BootstrapFailure and MigrationOrphanError are imported from
+# scripts.lib.migrate_schema at the top of this module.
 
 
 def confirm_apply(confirmation: Optional[str], no_prompt: bool = False) -> bool:
@@ -451,10 +418,68 @@ def _central_is_empty(qi_db: Path, rc_db: Path) -> bool:
     must run. Bookkeeping tables (``p4_import_*``) created by a previous
     failed apply do not count as "populated" — only the sentinel
     business tables matter.
+
+    Note: this function returns True for *both* a completely empty DB
+    (no tables) and one with only bookkeeping / partial-init tables (e.g.
+    ``dispatch_experiments`` from ``retroactive_backfill``). The
+    ``_qi_is_partial`` helper distinguishes these two sub-cases so the
+    apply flow can handle each correctly.
     """
     qi_fresh = not _has_table(qi_db, _QI_SENTINEL_TABLE)
     rc_fresh = not _has_table(rc_db, _RC_SENTINEL_TABLE)
     return qi_fresh or rc_fresh
+
+
+def _qi_is_partial(qi_db: Path) -> bool:
+    """True if the QI DB has tables but is missing the canonical sentinel.
+
+    OI-011 fix: ``retroactive_backfill._open_tracker()`` creates
+    ``dispatch_experiments`` in the central QI DB but skips all other
+    tables.  The result is a DB that ``_central_is_empty`` considers
+    "fresh" (missing ``success_patterns``) yet already contains data —
+    a partial-init limbo where ``bootstrap_qi_db`` should complete the
+    schema without requiring the ``--fresh-central`` operator gate
+    (which is reserved for truly empty, first-deploy DBs).
+
+    Returns True when ALL of:
+    - DB file exists and is non-empty.
+    - At least one table is present (not a truly-empty file).
+    - The sentinel table (``success_patterns``) is absent.
+
+    ``user_version`` is intentionally NOT checked here: DBs created
+    outside ``bootstrap_qi_db`` (e.g. test fixtures, legacy snapshots)
+    may have ``user_version=0`` while still containing the sentinel and
+    valid data.  Using ``user_version=0`` alone as an indicator would
+    incorrectly trigger bootstrap on those DBs and corrupt them.
+
+    ``bootstrap_qi_db`` is idempotent — existing tables and rows
+    (including ``dispatch_experiments`` data) are preserved via
+    ``CREATE TABLE IF NOT EXISTS`` and column-presence guards.
+    """
+    if not qi_db.exists() or qi_db.stat().st_size == 0:
+        return False
+    try:
+        con = sqlite3.connect(str(qi_db))
+        try:
+            table_count = con.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type IN ('table','virtual')"
+            ).fetchone()[0]
+            if table_count == 0:
+                return False  # truly empty file — not partial, treat as fresh
+            has_sentinel = (
+                con.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type IN ('table','virtual') AND name = ?",
+                    (_QI_SENTINEL_TABLE,),
+                ).fetchone()
+                is not None
+            )
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+    return not has_sentinel
 
 
 def _init_central_if_missing(qi_db: Path, rc_db: Path) -> None:
@@ -920,26 +945,6 @@ def _has_composite_project_unique(
     return False
 
 
-def _has_single_column_unique(
-    con: sqlite3.Connection,
-    table: str,
-    key_col: str,
-) -> bool:
-    """Return True iff a UNIQUE index covers ONLY ``key_col`` (the
-    pre-rebuild state)."""
-    if not _table_exists(con, table):
-        return False
-    for row in con.execute(f"PRAGMA index_list({table})"):
-        idx_name = row[1]
-        is_unique = bool(row[2])
-        if not is_unique:
-            continue
-        cols = [r[2] for r in con.execute(f"PRAGMA index_info({idx_name})")]
-        if cols == [key_col]:
-            return True
-    return False
-
-
 def _rebuild_one_table(
     con: sqlite3.Connection,
     table: str,
@@ -983,129 +988,8 @@ def _rebuild_one_table(
         _rebuild_one_table_dynamic(con, table, key_col)
 
 
-def _rebuild_one_table_dynamic(
-    con: sqlite3.Connection,
-    table: str,
-    key_col: str,
-) -> None:
-    """Round-6: schema-introspection rebuild for composite UNIQUE.
-
-    Reads the live table schema via ``PRAGMA table_info`` plus
-    ``sqlite_master.sql`` and reconstructs an equivalent ``CREATE TABLE``
-    statement that:
-
-    * preserves every column (name, type, NOT NULL, DEFAULT) in order;
-    * preserves the integer-PK ``AUTOINCREMENT`` modifier when the
-      original schema had it;
-    * **drops** the column-level ``UNIQUE`` modifier on ``key_col``
-      (effectively, by not re-emitting it) — the dynamic builder never
-      writes a column-level UNIQUE, so the only UNIQUE the rebuilt table
-      carries is the composite one we add;
-    * adds a table-level ``UNIQUE(project_id, key_col)`` constraint.
-
-    All non-UNIQUE indexes are captured before ``DROP TABLE`` and
-    re-created from their original SQL after rename. UNIQUE auto-indexes
-    backing the dropped column-level UNIQUE go away with the old table
-    and are not recreated (the composite UNIQUE provides the new index).
-
-    The rebuild runs inside the caller's transaction frame, so failure
-    raises and rolls back the entire composite-unique pass.
-    """
-    cols_info = list(con.execute(f"PRAGMA table_info({table})"))
-    if not cols_info:
-        raise BootstrapFailure(
-            f"dynamic rebuild: {table} has no columns (schema empty?)"
-        )
-
-    # Validate that key_col actually exists; otherwise the composite UNIQUE
-    # we'd produce would reference a phantom column.
-    col_names = [c[1] for c in cols_info]
-    if key_col not in col_names:
-        raise BootstrapFailure(
-            f"dynamic rebuild: {table} has no column {key_col!r}; "
-            "COMPOSITE_UNIQUE_TABLES_QI/RC entry must match the live schema."
-        )
-
-    # Pull the original CREATE TABLE so we can detect AUTOINCREMENT, which
-    # PRAGMA table_info does not surface directly.
-    row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?",
-        (table,),
-    ).fetchone()
-    if row is None or not row[0]:
-        raise BootstrapFailure(
-            f"dynamic rebuild: sqlite_master has no CREATE TABLE for {table}"
-        )
-    original_sql = row[0]
-
-    # Capture non-auto indexes BEFORE drop. ``sql`` is NULL for SQLite-
-    # auto-generated indexes (UNIQUE backings, internal sqlite_autoindex_*),
-    # which we explicitly do NOT want to recreate.
-    saved_index_sql = [
-        sql for (sql,) in con.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='index' AND tbl_name = ? AND sql IS NOT NULL",
-            (table,),
-        )
-    ]
-
-    # Build column definitions from PRAGMA introspection. Columns are
-    # emitted in cid order (matches original definition order).
-    col_defs: list[str] = []
-    for cid, name, ctype, notnull, dflt, pk in cols_info:
-        parts = [name, (ctype or "TEXT")]
-        if pk:
-            # SQLite reports the PK status per-column; only one column
-            # can carry an integer ROWID PK, so we emit PRIMARY KEY here
-            # rather than as a table constraint.
-            parts.append("PRIMARY KEY")
-            if (ctype or "").upper() == "INTEGER":
-                # AUTOINCREMENT only valid on INTEGER PRIMARY KEY. Detect
-                # via a regex on the original CREATE TABLE — normalize
-                # whitespace so multi-space definitions still match.
-                normalized = re.sub(r"\s+", " ", original_sql).upper()
-                pat = (
-                    rf"\b{re.escape(name.upper())}\s+INTEGER\s+PRIMARY\s+KEY"
-                    r"\s+AUTOINCREMENT\b"
-                )
-                if re.search(pat, normalized):
-                    parts.append("AUTOINCREMENT")
-        if notnull and not pk:
-            parts.append("NOT NULL")
-        if dflt is not None:
-            # PRAGMA returns dflt as the literal SQL fragment used in the
-            # original DEFAULT clause (e.g. ``'vnx-dev'``, ``0``,
-            # ``CURRENT_TIMESTAMP``, ``(strftime('%Y-...', 'now'))``).
-            # Re-emit as-is.
-            parts.append(f"DEFAULT {dflt}")
-        col_defs.append(" ".join(parts))
-
-    # Composite UNIQUE replaces the dropped single-column UNIQUE.
-    col_defs.append(f"UNIQUE (project_id, {key_col})")
-
-    # Build the rebuild SQL. ``<table>_p4r6_new`` is a transient name
-    # scoped to the rebuild transaction; renamed before any other code
-    # observes the database.
-    new_table = f"{table}_p4r6_new"
-    create_new = (
-        f"CREATE TABLE {new_table} (\n  " + ",\n  ".join(col_defs) + "\n)"
-    )
-    con.execute(create_new)
-
-    quoted_cols = ", ".join(col_names)
-    con.execute(
-        f"INSERT INTO {new_table} ({quoted_cols}) "
-        f"SELECT {quoted_cols} FROM {table}"
-    )
-    con.execute(f"DROP TABLE {table}")
-    con.execute(f"ALTER TABLE {new_table} RENAME TO {table}")
-
-    # Recreate user-defined indexes captured pre-drop. ``IF NOT EXISTS``
-    # guards on those statements would have been included in their
-    # original SQL when present.
-    for idx_sql in saved_index_sql:
-        with contextlib.suppress(sqlite3.OperationalError):
-            con.execute(idx_sql)
+# _rebuild_one_table_dynamic is imported from scripts.lib.migrate_schema
+# at the top of this module (OI-1533, part 2/3).
 
 
 def _audit_unique_constraints(qi_db: Path, rc_db: Path) -> None:
@@ -1379,138 +1263,8 @@ def _try_alter(con: sqlite3.Connection, stmt: str) -> None:
         raise
 
 
-def _table_exists(con: sqlite3.Connection, table: str) -> bool:
-    cur = con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual') AND name = ?",
-        (table,),
-    )
-    return cur.fetchone() is not None
-
-
-def _table_columns(
-    con: sqlite3.Connection,
-    table: str,
-    alias: Optional[str] = None,
-) -> list[str]:
-    pragma = f"PRAGMA {alias}.table_info({table})" if alias else f"PRAGMA table_info({table})"
-    return [r[1] for r in con.execute(pragma)]
-
-
-def _column_exists(
-    con: sqlite3.Connection,
-    table: str,
-    column: str,
-    alias: Optional[str] = None,
-) -> bool:
-    return column in _table_columns(con, table, alias=alias)
-
-
-def _rebuild_fts5_code_snippets(con: sqlite3.Connection) -> None:
-    """Schema-first FTS5 rebuild for code_snippets per ADR-009.
-
-    Derives column list from ``PRAGMA table_info`` at apply time so that
-    deployed DBs with extra columns beyond the canonical 12 are preserved
-    (OI-1375).  Attributes each row's ``project_id`` via ``snippet_metadata``
-    first, then ``p4_import_rowid_map`` as fallback; rows with no recoverable
-    project_id raise ``MigrationOrphanError`` BEFORE the DROP so the database
-    is left intact (OI-1376).
-
-    Must be called inside an active transaction.  Caller is responsible for
-    the ``BEGIN`` / ``ROLLBACK`` / ``COMMIT`` frame.
-    """
-    # --- schema-first column discovery (ADR-009) ----------------------------
-    cols_info = list(con.execute("PRAGMA table_info(code_snippets)"))
-    if not cols_info:
-        raise BootstrapFailure(
-            "code_snippets has no columns in PRAGMA table_info — schema empty?"
-        )
-    current_cols = [row[1] for row in cols_info]
-
-    # Preserve the original FTS5 tokenize options so the rebuilt table is
-    # semantically identical except for the added project_id column.
-    fts5_row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='code_snippets'"
-    ).fetchone()
-    tokenize_clause = "tokenize = 'porter unicode61'"
-    if fts5_row and fts5_row[0]:
-        m = re.search(r"tokenize\s*=\s*'[^']*'", fts5_row[0], re.IGNORECASE)
-        if m:
-            tokenize_clause = m.group(0)
-
-    # --- materialize existing rows into a plain temp table ------------------
-    # Using a regular (non-virtual) table preserves rowid values which are
-    # required both for the project_id correlated lookups below and for
-    # FTS5 rowid-preservation on re-insert.
-    quoted_cols = ", ".join(f'"{c}"' for c in current_cols)
-    con.execute(
-        f"CREATE TABLE IF NOT EXISTS code_snippets_rebuild_tmp AS "
-        f"SELECT rowid, {quoted_cols} FROM code_snippets"
-    )
-
-    # --- orphan check BEFORE DROP (fail fast, leave DB intact) --------------
-    has_rowid_map = _table_exists(con, "p4_import_rowid_map")
-    if has_rowid_map:
-        orphan_sql = (
-            "SELECT t.rowid FROM code_snippets_rebuild_tmp t "
-            "WHERE (SELECT m.project_id FROM snippet_metadata m "
-            "       WHERE m.snippet_rowid = t.rowid) IS NULL "
-            "AND NOT EXISTS ("
-            "    SELECT 1 FROM p4_import_rowid_map r "
-            "    WHERE r.source_table = 'code_snippets' AND r.central_rowid = t.rowid"
-            ")"
-        )
-    else:
-        orphan_sql = (
-            "SELECT t.rowid FROM code_snippets_rebuild_tmp t "
-            "WHERE (SELECT m.project_id FROM snippet_metadata m "
-            "       WHERE m.snippet_rowid = t.rowid) IS NULL"
-        )
-    orphan_rowids = [r[0] for r in con.execute(orphan_sql)]
-    if orphan_rowids:
-        # Drop the temp table we just created before raising so the caller's
-        # ROLLBACK has nothing extra to undo.
-        con.execute("DROP TABLE IF EXISTS code_snippets_rebuild_tmp")
-        raise MigrationOrphanError(
-            f"FTS5 rebuild: {len(orphan_rowids)} code_snippets row(s) have no "
-            f"recoverable project_id (no snippet_metadata match and no "
-            f"p4_import_rowid_map entry). "
-            f"Orphan rowids: {orphan_rowids[:20]}"
-            + ("..." if len(orphan_rowids) > 20 else "")
-            + ". Fix source data or re-run migration to regenerate rowid map."
-        )
-
-    # --- drop FTS5, recreate with dynamic column list + project_id ----------
-    con.execute("DROP TABLE IF EXISTS code_snippets")
-    new_col_list = ", ".join(current_cols) + f", project_id, {tokenize_clause}"
-    con.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS code_snippets USING fts5({new_col_list})"
-    )
-
-    # --- re-populate with SQL-level project_id attribution ------------------
-    # 1st choice: snippet_metadata.project_id via snippet_rowid → rowid join
-    #             (canonical cross-reference populated by import step)
-    # 2nd choice: p4_import_rowid_map.project_id via central_rowid lookup
-    #             (records which project imported each snippet — covers orphan
-    #             snippets that exist in the DB but have no metadata row)
-    if has_rowid_map:
-        pid_expr = (
-            "COALESCE("
-            "(SELECT m.project_id FROM snippet_metadata m WHERE m.snippet_rowid = t.rowid), "
-            "(SELECT r.project_id FROM p4_import_rowid_map r "
-            " WHERE r.source_table = 'code_snippets' AND r.central_rowid = t.rowid)"
-            ")"
-        )
-    else:
-        pid_expr = (
-            "(SELECT m.project_id FROM snippet_metadata m WHERE m.snippet_rowid = t.rowid)"
-        )
-
-    con.execute(
-        f"INSERT INTO code_snippets (rowid, {quoted_cols}, project_id) "
-        f"SELECT t.rowid, {quoted_cols}, {pid_expr} "
-        f"FROM code_snippets_rebuild_tmp t"
-    )
-    con.execute("DROP TABLE IF EXISTS code_snippets_rebuild_tmp")
+# _rebuild_fts5_code_snippets is imported from scripts.lib.migrate_schema
+# at the top of this module (OI-1536, part 2/3).
 
 
 def apply_migration_0016(qi_db: Path) -> None:
@@ -1575,15 +1329,8 @@ def apply_migration_0016(qi_db: Path) -> None:
 # ---------------------------------------------------------------------------
 # Import: per-project, per-table, single transaction
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ImportSummary:
-    project_id: str
-    db_name: str
-    table: str
-    rows_inserted: int
-    rows_skipped_existing: int
+# ImportSummary, _import_table, and their helpers are imported from
+# scripts.lib.migrate_import at the top of this module.
 
 
 def _ensure_idempotency_table(con: sqlite3.Connection) -> None:
@@ -1645,10 +1392,6 @@ def _ensure_skipped_table(con: sqlite3.Connection) -> None:
             con.execute("ALTER TABLE p4_import_skipped ADD COLUMN resolved_at TEXT")
 
 
-def _now_utc_iso() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
 def _generate_run_id() -> str:
     """Per-apply run identifier used to scope skipped-row resolution.
 
@@ -1701,389 +1444,6 @@ def _ensure_rowid_map_table(con: sqlite3.Connection) -> None:
         )
         """
     )
-
-
-def _integer_primary_key(con: sqlite3.Connection, table: str, alias: Optional[str] = None) -> Optional[str]:
-    """Return the column name that is INTEGER PRIMARY KEY (autoincrement rowid alias).
-
-    Such columns cannot be ported across project DBs because each source DB
-    starts numbering at 1 and would collide on import. Returning the name
-    lets the caller exclude it from the INSERT column list.
-    """
-    pragma = f"PRAGMA {alias}.table_info({table})" if alias else f"PRAGMA table_info({table})"
-    for cid, name, ctype, _notnull, _dflt, pk in con.execute(pragma):
-        if pk and (ctype or "").upper() == "INTEGER":
-            return name
-    return None
-
-
-def _common_columns(con: sqlite3.Connection, source_alias: str, table: str) -> list[str]:
-    """Return columns present in BOTH source and central tables (intersection).
-
-    Excludes the source's INTEGER PRIMARY KEY column so SQLite re-assigns
-    autoincrement ids in the central DB; otherwise project-local primary
-    keys (1, 2, 3, ...) collide with the first-imported project's rows.
-    """
-    if not _table_exists(con, table):
-        return []
-    central_cols = _table_columns(con, table)
-    src_cols = _table_columns(con, table, alias=source_alias)
-    src_int_pk = _integer_primary_key(con, table, alias=source_alias)
-    central_int_pk = _integer_primary_key(con, table)
-    skip = {c for c in (src_int_pk, central_int_pk) if c}
-    return [c for c in src_cols if c in central_cols and c not in skip]
-
-
-def _is_collision_column(name: str) -> bool:
-    """True if a column name participates in cross-project key prefixing.
-
-    Centralized so call sites in both the live migrator and dry-run
-    detector share identical rules. Covers exact matches, the
-    ``_dispatch_id`` / ``_pattern_id`` suffix family, and the explicitly
-    enumerated free-text identifier columns. (Finding 2 round 2.)
-    """
-    if name in COLLISION_PREFIX_COLUMNS:
-        return True
-    if name in COLLISION_NAMED_IDENTIFIER_COLUMNS:
-        return True
-    for suffix in COLLISION_PREFIX_SUFFIXES:
-        if name != suffix and name.endswith(suffix):
-            return True
-    return False
-
-
-def _collect_collision_columns(
-    con: sqlite3.Connection,
-    source_alias: str,
-    table: str,
-) -> tuple[str, ...]:
-    """Return per-table column names whose values must be project-prefixed.
-
-    Schema-driven so any column matching the prefix-eligible name rules
-    (see :func:`_is_collision_column`) is included automatically — no
-    manual edits needed when a new table grows a ``related_dispatch_id``
-    style reference. (Finding 2 round 2.)
-    """
-    if not _table_exists(con, table):
-        return ()
-    central_cols = _table_columns(con, table)
-    source_cols = set(_table_columns(con, table, alias=source_alias))
-    return tuple(
-        column
-        for column in central_cols
-        if column in source_cols and _is_collision_column(column)
-    )
-
-
-def _collect_json_array_columns(
-    con: sqlite3.Connection,
-    source_alias: str,
-    table: str,
-) -> tuple[str, ...]:
-    """Columns in ``table`` known to hold JSON arrays of identifiers.
-
-    Used by the live migrator to rewrite each array element with the
-    project prefix. (Finding 2 round 2.)
-    """
-    if not _table_exists(con, table):
-        return ()
-    central_cols = set(_table_columns(con, table))
-    source_cols = set(_table_columns(con, table, alias=source_alias))
-    return tuple(
-        column
-        for column in COLLISION_JSON_ARRAY_COLUMNS
-        if column in central_cols and column in source_cols
-    )
-
-
-def _prefix_value(project_id: str, value: object) -> object:
-    """Apply ``<project_id>:`` prefix to a scalar identifier value.
-
-    Idempotent: a value that already starts with the project's prefix
-    is returned unchanged so repeat-runs do not double-prefix.
-    """
-    if value is None or value == "":
-        return value
-    prefix = f"{project_id}:"
-    text_value = str(value)
-    return text_value if text_value.startswith(prefix) else f"{prefix}{text_value}"
-
-
-def _prefix_json_array(project_id: str, value: object) -> object:
-    """Apply project prefix to each element in a JSON-array string.
-
-    If the value is missing, empty, or fails to parse as a JSON array,
-    it is returned unchanged — defensive because legacy DBs sometimes
-    stored unstructured strings in these columns.
-    """
-    if value is None or value == "":
-        return value
-    if not isinstance(value, str):
-        return value
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError):
-        return value
-    if not isinstance(parsed, list):
-        return value
-    rewritten = [_prefix_value(project_id, item) for item in parsed]
-    return json.dumps(rewritten)
-
-
-def _record_rowid_mapping(
-    con: sqlite3.Connection,
-    project_id: str,
-    source_table: str,
-    source_rowid: int,
-    central_rowid: int,
-) -> None:
-    con.execute(
-        """
-        INSERT INTO p4_import_rowid_map
-            (project_id, source_table, source_rowid, central_rowid)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(project_id, source_table, source_rowid)
-        DO UPDATE SET central_rowid = excluded.central_rowid
-        """,
-        (project_id, source_table, source_rowid, central_rowid),
-    )
-
-
-def _mapped_central_rowid(
-    con: sqlite3.Connection,
-    project_id: str,
-    source_table: str,
-    source_rowid: int,
-) -> Optional[int]:
-    row = con.execute(
-        """
-        SELECT central_rowid
-        FROM p4_import_rowid_map
-        WHERE project_id = ? AND source_table = ? AND source_rowid = ?
-        """,
-        (project_id, source_table, source_rowid),
-    ).fetchone()
-    return int(row[0]) if row else None
-
-
-def _resolve_prior_skip(
-    con: sqlite3.Connection,
-    project_id: str,
-    source_table: str,
-    source_rowid: int,
-) -> None:
-    """Mark any prior unresolved p4_import_skipped row as resolved.
-
-    Called when a previously-skipped row finally imports successfully on
-    a later run. ``verify_import`` only treats unresolved skips as
-    discrepancies, so flipping ``resolved_at`` lets idempotent re-runs
-    self-heal without operator intervention. (Finding 3 round 2.)
-    """
-    con.execute(
-        """
-        UPDATE p4_import_skipped
-           SET resolved_at = ?
-         WHERE project_id = ?
-           AND source_table = ?
-           AND source_rowid = ?
-           AND resolved_at IS NULL
-        """,
-        (_now_utc_iso(), project_id, source_table, source_rowid),
-    )
-
-
-def _record_skip(
-    con: sqlite3.Connection,
-    project_id: str,
-    source_table: str,
-    source_rowid: int,
-    reason: str,
-    run_id: Optional[str],
-) -> None:
-    """Audit a row the migrator could not import (conflict / integrity).
-
-    The PRIMARY KEY is ``(project_id, source_table, source_rowid)`` so
-    this is naturally one-row-per-source-rowid; we re-stamp ``run_id`` /
-    ``skipped_at`` on each occurrence and clear ``resolved_at`` so a row
-    that re-skips after being marked resolved on a previous run shows up
-    as an active discrepancy again. (Finding 3 round 2.)
-    """
-    con.execute(
-        """
-        INSERT INTO p4_import_skipped
-            (project_id, source_table, source_rowid, reason, skipped_at, run_id, resolved_at)
-        VALUES (?, ?, ?, ?, ?, ?, NULL)
-        ON CONFLICT(project_id, source_table, source_rowid)
-        DO UPDATE SET
-            reason       = excluded.reason,
-            skipped_at   = excluded.skipped_at,
-            run_id       = excluded.run_id,
-            resolved_at  = NULL
-        """,
-        (
-            project_id,
-            source_table,
-            source_rowid,
-            reason,
-            _now_utc_iso(),
-            run_id,
-        ),
-    )
-
-
-def _import_table(
-    con: sqlite3.Connection,
-    source_alias: str,
-    project: ProjectEntry,
-    table: str,
-    run_id: Optional[str] = None,
-) -> ImportSummary:
-    source_cols = _common_columns(con, source_alias, table)
-    central_has_project_id = _column_exists(con, table, "project_id")
-    source_has_project_id = _column_exists(con, table, "project_id", alias=source_alias)
-    insert_cols = list(source_cols)
-    if central_has_project_id and not source_has_project_id:
-        insert_cols.append("project_id")
-    if not source_cols:
-        return ImportSummary(project.project_id, "", table, 0, 0)
-
-    cur = con.execute(
-        "SELECT source_rowid FROM p4_import_idempotency "
-        "WHERE project_id = ? AND source_table = ?",
-        (project.project_id, table),
-    )
-    already = {int(row[0]) for row in cur.fetchall()}
-
-    select_cols = ", ".join(f'"{c}"' for c in source_cols)
-    # Stream rows in batches instead of materializing the full result set.
-    # code_snippets can have 855k rows × full text payload; list() would load
-    # all snippet bodies into Python memory at once.  OI-1377 / ADR-009.
-    src_cursor = con.execute(
-        f"SELECT rowid, {select_cols} FROM {source_alias}.{table}"
-    )
-
-    inserted = 0
-    skipped = 0
-    collision_cols = _collect_collision_columns(con, source_alias, table)
-    json_array_cols = _collect_json_array_columns(con, source_alias, table)
-    is_entity_table = (
-        table == COLLISION_ENTITY_TABLE
-        and COLLISION_ENTITY_ID_COLUMN in source_cols
-        and COLLISION_ENTITY_TYPE_COLUMN in source_cols
-    )
-    while True:
-        batch = src_cursor.fetchmany(_IMPORT_BATCH_SIZE)
-        if not batch:
-            break
-        for row in batch:
-            check_abort()
-            rid = row[0]
-            if rid in already:
-                skipped += 1
-                continue
-            row_data = dict(zip(source_cols, row[1:]))
-            if central_has_project_id:
-                row_data["project_id"] = project.project_id
-            for column in collision_cols:
-                row_data[column] = _prefix_value(project.project_id, row_data.get(column))
-            for column in json_array_cols:
-                row_data[column] = _prefix_json_array(project.project_id, row_data.get(column))
-            if is_entity_table:
-                entity_type = row_data.get(COLLISION_ENTITY_TYPE_COLUMN)
-                if (entity_type or "").lower() in COLLISION_ENTITY_TYPES_PREFIXED:
-                    row_data[COLLISION_ENTITY_ID_COLUMN] = _prefix_value(
-                        project.project_id,
-                        row_data.get(COLLISION_ENTITY_ID_COLUMN),
-                    )
-            if table == "snippet_metadata" and "snippet_rowid" in row_data:
-                mapped_rowid = _mapped_central_rowid(
-                    con,
-                    project.project_id,
-                    "code_snippets",
-                    int(row_data["snippet_rowid"]),
-                )
-                if mapped_rowid is None:
-                    LOG.warning(
-                        "INSERT skipped project=%s table=%s rowid=%s err=missing_code_snippet_rowid_map",
-                        project.project_id,
-                        table,
-                        rid,
-                    )
-                    _record_skip(
-                        con,
-                        project.project_id,
-                        table,
-                        rid,
-                        "missing_code_snippet_rowid_map",
-                        run_id,
-                    )
-                    skipped += 1
-                    continue
-                row_data["snippet_rowid"] = mapped_rowid
-
-            values = [row_data[column] for column in insert_cols]
-            quoted_insert_cols = ", ".join(f'"{c}"' for c in insert_cols)
-            placeholders = ", ".join("?" for _ in insert_cols)
-            try:
-                cur = con.execute(
-                    f"INSERT OR IGNORE INTO {table} ({quoted_insert_cols}) VALUES ({placeholders})",
-                    values,
-                )
-                if cur.rowcount == 1:
-                    central_rowid = cur.lastrowid
-                    con.execute(
-                        "INSERT OR IGNORE INTO p4_import_idempotency "
-                        "(project_id, source_table, source_rowid) VALUES (?, ?, ?)",
-                        (project.project_id, table, rid),
-                    )
-                    # Self-heal: if a prior run logged this row as skipped (conflict
-                    # / integrity error), mark it resolved now that the import
-                    # succeeded. (Finding 3 round 2.)
-                    _resolve_prior_skip(con, project.project_id, table, rid)
-                    if table == "code_snippets":
-                        # Preserve the logical snippet linkage without forcing raw
-                        # rowid reuse across projects, which would collide.
-                        _record_rowid_mapping(
-                            con,
-                            project.project_id,
-                            table,
-                            rid,
-                            int(central_rowid),
-                        )
-                    inserted += 1
-                else:
-                    # SQLite IGNOREd the row (UNIQUE/PRIMARY KEY conflict). Do NOT
-                    # write to p4_import_idempotency — that table must reflect
-                    # actually-imported rows so re-runs can re-attempt the conflict
-                    # if the central row is later deleted/repaired. Audit the skip.
-                    LOG.warning(
-                        "INSERT IGNORED project=%s table=%s rowid=%s (central key conflict)",
-                        project.project_id, table, rid,
-                    )
-                    _record_skip(
-                        con,
-                        project.project_id,
-                        table,
-                        rid,
-                        "insert_or_ignore_conflict",
-                        run_id,
-                    )
-                    skipped += 1
-            except sqlite3.IntegrityError as exc:
-                LOG.warning(
-                    "INSERT skipped project=%s table=%s rowid=%s err=%s",
-                    project.project_id, table, rid, exc,
-                )
-                _record_skip(
-                    con,
-                    project.project_id,
-                    table,
-                    rid,
-                    f"integrity_error:{exc}",
-                    run_id,
-                )
-                skipped += 1
-    return ImportSummary(project.project_id, "", table, inserted, skipped)
 
 
 def import_project(
@@ -2227,197 +1587,6 @@ def verify_import(
     return report
 
 
-def _src_table_present(con: sqlite3.Connection, alias: str, table: str) -> bool:
-    """Return True iff ``alias.table`` is a real table or virtual table.
-
-    Used to distinguish *missing* tables (acceptable; the table was added
-    in a later schema and isn't in this source) from *unreadable* tables
-    (fatal; the source DB is corrupt). (Finding 4 round 2.)
-    """
-    cur = con.execute(
-        f"SELECT 1 FROM {alias}.sqlite_master WHERE type IN ('table','virtual') AND name = ?",
-        (table,),
-    )
-    return cur.fetchone() is not None
-
-
-def _compare_counts(
-    central_db: Path,
-    central_db_label: str,
-    src_db: Path,
-    project: ProjectEntry,
-    tables: Iterable[str],
-    read_errors: list[dict[str, object]],
-) -> dict[str, dict]:
-    """Compare per-project row counts; surface read failures via ``read_errors``.
-
-    Round-2 fix (Finding 4): a corrupt or unreadable source table no
-    longer silently degrades to zero rows. The condition is split into
-    'table absent' (fine — schema drift) vs 'table present but unreadable'
-    (fatal — appended to the shared ``read_errors`` list and surfaced as
-    a verification discrepancy).
-
-    Round-5 fix (Bug 3): when the central DB has the table but is
-    missing the ``project_id`` column, the verifier no longer silently
-    falls back to an unfiltered ``COUNT(*)``. That fallback could
-    produce per-project counts equal to the GLOBAL central total
-    (e.g. ``code_snippets`` reporting 855,159 for every project when
-    the FTS5 vtab was rebuilt without ``project_id``). Instead it now
-    records a ``central_missing_project_id`` read_error which becomes a
-    verification discrepancy.
-    """
-    out: dict[str, dict] = {}
-    tables_list = list(tables)
-    con = sqlite3.connect(str(central_db))
-    try:
-        try:
-            attach_readonly(con, "src", src_db)
-        except sqlite3.Error as exc:
-            read_errors.append(
-                {
-                    "db": central_db_label,
-                    "project_id": project.project_id,
-                    "phase": "attach",
-                    "error": str(exc),
-                    "path": str(src_db),
-                }
-            )
-            return out
-        for tbl in tables_list:
-            src_present = _src_table_present(con, "src", tbl)
-            central_present = _table_exists(con, tbl)
-            if not src_present:
-                # Source predates this table → acceptable schema drift.
-                continue
-            if not central_present:
-                # Round-3 fix-forward (Issue 3): a missing central table
-                # while the source HAS the table is a hard failure, not a
-                # silent skip. Without this, an empty-bootstrap apply
-                # would happily declare "verification clean" against
-                # zero imported rows. Surfacing as a read_error promotes
-                # to a verification discrepancy (exit code 4).
-                read_errors.append(
-                    {
-                        "db": central_db_label,
-                        "project_id": project.project_id,
-                        "phase": "central_table_missing",
-                        "table": tbl,
-                        "error": "central DB missing import-target table",
-                    }
-                )
-                continue
-            try:
-                src_cnt = con.execute(f"SELECT COUNT(*) FROM src.{tbl}").fetchone()[0]
-            except sqlite3.Error as exc:
-                read_errors.append(
-                    {
-                        "db": central_db_label,
-                        "project_id": project.project_id,
-                        "phase": "source_count",
-                        "table": tbl,
-                        "error": str(exc),
-                    }
-                )
-                continue
-            central_has_pid = _column_exists(con, tbl, "project_id")
-            if not central_has_pid:
-                # Round-5 fix (Bug 3): central is missing project_id on a
-                # table that is in the import list. After 0010+0015 every
-                # import-target table MUST have project_id. A missing
-                # column means the migration didn't take, or the FTS5
-                # vtab was rebuilt without it — either way the unfiltered
-                # COUNT(*) fallback would lie. Surface as discrepancy.
-                read_errors.append(
-                    {
-                        "db": central_db_label,
-                        "project_id": project.project_id,
-                        "phase": "central_missing_project_id",
-                        "table": tbl,
-                        "error": (
-                            "import-target table is missing project_id "
-                            "column post-migration; per-project verification "
-                            "cannot be performed without it"
-                        ),
-                    }
-                )
-                continue
-            try:
-                central_cnt = con.execute(
-                    f"SELECT COUNT(*) FROM {tbl} WHERE project_id = ?",
-                    (project.project_id,),
-                ).fetchone()[0]
-            except sqlite3.Error as exc:
-                read_errors.append(
-                    {
-                        "db": central_db_label,
-                        "project_id": project.project_id,
-                        "phase": "central_count",
-                        "table": tbl,
-                        "error": str(exc),
-                    }
-                )
-                continue
-            out[f"{central_db_label}.{tbl}"] = {
-                "source_rows": int(src_cnt),
-                "central_rows_for_project": int(central_cnt),
-            }
-        with contextlib.suppress(sqlite3.OperationalError):
-            con.execute("DETACH DATABASE src")
-    finally:
-        con.close()
-    return out
-
-
-def _collect_skipped_rows(
-    central_db: Path,
-    central_db_label: str,
-    run_id: Optional[str] = None,
-) -> list[dict[str, object]]:
-    """Return *unresolved* skipped rows, optionally scoped to a run.
-
-    Round-2 fix (Finding 3): adds the ``resolved_at IS NULL`` filter so a
-    conflict logged on run 1 that succeeded on run 2 stops surfacing as a
-    verify_import discrepancy. When ``run_id`` is supplied, the query
-    further narrows to that run so a fresh apply is only judged against
-    its own outcomes.
-    """
-    if not central_db.exists():
-        return []
-    con = sqlite3.connect(str(central_db))
-    try:
-        if not _table_exists(con, "p4_import_skipped"):
-            return []
-        cols = {r[1] for r in con.execute("PRAGMA table_info(p4_import_skipped)")}
-        has_resolved = "resolved_at" in cols
-        has_run_id = "run_id" in cols
-        clauses: list[str] = []
-        params: list[object] = []
-        if has_resolved:
-            clauses.append("resolved_at IS NULL")
-        if run_id and has_run_id:
-            clauses.append("run_id = ?")
-            params.append(run_id)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = (
-            "SELECT project_id, source_table, source_rowid, reason "
-            "FROM p4_import_skipped" + where +
-            " ORDER BY project_id, source_table, source_rowid"
-        )
-        rows = con.execute(sql, params).fetchall()
-        return [
-            {
-                "db": central_db_label,
-                "project_id": row[0],
-                "source_table": row[1],
-                "source_rowid": int(row[2]),
-                "reason": row[3],
-            }
-            for row in rows
-        ]
-    finally:
-        con.close()
-
-
 def _verification_discrepancies(report: dict) -> list[dict[str, object]]:
     """Build the unified discrepancy list used by ``raise_for_verification_failures``.
 
@@ -2468,7 +1637,8 @@ def raise_for_verification_failures(report: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Iterable[str] | None = None) -> int:
+def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments for migrate_to_central_vnx."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, default=None)
     parser.add_argument("--apply", action="store_true", help="ACTUALLY perform the import")
@@ -2559,13 +1729,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             "completion (success or failure)."
         ),
     )
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    return parser.parse_args(list(argv) if argv is not None else None)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
+def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
+    """Execute the apply / verify / backup flow.
+
+    Receives a fully-parsed ``args`` namespace (from :func:`_parse_args`) and
+    a filtered ``projects`` list (from :func:`main`).  Handles the
+    ``--verify-only``, dry-run, ``--test-apply``, and ``--apply`` code paths.
+    """
     # Env isolation pre-flight: warn if VNX_DATA_DIR is set and does not
     # match the --central-state argument.  This detects cross-repo env
     # contamination (e.g. VNX_DATA_DIR inherited from a different tmux pane).
@@ -2582,42 +1755,6 @@ def main(argv: Iterable[str] | None = None) -> int:
                 _env_vnx_data_dir,
                 args.central_state,
             )
-
-    registry_path = args.registry or _default_registry_path()
-    try:
-        projects = load_registry(registry_path)
-    except FileNotFoundError:
-        print(f"ERROR: registry not found at {registry_path}", file=sys.stderr)
-        return 2
-
-    if args.projects_filter:
-        valid_ids = {p.project_id for p in projects}
-        unknown = set(args.projects_filter) - valid_ids
-        if unknown:
-            LOG.error(
-                "--project filter contains unknown project_id(s): %s; "
-                "valid project_ids from registry: %s",
-                sorted(unknown),
-                sorted(valid_ids),
-            )
-            return 2
-        filter_set = set(args.projects_filter)
-        selected: list = []
-        for p in projects:
-            if p.project_id in filter_set:
-                selected.append(p)
-            else:
-                LOG.info("skipping project %s — not in --project filter", p.project_id)
-        projects = selected
-        LOG.info(
-            "--project filter active: migrating subset %s",
-            [p.project_id for p in projects],
-        )
-
-    # --test-apply and --verify-only are mutually exclusive.
-    if args.test_apply and args.verify_only:
-        LOG.error("--test-apply and --verify-only are mutually exclusive")
-        return 2
 
     # --test-apply: redirect central_state to a temp dir and run the full
     # bootstrap + migration chain without touching the live central DB.
@@ -2746,11 +1883,20 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     central_state.mkdir(parents=True, exist_ok=True)
 
+    # OI-011 fix: detect partial-init QI DB BEFORE the --fresh-central gate.
+    # A partial DB (e.g. dispatch_experiments only from retroactive_backfill)
+    # has tables but user_version=0 — it is NOT fresh and must NOT require
+    # --fresh-central, since existing data would be incorrectly abandoned.
+    # _init_central_if_missing is safe to call on a partial DB (idempotent).
+    central_qi_partial = _qi_is_partial(central_qi)
+
     # Round-3 fix-forward: detect a fresh central BEFORE creating empty
     # DB files. Without this gate, an operator who has just blown away
     # ~/.vnx-data/state/ would see "import complete" against empty DBs.
+    # OI-011: partial-init QI (data present, not truly empty) bypasses this
+    # gate — _init_central_if_missing handles the bootstrap idempotently.
     central_was_fresh = _central_is_empty(central_qi, central_rc)
-    if central_was_fresh and not args.fresh_central:
+    if central_was_fresh and not args.fresh_central and not central_qi_partial:
         LOG.error(
             "central appears fresh (missing canonical schema at %s); "
             "pass --fresh-central to acknowledge first-deploy bootstrap",
@@ -2768,10 +1914,23 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     pre_snapshot = _snapshot_central(central_qi, central_rc)
     try:
-        if central_was_fresh:
+        if central_was_fresh and not central_qi_partial:
             LOG.info(
                 "central is fresh; running canonical bootstrap "
                 "(quality_db_init + coordination_db.init_schema)"
+            )
+            _init_central_if_missing(central_qi, central_rc)
+        elif central_qi_partial:
+            # OI-011 fix: partial-init QI DB (e.g. only dispatch_experiments
+            # created by retroactive_backfill._open_tracker()) — complete the
+            # bootstrap via _init_central_if_missing which handles both QI
+            # (idempotent: dispatch_experiments data preserved) and RC init.
+            # ADR-007: bootstrap_qi_db wires composite PKs over project_id.
+            LOG.info(
+                "partial-init central QI DB detected (tables present but "
+                "user_version=0 or missing sentinel '%s'); running canonical "
+                "bootstrap to complete schema — existing data preserved",
+                _QI_SENTINEL_TABLE,
             )
             _init_central_if_missing(central_qi, central_rc)
 
@@ -2918,6 +2077,54 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"TEST MODE -- temp central dir cleaned up: {_test_apply_tmp_dir}")
 
     return 0
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    """CLI entry-point: parse args, load registry, filter projects, delegate to _run_apply."""
+    args = _parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    registry_path = args.registry or _default_registry_path()
+    try:
+        projects = load_registry(registry_path)
+    except FileNotFoundError:
+        print(f"ERROR: registry not found at {registry_path}", file=sys.stderr)
+        return 2
+
+    if args.projects_filter:
+        valid_ids = {p.project_id for p in projects}
+        unknown = set(args.projects_filter) - valid_ids
+        if unknown:
+            LOG.error(
+                "--project filter contains unknown project_id(s): %s; "
+                "valid project_ids from registry: %s",
+                sorted(unknown),
+                sorted(valid_ids),
+            )
+            return 2
+        filter_set = set(args.projects_filter)
+        selected: list = []
+        for p in projects:
+            if p.project_id in filter_set:
+                selected.append(p)
+            else:
+                LOG.info("skipping project %s — not in --project filter", p.project_id)
+        projects = selected
+        LOG.info(
+            "--project filter active: migrating subset %s",
+            [p.project_id for p in projects],
+        )
+
+    # --test-apply and --verify-only are mutually exclusive.
+    if args.test_apply and args.verify_only:
+        LOG.error("--test-apply and --verify-only are mutually exclusive")
+        return 2
+
+    return _run_apply(args, projects)
 
 
 def _snapshot_central(qi: Path, rc: Path) -> dict[str, Path]:

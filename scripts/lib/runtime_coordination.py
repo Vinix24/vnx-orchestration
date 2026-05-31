@@ -41,6 +41,7 @@ from coordination_db import (  # noqa: F401
 # Re-exports from runtime_state_machine
 from runtime_state_machine import (  # noqa: F401
     _check_idempotent_noop,
+    claim_next_queued_dispatch,
     create_attempt,
     increment_attempt_count,
     is_accepted_or_beyond,

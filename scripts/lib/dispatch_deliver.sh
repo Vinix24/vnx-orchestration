@@ -479,12 +479,16 @@ _ddt_subprocess_delivery() {
 
     log "V8 DISPATCH: subprocess adapter route — terminal=$terminal_id dispatch=$dispatch_id model=$model role=${agent_role:-<unset>}"
 
+    local _ar_flag=()
+    [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
+
     if ! python3 "$VNX_DIR/scripts/lib/subprocess_dispatch.py" \
             --terminal-id "$terminal_id" \
             --instruction "$complete_prompt" \
             --model "$model" \
             --dispatch-id "$dispatch_id" \
-            ${agent_role:+--role "$agent_role"}; then
+            ${agent_role:+--role "$agent_role"} \
+            "${_ar_flag[@]}"; then
         log_structured_failure "subprocess_delivery_failed" \
             "SubprocessAdapter delivery failed" \
             "terminal=$terminal_id dispatch=$dispatch_id"

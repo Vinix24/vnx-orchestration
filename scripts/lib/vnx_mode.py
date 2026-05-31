@@ -41,7 +41,7 @@ class VNXMode(str, Enum):
 # ---------------------------------------------------------------------------
 
 TIER_UNIVERSAL: FrozenSet[str] = frozenset({
-    "init", "doctor", "status", "recover", "help", "update",
+    "init", "migrate", "doctor", "status", "recover", "help", "update",
     "setup", "install-check", "install-validate",
 })
 
@@ -49,7 +49,7 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "staging-list", "promote", "queue-status", "gate-check", "suggest",
     "cost-report", "analyze-sessions", "intelligence-export",
     "intelligence-import", "init-feature", "bootstrap-skills",
-    "bootstrap-terminals", "bootstrap-hooks", "regen-settings",
+    "bootstrap-terminals", "bootstrap-hooks", "regen-settings", "regen-worker-permissions",
     "patch-agent-files", "register", "list-projects", "unregister",
     "roadmap", "insights",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
@@ -61,7 +61,7 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "new-worktree", "finish-worktree", "worktree-start", "worktree-stop",
     "worktree-refresh", "worktree-status", "merge-preflight",
     "smoke", "package-check",
-    "dispatch", "gate",
+    "dispatch", "gate", "dream",
     "snapshot", "restore", "quiesce-check", "pause", "resume",
     "pool",
 })

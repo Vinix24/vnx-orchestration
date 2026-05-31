@@ -62,6 +62,11 @@ scripts/smart_tap.log
 __pycache__/
 *.pyc
 
+# Python packaging build artifacts (never commit)
+dist/
+build/
+*.egg-info/
+
 # PR queue runtime artifacts (do not commit)
 /.pr_state.json
 /PR_QUEUE.md
@@ -71,6 +76,9 @@ config/
 
 # Old testing directory (merged into tests/)
 testing/
+
+# Private per-project prep migrations — never publish
+schemas/prep_migrations/
 
 # Environment files
 .env

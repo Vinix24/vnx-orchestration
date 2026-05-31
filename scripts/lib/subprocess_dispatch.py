@@ -54,8 +54,10 @@ from subprocess_dispatch_internals.git_helpers import (
     _check_commit_since,
     _commit_belongs_to_dispatch,
     _count_lines_changed_since_sha,
+    _get_active_worktree,
     _get_commit_hash,
     _get_current_branch,
+    _set_active_worktree,
 )
 from subprocess_dispatch_internals.handover import (
     _build_continuation_prompt,
@@ -101,6 +103,9 @@ from subprocess_dispatch_internals.state_paths import (
 
 __all__ = [
     "_extract_role_from_instruction",
+    "_select_dispatch_path",
+    "_build_cheap_lane_argv",
+    "_execute_cheap_lane_dispatch",
     "SubprocessAdapter",
     "HeadlessContextTracker",
     "WorkerHealthMonitor",
@@ -131,6 +136,7 @@ __all__ = [
     "_normalize_repo_path",
     "_parse_dirty_files",
     "_extract_touched_paths_from_event",
+    "subprocess",
     "_detect_pending_handover",
     "_build_continuation_prompt",
     "_write_rotation_handover",
@@ -143,7 +149,139 @@ __all__ = [
     "_capture_dispatch_parameters",
     "_capture_dispatch_outcome",
     "_update_pattern_confidence",
+    "_get_active_worktree",
+    "_set_active_worktree",
 ]
+
+
+def _select_dispatch_path(
+    task_class: str,
+    complexity: str = "medium",
+    current_model: str = "sonnet",
+    env: "dict[str, str] | None" = None,
+    auto_route_applied: bool = False,
+) -> "tuple[str | None, str]":
+    """Resolve the dispatch lane and effective Claude model from the routing policy.
+
+    Returns ``(cheap_lane_provider, effective_model)`` where:
+
+    - ``cheap_lane_provider`` is the non-Claude lane string (e.g.
+      ``"litellm:moonshot:kimi-k2-0905-default"``) when the routing policy
+      selects a non-Claude provider, or ``None`` when the dispatch stays on
+      Claude.
+    - ``effective_model`` is the Claude model to use (``"sonnet"``,
+      ``"haiku"``, ``"opus"``), unchanged from ``current_model`` whenever
+      a non-Claude lane is selected.
+
+    Short-circuit conditions that return ``(None, current_model)`` unchanged:
+    - ``VNX_ROUTING_POLICY_ENABLED`` is absent or not ``"1"`` in *env*.
+    - ``task_class`` is empty.
+    - ``auto_route_applied`` is ``True`` (smart_router already ran; do not
+      override its decision with the coarser routing_policy).
+    - Any exception raised by the routing policy (file-not-found, bad YAML,
+      unexpected errors) — fail open so dispatch continues on the current
+      Claude model.
+
+    Critical regression fix: the old ``__main__`` block fell back to the first
+    Claude model in ``fallback_chain`` when the lane was non-Claude.  This
+    silently routed the dispatch through Claude instead of the intended provider.
+    This function never touches ``fallback_chain`` for non-Claude lanes.
+    """
+    _env = env if env is not None else dict(os.environ)
+
+    # Guard: feature flag, empty task_class, or smart_router already decided.
+    if _env.get("VNX_ROUTING_POLICY_ENABLED") != "1":
+        return None, current_model
+    if not task_class:
+        return None, current_model
+    if auto_route_applied:
+        return None, current_model
+
+    try:
+        from routing_policy import decide_lane, lane_to_claude_model  # noqa: PLC0415
+        decision = decide_lane(task_class=task_class, complexity=complexity, env=_env)
+        claude_model = lane_to_claude_model(decision.lane)
+        if claude_model is not None:
+            # Claude lane: override model, no cheap-lane provider.
+            return None, claude_model
+        # Non-Claude lane: return lane as-is; do NOT fall through to fallback_chain.
+        return decision.lane, current_model
+    except Exception as exc:  # noqa: BLE001
+        import logging as _log_mod  # noqa: PLC0415
+        _log_mod.getLogger(__name__).warning(
+            "routing_policy: decision failed (%s); falling back to --model=%s",
+            exc, current_model,
+        )
+        return None, current_model
+
+
+def _build_cheap_lane_argv(
+    args: "argparse.Namespace",
+    cheap_lane_provider: str,
+) -> "list[str]":
+    """Build the provider_dispatch argv list for a non-Claude lane dispatch.
+
+    Constructs the full argument list forwarded to ``provider_dispatch.main()``
+    when ``routing_policy`` selects a non-Claude (cheap) provider.  Extracted
+    as a module-level function so tests can verify the delegation contract
+    without spawning real processes.
+
+    Args:
+        args:               Parsed ``argparse.Namespace`` from ``__main__``.
+        cheap_lane_provider: The lane string returned by ``_select_dispatch_path``
+                            (e.g. ``"litellm:moonshot:kimi-k2-0905-default"``).
+
+    Returns:
+        List of string arguments suitable for ``provider_dispatch.main(argv)``.
+    """
+    argv: "list[str]" = [
+        "--provider", cheap_lane_provider,
+        "--terminal-id", args.terminal_id,
+        "--dispatch-id", args.dispatch_id,
+        "--instruction", args.instruction,
+        "--model", args.model,
+        "--role", args.role or _ROLE_FALLBACK,
+        "--max-retries", str(args.max_retries),
+        "--gate", args.gate,
+    ]
+    if getattr(args, "no_auto_commit", False):
+        argv.append("--no-auto-commit")
+    if getattr(args, "dispatch_paths", ""):
+        argv.extend(["--dispatch-paths", args.dispatch_paths])
+    if getattr(args, "pr_id", None):
+        argv.extend(["--pr-id", args.pr_id])
+    if getattr(args, "no_repo_map", False):
+        argv.append("--no-repo-map")
+    return argv
+
+
+def _execute_cheap_lane_dispatch(
+    args: "argparse.Namespace",
+    cheap_lane_provider: str,
+) -> int:
+    """Delegate to provider_dispatch when routing policy selects a non-Claude lane.
+
+    This is the single delegation entry-point called from ``__main__`` when
+    ``_select_dispatch_path`` returns a non-None ``cheap_lane_provider``.
+    ``provider_dispatch`` owns receipt and unified_report emission after the
+    spawn completes; ``deliver_with_recovery`` (Claude) is never invoked on
+    this path.
+
+    Extracting it as a module-level function makes the delegation contract
+    directly testable: callers can mock ``provider_dispatch.main`` and assert
+    that ``deliver_with_recovery`` is not called (which is the primary
+    regression guard for the cheap-lane feature).
+
+    Args:
+        args:               Parsed ``argparse.Namespace`` from ``__main__``.
+        cheap_lane_provider: The non-Claude lane string (e.g.
+                            ``"litellm:moonshot:kimi-k2-0905-default"``).
+
+    Returns:
+        Exit code from ``provider_dispatch.main()``.
+    """
+    import provider_dispatch as _pd  # noqa: PLC0415
+    return _pd.main(_build_cheap_lane_argv(args, cheap_lane_provider))
 
 
 def _pool_heartbeat_loop(
@@ -154,7 +292,6 @@ def _pool_heartbeat_loop(
     interval: float = 15.0,
 ) -> None:
     """Update terminal_leases.last_heartbeat_at every *interval* seconds."""
-    import threading as _thr
     while not stop_event.wait(timeout=interval):
         try:
             from pool_state_repo import PoolStateRepository
@@ -212,11 +349,44 @@ if __name__ == "__main__":
         "--auto-route", action="store_true",
         help="Use smart_router to auto-select model (opt-in, default off).",
     )
+    parser.add_argument(
+        "--no-adr-inject", action="store_true",
+        help="Disable Wave-5 ADR context injection (debug/testing only).",
+    )
+    parser.add_argument(
+        "--no-repo-map", action="store_true",
+        help="Skip repo map injection for this dispatch (e.g. review/research batches).",
+    )
     args = parser.parse_args()
+
+    # Wave-5 ADR injection opt-out: set env var before instruction assembly (INT-2)
+    if getattr(args, "no_adr_inject", False):
+        os.environ["VNX_NO_ADR_INJECT"] = "1"
+
+    # Repo map opt-out: set env var so apply_repo_map_layer picks it up downstream.
+    if getattr(args, "no_repo_map", False):
+        os.environ["VNX_NO_REPO_MAP"] = "1"
 
     # OI-1107: fall back to Role: header in instruction, then to a documented default.
     if args.role is None:
         args.role = _extract_role_from_instruction(args.instruction) or _ROLE_FALLBACK
+
+    # Repo-map enrichment: apply before delivery so direct invocations (dispatch_deliver.sh,
+    # cheap-lane delegation) receive the same repo-map layer that the daemon provides.
+    # The double-injection guard in apply_repo_map_layer prevents re-injection when the
+    # instruction was already enriched (e.g. passed through from a daemon run).
+    try:
+        from dispatch_enricher import apply_repo_map_layer as _apply_repo_map  # noqa: PLC0415
+        args.instruction = _apply_repo_map(
+            args.instruction,
+            {"role": args.role},
+        )
+    except Exception as _repo_map_exc:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).warning(
+            "subprocess_dispatch: repo map enrichment failed (%s) — proceeding without",
+            _repo_map_exc,
+        )
 
     _dispatch_paths: "list[str] | None" = None
     if args.dispatch_paths.strip():
@@ -228,6 +398,7 @@ if __name__ == "__main__":
 
     # PR-SR-4: smart_router auto-route (opt-in, takes precedence over routing_policy).
     _auto_route_applied = False
+    _auto_cheap_lane: "str | None" = None  # G6: non-Claude provider from smart_router
     if getattr(args, "auto_route", False):
         try:
             from smart_router import decide as _smart_route, parse_route_model_id, write_route_decision  # noqa: PLC0415
@@ -243,7 +414,10 @@ if __name__ == "__main__":
                 )
                 if _r_provider == "claude":
                     _effective_model = _r_model
-                    _auto_route_applied = True
+                else:
+                    _auto_cheap_lane = _r_provider  # G6: route to non-Claude provider
+                    args.model = _r_model            # pass recommended model to provider_dispatch
+                _auto_route_applied = True  # G7: always skip routing_policy when smart_router ran
 
             _state_dir = Path(os.environ.get("VNX_STATE_DIR", ".vnx-data/state"))
             write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
@@ -259,40 +433,21 @@ if __name__ == "__main__":
                 _route_exc, args.model,
             )
 
-    if not _auto_route_applied and os.environ.get("VNX_ROUTING_POLICY_ENABLED") == "1" and args.task_class:
-        try:
-            from routing_policy import decide_lane, lane_to_claude_model
-            _decision = decide_lane(
-                task_class=args.task_class,
-                complexity=args.complexity,
-            )
-            _claude_model = lane_to_claude_model(_decision.lane)
-            if _claude_model is not None:
-                # Claude lane: override model directly.
-                _effective_model = _claude_model
-            else:
-                # LiteLLM lane: log routing intent; full LiteLLM path wired separately.
-                # Fallback to first Claude lane in the fallback_chain, or keep current model.
-                _fallback_claude = next(
-                    (lane_to_claude_model(fb) for fb in _decision.fallback_chain
-                     if lane_to_claude_model(fb) is not None),
-                    None,
-                )
-                if _fallback_claude is not None:
-                    _effective_model = _fallback_claude
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).info(
-                "routing_policy: task_class=%s complexity=%s -> lane=%s "
-                "(rule=%s) effective_model=%s",
-                args.task_class, args.complexity,
-                _decision.lane, _decision.rule_name, _effective_model,
-            )
-        except Exception as _routing_exc:
-            import logging as _log_mod
-            _log_mod.getLogger(__name__).warning(
-                "routing_policy: decision failed (%s); falling back to --model=%s",
-                _routing_exc, args.model,
-            )
+    _cheap_lane_provider, _effective_model = _select_dispatch_path(
+        task_class=args.task_class,
+        complexity=args.complexity,
+        current_model=_effective_model,
+        auto_route_applied=_auto_route_applied,
+    )
+    # G6: smart_router non-Claude selection takes precedence over routing_policy result.
+    if _auto_cheap_lane is not None:
+        _cheap_lane_provider = _auto_cheap_lane
+    if _cheap_lane_provider is not None or _effective_model != args.model:
+        import logging as _log_mod
+        _log_mod.getLogger(__name__).info(
+            "dispatch_path: task_class=%s complexity=%s -> cheap_lane=%s effective_model=%s",
+            args.task_class, args.complexity, _cheap_lane_provider, _effective_model,
+        )
 
     _state_dir = _default_state_dir()
     _db_path = _state_dir / "runtime_coordination.db"
@@ -315,6 +470,55 @@ if __name__ == "__main__":
     )
     _hb_thread.start()
 
+    if _cheap_lane_provider is not None:
+        # Non-Claude lane chosen by routing_policy: stop the heartbeat thread, then
+        # delegate execution to provider_dispatch via _execute_cheap_lane_dispatch.
+        # provider_dispatch owns receipt + unified_report emission; deliver_with_recovery
+        # (which would spawn a Claude process) is never called on this path.
+        _hb_stop.set()
+        _hb_thread.join(timeout=5)
+        sys.exit(_execute_cheap_lane_dispatch(args, _cheap_lane_provider))
+
+    # Scale chunk/total timeouts by --complexity so compute-heavy ("high")
+    # dispatches get more headroom and aren't killed by the per-chunk timeout
+    # during a long quiet-but-working step (e.g. static analysis). These are the
+    # *base* values fed into deliver_with_recovery; apply_runtime_overrides runs
+    # downstream so VNX_CHUNK_TIMEOUT / VNX_TOTAL_DEADLINE still take precedence.
+    from subprocess_dispatch_internals.runtime_overrides import complexity_timeout_defaults
+    _chunk_timeout, _total_deadline = complexity_timeout_defaults(args.complexity)
+
+    # VNX_ISOLATED_WORKTREE=1: create a per-dispatch ephemeral worktree so
+    # concurrent workers operate on independent file trees and never share HEAD.
+    # Default (unset): no change — proven path runs exactly as before.
+    _isolated = os.environ.get("VNX_ISOLATED_WORKTREE") == "1"
+    _isolation_wt_path = None
+    _isolation_project_root = Path(__file__).resolve().parents[2]
+    if _isolated:
+        try:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).info(
+                "VNX_ISOLATED_WORKTREE=1: creating dispatch worktree for %s",
+                args.dispatch_id,
+            )
+            from dispatch_worktree_isolation import (
+                create_dispatch_worktree as _create_wt,
+                remove_dispatch_worktree as _remove_wt,
+            )
+            _isolation_wt_path = _create_wt(
+                args.dispatch_id,
+                project_root=_isolation_project_root,
+            )
+            _set_active_worktree(_isolation_wt_path)
+        except Exception as _wt_exc:
+            import logging as _log_mod
+            _log_mod.getLogger(__name__).error(
+                "VNX_ISOLATED_WORKTREE: worktree creation failed (%s); "
+                "falling back to shared repo root",
+                _wt_exc,
+            )
+            _isolated = False
+            _isolation_wt_path = None
+
     try:
         ok = deliver_with_recovery(
             terminal_id=args.terminal_id,
@@ -323,6 +527,8 @@ if __name__ == "__main__":
             dispatch_id=args.dispatch_id,
             role=args.role,
             max_retries=args.max_retries,
+            chunk_timeout=_chunk_timeout,
+            total_deadline=_total_deadline,
             auto_commit=not args.no_auto_commit,
             gate=args.gate,
             dispatch_paths=_dispatch_paths,
@@ -331,5 +537,14 @@ if __name__ == "__main__":
     finally:
         _hb_stop.set()
         _hb_thread.join(timeout=5)
+        if _isolated and _isolation_wt_path is not None:
+            _set_active_worktree(None)
+            try:
+                _remove_wt(args.dispatch_id, project_root=_isolation_project_root)
+            except Exception as _rm_exc:
+                import logging as _log_mod
+                _log_mod.getLogger(__name__).warning(
+                    "VNX_ISOLATED_WORKTREE: worktree cleanup failed: %s", _rm_exc,
+                )
 
     sys.exit(0 if ok else 1)

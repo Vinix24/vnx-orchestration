@@ -61,7 +61,7 @@ def _setup_state_dir(tmp_path: str) -> str:
 def _register_and_lease(state_dir: str, terminal_id: str = "T1", dispatch_id: str = "d-001"):
     """Register a dispatch and acquire a lease — prerequisites for worker state."""
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, track="B")
+        register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, track="B", project_id="vnx-dev")
         acquire_lease(conn, terminal_id=terminal_id, dispatch_id=dispatch_id)
         conn.commit()
 
@@ -604,7 +604,7 @@ class TestFullLifecycleScenarios(unittest.TestCase):
 def _register_and_lease_second(state_dir: str):
     """Register a second dispatch and re-lease T1 (simulates new dispatch after release)."""
     with get_connection(state_dir) as conn:
-        register_dispatch(conn, dispatch_id="d-002", terminal_id="T1", track="B")
+        register_dispatch(conn, dispatch_id="d-002", terminal_id="T1", track="B", project_id="vnx-dev")
         # Release current lease first
         row = conn.execute(
             "SELECT generation FROM terminal_leases WHERE terminal_id = 'T1'"

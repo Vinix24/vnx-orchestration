@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,10 +23,15 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt, utc_now_iso
 from pr_queue_manager import PRQueueManager
-from closure_verifier import verify_closure
+from closure_verifier import verify_closure, _find_gate_result
+from gate_status import is_pass as gate_is_pass
+from project_scope import current_project_id
+from vnx_worktree import worktree_start
 
 
 ALLOWED_DRIFT_CATEGORIES = {"bugfix", "post_cleanup", "governance_gap", "path/runtime regression"}
+
+APPROVALS_SUBDIR = "roadmap_approvals"
 
 
 def _root_file(project_root: Path, name: str) -> Path:
@@ -43,6 +51,7 @@ class RoadmapManager:
         paths = ensure_env()
         self.project_root = Path(paths["PROJECT_ROOT"]).resolve()
         self.state_dir = Path(paths["VNX_STATE_DIR"]).resolve()
+        self.project_id = current_project_id()
         self.paths = RoadmapPaths(
             project_root=self.project_root,
             state_dir=self.state_dir,
@@ -56,22 +65,42 @@ class RoadmapManager:
 
     def _save_state(self, state: Dict[str, Any]) -> None:
         self.paths.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp = self.paths.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(self.paths.state_file))
+
+    def _blank_state(self) -> Dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "roadmap_file": None,
+            "current_active_feature": None,
+            "features": [],
+            "inserted_fixups": [],
+            "merged_features": [],
+            "last_verified_merge_commit": None,
+            "last_closure_verification_result": None,
+            "blocked_reason": None,
+            "updated_at": utc_now_iso(),
+        }
 
     def load_state(self) -> Dict[str, Any]:
         if not self.paths.state_file.exists():
-            return {
-                "roadmap_file": None,
-                "current_active_feature": None,
-                "features": [],
-                "inserted_fixups": [],
-                "merged_features": [],
-                "last_verified_merge_commit": None,
-                "last_closure_verification_result": None,
-                "blocked_reason": None,
-                "updated_at": utc_now_iso(),
-            }
-        return json.loads(self.paths.state_file.read_text(encoding="utf-8"))
+            return self._blank_state()
+
+        state = json.loads(self.paths.state_file.read_text(encoding="utf-8"))
+
+        file_pid = state.get("project_id")
+        if file_pid is None:
+            # One-shot migration: stamp unstamped legacy state, preserve feature progress.
+            state["project_id"] = self.project_id
+            self._save_state(state)
+            return state
+
+        if file_pid != self.project_id:
+            # ADR-007: cross-tenant contamination guard — re-initialize rather than leak.
+            return self._blank_state()
+
+        return state
 
     def _normalize_feature(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         review_stack = raw.get("review_stack") or []
@@ -105,6 +134,7 @@ class RoadmapManager:
         state = self.load_state()
         state.update(
             {
+                "project_id": self.project_id,
                 "roadmap_file": str(roadmap_file.resolve()),
                 "features": features,
                 "current_active_feature": None,
@@ -121,6 +151,7 @@ class RoadmapManager:
             "roadmap_transition",
             status="success",
             action="init",
+            project_id=self.project_id,
             roadmap_file=str(roadmap_file.resolve()),
             feature_count=len(features),
         )
@@ -131,7 +162,41 @@ class RoadmapManager:
         manager = PRQueueManager()
         manager.load_feature_plan(str(_root_file(self.project_root, "FEATURE_PLAN.md")))
 
-    def load_feature(self, feature_id: str) -> Dict[str, Any]:
+    def _ensure_feature_branch(self, branch_name: str) -> bool:
+        """Create feature branch from origin/main if absent. Idempotent; returns True if created."""
+        cwd = str(self.project_root)
+        probe = subprocess.run(["git", "-C", cwd, "rev-parse", "--git-dir"], capture_output=True)
+        if probe.returncode != 0:
+            return False
+        subprocess.run(["git", "-C", cwd, "fetch", "origin", "main"], capture_output=True)
+        exists = subprocess.run(
+            ["git", "-C", cwd, "show-ref", "--verify", f"refs/heads/{branch_name}"],
+            capture_output=True,
+        )
+        if exists.returncode == 0:
+            return False
+        for base in ("origin/main", "HEAD"):
+            r = subprocess.run(["git", "-C", cwd, "branch", branch_name, base], capture_output=True)
+            if r.returncode == 0:
+                return True
+        return False
+
+    def _provision_feature_worktree(self, branch_name: str) -> str:
+        """Create a git worktree for branch_name and initialize .vnx-data isolation. Returns path or empty."""
+        slug = branch_name.replace("/", "-")
+        wt_path = self.state_dir.parent / "worktrees" / slug
+        cwd = str(self.project_root)
+        if not wt_path.exists():
+            r = subprocess.run(
+                ["git", "-C", cwd, "worktree", "add", str(wt_path), branch_name],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                return ""
+        result = worktree_start(project_root=str(wt_path))
+        return str(wt_path) if result.success else ""
+
+    def load_feature(self, feature_id: str, no_worktree: bool = False) -> Dict[str, Any]:
         state = self.load_state()
         features = state.get("features") or []
         feature = next((item for item in features if item["feature_id"] == feature_id), None)
@@ -145,6 +210,10 @@ class RoadmapManager:
             raise FileNotFoundError(f"Feature plan not found: {plan_path}")
 
         self._materialize_plan(plan_path)
+
+        branch_name = feature["branch_name"]
+        branch_created = self._ensure_feature_branch(branch_name)
+        worktree_path = "" if no_worktree else self._provision_feature_worktree(branch_name)
 
         for item in features:
             if item["feature_id"] == feature_id:
@@ -160,12 +229,15 @@ class RoadmapManager:
             "roadmap_transition",
             status="success",
             action="load_feature",
+            project_id=self.project_id,
             feature_id=feature_id,
             title=feature["title"],
-            branch_name=feature["branch_name"],
+            branch_name=branch_name,
             risk_class=feature["risk_class"],
             merge_policy=feature["merge_policy"],
             review_stack=feature["review_stack"],
+            branch_created=branch_created,
+            worktree_path=worktree_path,
         )
         return state
 
@@ -297,6 +369,50 @@ Implement the minimum blocking fix required before the roadmap may advance.
         )
         return state
 
+    def _gates_incomplete(self, feature: Dict[str, Any], gate_results_dir: Path) -> bool:
+        """Return True when any required gate lacks a PASS result for the feature's PRs.
+
+        Required gates: every entry in review_stack except claude_github_optional.
+        ADR-007: project_id stamping is preserved — this check is additive.
+        """
+        review_stack = feature.get("review_stack") or []
+        required_gates = [g for g in review_stack if g != "claude_github_optional"]
+        if not required_gates:
+            return False
+
+        feature_plan_path = _root_file(self.project_root, "FEATURE_PLAN.md")
+        pr_ids: List[str] = []
+        if feature_plan_path.exists():
+            content = feature_plan_path.read_text(encoding="utf-8")
+            pr_ids = re.findall(r"^##\s+(PR-\d+):", content, re.MULTILINE)
+
+        if not pr_ids:
+            return True
+
+        if not gate_results_dir.exists():
+            return True
+
+        branch = feature.get("branch_name", "")
+        for pr_id in pr_ids:
+            for gate in required_gates:
+                # ADR-007 + ADR-005: scope lookup to current project_id and branch.
+                result = _find_gate_result(gate, pr_id, gate_results_dir, branch=branch, project_id=self.project_id)
+                if result is None:
+                    return True
+                passed, _ = gate_is_pass(result)
+                if not passed:
+                    return True
+                # Hole 1: status-only pass is insufficient (T0 7-invariant closure contract).
+                # Evidence must exist on disk and carry a contract_hash.
+                report_path = (result.get("report_path") or "").strip()
+                contract_hash = (result.get("contract_hash") or "").strip()
+                if not report_path or not Path(report_path).exists():
+                    return True
+                if not contract_hash:
+                    return True
+
+        return False
+
     def reconcile(self) -> Dict[str, Any]:
         state = self.load_state()
         current_id = state.get("current_active_feature")
@@ -320,15 +436,26 @@ Implement the minimum blocking fix required before the roadmap may advance.
             claim_file=(self.paths.state_dir / "closure_claim.json") if (self.paths.state_dir / "closure_claim.json").exists() else None,
         )
         drift_items = self._detect_blocking_drift() if verification["verdict"] == "pass" else []
+        if verification["verdict"] == "pass" and drift_items:
+            verdict = "drift_blocked"
+        elif verification["verdict"] == "pass":
+            gate_results_dir = self.state_dir / "review_gates" / "results"
+            verdict = "gates_incomplete" if self._gates_incomplete(feature, gate_results_dir) else "pass"
+        else:
+            verdict = "blocked"
         result = {
-            "verdict": "pass" if verification["verdict"] == "pass" and not drift_items else ("drift_blocked" if drift_items else "blocked"),
+            "verdict": verdict,
             "feature_id": current_id,
             "closure_verification": verification,
             "drift_items": drift_items,
         }
         state["last_closure_verification_result"] = result
         state["last_verified_merge_commit"] = (((verification.get("pr") or {}).get("mergeCommit") or {}).get("oid"))
-        state["blocked_reason"] = "blocking_drift_detected" if drift_items else (None if verification["verdict"] == "pass" else "closure_verification_failed")
+        state["blocked_reason"] = (
+            "blocking_drift_detected" if drift_items else
+            ("gates_incomplete" if verdict == "gates_incomplete" else
+             (None if verdict == "pass" else "closure_verification_failed"))
+        )
         state["updated_at"] = utc_now_iso()
         self._save_state(state)
         emit_governance_receipt(
@@ -339,11 +466,95 @@ Implement the minimum blocking fix required before the roadmap may advance.
         )
         return result
 
+    def _approvals_dir(self) -> Path:
+        d = self.state_dir / APPROVALS_SUBDIR
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _approval_token_path(self, feature_id: str) -> Path:
+        safe_id = feature_id.replace("/", "_")
+        return self._approvals_dir() / f"{safe_id}.json"
+
+    def _feature_requires_human_approval(self, feature: Dict[str, Any]) -> bool:
+        """ADR-007: human gate required when merge_policy=human OR risk_class=high."""
+        return feature.get("merge_policy") == "human" or feature.get("risk_class") == "high"
+
+    def _load_valid_approval_token(self, feature_id: str) -> Optional[Dict[str, Any]]:
+        """Return an unconsumed, project_id-stamped, feature-pinned token — or None."""
+        token_path = self._approval_token_path(feature_id)
+        if not token_path.exists():
+            return None
+        try:
+            token = json.loads(token_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if token.get("project_id") != self.project_id:
+            return None
+        if token.get("feature_id") != feature_id:
+            return None
+        if token.get("consumed"):
+            return None
+        return token
+
+    def _consume_approval_token(self, feature_id: str) -> None:
+        """Invalidate the token (single-use). Atomic write."""
+        token_path = self._approval_token_path(feature_id)
+        try:
+            token = json.loads(token_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            return
+        token["consumed"] = True
+        token["consumed_at"] = utc_now_iso()
+        tmp = token_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(token, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(token_path))
+
+    def approve(self, feature_id: str, actor: str, justification: str) -> Dict[str, Any]:
+        """Issue a single-use human approval token for feature_id.
+
+        ADR-007: token is project_id-stamped and feature-pinned.
+        """
+        state = self.load_state()
+        features = state.get("features") or []
+        feature = next((f for f in features if f["feature_id"] == feature_id), None)
+        if not feature:
+            raise ValueError(f"Unknown feature_id: {feature_id}")
+
+        issued_at = utc_now_iso()
+        token: Dict[str, Any] = {
+            "project_id": self.project_id,
+            "feature_id": feature_id,
+            "actor": actor,
+            "justification": justification,
+            "issued_at": issued_at,
+            "consumed": False,
+            "consumed_at": None,
+        }
+        token_path = self._approval_token_path(feature_id)
+        tmp = token_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(token, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(token_path))
+
+        emit_governance_receipt(
+            "roadmap_human_approval",
+            status="success",
+            action="approve",
+            project_id=self.project_id,
+            feature_id=feature_id,
+            actor=actor,
+            justification=justification,
+            issued_at=issued_at,
+        )
+        return token
+
     def advance(self) -> Dict[str, Any]:
         state = self.load_state()
         reconcile_result = self.reconcile()
         if reconcile_result["verdict"] == "blocked":
             return {"advanced": False, "reason": "closure_verification_failed", "reconcile": reconcile_result}
+
+        if reconcile_result["verdict"] == "gates_incomplete":
+            return {"advanced": False, "reason": "gates_incomplete", "reconcile": reconcile_result}
 
         if reconcile_result["verdict"] == "drift_blocked":
             state = self.load_state()
@@ -354,6 +565,25 @@ Implement the minimum blocking fix required before the roadmap may advance.
 
         state = self.load_state()
         current_id = state.get("current_active_feature")
+
+        # Human approval gate: merge_policy=human OR risk_class=high requires a valid token.
+        # conditional_auto + low delegates to auto_merge_policy (no token required).
+        if current_id:
+            cur_feature = next((f for f in state.get("features", []) if f["feature_id"] == current_id), None)
+            if cur_feature and self._feature_requires_human_approval(cur_feature):
+                token = self._load_valid_approval_token(current_id)
+                if not token:
+                    return {"advanced": False, "reason": "awaiting_human_approval", "feature_id": current_id}
+                self._consume_approval_token(current_id)
+                emit_governance_receipt(
+                    "roadmap_human_approval",
+                    status="success",
+                    action="consumed",
+                    project_id=self.project_id,
+                    feature_id=current_id,
+                    actor=token.get("actor"),
+                )
+
         if current_id and current_id not in state.get("merged_features", []):
             state.setdefault("merged_features", []).append(current_id)
             for item in state.get("features", []):
@@ -375,11 +605,118 @@ Implement the minimum blocking fix required before the roadmap may advance.
             state["blocked_reason"] = None
             state["updated_at"] = utc_now_iso()
             self._save_state(state)
-            emit_governance_receipt("roadmap_transition", status="success", action="advance_complete", merged_features=sorted(merged))
+            emit_governance_receipt("roadmap_transition", status="success", action="advance_complete", project_id=self.project_id, merged_features=sorted(merged))
             return {"advanced": False, "reason": "no_remaining_features"}
 
         self.load_feature(next_feature["feature_id"])
         return {"advanced": True, "reason": "loaded_next_feature", "next_feature": next_feature["feature_id"]}
+
+    def run_feature_step(self) -> Dict[str, Any]:
+        """Dispatch the next dependency-ready PR for the active feature.
+
+        ADR-007: emits project_id-stamped roadmap_dispatch_step receipt.
+        Respects VNX_QUEUE_POPUP_ENABLED env switch via promote_dispatch.
+        Returns dispatch_id + pr_id on success, or a no_ready_pr status without
+        side effects when no queued PR is dependency-ready.
+        """
+        state = self.load_state()
+        current_id = state.get("current_active_feature")
+        if not current_id:
+            return {"status": "no_active_feature", "reason": "no feature is currently active"}
+
+        pr_manager = PRQueueManager()
+        next_pr = pr_manager.get_next_pr()
+
+        if not next_pr:
+            emit_governance_receipt(
+                "roadmap_dispatch_step",
+                status="no_ready_pr",
+                project_id=self.project_id,
+                feature_id=current_id,
+            )
+            return {
+                "status": "no_ready_pr",
+                "feature_id": current_id,
+                "reason": "no dependency-ready PR in queue",
+            }
+
+        pr_id = next_pr["id"]
+        dispatch_id = pr_manager.create_dispatch_from_pr(pr_id)
+        if not dispatch_id:
+            return {
+                "status": "failed",
+                "feature_id": current_id,
+                "pr_id": pr_id,
+                "reason": "dispatch creation failed",
+            }
+
+        promoted = pr_manager.promote_dispatch(dispatch_id)
+        if not promoted:
+            return {
+                "status": "failed",
+                "feature_id": current_id,
+                "pr_id": pr_id,
+                "dispatch_id": dispatch_id,
+                "reason": "dispatch promotion failed",
+            }
+
+        pr_manager.update_pr_status(pr_id, "in_progress")
+
+        emit_governance_receipt(
+            "roadmap_dispatch_step",
+            status="success",
+            project_id=self.project_id,
+            feature_id=current_id,
+            pr_id=pr_id,
+            dispatch_id=dispatch_id,
+        )
+        return {
+            "status": "dispatched",
+            "feature_id": current_id,
+            "pr_id": pr_id,
+            "dispatch_id": dispatch_id,
+        }
+
+    def autopilot_tick(self) -> Dict[str, Any]:
+        """Single-iteration autopilot tick. Feature-flag gated (VNX_ROADMAP_AUTOPILOT=1).
+
+        Sequence: run_feature_step → (if queue drained) advance.
+        advance() runs reconcile() internally (RA-3/3b gate enforcement) then the
+        human approval check (RA-4), so this tick composes the full RA-1..5 loop.
+
+        ADR-007: project_id-scoped via existing primitives — no extra scoping needed.
+        ADR-018 Rule 2: single-claim, no loop. Caller (silence_watchdog) schedules repetition.
+        """
+        if os.environ.get("VNX_ROADMAP_AUTOPILOT", "0") not in ("1", "true", "True"):
+            return {"status": "disabled", "reason": "VNX_ROADMAP_AUTOPILOT not set"}
+
+        state = self.load_state()
+        if not state.get("current_active_feature"):
+            return {"status": "idle", "reason": "no_active_feature"}
+
+        step_result = self.run_feature_step()
+
+        if step_result["status"] == "dispatched":
+            return {
+                "status": "stepped",
+                "feature_id": step_result["feature_id"],
+                "pr_id": step_result["pr_id"],
+                "dispatch_id": step_result["dispatch_id"],
+            }
+
+        if step_result["status"] in ("failed", "no_active_feature"):
+            return {"status": step_result["status"], "step": step_result}
+
+        # Queue drained (no_ready_pr) → reconcile (via advance) + approval gate.
+        advance_result = self.advance()
+        if advance_result.get("advanced"):
+            return {"status": "advanced", "advance": advance_result}
+
+        return {
+            "status": "blocked",
+            "reason": advance_result.get("reason"),
+            "advance": advance_result,
+        }
 
     def status(self) -> Dict[str, Any]:
         state = self.load_state()
@@ -408,12 +745,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     load_parser = sub.add_parser("load")
     load_parser.add_argument("feature_id")
     load_parser.add_argument("--json", action="store_true")
+    load_parser.add_argument("--no-worktree", action="store_true", dest="no_worktree")
 
     reconcile_parser = sub.add_parser("reconcile")
     reconcile_parser.add_argument("--json", action="store_true")
 
     advance_parser = sub.add_parser("advance")
     advance_parser.add_argument("--json", action="store_true")
+
+    approve_parser = sub.add_parser("approve")
+    approve_parser.add_argument("feature_id")
+    approve_parser.add_argument("--actor", required=True)
+    approve_parser.add_argument("--justification", required=True)
+    approve_parser.add_argument("--json", action="store_true")
+
+    step_parser = sub.add_parser("step")
+    step_parser.add_argument("--json", action="store_true")
+
+    autopilot_parser = sub.add_parser("autopilot")
+    autopilot_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     manager = RoadmapManager()
@@ -423,11 +773,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.command == "status":
         result = manager.status()
     elif args.command == "load":
-        result = manager.load_feature(args.feature_id)
+        result = manager.load_feature(args.feature_id, no_worktree=getattr(args, "no_worktree", False))
     elif args.command == "reconcile":
         result = manager.reconcile()
     elif args.command == "advance":
         result = manager.advance()
+    elif args.command == "approve":
+        result = manager.approve(args.feature_id, actor=args.actor, justification=args.justification)
+    elif args.command == "step":
+        result = manager.run_feature_step()
+    elif args.command == "autopilot":
+        result = manager.autopilot_tick()
     else:
         raise AssertionError("unreachable")
 

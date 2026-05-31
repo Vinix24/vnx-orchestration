@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from project_scope import current_project_id as _current_project_id
 from runtime_coordination import (
     ACCEPTED_OR_BEYOND_STATES,
     TERMINAL_DISPATCH_STATES,
@@ -666,6 +667,7 @@ class DispatchBroker:
             row = register_dispatch(
                 conn,
                 dispatch_id=dispatch_id,
+                project_id=_current_project_id(),
                 terminal_id=terminal_id,
                 track=track,
                 priority=priority,

@@ -41,7 +41,7 @@ class CodexProvider(ClassifierProvider):
     def is_available(self) -> bool:
         return shutil.which("codex") is not None
 
-    def classify(self, prompt: str, max_tokens: int = 1500) -> ClassifierResult:
+    def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
         cmd = ["codex", "exec", "--json"]
         start = time.monotonic()
         try:

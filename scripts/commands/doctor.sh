@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 # VNX Command: doctor
 # Extracted from bin/vnx — validates VNX installation health.
 #
@@ -53,6 +53,25 @@ run_package_check() {
   return 0
 }
 
+run_contamination_check() {
+  # Wave 4 PR-4: warn (non-fatal) on pre-fix runtime state inside a central
+  # install. Mirrors check_contamination() in vnx_doctor.py so both doctor
+  # paths share one detector. Only fires for central installs; never fails.
+  if ! type _vnx_is_central_install >/dev/null 2>&1 || ! _vnx_is_central_install; then
+    return 0
+  fi
+  local check_script="$VNX_HOME/scripts/vnx_contamination_check.sh"
+  if [ ! -f "$check_script" ]; then
+    return 0
+  fi
+  if bash "$check_script" --version-dir "$VNX_HOME" --quiet; then
+    log "[doctor] OK: No runtime state inside central install."
+  else
+    log "[doctor] WARN: Pre-fix contamination inside central install — see cleanup instructions above."
+  fi
+  return 0
+}
+
 ensure_write_access() {
   local test_file="$VNX_STATE_DIR/.vnx_doctor_write_test"
   if touch "$test_file" 2>/dev/null; then
@@ -84,6 +103,105 @@ check_required_path() {
 
   err "[doctor] Missing file: $path"
   return 1
+}
+
+_doctor_check_settings() {
+  # Hooks and settings checks — extracted from cmd_doctor (OI-1573).
+  # Returns 1 if any check fails, 0 otherwise.
+  local failed=0
+  check_required_path "$PROJECT_ROOT/.claude/hooks/sessionstart.sh" file || failed=1
+  local settings_file="$PROJECT_ROOT/.claude/settings.json"
+  if [ -f "$settings_file" ]; then
+    # Validate JSON syntax
+    if command -v jq &>/dev/null; then
+      if jq empty "$settings_file" 2>/dev/null; then
+        log "[doctor] OK settings: valid JSON"
+      else
+        err "[doctor] settings.json is not valid JSON"
+        failed=1
+      fi
+    elif command -v python3 &>/dev/null; then
+      if python3 -c "import json; json.load(open('$settings_file'))" 2>/dev/null; then
+        log "[doctor] OK settings: valid JSON"
+      else
+        err "[doctor] settings.json is not valid JSON"
+        failed=1
+      fi
+    fi
+
+    # Validate structure via merge engine
+    local validate_script="$VNX_HOME/scripts/vnx_settings_merge.py"
+    if [ -f "$validate_script" ] && command -v python3 &>/dev/null; then
+      if python3 "$validate_script" --validate --project-root "$PROJECT_ROOT" --vnx-home "$VNX_HOME" 2>/dev/null; then
+        log "[doctor] OK settings: structure valid"
+      else
+        err "[doctor] settings.json structure validation failed"
+        failed=1
+      fi
+    fi
+
+    # Check hooks section exists
+    if grep -q '"hooks"' "$settings_file" 2>/dev/null; then
+      log "[doctor] OK hooks: settings.json has hooks section"
+    else
+      err "[doctor] Missing hooks section in .claude/settings.json"
+      failed=1
+    fi
+
+    # Check permissions section exists
+    if grep -q '"permissions"' "$settings_file" 2>/dev/null; then
+      log "[doctor] OK permissions: settings.json has permissions section"
+    else
+      err "[doctor] Missing permissions section in .claude/settings.json"
+      failed=1
+    fi
+  else
+    err "[doctor] Missing .claude/settings.json (run: vnx regen-settings --full)"
+    failed=1
+  fi
+  return $failed
+}
+
+_doctor_check_worktree() {
+  # Worktree isolation checks — extracted from cmd_doctor (OI-1573).
+  # Always returns 0 (issues are warnings, not fatal failures).
+  if _detect_worktree_context 2>/dev/null; then
+    log "[doctor] INFO: Running in git worktree: $_WT_ROOT"
+    local wt_data="$_WT_ROOT/.vnx-data"
+    if [ -L "$wt_data" ]; then
+      err "[doctor] WARN: .vnx-data is a SYMLINK (old model). Run 'vnx worktree-start' to migrate to isolated model."
+    elif [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
+      local snap_date
+      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2)
+      log "[doctor] OK worktree: isolated .vnx-data (snapshot: ${snap_date:-unknown})"
+      # Check snapshot freshness (warn if >14 days old)
+      if command -v python3 >/dev/null 2>&1 && [ -n "$snap_date" ]; then
+        local days_old
+        days_old=$(python3 -c "
+from datetime import datetime, timezone
+try:
+    snap = datetime.fromisoformat('$snap_date'.replace('Z','+00:00'))
+    print((datetime.now(timezone.utc) - snap).days)
+except:
+    print(-1)
+" 2>/dev/null)
+        if [ "${days_old:-0}" -ge 14 ]; then
+          log "[doctor] WARN: Intelligence snapshot is ${days_old} days old. Consider: vnx worktree-refresh"
+        fi
+      fi
+      # Check .env_override exists
+      if [ ! -f "$wt_data/.env_override" ]; then
+        err "[doctor] WARN: Missing .env_override in worktree. Run 'vnx worktree-start' to fix."
+      else
+        log "[doctor] OK worktree: .env_override present"
+      fi
+    elif [ -d "$wt_data" ]; then
+      err "[doctor] WARN: .vnx-data exists but no snapshot metadata. Run 'vnx worktree-start'."
+    else
+      err "[doctor] WARN: No .vnx-data in worktree. Run 'vnx worktree-start'."
+    fi
+  fi
+  return 0
 }
 
 cmd_doctor() {
@@ -193,57 +311,7 @@ cmd_doctor() {
   check_required_path "$TERMINALS_TEMPLATE_DIR/T3.md" file || failed=1
   check_required_path "$VNX_SKILLS_DIR/skills.yaml" file || failed=1
 
-  # Hooks and settings checks
-  check_required_path "$PROJECT_ROOT/.claude/hooks/sessionstart.sh" file || failed=1
-  local settings_file="$PROJECT_ROOT/.claude/settings.json"
-  if [ -f "$settings_file" ]; then
-    # Validate JSON syntax
-    if command -v jq &>/dev/null; then
-      if jq empty "$settings_file" 2>/dev/null; then
-        log "[doctor] OK settings: valid JSON"
-      else
-        err "[doctor] settings.json is not valid JSON"
-        failed=1
-      fi
-    elif command -v python3 &>/dev/null; then
-      if python3 -c "import json; json.load(open('$settings_file'))" 2>/dev/null; then
-        log "[doctor] OK settings: valid JSON"
-      else
-        err "[doctor] settings.json is not valid JSON"
-        failed=1
-      fi
-    fi
-
-    # Validate structure via merge engine
-    local validate_script="$VNX_HOME/scripts/vnx_settings_merge.py"
-    if [ -f "$validate_script" ] && command -v python3 &>/dev/null; then
-      if python3 "$validate_script" --validate --project-root "$PROJECT_ROOT" --vnx-home "$VNX_HOME" 2>/dev/null; then
-        log "[doctor] OK settings: structure valid"
-      else
-        err "[doctor] settings.json structure validation failed"
-        failed=1
-      fi
-    fi
-
-    # Check hooks section exists
-    if grep -q '"hooks"' "$settings_file" 2>/dev/null; then
-      log "[doctor] OK hooks: settings.json has hooks section"
-    else
-      err "[doctor] Missing hooks section in .claude/settings.json"
-      failed=1
-    fi
-
-    # Check permissions section exists
-    if grep -q '"permissions"' "$settings_file" 2>/dev/null; then
-      log "[doctor] OK permissions: settings.json has permissions section"
-    else
-      err "[doctor] Missing permissions section in .claude/settings.json"
-      failed=1
-    fi
-  else
-    err "[doctor] Missing .claude/settings.json (run: vnx regen-settings --full)"
-    failed=1
-  fi
+  _doctor_check_settings || failed=1
 
   # Quality intelligence database check
   local db_path="$VNX_STATE_DIR/quality_intelligence.db"
@@ -264,43 +332,7 @@ cmd_doctor() {
     log "[doctor] WARN: Quality intelligence DB not found. Run: vnx init-db"
   fi
 
-  # Worktree isolation checks
-  if _detect_worktree_context 2>/dev/null; then
-    log "[doctor] INFO: Running in git worktree: $_WT_ROOT"
-    local wt_data="$_WT_ROOT/.vnx-data"
-    if [ -L "$wt_data" ]; then
-      err "[doctor] WARN: .vnx-data is a SYMLINK (old model). Run 'vnx worktree-start' to migrate to isolated model."
-    elif [ -d "$wt_data" ] && [ -f "$wt_data/.snapshot_meta" ]; then
-      local snap_date
-      snap_date=$(grep '^snapshot_date=' "$wt_data/.snapshot_meta" 2>/dev/null | cut -d= -f2)
-      log "[doctor] OK worktree: isolated .vnx-data (snapshot: ${snap_date:-unknown})"
-      # Check snapshot freshness (warn if >14 days old)
-      if command -v python3 >/dev/null 2>&1 && [ -n "$snap_date" ]; then
-        local days_old
-        days_old=$(python3 -c "
-from datetime import datetime, timezone
-try:
-    snap = datetime.fromisoformat('$snap_date'.replace('Z','+00:00'))
-    print((datetime.now(timezone.utc) - snap).days)
-except:
-    print(-1)
-" 2>/dev/null)
-        if [ "${days_old:-0}" -ge 14 ]; then
-          log "[doctor] WARN: Intelligence snapshot is ${days_old} days old. Consider: vnx worktree-refresh"
-        fi
-      fi
-      # Check .env_override exists
-      if [ ! -f "$wt_data/.env_override" ]; then
-        err "[doctor] WARN: Missing .env_override in worktree. Run 'vnx worktree-start' to fix."
-      else
-        log "[doctor] OK worktree: .env_override present"
-      fi
-    elif [ -d "$wt_data" ]; then
-      err "[doctor] WARN: .vnx-data exists but no snapshot metadata. Run 'vnx worktree-start'."
-    else
-      err "[doctor] WARN: No .vnx-data in worktree. Run 'vnx worktree-start'."
-    fi
-  fi
+  _doctor_check_worktree
 
   # Version freshness check
   if [ -f "$VNX_HOME/.vnx-origin" ]; then
@@ -315,6 +347,7 @@ except:
 
   ensure_write_access || failed=1
   run_path_hygiene_check || failed=1
+  run_contamination_check
   if [ "$do_package_check" -eq 1 ]; then
     run_package_check || failed=1
   fi

@@ -9,15 +9,10 @@ from pathlib import Path
 
 
 def _read_version_file() -> str:
-    here = Path(__file__).resolve()
-    # vnx_cli/commands/version.py -> vnx_cli/commands -> vnx_cli -> project root
-    for ancestor in [here.parent, here.parent.parent, here.parent.parent.parent]:
-        version_file = ancestor / "VERSION"
-        if version_file.is_file():
-            content = version_file.read_text(encoding="utf-8").strip()
-            if content:
-                return content
-    return "unknown"
+    # Single source of truth: vnx_cli.__version__ (package metadata in an
+    # installed wheel, root VERSION file in a dev checkout).
+    from vnx_cli import __version__
+    return __version__
 
 
 def _git_commit(repo_dir: Path) -> str:
@@ -38,9 +33,11 @@ def _resolve_vnx_home() -> str:
         return env_val
 
     try:
-        scripts_lib = str(Path(__file__).resolve().parent.parent.parent / "scripts" / "lib")
-        if scripts_lib not in sys.path:
-            sys.path.insert(0, scripts_lib)
+        # Route through the shared engine bootstrap so the packaged
+        # (<site-packages>/vnx_orchestration) and dev-checkout layouts resolve
+        # identically (PR-PIP-REPACKAGE). Do not recompute scripts/lib inline.
+        from vnx_cli import _engine
+        _engine.ensure_engine_on_path()
         from vnx_paths import resolve_paths  # type: ignore[import]
         return resolve_paths().get("VNX_HOME", "unresolved")
     except Exception:

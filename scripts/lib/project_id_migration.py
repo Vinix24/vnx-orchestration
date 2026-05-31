@@ -39,10 +39,23 @@ QUALITY_INTELLIGENCE_TABLES: tuple[str, ...] = (
 )
 
 # Runtime Coordination: hot tables that need project_id at Phase 0.
+#
+# worker_states is included here even though its project_id column was
+# originally introduced by migration 0017. The v9 schema creates
+# worker_states WITHOUT project_id, and the v10 schema's
+# ``CREATE TABLE IF NOT EXISTS worker_states`` is a no-op on a DB that
+# already has the v9 table — so freshly-initialised and desynced DBs end up
+# missing worker_states.project_id unless 0017 happens to run. 0017 is
+# version-gated and also performs an invasive composite-UNIQUE rebuild, so it
+# will not re-run on a DB whose runtime_schema_version is already >= 12.
+# Listing worker_states here lets the idempotent init path self-heal the
+# column (and the ``idx_worker_states_project`` index) on every init,
+# independent of schema version. Closes the worker_states half of OI-095.
 RUNTIME_COORDINATION_TABLES: tuple[str, ...] = (
     "dispatches",
     "dispatch_attempts",
     "terminal_leases",
+    "worker_states",
     "coordination_events",
     "incident_log",
     "intelligence_injections",
@@ -79,6 +92,49 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     _validate_identifier(table)
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any(r[1] == column for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# worker_pid self-heal — 2nd schema-code drift (after worker_states.project_id)
+# ---------------------------------------------------------------------------
+#
+# rc6 code WRITES and READS ``terminal_leases.worker_pid``
+# (pool_state_repo.store_worker_pid / list_members), but no schema file or
+# migration ever defined the column. Every dispatch logged
+# "PID persistence failed: no such column: worker_pid" — non-fatal (the write
+# is in a rolled-back try/except) but it blinds the supervisor's worker-PID
+# tracking, degrading the lease-reaper / runtime_supervise path.
+#
+# The column is now declared in schemas/runtime_coordination{,_v10}.sql, but a
+# fresh DB builds terminal_leases from the v1 base (CREATE TABLE IF NOT EXISTS
+# in v10 is a no-op on the existing table) and pre-existing DBs predate the
+# declaration entirely — so, exactly like worker_states.project_id (OI-095), a
+# version-independent idempotent self-heal on every init is required. SQLite
+# has no ``ADD COLUMN IF NOT EXISTS``; guard with PRAGMA table_info first.
+WORKER_PID_TABLE = "terminal_leases"
+WORKER_PID_COLUMN = "worker_pid"
+
+
+def ensure_worker_pid_column(conn: sqlite3.Connection) -> str:
+    """Idempotently ensure ``terminal_leases.worker_pid`` (INTEGER, nullable).
+
+    Returns one of:
+      - ``"added"``           — column was just added
+      - ``"already_present"`` — column already existed
+      - ``"skipped_missing"`` — terminal_leases table not present in this DB
+
+    Reapplying is a clean no-op regardless of ``user_version``. Nullable
+    INTEGER: a worker PID when one is attached, NULL otherwise.
+    """
+    _validate_identifier(WORKER_PID_TABLE)
+    if not _table_exists(conn, WORKER_PID_TABLE):
+        return "skipped_missing"
+    if _column_exists(conn, WORKER_PID_TABLE, WORKER_PID_COLUMN):
+        return "already_present"
+    conn.execute(
+        f"ALTER TABLE {WORKER_PID_TABLE} ADD COLUMN {WORKER_PID_COLUMN} INTEGER"
+    )
+    return "added"
 
 
 def apply_project_id_migration(
@@ -133,6 +189,9 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
     """Apply migration 0010 to runtime_coordination.db. Idempotent.
 
     Stamps ``runtime_schema_version`` to 10 if not already present.
+    Creates the table first when absent — on some pip-wheel paths init_schema
+    may resolve a different schema directory and skip the base schema that would
+    normally create it, leaving the INSERT below to hit "no such table".
     """
     path = Path(db_path)
     if not path.exists():
@@ -142,6 +201,15 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         results = apply_project_id_migration(conn, RUNTIME_COORDINATION_TABLES)
+        # Self-heal the 2nd schema-code drift: terminal_leases.worker_pid.
+        # Independent of the project_id columns above; nullable INTEGER.
+        worker_pid_status = ensure_worker_pid_column(conn)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_schema_version ("
+            "version INTEGER PRIMARY KEY, "
+            "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), "
+            "description TEXT NOT NULL)"
+        )
         conn.execute(
             "INSERT OR IGNORE INTO runtime_schema_version (version, description) "
             "VALUES (?, ?)",
@@ -156,6 +224,7 @@ def run_runtime_coordination_migration(db_path: str | Path) -> Dict[str, object]
         "db_path": str(path),
         "schema_version": RUNTIME_SCHEMA_VERSION,
         "results": results,
+        "worker_pid_status": worker_pid_status,
     }
 
 

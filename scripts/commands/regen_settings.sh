@@ -76,6 +76,19 @@ HELP
     return 1
   fi
 
+  # Wave 4 PR-4: never write settings.json into an immutable central install.
+  # The merge/full target is "$PROJECT_ROOT/.claude/settings.json". If PROJECT_ROOT
+  # mis-resolved onto VNX_HOME (the install-central bug), writing there would
+  # contaminate the shared, versioned code tree. The guard is marker-gated
+  # (only fires when .vnx-install-mode=central), so embedded and standalone-dev
+  # layouts — where PROJECT_ROOT == VNX_HOME is legitimate — are unaffected.
+  # --validate is read-only and intentionally exempt.
+  if [ "$mode" = "--merge" ] || [ "$mode" = "--full" ]; then
+    if type _guard_not_vnx_home >/dev/null 2>&1; then
+      _guard_not_vnx_home "$PROJECT_ROOT" || return 1
+    fi
+  fi
+
   # Require python3
   if ! command -v python3 &>/dev/null; then
     err "[regen-settings] python3 is required"
@@ -101,4 +114,18 @@ HELP
   fi
 
   python3 "$merge_script" "${cmd_args[@]}"
+
+  # Co-run worker_permissions merge so both managed files stay in sync.
+  # Only fires for --merge and --full (not --validate which is read-only and already returned).
+  if [ "$mode" = "--merge" ] || [ "$mode" = "--full" ]; then
+    local wp_merge_script="$VNX_HOME/scripts/vnx_worker_permissions_merge.py"
+    if [ -f "$wp_merge_script" ]; then
+      local wp_args=("$mode" "--project-root" "$PROJECT_ROOT" "--vnx-home" "$VNX_HOME")
+      [ "$dry_run" -eq 1 ]    && wp_args+=("--dry-run")
+      [ "$no_backup" -eq 1 ]  && wp_args+=("--no-backup")
+      # --json for settings.json output does not apply to worker_permissions output
+      python3 "$wp_merge_script" "${wp_args[@]}" \
+        || log "[regen-settings] WARN: worker_permissions merge had issues (non-fatal)"
+    fi
+  fi
 }

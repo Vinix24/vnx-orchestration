@@ -5,6 +5,17 @@ Loads role-based permission profiles from .vnx/worker_permissions.yaml and
 generates CLAUDE.md permission instructions that are injected into dispatch
 instructions before subprocess launch.
 
+Path resolution priority (prevents template leak during rc-cutover):
+  1. $VNX_PROJECT_ROOT/.vnx/worker_permissions.yaml  — project override file
+  2. $PROJECT_ROOT/.vnx/worker_permissions.yaml       — same, alternate env var
+  3. Sibling resolution: Path(__file__).parents[2]/.vnx/worker_permissions.yaml
+     Works in both dev-mode (repo root/.vnx/) and central install (VNX_HOME/.vnx/).
+  4. $VNX_HOME/.vnx/worker_permissions.yaml           — fallback to shipped template
+
+In central-install mode the shipped template (VNX_HOME) is immutable and may
+not contain project-specific file_write_scope paths.  Priority 1/2 ensures the
+project copy wins; priority 3/4 are fallback-only.
+
 BILLING SAFETY: No Anthropic SDK. No api.anthropic.com calls.
 """
 
@@ -12,13 +23,46 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_PERMISSIONS_YAML_PATH = Path(__file__).resolve().parents[2] / ".vnx" / "worker_permissions.yaml"
+
+def _resolve_permissions_yaml() -> Path:
+    """Resolve worker_permissions.yaml with project-override-first priority.
+
+    Returns the first existing path from the priority list above.
+    Falls back to the sibling path even if it does not yet exist — callers
+    handle missing files gracefully via _load_yaml's empty-dict return.
+    """
+    # Priority 1: explicit project root override (set by central-install shim)
+    for env_var in ("VNX_PROJECT_ROOT", "PROJECT_ROOT"):
+        proj = os.environ.get(env_var)
+        if proj:
+            candidate = Path(proj) / ".vnx" / "worker_permissions.yaml"
+            if candidate.exists():
+                return candidate
+
+    # Priority 2: sibling resolution (works in dev-mode and embedded installs)
+    sibling = Path(__file__).resolve().parents[2] / ".vnx" / "worker_permissions.yaml"
+    if sibling.exists():
+        return sibling
+
+    # Priority 3: VNX_HOME env var (central install fallback)
+    vnx_home = os.environ.get("VNX_HOME")
+    if vnx_home:
+        candidate = Path(vnx_home) / "worker_permissions.yaml"
+        if candidate.exists():
+            return candidate
+
+    # Return the sibling path as default (may not exist; callers handle gracefully)
+    return sibling
+
+
+_PERMISSIONS_YAML_PATH = _resolve_permissions_yaml()
 
 
 @dataclass
@@ -41,12 +85,18 @@ def _load_yaml(path: Path) -> dict:
         return {}
 
 
-def load_permissions(role: str, yaml_path: Path = _PERMISSIONS_YAML_PATH) -> PermissionProfile:
+def load_permissions(role: str, yaml_path: Path | None = None) -> PermissionProfile:
     """Load PermissionProfile for role from worker_permissions.yaml.
+
+    yaml_path defaults to None which triggers project-override-first resolution
+    on every call (important in central-install mode where PROJECT_ROOT may be
+    set after module import).  Pass an explicit path in tests.
 
     Returns a profile with empty lists (no restrictions) when the role is not
     found or the YAML cannot be loaded — callers remain functional.
     """
+    if yaml_path is None:
+        yaml_path = _resolve_permissions_yaml()
     data = _load_yaml(yaml_path)
     profiles = data.get("profiles", {})
     raw = profiles.get(role)
@@ -118,7 +168,7 @@ def generate_permission_preamble(profile: PermissionProfile) -> str:
 
 def validate_dispatch_permissions(
     dispatch_metadata: dict,
-    yaml_path: Path = _PERMISSIONS_YAML_PATH,
+    yaml_path: Path | None = None,
 ) -> list[str]:
     """Check if dispatch role matches terminal assignment.
 
@@ -135,6 +185,8 @@ def validate_dispatch_permissions(
     if not terminal or not role:
         return warnings
 
+    if yaml_path is None:
+        yaml_path = _resolve_permissions_yaml()
     data = _load_yaml(yaml_path)
     assignments = data.get("terminal_assignments", {})
     expected_role = assignments.get(terminal)

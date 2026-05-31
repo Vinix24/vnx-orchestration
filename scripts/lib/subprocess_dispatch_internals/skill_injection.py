@@ -51,12 +51,18 @@ def _inject_permission_profile(terminal_id: str, role: str | None, instruction: 
 
 
 def _resolve_effective_role(terminal_id: str, role: str | None) -> str | None:
-    """Resolve effective role from terminal_assignments when role is None."""
+    """Resolve effective role from terminal_assignments when role is None.
+
+    Uses the project-override-first path resolution from worker_permissions so
+    central-install and embedded installs both find the project's customised
+    worker_permissions.yaml rather than the immutable VNX_HOME template.
+    """
     if role:
         return role
     try:
-        import yaml
-        yaml_path = Path(__file__).resolve().parents[3] / ".vnx" / "worker_permissions.yaml"
+        from worker_permissions import _resolve_permissions_yaml  # noqa: PLC0415
+        yaml_path = _resolve_permissions_yaml()
+        import yaml  # noqa: PLC0415
         data = yaml.safe_load(yaml_path.read_text()) or {}
         return data.get("terminal_assignments", {}).get(terminal_id)
     except Exception as exc:
@@ -103,12 +109,6 @@ def _build_intelligence_section(
         dispatch_paths=dispatch_paths,
         instruction_text=instruction_text,
     )
-
-
-def _format_intelligence_items(items: list) -> str:
-    """Group items by class and render as markdown sections."""
-    from intelligence_injection import format_intelligence_items  # noqa: PLC0415
-    return format_intelligence_items(items)
 
 
 def _inject_skill_context(

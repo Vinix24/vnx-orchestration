@@ -18,6 +18,7 @@ from coordination_db import (
     InvalidTransitionError,
     _append_event,
     _dump,
+    _has_project_id_col,
     _new_event_id,
     _now_utc,
 )
@@ -69,6 +70,7 @@ def register_dispatch(
     conn: sqlite3.Connection,
     *,
     dispatch_id: str,
+    project_id: str,
     terminal_id: Optional[str] = None,
     track: Optional[str] = None,
     priority: str = "P2",
@@ -79,28 +81,68 @@ def register_dispatch(
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Register a new dispatch in the queued state (idempotent)."""
+    """Register a new dispatch in the queued state (idempotent).
+
+    ADR-007: project_id is MANDATORY — no silent default. project_id is stamped
+    on the INSERT row for column compliance.
+
+    dispatch_id is GLOBALLY UNIQUE (timestamped slugs by construction). The
+    idempotency check keys on dispatch_id alone so all downstream state-machine
+    operations (transition_dispatch, increment_attempt_count, etc.) remain
+    consistent — they all key on dispatch_id only.
+
+    If a row with the same dispatch_id exists under a DIFFERENT project_id,
+    ValueError is raised — cross-tenant dispatch_id reuse is a bug, not a
+    silent merge.
+
+    Full composite-keying of the entire dispatch state machine is deferred to
+    a post-launch hardening item.
+    """
+    has_pid = _has_project_id_col(conn, "dispatches")
+
+    # dispatch_id is globally unique — check without project_id filter so
+    # transition_dispatch and other dispatch_id-keyed APIs stay consistent.
     existing = conn.execute(
         "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
     ).fetchone()
     if existing:
+        if has_pid:
+            existing_pid = existing["project_id"]
+            if existing_pid and existing_pid != project_id:
+                raise ValueError(
+                    f"Cross-tenant dispatch_id reuse: {dispatch_id!r} is already registered "
+                    f"under project {existing_pid!r}; refusing registration under {project_id!r}"
+                )
         return dict(existing)
 
     now = _now_utc()
-    conn.execute(
-        """
-        INSERT INTO dispatches
-            (dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
-             bundle_path, expires_after, created_at, updated_at, metadata_json)
-        VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (dispatch_id, terminal_id, track, priority, pr_ref, gate,
-         bundle_path, expires_after, now, now, _dump(metadata)),
-    )
+    if has_pid:
+        conn.execute(
+            """
+            INSERT INTO dispatches
+                (dispatch_id, project_id, state, terminal_id, track, priority, pr_ref, gate,
+                 bundle_path, expires_after, created_at, updated_at, metadata_json)
+            VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispatch_id, project_id, terminal_id, track, priority, pr_ref, gate,
+             bundle_path, expires_after, now, now, _dump(metadata)),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO dispatches
+                (dispatch_id, state, terminal_id, track, priority, pr_ref, gate,
+                 bundle_path, expires_after, created_at, updated_at, metadata_json)
+            VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispatch_id, terminal_id, track, priority, pr_ref, gate,
+             bundle_path, expires_after, now, now, _dump(metadata)),
+        )
     _append_event(
         conn, event_type="dispatch_queued", entity_type="dispatch",
         entity_id=dispatch_id, from_state=None, to_state="queued",
         actor=actor, reason="initial registration", metadata=metadata,
+        project_id=project_id,
     )
     return dict(
         conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
@@ -249,6 +291,101 @@ def create_attempt(
     return dict(
         conn.execute("SELECT * FROM dispatch_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
     )
+
+
+def claim_next_queued_dispatch(
+    conn: sqlite3.Connection,
+    terminal_id: str,
+    project_id: str,
+    actor: str = "runtime",
+) -> Optional[str]:
+    """Atomically claim the next queued dispatch for a project.
+
+    Uses BEGIN IMMEDIATE to serialize concurrent claimers — SQLite has no
+    SKIP LOCKED; this ensures the SELECT→UPDATE is atomic across writers.
+    Losers serialize and re-query; they get the next row or None.
+    Returns the dispatch_id string if a dispatch was claimed, None if the
+    queue is empty for this project.
+
+    ADR-007: scoped to project_id — a claimer for project A NEVER sees
+    project B queued rows. project_id is MANDATORY on every access.
+    See docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md.
+
+    Callers must pass a connection with no uncommitted DML. Setting
+    isolation_level=None (required for explicit BEGIN IMMEDIATE) commits
+    any pending implicit transaction on the connection.
+    """
+    conn.isolation_level = None  # autocommit mode for manual BEGIN IMMEDIATE control
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            """
+            SELECT dispatch_id FROM dispatches
+            WHERE project_id = ? AND state = 'queued'
+            ORDER BY priority ASC, created_at ASC
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+
+        if row is None:
+            conn.execute("ROLLBACK")
+            return None
+
+        dispatch_id = row["dispatch_id"]
+        now = _now_utc()
+
+        # State transition: queued → claimed — composite key (ADR-007: never dispatch_id alone)
+        validate_dispatch_transition("queued", "claimed")
+        conn.execute(
+            "UPDATE dispatches SET state = 'claimed', updated_at = ? WHERE dispatch_id = ? AND project_id = ?",
+            (now, dispatch_id, project_id),
+        )
+        _append_event(
+            conn, event_type="dispatch_claimed", entity_type="dispatch",
+            entity_id=dispatch_id, from_state="queued", to_state="claimed",
+            actor=actor, reason=f"queue claim by terminal {terminal_id}",
+            metadata={"terminal_id": terminal_id, "project_id": project_id},
+            project_id=project_id,
+        )
+
+        # Provenance columns: claimed_by / claimed_at (ADR-007: composite key; ADR-005: audit event)
+        table_cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatches)").fetchall()}
+        if "claimed_by" in table_cols:
+            conn.execute(
+                """
+                UPDATE dispatches
+                SET terminal_id = ?, claimed_by = ?, claimed_at = ?
+                WHERE dispatch_id = ? AND project_id = ?
+                """,
+                (terminal_id, terminal_id, now, dispatch_id, project_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE dispatches SET terminal_id = ? WHERE dispatch_id = ? AND project_id = ?",
+                (terminal_id, dispatch_id, project_id),
+            )
+        # ADR-005: ledger event for claimed_by/claimed_at provenance mutation
+        _append_event(
+            conn, event_type="dispatch_claim_provenance", entity_type="dispatch",
+            entity_id=dispatch_id, from_state=None, to_state=None,
+            actor=actor, reason=f"claim provenance stamped by terminal {terminal_id}",
+            metadata={
+                "terminal_id": terminal_id, "claimed_by": terminal_id,
+                "claimed_at": now, "dispatch_id": dispatch_id, "project_id": project_id,
+            },
+            project_id=project_id,
+        )
+
+        conn.execute("COMMIT")
+        return dispatch_id
+
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
 
 
 def update_attempt(

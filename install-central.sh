@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -eEuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # install-central.sh — Centralized VNX install to ~/.vnx-system/versions/<version>/
 # Separate from install.sh (embedded/open-source per-project installer).
 #
 # Layout created:
 #   ~/.vnx-system/
-#     versions/v1.0.0-rc2/     (immutable, content-addressed install)
+#     versions/v1.0.0/     (immutable, content-addressed install)
 #     current -> versions/...   (symlink, atomic switch)
 #     bin/vnx                   (shim that reads .vnx-version from project root)
 
-VERSION="v1.0.0-rc2"
+VERSION="v1.0.0"
 TARGET_DIR="${HOME}/.vnx-system"
 SOURCE_URL="https://github.com/Vinix24/vnx-orchestration"
 DRY_RUN=false
@@ -52,15 +54,15 @@ Usage: install-central.sh [OPTIONS]
 
 Options:
   --target <dir>    Install root (default: ~/.vnx-system)
-  --version <ver>   Version to install (default: v1.0.0-rc2)
+  --version <ver>   Version to install (default: v1.0.0)
   --source <url>    Git source URL (default: github.com/Vinix24/vnx-orchestration)
   --dry-run         Print steps without touching filesystem
   -h, --help        Show this help
 
 Examples:
   bash install-central.sh
-  bash install-central.sh --version v1.0.0-rc2 --dry-run
-  bash install-central.sh --target /opt/vnx-system --version v1.0.0-rc2
+  bash install-central.sh --version v1.0.0 --dry-run
+  bash install-central.sh --target /opt/vnx-system --version v1.0.0
 HELP
       exit 0 ;;
     *)
@@ -84,6 +86,27 @@ run() {
   else
     "$@"
   fi
+}
+
+# Marker written into each central-install version dir. scripts/lib/vnx_paths.{sh,py}
+# and the bin/vnx inline fallback read it to distinguish a central install
+# (PROJECT_ROOT = the operator's project) from a standalone vnx-orchestration dev
+# checkout (PROJECT_ROOT = VNX_HOME). Without it the resolver treats a central
+# install as a dev checkout and collapses runtime state into the immutable code tree.
+INSTALL_MODE_MARKER=".vnx-install-mode"
+INSTALL_MODE_VALUE="central"
+
+write_install_marker() {
+  local version_dir="$1"
+  local marker="${version_dir}/${INSTALL_MODE_MARKER}"
+  if [ "$DRY_RUN" = "true" ]; then
+    echo "  [dry-run] write ${INSTALL_MODE_MARKER} (${INSTALL_MODE_VALUE}) -> ${marker}"
+    return 0
+  fi
+  # Atomic write: never leave a half-written marker the resolver could misread.
+  local tmp="${marker}.tmp.$$"
+  printf '%s\n' "$INSTALL_MODE_VALUE" > "$tmp"
+  mv -f "$tmp" "$marker"
 }
 
 # ---------------------------------------------------------------------------
@@ -134,6 +157,9 @@ clone_version() {
 
   if [ -d "$version_dir" ]; then
     info "Version ${VERSION} already installed at ${version_dir} — skipping clone"
+    # Idempotent: ensure the marker exists even on a pre-existing version dir
+    # (e.g. cloned before this installer learned to write it).
+    write_install_marker "$version_dir"
     return 0
   fi
 
@@ -155,6 +181,7 @@ clone_version() {
     echo "  [dry-run] git clone --depth 1 --branch ${VERSION} ${clone_url} ${version_dir}"
   fi
 
+  write_install_marker "$version_dir"
   success "Cloned ${VERSION} to ${version_dir}"
 }
 
@@ -210,72 +237,21 @@ swap_symlink() {
 install_shim() {
   local shim_dir="${TARGET_DIR}/bin"
   local shim_path="${shim_dir}/vnx"
+  local tpl_path="${SCRIPT_DIR}/scripts/templates/vnx_shim.sh.tpl"
 
   info "Installing shim at ${shim_path}..."
   run mkdir -p "$shim_dir"
 
-  local shim_content
-  shim_content=$(cat <<'SHIM'
-#!/usr/bin/env bash
-# VNX project-pin shim — reads .vnx-version from project root (cwd traversal)
-set -euo pipefail
-
-VNX_SYSTEM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# Traverse up from cwd to find .vnx-version
-find_version_pin() {
-  local dir="$PWD"
-  while [ "$dir" != "/" ]; do
-    if [ -f "${dir}/.vnx-version" ]; then
-      cat "${dir}/.vnx-version"
-      return 0
-    fi
-    dir="$(dirname "$dir")"
-  done
-  echo ""
-}
-
-pin="$(find_version_pin | head -1 | tr -d '\n[:space:]')"
-
-if [ -n "$pin" ]; then
-  if ! [[ "$pin" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "[vnx-shim] ERROR: invalid pin '${pin}' in .vnx-version (must match [A-Za-z0-9._-]+)" >&2
-    exit 78  # EX_CONFIG
-  fi
-  version_dir="${VNX_SYSTEM_DIR}/versions/${pin}"
-  if [ ! -d "$version_dir" ]; then
-    echo "[vnx-shim] [x] Pinned version ${pin} not installed at ${version_dir}" >&2
-    echo "[vnx-shim] Run: bash ${VNX_SYSTEM_DIR}/../install-central.sh --version ${pin}" >&2
-    exit 1
-  fi
-  if command -v realpath >/dev/null 2>&1; then
-    resolved=$(realpath "$version_dir" 2>/dev/null) || { echo "[vnx-shim] ERROR: cannot resolve version_dir: ${version_dir}" >&2; exit 78; }
-    versions_root=$(realpath "${VNX_SYSTEM_DIR}/versions")
-    if [[ "$resolved" != "$versions_root"/* ]]; then
-      echo "[vnx-shim] ERROR: pin '${pin}' escapes versions root" >&2; exit 78
-    fi
-  fi
-  export VNX_HOME="$version_dir"
-else
-  if [ ! -e "${VNX_SYSTEM_DIR}/current" ]; then
-    echo "[vnx-shim] [x] No .vnx-version pin found and no current install at ${VNX_SYSTEM_DIR}/current" >&2
-    exit 1
-  fi
-  export VNX_HOME="${VNX_SYSTEM_DIR}/current"
-fi
-
-exec "${VNX_HOME}/bin/vnx-cli" "$@"
-SHIM
-)
+  [ -f "$tpl_path" ] || die "Shim template not found: ${tpl_path}"
 
   if [ "$DRY_RUN" = "false" ]; then
     local shim_tmp
     shim_tmp=$(mktemp "${shim_path}.tmp.XXXXXX")
-    printf '%s\n' "$shim_content" > "$shim_tmp"
+    cat "$tpl_path" > "$shim_tmp"
     chmod +x "$shim_tmp"
     mv -f "$shim_tmp" "$shim_path"
   else
-    echo "  [dry-run] write shim to ${shim_path} (chmod +x)"
+    echo "  [dry-run] write shim to ${shim_path} (chmod +x) from $(basename "${tpl_path}")"
   fi
 
   success "Shim installed: ${shim_path}"
@@ -296,17 +272,42 @@ verify_install() {
     [ -L "$current_link" ] || die "current symlink missing: ${current_link}"
     [ -x "$shim_path" ]    || die "shim not executable: ${shim_path}"
 
-    # Schema bootstrap check (idempotent)
+    # Install-mode marker must exist and read "central". The path resolver keys
+    # on this marker to keep PROJECT_ROOT (and all runtime state) out of the
+    # immutable code tree, so a missing/invalid marker is a hard install failure.
+    local marker="${version_dir}/${INSTALL_MODE_MARKER}"
+    [ -f "$marker" ] || die "install-mode marker missing: ${marker}"
+    local marker_value
+    marker_value="$(tr -d '[:space:]' < "$marker" 2>/dev/null || true)"
+    [ "$marker_value" = "$INSTALL_MODE_VALUE" ] \
+      || die "install-mode marker invalid: expected '${INSTALL_MODE_VALUE}', got '${marker_value}'"
+    success "Install-mode marker present (${INSTALL_MODE_VALUE})"
+
+    # Schema validation against a throwaway temp dir. quality_db_init.py always
+    # writes to its resolved VNX_STATE_DIR, so pin VNX_HOME + VNX_DATA_DIR/
+    # VNX_STATE_DIR at a temp location — the check then never writes runtime
+    # state into the version dir (or any real project that happens to be CWD).
     local db_init="${version_dir}/scripts/quality_db_init.py"
     if [ -f "$db_init" ]; then
-      python3 "$db_init" --check-only 2>/dev/null \
-        && success "Schema bootstrap check passed" \
-        || warn "Schema bootstrap check returned non-zero — may need manual init"
+      local tmp_db
+      tmp_db="$(mktemp -d)"
+      if VNX_HOME="$version_dir" VNX_DATA_DIR="$tmp_db" VNX_STATE_DIR="$tmp_db/state" \
+           python3 "$db_init" >/dev/null 2>&1; then
+        success "Schema validation passed (temp dir)"
+      else
+        warn "Schema validation returned non-zero — may need manual 'vnx init-db'"
+      fi
+      rm -rf "$tmp_db"
     else
-      info "quality_db_init.py not found at ${db_init} — skipping schema check"
+      local schema_file="${version_dir}/schemas/quality_intelligence.sql"
+      if [ -f "$schema_file" ]; then
+        success "Schema file present (${schema_file})"
+      else
+        warn "Schema file not found at ${schema_file}"
+      fi
     fi
   else
-    echo "  [dry-run] verify: version_dir, current symlink, shim executable, schema bootstrap"
+    echo "  [dry-run] verify: version_dir, current symlink, shim executable, install-mode marker, schema (temp dir)"
   fi
 
   success "Verification complete"

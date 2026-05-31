@@ -114,22 +114,20 @@ constraints:
     rule: forbid_route
     forbidden_route:
       provider: deepseek
-      via: claude_harness_oauth
+      via: claude_harness_subscription
     reason: >-
-      The DeepSeek harness (Claude binary with ANTHROPIC_BASE_URL redirect to
-      api.deepseek.com/anthropic) protects the auth IDENTITY, not the
-      mechanism. Running the redirect while authenticated on the production
-      OAuth SUBSCRIPTION rides that account = same ban-class as no-anthropic-sdk
-      (opencode/openclaw precedent), so `via: claude_harness_oauth` stays
-      blocked. The own-key KEY-AUTH lane (`via: claude_harness_keyauth`) is
-      ALLOWED: measured on `claude` 2.1.150 (2026-05-26), with
-      ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY (key-auth, not OAuth) +
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 + MCP off
-      (--strict-mcp-config --mcp-config '{"mcpServers":{}}') = 0 calls to
-      api.anthropic.com. The old "8 hits/session" leak (v2.1.136) was telemetry
-      + OAuth-subscription validation; both vanish in key-auth mode. See
-      ~/.claude/rules/provider-constraints.md and
-      deepseek-path-d-leak-hardened.md.
+      DeepSeek via Claude-harness (ANTHROPIC_BASE_URL redirect) is ALLOWED
+      with own DeepSeek API-key + hardening: ANTHROPIC_BASE_URL pointing to
+      DeepSeek endpoint, ANTHROPIC_API_KEY set to own DeepSeek key,
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (+ DISABLE_TELEMETRY +
+      DISABLE_AUTOUPDATER + DISABLE_ERROR_REPORTING), and MCP disabled
+      (--strict-mcp-config --mcp-config '{"mcpServers":{}}'). Measured on
+      claude v2.1.150 (2026-05-26): 0 calls to api.anthropic.com, all
+      inference routes to the DeepSeek endpoint. BLOCKED only when routing
+      through the production OAuth subscription without an own API key —
+      that redirects the protected account identity to DeepSeek, which is
+      the same ban-as as no-anthropic-sdk. Use via=claude_harness_keyed
+      when operating with own key + hardening.
     enforcement: code_raise
     audit_severity: blocking
     override_allowed: false

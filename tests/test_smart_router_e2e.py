@@ -80,7 +80,8 @@ class TestAutoRouteNdjsonPersistence:
         record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
         assert record["dispatch_id"] == "dispatch-claude-001"
         assert record["task_class"] == "01_code_generation"
-        assert record["chosen_route"]["model_id"] == "claude-sonnet-4-6"
+        # Cost-aware routing: kimi-k2-0905 has explicit cost=0.02 < sonnet null/inf → kimi wins.
+        assert record["chosen_route"]["model_id"] == "kimi-k2-0905"
 
     def test_kimi_route_writes_ndjson(self, recommendations_yaml, state_dir):
         decision = decide(
@@ -114,7 +115,8 @@ class TestAutoRouteNdjsonPersistence:
         record = json.loads(ndjson_path.read_text(encoding="utf-8").strip())
         assert record["chosen_route"]["model_id"] == "claude-opus-4-6"
 
-    def test_debug_task_routes_to_deepseek(self, recommendations_yaml, state_dir):
+    def test_debug_task_routes_to_deepseek(self, recommendations_yaml, state_dir, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
         decision = decide(
             instruction="debug the failing test in subprocess_dispatch",
             role="debugger",

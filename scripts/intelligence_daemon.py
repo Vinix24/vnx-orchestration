@@ -340,7 +340,7 @@ class IntelligenceDaemon:
                 return candidate
         return None
 
-    def _signal_handler(self, signum, frame):
+    def _signal_handler(self, signum, _frame):
         """Handle shutdown signals gracefully"""
         logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False

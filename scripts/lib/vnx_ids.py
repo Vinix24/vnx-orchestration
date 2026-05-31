@@ -10,6 +10,6 @@ import re
 
 # Canonical project_id: lowercase letter start, then 1-31 chars of
 # lowercase alphanum or hyphens. Total length: 2-32.
-# Matches: vnx-dev, sales-copilot, seocrawler-v2
+# Matches: vnx-dev, project-a, example-project
 # Rejects: Sales (uppercase), proj_ (underscore), a (single char), x*33
 PROJECT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")

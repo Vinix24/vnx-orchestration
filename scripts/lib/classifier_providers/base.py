@@ -44,7 +44,7 @@ class ClassifierProvider(ABC):
     name: str = "base"
 
     @abstractmethod
-    def classify(self, prompt: str, max_tokens: int = 1500) -> ClassifierResult:
+    def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
         """Run the classifier on `prompt`. Must return a ClassifierResult.
 
         Implementations must:

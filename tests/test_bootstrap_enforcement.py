@@ -58,7 +58,7 @@ class _BaseCase(unittest.TestCase):
 
     def _reg(self, dispatch_id: str, terminal_id: str = "T1") -> None:
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
             conn.commit()
 
     def _acquire(self, terminal_id: str, dispatch_id: str) -> int:
@@ -418,7 +418,7 @@ class TestChainCloseout(_BaseCase):
             # Insert a queued dispatch and lease it
             mgr = LeaseManager(tmp, auto_init=False)
             with get_connection(tmp) as conn:
-                register_dispatch(conn, dispatch_id="cli-active-001", terminal_id="T1")
+                register_dispatch(conn, dispatch_id="cli-active-001", terminal_id="T1", project_id="vnx-dev")
                 conn.commit()
             mgr.acquire("T1", dispatch_id="cli-active-001")
 

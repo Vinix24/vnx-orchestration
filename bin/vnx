@@ -12,29 +12,111 @@ export VNX_EXECUTABLE="$VNX_BIN"
 # (e.g. SEOcrawler PROJECT_ROOT leaking into marketing-magic-circle).
 # Preserve VNX_DATA_DIR if explicitly set (worktree isolation)
 _VNX_SAVED_DATA_DIR="${VNX_DATA_DIR:-}"
-unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR
+# Save any incoming VNX_PROJECT_ROOT (exported per-invocation by the
+# central-install shim, or set explicitly by an operator). The env reset below
+# unsets it together with PROJECT_ROOT/VNX_HOME so the resolver re-detects from
+# a clean slate, then we restore the explicit project-root override so
+# vnx_paths.sh re-applies it (detection priority 2: VNX_PROJECT_ROOT).
+_VNX_INCOMING_PROJECT_ROOT="${VNX_PROJECT_ROOT:-}"
+unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_PROJECT_ROOT
 [ -n "$_VNX_SAVED_DATA_DIR" ] && export VNX_DATA_DIR="$_VNX_SAVED_DATA_DIR"
-unset _VNX_SAVED_DATA_DIR
+[ -n "$_VNX_INCOMING_PROJECT_ROOT" ] && export VNX_PROJECT_ROOT="$_VNX_INCOMING_PROJECT_ROOT"
+unset _VNX_SAVED_DATA_DIR _VNX_INCOMING_PROJECT_ROOT
 
 if [ -f "$SCRIPT_DIR/../scripts/lib/vnx_paths.sh" ]; then
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/../scripts/lib/vnx_paths.sh"
 else
+  # Inline fallback resolver — fires only when scripts/lib/vnx_paths.sh is
+  # absent. Mirrors the layout detection in vnx_paths.sh so a central install
+  # (VNX_HOME = ~/.vnx-system/versions/<v>) does not conflate PROJECT_ROOT with
+  # VNX_HOME. Keep this in sync with scripts/lib/vnx_paths.sh.
   VNX_HOME_DEFAULT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  _vnx_home_git_root="$(git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" || _vnx_home_git_root=""
   if [ "$(basename "$VNX_HOME_DEFAULT")" = "vnx-system" ] && [ "$(basename "$(dirname "$VNX_HOME_DEFAULT")")" = ".claude" ]; then
+    # Embedded layout: project state lives in the parent project.
     PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/../.." && pwd)"
-  elif git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel >/dev/null 2>&1 && [ "$(git -C "$VNX_HOME_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" = "$VNX_HOME_DEFAULT" ]; then
-    PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+    VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ] && [ "$(cd "$VNX_PROJECT_ROOT" && pwd)" != "$VNX_HOME_DEFAULT" ]; then
+    # Explicit override exported by the central-install shim. Ignored when it
+    # points at VNX_HOME itself (shim mis-detection) — parity with the Python
+    # resolver guard; falls through to the git-root branch below.
+    PROJECT_ROOT_DEFAULT="$(cd "$VNX_PROJECT_ROOT" && pwd)"
+    VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$PROJECT_ROOT_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+    [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+  elif [ -n "$_vnx_home_git_root" ] && [ "$_vnx_home_git_root" = "$VNX_HOME_DEFAULT" ]; then
+    # VNX_HOME is its own git repo: central install OR standalone dev checkout.
+    # Only the .vnx-install-mode marker marks a central install; the old
+    # CWD-git-mismatch heuristic was removed (mis-fired on worktrees, #225).
+    _vnx_is_central=false
+    if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+      _vnx_is_central=true
+    fi
+    _cwd_git_root=""
+    if [ "$_vnx_is_central" = "true" ]; then
+      _cwd_git_root="$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null)" || _cwd_git_root=""
+      if [ -z "$_cwd_git_root" ]; then
+        _cwd_git_root="$(pwd)"
+      fi
+      if [ "$_cwd_git_root" = "/" ] || [ -z "$_cwd_git_root" ]; then
+        _cwd_git_root="$VNX_HOME_DEFAULT"
+      fi
+      PROJECT_ROOT_DEFAULT="$(cd "$_cwd_git_root" && pwd)"
+      VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$PROJECT_ROOT_DEFAULT" rev-parse --show-toplevel 2>/dev/null)" || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+      [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+    else
+      # Standalone dev checkout: keep runtime local to the checkout.
+      PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+      VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$VNX_HOME_DEFAULT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+      [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+    fi
+    unset _vnx_is_central _cwd_git_root
   else
     PROJECT_ROOT_DEFAULT="$(cd "$VNX_HOME_DEFAULT/.." && pwd)"
+    VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
   fi
-  VNX_CANONICAL_ROOT_DEFAULT="$(git -C "$VNX_HOME_DEFAULT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')" || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
-  [ -n "$VNX_CANONICAL_ROOT_DEFAULT" ] || VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  unset _vnx_home_git_root
 
   export VNX_HOME="${VNX_HOME:-$VNX_HOME_DEFAULT}"
   export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
   export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
-  export VNX_DATA_DIR="${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}"
+  # PR-PIP-2: ordered state-root resolution (lockstep with scripts/lib/vnx_paths.sh
+  # and vnx_paths.py). This inline fallback only runs when vnx_paths.sh is absent;
+  # keep the ordering identical: explicit > VNX_DATA_HOME/<id> > ~/.vnx-data/<id>
+  # if exists > project-local if exists > XDG default. Collision-safe on missing id.
+  if [ -z "${VNX_DATA_DIR:-}" ]; then
+    _vnx_pid=""
+    if [ -n "${VNX_PROJECT_ID:-}" ] && printf '%s' "$VNX_PROJECT_ID" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'; then
+      _vnx_pid="$VNX_PROJECT_ID"
+    else
+      _vnx_pid_dir="$PROJECT_ROOT"
+      while [ -n "$_vnx_pid_dir" ]; do
+        if [ -f "$_vnx_pid_dir/.vnx-project-id" ]; then
+          _vnx_pid_first="$(head -1 "$_vnx_pid_dir/.vnx-project-id" 2>/dev/null | tr -d '[:space:]')"
+          if [ -n "$_vnx_pid_first" ] && printf '%s' "$_vnx_pid_first" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'; then
+            _vnx_pid="$_vnx_pid_first"
+          fi
+          break
+        fi
+        [ "$_vnx_pid_dir" = "/" ] && break
+        _vnx_pid_dir="$(dirname "$_vnx_pid_dir")"
+      done
+      unset _vnx_pid_dir _vnx_pid_first
+    fi
+    if [ -n "${VNX_DATA_HOME:-}" ] && [ -n "$_vnx_pid" ]; then
+      VNX_DATA_DIR="${VNX_DATA_HOME%/}/$_vnx_pid"
+    elif [ -n "$_vnx_pid" ] && [ -d "$HOME/.vnx-data/$_vnx_pid" ]; then
+      VNX_DATA_DIR="$HOME/.vnx-data/$_vnx_pid"
+    elif [ -d "$PROJECT_ROOT/.vnx-data" ]; then
+      VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+    elif [ -n "$_vnx_pid" ]; then
+      VNX_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/vnx/$_vnx_pid"
+    else
+      VNX_DATA_DIR="$PROJECT_ROOT/.vnx-data"
+    fi
+    unset _vnx_pid
+  fi
+  export VNX_DATA_DIR
   export VNX_STATE_DIR="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
   export VNX_DISPATCH_DIR="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}"
   export VNX_LOGS_DIR="${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}"
@@ -43,6 +125,30 @@ else
   export VNX_REPORTS_DIR="${VNX_REPORTS_DIR:-$VNX_DATA_DIR/unified_reports}"
   export VNX_DB_DIR="${VNX_DB_DIR:-$VNX_DATA_DIR/database}"
   export VNX_INTELLIGENCE_DIR="${VNX_INTELLIGENCE_DIR:-$VNX_CANONICAL_ROOT/.vnx-intelligence}"
+
+  # Central-install write guard (mirror of scripts/lib/vnx_paths.sh). In a
+  # central install (.vnx-install-mode=central) project state must never resolve
+  # under VNX_HOME — that tree is immutable shared code. Fail loud instead of
+  # corrupting it. No-op for embedded / standalone-dev layouts (no marker). Uses
+  # raw printf because err() is not defined yet at this point in the script.
+  if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] \
+    && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+    _vnx_guard_home="$(cd "$VNX_HOME_DEFAULT" && pwd -P)"
+    for _vnx_guard_var in VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_INTELLIGENCE_DIR; do
+      _vnx_guard_val="${!_vnx_guard_var:-}"
+      [ -n "$_vnx_guard_val" ] || continue
+      case "$_vnx_guard_val" in
+        "$_vnx_guard_home"|"$_vnx_guard_home"/*)
+          printf 'ERROR: [guard] cannot write project state under immutable central install\n' >&2
+          printf 'ERROR: [guard]   %s=%s\n' "$_vnx_guard_var" "$_vnx_guard_val" >&2
+          printf 'ERROR: [guard]   VNX_HOME=%s (immutable shared code)\n' "$_vnx_guard_home" >&2
+          printf 'ERROR: [guard]   PROJECT_ROOT mis-detected; run vnx from your project directory\n' >&2
+          exit 1
+          ;;
+      esac
+    done
+    unset _vnx_guard_home _vnx_guard_var _vnx_guard_val
+  fi
 
   if [ -d "$PROJECT_ROOT_DEFAULT/.claude/skills" ]; then
     export VNX_SKILLS_DIR="$PROJECT_ROOT_DEFAULT/.claude/skills"
@@ -87,6 +193,38 @@ err() {
   printf 'ERROR: %s\n' "$*" >&2
 }
 
+# ── Central-install write guard ───────────────────────────────────────────
+# A central install marks its (immutable, shared) versioned code tree with a
+# .vnx-install-mode=central file written by install-central.sh. In that layout
+# no project state may be written under VNX_HOME. These helpers catch
+# PROJECT_ROOT mis-detection where PROJECT_ROOT collapses onto VNX_HOME — the
+# Wave 4 install-central bug. Embedded / standalone-dev layouts carry no marker
+# (PROJECT_ROOT == VNX_HOME is legitimate there), so the guard is a no-op.
+_vnx_is_central_install() {
+  [ -f "${VNX_HOME}/.vnx-install-mode" ] \
+    && [ "$(cat "${VNX_HOME}/.vnx-install-mode" 2>/dev/null)" = "central" ]
+}
+
+# Refuse a write whose target resolves under VNX_HOME in a central install.
+# Usage: _guard_not_vnx_home "<target-path>" || return 1
+_guard_not_vnx_home() {
+  local target="$1"
+  _vnx_is_central_install || return 0
+  local canon_target canon_home
+  canon_target="$(cd "$target" 2>/dev/null && pwd -P)" || canon_target="$target"
+  canon_home="$(cd "$VNX_HOME" 2>/dev/null && pwd -P)" || canon_home="$VNX_HOME"
+  case "$canon_target" in
+    "$canon_home"|"$canon_home"/*)
+      err "[guard] cannot write project state under immutable central install"
+      err "[guard]   target:   $canon_target"
+      err "[guard]   VNX_HOME: $canon_home (immutable shared code)"
+      err "[guard]   PROJECT_ROOT mis-detected — run vnx from your project directory (where .vnx-version lives)"
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 # ── Command loader ──────────────────────────────────────────────────────
 # Sources an external command file from scripts/commands/<name>.sh if it exists.
 # The sourced file defines the cmd_<name>() function which the main dispatch
@@ -129,6 +267,8 @@ Commands:
   bootstrap-terminals  Create ./\.claude/terminals (default: T0..T3)
   bootstrap-hooks    Deploy SessionStart hooks to .claude/hooks/ + settings.json
   regen-settings     Patch-manage settings.json (--merge|--full|--validate)
+  regen-worker-permissions  Overlay-merge worker_permissions.yaml preserving project overrides
+                     (--merge|--full|--validate)
   start [--profile X] Launch VNX tmux session (interactive profile selection)
                      Profiles: claude-only, claude-codex, claude-gemini, full-multi
   start --preset <name>  Start with a saved startup preset
@@ -145,7 +285,7 @@ Commands:
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
                        review --weekly  Aggregate last 7d suggestions by target file
-  insights           Read-only F57 dispatch parameter + behavioral intelligence signals
+  insights           Read-only dispatch parameter + behavioral intelligence signals
                        --json           Machine-readable JSON output
 
 Intelligence commands (git-tracked project knowledge):
@@ -597,6 +737,9 @@ cmd_intelligence_import() {
 }
 
 cmd_init() {
+  # Refuse to bootstrap into the immutable central code tree (mis-detection).
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
+
   # Parse --starter / --operator flags before forwarding to Python init.
   local mode_flag=""
   local init_args=()
@@ -718,15 +861,6 @@ cmd_init_db() {
   log "[init-db] Quality intelligence database ready"
 }
 
-print_terminal_command() {
-  local terminal="$1"
-  local template_file="$2"
-  local index="$3"
-
-  printf '%s) %s\n' "$index" "$terminal"
-  printf '   cd %q && cat %q\n' "$PROJECT_ROOT" "$template_file"
-}
-
 # ── Comprehensive orchestration process cleanup ───────────────────────
 # Kills ALL VNX orchestration processes for this project. Previous
 # versions only killed smart_tap and dispatcher, causing duplicate
@@ -821,10 +955,6 @@ vnx_kill_all_orchestration() {
   sleep 1  # Brief pause to let processes exit cleanly
 }
 
-build_block_file() {
-  vnx_build_block_file "$1" "$2" "$MARKER_BEGIN" "$MARKER_END"
-}
-
 upsert_marked_block() {
   local target_file="$1"
   local snippet_file="$2"
@@ -881,6 +1011,7 @@ select_snippet_for_target() {
 }
 
   cmd_patch_agent_files() {
+    _guard_not_vnx_home "$PROJECT_ROOT" || return 1
     local target
   for target in "$PROJECT_ROOT/CLAUDE.md" "$PROJECT_ROOT/AGENTS.md" "$PROJECT_ROOT/GEMINI.md"; do
     local base
@@ -1070,6 +1201,7 @@ EOF
 }
 
 cmd_bootstrap_skills() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local project_claude_dir="$PROJECT_ROOT/.claude"
   local project_skills_dir="$project_claude_dir/skills"
   local shipped_skills_dir="$VNX_HOME/skills"
@@ -1142,6 +1274,7 @@ cmd_bootstrap_skills() {
 }
 
 cmd_bootstrap_terminals() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local terminals_dir="$PROJECT_ROOT/.claude/terminals"
   local force=0
   local terminal_ids="T0 T1 T2 T3"
@@ -1307,6 +1440,7 @@ PYEOF
 }
 
 cmd_bootstrap_hooks() {
+  _guard_not_vnx_home "$PROJECT_ROOT" || return 1
   local project_claude_dir="$PROJECT_ROOT/.claude"
   local project_hooks_dir="$project_claude_dir/hooks"
   local project_settings="$project_claude_dir/settings.json"
@@ -1658,7 +1792,7 @@ cmd_worktree_status() {
 }
 
 # ── vnx update ─────────────────────────────────────────────────────────
-VNX_ORIGIN_URL="https://github.com/Vinix24/vnx-orchestration-system.git"
+VNX_ORIGIN_URL="https://github.com/Vinix24/vnx-orchestration.git"
 VNX_ORIGIN_FILE="$VNX_HOME/.vnx-origin"
 VNX_VERSION_LOCK="$VNX_HOME/version.lock"
 
@@ -1743,6 +1877,20 @@ cmd_update() {
     return 0
   fi
 
+  # Central install: the shared, versioned code tree is immutable. A self-update
+  # via clone+install would mutate it (or, worse, the wrong PROJECT_ROOT). Block
+  # the mutating path here — note that --check (read-only, handled above) and
+  # --pin (writes version.lock, not project state) still work. To move a central
+  # install forward, install a new version and repoint the per-project
+  # .vnx-version pin so the shim resolves it on the next invocation.
+  if _vnx_is_central_install; then
+    log "[update] Central install detected — 'vnx update' cannot mutate the shared code tree."
+    log "[update] Install a new version: bash <vnx-system>/install-central.sh --version <new-version>"
+    log "[update] Then repin this project: echo <new-version> > .vnx-version"
+    log "[update] (Use 'vnx update --check' for a read-only dry run.)"
+    return 1
+  fi
+
   log "[update] Pulling latest VNX from: $origin_url (branch: $branch)"
 
   local tmpdir
@@ -1798,6 +1946,17 @@ main() {
       ;;
     regen-settings)
       cmd_regen_settings "$@"
+      ;;
+    regen-worker-permissions)
+      if ! type cmd_regen_worker_permissions &>/dev/null; then
+        _load_command "regen_worker_permissions" 2>/dev/null || true
+      fi
+      if type cmd_regen_worker_permissions &>/dev/null; then
+        cmd_regen_worker_permissions "$@"
+      else
+        err "[regen-worker-permissions] command not available (scripts/commands/regen_worker_permissions.sh missing)"
+        exit 1
+      fi
       ;;
     start)
       cmd_start "$@"
@@ -1946,8 +2105,14 @@ main() {
     demo)
       cmd_demo "$@"
       ;;
+    migrate)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main migrate "$@"
+      ;;
     pool)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.commands.pool "$@"
+      ;;
+    dream)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec python3 -m vnx_cli.main dream "$@"
       ;;
     help|-h|--help)
       usage

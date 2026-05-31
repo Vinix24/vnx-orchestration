@@ -79,7 +79,7 @@ def main():
         import signal
         import time
 
-        def signal_handler(sig, frame):
+        def signal_handler(sig, _frame):
             logger.info("[DAEMON] Received shutdown signal, exiting...")
             sys.exit(0)
 

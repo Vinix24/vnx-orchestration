@@ -188,8 +188,11 @@ def _resolve_venv_path(paths: Dict[str, str]) -> Optional[str]:
 def check_directories(paths: Dict[str, str]) -> List[CheckResult]:
     results = []
 
+    project_root = Path(paths["PROJECT_ROOT"])
+    vnx_home = Path(paths["VNX_HOME"])
+
     required_dirs = [
-        ("VNX config", Path(paths["PROJECT_ROOT"]) / ".vnx"),
+        ("VNX config", project_root / ".vnx"),
         ("Runtime data", Path(paths["VNX_DATA_DIR"])),
         ("State", Path(paths["VNX_STATE_DIR"])),
         ("Logs", Path(paths["VNX_LOGS_DIR"])),
@@ -202,20 +205,38 @@ def check_directories(paths: Dict[str, str]) -> List[CheckResult]:
         ("Reports", Path(paths["VNX_REPORTS_DIR"])),
     ]
 
+    # Central-install mis-detection hint: if PROJECT_ROOT == VNX_HOME, all dirs will fail
+    # because no project has been initialized there. Give a single actionable message.
+    central_misdetect = (project_root == vnx_home)
+
     for label, dir_path in required_dirs:
         if dir_path.is_dir():
             results.append(CheckResult("dir", PASS, f"{label}: {dir_path}"))
         else:
-            results.append(CheckResult("dir", FAIL, f"Missing: {label} ({dir_path})",
-                                       "Run: vnx init"))
+            if central_misdetect:
+                results.append(CheckResult("dir", FAIL,
+                    f"Missing: {label} ({dir_path})",
+                    f"PROJECT_ROOT=VNX_HOME ({vnx_home}) — run vnx from your project directory, "
+                    f"not from inside ~/.vnx-system/. "
+                    f"Central install: check ~/.vnx-system/versions/*/.vnx-install-mode"))
+            else:
+                results.append(CheckResult("dir", FAIL, f"Missing: {label} ({dir_path})",
+                                           f"Run: cd {project_root} && vnx init"))
 
     # Config file
-    config_file = Path(paths["PROJECT_ROOT"]) / ".vnx" / "config.yml"
+    config_file = project_root / ".vnx" / "config.yml"
     if config_file.exists():
         results.append(CheckResult("file", PASS, f"Config: {config_file}"))
     else:
-        results.append(CheckResult("file", FAIL, f"Missing config: {config_file}",
-                                   "Run: vnx init"))
+        if central_misdetect:
+            results.append(CheckResult("file", FAIL,
+                f"Missing config at PROJECT_ROOT={project_root}",
+                f"PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+                f"Expected: {config_file}"))
+        else:
+            results.append(CheckResult("file", FAIL,
+                f"Missing config: {config_file}",
+                f"Run: cd {project_root} && vnx init"))
 
     return results
 
@@ -253,12 +274,18 @@ def check_templates(paths: Dict[str, str]) -> List[CheckResult]:
 def check_settings(paths: Dict[str, str]) -> List[CheckResult]:
     results = []
     project_root = Path(paths["PROJECT_ROOT"])
+    vnx_home = Path(paths["VNX_HOME"])
     settings_file = project_root / ".claude" / "settings.json"
 
     if not settings_file.exists():
+        if project_root == vnx_home:
+            return [CheckResult("settings", FAIL,
+                                f"Missing .claude/settings.json at PROJECT_ROOT={project_root}",
+                                "PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+                                "Central install: check .vnx-install-mode marker and shim VNX_PROJECT_ROOT export")]
         return [CheckResult("settings", FAIL,
-                            "Missing .claude/settings.json",
-                            "Run: vnx regen-settings --full")]
+                            f"Missing .claude/settings.json at PROJECT_ROOT={project_root}",
+                            f"Run: cd {project_root} && vnx regen-settings --full")]
 
     # JSON validity
     try:
@@ -308,11 +335,20 @@ def check_settings(paths: Dict[str, str]) -> List[CheckResult]:
 # ---------------------------------------------------------------------------
 
 def check_hooks(paths: Dict[str, str]) -> List[CheckResult]:
-    hook_file = Path(paths["PROJECT_ROOT"]) / ".claude" / "hooks" / "sessionstart.sh"
+    project_root = Path(paths["PROJECT_ROOT"])
+    vnx_home = Path(paths["VNX_HOME"])
+    hook_file = project_root / ".claude" / "hooks" / "sessionstart.sh"
     if hook_file.exists():
         return [CheckResult("hooks", PASS, f"SessionStart hook: {hook_file}")]
-    return [CheckResult("hooks", FAIL, f"Missing hook: {hook_file}",
-                        "Run: vnx bootstrap-hooks")]
+    if project_root == vnx_home:
+        return [CheckResult("hooks", FAIL,
+                            f"Missing hook: {hook_file}",
+                            "PROJECT_ROOT equals VNX_HOME — run vnx from your project directory. "
+                            "Central install: re-run install-central.sh to refresh shim, "
+                            "then: cd <your-project> && vnx bootstrap-hooks")]
+    return [CheckResult("hooks", FAIL,
+                        f"Missing hook: {hook_file}",
+                        f"Run: cd {project_root} && vnx bootstrap-hooks")]
 
 
 # ---------------------------------------------------------------------------
@@ -329,20 +365,80 @@ def check_database(paths: Dict[str, str]) -> List[CheckResult]:
 
     try:
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.execute(
+        table_count = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
-        )
-        table_count = cursor.fetchone()[0]
+        ).fetchone()[0]
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_sentinel = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='success_patterns'"
+        ).fetchone() is not None
         conn.close()
-
-        if table_count >= 10:
-            return [CheckResult("database", PASS,
-                                f"Quality DB: {table_count} tables")]
-        return [CheckResult("database", FAIL,
-                            f"Quality DB incomplete: {table_count} tables (expected >= 10)",
-                            "Run: vnx init-db")]
     except sqlite3.Error as e:
         return [CheckResult("database", FAIL, f"Cannot read DB: {e}")]
+
+    results: List[CheckResult] = []
+
+    if table_count < 10:
+        results.append(CheckResult(
+            "database", FAIL,
+            f"Quality DB incomplete: {table_count} tables (expected >= 10)",
+            "Run: python3 scripts/quality_db_init.py or vnx doctor --repair-quality-db",
+        ))
+        return results
+
+    results.append(CheckResult("database", PASS, f"Quality DB: {table_count} tables"))
+
+    # OI-011 repair detection: partial-init (dispatch_experiments only from
+    # retroactive_backfill) or never-bootstrapped (user_version=0).
+    if user_version == 0 or not has_sentinel:
+        results.append(CheckResult(
+            "database", WARN,
+            f"Quality DB under-versioned: user_version={user_version}, "
+            f"sentinel={'present' if has_sentinel else 'MISSING'}. "
+            "Self-learning loop and intelligence layer will not function.",
+            "Run: python3 scripts/quality_db_init.py  "
+            "or: vnx doctor --repair-quality-db",
+        ))
+    else:
+        results.append(CheckResult(
+            "database", PASS,
+            f"Quality DB bootstrapped (user_version={user_version})",
+        ))
+
+    return results
+
+
+def repair_quality_db(paths: Dict[str, str]) -> int:
+    """Run bootstrap_qi_db against the central QI DB to complete partial init.
+
+    Idempotent: safe to run on fully-bootstrapped DBs (all migrations skip).
+    Returns 0 on success, 1 on failure.
+    """
+    db_path = Path(paths["VNX_STATE_DIR"]) / "quality_intelligence.db"
+    vnx_home = Path(paths["VNX_HOME"])
+    schema_file = vnx_home / "schemas" / "quality_intelligence.sql"
+
+    print(f"Repairing quality DB at {db_path}...")
+
+    if not schema_file.exists():
+        print(f"ERROR: schema file not found: {schema_file}", file=sys.stderr)
+        return 1
+
+    try:
+        import importlib
+        qdb = importlib.import_module("scripts.quality_db_init")
+        success = qdb.bootstrap_qi_db(db_path, schema_file)
+        if success:
+            conn = sqlite3.connect(str(db_path))
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            conn.close()
+            print(f"Quality DB repair complete. user_version={user_version}")
+            return 0
+        print("ERROR: bootstrap_qi_db returned False", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"ERROR: repair failed: {exc}", file=sys.stderr)
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +579,80 @@ def check_path_hygiene(paths: Dict[str, str]) -> List[CheckResult]:
         return [CheckResult("hygiene", FAIL, "Path hygiene check failed")]
 
 
+def check_contamination(paths: Dict[str, str]) -> List[CheckResult]:
+    """Warn (non-fatal) on pre-fix runtime state inside a central install.
+
+    Wave 4 PR-4. Only meaningful for central installs (VNX_HOME =
+    ~/.vnx-system/versions/<v>, marked by .vnx-install-mode=central); embedded
+    and standalone-dev layouts carry no marker and are skipped. Delegates to
+    scripts/vnx_contamination_check.sh so the bash doctor path and this
+    Python path share one detector. Always WARN, never FAIL — removing
+    contamination is an explicit operator decision.
+    """
+    vnx_home = Path(paths["VNX_HOME"])
+    marker = vnx_home / ".vnx-install-mode"
+    try:
+        is_central = marker.is_file() and marker.read_text(encoding="utf-8").strip() == "central"
+    except OSError:
+        is_central = False
+    if not is_central:
+        return []
+
+    script = vnx_home / "scripts" / "vnx_contamination_check.sh"
+    if not script.exists():
+        return []
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script), "--version-dir", str(vnx_home), "--quiet"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return [CheckResult("contamination", WARN, "Contamination check timed out")]
+
+    if result.returncode == 0:
+        return [CheckResult("contamination", PASS, "No runtime state in central install")]
+
+    details = [ln for ln in result.stderr.strip().split("\n") if ln][:10]
+    return [CheckResult(
+        "contamination", WARN,
+        "Pre-fix runtime state found inside central install",
+        remediation="Copy any needed receipts into the owning project, then remove the paths listed below",
+        details=details,
+    )]
+
+
+def check_state_root_location(paths: Dict[str, str]) -> List[CheckResult]:
+    """WARN if the runtime data root resolves inside the (immutable) package.
+
+    PR-PIP-2 parity with the vnx_cli doctor: a pip-installed engine must not
+    write runtime state under site-packages or VNX_HOME. If VNX_DATA_DIR lands
+    there, point the operator at VNX_DATA_HOME / the XDG default. Always WARN,
+    never FAIL — an operator may deliberately override paths.
+    """
+    data_dir = Path(paths["VNX_DATA_DIR"]).resolve()
+    vnx_home = Path(paths["VNX_HOME"]).resolve()
+
+    def _within(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    s = str(data_dir)
+    in_pkg = "site-packages" in s or "dist-packages" in s
+    in_home = _within(data_dir, vnx_home)
+    if in_pkg or in_home:
+        return [CheckResult(
+            "state", WARN,
+            f"Runtime data root inside package/VNX_HOME: {data_dir}",
+            remediation="Set VNX_DATA_HOME or rely on the XDG default "
+                        "(~/.local/share/vnx/<project_id>) to keep state out of the wheel",
+        )]
+    return [CheckResult("state", PASS, f"Runtime data root outside package: {data_dir}")]
+
+
 # ---------------------------------------------------------------------------
 # Runtime checks (delegates to vnx_doctor_runtime.py)
 # ---------------------------------------------------------------------------
@@ -542,6 +712,8 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_worktree(paths))
     results.extend(check_version(paths))
     results.extend(check_path_hygiene(paths))
+    results.extend(check_contamination(paths))
+    results.extend(check_state_root_location(paths))
 
     if package_check:
         vnx_home = Path(paths["VNX_HOME"])
@@ -581,9 +753,22 @@ def main() -> int:
                         help="Runtime preflight only")
     parser.add_argument("--json", action="store_true",
                         help="Output all results as JSON")
+    parser.add_argument(
+        "--repair-quality-db",
+        action="store_true",
+        help=(
+            "OI-011 repair: run bootstrap_qi_db against the central quality DB "
+            "to complete a partial-init (e.g. dispatch_experiments-only from "
+            "retroactive_backfill). Idempotent — safe to run on a fully-bootstrapped "
+            "DB. Exits 0 on success, 1 on failure."
+        ),
+    )
     args = parser.parse_args()
 
     paths = ensure_env()
+
+    if args.repair_quality_db:
+        return repair_quality_db(paths)
 
     results = run_doctor(
         paths,

@@ -220,10 +220,14 @@ def _find_gate_result(
     pr_id: str,
     results_dir: Path,
     branch: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Search for a gate result file matching the PR and gate name.
 
-    If ``branch`` is provided, results from a different branch are rejected.
+    ADR-005: if ``branch`` is provided, results without a matching ``branch``
+    field are rejected as stale evidence from a prior feature.
+    ADR-007: if ``project_id`` is provided, results with a missing or
+    mismatched ``project_id`` field are rejected.
     If a result carries a ``report_path``, that file must exist on disk or the
     result is treated as stale and skipped.
     """
@@ -235,8 +239,16 @@ def _find_gate_result(
         data_pr_id = data.get("pr_id")
         if data_pr_id and data_pr_id != pr_id:
             return False
-        if branch and data.get("branch") and data["branch"] != branch:
-            return False
+        # ADR-007: project_id must be present and match when caller supplies one.
+        if project_id is not None:
+            data_pid = (data.get("project_id") or "").strip()
+            if not data_pid or data_pid != project_id:
+                return False
+        # ADR-005: branch must be present and match when caller supplies one.
+        # A branch-less result is stale evidence from a prior feature.
+        if branch:
+            if (data.get("branch") or "") != branch:
+                return False
         return True
 
     pr_slug = pr_id.lower().replace("-", "")
@@ -411,227 +423,168 @@ def _gate_terminal_status(result: Dict[str, Any]) -> str:
     return ""
 
 
-def _validate_review_evidence(
-    contract: ReviewContract,
-    results_dir: Path,
-    branch: Optional[str] = None,
-) -> List[CheckResult]:
-    """Validate review contract presence and gate results against the review stack.
-
-    Checks:
-    1. Review contract has required fields (pr_id, review_stack)
-    2. Each gate in the review stack has a result
-    3. Required gates (codex for high-risk) have passing verdicts
-    4. Optional gates have explicit state (contributed or intentionally absent)
-    5. Content hash consistency between contract and gate receipts
-    6. No unresolved error-severity deterministic findings
-
-    When ``branch`` is provided, gate results from a different branch are
-    rejected as stale evidence — preventing a result from a prior branch with
-    the same ``pr_id`` from satisfying current closure.
-    """
-    checks: List[CheckResult] = []
-
+def _check_contract_fields(contract: ReviewContract) -> List[CheckResult]:
+    """Validate required contract fields. Returns a single FAIL on missing field (caller should return early), or a PASS."""
     if not contract.pr_id:
-        checks.append(CheckResult("review_contract", "FAIL", "review contract missing pr_id"))
-        return checks
-
+        return [CheckResult("review_contract", "FAIL", "review contract missing pr_id")]
     if not contract.review_stack:
-        checks.append(CheckResult("review_contract", "FAIL", "review contract has empty review_stack"))
-        return checks
-
-    checks.append(CheckResult(
+        return [CheckResult("review_contract", "FAIL", "review contract has empty review_stack")]
+    return [CheckResult(
         "review_contract",
         "PASS",
         f"review contract present for {contract.pr_id} "
         f"(stack: {', '.join(contract.review_stack)})",
-    ))
+    )]
 
-    for gate in contract.review_stack:
-        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
 
-        if gate == "claude_github_optional":
-            # Fallback: explicit-absence state for the optional gate is recorded
-            # in the requests directory by gate_request_handler — not as a
-            # separate result file — so a missing result is not by itself
-            # ambiguous.  Look there before declaring no evidence.
+def _check_single_gate(
+    gate: str,
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    """Check a single gate from the review stack, returning one CheckResult."""
+    if gate == "claude_github_optional":
+        # Fallback: explicit-absence state for the optional gate is recorded
+        # in the requests directory by gate_request_handler — not as a
+        # separate result file — so a missing result is not by itself
+        # ambiguous.  Look there before declaring no evidence.
+        if result is None:
+            result = _find_gate_request_payload(gate, contract.pr_id, results_dir, branch=branch)
+        if result is None:
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                f"no evidence for optional gate {gate} — state must be explicit",
+            )
+        if (result.get("state") or "").lower() == "completed":
+            # Completed Claude review: terminal outcome lives in result_status, not status/verdict.
+            # contributed_evidence=true alone must NOT mask a fail outcome or blocking findings.
+            # gate_is_pass() handles state/result_status via gate_status._coerce_status (CFX-12).
+            passed, reason = gate_is_pass(result)
+            if passed:
+                advisory_count = int(result.get("advisory_count") or 0)
+                return CheckResult(
+                    f"gate_{gate}",
+                    "PASS",
+                    f"{gate} completed: pass (0 blocking, {advisory_count} advisory)",
+                )
+            return CheckResult(f"gate_{gate}", "FAIL", f"{gate} completed: {reason}")
+        if result.get("was_intentionally_absent") or result.get("contributed_evidence"):
+            state = result.get("state", "unknown")
+            source = result.get("__source", "result")
+            return CheckResult(
+                f"gate_{gate}",
+                "PASS",
+                f"{gate} state explicit: {state} (source: {source})",
+            )
+        return CheckResult(
+            f"gate_{gate}",
+            "FAIL",
+            f"{gate} state is ambiguous — neither contributed evidence nor intentionally absent",
+        )
+
+    if gate == "codex_gate":
+        enforcement = enforce_codex_gate(contract)
+        if enforcement.required:
             if result is None:
-                result = _find_gate_request_payload(gate, contract.pr_id, results_dir, branch=branch)
-            if result is None:
-                checks.append(CheckResult(
+                return CheckResult(
                     f"gate_{gate}",
                     "FAIL",
-                    f"no evidence for optional gate {gate} — state must be explicit",
-                ))
-            elif (result.get("state") or "").lower() == "completed":
-                # Completed Claude review: terminal outcome lives in result_status, not status/verdict.
-                # contributed_evidence=true alone must NOT mask a fail outcome or blocking findings.
-                # gate_is_pass() handles state/result_status via gate_status._coerce_status (CFX-12).
-                passed, reason = gate_is_pass(result)
-                if passed:
-                    advisory_count = int(result.get("advisory_count") or 0)
-                    checks.append(CheckResult(
+                    f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
+                )
+            if gate_is_terminal(result) and not result.get("report_path", ""):
+                return CheckResult(
+                    f"gate_{gate}",
+                    "FAIL",
+                    "codex_gate result is missing required report_path field",
+                )
+            # CFX-17: demote allowlisted findings before counting blocking.
+            translated = _apply_codex_severity_policy(result)
+            passed, reason = gate_is_pass(translated)
+            demoted = len(translated.get("severity_demotions") or [])
+            if passed:
+                if demoted:
+                    return CheckResult(
                         f"gate_{gate}",
                         "PASS",
-                        f"{gate} completed: pass (0 blocking, {advisory_count} advisory)",
-                    ))
-                else:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        f"{gate} completed: {reason}",
-                    ))
-            elif result.get("was_intentionally_absent") or result.get("contributed_evidence"):
-                state = result.get("state", "unknown")
-                source = result.get("__source", "result")
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "PASS",
-                    f"{gate} state explicit: {state} (source: {source})",
-                ))
-            else:
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    f"{gate} state is ambiguous — neither contributed evidence nor intentionally absent",
-                ))
+                        f"codex gate passed after demoting {demoted} finding(s) per severity policy",
+                    )
+                return CheckResult(f"gate_{gate}", "PASS", "codex gate passed")
+            return CheckResult(f"gate_{gate}", "FAIL", f"codex gate not passing — {reason}")
+        return CheckResult(f"gate_{gate}", "PASS", "codex gate not required by risk policy")
 
-        elif gate == "codex_gate":
-            enforcement = enforce_codex_gate(contract)
-            if enforcement.required:
-                if result is None:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        f"codex gate required ({', '.join(enforcement.reasons)}) but no result found",
-                    ))
-                elif gate_is_terminal(result) and not result.get("report_path", ""):
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        "codex_gate result is missing required report_path field",
-                    ))
-                else:
-                    # CFX-17: demote allowlisted findings before counting blocking.
-                    translated = _apply_codex_severity_policy(result)
-                    passed, reason = gate_is_pass(translated)
-                    demoted = len(translated.get("severity_demotions") or [])
-                    if passed:
-                        if demoted:
-                            checks.append(CheckResult(
-                                f"gate_{gate}",
-                                "PASS",
-                                f"codex gate passed after demoting {demoted} finding(s) per severity policy",
-                            ))
-                        else:
-                            checks.append(CheckResult(
-                                f"gate_{gate}",
-                                "PASS",
-                                "codex gate passed",
-                            ))
-                    else:
-                        checks.append(CheckResult(
-                            f"gate_{gate}",
-                            "FAIL",
-                            f"codex gate not passing — {reason}",
-                        ))
-            else:
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "PASS",
-                    "codex gate not required by risk policy",
-                ))
+    if gate == "gemini_review":
+        if result is None:
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                f"no gate result for required reviewer {gate}",
+            )
+        if gate_is_terminal(result) and not result.get("report_path", ""):
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                "gemini_review result is missing required report_path field",
+            )
+        passed, reason = gate_is_pass(result)
+        advisory_count = result.get("advisory_count", 0)
+        if passed:
+            return CheckResult(
+                f"gate_{gate}",
+                "PASS",
+                f"gemini review passed ({advisory_count} advisory, 0 blocking)",
+            )
+        return CheckResult(f"gate_{gate}", "FAIL", f"gemini review not passing — {reason}")
 
-        elif gate == "gemini_review":
-            if result is None:
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    f"no gate result for required reviewer {gate}",
-                ))
-            elif gate_is_terminal(result) and not result.get("report_path", ""):
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    "gemini_review result is missing required report_path field",
-                ))
-            else:
-                passed, reason = gate_is_pass(result)
-                advisory_count = result.get("advisory_count", 0)
-                if passed:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "PASS",
-                        f"gemini review passed ({advisory_count} advisory, 0 blocking)",
-                    ))
-                else:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        f"gemini review not passing — {reason}",
-                    ))
+    if gate == "ci_gate":
+        if result is None:
+            return CheckResult(f"gate_{gate}", "FAIL", "no ci_gate result found")
+        if not gate_is_terminal(result):
+            status = result.get("status", "unknown")
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                f"ci_gate checks still {status} — incomplete evidence",
+            )
+        contract_hash = result.get("contract_hash", "")
+        report_path = result.get("report_path", "")
+        if not contract_hash:
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                "ci_gate result is missing required contract_hash field",
+            )
+        if not report_path:
+            return CheckResult(
+                f"gate_{gate}",
+                "FAIL",
+                "ci_gate result is missing required report_path field",
+            )
+        passed, reason = gate_is_pass(result)
+        if passed:
+            advisory_count = result.get("advisory_count", 0)
+            return CheckResult(
+                f"gate_{gate}",
+                "PASS",
+                f"ci_gate passed ({advisory_count} advisory, 0 blocking)",
+            )
+        return CheckResult(f"gate_{gate}", "FAIL", f"ci_gate not passing — {reason}")
 
-        elif gate == "ci_gate":
-            if result is None:
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    "no ci_gate result found",
-                ))
-            elif not gate_is_terminal(result):
-                status = result.get("status", "unknown")
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    f"ci_gate checks still {status} — incomplete evidence",
-                ))
-            else:
-                contract_hash = result.get("contract_hash", "")
-                report_path = result.get("report_path", "")
-                if not contract_hash:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        "ci_gate result is missing required contract_hash field",
-                    ))
-                elif not report_path:
-                    checks.append(CheckResult(
-                        f"gate_{gate}",
-                        "FAIL",
-                        "ci_gate result is missing required report_path field",
-                    ))
-                else:
-                    passed, reason = gate_is_pass(result)
-                    if passed:
-                        advisory_count = result.get("advisory_count", 0)
-                        checks.append(CheckResult(
-                            f"gate_{gate}",
-                            "PASS",
-                            f"ci_gate passed ({advisory_count} advisory, 0 blocking)",
-                        ))
-                    else:
-                        blocking_count = result.get("blocking_count", 0)
-                        checks.append(CheckResult(
-                            f"gate_{gate}",
-                            "FAIL",
-                            f"ci_gate not passing — {reason}",
-                        ))
+    # Unknown gate
+    if result is None:
+        return CheckResult(f"gate_{gate}", "FAIL", f"no gate result for unknown gate {gate}")
+    return CheckResult(f"gate_{gate}", "PASS", f"gate {gate} result present")
 
-        else:
-            if result is None:
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "FAIL",
-                    f"no gate result for unknown gate {gate}",
-                ))
-            else:
-                checks.append(CheckResult(
-                    f"gate_{gate}",
-                    "PASS",
-                    f"gate {gate} result present",
-                ))
 
-    # Content hash consistency
+def _check_contract_hashes(contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
+    """Check content hash consistency between contract and gate receipts.
+
+    ADR-007: project_id-scoped filtering is enforced inside _find_gate_result; not added here
+    to match the same call site as the original gate-loop (branch=contract.branch, no project_id arg).
+    """
+    checks: List[CheckResult] = []
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result and contract.content_hash:
@@ -643,10 +596,12 @@ def _validate_review_evidence(
                     f"{gate} receipt hash mismatch — evidence is stale "
                     f"(contract={contract.content_hash[:8]}.. receipt={result_hash[:8]}..)",
                 ))
+    return checks
 
-    # Report path validation — per headless review evidence contract, every
-    # pass/fail gate result must carry a report_path pointing to a real file
-    # under $VNX_DATA_DIR/unified_reports/.
+
+def _check_report_paths(contract: ReviewContract, results_dir: Path) -> List[CheckResult]:
+    """Validate that every terminal gate result carries a report_path pointing to a real file."""
+    checks: List[CheckResult] = []
     for gate in contract.review_stack:
         result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
         if result is not None and gate_is_terminal(result):
@@ -669,22 +624,52 @@ def _validate_review_evidence(
                     "PASS",
                     f"{gate} normalized report exists at {report_path}",
                 ))
+    return checks
 
-    # Deterministic findings — error-severity blocks closure
+
+def _check_deterministic_findings(contract: ReviewContract) -> CheckResult:
+    """Return FAIL if any error-severity deterministic findings remain unresolved."""
     error_findings = [f for f in contract.deterministic_findings if f.severity == "error"]
     if error_findings:
-        checks.append(CheckResult(
+        return CheckResult(
             "deterministic_findings",
             "FAIL",
             f"{len(error_findings)} unresolved error-severity deterministic finding(s)",
-        ))
-    else:
-        total = len(contract.deterministic_findings)
-        checks.append(CheckResult(
-            "deterministic_findings",
-            "PASS",
-            f"{total} deterministic finding(s), 0 errors",
-        ))
+        )
+    total = len(contract.deterministic_findings)
+    return CheckResult("deterministic_findings", "PASS", f"{total} deterministic finding(s), 0 errors")
+
+
+def _validate_review_evidence(
+    contract: ReviewContract,
+    results_dir: Path,
+    branch: Optional[str] = None,
+) -> List[CheckResult]:
+    """Validate review contract presence and gate results against the review stack.
+
+    Checks:
+    1. Review contract has required fields (pr_id, review_stack)
+    2. Each gate in the review stack has a result
+    3. Required gates (codex for high-risk) have passing verdicts
+    4. Optional gates have explicit state (contributed or intentionally absent)
+    5. Content hash consistency between contract and gate receipts
+    6. No unresolved error-severity deterministic findings
+
+    When ``branch`` is provided, gate results from a different branch are
+    rejected as stale evidence — preventing a result from a prior branch with
+    the same ``pr_id`` from satisfying current closure.
+    """
+    checks = _check_contract_fields(contract)
+    if any(c.status == "FAIL" for c in checks):
+        return checks
+
+    for gate in contract.review_stack:
+        result = _find_gate_result(gate, contract.pr_id, results_dir, branch=contract.branch)
+        checks.append(_check_single_gate(gate, contract, result, results_dir, branch))
+
+    checks.extend(_check_contract_hashes(contract, results_dir))
+    checks.extend(_check_report_paths(contract, results_dir))
+    checks.append(_check_deterministic_findings(contract))
 
     return checks
 

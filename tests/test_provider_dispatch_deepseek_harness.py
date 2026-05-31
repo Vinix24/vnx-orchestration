@@ -92,17 +92,19 @@ class TestConstraint:
         from constraint_enforcer import ConstraintEnforcer
         return ConstraintEnforcer(path=_CONSTRAINTS)
 
-    def test_keyauth_harness_via_is_allowed(self):
+    def test_keyed_harness_via_is_allowed(self):
         enf = self._enforcer()
-        # Must not raise — this is the measured-safe own-key lane.
+        # Must not raise — this is the measured-safe own-key key-auth lane.
+        # via=claude_harness_keyed matches the SSOT vocabulary that
+        # provider_dispatch._constraint_via_for_provider emits for this lane.
         enf.enforce(
             provider="deepseek-harness",
             sub_provider="deepseek",
             model="deepseek-v4-pro",
-            via="claude_harness_keyauth",
+            via="claude_harness_keyed",
         )
 
-    def test_oauth_subscription_harness_via_is_blocked(self):
+    def test_subscription_harness_via_is_blocked(self):
         from constraint_enforcer import HardConstraintViolation
         enf = self._enforcer()
         with pytest.raises(HardConstraintViolation) as exc:
@@ -110,7 +112,7 @@ class TestConstraint:
                 provider="deepseek-harness",
                 sub_provider="deepseek",
                 model="deepseek-v4-pro",
-                via="claude_harness_oauth",
+                via="claude_harness_subscription",
             )
         assert exc.value.constraint_id == "deepseek-harness-subscription-blocked"
 

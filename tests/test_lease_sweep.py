@@ -43,7 +43,7 @@ class _SweepTestCase(unittest.TestCase):
 
     def _acquire(self, terminal_id: str, dispatch_id: str, *, lease_seconds: int = 600):
         with get_connection(self.state_dir) as conn:
-            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id)
+            register_dispatch(conn, dispatch_id=dispatch_id, terminal_id=terminal_id, project_id="vnx-dev")
             conn.commit()
         return self.mgr.acquire(terminal_id, dispatch_id=dispatch_id, lease_seconds=lease_seconds)
 

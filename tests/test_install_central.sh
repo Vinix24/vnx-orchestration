@@ -172,6 +172,7 @@ mkdir -p "${TMP_SHIM}/versions/v1.0.0-rc2"
 test_shim_script="$(mktemp)"
 {
   sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
   printf 'check_prereqs() { : ; }\n'
   printf 'clone_version() { : ; }\n'
   printf 'verify_install() { : ; }\n'
@@ -217,6 +218,7 @@ ln -sfn "${TMP_ROLLBACK}/versions/${OLD_VER}" "${TMP_ROLLBACK}/current"
 test_rollback_script="$(mktemp)"
 {
   sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
   printf 'check_prereqs() { : ; }\n'
   printf 'clone_version() { : ; }\n'
   printf 'verify_install() { return 1; }\n'  # force failure after symlink swap
@@ -247,6 +249,7 @@ mkdir -p "${TMP_ATOMIC}/versions/v1.0.0-rc2"
 test_atomic_script="$(mktemp)"
 {
   sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
   printf 'check_prereqs() { : ; }\n'
   printf 'clone_version() { : ; }\n'
   printf 'verify_install() { : ; }\n'
@@ -300,6 +303,7 @@ chmod +x "${FAKE_MV_DIR}/mv"
 test_macos_script="$(mktemp)"
 {
   sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
   printf 'check_prereqs() { : ; }\n'
   printf 'clone_version() { : ; }\n'
   printf 'verify_install() { : ; }\n'
@@ -460,6 +464,125 @@ else
 fi
 
 rm -rf "$TMP_14" "$test_14_script"
+
+# ---------------------------------------------------------------------------
+# Test 15: shim_no_vnx_cli_reference — installed shim must not contain 'vnx-cli'
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 15: shim_no_vnx_cli_reference — installed shim must not reference 'vnx-cli'"
+
+TMP_15="$(mktemp -d)"
+mkdir -p "${TMP_15}/versions/v1.0.0-rc3"
+
+test_15_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_15_script"
+chmod +x "$test_15_script"
+
+bash "$test_15_script" --target "$TMP_15" --version v1.0.0-rc3 >/dev/null 2>&1
+
+if [ -f "${TMP_15}/bin/vnx" ]; then
+  if grep -q 'vnx-cli' "${TMP_15}/bin/vnx" 2>/dev/null; then
+    fail "shim still contains references to 'vnx-cli'"
+  else
+    pass "shim contains no 'vnx-cli' references"
+  fi
+else
+  fail "shim not found at ${TMP_15}/bin/vnx"
+fi
+
+rm -rf "$TMP_15" "$test_15_script"
+
+# ---------------------------------------------------------------------------
+# Test 16: shim_execs_correct_binary — installed shim exec target is bin/vnx
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 16: shim_execs_correct_binary — shim exec line points to bin/vnx not bin/vnx-cli"
+
+TMP_16="$(mktemp -d)"
+mkdir -p "${TMP_16}/versions/v1.0.0-rc3"
+
+test_16_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_16_script"
+chmod +x "$test_16_script"
+
+bash "$test_16_script" --target "$TMP_16" --version v1.0.0-rc3 >/dev/null 2>&1
+
+if [ -f "${TMP_16}/bin/vnx" ]; then
+  # Shim must contain 'exec "${VNX_HOME}/bin/vnx"' (correct) and not 'bin/vnx-cli'
+  if grep -q 'exec.*bin/vnx"' "${TMP_16}/bin/vnx" && ! grep -q 'bin/vnx-cli' "${TMP_16}/bin/vnx"; then
+    pass "shim exec line correctly references bin/vnx"
+  else
+    exec_line="$(grep 'exec.*bin/vnx' "${TMP_16}/bin/vnx" || echo '(not found)')"
+    fail "shim exec line incorrect: ${exec_line}"
+  fi
+else
+  fail "shim not found at ${TMP_16}/bin/vnx"
+fi
+
+rm -rf "$TMP_16" "$test_16_script"
+
+# ---------------------------------------------------------------------------
+# Test 17: shim template — file exists, passes bash -n, matches installed shim
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 17: shim template exists, is valid bash, installed shim matches template"
+
+TPL_PATH="${REPO_ROOT}/scripts/templates/vnx_shim.sh.tpl"
+
+if [ -f "$TPL_PATH" ]; then
+  pass "template file exists: scripts/templates/vnx_shim.sh.tpl"
+else
+  fail "template file missing: ${TPL_PATH}"
+fi
+
+if bash -n "$TPL_PATH" 2>/dev/null; then
+  pass "template passes bash -n"
+else
+  fail "template fails bash -n: ${TPL_PATH}"
+fi
+
+# Install shim via template, then compare installed file content against template
+TMP_17="$(mktemp -d)"
+mkdir -p "${TMP_17}/versions/v1.0.0-rc3"
+
+test_17_script="$(mktemp)"
+{
+  sed '$ d' "$SCRIPT"  # strip last line: 'main "$@"'
+  printf 'SCRIPT_DIR="%s"\n' "$REPO_ROOT"
+  printf 'check_prereqs() { : ; }\n'
+  printf 'clone_version() { : ; }\n'
+  printf 'verify_install() { : ; }\n'
+  printf 'main "$@"\n'
+} > "$test_17_script"
+chmod +x "$test_17_script"
+
+bash "$test_17_script" --target "$TMP_17" --version v1.0.0-rc3 >/dev/null 2>&1
+
+if [ -f "${TMP_17}/bin/vnx" ]; then
+  if diff -q "$TPL_PATH" "${TMP_17}/bin/vnx" >/dev/null 2>&1; then
+    pass "installed shim content matches template verbatim"
+  else
+    fail "installed shim content differs from template"
+  fi
+else
+  fail "shim not found at ${TMP_17}/bin/vnx"
+fi
+
+rm -rf "$TMP_17" "$test_17_script"
 
 # ---------------------------------------------------------------------------
 # Summary

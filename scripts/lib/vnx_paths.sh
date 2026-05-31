@@ -41,6 +41,70 @@ _vnx_git_common_root() {
   fi
 }
 
+# ── State-root resolver (PR-PIP-2) ─────────────────────────────────────────
+# Lockstep mirror of scripts/lib/vnx_paths.py _resolve_state_root /
+# _resolve_state_project_id. Keep the ordering identical across py + sh + bin.
+
+# Validate a project_id against ^[a-z][a-z0-9-]{1,31}$ (mirror of PROJECT_ID_RE).
+_vnx_valid_project_id() {
+  printf '%s' "$1" | grep -Eq '^[a-z][a-z0-9-]{1,31}$'
+}
+
+# Best-effort project_id: VNX_PROJECT_ID env, else nearest .vnx-project-id
+# marker walking up from $1. Needs no operator_id (parity with the lenient
+# Python marker lookup). Prints the validated id (or nothing). Always returns 0.
+_vnx_state_project_id() {
+  local proot="$1" dir first
+  if [ -n "${VNX_PROJECT_ID:-}" ] && _vnx_valid_project_id "$VNX_PROJECT_ID"; then
+    printf '%s' "$VNX_PROJECT_ID"
+    return 0
+  fi
+  dir="$proot"
+  while [ -n "$dir" ]; do
+    if [ -f "$dir/.vnx-project-id" ]; then
+      first="$(head -1 "$dir/.vnx-project-id" 2>/dev/null | tr -d '[:space:]')"
+      if [ -n "$first" ] && _vnx_valid_project_id "$first"; then
+        printf '%s' "$first"
+      fi
+      return 0
+    fi
+    [ "$dir" = "/" ] && break
+    dir="$(dirname "$dir")"
+  done
+  return 0
+}
+
+# Ordered state-root resolution (first applicable wins). Args: <project_id> <project_root>.
+# Step 1 (explicit VNX_DATA_DIR_EXPLICIT) is handled by the caller before this
+# runs. Prints the resolved data root. Always returns 0.
+_vnx_resolve_state_root() {
+  local pid="$1" proot="$2" xdg
+  # 2. VNX_DATA_HOME — operator-chosen data home, per-project subdir.
+  if [ -n "${VNX_DATA_HOME:-}" ] && [ -n "$pid" ]; then
+    printf '%s/%s' "${VNX_DATA_HOME%/}" "$pid"
+    return 0
+  fi
+  # 3. Existing central install — keep resolving to ~/.vnx-data/<id>.
+  if [ -n "$pid" ] && [ -d "$HOME/.vnx-data/$pid" ]; then
+    printf '%s/.vnx-data/%s' "$HOME" "$pid"
+    return 0
+  fi
+  # 4. Existing dev checkout / pre-migration install — keep project-local dir.
+  if [ -d "$proot/.vnx-data" ]; then
+    printf '%s/.vnx-data' "$proot"
+    return 0
+  fi
+  # 5. Fresh install (clean footprint): XDG user-data-dir.
+  if [ -n "$pid" ]; then
+    xdg="${XDG_DATA_HOME:-$HOME/.local/share}"
+    printf '%s/vnx/%s' "${xdg%/}" "$pid"
+    return 0
+  fi
+  # Collision-safety: no resolvable project_id → stay project-local, never guess.
+  printf '%s/.vnx-data' "$proot"
+  return 0
+}
+
 # Always compute VNX_HOME from this script's location first (ground truth).
 if [ "$(basename "$_VNX_PATHS_DIR")" = "lib" ]; then
   _VNX_HOME_FROM_SCRIPT="$(cd -P "$_VNX_PATHS_DIR/../.." && pwd -P)"
@@ -74,26 +138,83 @@ unset _VNX_HOME_FROM_SCRIPT
 VNX_HOME_DEFAULT="$(_vnx_canon_dir "$VNX_HOME_DEFAULT")"
 
 # Default runtime/bootstrap root.
-# Embedded layout keeps runtime in the parent project; standalone repo/worktree
-# layout keeps runtime local to the checkout itself.
+#
+# Three layouts must be distinguished, because VNX_HOME (immutable code) and
+# PROJECT_ROOT (per-project runtime state) only coincide for a self-dev checkout:
+#
+#   1. Embedded     — VNX_HOME nested under the project's .claude tree (see
+#                     _vnx_is_embedded_layout)                  → PROJECT_ROOT = <project>
+#   2. Central      — VNX_HOME = a shared versioned install     → PROJECT_ROOT = CWD git root
+#   3. Standalone   — VNX_HOME = a vnx-orchestration checkout   → PROJECT_ROOT = VNX_HOME
+#
+# Layouts 2 and 3 both have "VNX_HOME is its own git repo root"; the central
+# install is distinguished *only* by a .vnx-install-mode marker written by the
+# installer. The earlier CWD-git-root-mismatch fallback was removed: a worktree
+# of vnx-orchestration itself yields a differing CWD git root and mis-fired the
+# heuristic, collapsing PROJECT_ROOT onto the parent repo (issue #225 /
+# PR-WAVE4-1 CI regression). See the Wave 4 install-central synthesis.
 _VNX_HOME_GIT_ROOT="$(_vnx_git_toplevel "$VNX_HOME_DEFAULT")"
+
+# Canonical repo root owns git-tracked intelligence/provenance. Default to
+# VNX_HOME; the branches below repoint it to the project in central mode so
+# intelligence exports land in the project, not the immutable code tree.
+VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+
 if _vnx_is_embedded_layout "$VNX_HOME_DEFAULT"; then
   PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/../.." && pwd -P)"
+elif [ -n "${VNX_PROJECT_ROOT:-}" ] && [ -d "$VNX_PROJECT_ROOT" ] \
+  && [ "$(_vnx_canon_dir "$VNX_PROJECT_ROOT")" != "$VNX_HOME_DEFAULT" ]; then
+  # Explicit override exported by the central-install shim (belt-and-suspenders).
+  # Ignored when it points at VNX_HOME itself (shim mis-detection) — parity with
+  # the Python resolver's _vnx_project_root_override guard; falls through to the
+  # git-root branch below.
+  PROJECT_ROOT_DEFAULT="$(_vnx_canon_dir "$VNX_PROJECT_ROOT")"
+  _VNX_CANONICAL_FROM_PROJECT="$(_vnx_git_toplevel "$PROJECT_ROOT_DEFAULT")"
+  if [ -n "$_VNX_CANONICAL_FROM_PROJECT" ]; then
+    VNX_CANONICAL_ROOT_DEFAULT="$_VNX_CANONICAL_FROM_PROJECT"
+  else
+    VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+  fi
+  unset _VNX_CANONICAL_FROM_PROJECT
 elif [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
-  PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+  # VNX_HOME is its own git repo root: central install OR standalone dev checkout.
+  _vnx_is_central=false
+  # Only signal: install-mode marker written by install-central.sh.
+  if [ -f "${VNX_HOME_DEFAULT}/.vnx-install-mode" ] \
+    && [ "$(cat "${VNX_HOME_DEFAULT}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+    _vnx_is_central=true
+  fi
+
+  _CWD_GIT_ROOT=""
+  if [ "$_vnx_is_central" = "true" ]; then
+    _CWD_GIT_ROOT="$(_vnx_git_toplevel "$(pwd)")"
+    if [ -z "$_CWD_GIT_ROOT" ]; then
+      _CWD_GIT_ROOT="$(pwd)"
+    fi
+    # Safety: never let PROJECT_ROOT collapse to filesystem root or empty.
+    if [ "$_CWD_GIT_ROOT" = "/" ] || [ -z "$_CWD_GIT_ROOT" ]; then
+      _CWD_GIT_ROOT="$VNX_HOME_DEFAULT"
+    fi
+    PROJECT_ROOT_DEFAULT="$(_vnx_canon_dir "$_CWD_GIT_ROOT")"
+    # Intelligence exports follow the project, not the immutable code tree.
+    VNX_CANONICAL_ROOT_DEFAULT="$(_vnx_git_toplevel "$PROJECT_ROOT_DEFAULT")"
+    if [ -z "${VNX_CANONICAL_ROOT_DEFAULT:-}" ]; then
+      VNX_CANONICAL_ROOT_DEFAULT="$PROJECT_ROOT_DEFAULT"
+    fi
+  else
+    # Standalone dev checkout: runtime/bootstrap stay local to the checkout.
+    PROJECT_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
+    _VNX_HOME_COMMON_ROOT="$(_vnx_git_common_root "$VNX_HOME_DEFAULT")"
+    if [ -n "$_VNX_HOME_COMMON_ROOT" ]; then
+      VNX_CANONICAL_ROOT_DEFAULT="$_VNX_HOME_COMMON_ROOT"
+    fi
+    unset _VNX_HOME_COMMON_ROOT
+  fi
+  unset _vnx_is_central _CWD_GIT_ROOT
 else
   PROJECT_ROOT_DEFAULT="$(cd -P "$VNX_HOME_DEFAULT/.." && pwd -P)"
 fi
-
-# Canonical repo root owns git-tracked intelligence/provenance.
-VNX_CANONICAL_ROOT_DEFAULT="$VNX_HOME_DEFAULT"
-if [ -n "$_VNX_HOME_GIT_ROOT" ] && [ "$_VNX_HOME_GIT_ROOT" = "$VNX_HOME_DEFAULT" ]; then
-  _VNX_HOME_COMMON_ROOT="$(_vnx_git_common_root "$VNX_HOME_DEFAULT")"
-  if [ -n "$_VNX_HOME_COMMON_ROOT" ]; then
-    VNX_CANONICAL_ROOT_DEFAULT="$_VNX_HOME_COMMON_ROOT"
-  fi
-fi
-unset _VNX_HOME_GIT_ROOT _VNX_HOME_COMMON_ROOT
+unset _VNX_HOME_GIT_ROOT
 
 # Guard against cross-project env contamination:
 # If inherited VNX_HOME points to a different project tree than VNX_HOME_DEFAULT
@@ -130,8 +251,15 @@ unset _vnx_current_project_root _vnx_current_canonical_root
 export PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_ROOT_DEFAULT}"
 export VNX_CANONICAL_ROOT="${VNX_CANONICAL_ROOT:-$VNX_CANONICAL_ROOT_DEFAULT}"
 
-# Data directory (runtime root).
-export VNX_DATA_DIR="${VNX_DATA_DIR:-$PROJECT_ROOT/.vnx-data}"
+# Data directory (runtime root). PR-PIP-2: when not explicitly set, resolve via
+# the ordered state-root resolver (explicit > VNX_DATA_HOME > ~/.vnx-data/<id>
+# if exists > project-local if exists > XDG default). Lockstep with vnx_paths.py.
+if [ -z "${VNX_DATA_DIR:-}" ]; then
+  _vnx_state_pid="$(_vnx_state_project_id "$PROJECT_ROOT")"
+  VNX_DATA_DIR="$(_vnx_resolve_state_root "$_vnx_state_pid" "$PROJECT_ROOT")"
+  unset _vnx_state_pid
+fi
+export VNX_DATA_DIR
 export VNX_STATE_DIR="${VNX_STATE_DIR:-$VNX_DATA_DIR/state}"
 export VNX_DISPATCH_DIR="${VNX_DISPATCH_DIR:-$VNX_DATA_DIR/dispatches}"
 export VNX_LOGS_DIR="${VNX_LOGS_DIR:-$VNX_DATA_DIR/logs}"
@@ -190,6 +318,37 @@ if [ -z "${VNX_SKILLS_DIR:-}" ]; then
   else
     export VNX_SKILLS_DIR="$VNX_HOME/skills"
   fi
+fi
+
+# ── Central-install write guard ────────────────────────────────────────────
+# In a central install (.vnx-install-mode=central marker in VNX_HOME), project
+# state must never resolve under VNX_HOME — that tree is immutable shared code.
+# If detection mis-fired and collapsed PROJECT_ROOT onto VNX_HOME (the Wave 4
+# install-central bug), fail loud rather than silently writing receipts,
+# dispatches and intelligence into the code tree. Standalone-dev / embedded
+# layouts carry no marker, so this is a no-op there (state under the checkout is
+# legitimate). The check runs after the worktree override so it sees final paths.
+if [ -f "${VNX_HOME}/.vnx-install-mode" ] \
+  && [ "$(cat "${VNX_HOME}/.vnx-install-mode" 2>/dev/null)" = "central" ]; then
+  _vnx_guard_home="$(_vnx_canon_dir "$VNX_HOME")"
+  for _vnx_guard_var in VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_INTELLIGENCE_DIR; do
+    _vnx_guard_val="${!_vnx_guard_var:-}"
+    [ -n "$_vnx_guard_val" ] || continue
+    case "$_vnx_guard_val" in
+      "$_vnx_guard_home"|"$_vnx_guard_home"/*)
+        printf 'ERROR: [vnx_paths] cannot write project state under immutable central install\n' >&2
+        printf 'ERROR: [vnx_paths]   %s=%s\n' "$_vnx_guard_var" "$_vnx_guard_val" >&2
+        printf 'ERROR: [vnx_paths]   VNX_HOME=%s (immutable shared code)\n' "$_vnx_guard_home" >&2
+        printf 'ERROR: [vnx_paths]   PROJECT_ROOT mis-detected; run from your project directory\n' >&2
+        # Data-integrity guard: halt unconditionally so the misconfiguration
+        # cannot proceed to write into the code tree, regardless of whether the
+        # caller enabled `set -e`. Restore the caller's shell options first.
+        eval "$__VNX_PATHS_SHELLOPTS"
+        exit 1
+        ;;
+    esac
+  done
+  unset _vnx_guard_home _vnx_guard_var _vnx_guard_val
 fi
 
 # ── Resolver functions ────────────────────────────────────────
@@ -301,5 +460,6 @@ _activate_venv() {
 
 unset _VNX_PATHS_DIR
 unset -f _vnx_canon_dir _vnx_is_embedded_layout _vnx_git_toplevel _vnx_git_common_root
+unset -f _vnx_valid_project_id _vnx_state_project_id _vnx_resolve_state_root
 eval "$__VNX_PATHS_SHELLOPTS"
 unset __VNX_PATHS_SHELLOPTS

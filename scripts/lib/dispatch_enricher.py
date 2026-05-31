@@ -29,6 +29,13 @@ from repo_map import build_repo_map, format_repo_map  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# Sentinel that marks an instruction already carrying a repo map.
+# Used as a double-injection guard in apply_repo_map_layer.
+_REPO_MAP_SENTINEL = "### Repo Map (auto-generated"
+
+# Hard cap on formatted repo-map output size to avoid bloating prompts.
+_REPO_MAP_MAX_CHARS = 8_000
+
 # Roles for which repo map adds no value (review/research dispatches)
 _REVIEW_ROLES = frozenset({
     "reviewer", "architect", "code-reviewer",
@@ -373,3 +380,60 @@ class DispatchEnricher:
             return False
 
         return True
+
+
+def apply_repo_map_layer(
+    instruction: str,
+    metadata: Dict,
+    *,
+    project_root: Optional[Path] = None,
+) -> str:
+    """Apply only the repo-map enrichment layer to an instruction.
+
+    Standalone helper that mirrors Layer 1 of DispatchEnricher.enrich() without
+    running the full pipeline.  Intended for provider_dispatch._enrich_instruction
+    and subprocess_dispatch.__main__ so all delivery paths get the repo-map layer
+    that headless_dispatch_daemon already provides.
+
+    Guards (all must pass to inject):
+    - VNX_NO_REPO_MAP=1 env var is absent
+    - metadata["no_repo_map"] is not True
+    - instruction does not already contain a repo map (double-injection guard)
+    - role/track are not review-only (same logic as DispatchEnricher._should_add_repo_map)
+    - at least one .py target file is found in the instruction
+
+    The formatted output is capped at _REPO_MAP_MAX_CHARS characters to prevent
+    prompt bloat.  Returns the original instruction unchanged on any failure.
+    """
+    if os.environ.get("VNX_NO_REPO_MAP") == "1":
+        return instruction
+    if metadata.get("no_repo_map", False):
+        return instruction
+    if _REPO_MAP_SENTINEL in instruction:
+        logger.debug("apply_repo_map_layer: repo map already present — skipping")
+        return instruction
+
+    enricher = DispatchEnricher()
+    if not enricher._should_add_repo_map(metadata):
+        return instruction
+
+    target_files = extract_target_files(instruction, metadata)
+    if not target_files:
+        logger.debug("apply_repo_map_layer: no target .py files found — skipping")
+        return instruction
+
+    root = project_root or Path(metadata.get("project_root") or "") or Path.cwd()
+    try:
+        repo_map = build_repo_map(target_files, root)
+        formatted = format_repo_map(repo_map)
+        if len(formatted) > _REPO_MAP_MAX_CHARS:
+            formatted = formatted[:_REPO_MAP_MAX_CHARS] + "\n...(truncated)"
+        logger.info(
+            "apply_repo_map_layer: injected %d symbols from %d files",
+            len(repo_map.symbols),
+            len({s.file_path for s in repo_map.symbols}),
+        )
+        return instruction + f"\n\n{formatted}"
+    except Exception as exc:
+        logger.warning("apply_repo_map_layer: repo map failed (%s) — skipping", exc)
+        return instruction

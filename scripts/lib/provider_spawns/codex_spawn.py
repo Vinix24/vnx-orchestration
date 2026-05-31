@@ -35,6 +35,8 @@ from canonical_event import CanonicalEvent  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CODEX_MODEL = "gpt-5.5"
+
 
 @dataclass
 class CodexSpawnResult:
@@ -78,7 +80,7 @@ class CodexSpawnResult:
 # ---------------------------------------------------------------------------
 
 _TOKEN_TEXT_RE = re.compile(
-    r"tokens?:\s*(\d+)\s+input\s*/\s*(\d+)\s+output",
+    r"tokens?(?:\s+used)?:\s*([\d,]+)\s+input(?:\s*/|,)(?:\s*[\d,]+\s+cached(?:\s*/|,))?\s*([\d,]+)\s+output",
     re.IGNORECASE,
 )
 
@@ -94,14 +96,33 @@ def _extract_token_count_payload(event: dict) -> Optional[dict]:
             return payload
         if em.get("type") == "token_count":
             return em
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if isinstance(usage, dict):
+            return usage
+    usage = event.get("usage")
+    if isinstance(usage, dict):
+        return usage
     msg = event.get("msg")
     if isinstance(msg, dict) and msg.get("type") == "token_count":
         return msg
     item = event.get("item")
     if isinstance(item, dict) and item.get("type") == "token_count":
         return item
-    if event.get("type") == "token_count":
+    if event.get("type") in ("token_count", "token_usage"):
         return event
+    return None
+
+
+def _parse_token_int(value: Any) -> Optional[int]:
+    """Return a token count from int or comma-formatted string values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.replace(",", "").strip()
+        if stripped.isdigit():
+            return int(stripped)
     return None
 
 
@@ -109,28 +130,37 @@ def _normalize_token_count(payload: dict) -> Optional[dict]:
     """Normalize a Codex token_count payload to the canonical token_usage dict."""
     if not isinstance(payload, dict):
         return None
-    input_t = payload.get("input_tokens")
+    input_t = _parse_token_int(payload.get("input_tokens"))
     if input_t is None:
-        input_t = payload.get("prompt_tokens", 0)
-    output_t = payload.get("output_tokens")
+        input_t = _parse_token_int(payload.get("prompt_tokens")) or 0
+    output_t = _parse_token_int(payload.get("output_tokens"))
     if output_t is None:
-        output_t = payload.get("completion_tokens", 0)
-    if not isinstance(input_t, int) or not isinstance(output_t, int):
-        return None
+        output_t = _parse_token_int(payload.get("completion_tokens")) or 0
     if input_t == 0 and output_t == 0:
         return None
-    cache_read = payload.get("cached_input_tokens")
+    cache_read = _parse_token_int(payload.get("cached_input_tokens"))
     if cache_read is None:
-        cache_read = payload.get("cache_read_tokens", 0)
-    cache_creation = payload.get("cache_creation_input_tokens")
+        cache_read = _parse_token_int(payload.get("cache_read_tokens")) or 0
+    cache_creation = _parse_token_int(payload.get("cache_creation_input_tokens"))
     if cache_creation is None:
-        cache_creation = payload.get("cache_creation_tokens", 0)
+        cache_creation = _parse_token_int(payload.get("cache_creation_tokens")) or 0
     return {
         "input_tokens": int(input_t),
         "output_tokens": int(output_t),
-        "cache_creation_tokens": int(cache_creation) if isinstance(cache_creation, int) else 0,
-        "cache_read_tokens": int(cache_read) if isinstance(cache_read, int) else 0,
+        "cache_creation_tokens": int(cache_creation),
+        "cache_read_tokens": int(cache_read),
     }
+
+
+def _extract_token_count_from_text(text: str) -> Optional[dict]:
+    """Parse Codex's human-readable token summary line when it appears."""
+    match = _TOKEN_TEXT_RE.search(text or "")
+    if not match:
+        return None
+    return _normalize_token_count({
+        "input_tokens": match.group(1),
+        "output_tokens": match.group(2),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -178,13 +208,21 @@ def _normalize_text_events(
         return make("init", {"raw_type": etype})
     if etype == "agent_message":
         content = payload.get("text", payload.get("content", payload.get("message", "")))
-        return make("text", {"text": str(content)})
+        data = {"text": str(content)}
+        token_count = _extract_token_count_from_text(str(content))
+        if token_count:
+            data["token_count"] = token_count
+        return make("text", data)
     if etype == "item.completed" and item_type == "agent_message":
-        content = item.get("content", "")
+        content = item.get("text", item.get("content", ""))
         if isinstance(content, list):
             texts = [b.get("text", "") for b in content if isinstance(b, dict)]
             content = "\n".join(t for t in texts if t)
-        return make("text", {"text": str(content)})
+        data = {"text": str(content)}
+        token_count = _extract_token_count_from_text(str(content))
+        if token_count:
+            data["token_count"] = token_count
+        return make("text", data)
     if etype in ("item.started", "item.updated") and item_type == "command_execution":
         cmd_str = item.get("command", item.get("cmd", item.get("args", "")))
         if isinstance(cmd_str, list):
@@ -260,19 +298,25 @@ def normalize_codex_event(raw: dict, terminal_id: str, dispatch_id: str) -> Cano
     if result is not None:
         return result
 
-    return make("error", {
-        "reason": f"unrecognized codex event type: {etype!r}",
+    # Unknown codex event type — non-fatal passthrough, same rationale as kimi.
+    logger.debug("codex_spawn: unknown event type %r — mapping to info (non-fatal)", etype)
+    return make("info", {
         "raw_type": etype,
         "raw": str(raw)[:300],
     })
 
 
-def _build_cmd(model: str) -> list:
+def _resolve_codex_model(model: Optional[str]) -> str:
+    """Resolve explicit model first, then env default, then the current CLI default."""
+    requested = (model or "").strip()
+    if requested:
+        return requested
+    return os.environ.get("VNX_CODEX_DEFAULT_MODEL", "").strip() or DEFAULT_CODEX_MODEL
+
+
+def _build_cmd(model: Optional[str]) -> list:
     """Build the codex exec argv."""
-    cmd = ["codex", "exec", "--json"]
-    if model:
-        cmd += ["-c", f'model="{model}"']
-    return cmd
+    return ["codex", "exec", "--json", "--model", _resolve_codex_model(model)]
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +343,7 @@ class _NormalizerHost(StreamingDrainerMixin):
 
 def _launch_codex_proc(
     prompt: str,
-    model: str,
+    model: Optional[str],
     extra_env: Optional[Dict[str, str]],
     cwd: Optional[Any],
 ) -> Tuple[Optional[subprocess.Popen], Optional[CodexSpawnResult]]:
@@ -489,7 +533,7 @@ def _drain_stream(
 
 def spawn_codex(
     prompt: str,
-    model: str,
+    model: Optional[str],
     dispatch_id: str,
     terminal_id: str,
     *,

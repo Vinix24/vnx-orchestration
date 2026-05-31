@@ -1,0 +1,81 @@
+version: 1
+
+# VNX worker permission profiles — shipped template.
+# Project-specific overrides (file_write_scope, project-added roles) survive
+# rc-cutover via 'vnx regen-worker-permissions --merge'.
+# DO NOT edit this template directly — edit the project copy at .vnx/worker_permissions.yaml.
+
+_vnx_meta:
+  managed_keys:
+    - version
+    - "profiles.<role>.allowed_tools (vnx_baseline)"
+    - "profiles.<role>.denied_tools (vnx_baseline)"
+    - "profiles.<role>.bash_allow_patterns (vnx_baseline)"
+    - "profiles.<role>.bash_deny_patterns (vnx_baseline)"
+    - "terminal_assignments (vnx_baseline; project overrides win)"
+  project_owned_keys:
+    - "profiles.<role>.file_write_scope"
+    - "profiles.<project-role>  (roles not present in this template)"
+  description: >
+    VNX worker permission profiles. Merge via 'vnx regen-worker-permissions --merge'.
+    file_write_scope entries and project-added roles survive cutover unchanged.
+
+profiles:
+  backend-developer:
+    allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "pytest*"
+      - "python3*"
+      - "git add*"
+      - "git commit*"
+      - "git push origin*"
+      - "pip install*"
+      - "bash -n*"
+    bash_deny_patterns:
+      - "rm -rf*"
+      - "git reset --hard*"
+      - "git push --force*"
+      - "git push -f*"
+      - "curl*anthropic*"
+    file_write_scope:
+      - "scripts/**"
+      - "tests/**"
+      - "dashboard/**"
+
+  test-engineer:
+    allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch, MultiEdit]
+    bash_allow_patterns:
+      - "pytest*"
+      - "python3 -m pytest*"
+      - "python3 -m py_compile*"
+      - "git add*"
+      - "git commit*"
+    bash_deny_patterns:
+      - "rm -rf*"
+      - "git push*"
+      - "git reset*"
+    file_write_scope:
+      - "tests/**"
+      - "scripts/check_*"
+
+  frontend-developer:
+    allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "npm*"
+      - "npx*"
+      - "node*"
+      - "git add*"
+      - "git commit*"
+    bash_deny_patterns:
+      - "rm -rf*"
+      - "git push --force*"
+    file_write_scope:
+      - "dashboard/**"
+
+terminal_assignments:
+  T1: backend-developer
+  T2: test-engineer
+  T3: frontend-developer

@@ -5,7 +5,7 @@ Covers every constraint in provider_constraints.yaml:
   - kimi-via-cli-only       (forbid_route, blocking)
   - t0-opus-only            (require_route, warn, override)
   - workers-sonnet-pinned   (require_route, warn, override)
-  - no-anthropic-sdk        (forbid_import — skipped at runtime)
+  - no-anthropic-sdk        (forbid_import — warning at runtime)
   - zai-via-openrouter-only (forbid_route, blocking)
   - deprecated-glm-models   (forbid_route, blocking)
   - deepseek-harness-subscription-blocked (forbid_route, blocking)
@@ -26,7 +26,12 @@ import pytest
 SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
-from constraint_enforcer import ConstraintEnforcer, HardConstraintViolation
+from providers.constraint_enforcer import (
+    ConstraintEnforcer,
+    ConstraintViolationError,
+    HardConstraintViolation,
+    check_constraints,
+)
 
 
 @pytest.fixture
@@ -128,13 +133,23 @@ class TestWorkersSonnetPinned:
 
 
 # ---------------------------------------------------------------------------
-# no-anthropic-sdk — forbid_import (skipped at runtime, CI-only)
+# no-anthropic-sdk — forbid_import (warning at runtime, CI grep elsewhere)
 # ---------------------------------------------------------------------------
 
 class TestNoAnthropicSdk:
 
-    def test_forbid_import_skipped_at_runtime(self, real_enforcer: ConstraintEnforcer):
+    def test_forbid_import_clean_instruction_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="claude", model="claude-opus-4-7")
+
+    def test_forbid_import_warns_at_runtime(self, real_enforcer: ConstraintEnforcer, caplog):
+        with caplog.at_level("WARNING"):
+            violations = real_enforcer.enforce(
+                provider="claude",
+                model="claude-opus-4-7",
+                instruction_text="Please do not import anthropic in this worker.",
+            )
+        assert any(v.code == "no-anthropic-sdk" and v.severity == "warn" for v in violations)
+        assert "no-anthropic-sdk" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -165,29 +180,36 @@ class TestDeprecatedGlmModels:
         with pytest.raises(HardConstraintViolation, match="deprecated-glm-models"):
             real_enforcer.enforce(provider="zai", model="glm-4.6")
 
+    def test_deprecated_glm_blocks(self, real_enforcer: ConstraintEnforcer):
+        with pytest.raises(HardConstraintViolation, match="glm-5.1"):
+            real_enforcer.enforce(provider="litellm:zai", model="glm-4.6")
+
     def test_glm51_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="zai", model="glm-5.1")
 
 
 # ---------------------------------------------------------------------------
-# deepseek-harness-subscription-blocked — forbid_route provider=deepseek
-# via=claude_harness_oauth (OAuth-subscription redirect). The own-key key-auth
-# lane (via=claude_harness_keyauth) is the measured-safe, ALLOWED path.
+# deepseek-harness-subscription-blocked — forbid_route provider=deepseek via=claude_harness_subscription
 # ---------------------------------------------------------------------------
 
 class TestDeepseekHarnessSubscriptionBlocked:
 
-    def test_deepseek_harness_oauth_blocked(self, real_enforcer: ConstraintEnforcer):
-        with pytest.raises(
-            HardConstraintViolation, match="deepseek-harness-subscription-blocked"
-        ):
-            real_enforcer.enforce(provider="deepseek", via="claude_harness_oauth")
+    def test_deepseek_subscription_redirect_blocked(self, real_enforcer: ConstraintEnforcer):
+        """Subscription-redirect path (no own API key) must be blocked."""
+        with pytest.raises(HardConstraintViolation, match="deepseek-harness-subscription-blocked"):
+            real_enforcer.enforce(provider="deepseek", via="claude_harness_subscription")
 
-    def test_deepseek_harness_keyauth_allowed(self, real_enforcer: ConstraintEnforcer):
-        # Own-key key-auth lane is measured-safe (0 calls to api.anthropic.com).
+    def test_deepseek_claude_harness_keyed_allowed(self, real_enforcer: ConstraintEnforcer):
+        """Own-key + hardening path must be allowed (no exception raised)."""
+        real_enforcer.enforce(provider="deepseek", via="claude_harness_keyed")
+
+    def test_deepseek_harness_lane_keyed_allowed(self, real_enforcer: ConstraintEnforcer):
+        """The deepseek-harness lane (provider=deepseek-harness, sub=deepseek,
+        via=claude_harness_keyed) must clear pre-flight — this is the exact
+        route provider_dispatch builds for the own-key key-auth lane."""
         real_enforcer.enforce(
             provider="deepseek-harness", sub_provider="deepseek",
-            via="claude_harness_keyauth",
+            via="claude_harness_keyed",
         )
 
     def test_deepseek_via_litellm_allowed(self, real_enforcer: ConstraintEnforcer):
@@ -283,18 +305,70 @@ class TestRequireRouteModelNoneStrict:
 class TestModuleLevelEnforce:
 
     def test_module_enforce_raises(self):
-        from constraint_enforcer import enforce
+        from providers.constraint_enforcer import enforce
         with pytest.raises(HardConstraintViolation, match="kimi-via-cli-only"):
             enforce(provider="litellm", sub_provider="moonshot", via="api")
 
     def test_module_enforce_moonshot_via_tag_raises(self):
-        from constraint_enforcer import enforce
+        from providers.constraint_enforcer import enforce
         with pytest.raises(HardConstraintViolation, match="kimi-via-cli-only"):
             enforce(provider="litellm", sub_provider="moonshot", via="moonshot")
 
     def test_module_enforce_allows(self):
-        from constraint_enforcer import enforce
+        from providers.constraint_enforcer import enforce
         enforce(provider="claude", model="claude-opus-4-7", terminal_id="T0")
+
+
+class TestRoute1Requirements:
+
+    def test_kimi_via_cli_blocks_kimi_litellm(self):
+        violations = check_constraints(
+            provider="litellm:moonshot",
+            model="kimi-k2",
+            terminal_id="T1",
+            via="moonshot",
+        )
+        assert any(v.code == "kimi-via-cli-only" and v.severity == "blocking" for v in violations)
+
+    def test_override_flag_allows_warn_rule(self, monkeypatch, caplog):
+        monkeypatch.setenv("VNX_OVERRIDE_WORKERS_SONNET_PINNED", "1")
+        with caplog.at_level("WARNING"):
+            violations = ConstraintEnforcer().enforce(
+                provider="claude",
+                terminal_id="T1",
+                model="claude-opus-4-7",
+            )
+        assert any(v.code == "workers-sonnet-pinned" and v.override_applied for v in violations)
+        assert "overridden" in caplog.text
+
+    def test_clean_dispatch_unaffected(self):
+        violations = check_constraints(
+            provider="claude",
+            model="sonnet",
+            terminal_id="T1",
+            via="cli",
+            check_registry=True,
+        )
+        assert violations == []
+
+    def test_model_not_in_current_registry_blocks(self):
+        violations = check_constraints(
+            provider="codex",
+            model="gpt-5.2-codex",
+            terminal_id="T1",
+            via="cli",
+            check_registry=True,
+        )
+        blocking = [v for v in violations if v.severity == "blocking"]
+        assert any(v.code == "model-not-in-current-registry" for v in blocking)
+        with pytest.raises(ConstraintViolationError, match="model-not-in-current-registry"):
+            ConstraintEnforcer().enforce(
+                provider="codex",
+                model="gpt-5.2-codex",
+                terminal_id="T1",
+                via="cli",
+                check_registry=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +408,7 @@ class TestDispatchViaMapping:
             _mock_enforce,
             raising=False,
         )
-        from constraint_enforcer import enforce as real_enforce
         with patch("provider_dispatch._dispatch_litellm", return_value=0):
-            from constraint_enforcer import enforce
             result = provider_dispatch.main([
                 "--provider", "litellm:deepseek",
                 "--terminal-id", "T1",
@@ -355,10 +427,10 @@ class TestStrictModeDispatch:
 
         monkeypatch.setenv("VNX_CONSTRAINTS_STRICT", "1")
         fake_path = tmp_path / "nonexistent.yaml"
+        import providers.constraint_enforcer as constraint_enforcer
         monkeypatch.setattr(
-            "constraint_enforcer._CONSTRAINTS_PATH", fake_path
+            "providers.constraint_enforcer._CONSTRAINTS_PATH", fake_path
         )
-        import constraint_enforcer
         monkeypatch.setattr(constraint_enforcer, "_CONSTRAINTS_PATH", fake_path)
         monkeypatch.setattr(constraint_enforcer, "_enforcer", None)
 
@@ -374,7 +446,7 @@ class TestStrictModeDispatch:
     def test_non_strict_mode_skips_on_missing_file(self, monkeypatch, tmp_path):
         """Without strict mode, missing file is debug-logged and dispatch continues."""
         import provider_dispatch
-        import constraint_enforcer
+        import providers.constraint_enforcer as constraint_enforcer
 
         monkeypatch.delenv("VNX_CONSTRAINTS_STRICT", raising=False)
         fake_path = tmp_path / "nonexistent.yaml"

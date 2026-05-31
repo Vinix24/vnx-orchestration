@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vnx-orchestration"
-version = "1.0.0-rc3"
+dynamic = ["version"]
 description = "Governance-first runtime for AI agents (NDJSON receipts, SPC-grade quality gates)"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -15,7 +15,13 @@ dependencies = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp>=1.20",
+    "jinja2>=3.0",
 ]
+
+# Full quality advisory/local-CI audit tools.
+# Install via `pip install vnx-orchestration[quality]`.
+[project.optional-dependencies]
+quality = ["vulture>=2.10", "ruff>=0.6"]
 
 [project.scripts]
 vnx = "vnx_cli.main:main"
@@ -24,9 +30,63 @@ vnx = "vnx_cli.main:main"
 Homepage = "https://github.com/Vinix24/vnx-orchestration"
 Repository = "https://github.com/Vinix24/vnx-orchestration"
 
+# Explicit package list, no autodiscovery. Two distributions ship:
+#   - vnx_cli            the importable console-script package (entry point)
+#   - vnx_orchestration  a PEP 420 namespace package whose source dir is the
+#                        repo root, used purely to carry the engine trees
+#                        (scripts/, schemas/, ...) as package data.
+# The engine is loaded by path injection (sys.path.insert on scripts/lib), not
+# imported as vnx_orchestration.scripts.*, so no granular subpackages are needed.
+# This keeps top_level.txt = {vnx_cli, vnx_orchestration} — no bare scripts/
+# schemas/configs/hooks/templates squatting the PyPI namespace — while the
+# dev-checkout layout stays byte-for-byte unchanged (no files moved).
 [tool.setuptools]
-packages = ["vnx_cli", "vnx_cli.commands"]
-include-package-data = true
+packages = ["vnx_cli", "vnx_cli.commands", "vnx_orchestration"]
+include-package-data = false
 
+# Map the vnx_orchestration namespace package onto the repo root so its
+# package-data globs resolve relative to the engine trees and install under
+# <site-packages>/vnx_orchestration/. vnx_cli has no entry and falls back to the
+# default root, so it still resolves at ./vnx_cli.
+[tool.setuptools.package-dir]
+"vnx_orchestration" = "."
+
+# Single source of truth for the version: the root VERSION file.
+# pyproject derives from it -> wheel metadata derives from pyproject ->
+# vnx_cli.__version__ reads it back via importlib.metadata. No drift.
+[tool.setuptools.dynamic]
+version = {file = ["VERSION"]}
+
+# Recursive globs ship every asset (sql, sh, json, yaml, md, extensionless git
+# hooks, ...) under each engine tree. Paths are relative to the vnx_orchestration
+# source dir (the repo root), so e.g. scripts/lib/vnx_paths.py installs as
+# vnx_orchestration/scripts/lib/vnx_paths.py and schemas/migrations/*.sql and the
+# hyphenated skills/* dirs are carried verbatim.
 [tool.setuptools.package-data]
-"vnx_cli" = ["templates/**/*", "schemas/**/*"]
+vnx_orchestration = [
+    "scripts/**/*",
+    "schemas/**/*",
+    "skills/**/*",
+    "templates/**/*",
+    "configs/**/*",
+    "hooks/**/*",
+    "examples/**/*",
+]
+
+# Exclude build artifacts, caches, and non-runtime content from the wheel.
+[tool.setuptools.exclude-package-data]
+vnx_orchestration = [
+    "**/__pycache__/**",
+    "**/__pycache__",
+    "**/*.pyc",
+    "**/*.pyo",
+    "scripts/benchmark/results/**",
+    "**/*.log",
+    "tests/**",
+    "dist/**",
+    "build/**",
+    "**/*.egg-info/**",
+    ".vnx-data/**",
+    "schemas/prep_migrations/**",
+    "scripts/*_prep*",
+]

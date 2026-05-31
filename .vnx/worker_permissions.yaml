@@ -1,5 +1,24 @@
 version: 1
 
+# VNX worker permission profiles.
+# Project-specific overrides survive rc-cutover via 'vnx regen-worker-permissions --merge'.
+# VNX-managed keys are listed in _vnx_meta.managed_keys below.
+
+_vnx_meta:
+  managed_keys:
+    - version
+    - "profiles.<role>.allowed_tools (vnx_baseline)"
+    - "profiles.<role>.denied_tools (vnx_baseline)"
+    - "profiles.<role>.bash_allow_patterns (vnx_baseline)"
+    - "profiles.<role>.bash_deny_patterns (vnx_baseline)"
+    - "terminal_assignments (vnx_baseline; project overrides win)"
+  project_owned_keys:
+    - "profiles.<role>.file_write_scope"
+    - "profiles.<project-role>  (roles not present in the template)"
+  description: >
+    VNX worker permission profiles. Merge via 'vnx regen-worker-permissions --merge'.
+    file_write_scope entries and project-added roles survive cutover unchanged.
+
 profiles:
   backend-developer:
     allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
@@ -54,6 +73,83 @@ profiles:
       - "git push --force*"
     file_write_scope:
       - "dashboard/**"
+
+  architect:
+    allowed_tools: [Read, Grep, Glob, Bash, WebSearch, WebFetch]
+    denied_tools: [Write, Edit, MultiEdit]
+    bash_allow_patterns:
+      - "git log*"
+      - "git diff*"
+      - "git show*"
+      - "python3 -c*"
+    bash_deny_patterns:
+      - "git add*"
+      - "git commit*"
+      - "git push*"
+      - "rm*"
+    file_write_scope: []
+
+  database-engineer:
+    allowed_tools: [Read, Write, Edit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch, MultiEdit]
+    bash_allow_patterns:
+      - "pytest*"
+      - "python3*"
+      - "sqlite3*"
+      - "git add*"
+      - "git commit*"
+      - "git push origin*"
+      - "bash -n*"
+    bash_deny_patterns:
+      - "rm -rf*"
+      - "git reset --hard*"
+      - "git push --force*"
+      - "git push -f*"
+      - "curl*anthropic*"
+    file_write_scope:
+      - "schemas/**"
+      - "tests/**"
+      - "scripts/**"
+
+  intelligence-engineer:
+    allowed_tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
+    denied_tools: [WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "pytest*"
+      - "python3*"
+      - "sqlite3*"
+      - "git add*"
+      - "git commit*"
+      - "git push origin*"
+      - "bash -n*"
+    bash_deny_patterns:
+      - "rm -rf*"
+      - "git reset --hard*"
+      - "git push --force*"
+      - "git push -f*"
+      - "curl*anthropic*"
+    file_write_scope:
+      - "scripts/**"
+      - "schemas/**"
+      - "tests/**"
+
+  security-engineer:
+    allowed_tools: [Read, Grep, Glob, Bash]
+    denied_tools: [Write, Edit, MultiEdit, WebSearch, WebFetch]
+    bash_allow_patterns:
+      - "python3 -c*"
+      - "python3 -m py_compile*"
+      - "git log*"
+      - "git diff*"
+      - "git show*"
+      - "bash -n*"
+      - "grep*"
+    bash_deny_patterns:
+      - "git add*"
+      - "git commit*"
+      - "git push*"
+      - "rm*"
+    file_write_scope: []
 
 terminal_assignments:
   T1: backend-developer
