@@ -4,9 +4,31 @@ Owns: spawn + stream-json parsing + canonical event normalization.
 Caller (provider_dispatch.py) handles: receipt, unified report, lease, etc.
 
 Kimi CLI invocation:
-    kimi --print --output-format stream-json --yolo -p "<prompt>"
+    kimi --print --output-format stream-json -p "<prompt>"
 
 Authentication: OAuth via `kimi login` (operator-managed). No API key in spawn.
+
+OUTPUT FORMAT (kimi-cli 1.44.0, wire protocol 1.10):
+    `--output-format stream-json` emits Anthropic-style content-block message
+    objects, one JSON object per line, with NO ``event_type`` field. Each line:
+
+        {"role": "assistant", "content": [
+            {"type": "think", "think": "<reasoning>"},
+            {"type": "text",  "text":  "<answer>"}],
+         "tool_calls": [{"type": "function", "id": "...",
+                         "function": {"name": "...", "arguments": "..."}}]}
+        {"role": "tool", "content": [{"type": "text", "text": "..."}],
+         "tool_call_id": "..."}
+
+    The answer text lives in ``content[]`` blocks where ``type == "text"`` (field
+    ``text``); reasoning in blocks where ``type == "think"`` (field ``think``).
+    The whole assistant message arrives end-loaded (after the model finishes
+    thinking), so per-chunk stall detection must tolerate a long first-token gap.
+    Token/usage accounting is NOT reported by this format — usage is recorded as
+    explicitly-unavailable rather than a silently-measured zero.
+
+    Legacy ``event_type`` event-stream shapes (pre-1.44) are still parsed for
+    backward compatibility.
 
 BILLING SAFETY: only subprocess.Popen(["kimi", ...]) is invoked.
 No Anthropic SDK, no LiteLLM, no direct API calls.
@@ -14,6 +36,7 @@ No Anthropic SDK, no LiteLLM, no direct API calls.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -49,6 +72,11 @@ class KimiSpawnResult:
 
     def frontmatter_fields(self) -> Dict[str, Any]:
         usage = self.token_usage or {}
+        # kimi-cli 1.44.0 stream-json does not report token accounting. When no
+        # token_count event was observed, surface tokens as explicitly
+        # unavailable (token_usage_measured=False) so downstream consumers do not
+        # read a silently-fabricated zero as a measured value.
+        measured = self.token_usage is not None
         return {
             "provider": "kimi",
             "sub_provider": "moonshot",
@@ -58,13 +86,48 @@ class KimiSpawnResult:
                 "output": int(usage.get("output_tokens", 0) or 0),
                 "cache_read": int(usage.get("cache_read_tokens", 0) or 0),
             },
+            "token_usage_measured": measured,
         }
+
+
+def _extract_content_blocks(content: list) -> "tuple[str, str]":
+    """Join the text and reasoning from a 1.44.0 ``content[]`` block list.
+
+    Returns ``(text, reasoning)`` where ``text`` concatenates every block with
+    ``type == "text"`` (field ``text``) and ``reasoning`` concatenates every
+    block with ``type == "think"`` (field ``think``, falling back to ``text``).
+    Unknown block types are ignored (non-fatal).
+    """
+    texts: list = []
+    thinks: list = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            value = block.get("text")
+            if value:
+                texts.append(str(value))
+        elif btype == "think":
+            value = block.get("think") or block.get("text")
+            if value:
+                thinks.append(str(value))
+    return "".join(texts), "\n".join(thinks)
 
 
 def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> CanonicalEvent:
     """Map a raw Kimi CLI stream-json event to a CanonicalEvent (Tier-1).
 
-    Supports two event formats:
+    Supports three event formats:
+
+    Content-block message (kimi-cli 1.44.0, wire protocol 1.10):
+      {"role": "assistant", "content": [{"type": "think", "think": "..."},
+                                        {"type": "text", "text": "..."}],
+       "tool_calls": [...]}                 -> text (+ reasoning, tool_calls)
+      {"role": "tool", "content": [{"type": "text", "text": "..."}],
+       "tool_call_id": "..."}               -> tool_result
+
+    Below: legacy ``event_type`` shapes, retained for backward compatibility.
 
     Legacy (pre-v1.26):
       {"event_type": "assistant_text", "content": "..."}
@@ -110,6 +173,31 @@ def normalize_kimi_event(raw: dict, terminal_id: str, dispatch_id: str) -> Canon
             "reason": "quota_or_auth",
             "message": f"[quota_or_auth] provider=kimi http_status={http_status} raw={str(raw)[:200]}",
         })
+
+    # kimi-cli 1.44.0 content-block message: {"role": ..., "content": [...]}.
+    # Detected by a list-valued ``content`` field with a string ``role`` and no
+    # legacy ``event_type``. Legacy events carry ``content`` as a string, so this
+    # check never shadows them.
+    role = raw.get("role")
+    content = raw.get("content")
+    if not event_type and isinstance(content, list) and isinstance(role, str):
+        text, reasoning = _extract_content_blocks(content)
+        if role == "tool":
+            return make("tool_result", {
+                "tool_use_id": str(raw.get("tool_call_id", "")),
+                "content": text or reasoning,
+            })
+        # assistant (and any other agent role): the answer text is the payload;
+        # reasoning + tool_calls ride along for observability but never become
+        # completion text. Intermediate tool-call turns legitimately carry an
+        # empty text block — only the final assistant message contributes text.
+        data: Dict[str, Any] = {"text": text}
+        if reasoning:
+            data["reasoning"] = reasoning
+        tool_calls = raw.get("tool_calls")
+        if tool_calls:
+            data["tool_calls"] = tool_calls
+        return make("text", data)
 
     if event_type in ("assistant_text", "text"):
         return make("text", {"text": str(raw.get("content", ""))})
@@ -284,8 +372,17 @@ def _consume_kimi_stream(
     event_store: Optional[Any],
     chunk_timeout: float,
     total_deadline: float,
-) -> "tuple[str, int, Optional[Dict], bool, bool, int, list]":
-    """Drain the stream; return (completion_text, events_written, token_usage, timed_out, stopped_early, failures, errors_captured)."""
+) -> "tuple[str, int, Optional[Dict], bool, bool, int, list, bool, list]":
+    """Drain the stream.
+
+    Returns (completion_text, events_written, token_usage, timed_out,
+    stopped_early, failures, errors_captured, saw_stream_output, raw_samples).
+
+    ``saw_stream_output`` is True once the CLI emits any real message line (text,
+    tool, thinking, or info event). Combined with an empty ``completion_text`` it
+    is the fail-loud signal: output arrived but no answer text was extracted.
+    ``raw_samples`` carries short excerpts of those lines for the error message.
+    """
     events_written = 0
     completion_parts: list = []
     token_usage: Optional[Dict[str, Any]] = None
@@ -293,6 +390,10 @@ def _consume_kimi_stream(
     timed_out = False
     _event_writer_failures = 0
     errors_captured: list = []
+    saw_stream_output = False
+    raw_samples: list = []
+
+    _CONTENT_EVENT_TYPES = ("text", "tool_use", "tool_result", "thinking", "info")
 
     for canonical_event in host.drain_stream(
         proc, terminal_id, dispatch_id, event_store,
@@ -300,6 +401,14 @@ def _consume_kimi_stream(
     ):
         events_written += 1
         evt_type = canonical_event.event_type
+
+        if evt_type in _CONTENT_EVENT_TYPES:
+            saw_stream_output = True
+            if len(raw_samples) < 6:
+                try:
+                    raw_samples.append(json.dumps(canonical_event.data)[:200])
+                except (TypeError, ValueError):
+                    raw_samples.append(str(canonical_event.data)[:200])
 
         if evt_type in ("text", "complete"):
             text = (canonical_event.data or {}).get("text", "")
@@ -347,7 +456,11 @@ def _consume_kimi_stream(
                     logger.debug("spawn_kimi: kill after on_event=False failed: %s", _ke)
                 break
 
-    return "".join(completion_parts), events_written, token_usage, timed_out, stopped_early, _event_writer_failures, errors_captured
+    return (
+        "".join(completion_parts), events_written, token_usage, timed_out,
+        stopped_early, _event_writer_failures, errors_captured,
+        saw_stream_output, raw_samples,
+    )
 
 
 def _finalize_kimi_result(
@@ -359,6 +472,8 @@ def _finalize_kimi_result(
     stopped_early: bool,
     event_writer_failures: int,
     errors_captured: Optional[list] = None,
+    saw_stream_output: bool = False,
+    raw_samples: Optional[list] = None,
 ) -> KimiSpawnResult:
     """Wait for process exit and return a KimiSpawnResult."""
     try:
@@ -368,10 +483,26 @@ def _finalize_kimi_result(
         proc.wait()
     rc = proc.returncode if proc.returncode is not None else 1
 
+    empty_extraction = not (completion_text or "").strip()
+
     if errors_captured:
         error: Optional[str] = "\n".join(errors_captured)
         if rc == 0:
             rc = 1  # error event overrides false-success zero exit code
+    elif empty_extraction and saw_stream_output and not stopped_early:
+        # FAIL-LOUD: the CLI emitted message lines but text extraction yielded
+        # ZERO characters — almost always a kimi-cli output-format change (the
+        # 1.44.0 content-block regression). NEVER report this as a silent
+        # success with an empty report; surface it as a failure with the raw
+        # output captured so the format drift is diagnosable.
+        sample = " | ".join(raw_samples or []) or "(no sample captured)"
+        error = (
+            "kimi returned a non-empty response but text extraction yielded ZERO "
+            "characters — likely a kimi-cli stream-json format change. "
+            f"events={events_written} raw_event_sample={sample}"
+        )
+        if rc == 0:
+            rc = 1
     elif rc != 0:
         error = f"kimi exited with code {rc}"
     else:
@@ -401,16 +532,21 @@ def spawn_kimi(
     on_event: Optional[Callable[[Any], Optional[bool]]] = None,
     extra_env: Optional[Dict[str, str]] = None,
     cwd: Optional[Any] = None,
-    chunk_timeout: float = 60.0,
+    chunk_timeout: float = 300.0,
     total_deadline: float = 900.0,
     event_store: Optional[Any] = None,
     **kwargs: Any,
 ) -> KimiSpawnResult:
-    """Spawn ``kimi --print --output-format stream-json --yolo -p <prompt>``.
+    """Spawn ``kimi --print --output-format stream-json -p <prompt>``.
 
     Returns KimiSpawnResult on completion (success OR controlled failure).
     Returns KimiSpawnResult(returncode=127) when the kimi binary is absent.
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
+
+    The per-chunk stall default is 300s (overridable via VNX_KIMI_STALL_THRESHOLD):
+    1.44.0 content-block output is end-loaded, so the first token can arrive only
+    after a long reasoning gap. A FAILURE is returned (never a silent empty
+    success) when the CLI emits output but no answer text is extracted.
 
     event_writer signature: ``(terminal_id, event_dict, dispatch_id=...)`` called
     per normalized event. Failures are counted in result.event_writer_failures.
@@ -449,14 +585,15 @@ def spawn_kimi(
         return err_result
 
     host = _KimiNormalizerHost(terminal_id=terminal_id, dispatch_id=dispatch_id)
-    completion_text, events_written, token_usage, timed_out, stopped_early, _event_writer_failures, errors_captured = (
-        _consume_kimi_stream(
-            proc=proc, host=host, on_event=on_event,
-            health_monitor=health_monitor, event_writer=event_writer,
-            terminal_id=terminal_id, dispatch_id=dispatch_id,
-            event_store=event_store, chunk_timeout=chunk_timeout,
-            total_deadline=total_deadline,
-        )
+    (
+        completion_text, events_written, token_usage, timed_out, stopped_early,
+        _event_writer_failures, errors_captured, saw_stream_output, raw_samples,
+    ) = _consume_kimi_stream(
+        proc=proc, host=host, on_event=on_event,
+        health_monitor=health_monitor, event_writer=event_writer,
+        terminal_id=terminal_id, dispatch_id=dispatch_id,
+        event_store=event_store, chunk_timeout=chunk_timeout,
+        total_deadline=total_deadline,
     )
     return _finalize_kimi_result(
         proc=proc, completion_text=completion_text,
@@ -464,4 +601,6 @@ def spawn_kimi(
         timed_out=timed_out, stopped_early=stopped_early,
         event_writer_failures=_event_writer_failures,
         errors_captured=errors_captured,
+        saw_stream_output=saw_stream_output,
+        raw_samples=raw_samples,
     )

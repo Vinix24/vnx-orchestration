@@ -168,6 +168,86 @@ class TestNormalizeKimiEvent(unittest.TestCase):
         self.assertIn("raw_type", event.data)
         self.assertEqual(event.data["raw_type"], "weird_event")
 
+    # --- kimi-cli 1.44.0 content-block format (wire protocol 1.10) ---------
+    # These fixtures are verbatim raw lines captured from
+    # `kimi --print --output-format stream-json -p ...` on kimi-cli 1.44.0.
+
+    def test_normalize_144_assistant_content_block_extracts_text(self):
+        """1.44.0 assistant message: text comes from content[] type==text blocks."""
+        raw = {
+            "role": "assistant",
+            "content": [
+                {"type": "think", "think": "reasoning here", "encrypted": None},
+                {"type": "text", "text": "Hello! 👋\n\n1\n2\n3\n\nDone."},
+            ],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "Hello! 👋\n\n1\n2\n3\n\nDone.")
+
+    def test_normalize_144_think_block_captured_as_reasoning(self):
+        """think blocks are captured as non-fatal reasoning, never as answer text."""
+        raw = {
+            "role": "assistant",
+            "content": [
+                {"type": "think", "think": "internal chain of thought"},
+                {"type": "text", "text": "final answer"},
+            ],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.data["text"], "final answer")
+        self.assertEqual(event.data["reasoning"], "internal chain of thought")
+
+    def test_normalize_144_multiple_text_blocks_are_concatenated(self):
+        raw = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "part one "},
+                {"type": "text", "text": "part two"},
+            ],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.data["text"], "part one part two")
+
+    def test_normalize_144_tool_calls_carried_for_observability(self):
+        """An intermediate assistant turn carries tool_calls but no text block."""
+        raw = {
+            "role": "assistant",
+            "content": [{"type": "think", "think": "I should run a shell tool."}],
+            "tool_calls": [{
+                "type": "function",
+                "id": "tool_abc",
+                "function": {"name": "Shell", "arguments": "{\"command\": \"echo hi\"}"},
+            }],
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        # No text block -> empty completion text on this intermediate turn.
+        self.assertEqual(event.data["text"], "")
+        # tool_calls ride along for observability.
+        self.assertEqual(event.data["tool_calls"][0]["id"], "tool_abc")
+
+    def test_normalize_144_tool_role_maps_to_tool_result(self):
+        raw = {
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "<system>Command executed successfully.</system>"},
+                {"type": "text", "text": "step-one\nstep-two\n"},
+            ],
+            "tool_call_id": "tool_abc",
+        }
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "tool_result")
+        self.assertEqual(event.data["tool_use_id"], "tool_abc")
+        self.assertIn("step-one", event.data["content"])
+
+    def test_normalize_144_does_not_shadow_legacy_string_content(self):
+        """Legacy events carry content as a string and must still parse via event_type."""
+        raw = {"event_type": "assistant_text", "content": "legacy string"}
+        event = normalize_kimi_event(raw, "T1", "dispatch-01")
+        self.assertEqual(event.event_type, "text")
+        self.assertEqual(event.data["text"], "legacy string")
+
     def test_event_has_correct_dispatch_and_terminal(self):
         raw = {"event_type": "complete"}
         event = normalize_kimi_event(raw, "T2", "my-dispatch")
@@ -354,6 +434,101 @@ class TestSpawnKimiIntegration(unittest.TestCase):
         self.assertIsNotNone(result.error)
         self.assertIn("rate limit exceeded", result.error)
         self.assertNotEqual(result.returncode, 0)
+
+    # --- kimi-cli 1.44.0 content-block end-to-end ---------------------------
+
+    def test_144_content_block_stream_extracts_final_answer(self):
+        """Full 1.44.0 tool-using stream: only the final assistant text is kept.
+
+        Verbatim shape from a real `kimi --print --output-format stream-json` run:
+        assistant(think+tool_calls) -> tool(result) -> assistant(think+text).
+        """
+        events = [
+            {
+                "role": "assistant",
+                "content": [{"type": "think", "think": "I should run a shell tool."}],
+                "tool_calls": [{
+                    "type": "function", "id": "tool_1",
+                    "function": {"name": "Shell", "arguments": "{\"command\": \"echo hi\"}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "content": [{"type": "text", "text": "hi\n"}],
+                "tool_call_id": "tool_1",
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "think", "think": "The command ran."},
+                    {"type": "text", "text": "The command printed: hi"},
+                ],
+            },
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNone(result.error, f"unexpected error: {result.error!r}")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.completion_text, "The command printed: hi")
+
+    def test_144_empty_extraction_on_nonempty_response_is_failure(self):
+        """FAIL-LOUD: CLI emits message lines but no text block -> FAILURE, not empty-success.
+
+        This is the core 1.44.0 governance defect: an output-format change made
+        text extraction yield zero characters while the process exited 0. The old
+        behavior was a silent empty report reported as success. The fix marks it
+        a failure with the raw output captured.
+        """
+        events = [
+            {
+                "role": "assistant",
+                "content": [{"type": "think", "think": "only reasoning, no answer block"}],
+                "tool_calls": [{
+                    "type": "function", "id": "tool_x",
+                    "function": {"name": "Shell", "arguments": "{}"},
+                }],
+            },
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertEqual(result.completion_text, "")
+        self.assertIsNotNone(result.error, "empty extraction must surface as an error")
+        self.assertNotEqual(result.returncode, 0, "empty extraction must not exit 0")
+        self.assertIn("ZERO", result.error)
+        # The raw output sample must be captured for diagnosis.
+        self.assertIn("raw_event_sample", result.error)
+
+    def test_144_unknown_format_text_under_wrong_key_fails_loud(self):
+        """If the CLI moves answer text to an unrecognized block type, fail loud."""
+        events = [
+            {"role": "assistant", "content": [{"type": "answer", "answer": "hidden"}]},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertEqual(result.completion_text, "")
+        self.assertIsNotNone(result.error)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_144_token_usage_unavailable_marked_explicitly_not_silent_zero(self):
+        """1.44.0 reports no usage: token_usage is None and frontmatter flags it."""
+        events = [
+            {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+        ]
+        result = self._run_with_events(events, returncode=0)
+        self.assertIsNone(result.token_usage, "no usage line -> token_usage must be None")
+        fm = result.frontmatter_fields()
+        self.assertFalse(fm["token_usage_measured"])
+        # The numeric fields remain schema-valid zeros, but measured=False marks
+        # them as unavailable rather than a measured zero.
+        self.assertEqual(fm["token_usage"], {"input": 0, "output": 0, "cache_read": 0})
+
+    def test_token_usage_measured_true_when_usage_present(self):
+        """When a usage event IS present, frontmatter marks tokens as measured."""
+        result = KimiSpawnResult(
+            returncode=0, completion_text="x", events_written=1, session_id=None,
+            timed_out=False, token_usage={"input_tokens": 10, "output_tokens": 5},
+        )
+        fm = result.frontmatter_fields()
+        self.assertTrue(fm["token_usage_measured"])
+        self.assertEqual(fm["token_usage"]["input"], 10)
+        self.assertEqual(fm["token_usage"]["output"], 5)
 
 
 class TestIsQuotaOrAuthError(unittest.TestCase):
