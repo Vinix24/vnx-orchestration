@@ -516,7 +516,8 @@ VALUES ('8.0.5-session-model', 'Add session_model column to session_analytics fo
 -- Full dispatch lifecycle tracking: dispatch → session → report → receipt
 CREATE TABLE IF NOT EXISTS dispatch_metadata (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dispatch_id TEXT NOT NULL UNIQUE,
+    dispatch_id TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT 'vnx-dev',
     terminal TEXT NOT NULL,
     track TEXT NOT NULL,
     provider TEXT,
@@ -536,7 +537,8 @@ CREATE TABLE IF NOT EXISTS dispatch_metadata (
     completed_at DATETIME,
     outcome_status TEXT,
     outcome_report_path TEXT,
-    session_id TEXT
+    session_id TEXT,
+    UNIQUE (project_id, dispatch_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id);
@@ -545,12 +547,11 @@ CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role);
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate);
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status);
 CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC);
--- ADR-007: provider is a descriptive (non-key) column, so it carries no UNIQUE
--- constraint. project_id is added by the multi-tenant migration (0010/0015), so
--- the base schema indexes provider alone; _migrate_v21 upgrades this to the
--- composite (project_id, provider) index once project_id exists, for
--- tenant-scoped per-provider self-learning analytics.
-CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider ON dispatch_metadata (provider);
+-- ADR-007: provider is a descriptive (non-key) column; index is composite over
+-- (project_id, provider) for tenant-scoped per-provider self-learning analytics.
+-- project_id is now in the base schema so the composite index is always correct.
+-- _migrate_v21 handles the upgrade path for legacy DBs that predate this change.
+CREATE INDEX IF NOT EXISTS idx_dispatch_meta_provider ON dispatch_metadata (project_id, provider);
 
 -- Analytics views for dispatch correlation
 

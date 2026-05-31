@@ -127,11 +127,18 @@ def main():
     # Stamp provider (provider-aware self-learning). Guarded: column lands via
     # migration v21; older DBs simply skip it. Kept separate from the two INSERT
     # branches above so the provider stamp applies regardless of project_id state.
+    # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
     if _has_column(conn, "dispatch_metadata", "provider"):
-        cur.execute(
-            "UPDATE dispatch_metadata SET provider = ? WHERE dispatch_id = ?",
-            (args.provider or "claude", args.dispatch_id),
-        )
+        if _has_column(conn, "dispatch_metadata", "project_id"):
+            cur.execute(
+                "UPDATE dispatch_metadata SET provider = ? WHERE project_id = ? AND dispatch_id = ?",
+                (args.provider or "claude", current_project_id(), args.dispatch_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE dispatch_metadata SET provider = ? WHERE dispatch_id = ?",
+                (args.provider or "claude", args.dispatch_id),
+            )
 
     conn.commit()
     conn.close()

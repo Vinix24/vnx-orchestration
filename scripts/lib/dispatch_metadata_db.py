@@ -98,6 +98,7 @@ def upsert_dispatch_provider_row(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     completed_at = now_iso if outcome_status else None
+    resolved_project_id = _resolve_project_id(project_id)
 
     conn = None
     try:
@@ -116,7 +117,7 @@ def upsert_dispatch_provider_row(
             insert_vals.append(provider)
         if has_project:
             insert_cols.append("project_id")
-            insert_vals.append(_resolve_project_id(project_id))
+            insert_vals.append(resolved_project_id)
         placeholders = ", ".join("?" for _ in insert_cols)
         conn.execute(
             f"INSERT OR IGNORE INTO dispatch_metadata ({', '.join(insert_cols)}) "
@@ -146,11 +147,21 @@ def upsert_dispatch_provider_row(
             set_clauses.append("completed_at = COALESCE(completed_at, ?)")
             params.append(completed_at)
 
-        params.append(dispatch_id)
-        conn.execute(
-            f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} WHERE dispatch_id = ?",
-            params,
-        )
+        # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
+        if has_project:
+            params.append(resolved_project_id)
+            params.append(dispatch_id)
+            conn.execute(
+                f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} "
+                f"WHERE project_id = ? AND dispatch_id = ?",
+                params,
+            )
+        else:
+            params.append(dispatch_id)
+            conn.execute(
+                f"UPDATE dispatch_metadata SET {', '.join(set_clauses)} WHERE dispatch_id = ?",
+                params,
+            )
         conn.commit()
         logger.debug(
             "upsert_dispatch_provider_row: stamped dispatch=%s provider=%s outcome=%s",

@@ -66,27 +66,16 @@ def test_migration_adds_provider_column_and_index(tmp_path):
 
 
 def test_migration_v21_upgrades_to_composite_index_when_project_id_present(tmp_path):
-    """ADR-007: once project_id exists, the provider index becomes composite.
+    """ADR-007: provider index is composite after bootstrap because project_id is
+    in the base dispatch_metadata schema (v22 also ensures this for legacy DBs).
 
-    Reproduces the production bootstrap state: the base schema SQL has already
-    created the plain (provider) index under the same name. _migrate_v21 must
-    drop-then-recreate so the composite is genuinely created — a bare
-    CREATE INDEX IF NOT EXISTS would silently skip on the name collision and
-    leave the DB stuck on the plain index. This test does NOT manually drop the
-    index first, so it fails if v21 relies on IF NOT EXISTS.
+    With project_id in the base schema, _migrate_v21 always finds it present and
+    creates the composite (project_id, provider) index directly. The full bootstrap
+    (including v22) guarantees the index ends up composite regardless of ordering.
     """
     db = _bootstrap_db(tmp_path)
     conn = sqlite3.connect(str(db))
-    conn.isolation_level = None
     try:
-        # Sanity: bootstrap left a plain (provider) index in place (no project_id yet).
-        pre_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_dispatch_meta_provider'"
-        ).fetchone()[0]
-        assert "project_id" not in pre_sql
-
-        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'")
-        quality_db_init._migrate_v21(conn)
         sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_dispatch_meta_provider'"
         ).fetchone()[0]
@@ -287,6 +276,81 @@ def test_receipt_carries_report_path_field():
     from governance_emit import emit_dispatch_receipt
     sig = inspect.signature(emit_dispatch_receipt)
     assert "report_path" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — cross-tenant isolation: scoped UPDATE must not overwrite other project
+# ---------------------------------------------------------------------------
+
+def test_cross_tenant_upsert_does_not_overwrite_other_project(tmp_path):
+    """ADR-007: a write scoped to project-B must not overwrite project-A's row.
+
+    Scenario: row (project_id='proj-a', dispatch_id='D-xten') exists with
+    provider='kimi'. upsert called for ('proj-b', 'D-xten', 'codex') — the
+    INSERT OR IGNORE is rejected by UNIQUE(project_id, dispatch_id) because
+    proj-b's row doesn't exist yet (INSERT targets (proj-b, D-xten)); the UPDATE
+    is scoped by project_id='proj-b' AND dispatch_id='D-xten' and finds no match.
+    Result: proj-a's provider remains 'kimi', unchanged.
+    """
+    db = _bootstrap_db(tmp_path)
+
+    # Seed a row owned by project A.
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO dispatch_metadata (dispatch_id, project_id, terminal, track, provider) "
+        "VALUES ('D-xten', 'proj-a', 'T1', 'A', 'kimi')"
+    )
+    conn.commit()
+    conn.close()
+
+    # Write from project B — same dispatch_id, different project.
+    ok = upsert_dispatch_provider_row(
+        db, dispatch_id="D-xten", terminal="T1", provider="codex",
+        project_id="proj-b",
+    )
+    # ok may be True (UPDATE ran, found 0 rows) or False (non-fatal error) — not
+    # the assertion of interest; what matters is proj-a's data is untouched.
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM dispatch_metadata WHERE dispatch_id='D-xten' AND project_id='proj-a'"
+        ).fetchone()
+        assert row is not None, "proj-a row must still exist"
+        assert row["provider"] == "kimi", "proj-a provider must NOT be overwritten by proj-b write"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — full litellm lane accepted by governance_emit regex
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("provider", [
+    "litellm:deepseek:deepseek-v4-pro",
+    "litellm:zai:glm-5.1-default",
+    "litellm:openrouter:glm-5.1-default",
+    "litellm:deepseek",
+    "litellm",
+])
+def test_governance_emit_accepts_full_litellm_lane(provider, tmp_path):
+    """governance_emit._validate_provider must accept full litellm:<sub>:<model> form."""
+    from governance_emit import _validate_provider
+    _validate_provider(provider)  # must not raise
+
+
+@pytest.mark.parametrize("bad_provider", [
+    "litellm:",
+    "litellm:123bad",
+    "foo:bar",
+    "",
+])
+def test_governance_emit_rejects_invalid_providers(bad_provider):
+    """_validate_provider must still reject genuinely-invalid provider strings."""
+    from governance_emit import _validate_provider
+    with pytest.raises(ValueError):
+        _validate_provider(bad_provider)
 
 
 if __name__ == "__main__":

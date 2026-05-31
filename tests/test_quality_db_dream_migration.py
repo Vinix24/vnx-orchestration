@@ -126,7 +126,7 @@ class TestDreamMigrationV20:
         conn.close()
 
         assert version == quality_db_init.HIGHEST_QI_VERSION
-        assert version == 21
+        assert version == 22
 
     def test_bootstrap_idempotent_on_existing_db(self, tmp_path):
         """Running bootstrap twice does not corrupt dream tables or raise."""

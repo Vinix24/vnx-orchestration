@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_RE = re.compile(r"^(claude|codex|gemini|kimi|litellm:[a-z][a-z0-9_-]*)$")
+_PROVIDER_RE = re.compile(
+    r"^(claude|codex|gemini|kimi|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_.-]*)?)?)$"
+)
 
 
 def _validate_provider(provider: str) -> None:
