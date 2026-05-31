@@ -22,7 +22,7 @@ Transform raw crawl data into meaningful insights through statistical analysis, 
 1. **Data Collection**
    - Query Supabase for relevant datasets
    - Aggregate metrics across crawls
-   - Join related tables for comprehensive view
+   - Join related tables for a full cross-table view
 
 2. **Statistical Analysis**
    ```python
@@ -113,7 +113,7 @@ Period: [Start] - [End]
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: data-analyst
+Skill actief: data-analyst
 ```
 
 No exceptions. This must appear before any other content.

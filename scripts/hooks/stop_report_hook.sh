@@ -99,6 +99,28 @@ if [ -d "$ACTIVE_DIR" ]; then
     done
 fi
 
+# ── Fallback: slug-only dispatch IDs (no track suffix) — match by Terminal header ──
+# Runs only when the track-suffix loop above found nothing. Strictly additive.
+if [ -z "$DISPATCH_ID" ] && [ -d "$ACTIVE_DIR" ]; then
+    FALLBACK_MATCHES=0
+    FALLBACK_FILE=""
+    for dispatch_file in "$ACTIVE_DIR"/*.md "$ACTIVE_DIR"/*.json; do
+        [ -f "$dispatch_file" ] || continue
+        FILE_TERMINAL=$(grep -m1 '^Terminal:' "$dispatch_file" 2>/dev/null | awk '{print $2}' || echo "")
+        if [ "$FILE_TERMINAL" = "$TERMINAL" ]; then
+            FALLBACK_MATCHES=$((FALLBACK_MATCHES + 1))
+            FALLBACK_FILE="$dispatch_file"
+        fi
+    done
+    if [ "$FALLBACK_MATCHES" -eq 1 ] && [ -f "$FALLBACK_FILE" ]; then
+        BASENAME="$(basename "$FALLBACK_FILE")"
+        DISPATCH_ID="${BASENAME%.*}"
+        DISPATCH_GATE=$(grep -m1 '^Gate:' "$FALLBACK_FILE" 2>/dev/null | awk '{print $2}' || echo "")
+        DISPATCH_TRACK=$(grep -m1 '^Track:' "$FALLBACK_FILE" 2>/dev/null | awk '{print $2}' || echo "")
+        PR_ID=$(grep -m1 '^PR-ID:' "$FALLBACK_FILE" 2>/dev/null | awk '{print $2}' || echo "")
+    fi
+fi
+
 if [ -z "$DISPATCH_ID" ]; then
     # No active dispatch — write partial trigger (extraction can still attempt git-based extraction)
     DISPATCH_ID="unknown-${TERMINAL}-$(date +%s)"

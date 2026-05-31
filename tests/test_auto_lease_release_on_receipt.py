@@ -260,7 +260,7 @@ class TestReleaseOnReceiptCLI(unittest.TestCase):
 class TestNoConfirmationTimeoutGuard(unittest.TestCase):
     """Verify the no_confirmation timeout guard at the Python API boundary.
 
-    The shell script (receipt_processor_v4.sh C2b) must NOT call
+    The shell script (receipt_processor.sh C2b) must NOT call
     release_on_receipt for task_timeout+no_confirmation events because
     Section C deliberately keeps the canonical lease held (blocked state)
     to prevent immediate re-dispatch.

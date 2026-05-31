@@ -6,7 +6,7 @@ mkdir+rm_rf+retry for stale-lock takeover, with a race window where two
 parallel contenders could both rm_rf each other's freshly-claimed lock dir
 and both proceed as singletons.
 
-The 2026-05-20 receipt-flood incident saw 10x receipt_processor_v4,
+The 2026-05-20 receipt-flood incident saw 10x receipt_processor,
 8x dispatcher_supervisor, and 8x receipt_processor_supervisor running in
 parallel after a burst of pause/resume cycles raced into the cleanup window.
 

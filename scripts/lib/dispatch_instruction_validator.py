@@ -5,7 +5,7 @@ Validates dispatch instruction markdown files for scope-drift risk
 before they are promoted from pending/ to the delivery queue.
 
 Validation rules:
-  D-1: Dispatch-ID must match canonical format YYYYMMDD-HHMMSS-<slug>-<track>
+  D-1: Dispatch-ID must match canonical format YYYYMMDD-HHMMSS-<slug>[-<track>]
   D-2: Instruction body must contain a Description section (or Instruction: block)
   D-3: Scope section must not exceed item count threshold (warn ≥ 9, block ≥ 16)
   D-4: Unbounded-task language must not appear in scope/description
@@ -27,7 +27,7 @@ from typing import List, Optional, Set
 # Constants
 # ---------------------------------------------------------------------------
 
-DISPATCH_ID_RE = re.compile(r"^\d{8}-\d{6}-.+-[A-C]$")
+DISPATCH_ID_RE = re.compile(r"^\d{8}-\d{6}-.+?(-[A-C])?$")
 
 # Scope item thresholds
 SCOPE_WARN_THRESHOLD = 9     # ≥ this many bullets → warn
@@ -114,19 +114,20 @@ def validate_dispatch_instruction(content: str) -> DispatchValidationResult:
 # ---------------------------------------------------------------------------
 
 def _check_dispatch_id(dispatch_id: Optional[str], result: DispatchValidationResult) -> None:
-    """D-1: Dispatch-ID must match YYYYMMDD-HHMMSS-slug-track format."""
+    """D-1: Dispatch-ID must match YYYYMMDD-HHMMSS-slug[-track] format."""
     if not dispatch_id:
         result.findings.append(DispatchFinding(
             rule="D-1", severity="blocker",
             message="No Dispatch-ID found. Must be present as 'Dispatch-ID: <id>' "
-                    "matching YYYYMMDD-HHMMSS-<slug>-[A-C].",
+                    "matching YYYYMMDD-HHMMSS-<slug> or YYYYMMDD-HHMMSS-<slug>-[A-C].",
         ))
         return
     if not DISPATCH_ID_RE.match(dispatch_id):
         result.findings.append(DispatchFinding(
             rule="D-1", severity="blocker",
             message=f"Dispatch-ID '{dispatch_id}' does not match required format "
-                    "YYYYMMDD-HHMMSS-<slug>-[A-C] (e.g. 20260422-182004-my-task-A).",
+                    "YYYYMMDD-HHMMSS-<slug>[-A/-B/-C] "
+                    "(e.g. 20260422-182004-my-task or 20260422-182004-my-task-A).",
         ))
 
 

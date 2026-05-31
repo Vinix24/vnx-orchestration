@@ -223,8 +223,8 @@ def _probe_tmux(terminals: Iterable[str], state_dir: Path, allow_tmux_probe: boo
 
 def _probe_process_health() -> Dict[str, Any]:
     proc_patterns = {
-        "dispatcher": r"dispatcher_v8_minimal|dispatcher_v7_compilation",
-        "receipt_processor": r"receipt_processor_v4",
+        "dispatcher": r"dispatcher_minimal|dispatcher_v7_compilation",
+        "receipt_processor": r"receipt_processor",
         "heartbeat_monitor": r"heartbeat_ack_monitor",
     }
 

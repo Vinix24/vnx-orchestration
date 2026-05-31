@@ -191,7 +191,7 @@ def test_a_dispatcher_sigkill_respawn(tmp_path: Path):
     runs_record = Path(str(fake_child) + ".runs")
 
     sup, _env = _launch_supervisor_with_fake_child(
-        tmp_path, DISPATCHER_SUPERVISOR, fake_child, "dispatcher_v8_minimal"
+        tmp_path, DISPATCHER_SUPERVISOR, fake_child, "dispatcher_minimal"
     )
     try:
         first_pid = _read_pid(pid_record, timeout=10)
@@ -235,7 +235,7 @@ def test_b_receipt_processor_sigkill_respawn(tmp_path: Path):
     runs_record = Path(str(fake_child) + ".runs")
 
     sup, _env = _launch_supervisor_with_fake_child(
-        tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor_v4"
+        tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor"
     )
     try:
         first_pid = _read_pid(pid_record, timeout=10)
@@ -278,7 +278,7 @@ def test_c_supervisor_handles_exit_0_gracefully(tmp_path: Path):
     runs_record = Path(str(fake_child) + ".runs")
 
     sup, _env = _launch_supervisor_with_fake_child(
-        tmp_path, DISPATCHER_SUPERVISOR, fake_child, "dispatcher_v8_minimal", once=True
+        tmp_path, DISPATCHER_SUPERVISOR, fake_child, "dispatcher_minimal", once=True
     )
     try:
         rc = sup.wait(timeout=15)
@@ -301,18 +301,18 @@ def test_d_stale_lock_cleanup(tmp_path: Path):
     pid_record = Path(str(fake_child) + ".pid")
 
     # Pre-seed a stale lock + PID file with bogus PID before launch.
-    # Names must match the singleton key used in receipt_processor_v4.sh:
-    #   enforce_singleton "receipt_processor_v4.sh"
+    # Names must match the singleton key used in receipt_processor.sh:
+    #   enforce_singleton "receipt_processor.sh"
     locks_dir = tmp_path / "locks"
     pids_dir = tmp_path / "pids"
-    stale_lock = locks_dir / "receipt_processor_v4.sh.lock"
+    stale_lock = locks_dir / "receipt_processor.sh.lock"
     stale_lock.mkdir(parents=True, exist_ok=True)
     (stale_lock / "pid").write_text("999999\n")
-    stale_pidfile = pids_dir / "receipt_processor_v4.sh.pid"
+    stale_pidfile = pids_dir / "receipt_processor.sh.pid"
     stale_pidfile.write_text("999999\n")
 
     sup, _env = _launch_supervisor_with_fake_child(
-        tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor_v4"
+        tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor"
     )
     try:
         # Supervisor should clean stale state, then spawn the child anyway.
@@ -345,7 +345,7 @@ def test_e_supervisor_singleton(tmp_path: Path):
     runs_record = Path(str(fake_child) + ".runs")
 
     sup1, _env1 = _launch_supervisor_with_fake_child(
-        tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor_v4"
+        tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor"
     )
     try:
         # Wait for first supervisor to spawn its child
@@ -357,7 +357,7 @@ def test_e_supervisor_singleton(tmp_path: Path):
 
         # Launch a second supervisor — must not start a second child concurrently.
         sup2, _env2 = _launch_supervisor_with_fake_child(
-            tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor_v4"
+            tmp_path, RECEIPT_SUPERVISOR, fake_child, "receipt_processor"
         )
         try:
             # Give sup2 a chance to either exit via singleton block or take over.

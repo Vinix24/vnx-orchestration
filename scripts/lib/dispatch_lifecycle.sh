@@ -1,6 +1,6 @@
 #!/bin/bash
 # dispatch_lifecycle.sh — Lifecycle, lease, and runtime-core functions for dispatcher V8.
-# Sourced by dispatcher_v8_minimal.sh.
+# Sourced by dispatcher_minimal.sh.
 # Requires: $STATE_DIR, $VNX_DIR set by orchestrator; dispatch_logging.sh sourced first.
 
 # Map track identifier to canonical terminal id.

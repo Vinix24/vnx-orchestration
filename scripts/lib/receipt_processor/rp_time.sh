@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_time.sh - Time/timestamp helpers
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: $MODE, $MAX_AGE_HOURS, $LAST_PROCESSED, $WATERMARK_FILE
 
 # Calculate cutoff timestamp based on mode

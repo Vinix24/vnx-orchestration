@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Log dispatch metadata to quality_intelligence.db after successful dispatch.
 
-Called non-fatally from dispatcher_v8_minimal.sh after each successful dispatch.
+Called non-fatally from dispatcher_minimal.sh after each successful dispatch.
 Inserts a row into dispatch_metadata with all available context.
 """
 
