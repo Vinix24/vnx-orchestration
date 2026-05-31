@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # VNX Command: dispatch
-# Sourced by bin/vnx — delivers a dispatch .md file to a terminal via SubprocessAdapter.
+# Sourced by bin/vnx — delivers a dispatch .md file to a VNX worker.
+#
+# DEFAULT lane: subscription-preserving ephemeral tmux-spawn
+#   (scripts/lib/tmux_interactive_dispatch.py — interactive claude, never `claude -p`).
+# OPT-IN burst lane: paid headless SubprocessAdapter
+#   (scripts/lib/subprocess_dispatch.py — `claude -p`), selected via:
+#     --adapter subprocess  (CLI flag)  >  Adapter: subprocess  (file header)
+#       >  VNX_ADAPTER=subprocess  (env)  >  default: tmux
 #
 # All variables from bin/vnx (VNX_HOME, VNX_DATA_DIR, VNX_STATE_DIR,
 # VNX_DISPATCH_DIR, log, err) are available when this runs.
@@ -8,14 +15,14 @@
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 _d_parse_header() {
-  # Parse [[TARGET:TX]], Role:, Gate:, Feature: from the dispatch file header.
-  # Outputs: TERMINAL ROLE GATE FEATURE (tab-separated)
+  # Parse [[TARGET:TX]], Role:, Gate:, Feature:, Adapter: from the dispatch file header.
+  # Outputs: TERMINAL ROLE GATE FEATURE ADAPTER (tab-separated)
   local file="$1"
   python3 -c "
 import re, sys
 
 path = '$file'
-target = role = gate = feature = ''
+target = role = gate = feature = adapter = ''
 try:
     with open(path) as f:
         for i, line in enumerate(f):
@@ -34,10 +41,13 @@ try:
             m = re.match(r'Feature:\s*(.+)', line)
             if m:
                 feature = m.group(1).strip()
+            m = re.match(r'Adapter:\s*(.+)', line)
+            if m:
+                adapter = m.group(1).strip()
 except Exception as e:
     print(f'ERROR: {e}', file=sys.stderr)
     sys.exit(1)
-print(f'{target}\t{role}\t{gate}\t{feature}')
+print(f'{target}\t{role}\t{gate}\t{feature}\t{adapter}')
 "
 }
 
@@ -94,6 +104,7 @@ cmd_dispatch() {
   local file=""
   local terminal_override=""
   local model_override="${VNX_MODEL:-sonnet}"
+  local adapter_override=""
   local dry_run=0
 
   if [ "$#" -eq 0 ]; then
@@ -108,7 +119,10 @@ cmd_dispatch() {
         cat <<HELP
 Usage: vnx dispatch <file.md> [OPTIONS]
 
-Deliver a dispatch .md file to a VNX terminal via SubprocessAdapter.
+Deliver a dispatch .md file to a VNX worker.
+
+Default lane: subscription-preserving ephemeral tmux-spawn (interactive claude).
+Burst lane:   paid headless SubprocessAdapter (claude -p), opt-in via --adapter.
 
 Arguments:
   file.md               Path to the dispatch instruction file
@@ -116,6 +130,8 @@ Arguments:
 Options:
   --terminal <TX>       Override terminal (default: auto-detect from [[TARGET:TX]])
   --model <model>       Override model (default: sonnet)
+  --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
+                        Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
   --dry-run             Show what would happen without dispatching
   -h, --help            Show this help
 
@@ -128,6 +144,7 @@ Examples:
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
+  vnx dispatch my-dispatch.md --adapter subprocess   # paid burst lane
 HELP
         return 0 ;;
     esac
@@ -147,13 +164,20 @@ HELP
         model_override="$2"; shift 2 ;;
       --model=*)
         model_override="${1#*=}"; shift ;;
+      --adapter)
+        adapter_override="$2"; shift 2 ;;
+      --adapter=*)
+        adapter_override="${1#*=}"; shift ;;
       --dry-run|-n)
         dry_run=1; shift ;;
       -h|--help)
         cat <<HELP
 Usage: vnx dispatch <file.md> [OPTIONS]
 
-Deliver a dispatch .md file to a VNX terminal via SubprocessAdapter.
+Deliver a dispatch .md file to a VNX worker.
+
+Default lane: subscription-preserving ephemeral tmux-spawn (interactive claude).
+Burst lane:   paid headless SubprocessAdapter (claude -p), opt-in via --adapter.
 
 Arguments:
   file.md               Path to the dispatch instruction file
@@ -161,6 +185,8 @@ Arguments:
 Options:
   --terminal <TX>       Override terminal (default: auto-detect from [[TARGET:TX]])
   --model <model>       Override model (default: sonnet)
+  --adapter <lane>      Delivery lane: tmux (default) or subprocess (burst).
+                        Precedence: --adapter > 'Adapter:' header > VNX_ADAPTER env > tmux
   --dry-run             Show what would happen without dispatching
   -h, --help            Show this help
 
@@ -173,6 +199,7 @@ Examples:
   vnx dispatch .vnx-data/dispatches/pending/my-dispatch.md
   vnx dispatch my-dispatch.md --terminal T2
   vnx dispatch my-dispatch.md --model opus --dry-run
+  vnx dispatch my-dispatch.md --adapter subprocess   # paid burst lane
 HELP
         return 0 ;;
       *)
@@ -210,11 +237,12 @@ HELP
     return 1
   fi
 
-  local terminal role gate feature
+  local terminal role gate feature adapter_header
   terminal=$(printf '%s' "$header_out" | cut -f1)
   role=$(printf '%s' "$header_out" | cut -f2)
   gate=$(printf '%s' "$header_out" | cut -f3)
   feature=$(printf '%s' "$header_out" | cut -f4)
+  adapter_header=$(printf '%s' "$header_out" | cut -f5)
 
   # Apply overrides
   [ -n "$terminal_override" ] && terminal="$terminal_override"
@@ -223,6 +251,20 @@ HELP
     err "[dispatch] No [[TARGET:TX]] found in dispatch file and no --terminal override"
     return 1
   fi
+
+  # Resolve delivery lane.
+  # Precedence: --adapter flag > 'Adapter:' header > VNX_ADAPTER env > default 'tmux'.
+  local adapter
+  adapter="${adapter_override:-${adapter_header:-${VNX_ADAPTER:-tmux}}}"
+  # Normalise to lowercase; accept only known lanes.
+  adapter=$(printf '%s' "$adapter" | tr '[:upper:]' '[:lower:]')
+  case "$adapter" in
+    tmux|subprocess) ;;
+    "") adapter="tmux" ;;
+    *)
+      err "[dispatch] Unknown adapter: '$adapter' (expected 'tmux' or 'subprocess')"
+      return 1 ;;
+  esac
 
   local track
   track=$(_d_resolve_track "$terminal")
@@ -240,6 +282,7 @@ HELP
   log "[dispatch] Gate:       ${gate:-<none>}"
   log "[dispatch] Feature:    ${feature:-<none>}"
   log "[dispatch] Model:      $model_override"
+  log "[dispatch] Adapter:    $adapter$([ "$adapter" = tmux ] && printf ' (default, subscription)' || printf ' (burst, paid)')"
   log "[dispatch] DispatchID: $dispatch_id"
 
   if [ "$dry_run" -eq 1 ]; then
@@ -247,10 +290,14 @@ HELP
     return 0
   fi
 
-  # Check terminal availability
-  if ! _d_check_terminal_idle "$terminal"; then
-    err "[dispatch] Terminal $terminal is busy. Use --dry-run to preview, or wait for completion."
-    return 1
+  # Terminal availability only applies to the leased subprocess lane.
+  # The tmux-spawn lane is leaseless (each dispatch gets a fresh ephemeral
+  # session + worktree), so there is no fixed terminal to be "busy".
+  if [ "$adapter" = "subprocess" ]; then
+    if ! _d_check_terminal_idle "$terminal"; then
+      err "[dispatch] Terminal $terminal is busy. Use --dry-run to preview, or wait for completion."
+      return 1
+    fi
   fi
 
   # Read instruction from file
@@ -262,29 +309,47 @@ HELP
   mkdir -p "${VNX_DISPATCH_DIR}/active"
   cp "$abs_file" "$active_path"
 
-  log "[dispatch] Dispatching to $terminal..."
+  log "[dispatch] Dispatching to $terminal via $adapter lane..."
 
-  # Deliver via subprocess_dispatch.py
-  local dispatch_script="$VNX_HOME/scripts/lib/subprocess_dispatch.py"
+  # Resolve the delivery script for the selected lane.
+  local dispatch_script
+  if [ "$adapter" = "tmux" ]; then
+    dispatch_script="$VNX_HOME/scripts/lib/tmux_interactive_dispatch.py"
+  else
+    dispatch_script="$VNX_HOME/scripts/lib/subprocess_dispatch.py"
+  fi
   if [ ! -f "$dispatch_script" ]; then
-    err "[dispatch] subprocess_dispatch.py not found: $dispatch_script"
+    err "[dispatch] delivery script not found: $dispatch_script"
     rm -f "$active_path"
     return 1
   fi
 
-  local _ar_flag=()
-  [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
-
   local exit_code=0
-  PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
-  python3 "$dispatch_script" \
-    --terminal-id "$terminal" \
-    --dispatch-id "$dispatch_id" \
-    --instruction "$instruction" \
-    --model "$model_override" \
-    ${role:+--role "$role"} \
-    "${_ar_flag[@]}" \
-    || exit_code=$?
+  if [ "$adapter" = "tmux" ]; then
+    # DEFAULT lane: subscription-preserving ephemeral tmux-spawn.
+    # Leaseless — pass the resolved terminal as the worker label for audit parity.
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
+    python3 "$dispatch_script" \
+      --dispatch-id "$dispatch_id" \
+      --instruction "$instruction" \
+      --model "$model_override" \
+      --worker-label "$terminal" \
+      ${role:+--role "$role"} \
+      || exit_code=$?
+  else
+    # OPT-IN burst lane: paid headless SubprocessAdapter.
+    local _ar_flag=()
+    [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
+    PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" \
+    python3 "$dispatch_script" \
+      --terminal-id "$terminal" \
+      --dispatch-id "$dispatch_id" \
+      --instruction "$instruction" \
+      --model "$model_override" \
+      ${role:+--role "$role"} \
+      ${_ar_flag[@]+"${_ar_flag[@]}"} \
+      || exit_code=$?
+  fi
 
   if [ "$exit_code" -eq 0 ]; then
     # Move to completed/
