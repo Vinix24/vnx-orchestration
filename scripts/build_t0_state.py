@@ -702,13 +702,30 @@ def _build_quality_digest(state_dir: Path) -> Dict[str, Any]:
 
 _RECENT_DISPATCHES_SQL = (
     "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
-    "dispatched_at, completed_at, outcome_status "
+    "dispatched_at, completed_at, outcome_status, provider, model "
     "FROM dispatch_metadata "
     "ORDER BY dispatched_at DESC "
     "LIMIT 50"
 )
 
 _RECENT_DISPATCHES_CENTRAL_SQL = (
+    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+    "dispatched_at, completed_at, outcome_status, provider, model "
+    "FROM dispatch_metadata "
+    "WHERE project_id = ? "
+    "ORDER BY dispatched_at DESC "
+    "LIMIT 50"
+)
+
+_RECENT_DISPATCHES_SQL_NO_PROVIDER = (
+    "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+    "dispatched_at, completed_at, outcome_status "
+    "FROM dispatch_metadata "
+    "ORDER BY dispatched_at DESC "
+    "LIMIT 50"
+)
+
+_RECENT_DISPATCHES_CENTRAL_SQL_NO_PROVIDER = (
     "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
     "dispatched_at, completed_at, outcome_status "
     "FROM dispatch_metadata "
@@ -734,17 +751,54 @@ def _query_qi_db(db_path: Path, sql: str, params: tuple = ()) -> List[Dict[str, 
         return []
 
 
+def _dm_available_columns(db_path: Path) -> frozenset:
+    """Return frozenset of column names in dispatch_metadata (empty if DB absent/error)."""
+    if not db_path.exists():
+        return frozenset()
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        try:
+            rows = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
+            return frozenset(r[1] for r in rows)
+        finally:
+            conn.close()
+    except Exception:
+        return frozenset()
+
+
 def _collect_recent_dispatches_per_project(
     project_id: str, state_dir: Path
 ) -> List[Dict[str, Any]]:
-    return _query_qi_db(state_dir / "quality_intelligence.db", _RECENT_DISPATCHES_SQL)
+    db_path = state_dir / "quality_intelligence.db"
+    cols = _dm_available_columns(db_path)
+    provider_part = ", provider" if "provider" in cols else ""
+    model_part = ", model" if "model" in cols else ""
+    sql = (
+        "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+        f"dispatched_at, completed_at, outcome_status{provider_part}{model_part} "
+        "FROM dispatch_metadata "
+        "ORDER BY dispatched_at DESC "
+        "LIMIT 50"
+    )
+    return _query_qi_db(db_path, sql)
 
 
 def _collect_recent_dispatches_central(project_id: str) -> List[Dict[str, Any]]:
     db_path = _central_qi_db_for_project(project_id)
     if db_path is None:
         return []
-    return _query_qi_db(db_path, _RECENT_DISPATCHES_CENTRAL_SQL, (project_id,))
+    cols = _dm_available_columns(db_path)
+    provider_part = ", provider" if "provider" in cols else ""
+    model_part = ", model" if "model" in cols else ""
+    sql = (
+        "SELECT dispatch_id, terminal, track, role, gate, priority, pr_id, "
+        f"dispatched_at, completed_at, outcome_status{provider_part}{model_part} "
+        "FROM dispatch_metadata "
+        "WHERE project_id = ? "
+        "ORDER BY dispatched_at DESC "
+        "LIMIT 50"
+    )
+    return _query_qi_db(db_path, sql, (project_id,))
 
 
 def _collect_recent_dispatches(

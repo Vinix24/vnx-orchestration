@@ -512,7 +512,6 @@ _fdd_log_dispatch_metadata() {
     # own provider. (See provider-aware self-learning, Wave 2 core.)
     python3 "$VNX_DIR/scripts/log_dispatch_metadata.py" \
         --dispatch-id "$dispatch_id" --terminal "$terminal_id" --track "$track" \
-        --provider "claude" \
         --role "$agent_role" --skill-name "$agent_role" --gate "$gate" \
         --cognition "$_dm_cognition" --priority "$_dm_priority" --pr-id "${pr_id:-}" \
         --pattern-count "${_dm_pattern_count:-0}" --prevention-rule-count "${_dm_rule_count:-0}" \
