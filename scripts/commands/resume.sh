@@ -42,14 +42,14 @@ _vnx_resume_start_daemons() {
       > "$logs_dir/dispatcher_supervisor.log" 2>&1 &
     _resume_dispatcher_pid=$!
     log "[resume] dispatcher_supervisor started (PID: $_resume_dispatcher_pid)."
-  elif [ -f "$scripts_dir/dispatcher_v8_minimal.sh" ]; then
-    log "[resume] Starting dispatcher_v8_minimal.sh directly..."
-    nohup bash "$scripts_dir/dispatcher_v8_minimal.sh" \
+  elif [ -f "$scripts_dir/dispatcher_minimal.sh" ]; then
+    log "[resume] Starting dispatcher_minimal.sh directly..."
+    nohup bash "$scripts_dir/dispatcher_minimal.sh" \
       > "$logs_dir/dispatcher.log" 2>&1 &
     _resume_dispatcher_pid=$!
     log "[resume] dispatcher started (PID: $_resume_dispatcher_pid)."
   else
-    err "[resume] Neither dispatcher_supervisor.sh nor dispatcher_v8_minimal.sh found."
+    err "[resume] Neither dispatcher_supervisor.sh nor dispatcher_minimal.sh found."
     return 1
   fi
 
@@ -60,14 +60,14 @@ _vnx_resume_start_daemons() {
       > "$logs_dir/receipt_processor_supervisor.log" 2>&1 &
     _resume_receipt_pid=$!
     log "[resume] receipt_processor_supervisor started (PID: $_resume_receipt_pid)."
-  elif [ -f "$scripts_dir/receipt_processor_v4.sh" ]; then
-    log "[resume] Starting receipt_processor_v4.sh directly..."
-    VNX_MODE=monitor nohup bash "$scripts_dir/receipt_processor_v4.sh" \
+  elif [ -f "$scripts_dir/receipt_processor.sh" ]; then
+    log "[resume] Starting receipt_processor.sh directly..."
+    VNX_MODE=monitor nohup bash "$scripts_dir/receipt_processor.sh" \
       > "$logs_dir/receipt_processor.log" 2>&1 &
     _resume_receipt_pid=$!
     log "[resume] receipt_processor started (PID: $_resume_receipt_pid)."
   else
-    err "[resume] Neither receipt_processor_supervisor.sh nor receipt_processor_v4.sh found."
+    err "[resume] Neither receipt_processor_supervisor.sh nor receipt_processor.sh found."
     return 1
   fi
 

@@ -1,7 +1,7 @@
 """Unit tests for scripts/lib/rp_find_newest_report_mtime.py
 
 Tests exercise the Python module directly (find_newest_report_mtime) and as a
-CLI subprocess to verify the interface used by receipt_processor_v4.sh.
+CLI subprocess to verify the interface used by receipt_processor.sh.
 """
 from __future__ import annotations
 

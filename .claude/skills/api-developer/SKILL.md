@@ -13,7 +13,7 @@ Specialize in clean, well-documented REST APIs with consistent contracts.
 - Define resource model and relationships
 - Design URL structure following REST conventions
 - Implement request/response validation
-- Add comprehensive error handling
+- Add error handling for validation failures, auth errors, not-found, and server faults
 - Generate OpenAPI documentation
 - Write integration tests
 
@@ -77,7 +77,7 @@ For accessing proven patterns and solutions, see: `@.claude/skills/api-developer
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: api-developer
+Skill actief: api-developer
 ```
 
 No exceptions. This must appear before any other content.

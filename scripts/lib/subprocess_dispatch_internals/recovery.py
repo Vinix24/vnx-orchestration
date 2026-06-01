@@ -346,6 +346,7 @@ def _attempt_delivery(
     model: str,
     dispatch_id: str,
     role: "str | None",
+    requires_mcp: bool = False,
     monitor,
     lease_generation: "int | None",
     heartbeat_interval: float,
@@ -360,6 +361,7 @@ def _attempt_delivery(
     return _sd.deliver_via_subprocess(
         terminal_id, instruction, model, dispatch_id,
         role=role,
+        requires_mcp=requires_mcp,
         lease_generation=lease_generation,
         heartbeat_interval=heartbeat_interval,
         chunk_timeout=chunk_timeout,
@@ -421,6 +423,7 @@ def deliver_with_recovery(
     dispatch_id: str,
     *,
     role: str | None = None,
+    requires_mcp: bool = False,
     repo_map: str | None = None,
     max_retries: int = 3,
     lease_generation: int | None = None,
@@ -458,7 +461,8 @@ def deliver_with_recovery(
     for attempt in range(max_retries + 1):
         sub_result = _attempt_delivery(
             terminal_id=terminal_id, instruction=instruction, model=model,
-            dispatch_id=dispatch_id, role=role, monitor=monitor,
+            dispatch_id=dispatch_id, role=role, requires_mcp=requires_mcp,
+            monitor=monitor,
             lease_generation=lease_generation,
             heartbeat_interval=heartbeat_interval,
             chunk_timeout=chunk_timeout, total_deadline=total_deadline,

@@ -13,9 +13,8 @@ Output exactly ONE Manager Block between `[[TARGET:X]]` and `[[DONE]]` markers:
 [[TARGET:A|B|C]]
 Manager Block
 
-Role: <skill-name>  # See .claude/skills/skills.yaml
-Track: <A|B|C>
-Terminal: <T1|T2|T3>
+Role: <skill-name>  # Primary routing field — see .claude/skills/skills.yaml
+Terminal: <T1|T2|T3>  # optional; legacy terminal-pin; role-scoped ephemeral pool is default
 Priority: <P0|P1|P2>
 Cognition: <normal|deep>
 Requires-Model: <opus|sonnet>
@@ -23,7 +22,7 @@ ClearContext: <true|false>
 Risk-Class: <low|medium|high>
 Merge-Policy: <human|conditional_auto>
 Review-Stack: <gemini_review,codex_gate,claude_github_optional>
-Dispatch-ID: <YYYYMMDD-HHMMSS-descriptor-track>
+Dispatch-ID: <YYYYMMDD-HHMMSS-descriptor-slug>
 Parent-Dispatch: <dispatch-id or "none">
 PR-ID: <PR-X or "none">
 Reason: <1-line justification>
@@ -115,18 +114,22 @@ Program: auth_feature_2025 - COMPLETE
 
 ### Required Fields
 Every Manager Block MUST have:
-- `Role`: Skill name from `.claude/skills/skills.yaml`
+- `Role`: **Primary routing field** — skill name from `.claude/skills/skills.yaml`
   - Examples: `backend-developer`, `frontend-developer`, `security-engineer`, `planner`, `architect`
-- `Track`: A (implementation), B (storage/testing), C (architecture/research)
-- `Terminal`: T1, T2, or T3
+  - This field drives worker spawn, permission profile, and skill activation
 - `Priority`: P0 (critical), P1 (high), P2 (normal)
 - `Cognition`: normal or deep
 - `ClearContext`: true or false (default: true)
-- `Dispatch-ID`: Unique ID with format YYYYMMDD-HHMMSS-descriptor-track
+- `Dispatch-ID`: Unique ID with format YYYYMMDD-HHMMSS-descriptor-slug
 - `Parent-Dispatch`: Parent dispatch ID or "none"
 - `PR-ID`: PR-X format (e.g., PR-4) or "none" for non-PR work
 - `Reason`: One-line justification
 - `Instruction`: Clear tasks with success criteria
+
+### Optional Fields
+- `Terminal`: T1, T2, or T3 — legacy terminal-pin; omit to use role-scoped ephemeral pool
+  - The old Track A→T1 / B→T2 / C→T3 mapping still applies for `[[TARGET:X]]` routing,
+    but terminal-id is no longer the primary worker identity (Role is)
 
 ### Optional Fields (Use When Needed)
 - `Gate`: investigation, planning, implementation, review, testing, integration (mode selection only)
@@ -164,8 +167,7 @@ Every Manager Block MUST have:
 Manager Block
 
 Role: backend-developer
-Track: A
-Terminal: T1
+Terminal: T1  # optional; legacy pin — omit to use role-scoped ephemeral pool
 Priority: P1
 Cognition: normal
 Requires-Model: sonnet
@@ -173,7 +175,7 @@ ClearContext: true
 Risk-Class: medium
 Merge-Policy: human
 Review-Stack: gemini_review,codex_gate,claude_github_optional
-Dispatch-ID: 20260203-153000-storage-fix-A
+Dispatch-ID: 20260203-153000-storage-fix
 Parent-Dispatch: none
 PR-ID: PR-4
 Reason: Implement storage persistence fix from architecture decision

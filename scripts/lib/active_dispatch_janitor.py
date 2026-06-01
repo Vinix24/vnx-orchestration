@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Receipt-driven reconciliation of dispatcher's active/ directory.
 
-Replaces the mtime-only "stuck file" heuristic in dispatcher_v8_minimal.sh.
+Replaces the mtime-only "stuck file" heuristic in dispatcher_minimal.sh.
 That heuristic moved any *.md older than 60 minutes from active/ to
 completed/, which silently misclassified legitimate long-running tasks
 (file mtime is set at delivery time and never refreshed) as completed and

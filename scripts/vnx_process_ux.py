@@ -40,13 +40,13 @@ from vnx_paths import ensure_env
 
 # Known managed processes: name -> script filename
 MANAGED_PROCESSES = {
-    "dispatcher": "dispatcher_v8_minimal.sh",
-    "smart_tap": "smart_tap_v7_json_translator.sh",
-    "receipt_processor": "receipt_processor_v4.sh",
+    "dispatcher": "dispatcher_minimal.sh",
+    "smart_tap": "smart_tap_json_translator.sh",
+    "receipt_processor": "receipt_processor.sh",
     "heartbeat_ack_monitor": "heartbeat_ack_monitor.py",
     "queue_watcher": "queue_popup_watcher.sh",
     "dashboard": "generate_valid_dashboard.sh",
-    "state_manager": "unified_state_manager_v2.py",
+    "state_manager": "unified_state_manager.py",
     "intelligence_daemon": "intelligence_daemon.py",
     "recommendations_engine": "recommendations_engine_daemon.sh",
     "vnx_supervisor": "vnx_supervisor_simple.sh",

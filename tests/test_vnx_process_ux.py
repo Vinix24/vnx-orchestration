@@ -364,7 +364,7 @@ class TestCmdRestart:
         scripts_dir = Path(vnx_paths["VNX_HOME"]) / "scripts"
         scripts_dir.mkdir(exist_ok=True)
         # Create a simple script that sleeps
-        script = scripts_dir / "dispatcher_v8_minimal.sh"
+        script = scripts_dir / "dispatcher_minimal.sh"
         script.write_text("#!/bin/bash\nsleep 60\n")
         script.chmod(0o755)
 

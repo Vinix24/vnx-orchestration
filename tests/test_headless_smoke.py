@@ -28,7 +28,7 @@ if SCRIPTS_LIB not in sys.path:
 
 from runtime_coordination import init_schema, get_connection, register_dispatch, create_attempt
 from headless_run_registry import HeadlessRunRegistry, HeadlessRun
-from exit_classifier import classify_exit, SUCCESS, TIMEOUT, NO_OUTPUT, INTERRUPTED
+from exit_classifier import classify_exit, FC_SUCCESS as SUCCESS, FC_TIMEOUT as TIMEOUT, FC_NO_OUTPUT as NO_OUTPUT, FC_INTERRUPTED as INTERRUPTED
 from headless_inspect import (
     format_run_line,
     format_run_detail,

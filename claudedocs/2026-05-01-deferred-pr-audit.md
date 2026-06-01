@@ -40,7 +40,7 @@ PR #364 (`refactor/night-w3-cluster-c`) was deferred due to merge conflicts with
 
 - `scripts/lib/subprocess_dispatch.py`
 - `scripts/append_receipt.py`
-- `scripts/receipt_processor_v4.sh` + `scripts/lib/receipt_*.py`
+- `scripts/receipt_processor.sh` + `scripts/lib/receipt_*.py`
 - `scripts/lib/dispatch_*.py`
 - `dashboard/api_governance.py`, `dashboard/api_intelligence_reporting.py`
 
@@ -49,7 +49,7 @@ The Wave 1–2 refactor sprint (merged to main 2026-04-30 to 2026-05-01) covered
 | PR | Title | Merged | Overlap |
 |---|---|---|---|
 | #368 (W1A) | refactor(subprocess_dispatch): split into focused modules | 2026-05-01T05:38:42Z | `scripts/lib/subprocess_dispatch.py` |
-| #369 (W1B) | refactor(receipt_processor): split into sourced helper libs | merged | `scripts/receipt_processor_v4.sh`, `scripts/lib/receipt_*.py` |
+| #369 (W1B) | refactor(receipt_processor): split into sourced helper libs | merged | `scripts/receipt_processor.sh`, `scripts/lib/receipt_*.py` |
 | #374 (W1C) | refactor(append_receipt): split into focused modules | merged | `scripts/append_receipt.py` |
 | #370 (W2C) | refactor(dispatch_register): split append_event | merged | dispatch module family |
 | #371 (W2D) | refactor(test_dispatch_register): split tests for size compliance | merged | dispatch tests |

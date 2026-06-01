@@ -1,7 +1,7 @@
 #!/bin/bash
 # dispatcher_supervisor_ticks.sh — Unified supervisor tick helpers for the dispatcher.
 #
-# Source this from dispatcher_v8_minimal.sh after dispatch_logging.sh is loaded.
+# Source this from dispatcher_minimal.sh after dispatch_logging.sh is loaded.
 #
 # Required bindings (provided by the sourcing dispatcher):
 #   log()            — from scripts/lib/dispatch_logging.sh

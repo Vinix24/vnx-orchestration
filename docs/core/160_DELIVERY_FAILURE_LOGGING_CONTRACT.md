@@ -131,7 +131,7 @@ Every delivery failure MUST emit a structured event via `log_structured_failure(
 ```json
 {
   "event": "delivery_failure",
-  "component": "dispatcher_v8_minimal.sh",
+  "component": "dispatcher_minimal.sh",
   "failure_code": "<code from Section 2>",
   "failure_class": "<class from failure_classifier.py>",
   "retryable": true,

@@ -116,7 +116,7 @@ For accessing proven patterns and solutions, see: `@.claude/skills/reviewer/scri
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: reviewer
+Skill actief: reviewer
 ```
 
 No exceptions. This must appear before any other content.

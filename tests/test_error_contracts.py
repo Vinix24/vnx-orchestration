@@ -74,8 +74,8 @@ def test_check_intelligence_health_json_output_and_semantic_exit(tmp_path: Path)
 
 
 def test_shell_critical_paths_no_true_suppression_and_structured_failures_present():
-    dispatcher = (SCRIPTS_DIR / "dispatcher_v8_minimal.sh").read_text(encoding="utf-8")
-    receipt_processor = (SCRIPTS_DIR / "receipt_processor_v4.sh").read_text(encoding="utf-8")
+    dispatcher = (SCRIPTS_DIR / "dispatcher_minimal.sh").read_text(encoding="utf-8")
+    receipt_processor = (SCRIPTS_DIR / "receipt_processor.sh").read_text(encoding="utf-8")
     t0_brief = (SCRIPTS_DIR / "generate_t0_brief.sh").read_text(encoding="utf-8")
 
     assert "|| true" not in dispatcher
