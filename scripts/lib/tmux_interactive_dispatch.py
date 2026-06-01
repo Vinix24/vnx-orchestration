@@ -553,20 +553,74 @@ class TmuxInteractiveDispatch:
                 return True
             time.sleep(poll_interval)
         logger.info(
-            "interactive: readiness marker not seen for %s before %.0fs warmup; "
-            "proceeding (input is queued into the box regardless)",
+            "interactive: readiness marker not seen for %s before %.0fs warmup "
+            "(STRICT=1 will abort; STRICT=0 will proceed)",
             pane_id,
             warmup_timeout,
         )
         return False
 
     def _deliver_instruction(self, pane_id: str, body: str) -> bool:
-        """Clear input, paste the instruction body, submit with Enter."""
+        """Clear input, paste the instruction body, settle, then submit with Enter."""
         self._runner.run(["send-keys", "-t", pane_id, "C-u"])
         if not self._paste(pane_id, body):
             return False
+        # Settle after bracketed paste so the pane has fully received the content.
+        _settle = float(os.environ.get("VNX_TMUX_PASTE_SETTLE_SECONDS", "0.75"))
+        if _settle > 0:
+            time.sleep(_settle)
         # Enter ALWAYS as a separate keystroke.
         return self._runner.run(["send-keys", "-t", pane_id, "Enter"]).returncode == 0
+
+    # Sentinel appended to every dispatch body (END_OF_INSTRUCTION_SENTINEL from dispatch_prepare).
+    _END_SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+    # Pane content that proves Claude is actively running (not idle at the input box).
+    _WORKING_MARKER = "esc to interrupt"
+
+    def _verify_submit(self, pane_id: str, body: str) -> bool:
+        """Confirm the instruction was actually submitted, not left staged in the input box.
+
+        After the initial Enter, capture-pane is checked for:
+        - ``_WORKING_MARKER`` ("esc to interrupt") — Claude is running → submitted.
+        - ``_END_SENTINEL`` still visible — bracketed paste is still staged → not submitted.
+
+        If still staged, waits VNX_TMUX_SUBMIT_RETRY_DELAY then sends exactly one more
+        separate Enter. Polls until submitted or VNX_TMUX_SUBMIT_VERIFY_TIMEOUT expires.
+        Returns False only when the sentinel is still staged after that hard timeout.
+        """
+        retry_delay = float(os.environ.get("VNX_TMUX_SUBMIT_RETRY_DELAY", "0.75"))
+        verify_timeout = float(os.environ.get("VNX_TMUX_SUBMIT_VERIFY_TIMEOUT", "5"))
+        sentinel_in_body = self._END_SENTINEL in body
+
+        def _still_staged() -> bool:
+            cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
+            content = cap.stdout if cap.returncode == 0 else ""
+            if self._WORKING_MARKER in content:
+                return False   # actively running — definitely submitted
+            if sentinel_in_body and self._END_SENTINEL in content:
+                return True    # sentinel still visible — still staged
+            return False       # unknown state; assume submitted (conservative)
+
+        if not _still_staged():
+            return True
+
+        # Retry: wait, then send exactly ONE more separate Enter.
+        if retry_delay > 0:
+            time.sleep(retry_delay)
+        self._runner.run(["send-keys", "-t", pane_id, "Enter"])
+
+        deadline = time.monotonic() + verify_timeout
+        while time.monotonic() < deadline:
+            if not _still_staged():
+                return True
+            time.sleep(0.1)
+
+        logger.warning(
+            "interactive: submit-verify timeout for pane %s after %.1fs: "
+            "end-sentinel still staged in input box",
+            pane_id, verify_timeout,
+        )
+        return False
 
     def _paste(self, pane_id: str, content: str, max_inline: int = 50000) -> bool:
         """Load *content* into a tmux buffer and paste it into the pane."""
@@ -735,6 +789,7 @@ class TmuxInteractiveDispatch:
             "for shortcuts",
             "? for shortcuts",
             "Welcome to Claude",
+            "Claude Code v",    # v2.1.159+ banner (additive — legacy markers kept above)
         ),
         completion_statuses: frozenset = DEFAULT_COMPLETION_STATUSES,
         dispatch_paths: "list[str] | str | None" = None,
@@ -960,13 +1015,44 @@ class TmuxInteractiveDispatch:
                     duration_seconds=time.monotonic() - start_time,
                 )
 
-            # 4. Wait for readiness (best-effort)
-            self._wait_ready(
+            # 4. Wait for readiness; STRICT mode aborts if not ready before warmup_timeout.
+            _ready = self._wait_ready(
                 pane_id,
                 ready_markers=ready_markers,
                 warmup_timeout=warmup_timeout,
                 poll_interval=warmup_poll_interval,
             )
+            _strict = os.environ.get("VNX_TMUX_READY_STRICT", "1").strip().lower() not in (
+                "0", "false", "no", "off"
+            )
+            if not _ready and _strict:
+                self._emit_event(
+                    "interactive_ready_timeout",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="no readiness marker before warmup_timeout; VNX_TMUX_READY_STRICT=1",
+                    metadata={"session": session, "pane_id": pane_id},
+                )
+                self._govern_report(
+                    dispatch_id=dispatch_id,
+                    terminal_id=label,
+                    instruction=instruction,
+                    receipt=None,
+                    duration_seconds=time.monotonic() - start_time,
+                    base_sha=worktree_handle.base_sha if worktree_handle else None,
+                    worktree_path=worktree_handle.path if worktree_handle else None,
+                )
+                _teardown("ready_timeout")
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    window_id=window_id,
+                    pane_id=pane_id,
+                    failure_reason="interactive_ready_timeout",
+                    duration_seconds=time.monotonic() - start_time,
+                )
 
             if attach:
                 self._attach(session)
@@ -1031,6 +1117,37 @@ class TmuxInteractiveDispatch:
                     pane_id=pane_id,
                     failure_reason="failed to deliver instruction via send-keys",
                     duration_seconds=time.monotonic() - start_time,
+                )
+
+            # 7b. Verify the instruction was actually submitted (not left staged).
+            if not self._verify_submit(pane_id, body):
+                self._emit_event(
+                    "interactive_submit_failed",
+                    dispatch_id=dispatch_id,
+                    label=label,
+                    reason="instruction still staged after paste-enter-verify-retry-timeout",
+                    metadata={"session": session, "pane_id": pane_id},
+                )
+                self._govern_report(
+                    dispatch_id=dispatch_id,
+                    terminal_id=label,
+                    instruction=instruction,
+                    receipt=None,
+                    duration_seconds=time.monotonic() - start_time,
+                    base_sha=worktree_handle.base_sha if worktree_handle else None,
+                    worktree_path=worktree_handle.path if worktree_handle else None,
+                )
+                _teardown("submit_failed")
+                return InteractiveDispatchResult(
+                    success=False,
+                    dispatch_id=dispatch_id,
+                    session=session,
+                    label=label,
+                    window_id=window_id,
+                    pane_id=pane_id,
+                    failure_reason="submit_failed",
+                    duration_seconds=time.monotonic() - start_time,
+                    worktree_state=_wt_state[0],
                 )
 
             # 8. Wait for receipt
