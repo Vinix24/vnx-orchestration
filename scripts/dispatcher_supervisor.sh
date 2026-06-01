@@ -1,7 +1,7 @@
 #!/bin/bash
-# dispatcher_supervisor.sh — Auto-restart supervisor for dispatcher_v8_minimal.sh
+# dispatcher_supervisor.sh — Auto-restart supervisor for dispatcher_minimal.sh
 #
-# Monitors dispatcher_v8_minimal.sh and restarts it after crashes.
+# Monitors dispatcher_minimal.sh and restarts it after crashes.
 # Uses exponential backoff (BACKOFF_INIT→BACKOFF_MAX) to avoid tight loops on
 # persistent failures. Resets backoff after the dispatcher runs longer than
 # BACKOFF_STABLE seconds. Enforces singleton so only one supervisor runs per
@@ -30,9 +30,9 @@ if [ "${VNX_RESUME_IN_PROGRESS:-0}" != "1" ] && [ -f "${VNX_STATE_DIR}/PAUSED" ]
 fi
 
 VNX_DIR="$VNX_HOME"
-DISPATCHER_SCRIPT="${VNX_DISPATCHER_SCRIPT:-$SCRIPT_DIR/dispatcher_v8_minimal.sh}"
+DISPATCHER_SCRIPT="${VNX_DISPATCHER_SCRIPT:-$SCRIPT_DIR/dispatcher_minimal.sh}"
 SUPERVISOR_NAME="dispatcher_supervisor"
-DISPATCHER_NAME="dispatcher_v8_minimal"
+DISPATCHER_NAME="dispatcher_minimal"
 
 LOG_FILE="$VNX_LOGS_DIR/dispatcher_supervisor.log"
 PID_FILE="$VNX_PIDS_DIR/${SUPERVISOR_NAME}.pid"

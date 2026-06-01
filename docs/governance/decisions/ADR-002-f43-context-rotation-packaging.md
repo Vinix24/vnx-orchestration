@@ -7,7 +7,7 @@
 
 ## Context
 
-F43 ("auto-handover at 65% context pressure for headless workers") is a feature that detects when a headless `claude -p` conversation is approaching the model's context window limit and triggers a handover dispatch — the worker writes a context summary, the orchestrator reads it, and dispatches a fresh worker that continues seamlessly. Without this, headless workers die abruptly when context fills up, losing in-progress work.
+F43 ("auto-handover at 65% context pressure for headless workers") is a feature that detects when a headless `claude -p` conversation is approaching the model's context window limit and triggers a handover dispatch — the worker writes a context summary, the orchestrator reads it, and dispatches a fresh worker that continues without loss of state. Without this, headless workers die abruptly when context fills up, losing in-progress work.
 
 Two F43 branches exist on origin but were closed without merging:
 - `feat/f43-context-rotation-headless` — 757 LOC, headless path

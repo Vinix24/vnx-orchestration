@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# rp_logging.sh - Logging helpers for receipt_processor_v4.sh
-# Sourced by scripts/receipt_processor_v4.sh
+# rp_logging.sh - Logging helpers for receipt_processor.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires globals: PROCESSING_LOG
 
 # Logging with levels
@@ -22,7 +22,7 @@ import sys
 code, message, details = sys.argv[1], sys.argv[2], sys.argv[3]
 event = {
     "event": "failure",
-    "component": "receipt_processor_v4.sh",
+    "component": "receipt_processor.sh",
     "code": code,
     "message": message,
 }

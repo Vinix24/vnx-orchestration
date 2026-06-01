@@ -6,7 +6,7 @@ Usage: terminal_state_check.py <state_file> <terminal_id> <dispatch_id>
 Outputs: ALLOW:<reason> or BLOCK:<reason>
 Exits:   0 always (output encodes the result)
 
-Extracted from dispatcher_v8_minimal.sh terminal_lock_allows_dispatch.
+Extracted from dispatcher_minimal.sh terminal_lock_allows_dispatch.
 Output contract (matches terminal_lock_allows_dispatch in dispatch_lifecycle.sh):
   rc=0 + stdout not starting with BLOCK:  -> ALLOW
   rc=0 + stdout "BLOCK:<reason>"          -> explicit block

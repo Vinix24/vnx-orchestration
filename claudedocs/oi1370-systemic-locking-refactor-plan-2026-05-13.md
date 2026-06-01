@@ -44,7 +44,7 @@ central copies under `~/.vnx-data/<pid>/state/`).
 
 ### 1e. Bash-side
 `scripts/lib/receipt_processor/rp_lock.sh:7-21` introduces a **third lock primitive**:
-`receipt_write.lock` used by `scripts/receipt_processor_v4.sh` for its own processing
+`receipt_write.lock` used by `scripts/receipt_processor.sh` for its own processing
 flow. This file is NOT shared with the Python writers and does NOT protect
 `t0_receipts.ndjson` itself — it gates the receipt-processor pipeline. Documented
 to prevent future confusion: `.state.lock`, `append_receipt.lock`, and

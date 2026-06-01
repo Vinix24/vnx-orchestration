@@ -21,9 +21,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from intelligence_selector import (  # noqa: E402
-    PATTERN_CATEGORY_CODE,
     PATTERN_CATEGORY_GOVERNANCE,
     IntelligenceSelector,
+)
+from intelligence_sources._common import (  # noqa: E402
+    PATTERN_CATEGORY_CODE,
     classify_pattern_category,
 )
 from pattern_dedup import (  # noqa: E402

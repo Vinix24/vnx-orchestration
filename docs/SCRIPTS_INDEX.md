@@ -35,7 +35,7 @@ These files implement the main `bin/vnx` command surface:
 
 Core dispatch/runtime orchestration:
 
-- `scripts/dispatcher_v8_minimal.sh` — main dispatch delivery entrypoint
+- `scripts/dispatcher_minimal.sh` — main dispatch delivery entrypoint
 - `scripts/pr_queue_manager.py` — queue and promotion management
 - `scripts/open_items_manager.py` — open-item creation, digestion, and rescan flow
 - `scripts/runtime_core_cli.py` — runtime-core operator tooling
@@ -61,7 +61,7 @@ These scripts process worker outputs into auditable receipts:
 - `scripts/append_receipt.py` — canonical receipt append helper
 - `scripts/report_parser.py` — parse report markdown into structured receipt fields
 - `scripts/report_watcher.sh` — watch reports and trigger receipt processing
-- `scripts/receipt_processor_v4.sh` — receipt processing and T0 delivery pipeline
+- `scripts/receipt_processor.sh` — receipt processing and T0 delivery pipeline
 - `scripts/heartbeat_ack_monitor.py` — receipt/ACK confirmation monitoring
 
 Related docs:

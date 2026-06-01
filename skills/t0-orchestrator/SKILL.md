@@ -30,7 +30,35 @@ You do not implement features directly.
 9. Dispatch output belongs in terminal output (manager block), not direct queue file edits.
 10. In full autonomous chain mode, do not ask the user for routine checkpoints; escalate only on true chain-breaking blockers.
 
-## 2. Primary Workflow (Receipt -> Review -> Dispatch)
+## 2. THIN-T0: Research and Reporting Boundaries
+
+**T0 does NOT conduct investigation, research, or write analysis reports.**
+
+T0 is a thin orchestration layer. All research, implementation, testing, and report-writing
+is delegated to workers (T1/T2/T3). T0 reviews the resulting receipts and reports — it does
+not produce them.
+
+### T0 output is limited to
+
+- Dispatch instructions (manager blocks written to terminal output)
+- Gate / closure decisions
+- Light state-checks (`Bash` read-only CLI calls for state queries)
+- Staging-area promotions via `pr_queue_manager.py`
+
+### T0 MUST NOT
+
+- Author analysis documents, investigation reports, or `claudedocs/*` files
+- Conduct multi-step research or exploration on behalf of the sprint
+- Use `Write` or `Edit` to create persistent files outside:
+  - `/tmp/*` (ephemeral dispatch scratch)
+  - `.vnx-data/dispatches/staging/` (manager blocks, ONLY via `pr_queue_manager.py staging`)
+- Delegate research to itself via self-dispatches
+
+When a gap requires investigation or a written deliverable, T0 MUST dispatch a worker
+(e.g. `backend-developer`, `architect`, `intelligence-engineer`) and wait for the receipt
+before making an orchestration decision.
+
+## 3. Primary Workflow (Receipt → Review → Dispatch)
 
 Run this loop each orchestration cycle.
 
@@ -48,7 +76,7 @@ Run this loop each orchestration cycle.
    2. DISPATCH one manager block
    3. ESCALATE
 
-## 3. Decision Framework
+## 4. Decision Framework
 
 Apply this 8-step decision tree in order. The first matching rule wins.
 
@@ -160,7 +188,7 @@ If output is anything other than "success", do NOT merge. Investigate the cause,
 
 RATIONALE: `gh pr checks` lists individual job names but the workflow as a whole can still produce a "failure" conclusion (e.g. multi-step Profile A whose Legacy path gate sub-step fails) while the visible names appear "pass". Multiple late-night merges on 2026-05-06/07 had VNX CI = failure that was missed by checking individual names only — Legacy path gate was tripping on a literal `.vnx-data/state/` string in build_current_state.py:263 that the rg-based gate flagged repository-wide on main, but did not flag in PR-scoped diffs.
 
-## 4. Quality Advisory Interpretation
+## 5. Quality Advisory Interpretation
 
 Use advisory as signal, not authority.
 
@@ -176,7 +204,7 @@ Use advisory as signal, not authority.
 4. `hold | risk > 0.8`
 - Block progression unless explicitly mitigated.
 
-## 5. Doubt and Escalation Policy
+## 6. Doubt and Escalation Policy
 
 When uncertain, use this sequence:
 
@@ -191,7 +219,7 @@ When uncertain, use this sequence:
 3. Keep safety-first default.
 - If ambiguity remains on blocker/warn criteria, do not complete PR.
 
-## 6. Startup Reconciliation
+## 7. Startup Reconciliation
 
 Run this sequence on every session start. For post-crash starts, run all steps. For normal starts, steps 1 and 3 are sufficient.
 
@@ -264,7 +292,7 @@ python3 scripts/lib/vnx_recover_runtime.py             # execute recovery
 
 This engine encapsulates lease cleanup, queue reconciliation, and terminal state recovery in a single pass. Use `--dry-run` first to verify the proposed recovery actions.
 
-## 7. Open Items Lifecycle
+## 8. Open Items Lifecycle
 
 ### 6.1 Inspect
 
@@ -305,7 +333,7 @@ python3 scripts/open_items_manager.py add \
 
 If CLI signature differs in your branch, use `--help` and map fields accordingly.
 
-## 8. PR Queue Lifecycle
+## 9. PR Queue Lifecycle
 
 ### 7.1 Read state
 
@@ -358,7 +386,7 @@ T0 must treat the following as closure blockers:
 - gate result exists but `report_path` is empty
 - ad hoc shell review output exists but no normalized report and no recorded result exist
 
-## 9. Dispatch Guard and Provider Awareness
+## 10. Dispatch Guard and Provider Awareness
 
 Before dispatching:
 
@@ -452,25 +480,28 @@ Gate execution (codex_gate, gemini_review) uses `scripts/review_gate_manager.py 
 
 Rule of thumb: Does the work produce a PR or a measurement? Then subprocess_dispatch.py. Does the work produce a gate result? Then review_gate_manager.py or t0_gate_enforcement.sh. Otherwise Bash is fine.
 
-## 10. Manager Block Quality Standard
+## 11. Manager Block Quality Standard
 
 Every dispatch must include:
 
 1. `[[TARGET:A|B|C]]`
 2. `[[DONE]]`
 3. Required headers:
-   1. `Role`
-   2. `Track`
-   3. `Terminal`
-   4. `PR-ID`
-   5. `Priority`
-   6. `Cognition`
-   7. `Dispatch-ID`
-   8. `Parent-Dispatch`
-   9. `Reason`
-4. `Workflow` and `Context`
+   1. `Role` — the primary routing field (skill name); replaces the old Track A/B/C model
+   2. `Terminal` — optional; legacy terminal-pin. Role-scoped pool is the default.
+   3. `PR-ID`
+   4. `Priority`
+   5. `Cognition`
+   6. `Dispatch-ID`
+   7. `Parent-Dispatch`
+   8. `Reason`
+4. `Context`
 5. Explicit success criteria
 6. If the dispatch requests a headless review gate, it must name the expected report path and required receipt/result linkage
+
+**T0 Write/Edit scope (HARD LIMIT):**
+- T0 may ONLY write to `/tmp/*` (ephemeral scratch) and `.vnx-data/dispatches/staging/`
+- `claudedocs/*` analysis reports are WORKER output, not T0 output — FORBIDDEN for T0
 
 Validate role names before init, promote, and dispatch when uncertain:
 
@@ -478,7 +509,7 @@ Validate role names before init, promote, and dispatch when uncertain:
 python3 scripts/validate_skill.py --list
 ```
 
-## 11. Recommended Script Toolbox
+## 12. Recommended Script Toolbox
 
 1. `scripts/queue_status.sh`
 - queue/staging/terminal summary
@@ -498,7 +529,7 @@ python3 scripts/validate_skill.py --list
 6. `scripts/intelligence.sh`
 - intelligence read helpers
 
-## 12. Decision Outputs
+## 13. Decision Outputs
 
 When not dispatching, provide explicit status to user:
 
@@ -506,7 +537,7 @@ When not dispatching, provide explicit status to user:
 2. `ESCALATE`: explain ambiguity and propose options.
 3. `PROCEED`: show why criteria are met.
 
-## 13. References
+## 14. References
 
 1. `references/dispatch-patterns.md`
 2. `references/example-workflows.md`
@@ -517,7 +548,7 @@ When not dispatching, provide explicit status to user:
 
 ---
 
-## 14. Session Resume After Crash
+## 15. Session Resume After Crash
 
 When T0 or a worker terminal crashes and the conversation context is lost:
 

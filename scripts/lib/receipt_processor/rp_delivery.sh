@@ -1,10 +1,10 @@
 # shellcheck shell=bash
 # rp_delivery.sh - Receipt delivery to T0 pane via tmux + outbox retry
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, _build_state_line/_build_quality_line/
 #           _drtp_get_next_action/_drtp_build_git_line from rp_extract.sh,
 #           extract_receipt_fields() from rp_extract.sh,
-#           get_pane_id_smart() from pane_manager_v2,
+#           get_pane_id_smart() from pane_manager,
 #           _rf_* fields, $RECEIPTS_PENDING_DIR, $RECEIPTS_PROCESSED_DIR
 
 # Section F (inner): Build enriched receipt message and paste to T0 tmux pane.

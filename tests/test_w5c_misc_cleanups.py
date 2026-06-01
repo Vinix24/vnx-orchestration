@@ -125,7 +125,7 @@ class TestEnsureUnifiedReport:
 
 class TestOnceModeWithRealSupervisor:
     def _make_fake_dispatcher(self, tmp_dir: str, exit_code: int = 0) -> str:
-        path = os.path.join(tmp_dir, "fake_dispatcher_v8_minimal.sh")
+        path = os.path.join(tmp_dir, "fake_dispatcher_minimal.sh")
         with open(path, "w") as f:
             f.write(f"#!/bin/bash\nexit {exit_code}\n")
         os.chmod(path, 0o755)

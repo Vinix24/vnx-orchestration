@@ -11,7 +11,7 @@
 #   treated any non-zero exit as [DEPENDENCY_ERROR]. Result: every legacy
 #   alias was blocked as a runtime dependency failure instead of dispatching.
 #
-# Fix (scripts/dispatcher_v8_minimal.sh):
+# Fix (scripts/dispatcher_minimal.sh):
 #   - Map role through map_role_to_skill before validate call.
 #   - Distinguish rc=10 (registry miss → SKILL_INVALID) from other non-zero
 #     codes (genuine runtime failure → DEPENDENCY_ERROR).
@@ -24,7 +24,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DISPATCHER="$PROJECT_ROOT/scripts/dispatcher_v8_minimal.sh"
+DISPATCHER="$PROJECT_ROOT/scripts/dispatcher_minimal.sh"
 DISPATCH_CREATE="$PROJECT_ROOT/scripts/lib/dispatch_create.sh"
 
 PASS=0

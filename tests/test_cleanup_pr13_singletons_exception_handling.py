@@ -264,21 +264,21 @@ def test_shadow_mode_runner_missing_t0_state_does_not_raise(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 12. unified_state_manager_v2
+# 12. unified_state_manager
 # ---------------------------------------------------------------------------
 
 def test_unified_state_manager_t0_brief_subprocess_failure_does_not_raise(tmp_path):
     """T0 brief script subprocess failure is swallowed without raising."""
-    import unified_state_manager_v2 as m
+    import unified_state_manager as m
     import subprocess as sp
 
     manager = m.UnifiedStateManagerV2.__new__(m.UnifiedStateManagerV2)
 
     fake_script = str(tmp_path / "fake_brief.sh")
 
-    with patch("unified_state_manager_v2.os.path.exists", return_value=True):
-        with patch("unified_state_manager_v2.subprocess.run", side_effect=FileNotFoundError("script gone")):
-            with patch("unified_state_manager_v2.T0_BRIEF_SCRIPT", fake_script):
+    with patch("unified_state_manager.os.path.exists", return_value=True):
+        with patch("unified_state_manager.subprocess.run", side_effect=FileNotFoundError("script gone")):
+            with patch("unified_state_manager.T0_BRIEF_SCRIPT", fake_script):
                 # Directly exercise the try/except block from the daemon loop
                 try:
                     if m.os.path.exists(fake_script):
