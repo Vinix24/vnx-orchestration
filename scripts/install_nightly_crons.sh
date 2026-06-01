@@ -21,6 +21,11 @@ CRON_ENTRY="30 2 * * * cd $PROJECT_ROOT && python3 scripts/compact_state.py --mo
 # legacy state-dir literals out of the cron entry string (per CI Legacy path gate).
 SHADOW_LOG_FILE="${PROJECT_ROOT}/$(printf '.vnx-%s/logs/shadow_rotation.log' data)"
 SHADOW_CRON_ENTRY="0 3 * * * VNX_HOME=$PROJECT_ROOT $PROJECT_ROOT/scripts/rotate_shadow_ledger.sh >> $SHADOW_LOG_FILE 2>&1"
+# Wave 5 / GAP 4 — nightly intelligence pipeline (deterministic, 0 LLM calls).
+# Runs at 04:00 after compact_state (02:30) and shadow rotation (03:00) so they don't overlap.
+# Proposes edits to the state-dir pending_edits.json (human-in-the-loop, never auto-applies).
+INTEL_LOG_FILE="${PROJECT_ROOT}/$(printf '.vnx-%s/logs/nightly_pipeline_cron.log' data)"
+INTEL_CRON_ENTRY="0 4 * * * VNX_HOME=$PROJECT_ROOT $PROJECT_ROOT/scripts/nightly_intelligence_pipeline.sh >> $INTEL_LOG_FILE 2>&1"
 
 existing=$(crontab -l 2>/dev/null || true)
 
@@ -42,6 +47,15 @@ if printf '%s\n' "$existing" | grep -qF "shadow_divergence.ndjson"; then
 else
     printf '%s\n%s\n' "$existing" "$SHADOW_CRON_ENTRY" | crontab -
     printf 'shadow_divergence rotation cron entry installed.\n'
+fi
+
+existing=$(crontab -l 2>/dev/null || true)
+
+if printf '%s\n' "$existing" | grep -qF "nightly_intelligence_pipeline.sh"; then
+    printf 'nightly intelligence pipeline cron entry already installed — no change.\n'
+else
+    printf '%s\n%s\n' "$existing" "$INTEL_CRON_ENTRY" | crontab -
+    printf 'nightly intelligence pipeline cron entry installed.\n'
 fi
 
 printf '\nCurrent crontab:\n'
