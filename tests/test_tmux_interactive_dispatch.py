@@ -1468,5 +1468,351 @@ class TestSharedGovernWiringTmux(_LaneTestCase):
                              f"Legacy placeholder found in governed report body: {body[:300]}")
 
 
+# ---------------------------------------------------------------------------
+# RECEIPT step: F1 lane-synthesized receipt guarantee (VNX_RECEIPT_FALLBACK)
+# ---------------------------------------------------------------------------
+
+class TestReceiptFallback(_LaneTestCase):
+    """ensure_receipt fires on timeout, is suppressed on normal path and when flag=0."""
+
+    def test_worker_skip_synthesizes_exactly_one_receipt(self):
+        """Worker completes but never emits a receipt -> exactly one lane-synthesized receipt."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_RECEIPT_FALLBACK": "1"}):
+            with patch("dispatch_govern._git_summary", return_value="timeout synthesis"):
+                with patch("dispatch_govern._git_changes", return_value="No diff"):
+                    self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertTrue(self.receipts_file.exists(), "receipts_file must exist after timeout + fallback")
+        lines = [ln for ln in self.receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        synthesized = [json.loads(ln) for ln in lines
+                       if json.loads(ln).get("source") == "tmux_interactive_lane_synthesized"]
+        self.assertEqual(
+            len(synthesized), 1,
+            f"Expected exactly 1 lane-synthesized receipt, got {len(synthesized)}: {synthesized}",
+        )
+        rec = synthesized[0]
+        self.assertTrue(rec.get("synthesized"), "synthesized field must be True")
+        self.assertEqual(rec["dispatch_id"], self.DISPATCH_ID)
+        self.assertEqual(rec["failure_reason"], "tmux_receipt_deadline_exceeded")
+
+    def test_worker_skip_synthesized_receipt_has_report_path(self):
+        """Lane-synthesized receipt includes a report_path linking to the emitted report."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_RECEIPT_FALLBACK": "1"}):
+            with patch("dispatch_govern._git_summary", return_value="no worker receipt scenario"):
+                with patch("dispatch_govern._git_changes", return_value="No diff"):
+                    self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        lines = [ln for ln in self.receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        synthesized = [json.loads(ln) for ln in lines
+                       if json.loads(ln).get("source") == "tmux_interactive_lane_synthesized"]
+        self.assertEqual(len(synthesized), 1)
+        report_path = synthesized[0].get("report_path")
+        self.assertTrue(report_path, "report_path must be present in lane-synthesized receipt")
+        self.assertIn(self.DISPATCH_ID, report_path)
+
+    def test_normal_path_no_synthesized_receipt(self):
+        """Worker emits its own receipt -> no lane-synthesized receipt appended."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=True,
+            receipt_status="done",
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_RECEIPT_FALLBACK": "1"}):
+            with patch("dispatch_govern._git_summary",
+                       return_value="feat: worker completed with enough chars"):
+                with patch("dispatch_govern._git_changes", return_value="scripts/x.py | 5 ++"):
+                    result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+        if self.receipts_file.exists():
+            lines = [ln for ln in self.receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            synthesized = [json.loads(ln) for ln in lines
+                           if json.loads(ln).get("source") == "tmux_interactive_lane_synthesized"]
+            self.assertEqual(
+                len(synthesized), 0,
+                f"No synthesized receipt expected when worker emitted its own: {synthesized}",
+            )
+
+    def test_fallback_disabled_no_synthesized_receipt(self):
+        """VNX_RECEIPT_FALLBACK=0: timeout path must not append a synthesized receipt."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {"VNX_RECEIPT_FALLBACK": "0"}):
+            with patch("dispatch_govern._git_summary", return_value="fallback disabled scenario"):
+                with patch("dispatch_govern._git_changes", return_value="No diff"):
+                    result = self._fast_dispatch(lane, deadline_seconds=0.2, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+        if self.receipts_file.exists():
+            lines = [ln for ln in self.receipts_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            synthesized = [json.loads(ln) for ln in lines
+                           if json.loads(ln).get("source") == "tmux_interactive_lane_synthesized"]
+            self.assertEqual(
+                len(synthesized), 0,
+                f"VNX_RECEIPT_FALLBACK=0 must suppress synthesized receipt: {synthesized}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# RECEIPT step: dedup — authored > synthesized; late worker wins
+# ---------------------------------------------------------------------------
+
+class TestReceiptDedup(_LaneTestCase):
+    """_wait_for_receipt applies dedup: authored receipt wins over synthesized."""
+
+    def test_dedup_authored_wins_over_synthesized_when_both_present(self):
+        """If both a synthesized and an authored receipt exist, _wait_for_receipt returns the authored one."""
+        synthesized_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T10:00:00Z",
+        }
+        authored_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "ephemeral",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T11:00:00Z",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(synthesized_receipt) + "\n")
+            fh.write(json.dumps(authored_receipt) + "\n")
+
+        # Baseline = 0 (fresh dispatch start), both receipts are "new"
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        selected = lane._wait_for_receipt(
+            self.DISPATCH_ID, deadline_seconds=0.1, poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES, baseline_count=0,
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(
+            selected.get("source"), "tmux_interactive",
+            f"Authored receipt must win; got source={selected.get('source')!r}",
+        )
+        self.assertFalse(selected.get("synthesized"), "Authored receipt must not have synthesized=True")
+
+    def test_dedup_no_double_count_both_receipts_returns_one(self):
+        """With both receipts present, _wait_for_receipt returns exactly one dict (no double-count)."""
+        for source, synth, ts in [
+            ("tmux_interactive_lane_synthesized", True, "2026-06-01T10:00:00Z"),
+            ("tmux_interactive", False, "2026-06-01T11:00:00Z"),
+        ]:
+            self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+            r = {
+                "event_type": "subprocess_completion",
+                "dispatch_id": self.DISPATCH_ID,
+                "terminal": "T1",
+                "status": "done",
+                "source": source,
+                "synthesized": synth,
+                "timestamp": ts,
+            }
+            with self.receipts_file.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(r) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        selected = lane._wait_for_receipt(
+            self.DISPATCH_ID, deadline_seconds=0.1, poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES, baseline_count=0,
+        )
+
+        self.assertIsInstance(selected, dict, "Must return a single dict, not a list")
+
+    def test_dedup_authored_wins_when_synthesized_last_by_position(self):
+        """Nontrivial case: authored is written FIRST, synthesized LAST.
+
+        Without dedup, [-1] would pick synthesized. With dedup, authored always wins.
+        """
+        authored_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "ephemeral",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T10:00:00Z",
+        }
+        synthesized_receipt = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T11:00:00Z",  # later timestamp, last by position
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(authored_receipt) + "\n")
+            fh.write(json.dumps(synthesized_receipt) + "\n")
+
+        lane = TmuxInteractiveDispatch(
+            self.state_dir,
+            receipts_file=self.receipts_file,
+            project_root=self.state_dir,
+        )
+        selected = lane._wait_for_receipt(
+            self.DISPATCH_ID, deadline_seconds=0.1, poll_interval=0.01,
+            completion_statuses=DEFAULT_COMPLETION_STATUSES, baseline_count=0,
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(
+            selected.get("source"), "tmux_interactive",
+            f"Authored receipt must win even when synthesized is last by position; "
+            f"got source={selected.get('source')!r}",
+        )
+        self.assertFalse(
+            selected.get("synthesized"),
+            "Winner must not have synthesized=True; authored receipt should be selected",
+        )
+
+    def test_consumer_path_dedup_authored_wins_exactly_once(self):
+        """Consumer code path (headless_orchestrator._OrchestratedReceiptWatcher) deduplicates
+        by dispatch_id: emits exactly one LoopEvent for the authored receipt when the ledger
+        contains a synthesized receipt first and an authored receipt later for the same dispatch_id.
+        """
+        import queue
+        import threading
+        from headless_orchestrator import _OrchestratedReceiptWatcher, LoopEvent
+
+        synthesized = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T08:00:00Z",
+        }
+        authored = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "terminal": "T1",
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T09:00:00Z",
+        }
+        self.receipts_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.receipts_file.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(synthesized) + "\n")
+            fh.write(json.dumps(authored) + "\n")
+
+        bus: "queue.Queue[LoopEvent]" = queue.Queue()
+        shutdown = threading.Event()
+        watcher = _OrchestratedReceiptWatcher(
+            self.state_dir,
+            shutdown_event=shutdown,
+            event_bus=bus,
+            dry_run=True,
+        )
+        watcher._refresh_t0_state = lambda state_dir: None
+        watcher._file_pos = 0  # read from the beginning
+
+        watcher._check_new_lines()
+
+        self.assertFalse(bus.empty(), "Consumer must emit a LoopEvent for the actionable receipts")
+        event = bus.get_nowait()
+        self.assertTrue(bus.empty(), "Exactly one LoopEvent expected — not two (no double-count)")
+        self.assertIsInstance(event, LoopEvent)
+        self.assertEqual(event.reason, "receipt")
+        self.assertEqual(
+            event.context.get("latest_dispatch_id"), self.DISPATCH_ID,
+            "LoopEvent must reference the correct dispatch_id",
+        )
+        self.assertEqual(
+            event.context.get("receipt_count"), 1,
+            "Dedup must collapse both receipts to exactly 1 winner per dispatch_id",
+        )
+        self.assertEqual(
+            event.context.get("receipt_status"), "done",
+            "Winner must be the authored receipt (status='done'), not the synthesized one (status='failed')",
+        )
+
+    def test_shared_dedup_helper_consumer_level(self):
+        """dedup_completion_receipts (shared helper) returns exactly one winner: the authored receipt.
+
+        Validates the helper used by both lane and consumer sites.
+        """
+        from dispatch_govern import dedup_completion_receipts
+
+        authored = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "done",
+            "source": "tmux_interactive",
+            "timestamp": "2026-06-01T09:00:00Z",  # authored is EARLIER in time
+        }
+        synthesized = {
+            "event_type": "subprocess_completion",
+            "dispatch_id": self.DISPATCH_ID,
+            "status": "failed",
+            "source": "tmux_interactive_lane_synthesized",
+            "synthesized": True,
+            "timestamp": "2026-06-01T10:00:00Z",  # synthesized is NEWER timestamp
+        }
+
+        # Synthesized written first (earlier position), authored second: authored wins by preference
+        winner_synth_first = dedup_completion_receipts([synthesized, authored])
+        self.assertIsNotNone(winner_synth_first)
+        self.assertEqual(
+            winner_synth_first.get("source"), "tmux_interactive",
+            "Authored must win when synthesized is first in list",
+        )
+        self.assertFalse(winner_synth_first.get("synthesized"))
+
+        # Authored written first (earlier position), synthesized last: authored STILL wins
+        winner_authored_first = dedup_completion_receipts([authored, synthesized])
+        self.assertIsNotNone(winner_authored_first)
+        self.assertEqual(
+            winner_authored_first.get("source"), "tmux_interactive",
+            "Authored must win when authored is first in list (synthesized is last by position AND newer)",
+        )
+        self.assertFalse(winner_authored_first.get("synthesized"))
+
+        # Exactly one winner per dispatch_id — no double processing
+        self.assertIs(
+            winner_synth_first, winner_authored_first,
+            "Both orderings must return the SAME authored receipt object",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

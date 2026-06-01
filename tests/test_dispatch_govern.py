@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(_SCRIPTS / "lib"))
+sys.path.insert(0, str(_SCRIPTS))
 
-from dispatch_govern import GovernRaw, GovernSpec, GovernedOutcome, govern, _synthesize
+from dispatch_govern import (
+    GovernRaw,
+    GovernSpec,
+    GovernedOutcome,
+    dedup_completion_receipts,
+    ensure_receipt,
+    govern,
+    _synthesize,
+)
 from report_body_contract import validate_body
 
 
@@ -519,3 +531,283 @@ def test_forbidden_placeholder_absent_from_scripts():
     assert violations == [], (
         f"Forbidden placeholder string found in scripts/: {violations}"
     )
+
+
+# ---------------------------------------------------------------------------
+# dedup_completion_receipts — unit tests
+# ---------------------------------------------------------------------------
+
+def test_dedup_empty_returns_none():
+    assert dedup_completion_receipts([]) is None
+
+
+def test_dedup_single_returns_it():
+    r = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T10:00:00Z"}
+    assert dedup_completion_receipts([r]) is r
+
+
+def test_dedup_prefers_authored_over_synthesized():
+    """Non-synthesized receipt wins regardless of timestamp order."""
+    synthesized = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T11:00:00Z"}
+    authored = {"dispatch_id": "x", "synthesized": False, "timestamp": "2026-06-01T10:00:00Z"}
+    result = dedup_completion_receipts([synthesized, authored])
+    assert result is authored, "authored must win over synthesized even when synthesized is newer"
+
+
+def test_dedup_authored_no_synthesized_field_wins():
+    """A receipt without the synthesized field is treated as authored."""
+    synthesized = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T12:00:00Z"}
+    authored = {"dispatch_id": "x", "timestamp": "2026-06-01T10:00:00Z"}
+    result = dedup_completion_receipts([synthesized, authored])
+    assert result is authored
+
+
+def test_dedup_late_authored_wins_over_earlier_synthesized():
+    """A worker receipt arriving AFTER a synthesized one must win."""
+    synthesized = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T10:00:00Z"}
+    authored = {"dispatch_id": "x", "timestamp": "2026-06-01T11:00:00Z"}
+    result = dedup_completion_receipts([synthesized, authored])
+    assert result is authored
+
+
+def test_dedup_no_double_count():
+    """With two receipts, dedup returns exactly one."""
+    r1 = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T10:00:00Z"}
+    r2 = {"dispatch_id": "x", "timestamp": "2026-06-01T11:00:00Z"}
+    result = dedup_completion_receipts([r1, r2])
+    assert isinstance(result, dict)
+
+
+def test_dedup_all_synthesized_picks_newest():
+    """When all receipts are synthesized, picks the one with the latest timestamp."""
+    r1 = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T10:00:00Z"}
+    r2 = {"dispatch_id": "x", "synthesized": True, "timestamp": "2026-06-01T11:00:00Z"}
+    result = dedup_completion_receipts([r1, r2])
+    assert result is r2
+
+
+def test_dedup_authored_newest_wins():
+    """When multiple authored receipts, picks newest timestamp."""
+    r1 = {"dispatch_id": "x", "timestamp": "2026-06-01T09:00:00Z"}
+    r2 = {"dispatch_id": "x", "timestamp": "2026-06-01T10:00:00Z"}
+    result = dedup_completion_receipts([r1, r2])
+    assert result is r2
+
+
+# ---------------------------------------------------------------------------
+# ensure_receipt — unit tests
+# ---------------------------------------------------------------------------
+
+def test_ensure_receipt_appended_when_no_worker_receipt(tmp_data, tmp_state):
+    """ensure_receipt fires when raw.receipt is None, appending exactly one synthesized receipt."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    assert receipts_file.exists(), "receipts_file must be created by ensure_receipt"
+    lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1, f"Expected exactly 1 receipt line, got {len(lines)}"
+    receipt = json.loads(lines[0])
+    assert receipt["source"] == "tmux_interactive_lane_synthesized"
+    assert receipt["synthesized"] is True
+    assert receipt["dispatch_id"] == spec.dispatch_id
+    assert receipt["failure_reason"] == "tmux_receipt_deadline_exceeded"
+
+
+def test_ensure_receipt_includes_report_path_when_provided(tmp_data, tmp_state):
+    """Lane-synthesized receipt includes report_path when a report was emitted."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+    fake_report = tmp_data / "unified_reports" / f"{spec.dispatch_id}.md"
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=fake_report,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    assert receipt.get("report_path") == str(fake_report)
+
+
+def test_ensure_receipt_not_fired_when_worker_receipt_exists(tmp_data, tmp_state):
+    """When raw.receipt is set (worker emitted), ensure_receipt does not fire."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt={"status": "done", "source": "tmux_interactive"}, duration_seconds=5.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="authored", permission_enforcement="soft")
+
+    assert not receipts_file.exists() or receipts_file.read_text().strip() == ""
+
+
+def test_ensure_receipt_disabled_by_flag(tmp_data, tmp_state, monkeypatch):
+    """VNX_RECEIPT_FALLBACK=0 disables ensure_receipt entirely."""
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "0")
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    assert not receipts_file.exists() or receipts_file.read_text().strip() == ""
+
+
+def test_ensure_receipt_idempotent(tmp_data, tmp_state):
+    """Calling ensure_receipt twice for the same dispatch_id appends at most one unique receipt."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1, f"Idempotency: expected 1 receipt, got {len(lines)}"
+
+
+# ---------------------------------------------------------------------------
+# govern() + ensure_receipt integration — timeout path appends synthesized receipt
+# ---------------------------------------------------------------------------
+
+def test_govern_timeout_appends_synthesized_receipt(tmp_data, tmp_state, monkeypatch):
+    """govern() with receipt=None must append a lane-synthesized receipt to t0_receipts.ndjson."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit; timeout. Body synthesized."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        govern(spec, raw, lane="tmux_interactive")
+
+    assert receipts_file.exists(), "ensure_receipt must create t0_receipts.ndjson"
+    lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
+    assert len(lines) >= 1
+    synthesized = [json.loads(l) for l in lines
+                   if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
+    assert len(synthesized) == 1, f"Expected exactly 1 lane-synthesized receipt, got {synthesized}"
+    assert synthesized[0]["synthesized"] is True
+    assert synthesized[0]["dispatch_id"] == spec.dispatch_id
+
+
+def test_govern_normal_path_no_synthesized_receipt(tmp_data, tmp_state, monkeypatch):
+    """govern() with a worker receipt must NOT append a synthesized one."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "1")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt={"status": "done", "source": "tmux_interactive"}, duration_seconds=5.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: real worker output with enough chars"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/x.py | 5 ++"):
+        govern(spec, raw, lane="tmux_interactive")
+
+    if receipts_file.exists():
+        lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
+        synthesized = [json.loads(l) for l in lines
+                       if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
+        assert synthesized == [], "No synthesized receipt expected when worker emitted its own"
+
+
+def test_govern_fallback_disabled_no_receipt_appended(tmp_data, tmp_state, monkeypatch):
+    """VNX_RECEIPT_FALLBACK=0: timeout path must NOT append a synthesized receipt."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_RECEIPT_FALLBACK", "0")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = GovernRaw(receipt=None, duration_seconds=3600.0)
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+
+    with patch("dispatch_govern._git_summary", return_value="No commit; timeout."), \
+         patch("dispatch_govern._git_changes", return_value="No git diff available"):
+        govern(spec, raw, lane="tmux_interactive")
+
+    if receipts_file.exists():
+        lines = [l for l in receipts_file.read_text().splitlines() if l.strip()]
+        synthesized = [json.loads(l) for l in lines
+                       if json.loads(l).get("source") == "tmux_interactive_lane_synthesized"]
+        assert synthesized == [], "VNX_RECEIPT_FALLBACK=0 must suppress synthesized receipt"
+
+
+# ---------------------------------------------------------------------------
+# Runtime-path regression: ensure_receipt importable under PYTHONPATH=scripts/lib only
+# ---------------------------------------------------------------------------
+
+def test_ensure_receipt_runtime_import_path(tmp_path):
+    """ensure_receipt() must write a synthesized receipt even when scripts/ is NOT on sys.path.
+
+    Replicates the real tmux runtime: dispatch.sh sets PYTHONPATH=scripts/lib only.
+    Before the fix, 'from append_receipt import append_receipt_payload' raised
+    ModuleNotFoundError at runtime (silently caught), so NO receipt was written.
+    The fix adds _SCRIPTS_DIR to sys.path inside dispatch_govern before the import.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    receipts_file = state_dir / "t0_receipts.ndjson"
+
+    scripts_lib = str(_SCRIPTS / "lib")
+
+    # Inline script that only has scripts/lib on sys.path — no scripts/
+    inline = f"""
+import sys, json
+from pathlib import Path
+
+state_dir = Path({str(state_dir)!r})
+receipts_file = state_dir / "t0_receipts.ndjson"
+
+from dispatch_govern import GovernSpec, GovernRaw, ensure_receipt
+
+spec = GovernSpec(
+    dispatch_id="runtime-path-test-001",
+    terminal_id="T1",
+    instruction="test",
+    data_dir=state_dir,
+    state_dir=state_dir,
+)
+raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+               contract_status="synthesized", permission_enforcement="soft")
+
+if not receipts_file.exists():
+    print("FAIL:no_receipts_file")
+    sys.exit(1)
+lines = [l.strip() for l in receipts_file.read_text().splitlines() if l.strip()]
+if not lines:
+    print("FAIL:empty_receipts_file")
+    sys.exit(1)
+r = json.loads(lines[-1])
+if r.get("source") != "tmux_interactive_lane_synthesized":
+    print(f"FAIL:wrong_source:{{r.get('source')!r}}")
+    sys.exit(1)
+if r.get("dispatch_id") != "runtime-path-test-001":
+    print(f"FAIL:wrong_dispatch_id:{{r.get('dispatch_id')!r}}")
+    sys.exit(1)
+print("OK")
+"""
+
+    env = {**os.environ, "PYTHONPATH": scripts_lib}
+    # Remove any scripts/ that might be inherited via PYTHONPATH
+    result = subprocess.run(
+        [sys.executable, "-c", inline],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"ensure_receipt failed under PYTHONPATH=scripts/lib only.\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+    assert "OK" in result.stdout, f"Expected OK, got: {result.stdout!r}"

@@ -76,6 +76,14 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
 
 DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
 
+# Receipt dedup — prefer worker-authored over lane-synthesized.
+# Imported defensively; fallback returns the last receipt by list order.
+try:
+    from dispatch_govern import dedup_completion_receipts as _dedup_receipts  # noqa: E402
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    def _dedup_receipts(receipts):  # type: ignore[misc]
+        return receipts[-1] if receipts else None
+
 # Only simple identifiers are valid model names (no whitespace or shell metacharacters).
 _SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
@@ -658,7 +666,9 @@ class TmuxInteractiveDispatch:
         while True:
             matches = self._matching_receipts(dispatch_id, completion_statuses)
             if len(matches) > baseline_count:
-                return matches[-1]
+                # Apply dedup: authored > synthesized; newest timestamp within tier.
+                preferred = _dedup_receipts(matches[baseline_count:])
+                return preferred if preferred is not None else matches[-1]
             if time.monotonic() >= deadline:
                 return None
             time.sleep(poll_interval)
