@@ -357,6 +357,10 @@ if __name__ == "__main__":
         "--no-repo-map", action="store_true",
         help="Skip repo map injection for this dispatch (e.g. review/research batches).",
     )
+    parser.add_argument(
+        "--requires-mcp", action="store_true", default=False,
+        help="Preserve ambient MCP config for this dispatch (Requires-MCP: true in dispatch file).",
+    )
     args = parser.parse_args()
 
     # Wave-5 ADR injection opt-out: set env var before instruction assembly (INT-2)
@@ -539,6 +543,7 @@ if __name__ == "__main__":
             model=_effective_model,
             dispatch_id=args.dispatch_id,
             role=args.role,
+            requires_mcp=args.requires_mcp,
             max_retries=args.max_retries,
             chunk_timeout=_chunk_timeout,
             total_deadline=_total_deadline,
