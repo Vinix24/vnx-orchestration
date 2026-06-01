@@ -348,10 +348,15 @@ class DispatchBroker:
                 raise BrokerError(f"Cannot claim: dispatch not found: {dispatch_id!r}")
 
             current_state = row["state"]
-            if current_state != "queued":
+            if current_state == "proposed":
+                raise BrokerError(
+                    f"Cannot claim dispatch {dispatch_id!r}: state is 'proposed' "
+                    f"(deliverable not yet approved). Run: vnx deliverable promote {dispatch_id}"
+                )
+            if current_state not in ("queued", "ready"):
                 raise BrokerError(
                     f"Cannot claim dispatch {dispatch_id!r}: "
-                    f"expected state 'queued', found {current_state!r}"
+                    f"expected state 'queued' or 'ready', found {current_state!r}"
                 )
 
             updated_row = transition_dispatch(

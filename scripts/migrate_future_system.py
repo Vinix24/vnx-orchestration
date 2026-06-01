@@ -328,6 +328,8 @@ def _ensure_dispatches_output_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE dispatches ADD COLUMN output_ref TEXT")
     if "output_kind" not in cols:
         conn.execute("ALTER TABLE dispatches ADD COLUMN output_kind TEXT")
+    if "operator_approved_at" not in cols:
+        conn.execute("ALTER TABLE dispatches ADD COLUMN operator_approved_at TEXT")
 
     conn.execute(
         "UPDATE dispatches SET output_ref = pr_ref, output_kind = 'pr' "
