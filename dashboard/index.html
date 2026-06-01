@@ -2177,7 +2177,7 @@
         visible.forEach(card => {
           const el = document.createElement("div");
           el.className = "kanban-card";
-          const trackClass = `track-${(card.track || "").toLowerCase()}`;
+          const trackClass = TRACK_CLASS[(card.track || "").toLowerCase()] || "";
           const shortId = card.id.length > 28 ? card.id.slice(0, 28) + "…" : card.id;
           el.innerHTML = `
             <div class="kanban-card-id" title="${escHtml(card.id)}">${escHtml(shortId)}</div>
@@ -2219,11 +2219,19 @@
 
     // ── Planning Kanban ──────────────────────────────────────────────────────
 
+    // Whitelist DB-derived values to known CSS classes (XSS hardening).
+    // No raw value from the API ever reaches a class attribute or innerHTML
+    // attribute position without passing through one of these allowlists.
+    const PHASE_CLASS = {queued:"phase-queued", active:"phase-active", parked:"phase-parked", done:"phase-done"};
+    const DELIVERABLE_STATUS_CLASS = {proposed:"status-proposed", ready:"status-ready", in_progress:"status-in_progress", done:"status-done"};
+    const OI_LINK_CLASS = {blocks:"oi-blocks", warns:"oi-warns", related:"oi-related"};
+    const TRACK_CLASS = {a:"track-a", b:"track-b", c:"track-c"};
+
     function renderPlanningCard(obj) {
       const card = document.createElement("div");
       card.className = "planning-card";
 
-      const phaseClass = `phase-${obj.phase || "queued"}`;
+      const phaseClass = PHASE_CLASS[obj.phase] || "phase-queued";
       const phaseBadge = `<span class="phase-badge ${phaseClass}">${escHtml(obj.phase || "?")}</span>`;
 
       const depBadges = (obj.depends_on || [])
@@ -2235,7 +2243,7 @@
       let delHtml = "";
       if ((obj.deliverables || []).length > 0) {
         const chips = obj.deliverables.map(d => {
-          const sc = `status-${(d.derived_status || "proposed").replace(/[^a-z_]/g, "")}`;
+          const sc = DELIVERABLE_STATUS_CLASS[d.derived_status] || "status-proposed";
           const kind = d.output_kind ? `[${escHtml(d.output_kind)}] ` : "";
           const ref = d.deliverable_ref ? escHtml(String(d.deliverable_ref).slice(0, 20)) : "?";
           return `<span class="deliverable-chip ${sc}">${kind}${ref}</span>`;
@@ -2247,7 +2255,7 @@
       const ois = obj.open_items || [];
       if (ois.length > 0) {
         const items = ois.slice(0, 3).map(oi => {
-          const cls = `oi-${oi.link_type || "related"}`;
+          const cls = OI_LINK_CLASS[oi.link_type] || "oi-related";
           const icon = oi.link_type === "blocks" ? "⛔" : oi.link_type === "warns" ? "⚠" : "·";
           const title = escHtml((oi.title || oi.oi_id || "").slice(0, 48));
           return `<div class="planning-oi ${cls}">${icon} ${title}</div>`;
