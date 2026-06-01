@@ -294,7 +294,7 @@ def _build_frontmatter(
 
     spawn_fm = result.frontmatter_fields() if hasattr(result, "frontmatter_fields") else {}
 
-    return {
+    frontmatter: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "dispatch_id": args.dispatch_id,
         "provider": spawn_fm.get("provider", provider.split(":")[0]),
@@ -319,6 +319,16 @@ def _build_frontmatter(
             "selected_model": model_used,
         },
     }
+
+    # Surface explicit token-accounting availability when the adapter reports it
+    # (e.g. kimi-cli 1.44.0 stream-json carries no usage). Read from the result
+    # object directly — not from frontmatter_fields() — to keep the cross-provider
+    # frontmatter contract stable.
+    tum = getattr(result, "token_usage_measured", None)
+    if tum is not None:
+        frontmatter["token_usage_measured"] = bool(tum)
+
+    return frontmatter
 
 
 _EMIT_MAX_RETRIES = 3
