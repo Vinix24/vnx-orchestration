@@ -56,6 +56,7 @@ from runtime_coordination import (
 class TestStateEnumerations(unittest.TestCase):
     def test_dispatch_states_complete(self):
         expected = {
+            "proposed", "ready",
             "queued", "claimed", "delivering", "accepted", "running",
             "completed", "timed_out", "failed_delivery", "expired", "recovered",
             "dead_letter",

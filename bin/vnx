@@ -2050,6 +2050,9 @@ main() {
     objective)
       python3 "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
+    deliverable)
+      python3 "$VNX_HOME/scripts/planning_cli.py" deliverable "$@"
+      ;;
     suggest)
       python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
       ;;
