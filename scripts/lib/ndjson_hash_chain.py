@@ -11,21 +11,6 @@ Event-type conventions per session-handoff:
 
 Per ADR-005: NDJSON-first principle preserved. Hash-chain is ADDITIVE metadata,
 not a replacement.
-
-Full-history verification across rotation boundaries
------------------------------------------------------
-After rotation, the live file starts with a ``ledger_rotation`` sentinel whose
-``prev_hash`` equals the hash of the last archived entry.  To verify the
-complete chain (all archives + live), use ``verify_history``::
-
-    from pathlib import Path
-    archives = sorted((archive_dir).glob("*.ndjson"))  # ascending = chronological
-    verify_history(archives + [live_file])
-
-Internally, ``verify_history`` calls ``verify_chain(segment, expected_prev=...)``
-for each segment, passing the tail hash of the previous segment as the starting
-point.  ``verify_chain`` accepts ``expected_prev=GENESIS_HASH`` (default) for
-the first segment and any non-genesis hash for continuation segments.
 """
 from __future__ import annotations
 
@@ -121,24 +106,14 @@ def _read_last_hash(path: Path) -> str | None:
         return None
 
 
-def verify_chain(path: Path, *, expected_prev: str = GENESIS_HASH) -> tuple[bool, list[dict]]:
-    """Verify the hash-chain integrity for an NDJSON file segment.
+def verify_chain(path: Path) -> tuple[bool, list[dict]]:
+    """Verify the hash-chain integrity for an NDJSON file.
 
     Returns (is_valid, violations_list).
     violations_list contains dicts with: line_number, expected_prev_hash, actual_prev_hash
-
-    expected_prev: starting prev_hash value for this segment.
-    - GENESIS_HASH (default): use for the first/only segment (or standalone file).
-      When expected_prev is GENESIS_HASH, the first entry may omit prev_hash
-      entirely (legacy backward-compat) or carry GENESIS_HASH explicitly.
-    - hash of last archived entry: use for the live segment after rotation.
-      The live segment's first entry (the ledger_rotation sentinel) must carry
-      prev_hash == expected_prev explicitly; None is not accepted.
-
-    For full cross-rotation verification use verify_history() instead.
     """
-    violations: list[dict] = []
-    _expected = expected_prev
+    violations = []
+    expected_prev = GENESIS_HASH
 
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -156,54 +131,24 @@ def verify_chain(path: Path, *, expected_prev: str = GENESIS_HASH) -> tuple[bool
 
             actual_prev = entry.get("prev_hash")
 
-            if line_no == 1 and _expected == GENESIS_HASH:
-                # Genesis segment: first entry may omit prev_hash (legacy) or use GENESIS_HASH.
+            if line_no == 1:
                 if actual_prev is not None and actual_prev != GENESIS_HASH:
                     violations.append({
                         "line_number": line_no,
-                        "expected_prev_hash": _expected,
+                        "expected_prev_hash": GENESIS_HASH,
                         "actual_prev_hash": actual_prev,
-                        "note": "first genesis entry: prev_hash must be GENESIS or absent",
+                        "note": "first entry: prev_hash must be GENESIS or absent",
                     })
-            elif actual_prev != _expected:
+            elif actual_prev != expected_prev:
                 violations.append({
                     "line_number": line_no,
-                    "expected_prev_hash": _expected,
+                    "expected_prev_hash": expected_prev,
                     "actual_prev_hash": actual_prev,
                 })
 
-            _expected = compute_entry_hash(entry)
+            expected_prev = compute_entry_hash(entry)
 
     return (len(violations) == 0, violations)
-
-
-def verify_history(segments: list[Path]) -> tuple[bool, list[dict]]:
-    """Verify hash-chain continuity across multiple NDJSON file segments.
-
-    Walk each segment in order (first segment starts from GENESIS_HASH),
-    carrying the tail hash of each segment as the expected_prev for the next.
-
-    Typical usage after rotation::
-
-        archives = sorted(archive_dir.glob("*.ndjson"))  # ascending = chronological
-        ok, violations = verify_history(archives + [live_file])
-
-    Each violation dict includes a 'segment' key with the file path.
-    Returns (is_valid, all_violations).
-    """
-    all_violations: list[dict] = []
-    expected_prev = GENESIS_HASH
-
-    for seg_path in segments:
-        _, violations = verify_chain(seg_path, expected_prev=expected_prev)
-        for v in violations:
-            v["segment"] = str(seg_path)
-        all_violations.extend(violations)
-        tail = _read_last_hash(seg_path)
-        if tail is not None:
-            expected_prev = tail
-
-    return (len(all_violations) == 0, all_violations)
 
 
 def walk_chain(path: Path) -> Iterator[tuple[int, dict, str]]:
