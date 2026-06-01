@@ -10,6 +10,9 @@ govern() is the single authority for producing the final unified report body:
   4. Call emit_unified_report with body_override + overwrite=True (for non-authored)
      so a stale placeholder file is replaced, not kept.
   5. Stamp contract_status + permission_enforcement in frontmatter.
+  6. Call ensure_receipt() to guarantee a completion receipt exists for every
+     subscription-session dispatch — appending a lane-synthesized receipt if
+     the worker never emitted one (gap #4 / VNX_RECEIPT_FALLBACK default-on).
 
 govern() NEVER raises — any unhandled error emits a minimal honest synthesized
 body and returns GovernedOutcome(contract_status="synthesized", error=str(e)).
@@ -23,10 +26,122 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Receipt dedup — authored > synthesized, newest timestamp wins within tier
+# ---------------------------------------------------------------------------
+
+def dedup_completion_receipts(receipts: list) -> "dict | None":
+    """Pick the preferred receipt from multiple completion receipts for one dispatch.
+
+    Preference: non-synthesized (worker-authored) receipts always win over
+    synthesized ones. Within the same tier, pick newest by ISO 8601 timestamp
+    (lexicographic sort). Fallback: last entry in list order.
+
+    Never raises.
+    """
+    if not receipts:
+        return None
+    if len(receipts) == 1:
+        return receipts[0]
+
+    authored = [r for r in receipts if not r.get("synthesized")]
+    pool = authored if authored else receipts
+
+    try:
+        return max(pool, key=lambda r: str(r.get("timestamp") or ""))
+    except Exception:  # noqa: BLE001
+        return pool[-1]
+
+
+# ---------------------------------------------------------------------------
+# Receipt fallback — F1 lane-synthesized receipt guarantee
+# ---------------------------------------------------------------------------
+
+def ensure_receipt(
+    spec: "GovernSpec",
+    raw: "GovernRaw",
+    lane: str,
+    *,
+    report_path: Optional[Path],
+    contract_status: str,
+    permission_enforcement: str,
+) -> None:
+    """Append a lane-synthesized completion receipt when the worker never emitted one.
+
+    Gate: VNX_RECEIPT_FALLBACK (default "1"). Set to "0" to disable.
+    Fires only when raw.receipt is None — i.e. the worker never produced a receipt
+    before the deadline. Never raises — best-effort audit trail.
+
+    The synthesized receipt uses source="tmux_interactive_lane_synthesized" so
+    dedup_completion_receipts() can distinguish it from a worker-authored one.
+    If the worker later emits its own receipt, the authored one wins on readback.
+    """
+    if os.environ.get("VNX_RECEIPT_FALLBACK", "1").strip() == "0":
+        return
+    if raw.receipt is not None:
+        return
+
+    receipts_file = spec.state_dir / "t0_receipts.ndjson"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    synthesized_receipt: dict = {
+        "event_type": "subprocess_completion",
+        "dispatch_id": spec.dispatch_id,
+        "terminal": spec.terminal_id,
+        "status": "failed",
+        "source": "tmux_interactive_lane_synthesized",
+        "synthesized": True,
+        "failure_reason": "tmux_receipt_deadline_exceeded",
+        "contract_status": contract_status,
+        "permission_enforcement": permission_enforcement,
+        "timestamp": ts,
+    }
+    if report_path is not None:
+        synthesized_receipt["report_path"] = str(report_path)
+
+    try:
+        # Use the canonical idempotency + locking layer directly.
+        # append_receipt_payload requires the facade (which calls register_facade in
+        # the CLI entry point), but dispatch_govern is a library module without a CLI
+        # entrypoint, so we go one level deeper: _write_receipt_under_lock + validation.
+        # Idempotency is fully honored; central dual-write is N/A (no project_id on
+        # synthesized receipts — the dual-write guard skips on missing project_id).
+        from append_receipt_internals.idempotency import (  # noqa: PLC0415
+            _cache_file_for,
+            _compute_idempotency_key,
+            _resolve_receipts_file,
+            _write_receipt_under_lock,
+        )
+        from append_receipt_internals.validation import _validate_receipt  # noqa: PLC0415
+
+        receipts_path = _resolve_receipts_file(str(receipts_file)).expanduser().resolve()
+        receipts_path.parent.mkdir(parents=True, exist_ok=True)
+        event_name = _validate_receipt(synthesized_receipt)
+        idempotency_key = _compute_idempotency_key(synthesized_receipt, event_name)
+        cache_path = _cache_file_for(receipts_path)
+        _write_receipt_under_lock(
+            synthesized_receipt,
+            receipts_path,
+            cache_path,
+            idempotency_key,
+            300,  # cache_window_seconds
+        )
+        logger.info(
+            "ensure_receipt: appended lane-synthesized receipt for dispatch=%s receipts_file=%s",
+            spec.dispatch_id, receipts_file,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ensure_receipt: failed to append synthesized receipt for dispatch=%s: %s",
+            spec.dispatch_id, exc,
+        )
 
 
 @dataclass
@@ -113,6 +228,12 @@ def _govern_error_fallback(
         )
     except Exception:  # noqa: BLE001
         rp = None
+    ensure_receipt(
+        spec, raw, lane,
+        report_path=rp,
+        contract_status="synthesized",
+        permission_enforcement="soft",
+    )
     return GovernedOutcome(
         report_path=rp,
         contract_status="synthesized",
@@ -247,6 +368,12 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("govern: emit_unified_report failed for %s: %s", dispatch_id, exc)
+        ensure_receipt(
+            spec, raw, lane,
+            report_path=None,
+            contract_status=contract_status,
+            permission_enforcement=permission_enforcement,
+        )
         return GovernedOutcome(
             report_path=None,
             contract_status=contract_status,
@@ -254,6 +381,13 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             permission_enforcement=permission_enforcement,
             error=str(exc),
         )
+
+    ensure_receipt(
+        spec, raw, lane,
+        report_path=report_path,
+        contract_status=contract_status,
+        permission_enforcement=permission_enforcement,
+    )
 
     return GovernedOutcome(
         report_path=report_path,
