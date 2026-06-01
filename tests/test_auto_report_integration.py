@@ -200,7 +200,7 @@ def vnx_env(tmp_path, monkeypatch):
 class TestMarkdownRendering:
 
     def test_required_receipt_fields_present(self):
-        """render_markdown produces all five fields required by receipt_processor_v4.sh."""
+        """render_markdown produces all five fields required by receipt_processor.sh."""
         report = _make_report()
         md = render_markdown(report)
 
@@ -415,7 +415,7 @@ Wired receipt processor integration. All manual tests pass.
 
 ## Files Modified
 
-- `scripts/receipt_processor_v4.sh` — validation logic
+- `scripts/receipt_processor.sh` — validation logic
 - `tests/test_receipt_processor.py` — regression tests
 
 ## Testing Evidence

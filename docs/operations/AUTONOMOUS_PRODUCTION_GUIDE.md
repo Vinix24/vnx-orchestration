@@ -869,7 +869,7 @@ bash .claude/vnx-system/scripts/vnx_preflight.sh
 | `scripts/vnx_preflight.sh` | NIEUW ⚠️ niet geïmplementeerd | Preflight validatie (sectie 1) |
 | `scripts/t0_evidence_validator.py` | NIEUW ⚠️ niet geïmplementeerd | Evidence verificatie (sectie 4) |
 | `scripts/queue_popup_watcher.sh` | EDIT | VNX_AUTO_ACCEPT bypass |
-| `scripts/dispatcher_v8_minimal.sh` | EDIT | Quality gate + evidence in dispatch footer |
+| `scripts/dispatcher_minimal.sh` | EDIT | Quality gate + evidence in dispatch footer |
 | `scripts/cost_tracker.py` | EDIT | Budget threshold per wave/fase/sessie |
 | `scripts/validate_feature_plan.py` | EDIT | Wave + size + gate + model validatie |
 | `scripts/heartbeat_ack_monitor.py` | EDIT | Deadlock detectie autonome modus |

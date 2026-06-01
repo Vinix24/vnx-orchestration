@@ -34,9 +34,9 @@ get_t0_pane() {
     echo "%0"
 }
 
-# Receipt processing - ALWAYS use receipt_processor_v4
+# Receipt processing - ALWAYS use receipt_processor
 RECEIPT_SERVICE_NAME="receipt_processor"
-RECEIPT_SCRIPT="receipt_processor_v4.sh"
+RECEIPT_SCRIPT="receipt_processor.sh"
 
 # Supervisor configuration
 # SUPERVISOR_LOCK no longer needed - using mkdir for locking on macOS
@@ -195,16 +195,16 @@ stop_process() {
 start_all() {
     log "Starting all VNX processes..."
 
-    start_process "dispatcher" "dispatcher_v8_minimal.sh"
+    start_process "dispatcher" "dispatcher_minimal.sh"
     # Note: Deprecated scripts moved to archive/legacy_scripts_2026-02-11/scripts/archived_phase1b/
     # - dispatcher_v7_compilation.sh (Phase 1B: replaced by V8 native skills)
     # - dispatcher_v6_ack_timeout.sh replaced by v7
     # - smart_tap_with_editor_multi.sh replaced by v7
     # - unified_state_manager.py replaced by v2
-    start_process "smart_tap" "smart_tap_v7_json_translator.sh"
+    start_process "smart_tap" "smart_tap_json_translator.sh"
     start_process "$RECEIPT_SERVICE_NAME" "$RECEIPT_SCRIPT"
-    # receipt_notifier.sh removed - replaced by receipt_processor_v4.sh (Phase 1B/1C)
-    # ack_dispatcher_v2 is deprecated - dispatcher_v8_minimal handles all dispatching
+    # receipt_notifier.sh removed - replaced by receipt_processor.sh (Phase 1B/1C)
+    # ack_dispatcher_v2 is deprecated - dispatcher_minimal handles all dispatching
     # dispatch_ack_watcher is also deprecated - heartbeat_ack_monitor socket path is canonical ACK flow
     # start_process "ack_dispatcher" "ack_dispatcher_v2.sh"
     start_process "heartbeat_ack_monitor" "heartbeat_ack_monitor.py"
@@ -215,10 +215,10 @@ start_all() {
       start_process "queue_watcher" "queue_auto_accept.sh"
     fi
     start_process "dashboard" "generate_valid_dashboard.sh"
-    start_process "state_manager" "unified_state_manager_v2.py"
+    start_process "state_manager" "unified_state_manager.py"
     start_process "intelligence_daemon" "intelligence_daemon.py"
     start_process "recommendations_engine" "recommendations_engine_daemon.sh"
-    # report_watcher and receipt_notifier removed - receipt_processor_v4.sh handles
+    # report_watcher and receipt_notifier removed - receipt_processor.sh handles
     # watch + parse + append + T0 notification as single process (dedup fix)
 
     log "All processes started"
@@ -227,20 +227,20 @@ start_all() {
 stop_all() {
     log "Stopping all VNX processes..."
 
-    stop_process "dispatcher" "dispatcher_v8_minimal.sh"
+    stop_process "dispatcher" "dispatcher_minimal.sh"
     # Using V8 - native skills with instruction-only dispatch (Phase 1B)
-    stop_process "smart_tap" "smart_tap_v7_json_translator.sh"
+    stop_process "smart_tap" "smart_tap_json_translator.sh"
     stop_process "$RECEIPT_SERVICE_NAME" "$RECEIPT_SCRIPT"
-    # receipt_notifier.sh removed - replaced by receipt_processor_v4.sh (Phase 1B/1C)
+    # receipt_notifier.sh removed - replaced by receipt_processor.sh (Phase 1B/1C)
     # ack_dispatcher_v2 is deprecated
     # stop_process "ack_dispatcher" "ack_dispatcher_v2.sh"
     stop_process "heartbeat_ack_monitor" "heartbeat_ack_monitor.py"
     stop_process "queue_watcher" "queue_popup_watcher.sh"
     stop_process "dashboard" "generate_valid_dashboard.sh"
-    stop_process "state_manager" "unified_state_manager_v2.py"
+    stop_process "state_manager" "unified_state_manager.py"
     stop_process "intelligence_daemon" "intelligence_daemon.py"
     stop_process "recommendations_engine" "recommendations_engine_daemon.sh"
-    # report_watcher and receipt_notifier removed (handled by receipt_processor_v4)
+    # report_watcher and receipt_notifier removed (handled by receipt_processor)
 
     log "All processes stopped"
 }
@@ -265,7 +265,7 @@ status() {
     # Check for duplicates
     echo "Checking for duplicate processes..."
     local has_duplicates=false
-    for script in dispatcher_v8_minimal smart_tap receipt_processor queue_popup generate_valid_dashboard unified_state_manager report_watcher recommendations_engine_daemon; do
+    for script in dispatcher_minimal smart_tap receipt_processor queue_popup generate_valid_dashboard unified_state_manager report_watcher recommendations_engine_daemon; do
         local count=$(pgrep -fc "$script" 2>/dev/null || echo "0")
         if [ "$count" -gt 1 ]; then
             echo -e "${RED}⚠️  WARNING: $script has $count instances running!${NC}"
@@ -341,11 +341,11 @@ monitor() {
         fi
         receipt_item="${RECEIPT_SERVICE_NAME}:${RECEIPT_SCRIPT}"
         # Build process list (conditionally include queue_watcher)
-        local _monitor_items="dispatcher:dispatcher_v8_minimal.sh smart_tap:smart_tap_v7_json_translator.sh $receipt_item heartbeat_ack_monitor:heartbeat_ack_monitor.py"
+        local _monitor_items="dispatcher:dispatcher_minimal.sh smart_tap:smart_tap_json_translator.sh $receipt_item heartbeat_ack_monitor:heartbeat_ack_monitor.py"
         if [ "${VNX_QUEUE_POPUP_ENABLED:-1}" != "0" ]; then
             _monitor_items="$_monitor_items queue_watcher:queue_popup_watcher.sh"
         fi
-        _monitor_items="$_monitor_items dashboard:generate_valid_dashboard.sh state_manager:unified_state_manager_v2.py intelligence_daemon:intelligence_daemon.py recommendations_engine:recommendations_engine_daemon.sh"
+        _monitor_items="$_monitor_items dashboard:generate_valid_dashboard.sh state_manager:unified_state_manager.py intelligence_daemon:intelligence_daemon.py recommendations_engine:recommendations_engine_daemon.sh"
         # Check each process
         for item in $_monitor_items; do
 

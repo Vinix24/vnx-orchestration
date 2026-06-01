@@ -2,7 +2,7 @@
 """
 VNX Runtime Core CLI — Shell interface for dispatcher integration.
 
-Called by dispatcher_v8_minimal.sh to perform durable coordination
+Called by dispatcher_minimal.sh to perform durable coordination
 operations (broker registration, lease acquisition, delivery tracking)
 without embedding Python logic in the shell script.
 

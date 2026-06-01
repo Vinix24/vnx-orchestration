@@ -1597,7 +1597,7 @@ def main() -> int:
         except Exception:
             pass  # best-effort — must not block SessionStart
         # Regenerate t0_brief.json alongside t0_state.json — orchestration helpers
-        # (receipt_processor_v4, intelligence_ack, t0_intelligence_aggregator) read
+        # (receipt_processor, intelligence_ack, t0_intelligence_aggregator) read
         # t0_brief.json directly and must stay in sync with the new state.
         try:
             brief_path = _STATE_DIR / "t0_brief.json"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch_project_guard.sh — OI-1067 cross-project contamination guard.
 #
-# Provides two pure-bash helpers used by dispatcher_v8_minimal.sh:
+# Provides two pure-bash helpers used by dispatcher_minimal.sh:
 #
 #   vnx_dispatch_resolve_project_id [default]
 #       Print the dispatcher's bound project_id from $VNX_PROJECT_ID, or the
@@ -28,7 +28,7 @@
 #         - malformed expected: print 'fatal'  and return 2
 #
 #       Pure: no logging side effects beyond the dispatch file move + marker.
-#       Callers (dispatcher_v8_minimal.sh) translate the printed status into
+#       Callers (dispatcher_minimal.sh) translate the printed status into
 #       structured log lines.
 
 # Strict allowlist for project_id values (mirrors project_scope.py §3.2).

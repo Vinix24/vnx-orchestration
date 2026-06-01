@@ -145,7 +145,7 @@ Generate optimization reports in:
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: supabase-expert
+Skill actief: supabase-expert
 ```
 
 No exceptions. This must appear before any other content.
