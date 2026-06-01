@@ -102,24 +102,117 @@ def test_govern_authored_uses_worker_report(tmp_data, tmp_state, monkeypatch):
     assert outcome.report_path is not None
 
 
-def test_govern_authored_does_not_overwrite_worker_report(tmp_data, tmp_state, monkeypatch):
-    """Authored body is not re-written by govern() (idempotency via emit_unified_report)."""
+def test_govern_authored_stamps_frontmatter_on_worker_report(tmp_data, tmp_state, monkeypatch):
+    """After govern(), a frontmatter-less worker report has a YAML frontmatter block stamped."""
     monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
     reports_dir.mkdir(parents=True)
     report_file = reports_dir / "test-govern-001.md"
-    original_body = _valid_body()
-    report_file.write_text(original_body, encoding="utf-8")
-    original_mtime = report_file.stat().st_mtime
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    content = report_file.read_text(encoding="utf-8")
+    assert content.startswith("---\n"), "Authored report must begin with YAML frontmatter after govern()"
+    assert "schema_version: 1" in content
+    assert "contract_status: authored" in content
+    assert "provider: claude" in content
+    assert "terminal_id: T1" in content
+    assert "lane: tmux_interactive" in content
+
+
+def test_govern_authored_preserves_worker_body(tmp_data, tmp_state, monkeypatch):
+    """Worker body is preserved below the stamped frontmatter."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    worker_body = _valid_body()
+    report_file.write_text(worker_body, encoding="utf-8")
 
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
     govern(spec, raw, lane="tmux_interactive")
 
-    # File unchanged (emit_unified_report idempotency)
-    assert report_file.stat().st_mtime == original_mtime
-    assert report_file.read_text(encoding="utf-8") == original_body
+    content = report_file.read_text(encoding="utf-8")
+    # Body sections from the worker report must survive below the frontmatter.
+    assert "## Summary" in content
+    assert "## Changes" in content
+    assert "## Verification" in content
+    assert "## Open Items" in content
+    # Worker's specific text content must be preserved.
+    assert "Implemented the feature correctly" in content
+
+
+def test_govern_authored_not_double_stamped(tmp_data, tmp_state, monkeypatch):
+    """Defensive: a worker report that already has frontmatter is not double-stamped."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    # Pre-stamp a frontmatter block simulating a future worker that authors its own.
+    existing_fm_body = (
+        "---\n"
+        "schema_version: 1\n"
+        "dispatch_id: test-govern-001\n"
+        "some_extra_field: worker-value\n"
+        "---\n\n"
+        + _valid_body()
+    )
+    report_file.write_text(existing_fm_body, encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+    govern(spec, raw, lane="tmux_interactive")
+
+    content = report_file.read_text(encoding="utf-8")
+    # Exactly one opening --- fence at the start.
+    assert content.count("---\n") >= 2, "Frontmatter fences missing"
+    # No double frontmatter: the content after the first closing --- should be body text.
+    fm_end = content.find("\n---\n", 4)  # find closing ---
+    assert fm_end != -1, "No closing --- found"
+    body_part = content[fm_end + 5:]
+    # Second --- must not immediately follow (no double-stamp).
+    assert not body_part.lstrip("\n").startswith("---\n"), (
+        "Double-stamp detected: body begins with another frontmatter block"
+    )
+    # Required fields must be present.
+    assert "schema_version: 1" in content
+    assert "contract_status: authored" in content
+
+
+def test_govern_authored_schema_strict_valid(tmp_data, tmp_state, monkeypatch):
+    """VNX_SCHEMA_STRICT=1: authored report frontmatter validates against the schema."""
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(_valid_body(), encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+    outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "authored"
+    assert outcome.error is None, f"govern() returned error under strict mode: {outcome.error}"
+    assert outcome.report_path is not None and outcome.report_path.exists()
+
+    content = outcome.report_path.read_text(encoding="utf-8")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
+    from unified_report_schema import UnifiedReportValidator
+    validator = UnifiedReportValidator()
+    result = validator.validate(content)
+    assert result.valid, (
+        f"Authored report fails schema validation under strict mode: {result.errors}"
+    )
 
 
 # ---------------------------------------------------------------------------

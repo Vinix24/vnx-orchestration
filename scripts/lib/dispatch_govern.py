@@ -181,6 +181,47 @@ class GovernedOutcome:
     error: Optional[str] = None
 
 
+def _has_yaml_frontmatter(text: str) -> bool:
+    """Return True if text begins with a YAML frontmatter block (--- ... ---)."""
+    stripped = text.lstrip("\n")
+    return stripped.startswith("---\n") or stripped.startswith("---\r\n")
+
+
+def _split_yaml_frontmatter(text: str) -> "tuple[dict, str]":
+    """Split text at YAML frontmatter boundary.
+
+    Returns (frontmatter_dict, body_text) where body_text is the content
+    after the closing --- delimiter with leading blank lines stripped.
+    If no valid frontmatter found, returns ({}, original text).
+    Best-effort: never raises.
+    """
+    try:
+        import yaml  # noqa: PLC0415
+        stripped = text.lstrip("\n")
+        if not stripped.startswith("---\n") and not stripped.startswith("---\r\n"):
+            return {}, text
+        lines = stripped.split("\n")
+        # lines[0] == "---"; find closing ---
+        close_line: Optional[int] = None
+        for i, line in enumerate(lines[1:], 1):
+            if line.rstrip("\r") == "---":
+                close_line = i
+                break
+        if close_line is None:
+            return {}, text
+        fm_text = "\n".join(lines[1:close_line])
+        body_lines = lines[close_line + 1:]
+        while body_lines and not body_lines[0].strip():
+            body_lines = body_lines[1:]
+        body = "\n".join(body_lines)
+        fm = yaml.safe_load(fm_text)
+        if not isinstance(fm, dict):
+            return {}, text
+        return fm, body
+    except Exception:  # noqa: BLE001
+        return {}, text
+
+
 def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """Produce the final unified report for a dispatch, stamped with contract metadata.
 
@@ -313,7 +354,10 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     permission_enforcement = "strict" if enforce else "soft"
 
     # -- d. Emit report with final body ---------------------------------------
-    # authored: idempotent (no overwrite) — worker already wrote the valid file.
+    # authored: force-write with frontmatter so ALL reports are schema-uniform.
+    #   The worker body is preserved; the frontmatter block is prepended.
+    #   If the worker already wrote frontmatter (defensive), merge — govern's
+    #   required fields take precedence.
     # synthesized/violated: overwrite=True so a stale placeholder is replaced.
     is_authored = contract_status == "authored"
 
@@ -362,6 +406,18 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
 
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 
+    # Determine the exact body and frontmatter to write.
+    # Authored path: detect if worker already wrote frontmatter (defensive merge);
+    # otherwise use the worker body as-is with our govern frontmatter prepended.
+    if is_authored and _has_yaml_frontmatter(body):
+        existing_fm, body_only = _split_yaml_frontmatter(body)
+        # Govern's required fields take precedence to guarantee schema-uniform output.
+        emit_frontmatter: dict = {**existing_fm, **frontmatter}
+        emit_body: str = body_only
+    else:
+        emit_frontmatter = frontmatter
+        emit_body = body
+
     try:
         report_path = emit_unified_report(
             dispatch_id=dispatch_id,
@@ -372,9 +428,9 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
             findings=[],
             duration_seconds=raw.duration_seconds,
             data_dir=spec.data_dir,
-            frontmatter=frontmatter,
-            body_override=body if not is_authored else None,
-            overwrite=not is_authored,
+            frontmatter=emit_frontmatter,
+            body_override=emit_body,
+            overwrite=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("govern: emit_unified_report failed for %s: %s", dispatch_id, exc)
