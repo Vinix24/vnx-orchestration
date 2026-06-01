@@ -316,6 +316,11 @@ Gate commands (pre-merge verification):
   gate-check --pr <ID>  Run deterministic pre-merge gate checks (GO/HOLD verdict)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
 
+Planning commands (strategic-layer read surface):
+  objective list      List objectives (tracks) grouped by horizon (now/next/later)
+                        Options: --horizon, --phase, --json
+  objective show <id> Show one objective: phase/horizon/deps/pr_ref
+
 Process commands (visibility and control):
   status             Show terminal health, dispatch queue, and gate results
   status --terminals   Just terminal health
@@ -2041,6 +2046,9 @@ main() {
       ;;
     queue-status)
       python3 "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
+      ;;
+    objective)
+      python3 "$VNX_HOME/scripts/planning_cli.py" objective "$@"
       ;;
     suggest)
       python3 "$VNX_HOME/scripts/apply_suggested_edits.py" "$@"
