@@ -11,8 +11,9 @@ Part of the universal governance interface:
 Idempotency layers:
   1. Permanent: SHA-256 of each report file in
      $VNX_STATE_DIR/report_to_receipt_processed.txt (survives restarts).
-     Also reads processed_receipts.txt (Bash processor watermark) to avoid
-     double-processing reports already handled by the Bash path.
+     This is the converter's OWN dedicated hash-set — it does NOT read or
+     write the Bash receipt processor's processed_receipts.txt watermark
+     (the two systems use separate dedup stores to avoid format conflation).
   2. Short-term: append_receipt_payload() rolling idempotency cache
      (receipt_idempotency_recent.ndjson, default 5-min window) guards against
      concurrent calls and same-cycle races.
@@ -42,7 +43,6 @@ logger = logging.getLogger(__name__)
 _LIB_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _LIB_DIR.parent  # scripts/ — append_receipt.py lives here
 _WATERMARK_FILENAME = "report_to_receipt_processed.txt"
-_BASH_WATERMARK_FILENAME = "processed_receipts.txt"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _BOLD_KV_RE = re.compile(r"\*\*([^*]+)\*\*:\s*(.+)", re.MULTILINE)
@@ -318,9 +318,10 @@ def scan_and_convert(
 ) -> int:
     """Scan report directories and convert unprocessed reports.
 
-    Checks two watermark files to avoid double-processing:
-    - report_to_receipt_processed.txt  (this converter's own permanent watermark)
-    - processed_receipts.txt           (Bash receipt processor's watermark)
+    Deduplication uses ONLY the converter's own watermark file
+    (report_to_receipt_processed.txt).  The Bash receipt processor's
+    processed_receipts.txt is intentionally NOT consulted — the two
+    systems own separate dedup stores to avoid format-conflation risk.
 
     Returns the count of newly emitted receipts (status="appended").
     Malformed reports are skipped with a warning; they are NOT marked as
@@ -337,10 +338,8 @@ def scan_and_convert(
     state_dir.mkdir(parents=True, exist_ok=True)
     receipts_file = str(state_dir / "t0_receipts.ndjson")
     watermark_path = state_dir / _WATERMARK_FILENAME
-    bash_watermark_path = state_dir / _BASH_WATERMARK_FILENAME
 
     watermark = _load_watermark(watermark_path)
-    bash_watermark = _load_watermark(bash_watermark_path)
 
     new_count = 0
 
@@ -359,13 +358,6 @@ def scan_and_convert(
 
             # Skip if already in our own watermark
             if file_hash in watermark:
-                continue
-
-            # If the Bash path already processed this report, sync our
-            # watermark and skip — no need to emit a second receipt.
-            if file_hash in bash_watermark:
-                _mark_processed(file_hash, watermark_path)
-                watermark.add(file_hash)
                 continue
 
             result = convert_report_to_receipt(

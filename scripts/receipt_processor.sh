@@ -338,8 +338,9 @@ _poll_new_reports() {
         fi
         # Generic YAML-frontmatter converter: runs every ~30 s (every 6 cycles).
         # Handles reports written with --- YAML frontmatter that report_parser.py
-        # does not parse.  Checks the Bash watermark (processed_receipts.txt) so
-        # it never double-emits for reports already handled above.  Non-fatal.
+        # does not parse.  Owns its own dedup store
+        # (report_to_receipt_processed.txt) — does NOT read the Bash watermark
+        # to avoid format-conflation risk.  Non-fatal.
         _cycle=$(( _cycle + 1 ))
         if [ $(( _cycle % 6 )) -eq 0 ]; then
             python3 "$SCRIPTS_DIR/lib/report_to_receipt_converter.py" \

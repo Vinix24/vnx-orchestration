@@ -7,7 +7,10 @@ Covers:
   3. Malformed report (no dispatch_id) → skipped with warning, no crash
   4. scan_and_convert() over a directory of mixed reports
   5. Watermark persistence: already-processed reports skipped across calls
-  6. Bash-watermark sync: reports in processed_receipts.txt are skipped
+  6. Isolation: converter does NOT read the Bash processor's
+     processed_receipts.txt (separate dedup stores, no format conflation)
+  7. Isolation: converter does NOT read/write the processor's mtime
+     watermark (receipt_processor_watermark)
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
 from report_to_receipt_converter import (
-    _BASH_WATERMARK_FILENAME,
     _WATERMARK_FILENAME,
     _compute_sha256,
     _load_watermark,
@@ -303,25 +305,58 @@ class TestWatermarkPersistence:
         assert n2 == 0
         assert _count_receipts(state_dir) == 1
 
-    def test_bash_watermark_sync_skips_report(self, reports_dir, state_dir):
-        """Reports in processed_receipts.txt (Bash watermark) are skipped."""
-        report = reports_dir / "20260601-bash.md"
-        _write_frontmatter_report(report, "20260601-bash")
+    def test_converter_ignores_bash_watermark(self, reports_dir, state_dir):
+        """Pre-populated processed_receipts.txt does NOT block the converter.
+
+        The converter owns its own dedup store (report_to_receipt_processed.txt).
+        A hash in the Bash processor's processed_receipts.txt is irrelevant
+        to the converter — it must NOT cause the converter to skip a report.
+        """
+        report = reports_dir / "20260601-ignored-bash.md"
+        _write_frontmatter_report(report, "20260601-ignored-bash")
         file_hash = _compute_sha256(report)
 
-        # Pre-populate the Bash watermark
-        bash_wm = state_dir / _BASH_WATERMARK_FILENAME
+        # Pre-populate the Bash watermark (processed_receipts.txt) with the
+        # report's hash — simulating that the Bash processor already handled it.
+        bash_wm = state_dir / "processed_receipts.txt"
         bash_wm.write_text(file_hash + "\n", encoding="utf-8")
 
         n = scan_and_convert([reports_dir], state_dir)
 
-        # The Python converter sees it in the Bash watermark → skips
-        assert n == 0
-        assert _count_receipts(state_dir) == 0
+        # Converter must NOT skip: it does not read the Bash watermark.
+        assert n == 1
+        assert _count_receipts(state_dir) == 1
 
-        # Our watermark is synced (so future scans also skip)
+        # Converter's own watermark is now populated.
         py_wm = _load_watermark(state_dir / _WATERMARK_FILENAME)
         assert file_hash in py_wm
+
+        # Second scan: converter's own watermark prevents re-emission.
+        n2 = scan_and_convert([reports_dir], state_dir)
+        assert n2 == 0
+        assert _count_receipts(state_dir) == 1
+
+    def test_converter_does_not_read_mtime_watermark(self, reports_dir, state_dir):
+        """The processor's receipt_processor_watermark is never consulted.
+
+        The Bash processor uses receipt_processor_watermark as an mtime
+        watermark.  The converter must never read or write it — the two
+        systems own separate dedup stores.
+        """
+        mtime_wm = state_dir / "receipt_processor_watermark"
+        # Pre-populate with a bogus mtime value.
+        mtime_wm.write_text("9999999999\n", encoding="utf-8")
+
+        report = reports_dir / "20260601-mtime-isolation.md"
+        _write_frontmatter_report(report, "20260601-mtime-isolation")
+
+        n = scan_and_convert([reports_dir], state_dir)
+
+        # Converter processes the report — it does not read the mtime watermark.
+        assert n == 1
+
+        # The mtime watermark file is untouched by the converter.
+        assert mtime_wm.read_text(encoding="utf-8").strip() == "9999999999"
 
 
 # ---------------------------------------------------------------------------
