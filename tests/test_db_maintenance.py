@@ -160,6 +160,18 @@ class TestDryRun:
         assert isinstance(result["estimated_reclaimable_bytes"], int)
         assert result["estimated_reclaimable_bytes"] >= 0
 
+    def test_dry_run_does_not_write_audit_ledger(self, tmp_path):
+        """dry_run() must NOT write any audit ledger (it does not mutate state)."""
+        db = tmp_path / "quality_intelligence.db"
+        conn = _make_db(db)
+        _insert_sessions(conn, ["2020-01-01"] * 5)
+        conn.close()
+
+        dry_run(db_path=str(db), retention_days=30)
+
+        audit_path = db.parent / "db_maintenance_audit.ndjson"
+        assert not audit_path.exists(), "dry_run() must not create audit ledger file"
+
 
 class TestApply:
     def test_apply_prunes_old_sessions(self, tmp_path):
@@ -263,3 +275,27 @@ class TestApply:
         conn.close()
         assert cs_count == 1
         assert sm_count <= 1
+
+    def test_apply_writes_audit_ledger(self, tmp_path):
+        """apply() must write exactly one NDJSON line to db_maintenance_audit.ndjson."""
+        db = tmp_path / "quality_intelligence.db"
+        conn = _make_db(db)
+        _insert_sessions(conn, ["2020-01-01"] * 5)
+        conn.close()
+
+        result = apply(db_path=str(db), retention_days=30)
+
+        audit_path = db.parent / "db_maintenance_audit.ndjson"
+        assert audit_path.exists(), "Audit ledger file must exist after apply()"
+
+        lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1, f"Expected exactly 1 audit line, got {len(lines)}"
+
+        record = json.loads(lines[0])
+        assert record["op"] == "db_maintenance"
+        assert isinstance(record["pruned"], dict)
+        assert "session_analytics" in record["pruned"]
+        assert isinstance(record["bytes_reclaimed"], (int, float))
+        assert record["vacuumed"] is True
+        assert record["db_path"] == str(db)
+        assert record["retention_days"] == 30

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import sqlite3
 import sys
@@ -220,6 +221,23 @@ def apply(db_path: Optional[str] = None, retention_days: int = DEFAULT_RETENTION
 
     size_after = _db_size_bytes(path)
     reclaimed = max(0, size_before - size_after)
+
+    # Write append-only audit ledger (durable record of destructive maintenance).
+    audit_path = path.parent / "db_maintenance_audit.ndjson"
+    audit_record = {
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "op": "db_maintenance",
+        "db_path": str(path),
+        "retention_days": retention_days,
+        "pruned": pruned_counts,
+        "bytes_reclaimed": reclaimed,
+        "vacuumed": True,
+    }
+    try:
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(audit_record, separators=(",", ":")) + "\n")
+    except Exception as exc:
+        print(f"[vnx_db_maintenance] Failed to write audit ledger: {exc}", file=sys.stderr)
 
     return {
         "dry_run": False,
