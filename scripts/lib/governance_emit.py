@@ -178,11 +178,22 @@ def emit_unified_report(
     data_dir: Path,
     *,
     frontmatter: Optional[Dict[str, Any]] = None,
+    body_override: Optional[str] = None,
+    overwrite: bool = False,
 ) -> Path:
     """Atomic write to unified_reports/<dispatch_id>.md. Returns path.
 
     Idempotent: returns the existing path without modifying it when the report
     already exists (worker may have written a richer report).
+
+    When *body_override* is provided, that exact markdown string is written as
+    the report body instead of the generic ## Response wrapper.  The govern()
+    function uses this to write the final contract body before emit so the body
+    is always finalized before the file is created (idempotency line 198).
+
+    When *overwrite* is True, force-writes the file even when it already exists.
+    govern() passes overwrite=True for synthesized/violated bodies to replace
+    stale placeholder files that would otherwise block idempotent early-return.
 
     When *frontmatter* is provided, prepends a YAML frontmatter block and
     validates against unified_report_v1 schema.  Default is shadow-mode (log
@@ -195,26 +206,29 @@ def emit_unified_report(
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     report_path = reports_dir / f"{dispatch_id}.md"
-    if report_path.exists():
+    if report_path.exists() and not overwrite:
         return report_path
 
-    if findings:
-        findings_lines = "\n".join(
-            f"- [{f.get('severity', 'info').upper()}] {f.get('message', str(f))}"
-            for f in findings
-        )
+    if body_override is not None:
+        body = body_override
     else:
-        findings_lines = "None"
+        if findings:
+            findings_lines = "\n".join(
+                f"- [{f.get('severity', 'info').upper()}] {f.get('message', str(f))}"
+                for f in findings
+            )
+        else:
+            findings_lines = "None"
 
-    body = (
-        f"# Dispatch {dispatch_id}\n\n"
-        f"- Provider: {provider}\n"
-        f"- Terminal: {terminal_id}\n"
-        f"- Duration: {duration_seconds:.1f}s\n\n"
-        f"## Instruction\n\n{instruction or '(not captured)'}\n\n"
-        f"## Response\n\n{response_text or '(no response captured)'}\n\n"
-        f"## Findings\n\n{findings_lines}\n"
-    )
+        body = (
+            f"# Dispatch {dispatch_id}\n\n"
+            f"- Provider: {provider}\n"
+            f"- Terminal: {terminal_id}\n"
+            f"- Duration: {duration_seconds:.1f}s\n\n"
+            f"## Instruction\n\n{instruction or '(not captured)'}\n\n"
+            f"## Response\n\n{response_text or '(no response captured)'}\n\n"
+            f"## Findings\n\n{findings_lines}\n"
+        )
 
     if frontmatter:
         import yaml
