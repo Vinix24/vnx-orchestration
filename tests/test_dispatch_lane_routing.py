@@ -61,7 +61,12 @@ def _make_env(tmp_path: Path, *, header_adapter: str | None = None) -> dict:
     }
 
 
-def _run(env_paths: dict, *cli_args: str, vnx_adapter: str | None = None):
+def _run(
+    env_paths: dict,
+    *cli_args: str,
+    vnx_adapter: str | None = None,
+    extra_env: dict | None = None,
+):
     """Source the real dispatch.sh and invoke cmd_dispatch via bash."""
     args = " ".join(f"'{a}'" for a in (str(env_paths["dispatch_file"]), *cli_args))
     script = f"""
@@ -79,6 +84,8 @@ cmd_dispatch {args}
     run_env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
     if vnx_adapter is not None:
         run_env["VNX_ADAPTER"] = vnx_adapter
+    if extra_env:
+        run_env.update(extra_env)
     return subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
@@ -170,6 +177,32 @@ def test_dry_run_no_delivery(tmp_path):
     assert res.returncode == 0, res.stderr
     assert not e["marker"].exists()
     assert "Adapter:" in res.stderr  # lane logged even on dry-run
+
+
+def test_auto_route_overrides_default_tmux(tmp_path):
+    """VNX_AUTO_ROUTE=1 with no explicit adapter -> subprocess (smart routing honoured)."""
+    e = _make_env(tmp_path)
+    res = _run(e, extra_env={"VNX_AUTO_ROUTE": "1"})
+    assert res.returncode == 0, res.stderr
+    rec = _lane(e)
+    assert rec["lane"] == "subprocess", f"expected subprocess, got {rec['lane']!r}"
+    assert "--auto-route" in rec["argv"], "--auto-route must be forwarded to subprocess"
+
+
+def test_auto_route_yields_to_explicit_adapter_flag(tmp_path):
+    """VNX_AUTO_ROUTE=1 yields to explicit --adapter tmux; tmux lane must be used."""
+    e = _make_env(tmp_path)
+    res = _run(e, "--adapter", "tmux", extra_env={"VNX_AUTO_ROUTE": "1"})
+    assert res.returncode == 0, res.stderr
+    assert _lane(e)["lane"] == "tmux"
+
+
+def test_auto_route_yields_to_vnx_adapter_env(tmp_path):
+    """VNX_AUTO_ROUTE=1 yields to explicit VNX_ADAPTER=tmux env var."""
+    e = _make_env(tmp_path)
+    res = _run(e, vnx_adapter="tmux", extra_env={"VNX_AUTO_ROUTE": "1"})
+    assert res.returncode == 0, res.stderr
+    assert _lane(e)["lane"] == "tmux"
 
 
 if __name__ == "__main__":

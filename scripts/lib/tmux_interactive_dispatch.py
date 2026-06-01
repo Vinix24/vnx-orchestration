@@ -357,13 +357,18 @@ class TmuxInteractiveDispatch:
         instruction: str,
         receipt: "dict | None",
         duration_seconds: float,
-    ) -> None:
-        """Emit governance unified_report for audit parity with subprocess lane. Best-effort."""
+    ) -> "Path | None":
+        """Emit governance unified_report for audit parity with subprocess lane.
+
+        Returns the emitted report path on success, None on failure.
+        A None return on a governed-completion path (worker succeeded) is an
+        audit-trail gap and must be surfaced by the caller.
+        """
         try:
             from governance_emit import emit_unified_report  # noqa: PLC0415
             status = (receipt or {}).get("status", "done")
             data_dir = self._state_dir.parent
-            emit_unified_report(
+            report_path = emit_unified_report(
                 dispatch_id=dispatch_id,
                 terminal_id=terminal_id,
                 provider="claude",
@@ -376,16 +381,19 @@ class TmuxInteractiveDispatch:
                 data_dir=data_dir,
             )
             logger.info(
-                "interactive: unified_report emitted dispatch=%s status=%s",
+                "interactive: unified_report emitted dispatch=%s status=%s path=%s",
                 dispatch_id,
                 status,
+                report_path,
             )
+            return report_path
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "interactive: unified_report emission failed for %s: %s",
                 dispatch_id,
                 exc,
             )
+            return None
 
     def _build_completion_protocol(self, dispatch_id: str, label: str) -> str:
         """Footer instructing the worker to emit a clean receipt directly.
@@ -395,6 +403,11 @@ class TmuxInteractiveDispatch:
         """
         append_receipt = self._project_root / "scripts" / "append_receipt.py"
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # report_path is deterministic — include it so the receipt->report linkage
+        # is established even when the report is written after the receipt.
+        report_path = str(
+            self._state_dir.parent / "unified_reports" / f"{dispatch_id}.md"
+        )
         receipt = {
             "event_type": "subprocess_completion",
             "dispatch_id": dispatch_id,
@@ -402,6 +415,7 @@ class TmuxInteractiveDispatch:
             "status": "done",
             "source": "tmux_interactive",
             "timestamp": ts,
+            "report_path": report_path,
         }
         state_dir = shlex.quote(str(self._state_dir))
         data_dir = shlex.quote(str(self._state_dir.parent))
@@ -991,17 +1005,26 @@ class TmuxInteractiveDispatch:
                 reason=f"receipt status={receipt.get('status')}",
                 metadata={"session": session, "status": receipt.get("status")},
             )
-            success = receipt is not None and receipt.get("status") not in (
+            worker_succeeded = receipt is not None and receipt.get("status") not in (
                 "failed",
                 "blocked",
             )
-            self._emit_unified_report(
+            emitted_report = self._emit_unified_report(
                 dispatch_id=dispatch_id,
                 terminal_id=label,
                 instruction=instruction,
                 receipt=receipt,
                 duration_seconds=time.monotonic() - start_time,
             )
+            # A governed-completion path (worker OK) with no linked report is an
+            # audit-trail gap — do not report success with an unlinked report.
+            if worker_succeeded and emitted_report is None:
+                logger.warning(
+                    "interactive: governed dispatch %s succeeded but unified_report "
+                    "emit failed — marking degraded",
+                    dispatch_id,
+                )
+            success = worker_succeeded and emitted_report is not None
             _teardown("success" if success else "worker_status_failed")
             return InteractiveDispatchResult(
                 success=success,
@@ -1012,7 +1035,11 @@ class TmuxInteractiveDispatch:
                 pane_id=pane_id,
                 receipt=receipt,
                 failure_reason=(
-                    None if success else f"worker_status: {receipt.get('status')}"
+                    None if success else (
+                        "unified_report_emit_failed"
+                        if worker_succeeded
+                        else f"worker_status: {receipt.get('status')}"
+                    )
                 ),
                 duration_seconds=time.monotonic() - start_time,
                 worktree_state=_wt_state[0],

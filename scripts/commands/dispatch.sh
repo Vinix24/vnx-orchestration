@@ -266,6 +266,16 @@ HELP
       return 1 ;;
   esac
 
+  # VNX_AUTO_ROUTE=1 overrides the bare default tmux lane so smart routing
+  # is honoured. Yields to any explicit adapter choice (--adapter flag,
+  # Adapter: header, or VNX_ADAPTER env).
+  if [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && \
+     [[ -z "$adapter_override" ]] && \
+     [[ -z "$adapter_header" ]] && \
+     [[ -z "${VNX_ADAPTER:-}" ]]; then
+    adapter="subprocess"
+  fi
+
   local track
   track=$(_d_resolve_track "$terminal")
 
