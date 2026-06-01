@@ -10,7 +10,7 @@ Run these steps only after SUP-PR1..PR4 are merged to `main`.
 ## vnx-roadmap-autopilot-wt
 
 **Profile:** Interactive terminals (T1/T2/T3 Sonnet-pinned). Currently runs
-`dispatcher_v8_minimal.sh` directly via `nohup`, plus `vnx_supervisor_simple.sh`
+`dispatcher_minimal.sh` directly via `nohup`, plus `vnx_supervisor_simple.sh`
 from the `vnx-manager` skill for non-dispatcher daemons.
 
 ```bash
@@ -24,7 +24,7 @@ grep -q VNX_SUPERVISOR_MODE bin/vnx \
   || echo 'export VNX_SUPERVISOR_MODE=unified' >> bin/vnx
 
 # 3. Stop bare dispatcher (check PID file exists first)
-kill $(cat .vnx-data/pids/dispatcher_v8_minimal.pid) 2>/dev/null || true
+kill $(cat .vnx-data/pids/dispatcher_minimal.pid) 2>/dev/null || true
 
 # 4. Start dispatcher under supervisor wrapper
 nohup bash scripts/dispatcher_supervisor.sh \
@@ -47,8 +47,8 @@ unset VNX_SUPERVISOR_MODE
 # Remove the export line from bin/vnx
 kill $(pgrep -f dispatcher_supervisor) 2>/dev/null || true
 kill $(pgrep -f receipt_processor_supervisor) 2>/dev/null || true
-nohup bash scripts/dispatcher_v8_minimal.sh > /dev/null 2>&1 &
-nohup bash scripts/receipt_processor_v4.sh  > /dev/null 2>&1 &
+nohup bash scripts/dispatcher_minimal.sh > /dev/null 2>&1 &
+nohup bash scripts/receipt_processor.sh  > /dev/null 2>&1 &
 ```
 
 ---
@@ -71,7 +71,7 @@ grep -q VNX_SUPERVISOR_MODE bin/vnx \
   || echo 'export VNX_SUPERVISOR_MODE=unified' >> bin/vnx
 
 # 3. Stop bare dispatcher
-kill $(cat .vnx-data/pids/dispatcher_v8_minimal.pid) 2>/dev/null || true
+kill $(cat .vnx-data/pids/dispatcher_minimal.pid) 2>/dev/null || true
 
 # 4. Start under wrapper
 nohup bash .vnx/scripts/dispatcher_supervisor.sh \
@@ -112,7 +112,7 @@ grep -q VNX_SUPERVISOR_MODE bin/vnx \
   || echo 'export VNX_SUPERVISOR_MODE=unified' >> bin/vnx
 
 # 3. Stop existing bare dispatcher
-kill $(cat .vnx-data/pids/dispatcher_v8_minimal.pid) 2>/dev/null || true
+kill $(cat .vnx-data/pids/dispatcher_minimal.pid) 2>/dev/null || true
 
 # 4. Confirm no stale leases before restart (clean slate)
 python3 scripts/lib/lease_sweep.py --dry-run
@@ -146,7 +146,7 @@ Before cutover:
 - [ ] `scripts/lib/lease_sweep.py` present
 - [ ] `scripts/lib/runtime_supervise.py` present
 - [ ] `scripts/receipt_processor_supervisor.sh` present
-- [ ] No bare `dispatcher_v8_minimal.sh` or `receipt_processor_v4.sh` still running
+- [ ] No bare `dispatcher_minimal.sh` or `receipt_processor.sh` still running
 
 After cutover (verify within 5 minutes):
 - [ ] `ps aux | grep dispatcher_supervisor` shows wrapper PID

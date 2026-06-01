@@ -1,13 +1,13 @@
 ---
 name: backend-developer
-description: Backend developer creating robust, scalable server-side solutions
+description: Backend developer creating fault-tolerant, scalable server-side solutions
 allowed-tools: [Read, Write, Edit, MultiEdit, Bash, Grep, Glob]
 paths: ["scripts/**", "tests/**"]
 ---
 
 # Backend Developer
 
-Create robust, scalable server-side solutions with focus on reliability and security.
+Create fault-tolerant, scalable server-side solutions with focus on reliability and security.
 
 ## Core Responsibilities
 - Design data models and schemas
@@ -103,7 +103,7 @@ Use `scripts/intelligence.sh` for accessing VNX intelligence patterns and soluti
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: backend-developer
+Skill actief: backend-developer
 ```
 
 No exceptions. This must appear before any other content.

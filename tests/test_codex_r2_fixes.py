@@ -2,11 +2,11 @@
 """
 Regression tests for Codex round-2 blocking findings on PR #316.
 
-Finding 1: scripts/dispatcher_v8_minimal.sh used `declare -A` for the
+Finding 1: scripts/dispatcher_minimal.sh used `declare -A` for the
            invalid-skill cooldown map. macOS /bin/bash 3.2 lacks
            associative arrays, so the dispatcher aborted at startup.
 
-Finding 2: scripts/dispatcher_v8_minimal.sh used `((count++))` under
+Finding 2: scripts/dispatcher_minimal.sh used `((count++))` under
            `set -e`. When `count` is 0 the post-increment arithmetic
            command returns status 1, aborting the loop after the first
            dispatch instead of continuing.
@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DISPATCHER_SH = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+DISPATCHER_SH = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
 DISPATCH_CREATE_SH = REPO_ROOT / "scripts" / "lib" / "dispatch_create.sh"
 
 
@@ -55,7 +55,7 @@ def _function_body(text: str, signature: str) -> str:
 
 class TestNoAssociativeArray:
     def test_dispatcher_does_not_use_declare_dash_a(self):
-        """dispatcher_v8_minimal.sh must not use `declare -A` (bash 3.2 gap)."""
+        """dispatcher_minimal.sh must not use `declare -A` (bash 3.2 gap)."""
         text = DISPATCHER_SH.read_text()
         assert "declare -A" not in text, (
             "declare -A is incompatible with /bin/bash 3.2 on macOS — "

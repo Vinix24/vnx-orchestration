@@ -60,10 +60,10 @@ CANONICAL_STATE_DIR = Path(os.environ.get("VNX_STATE_DIR", str(PROJECT_ROOT / ".
 LEGACY_STATE_DIR = VNX_DIR / "state"
 
 PROCESS_COMMANDS = {
-    "smart_tap": ["bash", "smart_tap_v7_json_translator.sh"],
-    "dispatcher": ["bash", "dispatcher_v8_minimal.sh"],
+    "smart_tap": ["bash", "smart_tap_json_translator.sh"],
+    "dispatcher": ["bash", "dispatcher_minimal.sh"],
     "queue_watcher": ["bash", "queue_popup_watcher.sh"],
-    "receipt_processor": ["bash", "receipt_processor_v4.sh"],
+    "receipt_processor": ["bash", "receipt_processor.sh"],
     "supervisor": ["bash", "vnx_supervisor_simple.sh"],
     "ack_dispatcher": ["bash", "dispatch_ack_watcher.sh"],
     "intelligence_daemon": ["python3", "intelligence_daemon.py"],
@@ -72,10 +72,10 @@ PROCESS_COMMANDS = {
 }
 
 PROCESS_KILL_PATTERNS = {
-    "smart_tap": "smart_tap_v7_json_translator",
-    "dispatcher": "dispatcher_v8_minimal|dispatcher_v7_compilation",
+    "smart_tap": "smart_tap_json_translator",
+    "dispatcher": "dispatcher_minimal|dispatcher_v7_compilation",
     "queue_watcher": "queue_popup_watcher",
-    "receipt_processor": "receipt_processor_v4",
+    "receipt_processor": "receipt_processor",
     "report_watcher": "report_watcher",
     "receipt_notifier": "receipt_notifier",
     "supervisor": "vnx_supervisor_simple",

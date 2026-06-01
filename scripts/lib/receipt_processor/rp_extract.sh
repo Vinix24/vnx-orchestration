@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_extract.sh - Receipt field extraction and quality/state line builders
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $STATE_DIR
 # Sets module-scope: _rf_status, _rf_event_type, _rf_dispatch_id, _rf_timestamp,
 #                    _rf_pr_id, _rf_report_path

@@ -25,7 +25,7 @@
       "max_lines": 160
     },
     {
-      "file": "dispatcher_v8_minimal.sh",
+      "file": "dispatcher_minimal.sh",
       "language": "shell",
       "function": "dispatch_with_skill_activation",
       "max_lines": 280
@@ -37,7 +37,7 @@
       "max_lines": 520
     },
     {
-      "file": "receipt_processor_v4.sh",
+      "file": "receipt_processor.sh",
       "language": "shell",
       "function": "process_single_report",
       "max_lines": 400

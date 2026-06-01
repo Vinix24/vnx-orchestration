@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Intelligence Daemon Monitor - Adds intelligence daemon status to dashboard
-To be called by unified_state_manager_v2.py
+To be called by unified_state_manager.py
 """
 
 import logging

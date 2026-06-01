@@ -113,7 +113,7 @@ Full smart-router wired for non-Claude providers + constraint-aware routing (#70
 Per-dispatch git worktree isolation (`VNX_ISOLATED_WORKTREE`, default off) extended to `provider_dispatch` for all providers.
 
 **Track Layer (FUT-1 + FUT-2)**
-`tracks` schema with DAL + CLI + audit-ordering (FUT-1). ADR-007 composite PK over `track_id + project_id`, tenant-scoping, composite-FK from `dispatches.track → tracks(track_id, project_id)` (FUT-2a). Structural regression tests for all track child tables (FUT-2b).
+`tracks` schema with DAL + CLI + audit-ordering (FUT-1). ADR-007 composite PK over `track_id + project_id`, tenant-scoping, composite-FK from `dispatches.track → tracks(track_id, project_id)` (FUT-2a). Structural regression tests for all track child tables (FUT-2b). Parallel execution contract: `docs/contracts/MULTI_TRACK_PARALLEL_EXECUTION_CONTRACT.md` (ADR-020, 2026-05-30).
 
 **Intelligence + Enrichment**
 Repo-map enrichment extended to all providers (#712). Kimi intelligence injection wired (#701). ADR FTS5 index + injection in dispatch context (INT-1, INT-2).

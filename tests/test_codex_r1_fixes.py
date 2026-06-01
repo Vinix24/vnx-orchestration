@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DISPATCHER_SH = REPO_ROOT / "scripts" / "dispatcher_v8_minimal.sh"
+DISPATCHER_SH = REPO_ROOT / "scripts" / "dispatcher_minimal.sh"
 DISPATCH_CREATE_SH = REPO_ROOT / "scripts" / "lib" / "dispatch_create.sh"
 
 
@@ -28,7 +28,7 @@ class TestCleanupStuckDispatches:
     """_cleanup_stuck_dispatches must release lease/claim before moving files."""
 
     def test_bash_syntax_dispatcher(self):
-        """dispatcher_v8_minimal.sh passes bash -n after fix."""
+        """dispatcher_minimal.sh passes bash -n after fix."""
         result = subprocess.run(
             ["bash", "-n", str(DISPATCHER_SH)],
             capture_output=True,

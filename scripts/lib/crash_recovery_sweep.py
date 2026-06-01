@@ -13,7 +13,7 @@ When the wrapper process is killed mid-dispatch (a terminal/iTerm crash, an
 OOM-kill, a ``kill -9`` of the dispatcher), none of that runs. The
 ``.vnx-data/dispatches/active/<id>/manifest.json`` entry is left behind with no
 receipt and no ``dead_letter`` promotion. T0 is never told the dispatch died,
-so the active bucket slowly fills with orphans (the SEOcrawler April backlog was
+so the active bucket slowly fills with orphans (a past project's April backlog was
 exactly this class of orphan, not an in-process timeout).
 
 PID-based death detection was impossible until PR #636 added the

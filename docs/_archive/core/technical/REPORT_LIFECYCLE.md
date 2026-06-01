@@ -10,7 +10,7 @@ VNX reports flow through a progressive lifecycle that maximizes intelligence ext
 
 ## Report Age Categories
 
-### 📅 Recent (0-7 Days)
+### Recent (0-7 Days)
 - **Status**: Full report available
 - **Storage**: Complete markdown file in `unified_reports/`
 - **Access**: Direct file reading
