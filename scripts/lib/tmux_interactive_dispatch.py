@@ -39,6 +39,41 @@ logger = logging.getLogger(__name__)
 
 from tmux_worktree import WorktreeAllocateError, WorktreeHandle, allocate, classify, reap  # noqa: E402
 
+# Capability scoping (interim, per WORKER-CAPABILITY-SCOPING-DESIGN.md §4.4/§5):
+# detached ephemeral spawns drop --dangerously-skip-permissions for an empty
+# ambient MCP + acceptEdits posture + role allow-list. Imported defensively;
+# if unavailable the detached branch keeps a minimal scoped fallback (never
+# --dangerously-skip-permissions, but without the role-specific allow-list).
+try:
+    from worker_permissions import (  # noqa: E402
+        EMPTY_MCP_CONFIG,
+        worker_scoped_enabled,
+        build_claude_scope_args as _wp_build_claude_scope_args,
+        resolve_worker_profile as _wp_resolve_worker_profile,
+    )
+    _WP_AVAILABLE = True
+except Exception:  # pragma: no cover - sibling import is available in-tree
+    EMPTY_MCP_CONFIG = '{"mcpServers":{}}'
+    _WP_AVAILABLE = False
+
+    def worker_scoped_enabled() -> bool:  # type: ignore[misc]
+        return os.environ.get("VNX_WORKER_SCOPED", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+
+    def _wp_build_claude_scope_args(profile, *, permission_mode="acceptEdits", requires_mcp=False):  # type: ignore[misc]
+        args = ["--permission-mode", permission_mode]
+        if not requires_mcp:
+            args += ["--strict-mcp-config", "--mcp-config", EMPTY_MCP_CONFIG]
+        args += ["--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Grep,Glob"]
+        return args
+
+    def _wp_resolve_worker_profile(role):  # type: ignore[misc]
+        return None
+
 DEFAULT_COMPLETION_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
 
 # Only simple identifiers are valid model names (no whitespace or shell metacharacters).
@@ -126,6 +161,8 @@ def _default_launch_command(
     *,
     skip_permissions: bool = False,
     extra_flags: str = "",
+    role: "str | None" = None,
+    requires_mcp: bool = False,
 ) -> str:
     """Build the interactive ``claude`` launch line (NOT ``claude -p``).
 
@@ -133,6 +170,13 @@ def _default_launch_command(
     if *extra_flags* contains ``-p``, ``--print``, or ``--print=…``: those flags
     convert an interactive session to headless, defeating the subscription-safe
     guarantee of this lane.
+
+    ``role``: when provided, selects the permission profile whose tool allow-list
+    is included as ``--allowedTools`` so detached headless workers proceed without
+    stalling on tool-use prompts (``acceptEdits`` alone only auto-approves file edits).
+
+    ``requires_mcp``: when True, ``--strict-mcp-config --mcp-config {}`` is omitted
+    so the worker keeps its normal ambient MCP config.
     """
     if not _SAFE_MODEL_RE.match(model):
         raise ValueError(
@@ -148,7 +192,19 @@ def _default_launch_command(
                 )
     flags = ""
     if skip_permissions:
-        flags = " --dangerously-skip-permissions"
+        # Detached/autonomous run (no TTY to answer prompts). Default: scope the
+        # spawn — role allow-list + optional empty-MCP — instead of the blanket
+        # skip-permissions blast radius. VNX_WORKER_SCOPED=0 restores the legacy
+        # flag for emergency rollback.
+        if worker_scoped_enabled():
+            profile = _wp_resolve_worker_profile(role)
+            scope_args = _wp_build_claude_scope_args(
+                profile,
+                requires_mcp=requires_mcp,
+            )
+            flags = " " + " ".join(shlex.quote(a) for a in scope_args)
+        else:
+            flags = " --dangerously-skip-permissions"
     if extra_flags:
         flags = f"{flags} {extra_flags}".rstrip()
     return f"source ~/.zshrc 2>/dev/null; claude --model {model}{flags}"
@@ -545,12 +601,16 @@ class TmuxInteractiveDispatch:
         attach: bool = False,
         isolated_worktree: bool = True,
         base_ref: str = "origin/main",
+        requires_mcp: bool = False,
     ) -> InteractiveDispatchResult:
         """Spawn -> drive -> collect -> teardown. Single-shot; no warm-open.
 
         ``skip_permissions`` defaults to ``not attach``: an autonomous detached
         worker cannot answer permission prompts, while an attached (human in the
         loop) session keeps them.  Pass an explicit bool to override.
+
+        ``requires_mcp``: when True, the worker keeps its normal ambient MCP config
+        instead of the default force-empty posture (forwarded to the launch builder).
         """
         if not self._runner.available():
             return InteractiveDispatchResult(
@@ -708,7 +768,11 @@ class TmuxInteractiveDispatch:
 
             # 3. Build launch command
             launch_cmd = self._launch_builder(
-                model, skip_permissions=skip_permissions, extra_flags=extra_flags
+                model,
+                skip_permissions=skip_permissions,
+                extra_flags=extra_flags,
+                role=role,
+                requires_mcp=requires_mcp,
             )
 
             # FIX 1: Final-command guard — bites regardless of how the command
