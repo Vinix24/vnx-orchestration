@@ -2093,5 +2093,238 @@ class TestSubmitVerify(_LaneTestCase):
         self.assertTrue(result.success, result.failure_reason)
 
 
+# ---------------------------------------------------------------------------
+# PR-TMUX-4: Submit-verify signal fix — input-region scoping, no echo false-positive
+# ---------------------------------------------------------------------------
+
+class _VerifyRunner:
+    """Minimal tmux runner for _verify_submit isolation tests.
+
+    Returns ``capture_seq`` items in order for ``capture-pane`` calls.
+    Counts ``send-keys Enter`` calls from within _verify_submit (retry Enters only).
+    """
+
+    def __init__(self, capture_seq):
+        self._seq = list(capture_seq)
+        self.enter_count = 0
+
+    def available(self):
+        return True
+
+    def run(self, args, *, timeout=10, input_text=None):
+        cmd = args[0] if args else ""
+        if cmd == "capture-pane":
+            content = self._seq.pop(0) if self._seq else "? for shortcuts\n> "
+            return TmuxResult(0, content)
+        if cmd == "send-keys" and args and args[-1] == "Enter":
+            self.enter_count += 1
+        return TmuxResult(0)
+
+
+class TestSubmitVerifySignal(unittest.TestCase):
+    """_verify_submit uses working-state and input-region signals, not sentinel-anywhere.
+
+    Regression for two codex-gate findings:
+    1. Echo false-positive: sentinel appearing in scrollback (Claude's echo after real
+       submit) was treated as "still staged" when no working marker was visible yet.
+    2. Legacy default path (no sentinel in body): no verification at all — new code
+       detects staged paste via [Pasted text annotation and body fingerprint.
+    """
+
+    SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+    WORKING = "esc to interrupt"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def _lane(self, runner):
+        return TmuxInteractiveDispatch(
+            self.state_dir,
+            runner=runner,
+            project_root=self.state_dir,
+        )
+
+    def _verify(self, runner, body, *, timeout="0.05", retry_delay="0"):
+        env = {
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": timeout,
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": retry_delay,
+        }
+        with patch.dict(os.environ, env):
+            return self._lane(runner)._verify_submit("pane-0", body)
+
+    def _scrollback_echoed_pane(self):
+        """Pane where sentinel appears in scrollback (upper 2 lines), bottom 10 are idle.
+
+        Simulates what Claude's TUI shows after a successful submit: the body (including
+        sentinel) is echoed into the conversation history while the input line is cleared.
+        """
+        upper = [self.SENTINEL, "scrollback: assistant starting..."]
+        bottom = ["? for shortcuts"] * 9 + ["> "]
+        return "\n".join(upper + bottom)
+
+    def test_echoed_sentinel_no_working_marker_is_not_staged(self):
+        """Sentinel in scrollback (upper lines), no working marker → NOT staged.
+
+        Core regression test: old code returned True (still staged) here because it
+        checked sentinel-anywhere in the pane without scoping to the input region.
+        """
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        runner = _VerifyRunner([self._scrollback_echoed_pane()])
+        result = self._verify(runner, body)
+
+        self.assertTrue(result, "sentinel in scrollback must NOT be treated as staged")
+
+    def test_echoed_sentinel_no_retry_enter(self):
+        """Sentinel only in scrollback → no retry Enter sent from _verify_submit."""
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        runner = _VerifyRunner([self._scrollback_echoed_pane()])
+        self._verify(runner, body)
+
+        self.assertEqual(
+            runner.enter_count, 0,
+            "no retry Enter must be sent when sentinel is only in the scrollback",
+        )
+
+    def test_sentinel_in_input_region_is_staged(self):
+        """Sentinel in bottom 10 lines (still in input buffer) → still staged."""
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        # Sentinel appears in the last 2 lines (input region).
+        staged_pane = f"scrollback content\nmore content\n{self.SENTINEL}\n> "
+        runner = _VerifyRunner([staged_pane] * 20)
+        result = self._verify(runner, body, timeout="0.05")
+
+        self.assertFalse(result, "sentinel in input region must be treated as staged")
+
+    def test_bracketed_paste_marker_in_input_region_is_staged(self):
+        """[Pasted text in bottom lines → staged. Works on legacy path without sentinel in body."""
+        body = "## Context\n\nInstruction without sentinel"  # legacy path — no sentinel
+        staged_pane = "[Pasted text (2048 chars)]\nsome instruction content here..."
+        runner = _VerifyRunner([staged_pane] * 20)
+        result = self._verify(runner, body, timeout="0.05")
+
+        self.assertFalse(result, "[Pasted text in input region must be detected as staged")
+
+    def test_legacy_path_working_state_is_submitted(self):
+        """No sentinel in body + working marker → submitted (legacy path works correctly)."""
+        body = "## Context\n\nInstruction without sentinel"
+        runner = _VerifyRunner([f"some content\n{self.WORKING}\n> "])
+        result = self._verify(runner, body)
+
+        self.assertTrue(result, "working marker must cause submitted result on legacy path")
+
+    def test_working_marker_overrides_staged_signals(self):
+        """Working marker anywhere overrides bracketed-paste and sentinel staged signals."""
+        body = f"## Context\n\nInstruction.\n\n{self.SENTINEL}\n"
+        pane = f"[Pasted text (100 chars)]\n{self.SENTINEL}\n{self.WORKING}\n> "
+        runner = _VerifyRunner([pane])
+        result = self._verify(runner, body)
+
+        self.assertTrue(result, "working marker must override staged signals")
+        self.assertEqual(runner.enter_count, 0, "no retry Enter when working marker present")
+
+
+class TestSubmitVerifyEchoIntegration(_LaneTestCase):
+    """Integration: echoed sentinel in scrollback must not cause submit_failed or double-Enter."""
+
+    SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
+
+    def _echoed_pane(self):
+        """Sentinel in scrollback (upper 2 lines), bottom 10 lines are idle prompt."""
+        upper = [self.SENTINEL, "scrollback: assistant starting..."]
+        bottom = ["? for shortcuts"] * 9 + ["> "]
+        return "\n".join(upper + bottom)
+
+    def test_echoed_sentinel_dispatch_succeeds(self):
+        """Full dispatch: pane shows echoed sentinel in scrollback → success, not submit_failed.
+
+        Regression: old _still_staged() saw sentinel-anywhere and returned True, causing
+        spurious retry Enter and eventually submit_failed on a real submit.
+        """
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._echoed_pane()],
+        )
+        lane = self._make_lane(fake)
+        result = self._fast_dispatch(lane)
+
+        self.assertTrue(
+            result.success,
+            f"echoed sentinel in scrollback must not cause submit_failed: {result.failure_reason}",
+        )
+        self.assertNotEqual(result.failure_reason, "submit_failed")
+
+    def test_echoed_sentinel_no_spurious_retry_enter(self):
+        """Full dispatch: echoed sentinel → exactly 1 Enter after paste-buffer (no spurious retry)."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=[self._echoed_pane()],
+        )
+        lane = self._make_lane(fake)
+        self._fast_dispatch(lane)
+
+        paste_idx = next(
+            (i for i, c in enumerate(fake.commands) if c and c[0] == "paste-buffer"), None
+        )
+        self.assertIsNotNone(paste_idx, "paste-buffer must have been called")
+        post_paste_enters = [
+            c for c in fake.commands[paste_idx + 1:]
+            if c and c[0] == "send-keys" and c[-1] == "Enter"
+        ]
+        self.assertEqual(
+            len(post_paste_enters), 1,
+            f"spurious retry Enter detected: {len(post_paste_enters)} Enters after paste-buffer "
+            "(expected 1 = initial only, no echo false-positive retry)",
+        )
+
+    def test_legacy_path_staged_paste_causes_submit_failed(self):
+        """Legacy path (no sentinel in body): [Pasted text in pane → submit_failed.
+
+        Regression: old code (sentinel_in_body=False) always returned False from
+        _still_staged(), providing zero verification on the default path. New code
+        detects [Pasted text staging annotation in the input region.
+        """
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            post_paste_capture_seq=["[Pasted text (4096 chars)]\ninstruction content..."] * 50,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch.dict(os.environ, {
+            "VNX_TMUX_PASTE_SETTLE_SECONDS": "0",
+            "VNX_TMUX_SUBMIT_RETRY_DELAY": "0",
+            "VNX_TMUX_SUBMIT_VERIFY_TIMEOUT": "0.1",
+        }):
+            with patch("dispatch_govern.govern") as mock_govern:
+                from dispatch_govern import GovernedOutcome
+                mock_govern.return_value = GovernedOutcome(
+                    report_path=None,
+                    contract_status="synthesized",
+                    permission_enforcement="soft",
+                )
+                result = lane.dispatch(
+                    "Do the thing.",
+                    self.DISPATCH_ID,
+                    role="backend-developer",
+                    model="sonnet",
+                    deadline_seconds=5.0,
+                    poll_interval=0.01,
+                    warmup_timeout=0.5,
+                    warmup_poll_interval=0.01,
+                    isolated_worktree=False,
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.failure_reason, "submit_failed",
+            f"legacy staged paste must cause submit_failed, got: {result.failure_reason!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

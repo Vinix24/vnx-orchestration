@@ -576,30 +576,52 @@ class TmuxInteractiveDispatch:
     _END_SENTINEL = "<!-- VNX-END-OF-INSTRUCTION -->"
     # Pane content that proves Claude is actively running (not idle at the input box).
     _WORKING_MARKER = "esc to interrupt"
+    # Bottom N lines of the pane constitute the "input region" for staged-paste detection.
+    _INPUT_REGION_LINES = 10
+    # Leading chars of the body used as a fingerprint to detect it in the input region.
+    _BODY_FINGERPRINT_LEN = 80
 
     def _verify_submit(self, pane_id: str, body: str) -> bool:
         """Confirm the instruction was actually submitted, not left staged in the input box.
 
-        After the initial Enter, capture-pane is checked for:
-        - ``_WORKING_MARKER`` ("esc to interrupt") — Claude is running → submitted.
-        - ``_END_SENTINEL`` still visible — bracketed paste is still staged → not submitted.
+        Submitted = working indicator present anywhere in the pane, OR the input region
+        (bottom ``_INPUT_REGION_LINES`` lines) contains none of the staged-paste signals.
+        Still staged = no working indicator AND the input region still shows the paste
+        (bracketed-paste annotation, END_SENTINEL, or leading body text).
+
+        Scoping the check to the input region avoids the echo false-positive: after a
+        real submit, Claude echoes the body into the conversation scrollback, which would
+        contain the sentinel — that is NOT the same as the body still being staged.
+
+        Works on both paths: VNX_SHARED_PREPARE=1 (body contains sentinel) and the legacy
+        default (no sentinel in body, detected via bracketed-paste annotation or fingerprint).
 
         If still staged, waits VNX_TMUX_SUBMIT_RETRY_DELAY then sends exactly one more
         separate Enter. Polls until submitted or VNX_TMUX_SUBMIT_VERIFY_TIMEOUT expires.
-        Returns False only when the sentinel is still staged after that hard timeout.
+        Returns False only when the paste is still staged after that hard timeout.
         """
         retry_delay = float(os.environ.get("VNX_TMUX_SUBMIT_RETRY_DELAY", "0.75"))
         verify_timeout = float(os.environ.get("VNX_TMUX_SUBMIT_VERIFY_TIMEOUT", "5"))
-        sentinel_in_body = self._END_SENTINEL in body
+        body_fingerprint = body.strip()[:self._BODY_FINGERPRINT_LEN]
 
         def _still_staged() -> bool:
             cap = self._runner.run(["capture-pane", "-t", pane_id, "-p"])
             content = cap.stdout if cap.returncode == 0 else ""
+            # Working indicator anywhere in pane → Claude is running → submitted.
             if self._WORKING_MARKER in content:
-                return False   # actively running — definitely submitted
-            if sentinel_in_body and self._END_SENTINEL in content:
-                return True    # sentinel still visible — still staged
-            return False       # unknown state; assume submitted (conservative)
+                return False
+            # Scope staged-paste check to the input region (bottom lines only).
+            # Sentinel/instruction text in the scrollback (upper area) means Claude already
+            # echoed the submitted content — do not treat that as "still staged".
+            lines = content.splitlines()
+            input_region = "\n".join(lines[-self._INPUT_REGION_LINES:]) if lines else ""
+            if "[Pasted text" in input_region:
+                return True   # bracketed-paste staging annotation still visible
+            if self._END_SENTINEL in input_region:
+                return True   # sentinel still in input buffer (not just scrollback echo)
+            if body_fingerprint and body_fingerprint in input_region:
+                return True   # leading body text still in input buffer
+            return False      # unknown state; assume submitted (conservative)
 
         if not _still_staged():
             return True
@@ -617,7 +639,7 @@ class TmuxInteractiveDispatch:
 
         logger.warning(
             "interactive: submit-verify timeout for pane %s after %.1fs: "
-            "end-sentinel still staged in input box",
+            "paste still staged in input region",
             pane_id, verify_timeout,
         )
         return False
