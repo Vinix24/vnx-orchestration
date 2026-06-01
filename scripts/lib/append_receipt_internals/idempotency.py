@@ -34,6 +34,40 @@ IDEMPOTENCY_FIELDS = (
 )
 
 
+# Hash-chain primitives live in scripts/lib/ndjson_hash_chain.py. Imported
+# lazily inside the lock path so the flag-OFF append path takes on no
+# import-time dependency.
+_LIB_DIR = Path(__file__).resolve().parent.parent
+
+
+def _chain_receipts_enabled() -> bool:
+    """True when VNX_CHAIN_RECEIPTS opts the append path into hash-chaining.
+
+    Default OFF. Recognised truthy values: 1, true, yes, on (case-insensitive).
+    When OFF the append path is byte-for-byte unchanged.
+    """
+    value = os.environ.get("VNX_CHAIN_RECEIPTS", "")
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _last_hash_under_lock(receipt_path: Path) -> str:
+    """Inline tail-hash read for the chained append.
+
+    Returns the canonical hash of the file's last entry, or GENESIS_HASH for an
+    empty/missing ledger. MUST be called while holding the append lock — it is
+    the read half of the read-tail + stamp + write + cache-update critical
+    section. Deliberately inlined (not ``append_chained_entry``) so no second
+    file handle is opened outside the VNX lock (fork risk).
+    """
+    import sys as _sys
+
+    if str(_LIB_DIR) not in _sys.path:
+        _sys.path.insert(0, str(_LIB_DIR))
+    from ndjson_hash_chain import GENESIS_HASH, _read_last_hash
+
+    return _read_last_hash(receipt_path) or GENESIS_HASH
+
+
 def _resolve_receipts_file(receipts_file: Optional[str] = None) -> Path:
     if receipts_file:
         return Path(receipts_file).expanduser()
@@ -147,6 +181,16 @@ def _write_receipt_under_lock(
                     receipts_file=receipt_path,
                     idempotency_key=idempotency_key,
                 )
+
+            # Hash-chain stamping (flag-gated). The read-tail + stamp happens
+            # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so
+            # the read-tail + stamp + write + cache-update sequence is fully
+            # serialized under the one append lock. Without this serialization
+            # concurrent appends would read the same tail hash and fork the
+            # chain. When the flag is OFF this block is skipped entirely and the
+            # receipt is written byte-for-byte as before.
+            if _chain_receipts_enabled():
+                receipt["prev_hash"] = _last_hash_under_lock(receipt_path)
 
             try:
                 with receipt_path.open("a", encoding="utf-8") as receipts_handle:
