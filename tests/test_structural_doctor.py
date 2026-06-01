@@ -425,3 +425,48 @@ class TestApply:
             assert ver == 26
         finally:
             backup_conn.close()
+
+    def test_apply_rollback_on_repair_errors(self, tmp_path, monkeypatch):
+        """If apply_repair returns errors, transaction rolls back, backup exists, exit non-zero.
+
+        Simulates an index DDL failure during --apply.  Asserts:
+          (a) the live temp DB is NOT mutated (rolled back — track tables absent)
+          (b) the doctor exits non-zero
+          (c) the backup file still exists
+        """
+        db_path = _create_divergent_db(tmp_path / "test_rollback.db")
+
+        def buggy_apply_repair(conn):
+            """Simulate a partial repair that creates a table but hits an index error."""
+            conn.execute("CREATE TABLE IF NOT EXISTS tracks (track_id TEXT)")
+            return {
+                "tables_created": ["tracks"],
+                "tables_already_exist": [],
+                "columns_added": [],
+                "columns_already_exist": [],
+                "indexes_created": [],
+                "output_ref_backfilled": 0,
+                "errors": ["Injected index DDL failure: no such column: bogus"],
+            }
+
+        monkeypatch.setattr(doctor, "apply_repair", buggy_apply_repair)
+
+        with pytest.raises(SystemExit) as exc_info:
+            doctor.apply_to_live(db_path)
+
+        assert exc_info.value.code == 1
+
+        # (a) DB NOT mutated — track tables still absent (rolled back)
+        conn = sqlite3.connect(str(db_path))
+        try:
+            for t in doctor.TRACK_TABLE_NAMES:
+                assert not doctor._table_exists(conn, t), (
+                    f"{t} should have been rolled back or never created"
+                )
+        finally:
+            conn.close()
+
+        # (c) Backup file was written before the transaction
+        bak_files = list(tmp_path.glob("*.db.bak-*"))
+        assert len(bak_files) == 1, "Backup file should exist"
+        assert bak_files[0].stat().st_size > 0

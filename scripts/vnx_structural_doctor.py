@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import shutil
 import sqlite3
@@ -436,6 +437,16 @@ def dry_run(db_path: Path) -> None:
         # --- Print results ---
         print_repair_report(report)
 
+        # All-or-nothing: index/repair errors make the verdict NOT-CLEAN
+        if report["errors"]:
+            post_diag["divergence"] = {
+                "verdict": "NOT-CLEAN",
+                "detail": (
+                    f"Repair encountered {len(report['errors'])} error(s). "
+                    f"All-or-nothing: tables/columns/indexes incomplete."
+                ),
+            }
+
         print(f"  Rowcount assertion:")
         print(f"    dispatches before: {disp_before}")
         print(f"    dispatches after : {disp_after}")
@@ -451,7 +462,7 @@ def dry_run(db_path: Path) -> None:
 
         print_diagnosis(post_diag)
 
-        if disp_before == disp_after and integrity_ok:
+        if not report["errors"] and disp_before == disp_after and integrity_ok:
             print("  Dry-run successful. Run with --apply to repair the live DB.")
         else:
             print("  [!] Dry-run found issues. --apply blocked until resolved.")
@@ -492,13 +503,29 @@ def apply_to_live(db_path: Path) -> None:
     print(f"  Backup written ({backup_path.stat().st_size} bytes)")
 
     # 3. Repair in a single transaction
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("BEGIN")  # explicit transaction — enables all-or-nothing rollback
 
     try:
         disp_before = _rowcount(conn, "dispatches")
         report = apply_repair(conn)
+
+        # All-or-nothing: if any repair step failed, roll back the transaction.
+        # Tables/columns/indexes are inseparable — partial repair is rejected.
+        if report["errors"]:
+            conn.rollback()
+            print(
+                f"\n  [FATAL] Repair incomplete — {len(report['errors'])} error(s). "
+                f"Transaction rolled back. Live DB NOT modified.",
+                file=sys.stderr,
+            )
+            for e in report["errors"]:
+                print(f"    - {e}", file=sys.stderr)
+            print_repair_report(report, file=sys.stderr)
+            sys.exit(1)
+
         conn.commit()
         disp_after = _rowcount(conn, "dispatches")
 
@@ -548,6 +575,25 @@ def apply_to_live(db_path: Path) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # ADR-005: write append-only audit event
+    audit_path = db_path.parent / "structural_doctor_audit.ndjson"
+    audit_record = json.dumps({
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "op": "structural_doctor_apply",
+        "db_path": str(db_path),
+        "tables_created": report["tables_created"],
+        "columns_added": report["columns_added"],
+        "indexes_created": len(report["indexes_created"]),
+        "dispatches_rowcount": disp_after,
+        "backup_path": str(backup_path),
+        "integrity_ok": integrity_ok,
+    })
+    try:
+        with open(audit_path, "a") as f:
+            f.write(audit_record + "\n")
+    except OSError as e:
+        print(f"  [WARNING] Failed to write audit record: {e}", file=sys.stderr)
 
     print(f"\n  Repair complete. Backup: {backup_path}")
 
