@@ -1,16 +1,62 @@
+# ============================================================================
+# ROADMAP.yaml is the SINGLE SOURCE OF TRUTH for the VNX feature roadmap.
+#
+# It is the only hand-edited planning surface. Two views are GENERATED from it
+# and must never be hand-edited:
+#   - FEATURE_PLAN.md  <- scripts/build_feature_plan.py
+#   - PR_QUEUE.md      <- scripts/build_pr_queue.py
+#
+# After editing this file, regenerate both views and commit them together:
+#   python3 scripts/build_feature_plan.py
+#   python3 scripts/build_pr_queue.py
+# CI guards this: tests/test_roadmap_consistency.py runs the generators with
+# --check and fails the build if either view drifts from this file.
+#
+# claudedocs/*.md (e.g. MASTER-PRELAUNCH-PLAN.md, DISPATCH-UNIFICATION-*.md) are
+# detailed working/design docs, NOT status SSOT. Their operational status is
+# folded into launch_state + features[] here. When a working doc is executed,
+# archive it under claudedocs/_archive/ and let this file carry the live state.
+#
+# This anti-drift rule exists because three planning baselines (this file,
+# the generated views, and the claudedocs prelaunch plan) had drifted apart:
+# launch_state falsely read "production-validated" while ~10 launch PRs were
+# still open. Keep status in ONE place (here); generate the rest.
+#
+# ADR-007: every new central-DB table needs a composite UNIQUE/PK over
+# project_id. Cite it explicitly in review-gate prompts for schema work.
+# ============================================================================
+
 roadmap_id: vnx-roadmap-autopilot
 title: VNX Multi-Feature Roadmap
 
 launch_state:
   version: "1.0.0"
-  date: "2026-05-29"
+  date: "2026-06-01"             # last update to this launch_state block
+  status: "pre-launch"            # code queue merged to main; NOT yet published
+  target_date: "2026-06-02"       # HN/Reddit launch target
+  last_verified: "2026-06-01"
+  verified_against: "origin/main@c0506771"
   note: >
-    1.0.0 is pip-installable and production-validated. Self-learning loop is runnable
-    (auto-dream shipped); nightly trigger and central-path unification are pending.
-    Smart routing (VNX_AUTO_ROUTE) and pool task consumer (VNX_POOL_TASK_CONSUMER)
-    are shipped opt-in. Roadmap autopilot tick (RA-6) ships dark (default off).
+    1.0.0 code queue is fully merged to main as of 2026-06-01. PRs #756, #759,
+    #758, #757, #760, #761, #763, #764, #765, #751, #766, #767, #769, and fix
+    #770 (dispatch prompt-before-scope-flags lane repair) are all merged.
+    1.0.0 is NOT yet published to PyPI. The only remaining gate is LB-3
+    (operator-gated): rebuild wheel from final main -> zero-hit security grep on
+    that exact artifact -> operator fresh-venv install acceptance ->
+    central-install refresh -> operator PyPI publish go -> tag+release. LB-3 is
+    the final immutable gate (PyPI is write-once). Honesty constraint: the
+    claude-subprocess lane is the true-honor reference; other lanes are governed
+    at soft/conditional enforcement and marked as such in every receipt. No
+    "worker-authored on every lane" or "as good as Sonnet" claim ships until
+    measured. Self-learning loop is runnable (auto-dream shipped) but its nightly
+    trigger and central-path unification stay dormant. Smart routing
+    (VNX_AUTO_ROUTE) and pool task consumer (VNX_POOL_TASK_CONSUMER) are shipped
+    opt-in. Roadmap autopilot tick (RA-6) ships dark (default off).
+  launch_blockers:
+    - "LB-3 (operator): rebuild wheel from final main + zero-hit security grep on that exact artifact + fresh-venv install acceptance + central-install refresh + PyPI publish go + tag+release"
 
 features:
+  # ---- Shipped foundation (pre-1.0) ----
   - feature_id: roadmap-autopilot
     title: Roadmap Autopilot, Auto-Next Feature Loading, and Multi-Reviewer Gates
     plan_path: roadmap/features/roadmap-autopilot/FEATURE_PLAN.md
@@ -22,11 +68,13 @@ features:
       - codex_gate
       - claude_github_optional
     depends_on: []
+    milestone: "1.0"
     status: shipped-dark
     notes: >
       RA-1..6 merged (project_id stamp, branch+worktree provisioning, gate enforcement,
       human-gate primitive, step driver, autopilot tick). RA-6 autopilot_tick ships dark
-      (default off, env-gated). RA-3b closed 4 advance-gate bypass holes.
+      (default off, env-gated). RA-3b closed 4 advance-gate bypass holes. User-facing
+      exposure deferred to 1.2 (needs smart-routing default-on).
 
   - feature_id: fut-1
     title: "Track-layer schema + DAL + CLI + audit-ordering (PR-FUT-1)"
@@ -37,6 +85,7 @@ features:
       - gemini_review
       - codex_gate
     depends_on: []
+    milestone: "1.0"
     status: done
 
   - feature_id: fut-2
@@ -49,5 +98,416 @@ features:
       - codex_gate
     depends_on:
       - fut-1
+    milestone: "1.0"
     status: done
     notes: "FUT-2a (composite PK + ADR-007 compliance) and FUT-2b (structural regression tests) both merged."
+
+  # ---- 1.0 clean-launch queue (in-flight; mapped to open PRs) ----
+  - feature_id: launch-wave0-hygiene
+    title: "1.0 launch — Wave 0 hygiene: untrack .venv + scratch, strip emoji/buzzwords (keep FEATURE_PLAN/PR_QUEUE tracked)"
+    branch_name: dispatch/20260530-180455-wave0
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on: []
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#756"
+        title: "chore(wave0): untrack .venv + scratch, strip emoji/buzzwords"
+        status: merged
+        risk_class: low
+    notes: "Merge first; unblocks a clean security-grep baseline. #755 lesson: keep FEATURE_PLAN.md + PR_QUEUE.md tracked, clean their content only."
+
+  - feature_id: launch-renames
+    title: "1.0 launch — Wave 1 renames: _vN files -> canonical names + compat shims (remove in 1.0.1)"
+    branch_name: dispatch/20260530-202158-renames
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-wave0-hygiene
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#759"
+        title: "refactor(rename): _vN files -> canonical names + compat shims"
+        status: merged
+        risk_class: high
+    notes: >
+      The rebase bomb (60-73 files incl live supervisors + bin/vnx). Merged alone;
+      grep-zero across all filetypes + 4 runtime smoke-tests + net-deletion
+      sanity check verified before subsequent PRs rebased.
+
+  - feature_id: launch-scrub
+    title: "1.0 launch — Wave 1 scrub: remove residual private-project artifacts from repo + wheel"
+    branch_name: dispatch/20260530-201207-scrub-t
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-renames
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#758"
+        title: "chore(scrub): remove residual private-project artifacts"
+        status: merged
+        risk_class: low
+
+  - feature_id: launch-readme
+    title: "1.0 launch — Wave 1 credibility: README control-plane repositioning + ADR section + architecture diagram"
+    branch_name: dispatch/20260530-183158-readme
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-renames
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#757"
+        title: "docs(readme): control-plane repositioning + ADR section + arch diagram"
+        status: merged
+        risk_class: medium
+    notes: "Re-scope the headline to what is true: claude-subprocess is the reference lane; do not oversell the tmux-spawn lane as a proven default."
+
+  - feature_id: launch-governance-core
+    title: "1.0 launch — Wave 1b: role-based manager block + auto-inject T0-action footer (enforcement, not convention)"
+    branch_name: dispatch/20260530-204128-wave1b
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-renames
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#760"
+        title: "feat(wave1b): role-based manager block + auto-inject T0-action footer"
+        status: merged
+        risk_class: high
+    notes: "Freeze trio with #759/#761. Drops Track:/Terminal: for Role:. Ships scripts/lib/dispatch_footer.py (avoid a colliding second footer in parity work)."
+
+  - feature_id: launch-provider-intel
+    title: "1.0 launch — Wave 2: provider-aware intelligence + receipt token/cost + report linkage (ADR-007 provider column)"
+    branch_name: dispatch/20260530-205917-wave2core
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-renames
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#761"
+        title: "feat(wave2): provider-aware intelligence + receipt token/cost"
+        status: merged
+        risk_class: high
+    notes: "Freeze trio. Adds provider column (ADR-007 composite-key compliant). Does NOT inject the non-Claude skill body; that gap closes in Option B parity (prepare())."
+
+  - feature_id: launch-kimi-robust
+    title: "1.0 launch — Wave 2: kimi 1.44.0 robust spawn + fail-loud on empty extraction (drop --yolo)"
+    branch_name: fix/kimi-robust-spawn
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-renames
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#763"
+        title: "fix(kimi): robust spawn + fail-loud on empty extraction"
+        status: merged
+        risk_class: medium
+    notes: "First instance of the provider-hardening program. Deeper content-block info-bug fix + MAJOR-2 regression test deferred to 1.0.1 (see kimi-deepfix-major2)."
+
+  - feature_id: launch-capability-interim
+    title: "1.0 launch — Wave 2: scope worker capabilities (drop --dangerously-skip-permissions, empty ambient MCP)"
+    branch_name: fix/worker-capability-scoping
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-renames
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#764"
+        title: "fix(worker): scope capabilities — drop --dangerously-skip-permissions, empty MCP"
+        status: merged
+        risk_class: high
+    notes: >
+      #762 closed as duplicate (same three hot files, conflicting). Removes the
+      MCP blast radius and the most quotable counter-example to the glass-box
+      claim; does NOT enforce per-profile file-write scope (full binding is 1.1,
+      see capability-binding-full).
+
+  - feature_id: launch-deepseek-lane
+    title: "1.0 launch — governed DeepSeek-harness lane (own-key, key-auth, MCP-off, account-safe)"
+    branch_name: feat/deepseek-harness-lane
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-governance-core
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#765"
+        title: "feat(providers): governed DeepSeek-harness lane"
+        status: merged
+        risk_class: medium
+    notes: "Native Anthropic-compat harness lane; never on the OAuth subscription. Measured 0 calls to api.anthropic.com under key-auth + MCP-off."
+
+  - feature_id: launch-adr020-contract
+    title: "1.0 launch — ADR-020 parallel multi-track execution contract (design-ratified; implementation 1.2)"
+    branch_name: dispatch/20260530-105008-track-doc
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - gemini_review
+    depends_on: []
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#751"
+        title: "docs(adr): ADR-020 parallel multi-track execution contract"
+        status: merged
+        risk_class: low
+    notes: "Doc-only. Must read 'design-ratified, implementation 1.2' in-doc so it is not mistaken for shipped behavior. Implementation lives in parallel-track-scheduler (1.2)."
+
+  - feature_id: launch-tmux-spawn-enrichment
+    title: "1.0 launch — fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report (dogfood default lane)"
+    branch_name: fix/tmux-spawn-enrichment
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-governance-core
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#766"
+        title: "fix(tmux-spawn): reuse skill+intelligence enrichment + emit unified_report"
+        status: merged
+        risk_class: medium
+    notes: "Dogfood fix for the default tmux-spawn lane. Reuses existing enrichment path instead of duplicating."
+
+  - feature_id: launch-tmux-default-routing
+    title: "1.0 launch — feat(dispatch): route default Claude lane through enriched tmux-spawn (dogfood + Wave-1b)"
+    branch_name: feat/tmux-default-routing
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-tmux-spawn-enrichment
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#767"
+        title: "feat(dispatch): route default Claude lane through enriched tmux-spawn"
+        status: merged
+        risk_class: medium
+    notes: "Default Claude lane now routes through the enriched tmux-spawn path. Builds on #766 enrichment."
+
+  - feature_id: launch-readme-honesty
+    title: "1.0 launch — docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope"
+    branch_name: docs/readme-honesty
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - codex_gate
+    depends_on:
+      - launch-tmux-default-routing
+    milestone: "1.0"
+    status: done
+    pr_queue:
+      - pr_id: "#769"
+        title: "docs(readme): honesty pass on tmux-lane maturity, lane uniformity, OpenRouter scope"
+        status: merged
+        risk_class: low
+    notes: >
+      Removes oversell of tmux-spawn as a proven default. Accurately describes
+      lane maturity tiers and OpenRouter scope. Required before public launch.
+      Fix #770 (dispatch prompt-before-scope-flags lane repair) also merged to
+      main as a 1.0 fix; no separate feature entry (scope: targeted dispatch bug fix).
+
+  - feature_id: tmux-lane-structural-refactor
+    title: "1.0 launch — June-15-critical: tmux subscription-lane PREPARE+GOVERN structural completion (tmux lane only, strangler-fig)"
+    branch_name: feat/tmux-lane-structural-refactor
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-governance-core
+      - launch-provider-intel
+    milestone: "1.0"
+    status: planned
+    notes: >
+      June-15-critical. The Anthropic OAuth change (June 15, 2026) makes claude-tmux-spawn
+      the only subscription-preserving lane and the default (#767). Builds on #766
+      (skill+intelligence enrichment) and #767 (default-routing). Scope: full PREPARE on
+      the tmux lane — permission preamble + worker-rules footer + report-contract directive;
+      full GOVERN close-out — guaranteed unified_report + validate_body before receipt
+      emission; env/receipt-consistency fix — VNX_STATE_DIR inherited into the tmux-spawn
+      worker so the receipt lands where the orchestrator reads it. Strangler-fig:
+      flag-gated + shadow-mode + burn-in before hard-enforce. Scoped to the tmux lane
+      ONLY. Full LaneRouter / all-lanes PREPARE/GOVERN unification and legacy deletion
+      defer to opt-a-envelope-extraction (1.1) and launch-option-b-parity (1.1). Provider
+      lanes (codex/gemini/kimi/litellm) are NOT June-15-critical.
+
+  - feature_id: launch-option-b-parity
+    title: "Option B parity (all lanes): uniform prepare()/govern() across subprocess + tmux + all provider lanes"
+    branch_name: feat/option-b-dispatch-parity
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - tmux-lane-structural-refactor
+      - launch-governance-core
+      - launch-provider-intel
+    milestone: "1.1"
+    status: planned
+    notes: >
+      Not yet PR'd. Extends the tmux-only PREPARE/GOVERN work (tmux-lane-structural-refactor,
+      1.0) to all remaining lanes: subprocess + provider lanes (codex/gemini/kimi/litellm).
+      Delivers Option A's BEHAVIOR (uniform enforcement) without its STRUCTURE (the
+      LaneRouter/envelope, deferred to opt-a-envelope-extraction). Build the contract body
+      BEFORE emit_unified_report (idempotency reorder). Distinct module names from
+      auto_report_contract.py and dispatch_footer.py. Provider lanes are NOT June-15-critical
+      and land here, post-launch.
+
+  # ---- Post-1.0 roadmap (planned; ordered with dependencies) ----
+  - feature_id: kimi-deepfix-major2
+    title: "Kimi #763 info-bug deep fix + MAJOR-2 regression test"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-kimi-robust
+      - launch-provider-intel
+    milestone: "1.0.1"
+    status: planned
+    notes: "Content-block edge cases not covered by the 1.44.0 stream-json parser fix; dedicated regression suite."
+
+  - feature_id: log-rotation
+    title: "Log-rotation fix: event-stream ring-buffer growth + receipt log size bounds"
+    risk_class: low
+    merge_policy: human
+    review_stack:
+      - gemini_review
+    depends_on: []
+    milestone: "1.0.1"
+    status: planned
+    notes: "Operational hygiene; not a fresh-install blocker."
+
+  - feature_id: opt-a-envelope-extraction
+    title: "Option A envelope extraction: dispatch_envelope.py + LaneRouter + delete legacy duplicated PREPARE/GOVERN"
+    plan_path: claudedocs/DISPATCH-UNIFICATION-opus.md
+    risk_class: high
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-option-b-parity
+    milestone: "1.1"
+    status: planned
+    notes: "Code-organization payoff (no duplication), not new behavior. Strangler-fig behind VNX_UNIFIED_ENVELOPE=1, legacy default until burn-in; delete legacy blocks only after."
+
+  - feature_id: capability-binding-full
+    title: "Full role->capability binding: mcp_servers allowlist + permission_mode per role + un-dead generate_claude_settings + per-adapter materialization + permission_enforcement receipt field"
+    plan_path: claudedocs/WORKER-CAPABILITY-SCOPING-DESIGN.md
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - opt-a-envelope-extraction
+    milestone: "1.1"
+    status: planned
+    notes: "Completes least-privilege beyond the 1.0 capability interim; needs Option A's PREPARE seam. Enforces per-profile file-write scope the interim does not."
+
+  - feature_id: per-folder-agents
+    title: "Per-folder agents: folder-addressable role = skill + permission-profile + model"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - capability-binding-full
+    milestone: "1.1"
+    status: planned
+    notes: "Depends on the role->capability binding existing. Build the 1.0 role layer folder-addressable so this slots on without rebuild. Maps to CC-native .claude/agents/*.md tools: frontmatter."
+
+  - feature_id: openrouter-arbitrary
+    title: "OpenRouter-arbitrary / OpenAI-compat proxy-gated lane class"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - opt-a-envelope-extraction
+    milestone: "1.1"
+    status: planned
+    notes: "Distinct lane class (Anthropic<->OpenAI proxy, ~1.1x overhead) from the native Anthropic-compat harnesses shipped in 1.0. Inherits uniform prepare/govern."
+
+  - feature_id: provider-hardening
+    title: "Provider hardening: fail-loud on empty extraction + CI-canary per CLI version + version-pin"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - launch-kimi-robust
+    milestone: "1.1"
+    status: planned
+    notes: "Systematizes the kimi #763 point fix: every provider fails loud on empty extraction; a CI canary dispatches a trivial task through each lane per CLI version; CLI versions pinned in provider_constraints.yaml."
+
+  - feature_id: usage-aware-routing
+    title: "Usage/budget aggregator + usage-aware routing (clean-API + admin-API + receipt-OBSERVE) + Mission Control widget"
+    risk_class: medium
+    merge_policy: human
+    review_stack:
+      - gemini_review
+      - codex_gate
+    depends_on:
+      - provider-hardening
+    milestone: "1.2"
+    status: planned
+    notes: >
+      ADR-007: usage_state is a new central-DB table -> composite UNIQUE/PK over
+      project_id (cite in the review-gate prompt). Clean-API tier (DeepSeek balance,
+      OpenRouter credits) and admin-API tier (Anthropic/OpenAI usage) are exact;
+      subscription lanes OBSERVE remaining quota from the CLI's own rate-limit/reset
+      responses captured in receipts, never console-scraping. Feeds the smart-router
+      (prefer abundant lanes, auto-skip exhausted, re-enable at reset).
