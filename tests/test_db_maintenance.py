@@ -280,6 +280,42 @@ class TestApply:
         )
         assert result["pruned"].get("code_snippets", 0) > 0
 
+    def test_apply_prune_is_transactional_mid_loop_error_rolls_back(self, tmp_path):
+        """Prune is all-or-nothing: mid-loop error rolls back, no partial prune."""
+        db = tmp_path / "quality_intelligence.db"
+        conn = _make_db(db)
+        _insert_snippets(conn, ["2020-01-01", "2020-02-01"])
+        _insert_sessions(conn, ["2020-01-01", "2020-02-01"])
+        conn.close()
+
+        # Sabotage: drop session_analytics (3rd in PRUNABLE_TABLES order:
+        # code_snippets → snippet_metadata → session_analytics).
+        # code_snippets+snippet_metadata DELETE succeeds, then
+        # session_analytics DELETE fails mid-loop → rollback everything.
+        conn = sqlite3.connect(str(db))
+        conn.execute("DROP TABLE session_analytics")
+        conn.commit()
+        conn.close()
+
+        result = apply(db_path=str(db), retention_days=30)
+
+        # Verify no partial prune — code_snippets + snippet_metadata rolled back.
+        conn = sqlite3.connect(str(db))
+        cs_count = conn.execute("SELECT COUNT(*) FROM code_snippets").fetchone()[0]
+        sm_count = conn.execute("SELECT COUNT(*) FROM snippet_metadata").fetchone()[0]
+        conn.close()
+
+        assert cs_count == 2, f"code_snippets: expected 2 (rolled back), got {cs_count}"
+        assert sm_count == 2, f"snippet_metadata: expected 2 (rolled back), got {sm_count}"
+        assert "session_analytics_error" in result["pruned"], (
+            "session_analytics should have recorded an error"
+        )
+        # Audit ledger must NOT be written when the prune was rolled back.
+        audit_path = db.parent / "db_maintenance_audit.ndjson"
+        assert not audit_path.exists(), (
+            "Audit ledger must not exist when prune was rolled back"
+        )
+
     def test_apply_writes_audit_ledger(self, tmp_path):
         """apply() must write exactly one NDJSON line to db_maintenance_audit.ndjson."""
         db = tmp_path / "quality_intelligence.db"
