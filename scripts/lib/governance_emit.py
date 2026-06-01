@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_RE = re.compile(r"^(claude|codex|gemini|kimi|litellm:[a-z][a-z0-9_-]*)$")
+_PROVIDER_RE = re.compile(
+    r"^(claude|codex|gemini|kimi|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_.-]*)?)?)$"
+)
 
 
 def _validate_provider(provider: str) -> None:
@@ -51,10 +53,15 @@ def emit_dispatch_receipt(
     token_usage: Dict[str, int],
     cost_usd: Optional[float],
     state_dir: Path,
+    report_path: Optional[str] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson. fcntl.flock for concurrent safety.
 
     Returns the receipt file path on success.
+
+    ``report_path`` links the receipt to its emitted unified report. The path is
+    deterministic (``unified_reports/<dispatch_id>.md``) so the caller can supply
+    it even when the report is written after the receipt.
 
     Raises:
         ValueError: provider field doesn't match required pattern
@@ -78,6 +85,7 @@ def emit_dispatch_receipt(
         "cost_usd": cost_usd,
         "findings": findings,
         "pr_id": pr_id,
+        "report_path": report_path,
         "timestamp": now_ts,
         "recorded_at": recorded_ts,
     }
