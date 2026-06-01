@@ -185,15 +185,49 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     # authored: idempotent (no overwrite) — worker already wrote the valid file.
     # synthesized/violated: overwrite=True so a stale placeholder is replaced.
     is_authored = contract_status == "authored"
+
+    # Build schema-complete frontmatter (unified_report_v1.json requires 14 fields).
+    # Partial frontmatter raises SchemaViolation under VNX_SCHEMA_STRICT=1 and
+    # blocks the atomic write, leaving a stale placeholder on disk.
+    receipt_data = raw.receipt or {}
+    _model = (receipt_data.get("model") or "unknown")
+    _exit_code = int(receipt_data.get("exit_code", 0) or 0)
+    _raw_token = receipt_data.get("token_usage") or {}
+    _token_usage = {
+        "input": int(_raw_token.get("input") or 0),
+        "output": int(_raw_token.get("output") or 0),
+        "cache_read": int(
+            _raw_token.get("cache_read") or _raw_token.get("cache_hit") or 0
+        ),
+    }
+    _cost_usd = float(receipt_data.get("cost_usd") or 0.0)
     frontmatter = {
+        "schema_version": 1,
         "dispatch_id": dispatch_id,
+        "provider": "claude",
+        "sub_provider": "anthropic",
+        "model": _model,
         "terminal_id": spec.terminal_id,
+        "pool_id": "interactive",
+        "role": "backend-developer",
+        "task_class": "implementation",
+        "pr_id": spec.pr_id or "none",
+        "duration_seconds": float(raw.duration_seconds),
+        "exit_code": _exit_code,
+        "token_usage": _token_usage,
+        "cost_usd": _cost_usd,
+        "route_decision": {
+            "strategy": "synthesized",
+            "selected_provider": "claude",
+            "selected_model": _model,
+            "reason": (
+                f"tmux interactive lane — govern synthesis (terminal={spec.terminal_id})"
+            ),
+        },
         "lane": lane,
         "contract_status": contract_status,
         "permission_enforcement": permission_enforcement,
     }
-    if spec.pr_id:
-        frontmatter["pr_id"] = spec.pr_id
 
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 

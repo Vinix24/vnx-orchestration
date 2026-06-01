@@ -442,6 +442,63 @@ def test_govern_synthesized_pr_section_passes_validate_body(tmp_data, tmp_state)
 
 
 # ---------------------------------------------------------------------------
+# govern() — VNX_SCHEMA_STRICT=1: overwrite must succeed + frontmatter valid
+# ---------------------------------------------------------------------------
+
+def test_govern_strict_mode_overwrites_stale_placeholder(tmp_data, tmp_state, monkeypatch):
+    """VNX_SCHEMA_STRICT=1: stale placeholder is replaced with schema-valid synthesized report.
+
+    Before the fix, govern() emitted a 5-field frontmatter that failed strict-mode
+    schema validation (missing schema_version + 9 other required fields), causing
+    SchemaViolation to abort the atomic write and leaving the stale placeholder on disk.
+    """
+    monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
+    monkeypatch.setenv("VNX_SCHEMA_STRICT", "1")
+
+    reports_dir = tmp_data / "unified_reports"
+    reports_dir.mkdir(parents=True)
+    placeholder_body = (
+        "# Dispatch test-govern-001\n\n"
+        "## Summary\n\n"
+        "Interactive tmux dispatch (lane: tmux_interactive). Status: done.\n\n"
+        "## Changes\n\nNone.\n\n"
+        "## Verification\n\nNone.\n\n"
+        "## Open Items\n\nNone.\n"
+    )
+    report_file = reports_dir / "test-govern-001.md"
+    report_file.write_text(placeholder_body, encoding="utf-8")
+
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: implement something real with enough chars to pass validation"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.contract_status == "synthesized"
+    assert outcome.error is None, f"govern() returned error: {outcome.error}"
+    assert outcome.report_path is not None
+    assert outcome.report_path.exists()
+
+    content = outcome.report_path.read_text(encoding="utf-8")
+
+    # Placeholder must be gone
+    forbidden = "Interactive tmux dispatch (lane: tmux_interactive). Status:"
+    assert forbidden not in content, f"Placeholder still present: {content[:400]}"
+
+    # schema_version must appear in the written frontmatter
+    assert "schema_version: 1" in content, f"schema_version missing: {content[:400]}"
+
+    # Full schema validation must pass
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
+    from unified_report_schema import UnifiedReportValidator
+    validator = UnifiedReportValidator()
+    result = validator.validate(content)
+    assert result.valid, f"Report fails schema validation under strict mode: {result.errors}"
+
+
+# ---------------------------------------------------------------------------
 # Grep-style: forbidden placeholder must not appear in any scripts/ file
 # ---------------------------------------------------------------------------
 
