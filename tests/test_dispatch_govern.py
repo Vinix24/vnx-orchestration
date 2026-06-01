@@ -659,6 +659,20 @@ def test_ensure_receipt_carries_provider_model_lane(tmp_data, tmp_state):
     assert receipt.get("lane") == "tmux_interactive", f"lane missing or wrong: {receipt}"
 
 
+def test_ensure_receipt_carries_terminal_id(tmp_data, tmp_state):
+    """FIX 2: lane-synthesized receipt must carry terminal_id AND keep terminal as alias."""
+    spec = _make_spec(tmp_data, tmp_state, terminal_id="T1")
+    raw = GovernRaw(receipt=None, duration_seconds=60.0)
+
+    ensure_receipt(spec, raw, lane="tmux_interactive", report_path=None,
+                   contract_status="synthesized", permission_enforcement="soft")
+
+    receipts_file = tmp_state / "t0_receipts.ndjson"
+    receipt = json.loads(receipts_file.read_text().splitlines()[0])
+    assert receipt.get("terminal_id") == "T1", f"terminal_id missing or wrong: {receipt}"
+    assert receipt.get("terminal") == "T1", f"terminal alias missing or wrong: {receipt}"
+
+
 def test_ensure_receipt_model_unknown_when_not_set(tmp_data, tmp_state):
     """Lane-synthesized receipt uses 'unknown' for model when spec.model is not set."""
     spec = _make_spec(tmp_data, tmp_state)

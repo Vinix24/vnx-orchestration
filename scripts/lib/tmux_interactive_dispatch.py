@@ -444,7 +444,9 @@ class TmuxInteractiveDispatch:
             )
         return outcome.report_path
 
-    def _build_completion_protocol(self, dispatch_id: str, label: str) -> str:
+    def _build_completion_protocol(
+        self, dispatch_id: str, label: str, model: str = "unknown"
+    ) -> str:
         """Footer instructing the worker to emit a clean receipt directly.
 
         The path to ``append_receipt.py`` is ABSOLUTE so it resolves correctly
@@ -461,10 +463,15 @@ class TmuxInteractiveDispatch:
             "event_type": "subprocess_completion",
             "dispatch_id": dispatch_id,
             "terminal": label,
+            "terminal_id": label,
             "status": "done",
             "source": "tmux_interactive",
             "timestamp": ts,
             "report_path": report_path,
+            "provider": "claude",
+            "sub_provider": "anthropic",
+            "model": model,
+            "lane": "tmux_interactive",
         }
         state_dir = shlex.quote(str(self._state_dir))
         data_dir = shlex.quote(str(self._state_dir.parent))
@@ -1210,7 +1217,7 @@ class TmuxInteractiveDispatch:
                     _TRAILER = "<!-- VNX-END-OF-INSTRUCTION -->"
                 body = (
                     _context_body
-                    + self._build_completion_protocol(dispatch_id, label)
+                    + self._build_completion_protocol(dispatch_id, label, model=model)
                     + f"\n\n{_TRAILER}\n"
                 )
             else:
@@ -1218,7 +1225,7 @@ class TmuxInteractiveDispatch:
                 body = (
                     _context_body
                     + self._scope_note(dispatch_paths)
-                    + self._build_completion_protocol(dispatch_id, label)
+                    + self._build_completion_protocol(dispatch_id, label, model=model)
                 )
 
             # 7. Deliver instruction

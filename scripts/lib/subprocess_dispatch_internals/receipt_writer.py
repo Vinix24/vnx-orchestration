@@ -163,6 +163,7 @@ def _build_receipt_payload(
         "event_type": "subprocess_completion",
         "dispatch_id": dispatch_id,
         "terminal": terminal_id,
+        "terminal_id": terminal_id,
         "status": status,
         "event_count": event_count,
         "session_id": session_id,

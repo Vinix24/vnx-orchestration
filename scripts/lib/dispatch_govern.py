@@ -117,6 +117,7 @@ def ensure_receipt(
         "event_type": "subprocess_completion",
         "dispatch_id": spec.dispatch_id,
         "terminal": spec.terminal_id,
+        "terminal_id": spec.terminal_id,
         "status": "failed",
         "source": "tmux_interactive_lane_synthesized",
         "synthesized": True,
