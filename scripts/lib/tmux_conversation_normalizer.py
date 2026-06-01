@@ -137,10 +137,10 @@ def normalize_conversation(
     clean_lines: list[str] = []
 
     for raw_line in raw_content.split('\n'):
-        # Skip lines dominated by TUI cursor/clear sequences (full-frame redraws).
-        if is_redraw_frame(raw_line):
-            continue
-        # Strip all remaining ANSI/OSC/control sequences.
+        # Strip ANSI/OSC/control sequences first so that real assistant text
+        # embedded inside TUI redraw frames is preserved.  A line is dropped only
+        # if it is entirely empty after stripping — not based on raw escape-sequence
+        # heuristics that would discard the text along with the chrome.
         clean = strip_ansi_osc(raw_line).strip()
         if not clean:
             continue

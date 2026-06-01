@@ -2414,6 +2414,56 @@ class TestCapturePipePaneWiring(_LaneTestCase):
                 pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
                 self.assertEqual(pipe_cmds, [], f"pipe-pane must not be called with VNX_TMUX_CAPTURE={flag_val}")
 
+    def test_path_traversal_dispatch_id_does_not_write_outside_log_dir(self):
+        """A dispatch_id with '../' must not allow pipe-pane to write outside the log dir.
+
+        The sanitizer must reject the unsafe id (capture skipped) so pipe-pane is
+        never called with a path that escapes .vnx-data/logs/conversations.
+        """
+        traversal_ids = [
+            "../escape",
+            "../../etc/passwd",
+            "foo/../bar",
+            "valid-prefix/../escape",
+            "/absolute/path",
+            "id with spaces",
+            "id;rm -rf /",
+        ]
+        for bad_id in traversal_ids:
+            with self.subTest(dispatch_id=bad_id):
+                rf = self.state_dir / f"receipts-traversal-{hash(bad_id) & 0xFFFF}.ndjson"
+                fake = FakeTmux(receipts_file=rf, dispatch_id=self.DISPATCH_ID)
+                lane = TmuxInteractiveDispatch(
+                    self.state_dir,
+                    runner=fake,
+                    receipts_file=rf,
+                    project_root=self.state_dir,
+                )
+                with patch.dict(os.environ, {"VNX_TMUX_CAPTURE": "1"}):
+                    # Directly call _start_pipe_pane with the malicious id.
+                    result = lane._start_pipe_pane("fake-pane", bad_id)
+
+                # Capture must be skipped — no path returned.
+                self.assertIsNone(
+                    result,
+                    f"unsafe dispatch_id {bad_id!r} must cause capture to be skipped (returned {result})",
+                )
+                # pipe-pane must NOT have been called with a path outside the log dir.
+                pipe_cmds = [c for c in fake.commands if c and c[0] == "pipe-pane"]
+                for cmd in pipe_cmds:
+                    shell_arg = cmd[-1] if cmd else ""
+                    log_dir = (self.state_dir.parent / "logs" / "conversations").resolve()
+                    # Any path in the shell command must be a child of log_dir.
+                    for token in shlex.split(shell_arg):
+                        p = Path(token)
+                        if p.is_absolute():
+                            try:
+                                p.relative_to(log_dir)
+                            except ValueError:
+                                self.fail(
+                                    f"pipe-pane shell arg {shell_arg!r} references path outside log_dir: {token}"
+                                )
+
 
 class TestCaptureNormalizerCloseout(_LaneTestCase):
     """Normalizer is called once at close-out; normalizer errors do not fail dispatch."""

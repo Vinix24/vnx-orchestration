@@ -228,22 +228,32 @@ class TestNormalizeConversation(unittest.TestCase):
 
     # -- deduplication: redraw frames must not produce duplicate events
     def test_duplicate_redraw_frames_do_not_produce_duplicate_text(self):
-        """The same text rendered 5× across TUI redraw frames must appear once in the output."""
-        # Each "frame" is a TUI screen dump: lots of cursor moves + text.
-        # The real text "Task complete" appears in each frame.
+        """Text embedded in TUI redraw frames must appear once — not dropped, not duplicated.
+
+        Each 'frame' is a realistic Claude TUI screen dump: many cursor-position
+        escape sequences (which previously triggered the redraw-frame filter and
+        dropped the line entirely) followed by actual assistant text.
+        The normalizer must (a) extract the text and (b) deduplicate it.
+        """
+        # Realistic TUI redraw frame: 4 absolute cursor positions + real assistant text.
+        # The old is_redraw_frame check (>= 3 cursor-abs sequences) would have dropped
+        # this line entirely, yielding zero events.
         single_frame = (
-            "\x1b[1;1H\x1b[2;40H\x1b[5;1H"  # 3 cursor positions → redraw frame filtered
-            "Task complete\n"
+            "\x1b[1;1H\x1b[2;40H\x1b[5;1H\x1b[10;1H"  # 4 cursor positions (redraw noise)
+            "Task complete"                              # real assistant text on the same line
+            "\n"
         )
-        # 5 identical frames
+        # 5 identical frames — text must appear exactly once after dedup.
         raw = single_frame * 5
         self._run(raw)
 
         text_events = [e for _, e, _ in self.event_store.appended if e.event_type == "text"]
-        if text_events:
-            all_text = "\n".join(e.data.get("text", "") for e in text_events)
-            occurrences = all_text.count("Task complete")
-            self.assertEqual(occurrences, 1, "deduplicated: 'Task complete' must appear exactly once")
+        # (a) text must become events — not zero.
+        self.assertTrue(text_events, "assistant text in redraw frames must become events (not dropped)")
+        all_text = "\n".join(e.data.get("text", "") for e in text_events)
+        # (b) duplicate frames of the same text must not duplicate events.
+        occurrences = all_text.count("Task complete")
+        self.assertEqual(occurrences, 1, "deduplicated: 'Task complete' must appear exactly once")
 
     def test_duplicate_lines_deduplicated(self):
         """Identical text lines across different parts of the log appear once in events."""

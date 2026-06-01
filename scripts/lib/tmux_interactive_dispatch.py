@@ -703,9 +703,28 @@ class TmuxInteractiveDispatch:
         if capture_flag in ("0", "false", "no", "off"):
             return None
         try:
+            # Sanitize dispatch_id: reject any id that contains path separators,
+            # '..' components, or characters outside [A-Za-z0-9._-].  shlex.quote
+            # stops shell meta-chars but '../' still escapes the log directory.
+            if not re.match(r'^[A-Za-z0-9._-]+$', dispatch_id):
+                logger.warning(
+                    "interactive: capture skipped — unsafe dispatch_id %r",
+                    dispatch_id,
+                )
+                return None
             log_dir = self._state_dir.parent / "logs" / "conversations"
             log_dir.mkdir(parents=True, exist_ok=True)
-            raw_log = log_dir / f"{dispatch_id}.log"
+            raw_log = (log_dir / f"{dispatch_id}.log").resolve()
+            # Path containment guard: resolved path must stay under log_dir.
+            try:
+                raw_log.relative_to(log_dir.resolve())
+            except ValueError:
+                logger.warning(
+                    "interactive: capture skipped — log path %s escaped %s",
+                    raw_log,
+                    log_dir,
+                )
+                return None
             # pipe-pane receives a single shell-command string; use shlex.quote
             # so paths with spaces or special characters are safe.
             shell_cmd = f"cat >> {shlex.quote(str(raw_log))}"
@@ -1056,7 +1075,18 @@ class TmuxInteractiveDispatch:
                 metadata={"session": session, "pane_id": pane_id, "window_id": window_id},
             )
 
-            # 2b. Wire pipe-pane capture (before claude launch so the full session is logged).
+            # 2b. Clear/archive EventStore terminal stream for this dispatch (mirror
+            # subprocess adapter behavior) so normalized events form a clean stream.
+            try:
+                from event_store import EventStore  # noqa: PLC0415
+                _pre_es = EventStore()
+                _prev_ev = _pre_es.last_event(label)
+                _prev_did = (_prev_ev or {}).get("dispatch_id") or None
+                _pre_es.clear(label, archive_dispatch_id=_prev_did)
+            except Exception as _pre_exc:  # noqa: BLE001
+                logger.debug("interactive: pre-capture EventStore clear failed (%s)", _pre_exc)
+
+            # Wire pipe-pane capture (before claude launch so the full session is logged).
             _raw_log[0] = self._start_pipe_pane(pane_id, dispatch_id)
 
             # 3. Build launch command
