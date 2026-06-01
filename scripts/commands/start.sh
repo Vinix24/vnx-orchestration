@@ -540,7 +540,7 @@ RESOLVER
   # .claude/skills/ via the symlink (tmux -c flag alone is insufficient).
   # ENV FIX: Unset stale VNX vars from tmux global env, then re-export
   # correct values for current project. This prevents cross-project
-  # contamination (e.g. SEOcrawler paths leaking into marketing-magic-circle).
+  # contamination (e.g. project-a paths leaking into project-b).
   local node_path=""
   node_path="$(_resolve_node_path 2>/dev/null)" || node_path=""
   local env_clean="unset PROJECT_ROOT VNX_HOME VNX_DATA_DIR VNX_STATE_DIR VNX_DISPATCH_DIR VNX_LOGS_DIR VNX_SKILLS_DIR VNX_PIDS_DIR VNX_LOCKS_DIR VNX_REPORTS_DIR VNX_DB_DIR"

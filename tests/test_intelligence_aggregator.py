@@ -268,7 +268,7 @@ def test_export_global_facet_json(tmp_path):
 
 
 def test_privacy_no_raw_strings_in_global(tmp_path):
-    sensitive_path = "/Users/vvd/Development/seocrawler/scripts/secret.py"
+    sensitive_path = "/Users/example/Development/project-a/scripts/secret.py"
     title_with_path = f"gate passed for {sensitive_path}"
     sensitive_dispatch = "20260516-wave5-pr4-foo"
     title_with_dispatch = f"dispatch {sensitive_dispatch} succeeded"
