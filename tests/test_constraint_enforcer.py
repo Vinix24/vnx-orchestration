@@ -203,6 +203,15 @@ class TestDeepseekHarnessSubscriptionBlocked:
         """Own-key + hardening path must be allowed (no exception raised)."""
         real_enforcer.enforce(provider="deepseek", via="claude_harness_keyed")
 
+    def test_deepseek_harness_lane_keyed_allowed(self, real_enforcer: ConstraintEnforcer):
+        """The deepseek-harness lane (provider=deepseek-harness, sub=deepseek,
+        via=claude_harness_keyed) must clear pre-flight — this is the exact
+        route provider_dispatch builds for the own-key key-auth lane."""
+        real_enforcer.enforce(
+            provider="deepseek-harness", sub_provider="deepseek",
+            via="claude_harness_keyed",
+        )
+
     def test_deepseek_via_litellm_allowed(self, real_enforcer: ConstraintEnforcer):
         real_enforcer.enforce(provider="litellm", sub_provider="deepseek", via="litellm")
 

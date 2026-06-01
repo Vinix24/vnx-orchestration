@@ -484,7 +484,7 @@ class TestHeadlessGuard(_LaneTestCase):
 
     def test_custom_launch_builder_with_dash_p_rejected(self):
         """Custom launch_builder returning a command with '-p' is blocked by final-command guard."""
-        def bad_builder(model, *, skip_permissions=False, extra_flags=""):
+        def bad_builder(model, *, skip_permissions=False, extra_flags="", **kwargs):
             return "claude -p something"
 
         fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
@@ -869,6 +869,226 @@ class TestWorktreeCliFlags(unittest.TestCase):
 
         self.assertIs(captured.get("isolated_worktree"), False)
         self.assertEqual(captured.get("base_ref"), "origin/feature/foo")
+
+
+class TestAssembleContextEnrichment(unittest.TestCase):
+    """_assemble_context must inject skill body + intelligence, not just a role label."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state_dir = Path(self._tmp.name)
+
+    def _make_lane(self) -> TmuxInteractiveDispatch:
+        return TmuxInteractiveDispatch(
+            self.state_dir,
+            project_root=self.state_dir,
+        )
+
+    def test_assemble_context_contains_skill_body_and_instruction(self):
+        """_assemble_context output contains mocked skill body + instruction (not just role label)."""
+        lane = self._make_lane()
+        fake_enriched = (
+            "## Base Worker Context\n\nYou are backend-developer.\n\n"
+            "DISPATCH INSTRUCTION:\n\nDo the thing."
+        )
+        with patch(
+            "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+            return_value=fake_enriched,
+        ):
+            result = lane._assemble_context(
+                role="backend-developer",
+                terminal_id="T1",
+                dispatch_id="test-dispatch-123",
+                instruction="Do the thing.",
+            )
+        self.assertIn("Base Worker Context", result)
+        self.assertIn("Do the thing.", result)
+        self.assertNotIn("## Role\n\nYou are operating as a **backend-developer** worker.", result)
+
+    def test_assemble_context_contains_intelligence_when_injected(self):
+        """_assemble_context passes intelligence via _inject_skill_context enrichment path."""
+        lane = self._make_lane()
+        fake_enriched = (
+            "## Relevant Intelligence (from past dispatches)\n\n"
+            "- **Antipattern**: do not rewrite enrichment from scratch\n\n"
+            "---\n\n"
+            "## Base Worker Context\n\nYou are backend-developer.\n\n"
+            "DISPATCH INSTRUCTION:\n\nDo the thing."
+        )
+        with patch(
+            "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+            return_value=fake_enriched,
+        ):
+            result = lane._assemble_context(
+                role="backend-developer",
+                terminal_id="T1",
+                dispatch_id="test-dispatch-123",
+                instruction="Do the thing.",
+            )
+        self.assertIn("Relevant Intelligence", result)
+        self.assertIn("Antipattern", result)
+        self.assertIn("Do the thing.", result)
+
+    def test_assemble_context_fallback_contains_role_label_and_instruction(self):
+        """When _inject_skill_context raises, fallback includes role label + instruction."""
+        lane = self._make_lane()
+        with patch(
+            "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+            side_effect=ImportError("no module"),
+        ):
+            result = lane._assemble_context(
+                role="backend-developer",
+                terminal_id="T1",
+                dispatch_id="test-dispatch-123",
+                instruction="Do the thing.",
+            )
+        self.assertIn("backend-developer", result)
+        self.assertIn("Do the thing.", result)
+
+    def test_assemble_context_passes_dispatch_id_to_enricher(self):
+        """_assemble_context forwards dispatch_id in dispatch_metadata to _inject_skill_context."""
+        lane = self._make_lane()
+        captured_metadata: list = []
+
+        def capture_inject(terminal_id, instruction, role, dispatch_metadata):
+            captured_metadata.append(dispatch_metadata or {})
+            return instruction
+
+        with patch(
+            "subprocess_dispatch_internals.skill_injection._inject_skill_context",
+            side_effect=capture_inject,
+        ):
+            lane._assemble_context(
+                role="backend-developer",
+                terminal_id="T1",
+                dispatch_id="my-dispatch-xyz",
+                instruction="Do the thing.",
+            )
+
+        self.assertTrue(captured_metadata, "dispatch_metadata must have been forwarded")
+        self.assertEqual(captured_metadata[0].get("dispatch_id"), "my-dispatch-xyz")
+
+
+class TestUnifiedReportEmission(_LaneTestCase):
+    """dispatch() must emit a unified_report alongside the receipt (audit parity)."""
+
+    def test_success_dispatch_emits_unified_report(self):
+        """Successful dispatch emits a unified_report with correct dispatch_id and provider."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch("governance_emit.emit_unified_report") as mock_emit:
+            result = self._fast_dispatch(lane)
+
+        self.assertTrue(result.success, result.failure_reason)
+        mock_emit.assert_called_once()
+        call_kwargs = mock_emit.call_args.kwargs
+        self.assertEqual(call_kwargs["dispatch_id"], self.DISPATCH_ID)
+        self.assertEqual(call_kwargs["provider"], "claude")
+
+    def test_failed_receipt_dispatch_emits_unified_report(self):
+        """Even a failed-receipt dispatch emits a unified_report (audit completeness)."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            receipt_status="failed",
+        )
+        lane = self._make_lane(fake)
+
+        with patch("governance_emit.emit_unified_report") as mock_emit:
+            result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success)
+        mock_emit.assert_called_once()
+
+    def test_timeout_dispatch_emits_unified_report(self):
+        """Timeout (no receipt collected) also emits a unified_report."""
+        fake = FakeTmux(
+            receipts_file=self.receipts_file,
+            dispatch_id=self.DISPATCH_ID,
+            emit_receipt=False,
+        )
+        lane = self._make_lane(fake)
+
+        with patch("governance_emit.emit_unified_report") as mock_emit:
+            result = self._fast_dispatch(lane, deadline_seconds=0.15, poll_interval=0.02)
+
+        self.assertFalse(result.success)
+        self.assertIn("deadline", result.failure_reason)
+        mock_emit.assert_called_once()
+
+    def test_report_emit_failure_marks_degraded(self):
+        """When unified_report emit fails, success=False with failure_reason=unified_report_emit_failed.
+
+        Regression for the codex-gate finding: a default-lane dispatch must not
+        claim success while leaving the audit trail without a linked report.
+        """
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        with patch(
+            "governance_emit.emit_unified_report",
+            side_effect=RuntimeError("simulated disk full"),
+        ):
+            result = self._fast_dispatch(lane)
+
+        self.assertFalse(result.success, "success must be False when report emit fails")
+        self.assertEqual(
+            result.failure_reason,
+            "unified_report_emit_failed",
+            f"expected 'unified_report_emit_failed', got {result.failure_reason!r}",
+        )
+        # Worker receipt is still present (worker completed OK, only report is missing).
+        self.assertIsNotNone(result.receipt)
+        self.assertEqual(result.receipt.get("status"), "done")
+
+
+class TestCompletionReceiptReportPath(_LaneTestCase):
+    """Completion receipt emitted by the worker must carry report_path (audit linkage)."""
+
+    def test_completion_protocol_receipt_includes_report_path(self):
+        """The receipt JSON in the worker footer must include a non-empty report_path.
+
+        Regression for codex-gate: tmux receipts omitted report_path, breaking the
+        receipt->report linkage on the now-DEFAULT lane.
+        """
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+        self.assertIsNotNone(m, "could not extract bash command from completion protocol")
+        argv = shlex.split(m.group(1).strip())
+        receipt = json.loads(argv[argv.index("--receipt") + 1])
+
+        self.assertIn("report_path", receipt, "report_path must be present in the receipt payload")
+        rp = receipt["report_path"]
+        self.assertTrue(rp, "report_path must be non-empty")
+        self.assertIn(self.DISPATCH_ID, rp, "report_path must reference the dispatch_id")
+        self.assertTrue(rp.endswith(".md"), "report_path must point to the .md unified report")
+
+    def test_completion_protocol_report_path_points_to_unified_reports_dir(self):
+        """report_path must be rooted in unified_reports/ relative to data_dir."""
+        fake = FakeTmux(receipts_file=self.receipts_file, dispatch_id=self.DISPATCH_ID)
+        lane = self._make_lane(fake)
+
+        protocol = lane._build_completion_protocol(self.DISPATCH_ID, "T1")
+
+        m = re.search(r"```bash\n(.+?)\n```", protocol, re.DOTALL)
+        self.assertIsNotNone(m)
+        argv = shlex.split(m.group(1).strip())
+        receipt = json.loads(argv[argv.index("--receipt") + 1])
+
+        expected_report_path = str(
+            self.state_dir.parent / "unified_reports" / f"{self.DISPATCH_ID}.md"
+        )
+        self.assertEqual(
+            receipt["report_path"],
+            expected_report_path,
+            "report_path must be the deterministic unified_reports/<dispatch_id>.md path",
+        )
 
 
 if __name__ == "__main__":

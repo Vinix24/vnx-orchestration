@@ -2,7 +2,7 @@
 """
 VNX LLM Benchmark -- Side-by-Side Model Comparison
 
-Runs identical SEOcrawler-domain prompts through multiple models (Ollama local
+Runs identical project-domain prompts through multiple models (Ollama local
 + Claude CLI) and produces a structured comparison report with automatic
 scoring on speed, format compliance, and completeness.
 
@@ -115,7 +115,7 @@ class BenchmarkConfig:
 
 
 # ---------------------------------------------------------------------------
-# Task definitions -- all prompts inline with realistic SEOcrawler data
+# Task definitions -- all prompts inline with realistic project data
 # ---------------------------------------------------------------------------
 
 SAMPLE_SESSION_SUMMARY = """\
@@ -911,9 +911,9 @@ Je bent een sales analyst voor een B2B software bedrijf.
 Er is een nieuw contactformulier binnengekomen. Beoordeel deze lead.
 
 Formulierdata:
-- Naam: Pieter Jansen
-- Email: p.jansen@vandermeijden-installatie.nl
-- Bedrijf: Van der Meijden Installatietechniek
+- Naam: Jan de Vries
+- Email: lead@example.com
+- Bedrijf: Example Company BV
 - Functie: Directeur-eigenaar
 - Aantal medewerkers: 35
 - Vraag: "We zoeken een betere manier om onze offertes en projecten bij te houden. Nu werken we nog met Excel maar dat wordt onoverzichtelijk bij 50+ lopende projecten. Budget is niet het probleem, we willen vooral iets dat onze monteurs ook in het veld kunnen gebruiken."
@@ -1782,7 +1782,7 @@ def run_benchmark(config: BenchmarkConfig, tasks: List[Task],
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="VNX LLM Benchmark -- compare Ollama models vs Claude on SEOcrawler tasks"
+        description="VNX LLM Benchmark -- compare Ollama models vs Claude on project tasks"
     )
     parser.add_argument(
         "--models", type=str, default=None,
@@ -1834,7 +1834,7 @@ def main() -> None:
         NUM_CTX = args.num_ctx
 
     print("=" * 64)
-    mode_label = "Marketing/MKB" if args.marketing else "Coding/SEOcrawler"
+    mode_label = "Marketing/MKB" if args.marketing else "Coding/Technical"
     print(f"  VNX LLM Benchmark ({mode_label})")
     print("=" * 64)
 

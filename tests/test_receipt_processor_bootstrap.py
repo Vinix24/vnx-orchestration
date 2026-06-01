@@ -1,4 +1,4 @@
-"""Tests for receipt_processor_v4.sh bootstrap protection.
+"""Tests for receipt_processor.sh bootstrap protection.
 
 Exercises _rp_apply_bootstrap_protection() by sourcing the real script in
 _RP_LIB_MODE=1 so tests always exercise the production function, not a copy.
@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-RP_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "receipt_processor_v4.sh"
+RP_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "receipt_processor.sh"
 
 
 def _run_bootstrap(
@@ -25,7 +25,7 @@ def _run_bootstrap(
     make_events_file_a_dir: bool = False,
 ) -> tuple[str, int, str, str, str, bool]:
     """
-    Invoke the real _rp_apply_bootstrap_protection from receipt_processor_v4.sh
+    Invoke the real _rp_apply_bootstrap_protection from receipt_processor.sh
     by sourcing the script in _RP_LIB_MODE=1.
 
     Returns (stderr, returncode, final_watermark_value, old_watermark_raw,

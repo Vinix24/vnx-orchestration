@@ -14,6 +14,7 @@ Version: 2.0
 
 import os
 import json
+import re
 import time
 import hashlib
 import argparse
@@ -25,6 +26,8 @@ import threading
 import logging
 import socket
 import sys
+
+_TERMINAL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # Configure logging
 logging.basicConfig(
@@ -485,23 +488,35 @@ class HeartbeatACKMonitor:
             return None
 
         try:
-            # Get pane info from tmux
-            cmd = f"tmux list-panes -a -F '#{{session_name}}:#{{window_name}} #{{pane_current_command}}' | grep -i {terminal}"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1)
+            # Get pane info from tmux — no shell=True; filter terminal in Python
+            result = subprocess.run(
+                ["tmux", "list-panes", "-a", "-F",
+                 "#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}"],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
 
             if result.returncode == 0 and result.stdout:
-                current_command = result.stdout.strip().split()[-1]
+                terminal_lower = terminal.lower()
+                matching = [
+                    line for line in result.stdout.splitlines()
+                    if terminal_lower in line.lower()
+                ]
+                if matching:
+                    current_command = matching[0].strip().split()[-1]
 
-                # If command is not idle (bash/zsh), terminal is active
-                if current_command not in ['bash', 'zsh', 'sh']:
-                    delay = (datetime.now(timezone.utc) - after_time).total_seconds()
+                    # If command is not idle (bash/zsh), terminal is active
+                    if current_command not in ['bash', 'zsh', 'sh']:
+                        delay = (datetime.now(timezone.utc) - after_time).total_seconds()
 
-                    return {
-                        'type': 'process_activity',
-                        'timestamp': datetime.now(timezone.utc),
-                        'delay_seconds': delay,
-                        'command': current_command
-                    }
+                        return {
+                            'type': 'process_activity',
+                            'timestamp': datetime.now(timezone.utc),
+                            'delay_seconds': delay,
+                            'command': current_command
+                        }
 
         except Exception as e:
             logger.error(f"Error checking terminal activity: {e}")
@@ -760,6 +775,11 @@ class HeartbeatACKMonitor:
                         pr_id = message.get('pr_id', '')  # SPRINT 2: Extract PR-ID
                         sent_time_str = message['sent_time']
 
+                        if not _TERMINAL_ID_RE.fullmatch(str(terminal or '')):
+                            conn.send(b'ERROR: Invalid terminal id\n')
+                            conn.close()
+                            continue
+
                         # Parse sent_time
                         sent_time = datetime.fromisoformat(sent_time_str)
 
@@ -825,6 +845,9 @@ def _parse_dispatch_payload(input_data: str) -> Dict[str, object]:
 
     if not dispatch_id or not terminal or not sent_time_str:
         raise ValueError("Missing required fields (dispatch_id, terminal, sent_time)")
+
+    if not _TERMINAL_ID_RE.fullmatch(str(terminal)):
+        raise ValueError(f"Invalid terminal id: {terminal!r}")
 
     sent_time = datetime.fromisoformat(str(sent_time_str).replace('Z', '+00:00'))
 

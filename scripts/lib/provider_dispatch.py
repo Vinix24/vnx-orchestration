@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
 # Providers whose spawn handlers exist.
-_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm"}
+_IMPLEMENTED_PROVIDERS = {"claude", "codex", "gemini", "kimi", "litellm", "deepseek-harness"}
 
 # Mapping: provider literal -> which future PR delivers its handler.
 _FUTURE_PR_MAP: dict = {}
@@ -155,10 +155,17 @@ def _extract_token_usage(result: Any, provider: str) -> Dict[str, int]:
         cache = int(details.get("cached_tokens", 0) or 0) or int(raw.get("prompt_cache_hit_tokens", 0) or 0)
         usage["cache_hit"] = cache
     elif provider in ("codex", "gemini", "kimi"):
-        usage["input"] = int(raw.get("input_tokens", 0) or 0)
-        usage["output"] = int(raw.get("output_tokens", 0) or 0)
-        usage["cache_hit"] = int(raw.get("cache_read_tokens", 0) or 0)
-    elif provider == "claude":
+        # Accept both the raw spawn shape (input_tokens/output_tokens/cache_read_tokens)
+        # AND an already-normalized shape (input/output/cache_read or cache_hit). A
+        # normalized dict reaching here previously yielded 0 — which then zeroed the
+        # receipt token_usage while the cost-event (computed from the same dict
+        # elsewhere) carried real numbers. Unify the extraction so both agree.
+        usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
+        usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
+        usage["cache_hit"] = int(
+            raw.get("cache_read_tokens", raw.get("cache_read", raw.get("cache_hit", 0))) or 0
+        )
+    elif provider in ("claude", "deepseek-harness"):
         usage["input"] = int(raw.get("input_tokens", raw.get("input", 0)) or 0)
         usage["output"] = int(raw.get("output_tokens", raw.get("output", 0)) or 0)
         usage["cache_hit"] = int(raw.get("cache_read_input_tokens", raw.get("cache_hit", 0)) or 0)
@@ -180,6 +187,7 @@ _PROVIDER_TO_REGISTRY_KEY: Dict[str, str] = {
     "codex": "openai",
     "gemini": "google",
     "kimi": "kimi",
+    "deepseek-harness": "deepseek",
 }
 
 
@@ -255,11 +263,22 @@ def _compute_cost(provider: str, model: str, token_usage: Dict[str, int]) -> Opt
     if provider == "kimi":
         return _compute_kimi_cost(model, token_usage)
     pricing = _load_pricing_from_registry(provider, model)
-    if not pricing:
+    if pricing:
+        cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
+        cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
+        return round(cost_in + cost_out, 8)
+    # Registry miss — fall back to the provider_costs rate table so API lanes
+    # (litellm:deepseek/zai, codex-API, gemini) still resolve to real dollars
+    # rather than silently landing at 0. The rate table returns None for
+    # subscription/OAuth flat lanes, which is the correct documented-$0 result.
+    try:
+        from provider_costs import resolve_cost_usd  # noqa: PLC0415
+        return resolve_cost_usd(
+            provider, model, token_usage.get("input", 0), token_usage.get("output", 0)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_compute_cost: rate-table fallback failed for %s/%s: %s", provider, model, exc)
         return None
-    cost_in = (token_usage.get("input", 0) / 1_000_000) * pricing["input"]
-    cost_out = (token_usage.get("output", 0) / 1_000_000) * pricing["output"]
-    return round(cost_in + cost_out, 8)
 
 
 def _build_frontmatter(
@@ -276,7 +295,7 @@ def _build_frontmatter(
 
     spawn_fm = result.frontmatter_fields() if hasattr(result, "frontmatter_fields") else {}
 
-    return {
+    frontmatter: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "dispatch_id": args.dispatch_id,
         "provider": spawn_fm.get("provider", provider.split(":")[0]),
@@ -302,9 +321,61 @@ def _build_frontmatter(
         },
     }
 
+    # Surface explicit token-accounting availability when the adapter reports it
+    # (e.g. kimi-cli 1.44.0 stream-json carries no usage). Read from the result
+    # object directly — not from frontmatter_fields() — to keep the cross-provider
+    # frontmatter contract stable.
+    tum = getattr(result, "token_usage_measured", None)
+    if tum is not None:
+        frontmatter["token_usage_measured"] = bool(tum)
+
+    return frontmatter
+
 
 _EMIT_MAX_RETRIES = 3
 _EMIT_RETRY_DELAY = 0.5  # seconds; multiplied by attempt number for backoff
+
+# Terminal → track mapping for headless provider dispatches (T0 plans, T1/T2/T3
+# execute Track A/B/C). Unknown terminals fall back to "headless".
+_TERMINAL_TRACK = {"T1": "A", "T2": "B", "T3": "C"}
+
+
+def _record_provider_metadata(
+    args: argparse.Namespace,
+    provider: str,
+    status: str,
+    report_path: Path,
+    state_dir: Path,
+) -> None:
+    """Best-effort: upsert a provider-stamped dispatch_metadata row.
+
+    This is what makes the self-learning/intelligence layer provider-aware: the
+    headless multi-provider path previously wrote NO dispatch_metadata row, so
+    non-Claude work created zero intelligence rows and the receipt processor's
+    outcome UPDATE was a silent no-op. Failures here never abort the dispatch.
+    """
+    try:
+        from dispatch_metadata_db import upsert_dispatch_provider_row  # noqa: PLC0415
+        db_path = Path(state_dir) / "quality_intelligence.db"
+        terminal = getattr(args, "terminal_id", "") or ""
+        upsert_dispatch_provider_row(
+            db_path,
+            dispatch_id=args.dispatch_id,
+            terminal=terminal,
+            provider=provider,
+            track=_TERMINAL_TRACK.get(terminal, "headless"),
+            role=getattr(args, "role", None),
+            gate=getattr(args, "gate", None) or None,
+            pr_id=getattr(args, "pr_id", None),
+            outcome_status=status,
+            report_path=str(report_path),
+            project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
+        )
+    except Exception as exc:  # noqa: BLE001 — metadata logging is non-fatal
+        logger.warning(
+            "_record_provider_metadata: failed for dispatch=%s provider=%s (non-fatal): %s",
+            getattr(args, "dispatch_id", "?"), provider, exc,
+        )
 
 
 def _emit_governance(
@@ -332,6 +403,11 @@ def _emit_governance(
     token_usage = _extract_token_usage(result, provider)
     cost_usd = _compute_cost(provider, model_used, token_usage)
 
+    # Deterministic report path — emitted below by emit_unified_report. Computed
+    # up front so the receipt can carry the linkage even though the report write
+    # happens afterward (the path string is stable regardless of write order).
+    report_path = data_dir / "unified_reports" / f"{args.dispatch_id}.md"
+
     # ADR-005: emit cost event BEFORE receipt/report writes. Raises on failure — fail-loud.
     from provider_costs import emit_provider_cost  # noqa: PLC0415
     emit_provider_cost(
@@ -343,6 +419,11 @@ def _emit_governance(
         dispatch_id=args.dispatch_id,
         project_id=os.environ.get("VNX_PROJECT_ID", "vnx-dev"),
     )
+
+    # Provider-aware self-learning: stamp a dispatch_metadata row so EVERY governed
+    # dispatch (incl. non-Claude) feeds the intelligence layer tagged by provider.
+    # Best-effort — metadata logging is non-fatal to the dispatch.
+    _record_provider_metadata(args, provider, status, report_path, state_dir)
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
@@ -360,6 +441,7 @@ def _emit_governance(
                 token_usage=token_usage,
                 cost_usd=cost_usd,
                 state_dir=state_dir,
+                report_path=str(report_path),
             )
             print(f"Receipt: {receipt_path}", file=sys.stderr)
             break
@@ -443,6 +525,10 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
         return os.environ.get("VNX_GEMINI_MODEL", "gemini-2.5-pro")
     if provider == "kimi":
         return os.environ.get("VNX_KIMI_MODEL", "") or _resolve_kimi_model_label()
+    if provider == "deepseek-harness":
+        from provider_spawns.deepseek_harness_spawn import resolve_harness_model  # noqa: PLC0415
+
+        return resolve_harness_model(args.model if args.model != "sonnet" else None)
     if provider.startswith("litellm:") or provider == "litellm":
         base_sub, model_alias = _litellm_parts(provider)
         env_model = os.environ.get("VNX_LITELLM_MODEL", "")
@@ -466,6 +552,12 @@ def _constraint_model_for_provider(args: argparse.Namespace, provider: str) -> s
 
 
 def _constraint_registry_check_enabled(args: argparse.Namespace, provider: str) -> bool:
+    if provider == "deepseek-harness":
+        # The harness lane governs its model via resolve_harness_model (default
+        # deepseek-v4-pro) and the endpoint's authoritative model field — it is
+        # not a litellm-registry-driven route. The forbid_route subscription
+        # block is the real safety gate, not registry membership.
+        return False
     if not (provider.startswith("litellm:") or provider == "litellm"):
         return True
     base_sub, model_alias = _litellm_parts(provider)
@@ -485,6 +577,12 @@ def _constraint_via_for_provider(provider: str, sub_provider: "str | None") -> "
     }
     if provider.startswith("litellm:") or provider == "litellm":
         return via_per_sub.get(sub_provider or "", "litellm")
+    if provider == "deepseek-harness":
+        # Own-key KEY-AUTH harness lane. The deepseek-harness-subscription-blocked
+        # constraint forbids via=claude_harness_subscription (the OAuth-subscription
+        # redirect). This measured-safe lane runs the own DeepSeek key in key-auth
+        # mode, so it routes via=claude_harness_keyed and clears pre-flight.
+        return "claude_harness_keyed"
     if provider in ("claude", "codex", "gemini", "kimi"):
         return "cli"
     return None
@@ -535,6 +633,11 @@ def _check_constraints(args: argparse.Namespace, provider: str):
     sub_provider = None
     if provider.startswith("litellm:"):
         sub_provider, _model_alias = _litellm_parts(provider)
+    elif provider == "deepseek-harness":
+        # sub_provider=deepseek lets the deepseek-harness-subscription-blocked
+        # constraint match on forbidden_route.provider=deepseek; the keyed via
+        # (set below) is what keeps this own-key lane clear of the block.
+        sub_provider = "deepseek"
     model = _constraint_model_for_provider(args, provider)
     via = _constraint_via_for_provider(provider, sub_provider)
     violations = check_constraints(
@@ -1036,6 +1139,102 @@ def _dispatch_kimi(args: argparse.Namespace) -> int:
             _remove_provider_worktree(args.dispatch_id)
 
 
+def _dispatch_deepseek_harness(args: argparse.Namespace) -> int:
+    """Route to spawn_deepseek_harness for the governed DeepSeek-harness lane.
+
+    Execution lane (not a review lane): the ``claude`` CLI drives DeepSeek's
+    Anthropic-compatible endpoint with full tool-use, authenticated with the
+    OWN DeepSeek key in KEY-AUTH mode (never the OAuth subscription).  Reuses
+    the governed claude spawn path (SubprocessAdapter) so it emits a receipt and
+    is not the raw ``claude -p`` receipt-bypass the GOV-1 guard targets.
+
+    Fast-fails before any subprocess spawn when DEEPSEEK_API_KEY is absent —
+    the lane must never ride the production OAuth account.
+    """
+    from provider_spawns.deepseek_harness_spawn import (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        DEEPSEEK_API_KEY_ENV,
+        DeepSeekHarnessSpawnResult,
+        resolve_harness_model,
+        spawn_deepseek_harness,
+    )
+
+    start_time = datetime.now(timezone.utc)
+
+    if not os.environ.get(DEEPSEEK_API_KEY_ENV):
+        print(
+            f"deepseek-harness requires {DEEPSEEK_API_KEY_ENV} env var "
+            "(own-key key-auth; OAuth subscription is forbidden for this lane)",
+            file=sys.stderr,
+        )
+        end_time = datetime.now(timezone.utc)
+        _blocked_result = DeepSeekHarnessSpawnResult(
+            returncode=_EX_USAGE,
+            completion={},
+            events_written=0,
+            session_id=None,
+            timed_out=False,
+            model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            error=f"missing {DEEPSEEK_API_KEY_ENV} — blocked before spawn",
+            token_usage=None,
+        )
+        try:
+            _emit_governance(
+                args, "deepseek-harness", DEFAULT_DEEPSEEK_HARNESS_MODEL,
+                _blocked_result, start_time, end_time, "blocked",
+            )
+        except Exception as _eg_exc:
+            logger.error(
+                "_dispatch_deepseek_harness: emit_governance for blocked dispatch failed: %s",
+                _eg_exc,
+            )
+        return _EX_USAGE
+
+    event_store = None
+    try:
+        from event_store import EventStore
+        event_store = EventStore()
+    except Exception as _es_exc:
+        logger.error(
+            "_dispatch_deepseek_harness: EventStore init failed; cannot proceed "
+            "without audit sink (ADR-005): %s",
+            _es_exc,
+        )
+        return 1
+
+    model = resolve_harness_model(args.model if args.model != "sonnet" else None)
+    enriched_instruction = _enrich_instruction(args)
+    # start_time already set at top of function (before the missing-key guard).
+    try:
+        result = spawn_deepseek_harness(
+            prompt=enriched_instruction,
+            model=model,
+            dispatch_id=args.dispatch_id,
+            terminal_id=args.terminal_id,
+        )
+        end_time = datetime.now(timezone.utc)
+        model_used = result.model or model
+
+        if result.error:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            print(f"spawn_deepseek_harness failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.timed_out:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "timeout")
+            print("spawn_deepseek_harness timed out", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "failure")
+            return 1
+        _emit_governance(args, "deepseek-harness", model_used, result, start_time, end_time, "success")
+        return 0
+    finally:
+        try:
+            event_store.clear(args.terminal_id, archive_dispatch_id=args.dispatch_id)
+        except Exception as _exc:
+            logger.debug("_dispatch_deepseek_harness: event archive+clear failed: %s", _exc)
+
+
 def _dispatch_gemini(args: argparse.Namespace) -> int:
     """Route to spawn_gemini for gemini-provider dispatches (PR-4.6.4).
 
@@ -1157,7 +1356,7 @@ def main(argv: list[str] | None = None) -> int:
     if provider not in _IMPLEMENTED_PROVIDERS and not provider.startswith("litellm:"):
         parser.error(
             f"Unknown provider '{provider}'. "
-            "Accepted values: claude, codex, gemini, kimi, litellm:<model>."
+            "Accepted values: claude, codex, gemini, kimi, deepseek-harness, litellm:<model>."
         )
 
     # PR-ROUTE-1: enforce provider constraints before any handler runs.
@@ -1190,6 +1389,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if provider == "kimi":
         return _dispatch_kimi(args)
+
+    if provider == "deepseek-harness":
+        return _dispatch_deepseek_harness(args)
 
     if provider.startswith("litellm:") or provider == "litellm":
         return _dispatch_litellm(args)

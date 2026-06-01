@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Standalone CQS updater for dispatch_metadata.
 
-Called from receipt_processor_v4.sh after dispatch outcome is recorded.
+Called from receipt_processor.sh after dispatch outcome is recorded.
 Reads receipt and session data, computes CQS, and updates the database.
 """
 

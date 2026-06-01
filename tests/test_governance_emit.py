@@ -79,6 +79,14 @@ def test_provider_field_validates_litellm_deepseek():
     _validate_provider("litellm:deepseek")
 
 
+def test_provider_field_validates_deepseek_harness():
+    # Regression: the governed deepseek-harness lane must pass provider
+    # validation so _emit_governance can write a receipt. Before the regex was
+    # extended, every governed deepseek-harness dispatch raised
+    # ValueError: Invalid provider 'deepseek-harness' at receipt-emit.
+    _validate_provider("deepseek-harness")
+
+
 def test_provider_field_validates_litellm_moonshot():
     _validate_provider("litellm:moonshot")
 
@@ -125,6 +133,20 @@ def test_receipt_written_to_correct_file(tmp_state):
     emit_dispatch_receipt(**_base_receipt_kwargs(tmp_state))
     receipt_path = tmp_state / "t0_receipts.ndjson"
     assert receipt_path.exists()
+
+
+def test_deepseek_harness_dispatch_emits_receipt(tmp_state):
+    # A governed deepseek-harness dispatch must pass provider-validation AND
+    # write a receipt — this is the gap that made #765's earlier validation
+    # incomplete (provider rejected at receipt-emit, no audit trail).
+    kwargs = _base_receipt_kwargs(tmp_state)
+    kwargs["provider"] = "deepseek-harness"
+    kwargs["model"] = "deepseek-v4-pro"
+    path = emit_dispatch_receipt(**kwargs)
+    assert path.exists()
+    data = json.loads((tmp_state / "t0_receipts.ndjson").read_text().strip().splitlines()[-1])
+    assert data["provider"] == "deepseek-harness"
+    assert data["model"] == "deepseek-v4-pro"
 
 
 def test_receipt_json_structure(tmp_state):

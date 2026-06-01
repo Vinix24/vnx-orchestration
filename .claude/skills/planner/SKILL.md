@@ -168,7 +168,7 @@ Use `scripts/intelligence.sh` for accessing VNX intelligence patterns and soluti
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: planner
+Skill actief: planner
 ```
 
 No exceptions. This must appear before any other content.

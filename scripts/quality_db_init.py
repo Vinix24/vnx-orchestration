@@ -23,7 +23,7 @@ import schema_migration
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 20
+HIGHEST_QI_VERSION = 22
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -718,6 +718,142 @@ def _migrate_v20(conn: sqlite3.Connection) -> None:
         log('INFO', 'Migrated: created dream_pattern_archives table + index (ADR-019, ADR-007)')
 
 
+def _migrate_v21(conn: sqlite3.Connection) -> None:
+    """V21: provider column on dispatch_metadata (provider-aware self-learning).
+
+    Non-Claude dispatches (codex/gemini/kimi/litellm) flow through
+    provider_dispatch._emit_governance, which now stamps the provider into the
+    dispatch_metadata row so the self-learning/intelligence layer is no longer
+    provider-blind.
+
+    ADR-007: Drop-then-recreate ensures the composite (project_id, provider) index
+    is the correct shape. The base schema now includes project_id, so this branch
+    is always taken on fresh DBs. Legacy DBs without project_id get a plain index
+    upgraded to composite by _migrate_v22 after the 0010 migration lands.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "provider" not in cols:
+        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN provider TEXT")
+        log('INFO', 'Migrated dispatch_metadata: added provider column')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    # Drop first so the correct shape is always (re)created — idempotent on
+    # re-runs (DROP IF EXISTS is a no-op when the index is already absent).
+    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
+    if "project_id" in cols:
+        conn.execute(
+            "CREATE INDEX idx_dispatch_meta_provider "
+            "ON dispatch_metadata (project_id, provider)"
+        )
+        log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index (ADR-007)')
+    else:
+        conn.execute(
+            "CREATE INDEX idx_dispatch_meta_provider "
+            "ON dispatch_metadata (provider)"
+        )
+
+
+def _migrate_v22(conn: sqlite3.Connection) -> None:
+    """V22: dispatch_metadata composite UNIQUE (project_id, dispatch_id) + composite provider index.
+
+    ADR-007: the original UNIQUE(dispatch_id) constraint is single-tenant — a cross-
+    project UPDATE scoped only by dispatch_id would overwrite any tenant's row. Rebuild
+    the table with UNIQUE(project_id, dispatch_id) so each tenant's rows are isolated.
+
+    Also ensures the composite (project_id, provider) index exists for legacy DBs where
+    project_id was added by the 0010 migration AFTER _migrate_v21 ran with a plain index.
+    Table recreation is the only SQLite-safe way to alter a UNIQUE constraint.
+    No destructive data drops — INSERT OR IGNORE preserves all existing rows.
+    """
+    # Ensure project_id exists before table recreation.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "project_id" not in cols:
+        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN project_id TEXT NOT NULL DEFAULT 'vnx-dev'")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+
+    # Check if the composite UNIQUE already exists (idempotent guard).
+    tbl_sql = (conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_metadata'"
+    ).fetchone() or ("",))[0]
+    needs_rebuild = (
+        "UNIQUE (project_id, dispatch_id)" not in tbl_sql
+        and "UNIQUE(project_id,dispatch_id)" not in tbl_sql
+        and "UNIQUE(project_id, dispatch_id)" not in tbl_sql
+    )
+
+    if needs_rebuild:
+        # Build the column list from the live table so any future migration-added
+        # columns are preserved without hardcoding them here.
+        cols_info = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
+        col_names = [r[1] for r in cols_info]
+        # Exclude id — AUTOINCREMENT PK is re-stamped by the new table.
+        non_id_cols = [c for c in col_names if c != "id"]
+        col_list = ", ".join(non_id_cols)
+
+        conn.execute(f"""
+            CREATE TABLE _dispatch_metadata_v22 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispatch_id TEXT NOT NULL,
+                project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+                terminal TEXT NOT NULL,
+                track TEXT NOT NULL,
+                provider TEXT,
+                role TEXT,
+                skill_name TEXT,
+                gate TEXT,
+                cognition TEXT DEFAULT 'normal',
+                priority TEXT DEFAULT 'P1',
+                pr_id TEXT,
+                parent_dispatch TEXT,
+                pattern_count INTEGER DEFAULT 0,
+                prevention_rule_count INTEGER DEFAULT 0,
+                intelligence_json TEXT,
+                instruction_char_count INTEGER DEFAULT 0,
+                context_file_count INTEGER DEFAULT 0,
+                dispatched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME,
+                outcome_status TEXT,
+                outcome_report_path TEXT,
+                session_id TEXT,
+                cqs REAL,
+                normalized_status TEXT,
+                cqs_components TEXT,
+                target_open_items TEXT,
+                open_items_created INTEGER DEFAULT 0,
+                open_items_resolved INTEGER DEFAULT 0,
+                quality_advisory_json TEXT,
+                UNIQUE (project_id, dispatch_id)
+            )
+        """)
+        # Copy only columns that exist in both source and destination.
+        dest_cols_info = conn.execute("PRAGMA table_info(_dispatch_metadata_v22)").fetchall()
+        dest_cols = {r[1] for r in dest_cols_info}
+        shared_cols = [c for c in non_id_cols if c in dest_cols]
+        shared_list = ", ".join(shared_cols)
+        conn.execute(
+            f"INSERT OR IGNORE INTO _dispatch_metadata_v22 ({shared_list}) "
+            f"SELECT {shared_list} FROM dispatch_metadata"
+        )
+        conn.execute("DROP TABLE dispatch_metadata")
+        conn.execute("ALTER TABLE _dispatch_metadata_v22 RENAME TO dispatch_metadata")
+        log('INFO', 'Migrated dispatch_metadata: composite UNIQUE (project_id, dispatch_id) (ADR-007)')
+
+    # Ensure composite (project_id, provider) index — covers legacy DBs where
+    # _migrate_v21 ran before project_id existed and left a plain (provider) index.
+    conn.execute("DROP INDEX IF EXISTS idx_dispatch_meta_provider")
+    conn.execute(
+        "CREATE INDEX idx_dispatch_meta_provider "
+        "ON dispatch_metadata (project_id, provider)"
+    )
+    # Recreate other indexes (idempotent IF NOT EXISTS).
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_id ON dispatch_metadata (dispatch_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_terminal ON dispatch_metadata (terminal)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_role ON dispatch_metadata (role)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_gate ON dispatch_metadata (gate)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_outcome ON dispatch_metadata (outcome_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dispatch_meta_dispatched ON dispatch_metadata (dispatched_at DESC)")
+    log('INFO', 'Migrated dispatch_metadata: composite (project_id, provider) index ensured (ADR-007)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -740,6 +876,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     18: _migrate_v18,
     19: _migrate_v19,
     20: _migrate_v20,
+    21: _migrate_v21,
+    22: _migrate_v22,
 }
 
 

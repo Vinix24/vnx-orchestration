@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Model routing verification — pure logic, no tmux or dispatcher dependencies.
-# Sourced by dispatcher_v8_minimal.sh and directly testable in isolation.
+# Sourced by dispatcher_minimal.sh and directly testable in isolation.
 #
 # Implements the model switch result states defined in:
 #   docs/core/100_VERIFIED_PROVIDER_MODEL_ROUTING_CONTRACT.md §5

@@ -28,16 +28,16 @@ cat > "$DASHBOARD_FILE" << EOF
 {
     "timestamp": "$TIMESTAMP",
     "processes": {
-        "smart_tap": $(check_process "smart_tap_v7_json_translator"),
-        "dispatcher": $(check_process "dispatcher_v8_minimal"),
+        "smart_tap": $(check_process "smart_tap_json_translator"),
+        "dispatcher": $(check_process "dispatcher_minimal"),
         "queue_watcher": $(check_process "queue_popup_watcher"),
-        "receipt_processor": $(check_process "receipt_processor_v4"),
+        "receipt_processor": $(check_process "receipt_processor"),
         "supervisor": $(check_process "vnx_supervisor_simple"),
         "ack_dispatcher": $(check_process "dispatch_ack_watcher"),
         "intelligence_daemon": $(check_process "intelligence_daemon.py"),
         "report_watcher": $(check_process "report_watcher"),
         "receipt_notifier": $(check_process "receipt_notifier"),
-        "unified_state_manager": $(check_process "unified_state_manager_v2"),
+        "unified_state_manager": $(check_process "unified_state_manager"),
         "recommendations_engine": $(check_process "recommendations_engine_daemon")
     },
     "terminals": $(python3 "$SCRIPT_DIR/lib/canonical_state_views.py" --state-dir "$STATE_DIR" dashboard-terminals),

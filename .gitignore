@@ -67,6 +67,13 @@ dist/
 build/
 *.egg-info/
 
+# Virtual environments
+.venv/
+venv/
+
+# Scratch/advisory docs (generated, not part of source)
+CHANGELOG_QUALITY_ADVISORY.md
+
 # PR queue runtime artifacts (do not commit)
 /.pr_state.json
 /PR_QUEUE.md
@@ -76,6 +83,9 @@ config/
 
 # Old testing directory (merged into tests/)
 testing/
+
+# Private per-project prep migrations — never publish
+schemas/prep_migrations/
 
 # Environment files
 .env

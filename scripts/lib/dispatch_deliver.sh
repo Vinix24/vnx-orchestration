@@ -1,6 +1,6 @@
 #!/bin/bash
 # dispatch_deliver.sh — tmux delivery, mode control, and delivery orchestration.
-# Sourced by dispatcher_v8_minimal.sh.
+# Sourced by dispatcher_minimal.sh.
 # Requires: $STATE_DIR, $VNX_DIR, $VNX_DISPATCH_PAYLOAD_DIR set by orchestrator.
 # Requires: dispatch_logging.sh and dispatch_lifecycle.sh sourced first.
 
@@ -477,10 +477,20 @@ _ddt_subprocess_delivery() {
     local terminal_id="$1" dispatch_id="$2" complete_prompt="$3" model="$4" dispatch_file="$5"
     local agent_role="${6:-}"
 
-    log "V8 DISPATCH: subprocess adapter route — terminal=$terminal_id dispatch=$dispatch_id model=$model role=${agent_role:-<unset>}"
+    # Derive requires_mcp from dispatch file header so MCP-aware dispatches keep
+    # their ambient MCP config instead of getting force-emptied by the worker scope.
+    local _requires_mcp="false"
+    if [[ -f "$dispatch_file" ]]; then
+        _requires_mcp=$(sed -n 's/^Requires-MCP:[[:space:]]*//Ip' "$dispatch_file" 2>/dev/null | sed 's/#.*//' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+        _requires_mcp="${_requires_mcp:-false}"
+    fi
+
+    log "V8 DISPATCH: subprocess adapter route — terminal=$terminal_id dispatch=$dispatch_id model=$model role=${agent_role:-<unset>} requires_mcp=${_requires_mcp}"
 
     local _ar_flag=()
     [[ "${VNX_AUTO_ROUTE:-0}" == "1" ]] && _ar_flag=(--auto-route)
+    local _mcp_flag=()
+    [[ "$_requires_mcp" == "true" ]] && _mcp_flag=(--requires-mcp)
 
     if ! python3 "$VNX_DIR/scripts/lib/subprocess_dispatch.py" \
             --terminal-id "$terminal_id" \
@@ -488,6 +498,7 @@ _ddt_subprocess_delivery() {
             --model "$model" \
             --dispatch-id "$dispatch_id" \
             ${agent_role:+--role "$agent_role"} \
+            "${_mcp_flag[@]}" \
             "${_ar_flag[@]}"; then
         log_structured_failure "subprocess_delivery_failed" \
             "SubprocessAdapter delivery failed" \
