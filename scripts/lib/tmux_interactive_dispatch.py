@@ -392,83 +392,47 @@ class TmuxInteractiveDispatch:
     ) -> "Path | None":
         """Emit governance unified_report via the shared govern() step.
 
-        Returns the emitted report path on success, None on failure.
-        A None return on a governed-completion path (worker succeeded) is an
-        audit-trail gap and must be surfaced by the caller.
+        The tmux lane always routes through govern() — no VNX_SHARED_GOVERN gate
+        applies here. govern() is guaranteed not to raise; on any internal error
+        it emits an honest minimal synthesized body with contract_status="synthesized".
 
-        Routes through dispatch_govern.govern() when VNX_SHARED_GOVERN=1,
-        otherwise falls back to the legacy placeholder emit path.
+        Returns the emitted report path on success, None on critical import failure.
+        A None return is an audit-trail gap and must be surfaced by the caller.
         """
-        shared_govern = os.environ.get("VNX_SHARED_GOVERN", "0").strip().lower() in (
-            "1", "true", "yes", "on"
-        )
-
-        if shared_govern:
-            try:
-                from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
-                spec = GovernSpec(
-                    dispatch_id=dispatch_id,
-                    terminal_id=terminal_id,
-                    instruction=instruction,
-                    data_dir=self._state_dir.parent,
-                    state_dir=self._state_dir,
-                    pr_id=pr_id,
-                    base_sha=base_sha,
-                    worktree_path=worktree_path,
-                )
-                raw = GovernRaw(receipt=receipt, duration_seconds=duration_seconds)
-                outcome = govern(spec, raw, lane="tmux_interactive")
-                if outcome.report_path:
-                    logger.info(
-                        "interactive: govern() emitted report dispatch=%s "
-                        "contract_status=%s path=%s",
-                        dispatch_id, outcome.contract_status, outcome.report_path,
-                    )
-                else:
-                    logger.warning(
-                        "interactive: govern() returned no report_path for dispatch=%s "
-                        "contract_status=%s error=%s",
-                        dispatch_id, outcome.contract_status, outcome.error,
-                    )
-                return outcome.report_path
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "interactive: govern() failed for %s: %s — falling back to legacy emit",
-                    dispatch_id, exc,
-                )
-                # Fall through to legacy emit below.
-
-        # Legacy path (VNX_SHARED_GOVERN=0 or govern() errored).
         try:
-            from governance_emit import emit_unified_report  # noqa: PLC0415
-            status = (receipt or {}).get("status", "done")
-            data_dir = self._state_dir.parent
-            report_path = emit_unified_report(
-                dispatch_id=dispatch_id,
-                terminal_id=terminal_id,
-                provider="claude",
-                instruction=instruction,
-                response_text=(
-                    f"Interactive tmux dispatch (lane: tmux_interactive). Status: {status}."
-                ),
-                findings=[],
-                duration_seconds=duration_seconds,
-                data_dir=data_dir,
-            )
-            logger.info(
-                "interactive: unified_report emitted dispatch=%s status=%s path=%s",
-                dispatch_id,
-                status,
-                report_path,
-            )
-            return report_path
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "interactive: unified_report emission failed for %s: %s",
-                dispatch_id,
-                exc,
+            from dispatch_govern import GovernRaw, GovernSpec, govern  # noqa: PLC0415
+        except ImportError as exc:
+            logger.error(
+                "interactive: dispatch_govern import failed for dispatch=%s: %s",
+                dispatch_id, exc,
             )
             return None
+
+        spec = GovernSpec(
+            dispatch_id=dispatch_id,
+            terminal_id=terminal_id,
+            instruction=instruction,
+            data_dir=self._state_dir.parent,
+            state_dir=self._state_dir,
+            pr_id=pr_id,
+            base_sha=base_sha,
+            worktree_path=worktree_path,
+        )
+        raw = GovernRaw(receipt=receipt, duration_seconds=duration_seconds)
+        outcome = govern(spec, raw, lane="tmux_interactive")
+        if outcome.report_path:
+            logger.info(
+                "interactive: govern() emitted report dispatch=%s "
+                "contract_status=%s path=%s",
+                dispatch_id, outcome.contract_status, outcome.report_path,
+            )
+        else:
+            logger.warning(
+                "interactive: govern() returned no report_path for dispatch=%s "
+                "contract_status=%s error=%s",
+                dispatch_id, outcome.contract_status, outcome.error,
+            )
+        return outcome.report_path
 
     def _build_completion_protocol(self, dispatch_id: str, label: str) -> str:
         """Footer instructing the worker to emit a clean receipt directly.

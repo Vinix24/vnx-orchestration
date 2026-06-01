@@ -1397,47 +1397,44 @@ class TestSharedGovernWiringTmux(_LaneTestCase):
         _, _, lane_arg = govern_calls[-1]
         self.assertEqual(lane_arg, "tmux_interactive")
 
-    def test_shared_govern_0_does_not_route_through_govern(self):
-        """VNX_SHARED_GOVERN=0 (default): _govern_report uses legacy emit path."""
-        govern_calls = []
+    def test_shared_govern_0_always_routes_through_govern(self):
+        """VNX_SHARED_GOVERN=0: tmux lane still calls govern() — flag is irrelevant for tmux."""
+        _, govern_calls = self._run_dispatch_with_govern_flag("0")
+        self.assertGreaterEqual(
+            len(govern_calls), 1,
+            "dispatch_govern.govern() must be called even when VNX_SHARED_GOVERN=0 (tmux always uses govern)",
+        )
 
-        def fake_govern(spec, raw, lane_name):
-            govern_calls.append((spec, raw, lane_name))
-            from dispatch_govern import GovernedOutcome
-            return GovernedOutcome(report_path=None, contract_status="synthesized")
+    def test_shared_govern_no_legacy_fallback_on_govern_error(self):
+        """When govern() is forced to raise (broken mock), there is no legacy emit fallback.
 
+        In production govern() never raises (error fallback is internal). This test
+        verifies that the tmux _govern_report does NOT fall back to the old placeholder
+        emit path even in exceptional conditions.
+        """
         fake = FakeTmux(
             receipts_file=self.receipts_file,
             dispatch_id=self.DISPATCH_ID,
         )
         lane = self._make_lane(fake)
+        mock_emit_calls = []
 
-        with patch.dict(os.environ, {"VNX_SHARED_GOVERN": "0"}):
-            with patch("dispatch_govern.govern", side_effect=fake_govern):
-                with patch("governance_emit.emit_unified_report") as mock_emit:
-                    mock_emit.return_value = self.state_dir / "unified_reports" / f"{self.DISPATCH_ID}.md"
-                    self._fast_dispatch(lane)
+        def capturing_emit(*args, response_text=None, **kwargs):
+            mock_emit_calls.append(response_text or "")
+            reports_dir = self.state_dir.parent / "unified_reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            path = reports_dir / f"{self.DISPATCH_ID}.md"
+            path.write_text(response_text or "fallback", encoding="utf-8")
+            return path
 
-        # govern() must NOT be called; emit_unified_report IS called (legacy path).
-        self.assertEqual(len(govern_calls), 0, "govern() must NOT be called when flag=0")
-        mock_emit.assert_called()
+        with patch("dispatch_govern.govern", side_effect=RuntimeError("govern exploded")):
+            with patch("governance_emit.emit_unified_report", side_effect=capturing_emit):
+                self._fast_dispatch(lane)
 
-    def test_shared_govern_govern_error_falls_back_to_legacy(self):
-        """When govern() raises, _govern_report falls back to legacy emit."""
-        fake = FakeTmux(
-            receipts_file=self.receipts_file,
-            dispatch_id=self.DISPATCH_ID,
-        )
-        lane = self._make_lane(fake)
-
-        with patch.dict(os.environ, {"VNX_SHARED_GOVERN": "1"}):
-            with patch("dispatch_govern.govern", side_effect=RuntimeError("govern exploded")):
-                with patch("governance_emit.emit_unified_report") as mock_emit:
-                    mock_emit.return_value = self.state_dir / "unified_reports" / f"{self.DISPATCH_ID}.md"
-                    result = self._fast_dispatch(lane)
-
-        # Fallback succeeded; emit_unified_report was called.
-        mock_emit.assert_called()
+        # The legacy placeholder string must not appear in any emit call.
+        forbidden = "Interactive tmux dispatch (lane: tmux_interactive). Status:"
+        for body in mock_emit_calls:
+            self.assertNotIn(forbidden, body, "Legacy placeholder must never be emitted")
 
     def test_no_placeholder_in_govern_flag_on_reports(self):
         """VNX_SHARED_GOVERN=1: emitted reports must not contain the legacy placeholder."""

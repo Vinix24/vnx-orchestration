@@ -4,13 +4,17 @@ govern() is the single authority for producing the final unified report body:
   1. If a worker-authored report exists at unified_reports/<dispatch_id>.md
      and passes validate_body: use it as-is (contract_status="authored").
   2. Else synthesize a git-derived body (contract_status="synthesized").
-  3. Run validate_body on the final body; authored-but-invalid in shadow mode
-     flags contract_status="violated" (does not reject for tmux lane).
-  4. Call emit_unified_report with body_override so the body is final before emit.
+  3. Run validate_body on the final body; violations flagged for both authored
+     and synthesized bodies. authored+enforce returns early; synthesized always
+     shadows (flags, does not reject).
+  4. Call emit_unified_report with body_override + overwrite=True (for non-authored)
+     so a stale placeholder file is replaced, not kept.
   5. Stamp contract_status + permission_enforcement in frontmatter.
 
+govern() NEVER raises — any unhandled error emits a minimal honest synthesized
+body and returns GovernedOutcome(contract_status="synthesized", error=str(e)).
+
 Synthesis is GIT-DERIVED, never capture-pane.
-Body is final BEFORE emit (emit is idempotent-on-exists, governance_emit.py:198).
 """
 
 from __future__ import annotations
@@ -55,12 +59,69 @@ class GovernedOutcome:
 def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """Produce the final unified report for a dispatch, stamped with contract metadata.
 
+    Never raises — any unhandled internal error emits a minimal honest synthesized
+    body with contract_status="synthesized" and error set.
+
     Order:
       a. Check for worker-authored report; validate it.
       b. If absent or placeholder: synthesize from git.
-      c. Validate final body (shadow-mode for tmux; violations flagged, not rejected).
-      d. Emit via emit_unified_report(body_override=...) so body is final before write.
+      c. Validate final body (shadow-mode for both lanes; authored+enforce may reject).
+      d. Emit via emit_unified_report(body_override=..., overwrite=True for non-authored)
+         so a stale placeholder file is replaced rather than kept by idempotency.
     """
+    dispatch_id = spec.dispatch_id
+    try:
+        return _govern_impl(spec, raw, lane)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "govern: unhandled error dispatch=%s lane=%s: %s — emitting error body",
+            dispatch_id, lane, exc,
+        )
+        return _govern_error_fallback(spec, raw, lane, exc)
+
+
+def _govern_error_fallback(
+    spec: GovernSpec, raw: GovernRaw, lane: str, exc: Exception
+) -> GovernedOutcome:
+    """Emit a minimal honest body when _govern_impl hit an unrecoverable error."""
+    from governance_emit import emit_unified_report  # noqa: PLC0415
+
+    dispatch_id = spec.dispatch_id
+    error_body = (
+        f"# Dispatch {dispatch_id}\n\n"
+        f"- Lane: {lane}\n"
+        f"- contract_status: synthesized\n\n"
+        f"## Summary\n\n"
+        f"Governance error during dispatch close-out. "
+        f"Report synthesized by error handler. Error: {exc}\n\n"
+        f"## Changes\n\nNot available — governance error during synthesis.\n\n"
+        f"## Verification\n\nNone — error path.\n\n"
+        f"## Open Items\n\nGovernance error: {exc}\n"
+    )
+    try:
+        rp = emit_unified_report(
+            dispatch_id=dispatch_id,
+            terminal_id=spec.terminal_id,
+            provider="claude",
+            instruction=spec.instruction,
+            response_text=f"Lane: {lane}. Error.",
+            findings=[],
+            duration_seconds=raw.duration_seconds,
+            data_dir=spec.data_dir,
+            body_override=error_body,
+            overwrite=True,
+        )
+    except Exception:  # noqa: BLE001
+        rp = None
+    return GovernedOutcome(
+        report_path=rp,
+        contract_status="synthesized",
+        error=str(exc),
+    )
+
+
+def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
+    """Core govern logic. Called by govern(); any exception is caught there."""
     from report_body_contract import BodyResult, validate_body  # noqa: PLC0415
     from governance_emit import emit_unified_report  # noqa: PLC0415
 
@@ -98,36 +159,32 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
         body = _synthesize(spec, raw)
         contract_status = "synthesized"
 
-    # -- c. Validate final body (shadow-mode flagging) -----------------------
+    # -- c. Validate final body — applies to BOTH authored and synthesized ----
     final_bv = validate_body(body, pr_id=spec.pr_id)
-    if contract_status == "authored" and not final_bv.valid:
+    if not final_bv.valid:
         logger.warning(
-            "govern: authored body failed re-validation for dispatch=%s "
+            "govern: %s body failed validation for dispatch=%s "
             "(missing=%s, placeholder=%s) — flagging violated%s",
-            dispatch_id, final_bv.missing, final_bv.placeholder,
-            " (enforcing)" if enforce else " (shadow)",
+            contract_status, dispatch_id, final_bv.missing, final_bv.placeholder,
+            " (enforcing)" if (enforce and contract_status == "authored") else " (shadow)",
         )
-        contract_status = "violated"
-        if enforce:
+        # authored+enforce: return early; synthesized or soft: stamp and continue.
+        if enforce and contract_status == "authored":
             return GovernedOutcome(
                 report_path=None,
                 contract_status="violated",
                 body_result=final_bv,
-                permission_enforcement="strict" if enforce else "soft",
+                permission_enforcement="strict",
                 error=f"contract_violated: missing={final_bv.missing}",
             )
+        contract_status = "violated"
 
     permission_enforcement = "strict" if enforce else "soft"
 
     # -- d. Emit report with final body ---------------------------------------
-    # body_override ensures the final contract body is written instead of the
-    # generic "## Response" wrapper.  emit is idempotent-on-exists (line 198),
-    # so body MUST be final before we call it.
-    #
-    # For authored reports the worker already wrote the file; emit_unified_report
-    # will detect the existing file and return without overwriting.  We rely on
-    # the worker having written a valid body — the validate_body pass above
-    # confirmed it.  Only synthesized or violated bodies need body_override.
+    # authored: idempotent (no overwrite) — worker already wrote the valid file.
+    # synthesized/violated: overwrite=True so a stale placeholder is replaced.
+    is_authored = contract_status == "authored"
     frontmatter = {
         "dispatch_id": dispatch_id,
         "terminal_id": spec.terminal_id,
@@ -151,7 +208,8 @@ def govern(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
             duration_seconds=raw.duration_seconds,
             data_dir=spec.data_dir,
             frontmatter=frontmatter,
-            body_override=body if contract_status != "authored" else None,
+            body_override=body if not is_authored else None,
+            overwrite=not is_authored,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("govern: emit_unified_report failed for %s: %s", dispatch_id, exc)
@@ -195,7 +253,7 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
     # -- ## Open Items --------------------------------------------------------
     open_items = f"Report synthesized by tmux lane; worker did not author unified_reports/{dispatch_id}.md."
 
-    return (
+    body = (
         f"# Dispatch {dispatch_id}\n\n"
         f"- Lane: tmux_interactive\n"
         f"- Status: {status}\n"
@@ -205,6 +263,11 @@ def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
         f"## Verification\n\n{verification}\n\n"
         f"## Open Items\n\n{open_items}\n"
     )
+
+    if spec.pr_id:
+        body += f"\n## PR\n\nPR #{spec.pr_id} (synthesized — see branch)\n"
+
+    return body
 
 
 def _git_summary(spec: GovernSpec, status: str) -> str:

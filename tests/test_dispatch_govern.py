@@ -121,7 +121,8 @@ def test_govern_synthesized_when_no_worker_report(tmp_data, tmp_state, monkeypat
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
 
-    with patch("dispatch_govern._git_summary", return_value="feat: implement X\n\nWorker status: done."), \
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: implement X with full coverage. Worker status: done. Synthesized."), \
          patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 +++++"):
         outcome = govern(spec, raw, lane="tmux_interactive")
 
@@ -199,7 +200,7 @@ def test_govern_synthesized_includes_git_changes(tmp_data, tmp_state, monkeypatc
 # ---------------------------------------------------------------------------
 
 def test_govern_placeholder_worker_report_triggers_synthesis(tmp_data, tmp_state, monkeypatch):
-    """A worker report with the placeholder body is rejected -> synthesized."""
+    """A placeholder worker report is rejected, synthesized, and the file is OVERWRITTEN."""
     monkeypatch.setenv("VNX_SHARED_GOVERN", "1")
 
     reports_dir = tmp_data / "unified_reports"
@@ -219,13 +220,20 @@ def test_govern_placeholder_worker_report_triggers_synthesis(tmp_data, tmp_state
     spec = _make_spec(tmp_data, tmp_state)
     raw = _make_raw()
 
-    with patch("dispatch_govern._git_summary", return_value="feat: something real with enough chars here to pass"), \
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: something real with enough chars to pass the fifty-char minimum check"), \
          patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
         outcome = govern(spec, raw, lane="tmux_interactive")
 
-    # Idempotent: file already exists so emit returns existing path;
-    # but since validate_body rejected it, contract_status=synthesized.
     assert outcome.contract_status == "synthesized"
+    assert outcome.report_path is not None
+
+    # FIX 1: The file must be OVERWRITTEN with the synthesized body — not left as placeholder.
+    final_content = outcome.report_path.read_text(encoding="utf-8")
+    forbidden = "Interactive tmux dispatch (lane: tmux_interactive). Status:"
+    assert forbidden not in final_content, (
+        f"Placeholder still present after govern() overwrite: {final_content[:300]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +328,8 @@ def test_govern_timeout_path_synthesizes(tmp_data, tmp_state, monkeypatch):
     spec = _make_spec(tmp_data, tmp_state)
     raw = GovernRaw(receipt=None, duration_seconds=3600.0)
 
-    with patch("dispatch_govern._git_summary", return_value="No commit; timeout. Body synthesized by governance layer."), \
+    with patch("dispatch_govern._git_summary",
+               return_value="No commit; timeout. Body synthesized by governance layer (no worker report)."), \
          patch("dispatch_govern._git_changes", return_value="No git diff available"):
         outcome = govern(spec, raw, lane="tmux_interactive")
 
@@ -347,3 +356,109 @@ def test_govern_flag_off_uses_legacy_path(tmp_data, tmp_state, monkeypatch):
         outcome = govern(spec, raw, lane="tmux_interactive")
 
     assert isinstance(outcome, GovernedOutcome)
+
+
+# ---------------------------------------------------------------------------
+# govern() — FIX 2: error path emits honest body, never raises
+# ---------------------------------------------------------------------------
+
+def test_govern_never_raises_on_internal_error(tmp_data, tmp_state):
+    """govern() must never raise — any internal error returns GovernedOutcome."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._govern_impl", side_effect=RuntimeError("simulated failure")):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert isinstance(outcome, GovernedOutcome)
+    assert outcome.contract_status == "synthesized"
+    assert outcome.error is not None
+    assert "simulated failure" in outcome.error
+
+
+def test_govern_error_path_body_not_placeholder(tmp_data, tmp_state):
+    """When govern() hits an error, the emitted body must not contain the forbidden string."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+    forbidden = "Interactive tmux dispatch (lane: tmux_interactive). Status:"
+
+    with patch("dispatch_govern._govern_impl", side_effect=RuntimeError("synthesis broke")):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert isinstance(outcome, GovernedOutcome)
+    if outcome.report_path and outcome.report_path.exists():
+        content = outcome.report_path.read_text(encoding="utf-8")
+        assert forbidden not in content, f"Placeholder in error-path report: {content[:300]}"
+
+
+# ---------------------------------------------------------------------------
+# govern() — FIX 3: synthesized body includes ## PR when pr_id set
+# ---------------------------------------------------------------------------
+
+def test_govern_synthesized_with_pr_id_includes_pr_section(tmp_data, tmp_state):
+    """Synthesized body includes ## PR when pr_id is set on the spec."""
+    spec = _make_spec(tmp_data, tmp_state, pr_id="42")
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: implement feature with sufficient non-whitespace chars to satisfy validation contract"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.report_path is not None
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert "## PR" in content, "Synthesized body missing ## PR section when pr_id set"
+    assert "42" in content
+
+
+def test_govern_synthesized_without_pr_id_omits_pr_section(tmp_data, tmp_state):
+    """Synthesized body omits ## PR when pr_id is not set."""
+    spec = _make_spec(tmp_data, tmp_state)
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary", return_value="feat: feature without PR with enough chars"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 5 ++"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    assert outcome.report_path is not None
+    content = outcome.report_path.read_text(encoding="utf-8")
+    assert "## PR" not in content
+
+
+def test_govern_synthesized_pr_section_passes_validate_body(tmp_data, tmp_state):
+    """Synthesized body with pr_id set passes validate_body(pr_id=...) without violation."""
+    spec = _make_spec(tmp_data, tmp_state, pr_id="77")
+    raw = _make_raw()
+
+    with patch("dispatch_govern._git_summary",
+               return_value="feat: add new feature with enough non-whitespace chars to pass the fifty char minimum"), \
+         patch("dispatch_govern._git_changes", return_value="scripts/lib/foo.py | 10 ++"):
+        outcome = govern(spec, raw, lane="tmux_interactive")
+
+    # With ## PR included, validate_body should not flag violated.
+    assert outcome.contract_status in ("synthesized",), (
+        f"Expected synthesized, got {outcome.contract_status} (body_result={outcome.body_result})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Grep-style: forbidden placeholder must not appear in any scripts/ file
+# ---------------------------------------------------------------------------
+
+def test_forbidden_placeholder_absent_from_scripts():
+    """No script file may emit the forbidden placeholder string."""
+    forbidden = "Interactive tmux dispatch (lane: tmux_interactive). Status:"
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+
+    violations = []
+    for py_file in scripts_dir.rglob("*.py"):
+        try:
+            content = py_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if forbidden in content:
+            violations.append(str(py_file))
+
+    assert violations == [], (
+        f"Forbidden placeholder string found in scripts/: {violations}"
+    )

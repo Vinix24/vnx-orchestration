@@ -137,10 +137,12 @@ class TestReportBodyContract(unittest.TestCase):
         result = report_body_contract.build_directive("disp-abc-789")
         self.assertIn("disp-abc-789", result)
 
-    def test_validate_body_raises_not_implemented(self):
-        """validate_body() must raise NotImplementedError (T2 deferral)."""
-        with self.assertRaises(NotImplementedError):
-            report_body_contract.validate_body("any text", {})
+    def test_validate_body_returns_body_result(self):
+        """validate_body() is implemented and returns BodyResult (T2 deferral resolved)."""
+        from report_body_contract import BodyResult
+        result = report_body_contract.validate_body("any text")
+        self.assertIsInstance(result, BodyResult)
+        self.assertFalse(result.valid)  # "any text" has no required sections
 
 
 # ---------------------------------------------------------------------------
