@@ -184,8 +184,11 @@ def apply(db_path: Optional[str] = None, retention_days: int = DEFAULT_RETENTION
 
     conn = sqlite3.connect(str(path))
     pruned_counts = {}
+    prune_error = None
 
     try:
+        conn.execute("BEGIN")
+
         for spec in PRUNABLE_TABLES:
             table = spec["table"]
             date_col = spec["date_col"]
@@ -223,27 +226,37 @@ def apply(db_path: Optional[str] = None, retention_days: int = DEFAULT_RETENTION
             except sqlite3.OperationalError as exc:
                 pruned_counts[table] = 0
                 pruned_counts[f"{table}_error"] = str(exc)
+                prune_error = exc
+                break
 
-        conn.commit()
-        conn.execute("VACUUM")
+        if prune_error:
+            conn.rollback()
+            # Zero out rowcounts captured before the error — nothing was committed.
+            for key in list(pruned_counts.keys()):
+                if not key.endswith("_error"):
+                    pruned_counts[key] = 0
+        else:
+            conn.commit()
+            conn.execute("VACUUM")
     finally:
         conn.close()
 
     size_after = _db_size_bytes(path)
     reclaimed = max(0, size_before - size_after)
 
-    # Write append-only audit ledger (durable record of destructive maintenance).
-    audit_path = path.parent / "db_maintenance_audit.ndjson"
-    audit_record = {
-        "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "op": "db_maintenance",
-        "db_path": str(path),
-        "retention_days": retention_days,
-        "pruned": pruned_counts,
-        "bytes_reclaimed": reclaimed,
-        "vacuumed": True,
-    }
-    _write_audit_record(audit_path, audit_record)
+    # Write append-only audit ledger only when the prune committed successfully.
+    if not prune_error:
+        audit_path = path.parent / "db_maintenance_audit.ndjson"
+        audit_record = {
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "op": "db_maintenance",
+            "db_path": str(path),
+            "retention_days": retention_days,
+            "pruned": pruned_counts,
+            "bytes_reclaimed": reclaimed,
+            "vacuumed": True,
+        }
+        _write_audit_record(audit_path, audit_record)
 
     return {
         "dry_run": False,
