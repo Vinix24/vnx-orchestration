@@ -248,8 +248,10 @@ class SubprocessAdapter:
         resume_session: Optional[str] = None,
         cwd: Optional[Any] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        extra_cli_args: Optional[List[str]] = None,
         role: Optional[str] = None,
         requires_mcp: bool = False,
+        scrub_env_keys: Optional[frozenset] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -264,6 +266,12 @@ class SubprocessAdapter:
         cwd: if provided, the subprocess is started in that directory.  Pass
         the agent's project directory (e.g. agents/{role}/) so the headless
         process has the right working context.
+
+        extra_cli_args: if provided, these flags are inserted into the claude
+        argv after the standard flags and before --resume/instruction.  Used by
+        the DeepSeek-harness lane to force MCP off
+        (``--strict-mcp-config --mcp-config '{"mcpServers":{}}'``).  Default
+        None preserves byte-identical argv for the existing claude lane.
 
         role: if provided (or present in the stored config), selects the
         permission profile whose tool allow-list scopes the spawn. Falls back to
@@ -283,6 +291,8 @@ class SubprocessAdapter:
             "--verbose",
             "--model", effective_model,
         ]
+        if extra_cli_args:
+            cmd.extend(extra_cli_args)
         if resume_session:
             cmd.extend(["--resume", resume_session])
         # The prompt MUST precede the capability-scoping flags. --allowedTools /
@@ -300,9 +310,12 @@ class SubprocessAdapter:
         }
         if cwd is not None:
             popen_kwargs["cwd"] = str(cwd)
-        if extra_env:
+        if extra_env or scrub_env_keys:
             merged_env = os.environ.copy()
-            merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            if extra_env:
+                merged_env.update({k: v for k, v in extra_env.items() if v is not None})
+            for _scrub_key in (scrub_env_keys or ()):
+                merged_env.pop(_scrub_key, None)
             popen_kwargs["env"] = merged_env
 
         # Clear stale session_id before spawning; updated when the init event arrives.
