@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""dispatch_metadata_db.py — Shared dispatch_metadata row writer (provider-aware).
+"""dispatch_metadata_db.py — Shared dispatch_metadata row writer (provider+model-aware).
 
 Single source of truth for stamping a ``dispatch_metadata`` row with its
-``provider``. Used by BOTH dispatch paths so the self-learning/intelligence
-layer is never provider-blind:
+``provider`` and ``model``. Used by BOTH dispatch paths so the
+self-learning/intelligence layer is never provider-blind:
 
   - ``log_dispatch_metadata.py`` (tmux / interactive claude path via dispatcher)
   - ``provider_dispatch._emit_governance`` (headless multi-provider path:
@@ -14,8 +14,8 @@ created zero intelligence rows and the receipt processor's
 ``UPDATE dispatch_metadata ... WHERE dispatch_id=?`` was a silent no-op.
 
 ADR-007: every write stamps ``project_id`` when the column exists. ``provider``
-is a descriptive (non-key) column, so it carries no UNIQUE constraint; the
-composite ``(project_id, provider)`` index (migration v21) keeps it
+and ``model`` are descriptive (non-key) columns; the composite
+``(project_id, provider)`` index (migration v21/GAP-2) keeps them
 tenant-scoped-queryable.
 
 Design notes:
@@ -24,8 +24,11 @@ Design notes:
     the dispatcher's ``|| log WARNING`` contract.
   - Idempotent: ``INSERT OR IGNORE`` creates the row only when absent so a richer
     row written by the dispatcher path is never clobbered. The follow-up UPDATE
-    stamps provider authoritatively and fills outcome/report_path/role/gate/pr_id
+    stamps provider/model authoritatively and fills outcome/report_path/role/gate/pr_id
     only when not already set (COALESCE), so concurrent writers converge.
+  - Column-guarded: each optional column (provider, model, project_id, …) is checked
+    via PRAGMA table_info before use so the code is safe on legacy DBs that predate
+    the migration.
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ def upsert_dispatch_provider_row(
     dispatch_id: str,
     terminal: str,
     provider: str,
+    model: Optional[str] = None,
     track: str = "headless",
     role: Optional[str] = None,
     gate: Optional[str] = None,
@@ -75,10 +79,16 @@ def upsert_dispatch_provider_row(
     report_path: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> bool:
-    """Create-if-absent and provider-stamp a ``dispatch_metadata`` row.
+    """Create-if-absent and provider/model-stamp a ``dispatch_metadata`` row.
 
     Returns ``True`` when a row was written/updated, ``False`` when the write was
     skipped (DB missing) or a sqlite error was swallowed.
+
+    Args:
+        model: The AI model string used (e.g. "claude-sonnet-4-6", "codex",
+               "kimi"). Stamped when the ``model`` column exists (migration
+               v23 / GAP-2). Optional — callers that don't know the model
+               may omit it.
 
     Raises:
         ValueError: ``dispatch_id``, ``terminal``, or ``provider`` is empty —
@@ -104,6 +114,7 @@ def upsert_dispatch_provider_row(
     try:
         conn = sqlite3.connect(str(db_path))
         has_provider = _has_column(conn, "dispatch_metadata", "provider")
+        has_model = _has_column(conn, "dispatch_metadata", "model")
         has_project = _has_column(conn, "dispatch_metadata", "project_id")
         has_report_path = _has_column(conn, "dispatch_metadata", "outcome_report_path")
         has_outcome = _has_column(conn, "dispatch_metadata", "outcome_status")
@@ -115,6 +126,9 @@ def upsert_dispatch_provider_row(
         if has_provider:
             insert_cols.append("provider")
             insert_vals.append(provider)
+        if has_model and model:
+            insert_cols.append("model")
+            insert_vals.append(model)
         if has_project:
             insert_cols.append("project_id")
             insert_vals.append(resolved_project_id)
@@ -125,12 +139,15 @@ def upsert_dispatch_provider_row(
             insert_vals,
         )
 
-        # --- authoritative provider stamp + non-clobbering field fills ---
+        # --- authoritative provider/model stamp + non-clobbering field fills ---
         set_clauses = []
         params: list = []
         if has_provider:
             set_clauses.append("provider = ?")
             params.append(provider)
+        if has_model and model:
+            set_clauses.append("model = COALESCE(model, ?)")
+            params.append(model)
         set_clauses.append("role = COALESCE(role, ?)")
         params.append(role or None)
         set_clauses.append("gate = COALESCE(gate, ?)")
@@ -164,8 +181,8 @@ def upsert_dispatch_provider_row(
             )
         conn.commit()
         logger.debug(
-            "upsert_dispatch_provider_row: stamped dispatch=%s provider=%s outcome=%s",
-            dispatch_id, provider, outcome_status,
+            "upsert_dispatch_provider_row: stamped dispatch=%s provider=%s model=%s outcome=%s",
+            dispatch_id, provider, model, outcome_status,
         )
         return True
     except sqlite3.Error as exc:

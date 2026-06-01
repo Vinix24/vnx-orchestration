@@ -40,7 +40,8 @@ logger = logging.getLogger(__name__)
 
 _RECENT_COMPARABLE_SQL_TEMPLATE = (
     "SELECT dispatch_id, terminal, track, role, skill_name, gate, "
-    "outcome_status, dispatched_at "
+    "outcome_status, dispatched_at, pattern_count, prevention_rule_count, "
+    "provider, model "
     "FROM dispatch_metadata "
     "WHERE dispatched_at >= ? AND outcome_status IS NOT NULL "
     "ORDER BY dispatched_at DESC LIMIT 20"
@@ -86,6 +87,17 @@ def query_recent_comparable(
     return legacy
 
 
+def _dm_column_set(conn: sqlite3.Connection) -> frozenset:
+    """Return frozenset of column names present in dispatch_metadata (migration guard)."""
+    try:
+        rows = conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
+        return frozenset(
+            (r["name"] if isinstance(r, sqlite3.Row) else r[1]) for r in rows
+        )
+    except Exception:
+        return frozenset()
+
+
 def _query_per_project(
     db: sqlite3.Connection,
     task_class: str,
@@ -100,12 +112,17 @@ def _query_per_project(
     dm_scope_clause, dm_scope_params = _project_scope_clause(
         has_column_fn("dispatch_metadata", "project_id")
     )
+    _dm_cols = _dm_column_set(db)
+    provider_cols = (
+        (", provider" if "provider" in _dm_cols else "")
+        + (", model" if "model" in _dm_cols else "")
+    )
     try:
         rows = db.execute(
             f"""
             SELECT dispatch_id, terminal, track, role, skill_name, gate,
                    outcome_status, dispatched_at, pattern_count,
-                   prevention_rule_count
+                   prevention_rule_count{provider_cols}
             FROM dispatch_metadata
             WHERE dispatched_at >= ?
               AND outcome_status IS NOT NULL
@@ -143,8 +160,11 @@ def _row_to_intelligence_item(
     outcome = row_d.get("outcome_status", "unknown")
     skill = row_d.get("skill_name") or row_d.get("role") or "unknown"
     gate = row_d.get("gate") or ""
+    provider_str = row_d.get("provider") or ""
+    model_str = row_d.get("model") or ""
+    provider_tag = f" [{provider_str}/{model_str}]" if provider_str else ""
     content = (
-        f"Dispatch {row_d['dispatch_id']} ({skill}, {gate}) "
+        f"Dispatch {row_d['dispatch_id']} ({skill}, {gate}){provider_tag} "
         f"completed with status: {outcome}. "
         f"Patterns used: {row_d.get('pattern_count', 0)}, "
         f"Prevention rules: {row_d.get('prevention_rule_count', 0)}."
@@ -185,11 +205,16 @@ def _query_central(
             datetime.now(timezone.utc) - timedelta(days=RECENT_COMPARABLE_DAYS)
         ).isoformat()
         has_project_id = _table_has_column(conn, "dispatch_metadata", "project_id")
+        _dm_cols = _dm_column_set(conn)
+        provider_cols = (
+            (", provider" if "provider" in _dm_cols else "")
+            + (", model" if "model" in _dm_cols else "")
+        )
         if has_project_id and project_id:
             rows = conn.execute(
-                """SELECT dispatch_id, terminal, track, role, skill_name, gate,
+                f"""SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
-                       prevention_rule_count
+                       prevention_rule_count{provider_cols}
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL
@@ -199,9 +224,9 @@ def _query_central(
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT dispatch_id, terminal, track, role, skill_name, gate,
+                f"""SELECT dispatch_id, terminal, track, role, skill_name, gate,
                        outcome_status, dispatched_at, pattern_count,
-                       prevention_rule_count
+                       prevention_rule_count{provider_cols}
                 FROM dispatch_metadata
                 WHERE dispatched_at >= ?
                   AND outcome_status IS NOT NULL

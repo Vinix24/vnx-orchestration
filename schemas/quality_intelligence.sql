@@ -521,6 +521,7 @@ CREATE TABLE IF NOT EXISTS dispatch_metadata (
     terminal TEXT NOT NULL,
     track TEXT NOT NULL,
     provider TEXT,
+    model TEXT,
     role TEXT,
     skill_name TEXT,
     gate TEXT,
@@ -715,3 +716,6 @@ VALUES ('8.3.0-adr-registry', 'Add adrs table + FTS5 virtual table + sync trigge
 
 INSERT OR IGNORE INTO schema_version (version, description)
 VALUES ('8.4.0-provider-aware', 'Add provider column to dispatch_metadata for provider-aware self-learning intelligence (non-Claude parity)');
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES ('8.5.0-model-aware', 'Add model column to dispatch_metadata (GAP 2): provider+model-aware self-learning intelligence');

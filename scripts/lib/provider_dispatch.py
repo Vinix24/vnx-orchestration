@@ -346,8 +346,9 @@ def _record_provider_metadata(
     status: str,
     report_path: Path,
     state_dir: Path,
+    model_used: Optional[str] = None,
 ) -> None:
-    """Best-effort: upsert a provider-stamped dispatch_metadata row.
+    """Best-effort: upsert a provider+model-stamped dispatch_metadata row.
 
     This is what makes the self-learning/intelligence layer provider-aware: the
     headless multi-provider path previously wrote NO dispatch_metadata row, so
@@ -363,6 +364,7 @@ def _record_provider_metadata(
             dispatch_id=args.dispatch_id,
             terminal=terminal,
             provider=provider,
+            model=model_used or None,
             track=_TERMINAL_TRACK.get(terminal, "headless"),
             role=getattr(args, "role", None),
             gate=getattr(args, "gate", None) or None,
@@ -421,9 +423,9 @@ def _emit_governance(
     )
 
     # Provider-aware self-learning: stamp a dispatch_metadata row so EVERY governed
-    # dispatch (incl. non-Claude) feeds the intelligence layer tagged by provider.
+    # dispatch (incl. non-Claude) feeds the intelligence layer tagged by provider+model.
     # Best-effort — metadata logging is non-fatal to the dispatch.
-    _record_provider_metadata(args, provider, status, report_path, state_dir)
+    _record_provider_metadata(args, provider, status, report_path, state_dir, model_used=model_used)
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
