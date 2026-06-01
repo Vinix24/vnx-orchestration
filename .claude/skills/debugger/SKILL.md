@@ -98,7 +98,7 @@ For accessing proven patterns and solutions, see: `@.claude/skills/debugger/scri
 **MANDATORY — first line of every response after skill load:**
 
 ```
-🔧 Skill actief: debugger
+Skill actief: debugger
 ```
 
 No exceptions. This must appear before any other content.

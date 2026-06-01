@@ -22,7 +22,7 @@ The MC outage on 2026-04-28 had three independent causes:
 
 1. **No periodic TTL sweep** — `terminal_leases.state='leased'` rows accumulated when
    workers exited abnormally.  `LeaseManager.expire_stale()` existed but had no caller.
-2. **No dispatcher restart** — `dispatcher_v8_minimal.sh` exited via `set -euo pipefail`
+2. **No dispatcher restart** — `dispatcher_minimal.sh` exited via `set -euo pipefail`
    on an unhandled error.  `dispatcher_supervisor.sh` existed but was not running.
 3. **Stale `pending/` re-pickup** — when a worker crashed before the dispatch file was
    moved out of `pending/`, the next dispatcher poll re-picked it, causing duplicate
@@ -59,10 +59,10 @@ This is the only required change to enable the in-loop ticks (`expire_stale` eve
 ### Step 2 — stop the bare dispatcher
 
 ```bash
-kill $(cat .vnx-data/pids/dispatcher_v8_minimal.pid)
+kill $(cat .vnx-data/pids/dispatcher_minimal.pid)
 ```
 
-Wait for the process to exit (`ps aux | grep dispatcher_v8_minimal` returns nothing).
+Wait for the process to exit (`ps aux | grep dispatcher_minimal` returns nothing).
 
 ### Step 3 — start dispatcher under the supervisor wrapper
 
@@ -127,8 +127,8 @@ kill $(pgrep -f dispatcher_supervisor)
 kill $(pgrep -f receipt_processor_supervisor)
 
 # 3. Restart bare daemons as before
-nohup bash scripts/dispatcher_v8_minimal.sh > /dev/null 2>&1 &
-nohup bash scripts/receipt_processor_v4.sh  > /dev/null 2>&1 &
+nohup bash scripts/dispatcher_minimal.sh > /dev/null 2>&1 &
+nohup bash scripts/receipt_processor.sh  > /dev/null 2>&1 &
 ```
 
 No database schema changes are involved — rollback is instant.
@@ -189,7 +189,7 @@ The dispatcher is crashing before `BACKOFF_STABLE` (60 s) elapses. Check the
 dispatcher's own log:
 
 ```bash
-tail -80 .vnx-data/logs/dispatcher_v8_minimal.log
+tail -80 .vnx-data/logs/dispatcher_minimal.log
 ```
 
 The most common cause is a pending dispatch file that triggers an error on every
@@ -204,12 +204,12 @@ bin/vnx
   └── export VNX_SUPERVISOR_MODE=unified
 
 scripts/dispatcher_supervisor.sh           ← wrapper (backoff + respawn)
-  └── scripts/dispatcher_v8_minimal.sh     ← inner loop
+  └── scripts/dispatcher_minimal.sh     ← inner loop
         ├── _maybe_expire_stale_leases()   ← every 30s → scripts/lib/lease_sweep.py
         └── _maybe_runtime_supervise()     ← every 60s → scripts/lib/runtime_supervise.py
 
 scripts/receipt_processor_supervisor.sh    ← wrapper (backoff + respawn)
-  └── scripts/receipt_processor_v4.sh     ← inner poll loop
+  └── scripts/receipt_processor.sh     ← inner poll loop
 
 scripts/lib/cleanup_worker_exit.py         ← called by both adapters on worker exit
   ├── LeaseManager.release()

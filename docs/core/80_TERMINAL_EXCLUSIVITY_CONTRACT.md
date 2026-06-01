@@ -108,7 +108,7 @@ These rules define the contract that PR-1 must enforce in code. Each rule is lab
 
 **Rule**: If the canonical lease check fails for any reason — Python crash, SQLite error, missing database file, timeout, unexpected output format — the terminal is classified as **ambiguous** and dispatch is **blocked**.
 
-**Current violation**: `rc_check_terminal()` returns `ALLOW` on any failure (line 342-343 of `dispatcher_v8_minimal.sh`). The JSON parse fallback also defaults to `"yes"` (available) on parse failure (line 347).
+**Current violation**: `rc_check_terminal()` returns `ALLOW` on any failure (line 342-343 of `dispatcher_minimal.sh`). The JSON parse fallback also defaults to `"yes"` (available) on parse failure (line 347).
 
 **Required behavior**: On canonical check failure, emit `BLOCK:canonical_check_failed:<error_class>` and return non-zero. The dispatcher must not fall through to delivery.
 
@@ -393,11 +393,11 @@ These are the specific code locations that PR-1 must fix.
 
 | File | Line | Violation | Required Fix |
 |------|------|-----------|-------------|
-| `dispatcher_v8_minimal.sh` | 180-181 | `terminal_lock_allows_dispatch()` returns 0 (allow) when state file missing | Return 0 only when no lease row exists in canonical source (FC-5). Block on unreadable file. |
-| `dispatcher_v8_minimal.sh` | 338 | `rc_check_terminal()` returns `ALLOW` when `_rc_enabled` is false | When `VNX_RUNTIME_PRIMARY=1`, absence of runtime core is a hard block (FC-3). |
-| `dispatcher_v8_minimal.sh` | 342-343 | `rc_check_terminal()` returns `ALLOW` on Python execution failure | Return `BLOCK:canonical_check_failed` (FC-1). |
-| `dispatcher_v8_minimal.sh` | 347 | JSON parse of canonical check result defaults to `"yes"` on error | Default to `"no"` (blocked) on parse error (FC-1). |
-| `dispatcher_v8_minimal.sh` | 210 | `terminal_lock_allows_dispatch()` returns allow when no record exists for terminal | Acceptable only after canonical check has passed (FC-5 + FC-6 conjunction). |
+| `dispatcher_minimal.sh` | 180-181 | `terminal_lock_allows_dispatch()` returns 0 (allow) when state file missing | Return 0 only when no lease row exists in canonical source (FC-5). Block on unreadable file. |
+| `dispatcher_minimal.sh` | 338 | `rc_check_terminal()` returns `ALLOW` when `_rc_enabled` is false | When `VNX_RUNTIME_PRIMARY=1`, absence of runtime core is a hard block (FC-3). |
+| `dispatcher_minimal.sh` | 342-343 | `rc_check_terminal()` returns `ALLOW` on Python execution failure | Return `BLOCK:canonical_check_failed` (FC-1). |
+| `dispatcher_minimal.sh` | 347 | JSON parse of canonical check result defaults to `"yes"` on error | Default to `"no"` (blocked) on parse error (FC-1). |
+| `dispatcher_minimal.sh` | 210 | `terminal_lock_allows_dispatch()` returns allow when no record exists for terminal | Acceptable only after canonical check has passed (FC-5 + FC-6 conjunction). |
 
 ## Appendix C: Relationship To Other Contracts
 

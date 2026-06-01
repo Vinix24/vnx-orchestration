@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Log dispatch metadata to quality_intelligence.db after successful dispatch.
 
-Called non-fatally from dispatcher_v8_minimal.sh after each successful dispatch.
+Called non-fatally from dispatcher_minimal.sh after each successful dispatch.
 Inserts a row into dispatch_metadata with all available context.
 """
 
@@ -43,6 +43,8 @@ def main():
     parser.add_argument("--role", default="")
     parser.add_argument("--skill-name", default="")
     parser.add_argument("--gate", default="")
+    parser.add_argument("--provider", default="claude",
+                        help="Provider that executed this dispatch (claude/codex/gemini/kimi/litellm:*)")
     parser.add_argument("--cognition", default="normal")
     parser.add_argument("--priority", default="P1")
     parser.add_argument("--pr-id", default="")
@@ -122,6 +124,22 @@ def main():
             args.target_open_items,
             datetime.utcnow().isoformat(),
         ))
+    # Stamp provider (provider-aware self-learning). Guarded: column lands via
+    # migration v21; older DBs simply skip it. Kept separate from the two INSERT
+    # branches above so the provider stamp applies regardless of project_id state.
+    # ADR-007: scope UPDATE by (project_id, dispatch_id) to prevent cross-tenant overwrite.
+    if _has_column(conn, "dispatch_metadata", "provider"):
+        if _has_column(conn, "dispatch_metadata", "project_id"):
+            cur.execute(
+                "UPDATE dispatch_metadata SET provider = ? WHERE project_id = ? AND dispatch_id = ?",
+                (args.provider or "claude", current_project_id(), args.dispatch_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE dispatch_metadata SET provider = ? WHERE dispatch_id = ?",
+                (args.provider or "claude", args.dispatch_id),
+            )
+
     conn.commit()
     conn.close()
     print(f"Logged dispatch metadata: {args.dispatch_id}")

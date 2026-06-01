@@ -12,7 +12,7 @@ VNX_ROOT = TESTS_DIR.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
 
 APPROVED_WRITERS = {
-    "receipt_processor_v4.sh",
+    "receipt_processor.sh",
     "report_watcher.sh",
     "heartbeat_ack_monitor.py",
     "check_active_drain.py",

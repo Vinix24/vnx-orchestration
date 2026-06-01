@@ -13,7 +13,7 @@ This contract defines exact module boundaries, function decompositions, and impo
 
 **Verified counts** (2026-04-05):
 - Total open items: 738 (57 blockers)
-- dispatcher_v8_minimal.sh: 2140L (limit 500L, 4.3x over)
+- dispatcher_minimal.sh: 2140L (limit 500L, 4.3x over)
 - runtime_coordination.py: 1164L (limit 400L, 2.9x over)
 - review_gate_manager.py: 1017L (limit 400L, 2.5x over)
 - Functions > 80L across codebase: 183 (159 Python, 24 shell)
@@ -125,7 +125,7 @@ Functions for logging and audit:
 - `emit_blocked_dispatch_audit()` (43L, lines 174–216)
 - `emit_lease_cleanup_audit()` (29L, lines 593–621)
 
-#### `scripts/dispatcher_v8_minimal.sh` — Orchestrator (~350L)
+#### `scripts/dispatcher_minimal.sh` — Orchestrator (~350L)
 
 Remains as the main entry point:
 - Shared variable declarations and constants (~50L)
@@ -155,7 +155,7 @@ After decomposition:
 - `bash -n` must pass on ALL .sh files (mandatory per project rules)
 - Dispatcher behavior must be identical (dispatch a test, verify receipt)
 - No module exceeds 500L
-- `dispatcher_v8_minimal.sh` (orchestrator) < 500L
+- `dispatcher_minimal.sh` (orchestrator) < 500L
 
 ---
 
@@ -451,10 +451,10 @@ Already covered in sections 1–3 above. Summary:
 
 | File | Function | Lines | Action |
 |------|----------|-------|--------|
-| dispatcher_v8_minimal.sh | `dispatch_with_skill_activation()` | 552 | Split into 4 functions |
-| dispatcher_v8_minimal.sh | `configure_terminal_mode()` | 272 | Split into 4 functions |
-| dispatcher_v8_minimal.sh | `process_dispatches()` | 198 | Split into 3 functions |
-| dispatcher_v8_minimal.sh | `terminal_lock_allows_dispatch()` | 92 | Extract Python to library |
+| dispatcher_minimal.sh | `dispatch_with_skill_activation()` | 552 | Split into 4 functions |
+| dispatcher_minimal.sh | `configure_terminal_mode()` | 272 | Split into 4 functions |
+| dispatcher_minimal.sh | `process_dispatches()` | 198 | Split into 3 functions |
+| dispatcher_minimal.sh | `terminal_lock_allows_dispatch()` | 92 | Extract Python to library |
 | runtime_coordination.py | `release_all_leases()` | 128 | Split into 3 helpers + orchestrator |
 | runtime_coordination.py | `transition_dispatch_idempotent()` | 83 | Extract `_check_idempotent_noop()` helper |
 | review_gate_manager.py | `request_claude_github_with_contract()` | 90 | Extract `_determine_claude_github_state()` |
@@ -524,14 +524,14 @@ Already covered in sections 1–3 above. Summary:
 | # | File | Function | Lines |
 |---|------|----------|-------|
 | 1 | scripts/commands/start.sh | `cmd_start()` | 741 |
-| 2 | scripts/smart_tap_v7_json_translator.sh | `is_json()` | 608 |
-| 3 | scripts/dispatcher_v8_minimal.sh | `dispatch_with_skill_activation()` | 552 |
+| 2 | scripts/smart_tap_json_translator.sh | `is_json()` | 608 |
+| 3 | scripts/dispatcher_minimal.sh | `dispatch_with_skill_activation()` | 552 |
 | 4 | scripts/generate_t0_brief.sh | `main()` | 492 |
 | 5 | scripts/commands/merge_preflight.sh | `cmd_merge_preflight()` | 307 |
-| 6 | scripts/dispatcher_v8_minimal.sh | `configure_terminal_mode()` | 272 |
+| 6 | scripts/dispatcher_minimal.sh | `configure_terminal_mode()` | 272 |
 | 7 | scripts/commands/new_worktree.sh | `cmd_new_worktree()` | 269 |
 | 8 | scripts/commands/doctor.sh | `cmd_doctor()` | 261 |
-| 9 | scripts/dispatcher_v8_minimal.sh | `process_dispatches()` | 198 |
+| 9 | scripts/dispatcher_minimal.sh | `process_dispatches()` | 198 |
 | 10 | scripts/generate_valid_dashboard.sh | `get_pr_queue_summary()` | 179 |
 | 11 | scripts/commands/recover.sh | `cmd_recover()` | 170 |
 | 12 | scripts/commands/finish_worktree.sh | `cmd_finish_worktree()` | 160 |
@@ -539,10 +539,10 @@ Already covered in sections 1–3 above. Summary:
 | 14 | scripts/report_watcher.sh | `process_report()` | 144 |
 | 15 | scripts/lib/input_mode_guard.sh | `check_pane_input_ready()` | 131 |
 | 16 | tests/test_full_auto.sh | `run_gate_cycle()` | 126 |
-| 17 | scripts/receipt_processor_v4.sh | `process_single_report()` | 124 |
+| 17 | scripts/receipt_processor.sh | `process_single_report()` | 124 |
 | 18 | scripts/vnx_supervisor_simple.sh | `monitor()` | 118 |
 | 19 | scripts/receipt_notifier.sh | `notify_t0_enhanced()` | 104 |
-| 20 | scripts/dispatcher_v8_minimal.sh | `terminal_lock_allows_dispatch()` | 92 |
+| 20 | scripts/dispatcher_minimal.sh | `terminal_lock_allows_dispatch()` | 92 |
 | 21 | scripts/commands/regen_settings.sh | `cmd_regen_settings()` | 88 |
 | 22 | tests/test_receipt_flow.sh | `test_document_generation()` | 85 |
 | 23 | scripts/lib/process_lifecycle.sh | `vnx_proc_acquire_lock()` | 84 |
@@ -564,7 +564,7 @@ PR-4 will handle all 183 functions > 80L. The scope is large but most splits are
 
 ### 5.1 Dispatcher (Shell)
 
-**Current**: `dispatcher_v8_minimal.sh` is self-contained. No other files source it.
+**Current**: `dispatcher_minimal.sh` is self-contained. No other files source it.
 
 **After refactor**: The orchestrator sources 4 modules at the top:
 
@@ -614,7 +614,7 @@ Run `grep -r "runtime_coordination" --include="*.py"` to find all. Key consumers
 ## 6. Cross-File Dependency Verification
 
 No cross-dependencies exist between the 3 target files:
-- `dispatcher_v8_minimal.sh` does NOT source `runtime_coordination.py` or `review_gate_manager.py` directly (it calls them via `python scripts/...` subprocess)
+- `dispatcher_minimal.sh` does NOT source `runtime_coordination.py` or `review_gate_manager.py` directly (it calls them via `python scripts/...` subprocess)
 - `runtime_coordination.py` does NOT import `review_gate_manager.py`
 - `review_gate_manager.py` does NOT import `runtime_coordination.py`
 
@@ -632,7 +632,7 @@ No cross-dependencies exist between the 3 target files:
 | dispatch_deliver.sh | ~350 | 500 | ✅ (tight) |
 | dispatch_lifecycle.sh | ~380 | 500 | ✅ |
 | dispatch_logging.sh | ~160 | 500 | ✅ |
-| dispatcher_v8_minimal.sh (orchestrator) | ~350 | 500 | ✅ |
+| dispatcher_minimal.sh (orchestrator) | ~350 | 500 | ✅ |
 
 ### Runtime Coordination
 

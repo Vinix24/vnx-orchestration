@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # rp_state.sh - terminal_state.json shadow writers
-# Sourced by scripts/receipt_processor_v4.sh
+# Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $SCRIPTS_DIR, $CONFIRMATION_GRACE_SECONDS,
 #           and _rf_* fields populated by extract_receipt_fields()
 

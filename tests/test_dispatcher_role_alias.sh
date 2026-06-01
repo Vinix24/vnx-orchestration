@@ -7,7 +7,7 @@
 #   raw alias. gather_intelligence.py gather returns rc≠0 (dispatch_blocked=true)
 #   for an unregistered alias, which the caller classified as [DEPENDENCY_ERROR].
 #
-# Fix (scripts/dispatcher_v8_minimal.sh):
+# Fix (scripts/dispatcher_minimal.sh):
 #   - _validate_agent_intelligence sets _PD_MAPPED_ROLE="$_mapped_role" on success.
 #   - process_dispatches() calls gather_dispatch_intelligence with
 #     "${_PD_MAPPED_ROLE:-$agent_role}" instead of "$agent_role".
@@ -16,7 +16,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DISPATCHER="$SCRIPT_DIR/../scripts/dispatcher_v8_minimal.sh"
+DISPATCHER="$SCRIPT_DIR/../scripts/dispatcher_minimal.sh"
 DISPATCH_CREATE="$PROJECT_ROOT/scripts/lib/dispatch_create.sh"
 
 PASS=0

@@ -11,7 +11,7 @@ Usage:
   python scripts/rollback_runtime_core.py status    # show current flag state
 
 The rollback operation sets VNX_RUNTIME_PRIMARY=0 which causes:
-  - dispatcher_v8_minimal.sh to skip all broker/lease calls
+  - dispatcher_minimal.sh to skip all broker/lease calls
   - load_runtime_core() to return None (no-op)
   - legacy terminal_state_shadow path to remain the sole coordination path
 

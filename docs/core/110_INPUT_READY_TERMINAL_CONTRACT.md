@@ -15,7 +15,7 @@ This document is the single source of truth for what makes a tmux pane dispatch-
 
 ### 1.1 The Problem
 
-Dispatches often begin with a slash-prefixed skill invocation (e.g., `/architect`, `/backend-developer`). The V8 hybrid dispatch mechanism delivers this skill command via `tmux send-keys -l` (dispatcher_v8_minimal.sh, line 1625).
+Dispatches often begin with a slash-prefixed skill invocation (e.g., `/architect`, `/backend-developer`). The V8 hybrid dispatch mechanism delivers this skill command via `tmux send-keys -l` (dispatcher_minimal.sh, line 1625).
 
 This is safe only when the target pane is in **normal input mode** (`pane_in_mode = 0`). When a pane is in tmux copy-mode or search-mode (`pane_in_mode = 1`):
 
