@@ -485,6 +485,81 @@ class TestEnvelopeIdempotentDedup:
         mock_report.assert_called_once()
         mock_receipt.assert_called_once()
 
+    def test_receipt_ledger_unreadable_skips_emit(self, spec_claude, caplog):
+        """When receipt NDJSON exists but cannot be read (OSError), skip emit with warning.
+
+        Fail-closed: treat the unreadable ledger as "cannot confirm dedup" and skip
+        the receipt write rather than risking a silent double-emit. A WARNING is logged
+        with the exception details.
+        """
+        report_path, receipt_path, mock_report, mock_receipt = _stub_governance(spec_claude)
+
+        # Create the NDJSON so it passes .exists() check
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text('{"dispatch_id":"other-dispatch"}\n', encoding="utf-8")
+
+        claude_result = _FakeClaudeResult(returncode=0)
+
+        # Patch open to raise OSError for the receipt file read.
+        # Only _receipt_exists_for_dispatch opens this path during GOVERN;
+        # emit_dispatch_receipt is mocked and won't call open.
+        _real_open = open
+        def _selective_open(path, *args, **kwargs):
+            if isinstance(path, Path):
+                path = str(path)
+            if str(receipt_path) in str(path):
+                raise OSError("Permission denied")
+            return _real_open(path, *args, **kwargs)
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="dispatch_envelope"):
+            with patch("provider_spawns.claude_spawn.spawn_claude", return_value=claude_result), \
+                 patch("governance_emit.emit_unified_report", mock_report), \
+                 patch("governance_emit.emit_dispatch_receipt", mock_receipt), \
+                 patch("builtins.open", side_effect=_selective_open):
+                result = run_envelope(spec_claude, lane="claude-subprocess")
+
+        assert result.status == "success"
+        assert result.returncode == 0
+        assert result.receipt_path == receipt_path
+        mock_report.assert_called_once()
+        # Receipt emit is SKIPPED (fail-closed: unreadable ledger → skip to avoid double-emit)
+        mock_receipt.assert_not_called()
+        # A WARNING was logged with the exception details
+        assert any(
+            "cannot read receipt ledger" in record.message
+            and "Permission denied" in record.message
+            for record in caplog.records
+        ), f"Expected WARNING about unreadable receipt ledger, got: {[r.message for r in caplog.records]}"
+
+    def test_receipt_exists_for_dispatch_oserror_returns_true(self, tmp_path, caplog):
+        """Unit test: _receipt_exists_for_dispatch returns True on OSError (fail-closed)."""
+        receipt_path = tmp_path / "t0_receipts.ndjson"
+        receipt_path.write_text('{"dispatch_id":"some-id"}\n', encoding="utf-8")
+
+        _real_open = open
+        def _raise_oserror(path, *args, **kwargs):
+            if isinstance(path, Path):
+                path = str(path)
+            if str(receipt_path) in str(path):
+                raise OSError("Permission denied")
+            return _real_open(path, *args, **kwargs)
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="dispatch_envelope"):
+            with patch("builtins.open", side_effect=_raise_oserror):
+                result = dispatch_envelope._receipt_exists_for_dispatch(
+                    receipt_path, "some-id"
+                )
+
+        # Fail-closed: unreadable ledger → return True (skip emit, no double-receipt)
+        assert result is True
+        # Warning logged with exception details
+        assert any(
+            "cannot read receipt ledger" in record.message
+            for record in caplog.records
+        ), f"Expected WARNING log, got: {[r.message for r in caplog.records]}"
+
 
 # ---------------------------------------------------------------------------
 # Flag gate: claude - flag-off = legacy path; flag-on = envelope invoked

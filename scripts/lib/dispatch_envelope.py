@@ -297,7 +297,9 @@ def _prepare(spec: EnvelopeSpec) -> str:
             dispatch_paths=None,
         )
     except ImportError:
-        pass
+        logger.debug(
+            "envelope._prepare: intelligence_injection not available — skipping"
+        )
     except Exception as exc:
         logger.warning(
             "envelope._prepare: intelligence injection failed (%s) — skipping", exc
@@ -335,8 +337,14 @@ def _receipt_exists_for_dispatch(receipt_path: Path, dispatch_id: str) -> bool:
             for line in fh:
                 if target in line:
                     return True
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning(
+            "envelope._receipt_exists_for_dispatch: cannot read receipt ledger %s: %s — "
+            "treating as unreadable (fail-closed: will skip emit to avoid double-receipt)",
+            receipt_path,
+            exc,
+        )
+        return True
     return False
 
 
