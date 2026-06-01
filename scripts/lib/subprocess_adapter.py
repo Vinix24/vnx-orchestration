@@ -283,10 +283,15 @@ class SubprocessAdapter:
             "--verbose",
             "--model", effective_model,
         ]
-        cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
         if resume_session:
             cmd.extend(["--resume", resume_session])
+        # The prompt MUST precede the capability-scoping flags. --allowedTools /
+        # --disallowedTools are variadic (<tools...>); if the instruction is appended
+        # AFTER them it is consumed as a tool value, leaving claude with no prompt
+        # ("Error: Input must be provided ... when using --print" -> exit 1). Placing
+        # the instruction before the scope args keeps it as the -p prompt positional.
         cmd.append(effective_instruction)
+        cmd.extend(_build_worker_scope_args(effective_role, requires_mcp=requires_mcp))
 
         popen_kwargs: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
