@@ -16,7 +16,13 @@ SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-from ndjson_hash_chain import GENESIS_HASH, compute_entry_hash, verify_chain
+from ndjson_hash_chain import (
+    GENESIS_HASH,
+    append_chained_entry,
+    compute_entry_hash,
+    verify_chain,
+    verify_history,
+)
 from vnx_receipt_rotate import (
     _count_lines,
     _read_last_entry,
@@ -274,3 +280,172 @@ class TestProcessorContinuity:
         lines = [l for l in receipts.read_text().strip().split("\n") if l.strip()]
         assert len(lines) == 2
         assert json.loads(lines[1])["dispatch_id"] == "DISP-0099"
+
+
+class TestFullHistoryVerification:
+    """Tests for verify_history: cross-rotation chain continuity."""
+
+    def test_full_history_valid_after_rotation_with_chained_appends(self, tmp_path):
+        """Archive + live together form a valid chain after rotation + new chained entries."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        archive_dir = tmp_path / "state" / "archive"
+
+        for i in range(5):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        result = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+        archive_path = Path(result["archive_path"])
+
+        # Append M entries to the live file via append_chained_entry so they chain from sentinel.
+        for i in range(5, 10):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        ok, violations = verify_history([archive_path, receipts])
+        assert ok, f"Full-history violations: {violations}"
+
+    def test_full_history_tampered_archive_entry_fails(self, tmp_path):
+        """Tampering any archive entry breaks the full-history chain."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        archive_dir = tmp_path / "state" / "archive"
+
+        for i in range(5):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        result = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+        archive_path = Path(result["archive_path"])
+
+        for i in range(5, 8):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        # Tamper an entry in the middle of the archive.
+        lines = archive_path.read_text().strip().split("\n")
+        tampered = json.loads(lines[2])
+        tampered["status"] = "TAMPERED"
+        lines[2] = json.dumps(tampered)
+        archive_path.write_text("\n".join(lines) + "\n")
+
+        ok, violations = verify_history([archive_path, receipts])
+        assert not ok
+        assert len(violations) >= 1
+
+    def test_full_history_tampered_live_entry_fails(self, tmp_path):
+        """Tampering a post-rotation live entry breaks the full-history chain."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        archive_dir = tmp_path / "state" / "archive"
+
+        for i in range(3):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        result = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+        archive_path = Path(result["archive_path"])
+
+        for i in range(3, 6):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        # Tamper an entry in the live file (not the sentinel).
+        lines = receipts.read_text().strip().split("\n")
+        assert len(lines) >= 3
+        tampered = json.loads(lines[2])
+        tampered["terminal"] = "TAMPERED"
+        lines[2] = json.dumps(tampered)
+        receipts.write_text("\n".join(lines) + "\n")
+
+        ok, violations = verify_history([archive_path, receipts])
+        assert not ok
+        assert len(violations) >= 1
+
+    def test_verify_chain_with_nongenesis_expected_prev(self, tmp_path):
+        """verify_chain(path, expected_prev=<non-genesis>) validates a post-rotation segment."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        archive_dir = tmp_path / "state" / "archive"
+
+        for i in range(4):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        archive_last_entry = _read_last_entry(receipts)
+        archive_tail_hash = compute_entry_hash(archive_last_entry)
+
+        result = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+
+        # The sentinel is the first entry of the new live file.
+        # verify_chain with expected_prev=archive_tail_hash must accept it.
+        ok, violations = verify_chain(receipts, expected_prev=archive_tail_hash)
+        assert ok, f"Live-segment violations: {violations}"
+
+    def test_multi_archive_full_history_valid(self, tmp_path):
+        """Two rotations: [archive1, archive2, live] form a valid history chain."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        archive_dir = tmp_path / "state" / "archive"
+
+        for i in range(3):
+            append_chained_entry(receipts, _make_receipt(i))
+        result1 = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+        archive1 = Path(result1["archive_path"])
+
+        for i in range(3, 6):
+            append_chained_entry(receipts, _make_receipt(i))
+        result2 = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+        archive2 = Path(result2["archive_path"])
+
+        for i in range(6, 9):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        ok, violations = verify_history([archive1, archive2, receipts])
+        assert ok, f"Multi-archive history violations: {violations}"
+
+
+class TestProcessorRotationAwareness:
+    """Tests verifying that rotation is detectable via inode change and chain remains intact."""
+
+    def test_inode_changes_on_atomic_rotation(self, tmp_path):
+        """The new live file has a different inode from the archived file (atomic rename)."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        _write_receipts(receipts, 10)
+        pre_inode = receipts.stat().st_ino
+
+        rotate(receipts_file=str(receipts), max_mb=0.0001, force=True)
+
+        post_inode = receipts.stat().st_ino
+        assert post_inode != pre_inode, "Inode must differ after rotation (new file created)"
+
+    def test_processor_continuation_no_dup_no_skip(self, tmp_path):
+        """After rotation, exactly-once: N archived + M new live — no duplicates, no skips."""
+        receipts = tmp_path / "state" / "t0_receipts.ndjson"
+        archive_dir = tmp_path / "state" / "archive"
+
+        N = 5
+        M = 4
+
+        # Simulate processor having written N receipts.
+        for i in range(N):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        pre_inode = receipts.stat().st_ino
+
+        # Rotation happens.
+        result = rotate(receipts_file=str(receipts), archive_dir=str(archive_dir), max_mb=0.0001, force=True)
+        archive_path = Path(result["archive_path"])
+
+        # Processor detects rotation via inode change.
+        post_inode = receipts.stat().st_ino
+        assert post_inode != pre_inode, "Processor must detect inode change as rotation signal"
+
+        # Processor continues: writes M new receipts to the new live file.
+        for i in range(N, N + M):
+            append_chained_entry(receipts, _make_receipt(i))
+
+        # Verify: N entries in archive, sentinel + M in live.
+        archive_lines = [l for l in archive_path.read_text().strip().split("\n") if l.strip()]
+        live_lines = [l for l in receipts.read_text().strip().split("\n") if l.strip()]
+        assert len(archive_lines) == N
+        assert len(live_lines) == M + 1  # sentinel + M
+
+        # No dispatch IDs duplicated across archive and live.
+        all_entries = [json.loads(l) for l in archive_lines + live_lines]
+        receipt_entries = [e for e in all_entries if e.get("event_type") not in (_ROTATION_EVENT_TYPE,)]
+        dispatch_ids = [e["dispatch_id"] for e in receipt_entries]
+        assert len(dispatch_ids) == len(set(dispatch_ids)), "No duplicate dispatch IDs across archive + live"
+
+        # Full-history chain is valid end-to-end.
+        ok, violations = verify_history([archive_path, receipts])
+        assert ok, f"Full-history violations after processor continuation: {violations}"
