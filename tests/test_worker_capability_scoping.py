@@ -182,13 +182,24 @@ class TestDeliverSpawnArgv:
         allowed = set(cmd[allow_idx + 1].split(","))
         assert CODE_WORKER_ESSENTIALS.issubset(allowed)
 
-    def test_instruction_still_last_arg(self):
+    def test_instruction_precedes_variadic_scope_flags(self):
+        # Regression: --allowedTools / --disallowedTools are variadic (<tools...>).
+        # If the instruction is appended AFTER them it is swallowed as a tool value,
+        # leaving claude --print with no prompt -> "Input must be provided" -> exit 1.
+        # The prompt must therefore come BEFORE the scope flags.
         adapter = SubprocessAdapter()
         proc = _make_alive_process()
         with patch("subprocess.Popen", return_value=proc) as mock_popen:
             adapter.deliver("T1", "dispatch-cap-3", instruction="the instruction")
         cmd = mock_popen.call_args[0][0]
-        assert cmd[-1] == "the instruction"
+        assert "the instruction" in cmd
+        instr_idx = cmd.index("the instruction")
+        allow_idx = cmd.index("--allowedTools")
+        assert instr_idx < allow_idx, (
+            "instruction must precede --allowedTools or it is consumed as a tool value"
+        )
+        if "--disallowedTools" in cmd:
+            assert instr_idx < cmd.index("--disallowedTools")
 
     def test_feature_flag_off_restores_skip_permissions(self, monkeypatch):
         monkeypatch.setenv("VNX_WORKER_SCOPED", "0")
