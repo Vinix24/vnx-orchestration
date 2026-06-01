@@ -1120,6 +1120,129 @@
       padding: 1.5rem 0;
       font-size: 0.9rem;
     }
+
+    /* ── Planning Kanban ── */
+    .planning-board {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+      margin-top: 0.8rem;
+      overflow-x: auto;
+    }
+    @media (max-width: 900px) { .planning-board { grid-template-columns: 1fr; } }
+
+    .planning-column { display: flex; flex-direction: column; gap: 0.5rem; min-width: 220px; }
+
+    .planning-col-header {
+      font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.12em; color: var(--muted);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 0.2rem 0.5rem; border-bottom: 1px solid var(--border-soft);
+    }
+    .planning-col-now .planning-col-header    { color: var(--brand-orange); border-bottom-color: rgba(249,115,22,0.4); }
+    .planning-col-next .planning-col-header   { color: var(--brand-gold);   border-bottom-color: rgba(250,204,21,0.4); }
+    .planning-col-later .planning-col-header  { color: var(--muted); }
+
+    .planning-card {
+      padding: 0.7rem 0.8rem;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.05);
+      display: grid; gap: 0.4rem;
+      transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+    }
+    .planning-card:hover {
+      border-color: rgba(250,204,21,0.35);
+      background: rgba(250,204,21,0.04);
+      box-shadow: 0 4px 20px rgba(250,204,21,0.08);
+    }
+    .planning-card-title {
+      font-size: 0.9rem; font-weight: 600; color: var(--text);
+      line-height: 1.35;
+    }
+    .planning-card-meta {
+      display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center;
+    }
+    .phase-badge {
+      display: inline-block; padding: 0.1rem 0.45rem;
+      border-radius: 6px; font-size: 0.68rem; font-weight: 700;
+      letter-spacing: 0.05em; text-transform: uppercase;
+      border: 1px solid rgba(255,255,255,0.12);
+    }
+    .phase-badge.phase-active  { background: rgba(249,115,22,0.18); color: var(--brand-orange); border-color: rgba(249,115,22,0.3); }
+    .phase-badge.phase-queued  { background: rgba(250,204,21,0.14); color: var(--brand-gold);   border-color: rgba(250,204,21,0.3); }
+    .phase-badge.phase-parked  { background: rgba(255,255,255,0.06); color: var(--muted); }
+    .phase-badge.phase-done    { background: rgba(80,250,123,0.14); color: var(--green); border-color: rgba(80,250,123,0.3); }
+
+    .dep-badge {
+      display: inline-block; padding: 0.1rem 0.4rem;
+      border-radius: 6px; font-size: 0.65rem; font-weight: 600;
+      background: rgba(96,165,250,0.12); color: #60a5fa;
+      border: 1px solid rgba(96,165,250,0.2);
+      white-space: nowrap;
+    }
+
+    .planning-deliverables {
+      display: flex; flex-wrap: wrap; gap: 0.28rem;
+      margin-top: 0.1rem;
+    }
+    .deliverable-chip {
+      display: inline-flex; align-items: center; gap: 0.28rem;
+      padding: 0.15rem 0.5rem; border-radius: 999px;
+      font-size: 0.68rem; font-weight: 600;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.05);
+      color: var(--muted); white-space: nowrap;
+    }
+    .deliverable-chip.status-done       { color: var(--green);         border-color: rgba(80,250,123,0.25); }
+    .deliverable-chip.status-in_progress { color: var(--brand-orange); border-color: rgba(249,115,22,0.25); }
+    .deliverable-chip.status-ready      { color: var(--brand-gold);    border-color: rgba(250,204,21,0.25); }
+
+    .planning-oi-list {
+      display: grid; gap: 0.25rem; margin-top: 0.2rem;
+    }
+    .planning-oi {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.72rem; color: var(--muted);
+      padding: 0.18rem 0.4rem; border-radius: 6px;
+    }
+    .planning-oi.oi-blocks  { color: var(--red);         background: rgba(255,107,107,0.08); }
+    .planning-oi.oi-warns   { color: var(--brand-gold);  background: rgba(250,204,21,0.07); }
+    .planning-oi.oi-related { color: var(--muted);       background: rgba(255,255,255,0.03); }
+
+    .planning-footer {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 0.72rem; color: var(--muted); margin-top: 0.1rem;
+    }
+    .planning-dispatch-count {
+      background: rgba(255,255,255,0.07); border-radius: 4px;
+      padding: 0.1rem 0.38rem;
+    }
+    .planning-dispatch-link {
+      color: var(--brand-gold); text-decoration: none; font-weight: 600;
+      font-size: 0.72rem;
+    }
+    .planning-dispatch-link:hover { text-decoration: underline; }
+
+    .planning-empty {
+      font-size: 0.82rem; color: var(--muted); padding: 0.9rem 0.3rem; opacity: 0.55; text-align: center;
+    }
+
+    .planning-error {
+      font-size: 0.82rem; color: var(--red); padding: 0.6rem;
+      background: rgba(255,107,107,0.07); border-radius: 8px;
+      border: 1px solid rgba(255,107,107,0.2);
+    }
+
+    /* nav link */
+    .planning-nav-link {
+      display: inline-flex; align-items: center; padding: 0.4rem 0.85rem;
+      border-radius: 999px; border: 1px solid var(--border-soft);
+      background: rgba(255,255,255,0.04); color: var(--muted);
+      font-size: 0.82rem; text-decoration: none; white-space: nowrap;
+      transition: border-color 0.18s, color 0.18s;
+    }
+    .planning-nav-link:hover { border-color: rgba(250,204,21,0.4); color: var(--brand-gold); }
   </style>
 </head>
 <body>
@@ -1130,6 +1253,7 @@
         <p>7-second refresh · powered by `dashboard_status.json`</p>
       </div>
       <div class="header-right">
+        <a href="#planning-kanban" class="planning-nav-link">Planning</a>
         <div id="health-indicator" class="health-indicator">
           <span id="health-dot" class="health-dot"></span>
           <span id="health-label">Checking...</span>
@@ -1245,6 +1369,36 @@
           <div class="kanban-column kanban-col-done">
             <div class="kanban-col-header">Done <span class="kanban-col-count" id="kanban-count-done">0</span></div>
             <div id="kanban-cards-done"></div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section id="planning-kanban">
+      <article class="panel">
+        <h2>Planning <span id="planning-total" style="font-size:0.82rem; color:var(--muted); font-weight:400;"></span></h2>
+        <div id="planning-error" class="planning-error" style="display:none;"></div>
+        <div class="planning-board" id="planning-board">
+          <div class="planning-column planning-col-now">
+            <div class="planning-col-header">
+              Now
+              <span class="kanban-col-count" id="planning-count-now">0</span>
+            </div>
+            <div id="planning-cards-now"></div>
+          </div>
+          <div class="planning-column planning-col-next">
+            <div class="planning-col-header">
+              Next
+              <span class="kanban-col-count" id="planning-count-next">0</span>
+            </div>
+            <div id="planning-cards-next"></div>
+          </div>
+          <div class="planning-column planning-col-later">
+            <div class="planning-col-header">
+              Later
+              <span class="kanban-col-count" id="planning-count-later">0</span>
+            </div>
+            <div id="planning-cards-later"></div>
           </div>
         </div>
       </article>
@@ -2062,6 +2216,114 @@
     })();
 
     refreshKanban();
+
+    // ── Planning Kanban ──────────────────────────────────────────────────────
+
+    function renderPlanningCard(obj) {
+      const card = document.createElement("div");
+      card.className = "planning-card";
+
+      const phaseClass = `phase-${obj.phase || "queued"}`;
+      const phaseBadge = `<span class="phase-badge ${phaseClass}">${escHtml(obj.phase || "?")}</span>`;
+
+      const depBadges = (obj.depends_on || [])
+        .map(d => `<span class="dep-badge" title="kind: ${escHtml(d.kind || "")}">dep: ${escHtml(d.to_track_id)}</span>`)
+        .join("");
+
+      const metaHtml = `<div class="planning-card-meta">${phaseBadge}${depBadges}</div>`;
+
+      let delHtml = "";
+      if ((obj.deliverables || []).length > 0) {
+        const chips = obj.deliverables.map(d => {
+          const sc = `status-${(d.derived_status || "proposed").replace(/[^a-z_]/g, "")}`;
+          const kind = d.output_kind ? `[${escHtml(d.output_kind)}] ` : "";
+          const ref = d.deliverable_ref ? escHtml(String(d.deliverable_ref).slice(0, 20)) : "?";
+          return `<span class="deliverable-chip ${sc}">${kind}${ref}</span>`;
+        }).join("");
+        delHtml = `<div class="planning-deliverables">${chips}</div>`;
+      }
+
+      let oiHtml = "";
+      const ois = obj.open_items || [];
+      if (ois.length > 0) {
+        const items = ois.slice(0, 3).map(oi => {
+          const cls = `oi-${oi.link_type || "related"}`;
+          const icon = oi.link_type === "blocks" ? "⛔" : oi.link_type === "warns" ? "⚠" : "·";
+          const title = escHtml((oi.title || oi.oi_id || "").slice(0, 48));
+          return `<div class="planning-oi ${cls}">${icon} ${title}</div>`;
+        }).join("");
+        const more = ois.length > 3 ? `<div class="planning-oi oi-related">+${ois.length - 3} more</div>` : "";
+        oiHtml = `<div class="planning-oi-list">${items}${more}</div>`;
+      }
+
+      const dispCount = obj.dispatch_count || 0;
+      const prRef = obj.pr_ref ? `<a class="planning-dispatch-link" href="/api/dispatches?t=0" title="PR ${escHtml(obj.pr_ref)}">${escHtml(String(obj.pr_ref).slice(0, 12))}</a>` : "";
+      const footer = `<div class="planning-footer">
+        <span class="planning-dispatch-count">${dispCount} dispatch${dispCount !== 1 ? "es" : ""}</span>
+        ${prRef}
+      </div>`;
+
+      card.innerHTML = `
+        <div class="planning-card-title">${escHtml(obj.title || obj.track_id)}</div>
+        ${metaHtml}
+        ${delHtml}
+        ${oiHtml}
+        ${footer}
+      `;
+      return card;
+    }
+
+    function renderPlanning(data) {
+      const errEl = document.getElementById("planning-error");
+      const totalEl = document.getElementById("planning-total");
+
+      if (data.degraded) {
+        if (errEl) {
+          errEl.style.display = "";
+          errEl.textContent = "Planning unavailable: " + (data.degraded_reasons || []).join("; ");
+        }
+        return;
+      }
+      if (errEl) errEl.style.display = "none";
+
+      const horizons = data.horizons || {};
+      ["now", "next", "later"].forEach(h => {
+        const cards = horizons[h] || [];
+        const container = document.getElementById(`planning-cards-${h}`);
+        const counter = document.getElementById(`planning-count-${h}`);
+        if (!container) return;
+        if (counter) counter.textContent = cards.length;
+        container.innerHTML = "";
+        if (cards.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "planning-empty";
+          empty.textContent = "No objectives";
+          container.appendChild(empty);
+          return;
+        }
+        cards.forEach(obj => container.appendChild(renderPlanningCard(obj)));
+      });
+
+      if (totalEl) {
+        const total = data.total_tracks || 0;
+        totalEl.textContent = total > 0 ? `(${total} objectives)` : "";
+      }
+    }
+
+    async function refreshPlanning() {
+      try {
+        const res = await fetch("/api/operator/planning?t=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderPlanning(data);
+      } catch (err) {
+        const errEl = document.getElementById("planning-error");
+        if (errEl) { errEl.style.display = ""; errEl.textContent = "Planning fetch error: " + err.message; }
+        console.error("planning refresh error", err);
+      }
+    }
+
+    refreshPlanning();
   </script>
 </body>
 </html>

@@ -161,6 +161,10 @@ from api_recommendations import (  # noqa: E402
     get_operator_recommendations,
 )
 
+from api_planning import (  # noqa: E402
+    _operator_get_planning,
+)
+
 from api_intelligence import (  # noqa: E402
     _intelligence_get_patterns,
     _intelligence_get_injections,
@@ -350,6 +354,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/operator/recommendations":
             _json_response(self, HTTPStatus.OK, get_operator_recommendations())
+            return
+
+        if path == "/api/operator/planning":
+            _json_response(self, HTTPStatus.OK, _operator_get_planning())
             return
 
         # Register stream SSE endpoints — pass CANONICAL_STATE_DIR so the
