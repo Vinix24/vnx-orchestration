@@ -321,11 +321,12 @@ def _build_frontmatter(
     }
 
     # Surface explicit token-accounting availability when the adapter reports it
-    # (e.g. kimi-cli 1.44.0 stream-json carries no usage). Top-level frontmatter
-    # permits additional properties, so this records "unavailable" instead of a
-    # silently-measured zero.
-    if "token_usage_measured" in spawn_fm:
-        frontmatter["token_usage_measured"] = bool(spawn_fm["token_usage_measured"])
+    # (e.g. kimi-cli 1.44.0 stream-json carries no usage). Read from the result
+    # object directly — not from frontmatter_fields() — to keep the cross-provider
+    # frontmatter contract stable.
+    tum = getattr(result, "token_usage_measured", None)
+    if tum is not None:
+        frontmatter["token_usage_measured"] = bool(tum)
 
     return frontmatter
 

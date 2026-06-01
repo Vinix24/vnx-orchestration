@@ -59,11 +59,11 @@ class TestBuildKimiCmd(unittest.TestCase):
             if env_backup is not None:
                 os.environ["VNX_KIMI_YOLO"] = env_backup
 
-    def test_yolo_included_when_env_set(self):
+    def test_yolo_never_added_even_when_env_set(self):
         os.environ["VNX_KIMI_YOLO"] = "1"
         try:
             cmd = _build_kimi_cmd("prompt", None, None)
-            self.assertIn("--yolo", cmd)
+            self.assertNotIn("--yolo", cmd)
         finally:
             del os.environ["VNX_KIMI_YOLO"]
 
@@ -507,26 +507,29 @@ class TestSpawnKimiIntegration(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     def test_144_token_usage_unavailable_marked_explicitly_not_silent_zero(self):
-        """1.44.0 reports no usage: token_usage is None and frontmatter flags it."""
+        """1.44.0 reports no usage: token_usage is None and property flags it."""
         events = [
             {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
         ]
         result = self._run_with_events(events, returncode=0)
         self.assertIsNone(result.token_usage, "no usage line -> token_usage must be None")
+        # token_usage_measured is a property, not part of the cross-provider
+        # frontmatter_fields() contract — check it on the result object directly.
+        self.assertFalse(result.token_usage_measured)
         fm = result.frontmatter_fields()
-        self.assertFalse(fm["token_usage_measured"])
         # The numeric fields remain schema-valid zeros, but measured=False marks
         # them as unavailable rather than a measured zero.
         self.assertEqual(fm["token_usage"], {"input": 0, "output": 0, "cache_read": 0})
 
     def test_token_usage_measured_true_when_usage_present(self):
-        """When a usage event IS present, frontmatter marks tokens as measured."""
+        """When a usage event IS present, the property marks tokens as measured."""
         result = KimiSpawnResult(
             returncode=0, completion_text="x", events_written=1, session_id=None,
             timed_out=False, token_usage={"input_tokens": 10, "output_tokens": 5},
         )
+        # token_usage_measured is a property, not part of frontmatter_fields().
+        self.assertTrue(result.token_usage_measured)
         fm = result.frontmatter_fields()
-        self.assertTrue(fm["token_usage_measured"])
         self.assertEqual(fm["token_usage"]["input"], 10)
         self.assertEqual(fm["token_usage"]["output"], 5)
 

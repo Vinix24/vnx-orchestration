@@ -70,13 +70,19 @@ class KimiSpawnResult:
     error: Optional[str] = None
     event_writer_failures: int = 0
 
+    @property
+    def token_usage_measured(self) -> bool:
+        """True when actual token accounting was observed in the stream.
+
+        kimi-cli 1.44.0 stream-json does not report token accounting, so this
+        is False when token_usage is None (no token_count event was observed).
+        Available as an attribute for receipt/metadata consumers without being
+        part of the cross-provider frontmatter_fields() contract.
+        """
+        return self.token_usage is not None
+
     def frontmatter_fields(self) -> Dict[str, Any]:
         usage = self.token_usage or {}
-        # kimi-cli 1.44.0 stream-json does not report token accounting. When no
-        # token_count event was observed, surface tokens as explicitly
-        # unavailable (token_usage_measured=False) so downstream consumers do not
-        # read a silently-fabricated zero as a measured value.
-        measured = self.token_usage is not None
         return {
             "provider": "kimi",
             "sub_provider": "moonshot",
@@ -86,7 +92,6 @@ class KimiSpawnResult:
                 "output": int(usage.get("output_tokens", 0) or 0),
                 "cache_read": int(usage.get("cache_read_tokens", 0) or 0),
             },
-            "token_usage_measured": measured,
         }
 
 
@@ -303,12 +308,10 @@ def _is_quota_or_auth_error(text: str) -> bool:
 def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) -> list:
     """Build the kimi argv list.
 
-    --yolo is omitted by default; set VNX_KIMI_YOLO=1 to opt in.
     Kimi's --print mode is non-interactive and does not require --yolo.
+    --yolo is never passed; VNX_KIMI_YOLO is ignored.
     """
     cmd = ["kimi", "--print", "--output-format", "stream-json"]
-    if os.environ.get("VNX_KIMI_YOLO") == "1":
-        cmd.append("--yolo")
     cmd.extend(["-p", prompt])
     if model:
         cmd.extend(["-m", model])
