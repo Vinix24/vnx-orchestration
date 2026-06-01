@@ -84,6 +84,7 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
                 "track_id": t["track_id"],
                 "title": t["title"],
                 "phase": t["phase"],
+                "derived_status": t.get("derived_status"),
                 "horizon": t.get("horizon"),
                 "priority": t.get("priority"),
                 "pr_ref": t.get("pr_ref"),
@@ -117,8 +118,10 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
             marker = "*" if t.get("next_up") else " "
             dep_str = f"  deps: {', '.join(deps)}" if deps else ""
             pr_str = f"  pr: {t['pr_ref']}" if t.get("pr_ref") else ""
+            derived = t.get("derived_status")
+            drift_badge = f" ~{derived}" if derived and derived != t["phase"] else ""
             print(
-                f" {marker} {t['track_id']:<28} [{t['phase']:<7}] "
+                f" {marker} {t['track_id']:<28} [{t['phase']:<7}]{drift_badge} "
                 f"{t.get('priority') or '-':<3} {t['title']}{pr_str}{dep_str}"
             )
         print()
